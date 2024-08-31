@@ -1,9 +1,12 @@
 import fs from 'node:fs/promises';
 import esbuild from 'esbuild';
-import { copy } from 'esbuild-plugin-copy';
+//import { copy } from 'esbuild-plugin-copy';
+import { color } from '@astrojs/cli-kit';
 import glob from 'fast-glob';
 
 import prebuild from './prebuild.js';
+
+const { green, red, yellow, dim } = color;
 
 /** @type {import('esbuild').BuildOptions} */
 const defaultConfig = {
@@ -86,7 +89,9 @@ export default async function build(...args) {
         if (prebuilds.length) {
           await prebuild(...prebuilds);
         }
+
         const date = dt.format(new Date());
+
         if (result && result.errors.length) {
           console.error(dim(`[${date}] `) + red(error || result.errors.join('\n')));
         } else {
@@ -96,7 +101,8 @@ export default async function build(...args) {
                 yellow('⚠ updated with warnings:\n' + result.warnings.join('\n')),
             );
           }
-          console.log(dim(`[${date}] `) + green('✔ updated'));
+
+          console.log(dim(`[${date}] `) + green('✔  updated'));
         }
       });
     },
