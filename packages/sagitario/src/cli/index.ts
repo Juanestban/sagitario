@@ -1,11 +1,9 @@
 import { color } from '@astrojs/cli-kit';
 
-console.log('Hi! v2');
-
 type Hook = 'dev' | 'build' | 'preview';
 const flags = {};
 
-const commands: Record<Hook, any> = {
+const commands: Record<Hook, () => Promise<void>> = {
   build: async () => {
     const { build } = await import('./build/index.js');
     await build({ flags });
@@ -14,6 +12,7 @@ const commands: Record<Hook, any> = {
   dev: async () => {
     const { dev } = await import('./dev/index.js');
     const server = await dev({ flags });
+
     if (server) {
       return await new Promise(() => {}); // forever love!!! ❤️‍🔥
     }
@@ -32,22 +31,24 @@ const commands: Record<Hook, any> = {
   },
 };
 
-function startCommand(cmd: string) {
+async function startCommand(cmd: string) {
   if (!commands.hasOwnProperty(cmd)) {
     console.log(color.red("This command don't exist."));
-    throw new Error(`error running ${cmd} -- no command found or supported.`);
-  }
 
+    throw new Error(`error running [${cmd}] -- no command found or supported.`);
+  }
   const result = commands[cmd as Hook];
-  result();
+  await result();
 }
 
 export async function cli(argsv: string[]) {
   try {
-    const cmd = argsv[0];
-    startCommand(cmd);
+    const cmd = argsv.slice(2)[0];
+
+    await startCommand(cmd);
   } catch (error) {
-    console.log(color.red('[Error]:') + "can't run command - exiting");
+    console.log(color.red('[Error]:'), "can't run command - exiting");
+    console.error(error);
     process.exit(1);
   }
 }
