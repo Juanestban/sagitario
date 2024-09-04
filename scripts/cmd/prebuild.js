@@ -32,9 +32,9 @@ export default async function prebuild(...args) {
   );
 
   function getPrebuildURL(entryFilePath, dev = false) {
-    const entryURL = pathToFileURL(entryfilepath);
-    const basename = path.basename(entryfilepath);
-    const ext = path.extname(entryfilepath);
+    const entryURL = pathToFileURL(entryFilePath);
+    const basename = path.basename(entryFilePath);
+    const ext = path.extname(entryFilePath);
     const name = basename.slice(0, basename.indexOf(ext));
     const outname = dev ? `${name}.prebuilt-dev${ext}` : `${name}.prebuilt${ext}`;
     const outURL = new URL('./' + outname, entryURL);
