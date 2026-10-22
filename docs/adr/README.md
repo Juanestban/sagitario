@@ -17,7 +17,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0006](0006-no-null-option.md) | No null; `Option<T>` only | Accepted |
 | [0007](0007-mutability-const-var.md) | Mutability with `const` / `var` | Accepted |
 | [0008](0008-concurrency-deferred.md) | Single-threaded MVP; Rust-style concurrency later | Accepted |
-| [0009](0009-ffi-and-unsafe.md) | Rust-style FFI and `unsafe` | Accepted |
+| [0009](0009-ffi-and-unsafe.md) | Rust-style FFI and `unsafe` | Accepted (refined by 0026) |
 | [0010](0010-modules-and-packages.md) | File-as-module, logical imports, packages | Accepted (amended by 0024, 0025) |
 | [0011](0011-surface-syntax.md) | Surface syntax | Accepted |
 | [0012](0012-closures.md) | Closures capture by value, read-only | Accepted |
@@ -34,6 +34,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0023](0023-string-api-and-panic.md) | The `String` API, `StringBuilder` and `panic` | Accepted |
 | [0024](0024-modules-imports-and-visibility.md) | Modules, imports, visibility and the entry point | Accepted (amended by 0025) |
 | [0025](0025-single-pub-visibility.md) | A single `pub` visibility, without `pub(pkg)` | Accepted |
+| [0026](0026-ffi-details.md) | FFI details: pointers, `unsafe`, `std::ffi` and exports | Accepted |
 
 ## Template
 

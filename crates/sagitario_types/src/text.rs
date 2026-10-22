@@ -28,6 +28,7 @@ const USIZE: Type = Type::Int(IntTy::Usize);
 fn string_methods() -> Vec<RuntimeMethod> {
   vec![
     runtime("len", Vec::new(), USIZE, "sag_string_len"),
+    runtime("as_ptr", Vec::new(), Type::Ptr { mutable: false, pointee: Box::new(Type::Int(IntTy::U8)) }, "sag_string_ptr"),
     runtime("is_empty", Vec::new(), Type::Bool, "sag_string_is_empty"),
     runtime("contains", vec![Type::String], Type::Bool, "sag_string_contains"),
     runtime("starts_with", vec![Type::String], Type::Bool, "sag_string_starts_with"),

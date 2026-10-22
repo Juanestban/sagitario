@@ -49,7 +49,7 @@ These must be rejected as identifiers so they can be introduced later without br
 ## Attributes (F1)
 
 ```sag
-@export("sag_add")
+@export("demo_add")
 extern "C" fn add(a: i32, b: i32) -> i32 { a + b }
 
 @repr(C)

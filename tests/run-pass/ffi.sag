@@ -1,0 +1,82 @@
+// Calls into C (`puts`, `strlen`, `div` returning a `@repr(C)` struct, `malloc`), raw
+// pointers, `CString` and exported `extern "C"` functions.
+// expect-stdout: hola desde C
+// expect-stdout: 12 hola desde C
+// expect-stdout: 3 2 4
+// expect-stdout: 101 20 3
+// expect-stdout: 42
+// expect-stdout: true 5 3
+// expect-stdout: nul byte found in provided data at position: 1
+// expect-stdout: 101
+use std::ffi::{self, c_char, c_int, c_void, CString};
+
+extern "C" {
+  fn puts(text: *const c_char) -> c_int;
+  fn strlen(text: *const c_char) -> usize;
+  fn abs(value: c_int) -> c_int;
+  fn div(numerator: c_int, denominator: c_int) -> DivT;
+  fn malloc(size: usize) -> *mut c_void;
+  fn free(memory: *mut c_void);
+}
+
+@repr(C)
+struct DivT {
+  pub quot: c_int;
+  pub rem: c_int;
+}
+
+struct Node {
+  pub value: i32;
+  pub next: *const Node;
+}
+
+@export("demo_add")
+extern "C" fn add(a: i32, b: i32) -> i32 {
+  a + b
+}
+
+extern "C" fn twice(x: f64) -> f64 {
+  x * 2.0
+}
+
+fn main() {
+  const greeting = CString::new("hola desde C").unwrap();
+  unsafe { puts(greeting.as_ptr()); }
+
+  const length = unsafe { strlen(greeting.as_ptr()) };
+  const back = unsafe { ffi::string_from_c(greeting.as_ptr()) };
+  println(`${length} ${back}`);
+
+  const result = unsafe { div(17, 5) };
+  const absolute = unsafe { abs(-4) };
+  println(`${result.quot} ${result.rem} ${absolute}`);
+
+  var numbers = [1, 2, 3];
+  const p = numbers.as_mut_ptr();
+  unsafe {
+    *p.add(1) = 20;
+    *p += 100;
+  }
+  const third = unsafe { *p.add(2) };
+  println(`${numbers[0]} ${numbers[1]} ${third}`);
+
+  const raw = unsafe { malloc(8) } as *mut i64;
+  unsafe {
+    *raw = 42;
+    const value = *raw;
+    println(`${value}`);
+    free(raw as *mut c_void);
+  }
+
+  const last = Node { value: 2, next: 0 as *const Node };
+  const first = Node { value: 1, next: last.next };
+  println(`${first.next.is_null()} ${add(2, 3)} ${twice(1.5)}`);
+
+  match CString::new("a\0b") {
+    Ok(_) => println("unexpected"),
+    Err(message) => println(message),
+  }
+  const bytes = "hey".as_ptr();
+  const second = unsafe { *bytes.add(1) };
+  println(`${second}`);
+}

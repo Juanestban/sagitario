@@ -76,7 +76,7 @@ pub fn run(options: &CompileOptions) -> u8 {
 }
 
 struct FrontEnd {
-  c_source: Option<String>,
+  c_source: Option<sagitario_codegen_c::GeneratedC>,
 }
 
 /// Lexes, parses, resolves and type checks; with `generate`, also lowers to SIR and emits C.
@@ -264,11 +264,19 @@ fn use_color(format: DiagnosticFormat) -> bool {
 }
 
 fn compile_to(options: &CompileOptions, executable: &Path) -> Result<(), u8> {
-  let c_source = front_end(options, true)?.c_source.unwrap_or_default();
+  let Some(generated) = front_end(options, true)?.c_source else {
+    eprintln!("internal compiler error: no C was generated");
+    return Err(EXIT_ICE);
+  };
   if options.emit_c {
     let c_path = options.input.with_extension("c");
-    if let Err(error) = fs::write(&c_path, &c_source) {
-      eprintln!("error: cannot write `{}`: {error}", c_path.display());
+    let ffi_path = c_path.with_file_name(format!("{}_ffi.c", options.input.file_stem().unwrap_or_default().to_string_lossy()));
+    let written = fs::write(&c_path, &generated.program).and_then(|()| match &generated.ffi {
+      Some(ffi) => fs::write(&ffi_path, ffi),
+      None => Ok(()),
+    });
+    if let Err(error) = written {
+      eprintln!("error: cannot write the generated C next to `{}`: {error}", options.input.display());
       return Err(EXIT_FAILURE);
     }
   }
@@ -279,9 +287,14 @@ fn compile_to(options: &CompileOptions, executable: &Path) -> Result<(), u8> {
   })?;
   let program_c = dir.path.join("program.c");
   let runtime_c = dir.path.join("sagitario_runtime.c");
-  let written = fs::write(&program_c, &c_source)
+  let ffi_c = dir.path.join("sag_ffi.c");
+  let written = fs::write(&program_c, &generated.program)
     .and_then(|()| fs::write(dir.path.join(sagitario_codegen_c::RUNTIME_HEADER), RUNTIME_HEADER))
-    .and_then(|()| fs::write(&runtime_c, RUNTIME_SOURCE));
+    .and_then(|()| fs::write(&runtime_c, RUNTIME_SOURCE))
+    .and_then(|()| match &generated.ffi {
+      Some(ffi) => fs::write(&ffi_c, ffi),
+      None => Ok(()),
+    });
   if let Err(error) = written {
     eprintln!("error: cannot write generated C to `{}`: {error}", dir.path.display());
     return Err(EXIT_FAILURE);
@@ -297,6 +310,7 @@ fn compile_to(options: &CompileOptions, executable: &Path) -> Result<(), u8> {
     .arg(&dir.path)
     .arg(&program_c)
     .arg(&runtime_c)
+    .args(generated.ffi.as_ref().map(|_| &ffi_c))
     .arg("-o")
     .arg(executable)
     .args(libm)

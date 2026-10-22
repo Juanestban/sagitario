@@ -77,6 +77,32 @@ pub enum Item {
   Fn(FnDecl),
   Struct(StructDecl),
   Enum(EnumDecl),
+  Extern(ExternBlock),
+}
+
+/// `extern "C" { fn name(params) -> Ret; ... }`: C functions the program calls
+/// (docs/spec/10-ffi.md).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternBlock {
+  pub functions: Vec<ExternFn>,
+  pub span: Span,
+}
+
+/// A C function declared in an `extern "C"` block; its name is its C symbol.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternFn {
+  pub visibility: Visibility,
+  pub name: Ident,
+  pub params: Vec<Param>,
+  pub return_type: Option<TypeExpr>,
+  pub span: Span,
+}
+
+/// `@export("symbol")` on an `extern "C" fn`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Export {
+  pub symbol: String,
+  pub span: Span,
 }
 
 /// `enum Name { variants, then functions }`.
@@ -116,6 +142,8 @@ pub struct VariantFieldDecl {
 /// `struct Name { fields and functions }`; members keep their source order within each list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StructDecl {
+  /// `@repr(C)`: C layout, usable across the FFI boundary.
+  pub repr_c: bool,
   pub visibility: Visibility,
   pub name: Ident,
   pub fields: Vec<FieldDecl>,
@@ -134,6 +162,9 @@ pub struct FieldDecl {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FnDecl {
   pub id: NodeId,
+  /// `extern "C" fn`: callable from C, exported under its name or `export`.
+  pub extern_c: bool,
+  pub export: Option<Export>,
   pub visibility: Visibility,
   pub name: Ident,
   /// `self` or `var self`, only in struct methods.
@@ -173,6 +204,8 @@ pub enum TypeExprKind {
   Generic { path: Path, args: Vec<TypeExpr> },
   /// `[T; N]`
   Array { elem: Box<TypeExpr>, len: ArrayLen },
+  /// `*const T` or `*mut T`
+  Ptr { mutable: bool, pointee: Box<TypeExpr> },
 }
 
 /// The length of an array type or repeat expression: an integer literal.
@@ -270,6 +303,8 @@ impl BinaryOp {
 pub enum UnaryOp {
   Neg,
   Not,
+  /// `*pointer`, only inside `unsafe`.
+  Deref,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -284,7 +319,13 @@ impl Expr {
   pub fn is_block_like(&self) -> bool {
     matches!(
       self.kind,
-      ExprKind::If { .. } | ExprKind::While { .. } | ExprKind::Loop { .. } | ExprKind::For { .. } | ExprKind::Match { .. } | ExprKind::Block(_)
+      ExprKind::If { .. }
+        | ExprKind::While { .. }
+        | ExprKind::Loop { .. }
+        | ExprKind::For { .. }
+        | ExprKind::Match { .. }
+        | ExprKind::Block(_)
+        | ExprKind::Unsafe(_)
     )
   }
 }
@@ -369,6 +410,8 @@ pub enum ExprKind {
     arms: Vec<MatchArm>,
   },
   Block(Block),
+  /// `unsafe { ... }`
+  Unsafe(Block),
   If {
     cond: Box<Expr>,
     then_block: Block,

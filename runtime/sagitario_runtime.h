@@ -4,6 +4,7 @@
 #define SAGITARIO_RUNTIME_H
 
 #include <float.h>
+#include <limits.h>
 #include <math.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -141,6 +142,40 @@ size_t sag_builder_len(sag_builder builder);
 bool sag_builder_is_empty(sag_builder builder);
 void sag_builder_clear(sag_builder builder);
 sag_string sag_builder_to_string(sag_builder builder);
+
+/* ---- FFI (docs/spec/10-ffi.md) ----------------------------------------------------------- */
+
+/* C's `char`, the type `std::ffi::c_char` stands for. */
+#if CHAR_MIN < 0
+typedef int8_t sag_c_char;
+#else
+typedef uint8_t sag_c_char;
+#endif
+
+/* A NUL-terminated copy of a string (`CString`), reference counted. */
+typedef struct sag_cstring_obj *sag_cstring;
+
+/* Copies `text` into `*out` and returns true, or returns false with Rust's message in `*error`
+ * when the text contains a NUL byte. Both outputs are always written (NULL or ""). */
+bool sag_cstring_new(sag_string text, sag_cstring *out, sag_string *error);
+void sag_cstring_retain(sag_cstring c);
+void sag_cstring_release(sag_cstring c);
+const sag_c_char *sag_cstring_ptr(sag_cstring c);
+/* Copies a NUL-terminated C string, replacing invalid UTF-8 with U+FFFD; panics on NULL. */
+sag_string sag_string_from_c_at(const sag_c_char *p, const char *file, int line);
+_Noreturn void sag_null_pointer_at(const char *file, int line);
+
+static inline const uint8_t *sag_string_ptr(sag_string s) {
+  return s.ptr;
+}
+
+/* Raw pointer operations; offsets and dereferences only happen inside `unsafe`. A null pointer
+ * is checked before every dereference. */
+#define SAG_PTR_IS_NULL(p) ((p) == NULL)
+#define SAG_PTR_ADD(p, n) ((p) + (n))
+#define SAG_ARRAY_PTR(a) ((a).data)
+#define SAG_ARRAY_MUT_PTR(a) ((a).data)
+#define SAG_CHECK_PTR(p, file, line) ((p) != NULL ? (p) : (sag_null_pointer_at(file, line), (p)))
 
 /* ---- Arrays ------------------------------------------------------------------------------ */
 

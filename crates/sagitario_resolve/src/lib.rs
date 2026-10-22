@@ -10,8 +10,8 @@ mod modules;
 use std::collections::{HashMap, HashSet};
 
 use sagitario_ast::{
-  Block, EnumDecl, Expr, ExprKind, FnDecl, Ident, Item, Module, NodeId, Package, Path, Pattern, PatternKind, Stmt, StructDecl, TemplatePart,
-  TypeExpr, TypeExprKind, VariantFields, Visibility,
+  Block, EnumDecl, Expr, ExprKind, ExternFn, FnDecl, Ident, Item, Module, NodeId, Package, Path, Pattern, PatternKind, Stmt, StructDecl,
+  TemplatePart, TypeExpr, TypeExprKind, VariantFields, Visibility,
 };
 use sagitario_diagnostics::{Diagnostic, Diagnostics, codes};
 use sagitario_span::Span;
@@ -25,6 +25,10 @@ pub enum Builtin {
   Println,
   Eprintln,
   Panic,
+  /// `std::ffi::CString::new`
+  CStringNew,
+  /// `std::ffi::string_from_c`, which needs `unsafe`.
+  StringFromC,
 }
 
 impl Builtin {
@@ -36,6 +40,8 @@ impl Builtin {
       Builtin::Println => "println",
       Builtin::Eprintln => "eprintln",
       Builtin::Panic => "panic",
+      Builtin::CStringNew => "CString::new",
+      Builtin::StringFromC => "string_from_c",
     }
   }
 
@@ -55,6 +61,80 @@ pub struct StructId(pub u32);
 /// Index of an enum in `Resolution::enums`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct EnumId(pub u32);
+
+/// Index of a C function declared in an `extern` block, in `Resolution::externs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ExternId(pub u32);
+
+/// The C types of `std::ffi` (docs/spec/10-ffi.md); their sizes depend on the target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CType {
+  Char,
+  SChar,
+  UChar,
+  Short,
+  UShort,
+  Int,
+  UInt,
+  Long,
+  ULong,
+  LongLong,
+  ULongLong,
+  Float,
+  Double,
+  Void,
+}
+
+impl CType {
+  pub const ALL: [CType; 14] = [
+    CType::Char,
+    CType::SChar,
+    CType::UChar,
+    CType::Short,
+    CType::UShort,
+    CType::Int,
+    CType::UInt,
+    CType::Long,
+    CType::ULong,
+    CType::LongLong,
+    CType::ULongLong,
+    CType::Float,
+    CType::Double,
+    CType::Void,
+  ];
+
+  pub fn name(self) -> &'static str {
+    match self {
+      CType::Char => "c_char",
+      CType::SChar => "c_schar",
+      CType::UChar => "c_uchar",
+      CType::Short => "c_short",
+      CType::UShort => "c_ushort",
+      CType::Int => "c_int",
+      CType::UInt => "c_uint",
+      CType::Long => "c_long",
+      CType::ULong => "c_ulong",
+      CType::LongLong => "c_longlong",
+      CType::ULongLong => "c_ulonglong",
+      CType::Float => "c_float",
+      CType::Double => "c_double",
+      CType::Void => "c_void",
+    }
+  }
+}
+
+/// A module or item of the standard library. In F1 it only has `std::ffi`, provided by the
+/// compiler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StdItem {
+  /// `std`
+  Root,
+  /// `std::ffi`
+  Ffi,
+  CType(CType),
+  CString,
+  StringFromC,
+}
 
 /// Index of a module in `Resolution::modules`; the root module is `ModId(0)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -132,6 +212,8 @@ pub struct LocalInfo {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Res {
   Fn(FnId),
+  /// A C function of an `extern` block.
+  Extern(ExternId),
   Builtin(Builtin),
   Local(LocalId),
   Struct(StructId),
@@ -144,6 +226,10 @@ pub enum TypeRes {
   Item(TypeItem),
   /// A primitive or prelude type, or `Self`, which the type checker resolves by name.
   Builtin,
+  /// A C type of `std::ffi`.
+  CType(CType),
+  /// `std::ffi::CString`
+  CString,
   /// Already reported.
   Error,
 }
@@ -152,8 +238,10 @@ pub enum TypeRes {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ItemRef {
   Fn(FnId),
+  Extern(ExternId),
   Type(TypeItem),
   Module(ModId),
+  Std(StdItem),
 }
 
 /// An item declared in a module.
@@ -203,6 +291,17 @@ pub struct FnInfo {
   pub owner: Option<TypeItem>,
 }
 
+/// Where a C function of an `extern` block is declared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExternInfo {
+  /// Index in `Package::modules`.
+  pub module: usize,
+  /// Index in `Module::items` of the `extern` block.
+  pub item: usize,
+  /// Index in the block's functions.
+  pub member: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeInfo {
   /// Index in `Package::modules` of the declaring module.
@@ -221,6 +320,8 @@ pub struct Resolution {
   pub structs: Vec<TypeInfo>,
   /// Indexed by `EnumId`.
   pub enums: Vec<TypeInfo>,
+  /// Indexed by `ExternId`.
+  pub externs: Vec<ExternInfo>,
   /// The module tree, indexed by `ModId`.
   pub modules: Vec<ModuleInfo>,
   /// Local bindings of each function, indexed by `FnId` then `LocalId`.
@@ -244,6 +345,20 @@ impl Resolution {
       (Item::Enum(decl), Some(member)) => decl.functions.get(member),
       _ => None,
     }
+  }
+
+  pub fn extern_decl<'p>(&self, package: &'p Package, id: ExternId) -> Option<&'p ExternFn> {
+    let info = self.externs.get(id.0 as usize)?;
+
+    match package.modules.get(info.module)?.items.get(info.item)? {
+      Item::Extern(block) => block.functions.get(info.member),
+      _ => None,
+    }
+  }
+
+  /// Every C function of the `extern` blocks with its id.
+  pub fn extern_decls<'p>(&self, package: &'p Package) -> Vec<(ExternId, &'p ExternFn)> {
+    (0..self.externs.len() as u32).filter_map(|id| self.extern_decl(package, ExternId(id)).map(|decl| (ExternId(id), decl))).collect()
   }
 
   /// Every function with its id, in declaration order.
@@ -391,6 +506,20 @@ pub fn resolve(package: &Package, diagnostics: &mut Diagnostics) -> Resolution {
     resolution.type_paths.extend(output.type_paths);
   }
 
+  for (id, decl) in resolution.extern_decls(package) {
+    let Some(info) = resolution.externs.get(id.0 as usize).copied() else { continue };
+    let mut resolver = Resolver::new(package, &resolution, module_of(&module_ids, info.module), None, diagnostics);
+
+    for ty in decl.params.iter().map(|param| &param.ty).chain(decl.return_type.as_ref()) {
+      resolver.type_expr(ty);
+    }
+
+    let output = resolver.finish();
+
+    used.extend(output.used);
+    resolution.type_paths.extend(output.type_paths);
+  }
+
   for (id, decl) in resolution.fn_decls(package) {
     let Some(info) = resolution.functions.get(id.0 as usize).copied() else { continue };
     let mut resolver = Resolver::new(package, &resolution, module_of(&module_ids, info.module), info.owner, diagnostics);
@@ -444,14 +573,26 @@ fn module_of(module_ids: &[ModId], source: usize) -> ModId {
 /// Registers the functions, structs and enums of one module.
 fn declare_items(resolution: &mut Resolution, source: usize, node: ModId, module: &Module, diagnostics: &mut Diagnostics) {
   for (index, item) in module.items.iter().enumerate() {
-    let (name, item_ref, visibility) = match item {
+    let names = match item {
       Item::Fn(decl) => {
         let id = FnId(resolution.functions.len() as u32);
 
         resolution.functions.push(FnInfo { module: source, item: index, member: None, owner: None });
 
-        (&decl.name, ItemRef::Fn(id), decl.visibility)
+        vec![(&decl.name, ItemRef::Fn(id), decl.visibility)]
       }
+      Item::Extern(block) => block
+        .functions
+        .iter()
+        .enumerate()
+        .map(|(member, function)| {
+          let id = ExternId(resolution.externs.len() as u32);
+
+          resolution.externs.push(ExternInfo { module: source, item: index, member });
+
+          (&function.name, ItemRef::Extern(id), function.visibility)
+        })
+        .collect(),
       Item::Struct(decl) => {
         let owner = TypeItem::Struct(StructId(resolution.structs.len() as u32));
         let functions = register_functions(resolution, source, index, decl.functions.len(), owner);
@@ -462,7 +603,7 @@ fn declare_items(resolution: &mut Resolution, source: usize, node: ModId, module
 
         check_members(&decl.name.name, "fields and functions of a struct share one namespace", names, diagnostics);
 
-        (&decl.name, ItemRef::Type(owner), decl.visibility)
+        vec![(&decl.name, ItemRef::Type(owner), decl.visibility)]
       }
       Item::Enum(decl) => {
         let owner = TypeItem::Enum(EnumId(resolution.enums.len() as u32));
@@ -480,13 +621,22 @@ fn declare_items(resolution: &mut Resolution, source: usize, node: ModId, module
           }
         }
 
-        (&decl.name, ItemRef::Type(owner), decl.visibility)
+        vec![(&decl.name, ItemRef::Type(owner), decl.visibility)]
       }
     };
 
+    for (name, item_ref, visibility) in names {
+      declare_item(resolution, node, name, item_ref, visibility, diagnostics);
+    }
+  }
+}
+
+/// Adds a module-level name, reporting a clash with another item or a submodule.
+fn declare_item(resolution: &mut Resolution, node: ModId, name: &Ident, item_ref: ItemRef, visibility: Visibility, diagnostics: &mut Diagnostics) {
+  {
     check_reserved(&name.name, name.span, diagnostics);
 
-    let Some(info) = resolution.modules.get_mut(node.0 as usize) else { continue };
+    let Some(info) = resolution.modules.get_mut(node.0 as usize) else { return };
 
     if let Some(previous) = info.items.get(&name.name) {
       diagnostics.push(
@@ -758,7 +908,7 @@ impl<'a> Resolver<'a> {
         self.expr(start);
         self.expr(end);
       }
-      ExprKind::Block(block) | ExprKind::Loop { body: block } => self.block(block),
+      ExprKind::Block(block) | ExprKind::Loop { body: block } | ExprKind::Unsafe(block) => self.block(block),
       ExprKind::If { cond, then_block, else_branch } => {
         self.expr(cond);
         self.block(then_block);
@@ -967,13 +1117,29 @@ impl<'a> Resolver<'a> {
 
     match (named, rest) {
       (Named::Item(ItemRef::Fn(id)), []) => Some(Res::Fn(id)),
+      (Named::Item(ItemRef::Extern(id)), []) => Some(Res::Extern(id)),
+      (Named::Item(ItemRef::Std(StdItem::StringFromC)), []) => Some(Res::Builtin(Builtin::StringFromC)),
+      (Named::Item(ItemRef::Std(StdItem::CString)), [member]) => {
+        if member.name == "new" {
+          return Some(Res::Builtin(Builtin::CStringNew));
+        }
+
+        self.error(member.span, format!("no function `{}` in `CString`", member.name));
+
+        None
+      }
       (Named::Item(ItemRef::Type(item)), []) => {
         self.not_a_value(&last.name, last.span, item);
 
         None
       }
-      (Named::Item(ItemRef::Module(_)), []) => {
+      (Named::Item(ItemRef::Module(_) | ItemRef::Std(StdItem::Root | StdItem::Ffi)), []) => {
         self.error(last.span, format!("`{}` is a module, not a value", last.name));
+
+        None
+      }
+      (Named::Item(ItemRef::Std(StdItem::CType(_) | StdItem::CString)), []) => {
+        self.error(last.span, format!("`{}` is a type, not a value", last.name));
 
         None
       }
@@ -1042,12 +1208,19 @@ impl<'a> Resolver<'a> {
 
     match self.lookup_item(name) {
       Some(ItemRef::Fn(id)) => return Some(Res::Fn(id)),
+      Some(ItemRef::Extern(id)) => return Some(Res::Extern(id)),
+      Some(ItemRef::Std(StdItem::StringFromC)) => return Some(Res::Builtin(Builtin::StringFromC)),
+      Some(ItemRef::Std(StdItem::CType(_) | StdItem::CString)) => {
+        self.error(span, format!("`{name}` is a type, not a value"));
+
+        return None;
+      }
       Some(ItemRef::Type(item)) => {
         self.not_a_value(name, span, item);
 
         return None;
       }
-      Some(ItemRef::Module(_)) => {
+      Some(ItemRef::Module(_) | ItemRef::Std(StdItem::Root | StdItem::Ffi)) => {
         self.diagnostics.push(
           Diagnostic::error(codes::UNRESOLVED_NAME, span, format!("`{name}` is a module, not a value"))
             .with_help(format!("name one of its items: `{name}::item`")),
@@ -1100,11 +1273,7 @@ impl<'a> Resolver<'a> {
         Some(item) => Named::Item(item),
         None if name == "Option" => Named::Prelude(EnumKind::Option),
         None if name == "Result" => Named::Prelude(EnumKind::Result),
-        None if name == "std" => {
-          self.diagnostics.push(Diagnostic::error(codes::NOT_IMPLEMENTED, first.span, "the standard library (`std`) is not available yet"));
-
-          return None;
-        }
+        None if name == "std" => Named::Item(ItemRef::Std(StdItem::Root)),
         None => {
           let mut diagnostic = Diagnostic::error(codes::UNRESOLVED_NAME, first.span, format!("cannot find `{name}` in this scope"));
           let items = self.item_names();
@@ -1125,27 +1294,63 @@ impl<'a> Resolver<'a> {
     // `super` may only repeat at the start: `super::super::x`.
     let mut leading_super = first.name == "super";
 
-    while let Named::Item(ItemRef::Module(module)) = named
+    while let Named::Item(ItemRef::Module(_) | ItemRef::Std(StdItem::Root | StdItem::Ffi)) = named
       && let Some((segment, tail)) = rest.split_first()
     {
-      named = match segment.name.as_str() {
-        "super" if leading_super => Named::Item(ItemRef::Module(self.parent(module, segment.span)?)),
-        "pkg" | "self" | "super" | "Self" => {
+      named = match (named, segment.name.as_str()) {
+        (Named::Item(ItemRef::Module(module)), "super") if leading_super => Named::Item(ItemRef::Module(self.parent(module, segment.span)?)),
+        (_, "pkg" | "self" | "super" | "Self") => {
           self.error(segment.span, format!("`{}` can only start a path", segment.name));
 
           return None;
         }
-        _ => {
+        (Named::Item(ItemRef::Module(module)), _) => {
           leading_super = false;
 
           Named::Item(self.module_member(module, segment)?)
         }
+        (_, name) => Named::Item(ItemRef::Std(self.std_member(named, name, segment.span)?)),
       };
       last = segment;
       rest = tail;
     }
 
     Some((named, last, rest))
+  }
+
+  /// A member of `std` or `std::ffi`, the only part of the standard library in F1.
+  fn std_member(&mut self, module: Named, name: &str, span: Span) -> Option<StdItem> {
+    if let Named::Item(ItemRef::Std(StdItem::Root)) = module {
+      if name == "ffi" {
+        return Some(StdItem::Ffi);
+      }
+
+      self.diagnostics.push(
+        Diagnostic::error(codes::NOT_IMPLEMENTED, span, format!("`std::{name}` is not available yet"))
+          .with_note("in F1 the standard library only has `std::ffi`"),
+      );
+
+      return None;
+    }
+
+    let item = match name {
+      "CString" => Some(StdItem::CString),
+      "string_from_c" => Some(StdItem::StringFromC),
+      _ => CType::ALL.into_iter().find(|ty| ty.name() == name).map(StdItem::CType),
+    };
+
+    if item.is_none() {
+      let names = CType::ALL.iter().map(|ty| ty.name()).chain(["CString", "string_from_c"]);
+      let mut diagnostic = Diagnostic::error(codes::UNRESOLVED_NAME, span, format!("cannot find `{name}` in `std::ffi`"));
+
+      if let Some(similar) = sagitario_diagnostics::closest_match(name, names) {
+        diagnostic = diagnostic.with_help(format!("a name with a similar spelling exists: `{similar}`"));
+      }
+
+      self.diagnostics.push(diagnostic);
+    }
+
+    item
   }
 
   fn parent(&mut self, module: ModId, span: Span) -> Option<ModId> {
@@ -1285,6 +1490,7 @@ impl<'a> Resolver<'a> {
         }
       }
       TypeExprKind::Array { elem, .. } => self.type_expr(elem),
+      TypeExprKind::Ptr { pointee, .. } => self.type_expr(pointee),
     }
   }
 
@@ -1311,6 +1517,8 @@ impl<'a> Resolver<'a> {
         } else {
           match self.lookup_item(name) {
             Some(ItemRef::Type(item)) => TypeRes::Item(item),
+            Some(ItemRef::Std(StdItem::CType(ty))) => TypeRes::CType(ty),
+            Some(ItemRef::Std(StdItem::CString)) => TypeRes::CString,
             Some(item) => {
               self.not_a_type(&segment.name, segment.span, item);
 
@@ -1322,7 +1530,9 @@ impl<'a> Resolver<'a> {
               let items = self.item_names();
               let known = NUMERIC_TYPES.iter().chain(PRELUDE_TYPES).copied().chain(items.iter().map(String::as_str));
 
-              if let Some(similar) = sagitario_diagnostics::closest_match(name, known) {
+              if name == "CString" || CType::ALL.iter().any(|ty| ty.name() == name) {
+                diagnostic = diagnostic.with_help(format!("import it from the standard library: `use std::ffi::{name};`"));
+              } else if let Some(similar) = sagitario_diagnostics::closest_match(name, known) {
                 diagnostic = diagnostic.with_help(format!("a type with a similar name exists: `{similar}`"));
               }
 
@@ -1335,6 +1545,8 @@ impl<'a> Resolver<'a> {
       }
       segments => match self.qualified(segments) {
         Some((Named::Item(ItemRef::Type(item)), _, [])) => TypeRes::Item(item),
+        Some((Named::Item(ItemRef::Std(StdItem::CType(ty))), _, [])) => TypeRes::CType(ty),
+        Some((Named::Item(ItemRef::Std(StdItem::CString)), _, [])) => TypeRes::CString,
         Some((Named::Item(item), last, [])) => {
           self.not_a_type(&last.name, last.span, item);
 
@@ -1354,9 +1566,9 @@ impl<'a> Resolver<'a> {
 
   fn not_a_type(&mut self, name: &str, span: Span, item: ItemRef) {
     let what = match item {
-      ItemRef::Fn(_) => "a function",
-      ItemRef::Module(_) => "a module",
-      ItemRef::Type(_) => "a type",
+      ItemRef::Fn(_) | ItemRef::Extern(_) | ItemRef::Std(StdItem::StringFromC) => "a function",
+      ItemRef::Module(_) | ItemRef::Std(StdItem::Root | StdItem::Ffi) => "a module",
+      ItemRef::Type(_) | ItemRef::Std(StdItem::CType(_) | StdItem::CString) => "a type",
     };
 
     self.error(span, format!("`{name}` is {what}, not a type"));

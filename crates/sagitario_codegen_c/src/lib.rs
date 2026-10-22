@@ -11,12 +11,24 @@
 
 use sagitario_ast::{BinaryOp, UnaryOp};
 use sagitario_resolve::{Builtin, EnumId, FnId, StructId};
-use sagitario_sir::{Callee, Const, Function, Layouts, Local, Operand, PanicMessage, Place, Program, Projection, Rvalue, Stmt, TemplatePiece};
+use sagitario_sir::{
+  Callee, Const, ExternDecl, Function, Layouts, Local, Operand, PanicMessage, Place, Program, Projection, Rvalue, Stmt, TemplatePiece,
+};
 use sagitario_types::{EnumRef, FloatTy, IntTy, StructRef, Type};
 
 pub const RUNTIME_HEADER: &str = "sagitario_runtime.h";
 
-pub fn generate(program: &Program) -> String {
+/// The C translation units of a program.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeneratedC {
+  /// The program, which includes the runtime header.
+  pub program: String,
+  /// The calls into C and the exported functions, compiled apart without system headers so the
+  /// program's own declarations of C functions cannot clash with them; `None` without FFI.
+  pub ffi: Option<String>,
+}
+
+pub fn generate(program: &Program) -> GeneratedC {
   let mut generator = Generator {
     layouts: &program.layouts,
     instances: Vec::new(),
@@ -26,6 +38,7 @@ pub fn generate(program: &Program) -> String {
     locals: &[],
     self_by_ref: false,
     source_line: None,
+    pointees: Vec::new(),
   };
   let order = generator.aggregate_order(program);
 
@@ -33,10 +46,16 @@ pub fn generate(program: &Program) -> String {
   generator.out.push_str(&format!("#include \"{RUNTIME_HEADER}\"\n\n"));
   generator.type_definitions(&order);
 
+  for (index, decl) in program.externs.iter().enumerate() {
+    let prototype = generator.extern_prototype(index, decl);
+
+    generator.out.push_str(&format!("{prototype};\n"));
+  }
+
   for (index, function) in program.functions.iter().enumerate() {
     let signature = generator.signature(FnId(index as u32), function);
 
-    generator.out.push_str(&format!("static {signature};\n"));
+    generator.out.push_str(&format!("{}{signature};\n", linkage(function)));
   }
 
   generator.out.push('\n');
@@ -46,7 +65,15 @@ pub fn generate(program: &Program) -> String {
   }
 
   generator.entry_point(program);
-  generator.out
+
+  let ffi = generator.ffi_unit(program);
+
+  GeneratedC { program: generator.out, ffi }
+}
+
+/// Exported functions are called from the FFI translation unit; the others stay private.
+fn linkage(function: &Function) -> &'static str {
+  if function.export.is_some() { "" } else { "static " }
 }
 
 /// A C struct to define: a struct, an enum, or an array, `Option` or `Result` type (index in
@@ -73,6 +100,8 @@ struct Generator<'a> {
   self_by_ref: bool,
   /// The source file and line of the statement being generated.
   source_line: Option<(u32, u32)>,
+  /// Types behind pointers, given a C type after the aggregate being visited.
+  pointees: Vec<Type>,
 }
 
 impl<'a> Generator<'a> {
@@ -95,6 +124,18 @@ impl<'a> Generator<'a> {
       }
     }
 
+    for decl in &program.externs {
+      for ty in decl.params.iter().chain([&decl.ret]) {
+        self.visit_type(ty, &mut done, &mut order);
+      }
+    }
+
+    // A pointer only needs its pointee declared, so pointees may come in any order (and a
+    // struct may point to itself).
+    while let Some(pointee) = self.pointees.pop() {
+      self.visit_type(&pointee, &mut done, &mut order);
+    }
+
     order
   }
 
@@ -114,6 +155,11 @@ impl<'a> Generator<'a> {
 
         self.instances.push(ty.clone());
         order.push(Aggregate::Instance(self.instances.len() - 1));
+
+        return;
+      }
+      Type::Ptr { pointee, .. } => {
+        self.pointees.push(pointee.as_ref().clone());
 
         return;
       }
@@ -153,43 +199,18 @@ impl<'a> Generator<'a> {
   }
 
   fn type_definitions(&mut self, order: &[Aggregate]) {
+    // Declared first, so pointers can refer to any of them.
+    for aggregate in order {
+      let name = self.c_type(&self.aggregate_type(*aggregate));
+
+      self.out.push_str(&format!("typedef struct {name} {name};\n"));
+    }
+
     for aggregate in order {
       let ty = self.aggregate_type(*aggregate);
-      let name = self.c_type(&ty);
-      let members = match &ty {
-        Type::Struct(_) => {
-          let fields = self.parts(&ty).concat();
-          let mut members: Vec<String> = fields.iter().enumerate().map(|(index, field)| format!("{} f{index};", self.c_type(field))).collect();
+      let definition = self.definition(&ty);
 
-          if members.is_empty() {
-            // C has no empty structs.
-            members.push("uint8_t sag_unused;".to_string());
-          }
-
-          members.join(" ")
-        }
-        Type::Array(elem, len) => {
-          // C has no zero-length arrays; the extra element is never accessed.
-          format!("{} data[{}];", self.c_type(elem), len.max(&1))
-        }
-        _ => {
-          let variants: Vec<String> = self
-            .parts(&ty)
-            .iter()
-            .enumerate()
-            .filter(|(_, fields)| !fields.is_empty())
-            .map(|(index, fields)| {
-              let fields: Vec<String> = fields.iter().enumerate().map(|(field, field_ty)| format!("{} f{field};", self.c_type(field_ty))).collect();
-
-              format!("struct {{ {} }} v{index};", fields.join(" "))
-            })
-            .collect();
-
-          if variants.is_empty() { "uint32_t tag;".to_string() } else { format!("uint32_t tag; union {{ {} }} u;", variants.join(" ")) }
-        }
-      };
-
-      self.out.push_str(&format!("typedef struct {name} {{ {members} }} {name};\n"));
+      self.out.push_str(&definition);
     }
 
     for aggregate in order {
@@ -197,6 +218,45 @@ impl<'a> Generator<'a> {
     }
 
     self.out.push('\n');
+  }
+
+  /// `struct sag_xN { ... };` for an aggregate type.
+  fn definition(&self, ty: &Type) -> String {
+    let name = self.c_type(ty);
+    let members = match ty {
+      Type::Struct(_) => {
+        let fields = self.parts(ty).concat();
+        let mut members: Vec<String> = fields.iter().enumerate().map(|(index, field)| format!("{} f{index};", self.c_type(field))).collect();
+
+        if members.is_empty() {
+          // C has no empty structs.
+          members.push("uint8_t sag_unused;".to_string());
+        }
+
+        members.join(" ")
+      }
+      Type::Array(elem, len) => {
+        // C has no zero-length arrays; the extra element is never accessed.
+        format!("{} data[{}];", self.c_type(elem), len.max(&1))
+      }
+      _ => {
+        let variants: Vec<String> = self
+          .parts(ty)
+          .iter()
+          .enumerate()
+          .filter(|(_, fields)| !fields.is_empty())
+          .map(|(index, fields)| {
+            let fields: Vec<String> = fields.iter().enumerate().map(|(field, field_ty)| format!("{} f{field};", self.c_type(field_ty))).collect();
+
+            format!("struct {{ {} }} v{index};", fields.join(" "))
+          })
+          .collect();
+
+        if variants.is_empty() { "uint32_t tag;".to_string() } else { format!("uint32_t tag; union {{ {} }} u;", variants.join(" ")) }
+      }
+    };
+
+    format!("struct {name} {{ {members} }};\n")
   }
 
   /// `sag_retain_*` and `sag_release_*` for a managed aggregate.
@@ -256,6 +316,7 @@ impl<'a> Generator<'a> {
     match ty {
       Type::String => format!("sag_string_{action}({value})"),
       Type::StringBuilder => format!("sag_builder_{action}({value})"),
+      Type::CString => format!("sag_cstring_{action}({value})"),
       _ => format!("sag_{action}_{}(&{value})", self.c_type(ty).trim_start_matches("sag_")),
     }
   }
@@ -279,6 +340,9 @@ impl<'a> Generator<'a> {
       Type::Struct(inner) => format!("sag_s{}", inner.id.0),
       Type::Enum(inner) => format!("sag_e{}", inner.id.0),
       Type::Array(..) | Type::Option(_) | Type::Result(..) => format!("sag_t{}", self.instance_index(ty)),
+      Type::CString => "sag_cstring".to_string(),
+      Type::CVoid => "void".to_string(),
+      Type::Ptr { mutable, pointee } => format!("{}{}*", self.c_type(pointee), if *mutable { "" } else { " const" }),
     }
   }
 
@@ -306,6 +370,103 @@ impl<'a> Generator<'a> {
 
     self.out.push_str("  return sag_rt_finish();\n");
     self.out.push_str("}\n");
+  }
+
+  /// `ret sag_ffi_N(params)`, the wrapper calling a C function.
+  fn extern_prototype(&self, index: usize, decl: &ExternDecl) -> String {
+    format!("{} {}({})", self.return_type(&decl.ret), ffi_name(index), self.c_params(&decl.params))
+  }
+
+  fn return_type(&self, ty: &Type) -> String {
+    if matches!(ty, Type::Unit | Type::Never) { "void".to_string() } else { self.c_type(ty) }
+  }
+
+  /// `T a0, U a1`, or `void`.
+  fn c_params(&self, params: &[Type]) -> String {
+    let params: Vec<String> = params.iter().enumerate().map(|(index, ty)| format!("{} a{index}", self.c_type(ty))).collect();
+
+    if params.is_empty() { "void".to_string() } else { params.join(", ") }
+  }
+
+  /// The FFI translation unit: a wrapper per C function the program calls, and a function with
+  /// the exported symbol per `extern "C" fn`. It includes no system header, so the program's
+  /// declarations of C functions are the only ones it sees.
+  fn ffi_unit(&self, program: &Program) -> Option<String> {
+    let exports: Vec<(usize, &Function, &String)> =
+      program.functions.iter().enumerate().filter_map(|(index, function)| function.export.as_ref().map(|symbol| (index, function, symbol))).collect();
+
+    if program.externs.is_empty() && exports.is_empty() {
+      return None;
+    }
+
+    let mut declared = Vec::new();
+    let mut defined = Vec::new();
+    let signature_types = program.externs.iter().flat_map(|decl| decl.params.iter().chain([&decl.ret]));
+    let export_types = exports.iter().flat_map(|(_, function, _)| function.locals.iter().take(function.param_count).chain([&function.ret]));
+
+    for ty in signature_types.chain(export_types) {
+      self.ffi_types(ty, true, &mut declared, &mut defined);
+    }
+
+    let mut out = String::from("/* Generated by sag: calls between the program and C. Do not edit. */\n");
+
+    out.push_str("#include <stdbool.h>\n#include <stddef.h>\n#include <stdint.h>\n\n");
+
+    for name in &declared {
+      out.push_str(&format!("typedef struct {name} {name};\n"));
+    }
+
+    for ty in &defined {
+      out.push_str(&self.definition(ty));
+    }
+
+    for (index, decl) in program.externs.iter().enumerate() {
+      let args: Vec<String> = (0..decl.params.len()).map(|arg| format!("a{arg}")).collect();
+      let call = format!("{}({})", decl.symbol, args.join(", "));
+      let body = if matches!(decl.ret, Type::Unit | Type::Never) { format!("{call};") } else { format!("return {call};") };
+      let ret = self.return_type(&decl.ret);
+      let params = self.c_params(&decl.params);
+
+      out.push_str(&format!("\nextern {ret} {}({params});\n", decl.symbol));
+      out.push_str(&format!("{} {{ {body} }}\n", self.extern_prototype(index, decl)));
+    }
+
+    for (index, function, symbol) in exports {
+      let id = FnId(index as u32);
+      let params: Vec<Type> = function.locals.iter().take(function.param_count).cloned().collect();
+      let args: Vec<String> = (0..params.len()).map(|arg| format!("a{arg}")).collect();
+      let call = format!("{}({})", fn_name(id), args.join(", "));
+      let body = if matches!(function.ret, Type::Unit | Type::Never) { format!("{call};") } else { format!("return {call};") };
+
+      out.push_str(&format!("\n{};\n", self.signature(id, function)));
+      out.push_str(&format!("{} {symbol}({}) {{ {body} }}\n", self.return_type(&function.ret), self.c_params(&params)));
+    }
+
+    Some(out)
+  }
+
+  /// Collects the aggregate types the FFI unit needs: declared when behind a pointer, also
+  /// defined when passed by value (`@repr(C)` structs and their fields).
+  fn ffi_types(&self, ty: &Type, by_value: bool, declared: &mut Vec<String>, defined: &mut Vec<Type>) {
+    match ty {
+      Type::Ptr { pointee, .. } => self.ffi_types(pointee, false, declared, defined),
+      Type::Struct(_) | Type::Enum(_) | Type::Array(..) | Type::Option(_) | Type::Result(..) => {
+        let name = self.c_type(ty);
+
+        if !declared.contains(&name) {
+          declared.push(name);
+        }
+
+        if by_value && !defined.contains(ty) {
+          for part in self.parts(ty).concat() {
+            self.ffi_types(&part, true, declared, defined);
+          }
+
+          defined.push(ty.clone());
+        }
+      }
+      _ => {}
+    }
   }
 
   fn line_directive(&mut self, file: u32, line: u32) {
@@ -354,7 +515,7 @@ impl<'a> Generator<'a> {
 
     self.locals = &function.locals;
     self.self_by_ref = function.self_by_ref;
-    self.out.push_str(&format!("static {signature} {{\n"));
+    self.out.push_str(&format!("{}{signature} {{\n", linkage(function)));
     self.indent = 1;
 
     for (index, ty) in function.locals.iter().enumerate().skip(function.param_count) {
@@ -389,6 +550,7 @@ impl<'a> Generator<'a> {
         }
         Projection::Tag => out.push_str(".tag"),
         Projection::VariantField { variant, field } => out.push_str(&format!(".u.v{variant}.f{field}")),
+        Projection::Deref => out = format!("(*SAG_CHECK_PTR({out}, __FILE__, __LINE__))"),
       }
     }
 
@@ -591,13 +753,20 @@ impl<'a> Generator<'a> {
         format!("sag_neg_{}_at({}, __FILE__, __LINE__)", int.name(), self.operand(value))
       }
       Rvalue::Unary { op: UnaryOp::Neg, operand: value, .. } => format!("(-{})", self.operand(value)),
+      // Dereferences are places (`Projection::Deref`); this form is not produced.
+      Rvalue::Unary { op: UnaryOp::Deref, operand: value, .. } => format!("(*{})", self.operand(value)),
       Rvalue::Binary { op, ty, lhs, rhs } => binary(*op, ty, &self.operand(lhs), &self.operand(rhs)),
-      Rvalue::Cast { from, to, operand: value } => cast(from, to, &self.operand(value)),
+      Rvalue::Cast { from, to, operand: value } => match (from, to) {
+        (Type::Ptr { .. }, Type::Ptr { .. }) => format!("(({}){})", self.c_type(to), self.operand(value)),
+        (Type::Int(_), Type::Ptr { .. }) => format!("(({})(uintptr_t){})", self.c_type(to), self.operand(value)),
+        (Type::Ptr { .. }, Type::Int(int)) => format!("(({})(uintptr_t){})", int_c_type(*int), self.operand(value)),
+        _ => cast(from, to, &self.operand(value)),
+      },
       Rvalue::Call { callee, args } => {
         let mut args: Vec<String> = args.iter().map(|arg| self.operand(arg)).collect();
 
         // Runtime functions that can panic report the source location.
-        if matches!(callee, Callee::Runtime { located: true, .. } | Callee::Builtin(Builtin::Panic)) {
+        if matches!(callee, Callee::Runtime { located: true, .. } | Callee::Builtin(Builtin::Panic | Builtin::StringFromC)) {
           args.push("__FILE__".to_string());
           args.push("__LINE__".to_string());
         }
@@ -657,6 +826,9 @@ impl<'a> Generator<'a> {
             | Type::Array(..)
             | Type::Option(_)
             | Type::Result(..)
+            | Type::Ptr { .. }
+            | Type::CVoid
+            | Type::CString
             | Type::Never
             | Type::Error => {
               continue;
@@ -685,6 +857,11 @@ fn enum_type(index: usize) -> Type {
 /// Functions are named by id, so any Sagitario identifier (including Unicode) is safe in C.
 fn fn_name(id: FnId) -> String {
   format!("sag_fn_{}", id.0)
+}
+
+/// The wrapper, in the FFI translation unit, that calls the C function of `extern` number `index`.
+fn ffi_name(index: usize) -> String {
+  format!("sag_ffi_{index}")
 }
 
 fn local_name(local: Local) -> String {
@@ -744,10 +921,14 @@ fn cast(from: &Type, to: &Type, value: &str) -> String {
 fn callee_name(callee: Callee) -> String {
   match callee {
     Callee::Fn(id) => fn_name(id),
+    Callee::Extern(id) => ffi_name(id.0 as usize),
     Callee::Builtin(Builtin::Print) => "sag_print".to_string(),
     Callee::Builtin(Builtin::Println) => "sag_println".to_string(),
     Callee::Builtin(Builtin::Eprintln) => "sag_eprintln".to_string(),
     Callee::Builtin(Builtin::Panic) => "sag_panic_str_at".to_string(),
+    Callee::Builtin(Builtin::StringFromC) => "sag_string_from_c_at".to_string(),
+    // Lowered to a call of `sag_cstring_new` with its outputs.
+    Callee::Builtin(Builtin::CStringNew) => "sag_cstring_new".to_string(),
     Callee::Runtime { function, .. } => function.to_string(),
   }
 }

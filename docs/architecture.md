@@ -107,6 +107,14 @@ could be added.
   caller's value.
 - Indexing goes through `sag_index_at`, which panics when the index is out of bounds.
 - When `main` returns `Result<(), String>`, the C `main` prints an `Err` and exits with code 1.
+- Every aggregate is declared (`typedef struct sag_sN sag_sN;`) before any is defined, so raw
+  pointers can refer to any type, including the struct that contains them.
+- FFI (docs/spec/10-ffi.md): calls to C functions and exported `extern "C" fn`s go through a
+  second translation unit, `sag_ffi.c`, which includes no system header (only `stdint.h`,
+  `stddef.h`, `stdbool.h`). It declares each C function with the program's signature and
+  defines a wrapper `sag_ffi_N` for it, plus a function with each exported symbol that calls
+  the Sagitario function; exported functions are the only non-`static` ones. A dereference
+  goes through `SAG_CHECK_PTR`, which panics on a null pointer.
 - Planned (F2): `Option<ClassRef>` as a nullable pointer.
 
 ## Runtime
@@ -123,6 +131,8 @@ Minimal C, embedded in the `sag` binary and compiled with every program:
 - a string builder used by template strings, with shortest round-trip float formatting,
 - the `String` API (`sag_string_*`; `trim` and `substring` return views sharing the buffer),
   parsing (`sag_parse_*`), ASCII `char` helpers and the ARC `StringBuilder` (`sag_builder_*`),
+- FFI support: the ARC `CString` (`sag_cstring_*`), `sag_string_from_c_at` (lossy UTF-8),
+  `sag_c_char` (C's `char`) and the raw pointer macros (`SAG_PTR_ADD`, `SAG_CHECK_PTR`, ...),
 - a live-object counter checked at exit when `SAG_LEAK_CHECK` is set (exit code 102).
 
 Anything expressible in Sagitario belongs in `std/` instead.
@@ -154,7 +164,8 @@ to forward arguments to the program.
 - The file given to `sag` is the program's root module; the modules it uses are loaded from
   its directory.
 - `sag build main.sag` writes the executable next to the source (`main` / `main.exe`);
-  `--emit-c` also writes `main.c` there (it includes `sagitario_runtime.h` from `runtime/`).
+  `--emit-c` also writes `main.c` there (it includes `sagitario_runtime.h` from `runtime/`),
+  and `main_ffi.c` when the program uses the FFI.
   `sag run` builds into a temporary directory that is removed afterwards.
 - The driver stops after lexing or parsing if they report errors (an incomplete syntax tree
   would only cause confusing follow-up errors); otherwise resolution, type checking and flow

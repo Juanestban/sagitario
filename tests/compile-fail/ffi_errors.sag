@@ -1,0 +1,36 @@
+use std::ffi::{c_char, c_int, c_void};
+
+extern "C" {
+  fn puts(text: *const c_char) -> c_int;
+  fn takes_string(text: String); //~ ERROR E0322
+  fn int(); //~ ERROR E0208
+}
+
+struct Plain {
+  pub x: i32;
+}
+
+@repr(C)
+struct Bad {
+  pub name: String; //~ ERROR E0322
+}
+
+extern "C" fn by_value(plain: Plain) -> i32 { //~ ERROR E0322
+  plain.x
+}
+
+@export("shared")
+extern "C" fn first() {}
+
+@export("shared") //~ ERROR E0208
+extern "C" fn second() {}
+
+fn main() {
+  puts(0 as *const c_char); //~ ERROR E0323
+  const p = 0 as *const i32;
+  const _v = *p; //~ ERROR E0323
+  unsafe { println("nothing unsafe"); } //~ WARN W0007
+  const _void: c_void = 1; //~ ERROR E0322
+  const _strings = 0 as *const String; //~ ERROR E0322
+  unsafe { *p = 1; } //~ ERROR E0312
+}

@@ -6,12 +6,12 @@
 //! that state. So `loop { x = 1; break; }` assigns a `const` once, while `while c { x = 1; }`
 //! may assign it twice.
 
-use sagitario_ast::{BinaryOp, Block, Expr, ExprKind, FnDecl, Pattern, PatternKind, Stmt, TemplatePart};
+use sagitario_ast::{BinaryOp, Block, Expr, ExprKind, FnDecl, Pattern, PatternKind, Stmt, TemplatePart, UnaryOp};
 use sagitario_diagnostics::{Diagnostic, Diagnostics, codes};
 use sagitario_resolve::{LocalId, LocalInfo, LocalKind, Res, Resolution};
 use sagitario_span::Span;
 
-use crate::{Receiver, TypedModule};
+use crate::{BuiltinMethod, Receiver, TypedModule};
 
 pub(crate) fn check_function(decl: &FnDecl, locals: &[LocalInfo], resolution: &Resolution, typed: &TypedModule, diagnostics: &mut Diagnostics) {
   let count = locals.len();
@@ -164,7 +164,9 @@ impl Flow<'_> {
           self.define(id, stmt.init.is_some());
         }
       }
-      Stmt::Assign { target, value, .. } if matches!(target.kind, ExprKind::Field { .. } | ExprKind::Index { .. }) => {
+      Stmt::Assign { target, value, .. }
+        if matches!(target.kind, ExprKind::Field { .. } | ExprKind::Index { .. } | ExprKind::Unary { op: UnaryOp::Deref, .. }) =>
+      {
         // Modifying a part of a binding reads the binding and counts as reassigning it.
         self.expr(target);
         self.expr(value);
@@ -291,7 +293,9 @@ impl Flow<'_> {
 
         let function = self.typed.method_calls.get(&expr.id).copied();
 
-        if function.and_then(|function| self.typed.sig(function)).is_some_and(|sig| sig.receiver == Some(Receiver::Var)) {
+        let as_mut_ptr = matches!(self.typed.builtin_methods.get(&expr.id), Some(BuiltinMethod::Runtime { function: "SAG_ARRAY_MUT_PTR", .. }));
+
+        if as_mut_ptr || function.and_then(|function| self.typed.sig(function)).is_some_and(|sig| sig.receiver == Some(Receiver::Var)) {
           self.mutate(receiver);
         }
       }
@@ -367,7 +371,7 @@ impl Flow<'_> {
         self.expr(start);
         self.expr(end);
       }
-      ExprKind::Block(block) => self.block(block),
+      ExprKind::Block(block) | ExprKind::Unsafe(block) => self.block(block),
       ExprKind::If { cond, then_block, else_branch } => {
         self.expr(cond);
 
