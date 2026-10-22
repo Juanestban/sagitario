@@ -28,6 +28,8 @@ pub struct CompileOptions {
   pub diagnostic_format: DiagnosticFormat,
   /// Arguments forwarded to the compiled program (`sag run file.sag -- args`).
   pub program_args: Vec<String>,
+  /// Release mode: integer overflow wraps and C is optimized (docs/spec/02-types.md#build-modes).
+  pub release: bool,
 }
 
 /// `sag check`: runs the front end only.
@@ -166,14 +168,19 @@ fn compile_to(options: &CompileOptions, executable: &Path) -> Result<(), u8> {
     return Err(EXIT_FAILURE);
   }
 
+  let mode: &[&str] = if options.release { &["-O2", "-DSAG_RELEASE"] } else { &["-O0", "-g"] };
+  // `fmod` and friends live in libm outside Windows.
+  let libm: &[&str] = if compiler.target.contains("windows") { &[] } else { &["-lm"] };
   let output = Command::new(&compiler.command)
-    .args(["-std=c11", "-pedantic-errors", "-g", "-O0"])
+    .args(["-std=c11", "-pedantic-errors"])
+    .args(mode)
     .arg("-I")
     .arg(&dir.path)
     .arg(&program_c)
     .arg(&runtime_c)
     .arg("-o")
     .arg(executable)
+    .args(libm)
     .output();
   match output {
     Ok(output) if output.status.success() => Ok(()),
@@ -191,6 +198,8 @@ fn compile_to(options: &CompileOptions, executable: &Path) -> Result<(), u8> {
 
 struct CCompiler {
   command: String,
+  /// Target triple reported by `-dumpmachine`.
+  target: String,
 }
 
 /// Finds the C compiler: `--cc`, then `SAG_CC`, then `clang`, then `gcc` (docs/architecture.md).
@@ -214,7 +223,7 @@ fn find_c_compiler(explicit: Option<&str>) -> Result<CCompiler, u8> {
          set SAG_CC to an LLVM clang targeting `x86_64-pc-windows-msvc` (docs/adr/0018-windows-c-toolchain.md)"
       );
     }
-    return Ok(CCompiler { command });
+    return Ok(CCompiler { command, target });
   }
   match configured {
     Some(command) => eprintln!("error: cannot run the C compiler `{command}` (from --cc or SAG_CC)"),

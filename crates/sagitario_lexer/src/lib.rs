@@ -26,6 +26,8 @@ pub enum TokenKind {
   },
   /// A plain string literal with escapes already processed.
   Str(String),
+  /// A template string: literal text alternating with `${...}` interpolations.
+  Template(Vec<TemplatePart>),
   Char(char),
   /// `///` (outer) or `//!` (inner) documentation.
   DocComment {
@@ -81,6 +83,7 @@ impl TokenKind {
       TokenKind::Int { .. } => "integer literal".to_string(),
       TokenKind::Float { .. } => "float literal".to_string(),
       TokenKind::Str(_) => "string literal".to_string(),
+      TokenKind::Template(_) => "template string".to_string(),
       TokenKind::Char(_) => "character literal".to_string(),
       TokenKind::DocComment { .. } => "documentation comment".to_string(),
       TokenKind::Eof => "end of file".to_string(),
@@ -130,6 +133,14 @@ impl TokenKind {
       _ => "?",
     }
   }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TemplatePart {
+  /// Literal text with escapes already processed.
+  Text(String),
+  /// The tokens of one `${...}` interpolation, ending with `Eof`.
+  Expr(Vec<Token>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -255,32 +266,37 @@ struct Lexer<'a> {
 impl Lexer<'_> {
   fn run(&mut self) {
     while let Some(c) = self.peek() {
-      let start = self.pos;
-
-      if c.is_whitespace() {
-        self.bump();
-      } else if c == '/' && self.peek_at(1) == Some('/') {
-        self.line_comment(start);
-      } else if c == '/' && self.peek_at(1) == Some('*') {
-        self.block_comment(start);
-      } else if c.is_ascii_digit() {
-        self.number(start);
-      } else if c == '_' || c.is_alphabetic() {
-        self.ident(start);
-      } else if c == '"' {
-        self.string(start);
-      } else if c == '\'' {
-        self.char_literal(start);
-      } else if c == '`' {
-        self.template(start);
-      } else {
-        self.punctuation(start, c);
-      }
+      self.step(c);
     }
 
     let end = self.pos;
 
     self.push(TokenKind::Eof, end);
+  }
+
+  /// Lexes one token (or skips whitespace or a comment) starting with `c`.
+  fn step(&mut self, c: char) {
+    let start = self.pos;
+
+    if c.is_whitespace() {
+      self.bump();
+    } else if c == '/' && self.peek_at(1) == Some('/') {
+      self.line_comment(start);
+    } else if c == '/' && self.peek_at(1) == Some('*') {
+      self.block_comment(start);
+    } else if c.is_ascii_digit() {
+      self.number(start);
+    } else if c == '_' || c.is_alphabetic() {
+      self.ident(start);
+    } else if c == '"' {
+      self.string(start);
+    } else if c == '\'' {
+      self.char_literal(start);
+    } else if c == '`' {
+      self.template(start);
+    } else {
+      self.punctuation(start, c);
+    }
   }
 
   fn peek(&self) -> Option<char> {
@@ -629,26 +645,81 @@ impl Lexer<'_> {
   fn template(&mut self, start: usize) {
     self.bump();
 
+    let mut parts = Vec::new();
+    let mut text = String::new();
+
     loop {
       match self.peek() {
-        None => break,
+        None => {
+          self.error(codes::UNTERMINATED_STRING, start, "unterminated template string");
+
+          break;
+        }
         Some('`') => {
           self.bump();
 
           break;
         }
         Some('\\') => {
-          self.bump();
-          self.bump();
+          if let Some(c) = self.escape() {
+            text.push(c);
+          }
         }
-        Some(_) => {
+        Some('$') if self.peek_at(1) == Some('{') => {
+          self.pos += 2;
+
+          if !text.is_empty() {
+            parts.push(TemplatePart::Text(std::mem::take(&mut text)));
+          }
+
+          parts.push(TemplatePart::Expr(self.interpolation(start)));
+        }
+        Some(c) => {
           self.bump();
+          text.push(c);
         }
       }
     }
 
-    self.error(codes::NOT_IMPLEMENTED, start, "template strings are not implemented yet");
-    self.push(TokenKind::Str(String::new()), start);
+    if !text.is_empty() {
+      parts.push(TemplatePart::Text(text));
+    }
+
+    self.push(TokenKind::Template(parts), start);
+  }
+
+  /// Lexes the tokens of a `${...}` interpolation up to its closing `}`, which is consumed.
+  fn interpolation(&mut self, template_start: usize) -> Vec<Token> {
+    let outer = std::mem::take(&mut self.tokens);
+    let mut depth = 0usize;
+
+    loop {
+      let Some(c) = self.peek() else {
+        self.error(codes::UNTERMINATED_STRING, template_start, "unterminated interpolation in template string");
+
+        break;
+      };
+
+      if c == '}' && depth == 0 {
+        self.bump();
+
+        break;
+      }
+
+      self.step(c);
+
+      match self.tokens.last().map(|token| &token.kind) {
+        Some(TokenKind::LBrace) => depth += 1,
+        Some(TokenKind::RBrace) => depth = depth.saturating_sub(1),
+        _ => {}
+      }
+    }
+
+    let end = self.pos;
+
+    self.push(TokenKind::Eof, end);
+
+    std::mem::replace(&mut self.tokens, outer)
   }
 
   fn punctuation(&mut self, start: usize, c: char) {
@@ -884,8 +955,33 @@ mod tests {
   }
 
   #[test]
-  fn reports_unexpected_characters_and_pending_templates() {
+  fn reports_unexpected_characters() {
     assert_eq!(error_codes("a # b"), vec!["E0001"]);
-    assert_eq!(error_codes("`x`"), vec!["E0900"]);
+  }
+
+  #[test]
+  fn lexes_template_strings() {
+    let kinds = kinds("`a ${x + 1} \\${b} ${ { y } }${`in ${z}`}`");
+    let [TokenKind::Template(parts), TokenKind::Eof] = kinds.as_slice() else { panic!("unexpected tokens: {kinds:?}") };
+    let [TemplatePart::Text(a), TemplatePart::Expr(first), TemplatePart::Text(literal), TemplatePart::Expr(braces), TemplatePart::Expr(nested)] =
+      parts.as_slice()
+    else {
+      panic!("unexpected parts: {parts:?}")
+    };
+
+    assert_eq!(a, "a ");
+    assert_eq!(
+      first.iter().map(|token| token.kind.clone()).collect::<Vec<_>>(),
+      vec![TokenKind::Ident("x".to_string()), TokenKind::Plus, int(1, None), TokenKind::Eof]
+    );
+    assert_eq!(literal, " ${b} ");
+    assert_eq!(braces.len(), 4);
+    assert!(matches!(nested.first().map(|token| &token.kind), Some(TokenKind::Template(_))));
+  }
+
+  #[test]
+  fn reports_unterminated_templates() {
+    assert_eq!(error_codes("`abc"), vec!["E0002"]);
+    assert_eq!(error_codes("`a ${x"), vec!["E0002", "E0002"]);
   }
 }

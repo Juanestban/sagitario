@@ -1,0 +1,25 @@
+// Integer and float arithmetic, interpolation formats and `as` conversions.
+// expect-stdout: 7 -3 10 2 1
+// expect-stdout: -7 -1
+// expect-stdout: 255 44 4294967295 -1
+// expect-stdout: 1 0 65 A
+// expect-stdout: 2147483647 -2147483648 0 255 0
+// expect-stdout: 1.5 2 0.30000000000000004 -0.5
+// expect-stdout: 0.1 100000000000000000000 0.0000001 inf
+// expect-stdout: true false
+pub fn main() {
+  const a = 5;
+  const b = 2;
+  println(`${a + b} ${b - a} ${a * b} ${a / b} ${a % b}`);
+  println(`${-a - b} ${-a % b}`);
+
+  const big: u8 = 255;
+  println(`${big} ${300 as u8} ${-1 as u32} ${4294967295u32 as i32}`);
+  println(`${true as u8} ${false as i32} ${'A' as u32} ${65u8 as char}`);
+  println(`${3.0e9 as i32} ${-3.0e9 as i32} ${-1.5 as u8} ${300.7 as u8} ${(0.0 / 0.0) as i32}`);
+
+  const x = 1.5;
+  println(`${x} ${2.0} ${0.1 + 0.2} ${-0.5}`);
+  println(`${0.1f32} ${1e20} ${1e-7} ${1.0 / 0.0}`);
+  println(`${a < b || b == 2 && !false} ${'a' > 'b'}`);
+}

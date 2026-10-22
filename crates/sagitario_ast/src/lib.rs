@@ -83,8 +83,74 @@ pub struct Block {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stmt {
-  /// `expr;`
+  /// `const name: Type = init;` or `var ...`
+  Let(LetStmt),
+  /// `target = value;`, or `target op= value;` when `op` is set.
+  Assign { target: Expr, op: Option<BinaryOp>, value: Expr, span: Span },
+  /// `expr;`, or a block-like expression (`if`, `while`, ...) used as a statement.
   Expr(Expr),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LetStmt {
+  pub id: NodeId,
+  /// `var` (true) or `const` (false).
+  pub mutable: bool,
+  pub name: Ident,
+  pub ty: Option<TypeExpr>,
+  pub init: Option<Expr>,
+  pub span: Span,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BinaryOp {
+  Add,
+  Sub,
+  Mul,
+  Div,
+  Rem,
+  Eq,
+  Ne,
+  Lt,
+  Le,
+  Gt,
+  Ge,
+  And,
+  Or,
+}
+
+impl BinaryOp {
+  pub fn symbol(self) -> &'static str {
+    match self {
+      BinaryOp::Add => "+",
+      BinaryOp::Sub => "-",
+      BinaryOp::Mul => "*",
+      BinaryOp::Div => "/",
+      BinaryOp::Rem => "%",
+      BinaryOp::Eq => "==",
+      BinaryOp::Ne => "!=",
+      BinaryOp::Lt => "<",
+      BinaryOp::Le => "<=",
+      BinaryOp::Gt => ">",
+      BinaryOp::Ge => ">=",
+      BinaryOp::And => "&&",
+      BinaryOp::Or => "||",
+    }
+  }
+
+  pub fn is_arithmetic(self) -> bool {
+    matches!(self, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem)
+  }
+
+  pub fn is_comparison(self) -> bool {
+    matches!(self, BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge)
+  }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum UnaryOp {
+  Neg,
+  Not,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,6 +158,13 @@ pub struct Expr {
   pub id: NodeId,
   pub kind: ExprKind,
   pub span: Span,
+}
+
+impl Expr {
+  /// Block-like expressions can be statements without a trailing `;`.
+  pub fn is_block_like(&self) -> bool {
+    matches!(self.kind, ExprKind::If { .. } | ExprKind::While { .. } | ExprKind::Loop { .. } | ExprKind::For { .. } | ExprKind::Block(_))
+  }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,6 +180,7 @@ pub enum ExprKind {
   Bool(bool),
   Char(char),
   Str(String),
+  Template(Vec<TemplatePart>),
   /// `()`
   Unit,
   Path(Path),
@@ -114,4 +188,56 @@ pub enum ExprKind {
     callee: Box<Expr>,
     args: Vec<Expr>,
   },
+  Unary {
+    op: UnaryOp,
+    operand: Box<Expr>,
+  },
+  Binary {
+    op: BinaryOp,
+    lhs: Box<Expr>,
+    rhs: Box<Expr>,
+  },
+  Cast {
+    expr: Box<Expr>,
+    ty: TypeExpr,
+  },
+  /// `start..end` or `start..=end`
+  Range {
+    start: Box<Expr>,
+    end: Box<Expr>,
+    inclusive: bool,
+  },
+  Block(Block),
+  If {
+    cond: Box<Expr>,
+    then_block: Block,
+    /// A `Block` expression or another `If` (`else if`).
+    else_branch: Option<Box<Expr>>,
+  },
+  While {
+    cond: Box<Expr>,
+    body: Block,
+  },
+  Loop {
+    body: Block,
+  },
+  /// `for var in iter { body }`; the loop variable binding is identified by the expression's id.
+  For {
+    var: Ident,
+    iter: Box<Expr>,
+    body: Block,
+  },
+  Break {
+    value: Option<Box<Expr>>,
+  },
+  Continue,
+  Return {
+    value: Option<Box<Expr>>,
+  },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TemplatePart {
+  Text(String),
+  Expr(Expr),
 }

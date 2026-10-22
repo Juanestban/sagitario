@@ -37,13 +37,18 @@ pub fn main() { ... }
 ```
 
 - `expect-stdout` may appear several times; lines are matched in order.
+- `// sag-flags: --release` passes extra options to `sag run` (e.g. to test release-mode
+  wrapping).
+- Panics print `panic at <file>:<line>: <message>`; `expect-panic` matches a substring.
 - `//~ ERROR Ennnn` asserts a diagnostic with that code on the same line. Every expected
   diagnostic must appear and no unexpected error may appear.
 
 ## Memory checks
 
-- In test mode the runtime counts live ARC objects; a non-zero count at exit fails the test.
-- Where supported, test programs are compiled with ASan and UBSan.
+- The runtime counts live ARC objects. When the environment variable `SAG_LEAK_CHECK` is set
+  (the harness always sets it), a program that exits normally with objects still alive prints
+  `leak check: N ARC object(s) still alive at exit` and exits with code 102, failing the test.
+- Where supported, test programs are compiled with ASan and UBSan (planned for F2).
 
 ## Rules
 

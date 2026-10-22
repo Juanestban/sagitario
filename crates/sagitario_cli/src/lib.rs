@@ -15,6 +15,7 @@ Commands:
   version  Show the compiler version
 
 Options:
+  --release                   Optimize; integer overflow wraps instead of panicking (build, run)
   --emit-c                    Also write the generated C (build, run)
   --cc <compiler>             C compiler to use; overrides SAG_CC (build, run)
   --diagnostic-format <fmt>   `human` (default) or `short`: one line per diagnostic";
@@ -87,6 +88,10 @@ fn parse_compile_options<I: Iterator<Item = String>>(mut args: I, mode: Mode) ->
       "--emit-c" => {
         require_codegen(mode, &flag)?;
         options.emit_c = true;
+      }
+      "--release" => {
+        require_codegen(mode, &flag)?;
+        options.release = true;
       }
       "--cc" => {
         require_codegen(mode, &flag)?;
@@ -197,7 +202,15 @@ mod tests {
   }
 
   #[test]
+  fn parses_release() {
+    let expected = CompileOptions { release: true, ..options("main.sag") };
+
+    assert_eq!(parse(&["run", "--release", "main.sag"]), Ok(Command::Run(expected)));
+  }
+
+  #[test]
   fn rejects_codegen_flags_for_check() {
+    assert!(parse(&["check", "--release", "main.sag"]).is_err());
     assert!(parse(&["check", "--emit-c", "main.sag"]).is_err());
     assert!(parse(&["check", "--cc", "clang", "main.sag"]).is_err());
   }

@@ -1,0 +1,63 @@
+// ARC strings: ownership across calls, loops, break values, early returns and shadowing.
+// The harness fails the test if any string leaks (SAG_LEAK_CHECK).
+// expect-stdout: hello, world
+// expect-stdout: 3 copies: ab ab ab
+// expect-stdout: found: item 4
+// expect-stdout: early: x=1, late: y=2
+// expect-stdout: same
+// expect-stdout: shadowed twice
+fn greet(name: String) -> String {
+  `hello, ${name}`
+}
+
+fn identity(s: String) -> String {
+  s
+}
+
+fn pick(flag: bool) -> String {
+  const temp = `x=${1}`;
+
+  if flag {
+    return temp;
+  }
+
+  const other = `y=${2}`;
+  other
+}
+
+pub fn main() {
+  const message = greet("world");
+  println(message);
+
+  const piece = identity(`a${"b"}`);
+  var copies = "";
+  var n = 0;
+
+  while n < 3 {
+    copies = `${copies} ${piece}`;
+    n += 1;
+  }
+
+  println(`3 copies:${copies}`);
+
+  var i = 0;
+  const found = loop {
+    i += 1;
+    const label = `item ${i}`;
+
+    if i == 4 {
+      break label;
+    }
+  };
+
+  println(`found: ${found}`);
+  println(`early: ${pick(true)}, late: ${pick(false)}`);
+
+  var s = "same";
+  s = s;
+  println(s);
+
+  const t = `shadowed`;
+  const t = `${t} twice`;
+  println(t);
+}

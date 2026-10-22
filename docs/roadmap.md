@@ -21,12 +21,13 @@ UTF-8 `String`, arrays, `extern "C"`/`unsafe`, `panic`, printing.
 Built as a vertical slice first, then widened feature by feature through every phase:
 
 1. Vertical slice: `pub fn main()`, prelude `println` with string literals, unit functions.
-2. `const`/`var`, operators with overflow checks, `if`/`else`/`while`/`loop`/`for` over ranges,
-   functions with parameters and return values, basic template-string interpolation.
+2. `const`/`var`, operators with overflow checks, `as`, `if`/`else`/`while`/`loop`/`for` over
+   ranges, functions with return values, template-string interpolation, ARC `String`s,
+   `--release` (ADR-0020).
 3. Diagnostic quality and the first broad `compile-fail` suites.
 4. Structs with methods and static functions; fixed arrays.
 5. Enums, exhaustive `match`, `Option`/`Result` and `?`.
-6. UTF-8 `String`, full template strings, `panic` and `run-panic` suites.
+6. The `String` API (methods, `StringBuilder`, `chars()`), `panic` and `run-panic` suites.
 7. Multi-file modules, `use` and visibility.
 8. FFI: `extern "C"`, `unsafe`, `@export`, `@repr(C)`.
 9. The reference programs below.
