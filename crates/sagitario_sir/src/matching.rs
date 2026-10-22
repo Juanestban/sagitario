@@ -234,7 +234,7 @@ impl FnLowering<'_> {
   }
 
   fn arm_body(&mut self, arm: &MatchArm, dest: Option<Local>, done: Local) -> LResult<()> {
-    let line = self.line(arm.body.span.start);
+    let line = self.line(arm.body.span);
 
     self.emit(line);
 

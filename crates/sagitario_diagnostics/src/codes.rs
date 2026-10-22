@@ -44,6 +44,8 @@ pub const INVALID_MAIN: Code = Code("E0204");
 pub const PRIVATE_MEMBER: Code = Code("E0205");
 /// Alternatives of a `|` pattern that bind different names.
 pub const INCONSISTENT_BINDINGS: Code = Code("E0206");
+/// An item used outside the modules that can see it.
+pub const PRIVATE_ITEM: Code = Code("E0207");
 
 /// An expression whose type differs from the expected one.
 pub const MISMATCHED_TYPES: Code = Code("E0300");
@@ -101,6 +103,10 @@ pub const UNNEEDED_VAR: Code = Code("W0002");
 pub const UNREACHABLE_CODE: Code = Code("W0003");
 /// A `match` arm that can never match because earlier arms cover its values.
 pub const UNREACHABLE_PATTERN: Code = Code("W0004");
+/// A `use` whose name is never used.
+pub const UNUSED_IMPORT: Code = Code("W0005");
+/// A type in the signature or fields of an item that is visible in more places than the type.
+pub const PRIVATE_INTERFACE: Code = Code("W0006");
 
 pub const ALL: &[Code] = &[
   UNEXPECTED_CHARACTER,
@@ -121,6 +127,7 @@ pub const ALL: &[Code] = &[
   INVALID_MAIN,
   PRIVATE_MEMBER,
   INCONSISTENT_BINDINGS,
+  PRIVATE_ITEM,
   MISMATCHED_TYPES,
   WRONG_ARGUMENT_COUNT,
   INTEGER_OUT_OF_RANGE,
@@ -148,6 +155,8 @@ pub const ALL: &[Code] = &[
   UNNEEDED_VAR,
   UNREACHABLE_CODE,
   UNREACHABLE_PATTERN,
+  UNUSED_IMPORT,
+  PRIVATE_INTERFACE,
 ];
 
 #[cfg(test)]

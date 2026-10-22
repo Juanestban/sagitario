@@ -246,49 +246,63 @@ pub fn render_human(diagnostic: &Diagnostic, sources: &SourceMap, color: bool) -
   let Some(file) = sources.get(diagnostic.span.file) else {
     return out;
   };
-  let mut markers = vec![marker(file, diagnostic.span, true, None)];
-  let mut other_files = Vec::new();
+  // Source excerpts, one per file: the primary span's file first, then the files of labels
+  // pointing elsewhere (such as a declaration in another module).
+  let mut groups = vec![(diagnostic.span.file, file, vec![marker(file, diagnostic.span, true, None)])];
+  let mut unplaced = Vec::new();
 
   for label in &diagnostic.labels {
-    if label.span.file == diagnostic.span.file {
-      markers.push(marker(file, label.span, false, Some(&label.message)));
-    } else {
-      other_files.push(&label.message);
+    let Some(label_file) = sources.get(label.span.file) else {
+      unplaced.push(&label.message);
+      continue;
+    };
+    let label_marker = marker(label_file, label.span, false, Some(&label.message));
+
+    match groups.iter_mut().find(|(id, _, _)| *id == label.span.file) {
+      Some((_, _, markers)) => markers.push(label_marker),
+      None => groups.push((label.span.file, label_file, vec![label_marker])),
     }
   }
 
-  markers.sort_by_key(|marker| (marker.line, marker.column));
-
   let main = file.line_col(diagnostic.span.start);
-  let width = markers.iter().map(|marker| marker.line).max().unwrap_or(main.line).to_string().len();
+  let width = groups.iter().flat_map(|(_, _, markers)| markers.iter().map(|marker| marker.line)).max().unwrap_or(main.line).to_string().len();
   let pad = " ".repeat(width);
   let gutter = |text: &str| format!("{}{text}{}", style.secondary, style.reset);
 
-  out.push_str(&format!("{pad}{} {}:{}:{}\n", gutter("-->"), file.path().display(), main.line, main.column));
-  out.push_str(&format!("{pad} {}\n", gutter("|")));
+  for (index, (_, file, markers)) in groups.iter_mut().enumerate() {
+    markers.sort_by_key(|marker| (marker.line, marker.column));
 
-  let mut previous_line: Option<u32> = None;
+    let (arrow, line, column) = match markers.first() {
+      Some(first) if index > 0 => (":::", first.line, first.column),
+      _ => ("-->", main.line, main.column),
+    };
 
-  for current in &markers {
-    if previous_line != Some(current.line) {
-      if previous_line.is_some_and(|previous| current.line > previous + 1) {
-        out.push_str(&format!("{}\n", gutter("...")));
+    out.push_str(&format!("{pad}{} {}:{line}:{column}\n", gutter(arrow), file.path().display()));
+    out.push_str(&format!("{pad} {}\n", gutter("|")));
+
+    let mut previous_line: Option<u32> = None;
+
+    for current in markers.iter() {
+      if previous_line != Some(current.line) {
+        if previous_line.is_some_and(|previous| current.line > previous + 1) {
+          out.push_str(&format!("{}\n", gutter("...")));
+        }
+
+        out.push_str(&format!("{} {}\n", gutter(&format!("{:>width$} |", current.line)), file.line_text(current.line)));
+        previous_line = Some(current.line);
       }
 
-      out.push_str(&format!("{} {}\n", gutter(&format!("{:>width$} |", current.line)), file.line_text(current.line)));
-      previous_line = Some(current.line);
+      let line_text = file.line_text(current.line);
+      // Keep tabs so the underline lines up with the source line.
+      let prefix: String = line_text.chars().take(current.column.saturating_sub(1) as usize).map(|c| if c == '\t' { '\t' } else { ' ' }).collect();
+      let (symbol, color) = if current.primary { ("^", style.primary) } else { ("-", style.secondary) };
+      let message = current.message.map_or(String::new(), |message| format!(" {message}"));
+
+      out.push_str(&format!("{pad} {} {prefix}{color}{}{message}{}\n", gutter("|"), symbol.repeat(current.width), style.reset));
     }
-
-    let line_text = file.line_text(current.line);
-    // Keep tabs so the underline lines up with the source line.
-    let prefix: String = line_text.chars().take(current.column.saturating_sub(1) as usize).map(|c| if c == '\t' { '\t' } else { ' ' }).collect();
-    let (symbol, color) = if current.primary { ("^", style.primary) } else { ("-", style.secondary) };
-    let message = current.message.map_or(String::new(), |message| format!(" {message}"));
-
-    out.push_str(&format!("{pad} {} {prefix}{color}{}{message}{}\n", gutter("|"), symbol.repeat(current.width), style.reset));
   }
 
-  for note in diagnostic.notes.iter().chain(other_files) {
+  for note in diagnostic.notes.iter().chain(unplaced) {
     out.push_str(&format!("{pad} {} {}note{}: {note}\n", gutter("="), style.bold, style.reset));
   }
 
@@ -330,6 +344,28 @@ error[E0300]: expected `String`, found `i32`
 2 |   println(42);
   |           ^^
   = note: string literals are written between double quotes
+";
+
+    assert_eq!(render_human(&diagnostic, &sources, false), expected);
+  }
+
+  #[test]
+  fn renders_labels_in_other_files() {
+    let mut sources = SourceMap::new();
+    let main = sources.add(PathBuf::from("main.sag"), "use pkg::vault::hidden;\n".to_string());
+    let vault = sources.add(PathBuf::from("vault.sag"), "fn hidden() {}\n".to_string());
+    let diagnostic = Diagnostic::error(codes::PRIVATE_ITEM, Span::new(main, 16, 22), "`hidden` is private")
+      .with_label(Span::new(vault, 3, 9), "declared without `pub` here");
+    let expected = "\
+error[E0207]: `hidden` is private
+ --> main.sag:1:17
+  |
+1 | use pkg::vault::hidden;
+  |                 ^^^^^^
+ ::: vault.sag:1:4
+  |
+1 | fn hidden() {}
+  |    ------ declared without `pub` here
 ";
 
     assert_eq!(render_human(&diagnostic, &sources, false), expected);

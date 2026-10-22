@@ -32,6 +32,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0021](0021-structs-and-fixed-arrays.md) | Structs, methods and fixed arrays | Accepted |
 | [0022](0022-enums-match-option-result.md) | Enums, `match`, `Option`/`Result` and `?` | Accepted |
 | [0023](0023-string-api-and-panic.md) | The `String` API, `StringBuilder` and `panic` | Accepted |
+| [0024](0024-modules-imports-and-visibility.md) | Modules, imports, visibility and the entry point | Accepted |
 
 ## Template
 

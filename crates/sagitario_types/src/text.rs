@@ -5,6 +5,8 @@
 use sagitario_ast::{Expr, Ident, Path};
 use sagitario_diagnostics::{Diagnostic, codes};
 
+use sagitario_resolve::TypeRes;
+
 use crate::{BuiltinMethod, Checker, FloatTy, IntTy, Type};
 
 /// A method implemented by a runtime function: its name, parameters, result and whether it
@@ -169,7 +171,8 @@ impl Checker<'_> {
   /// `new Type(args)`: in F1 only `new StringBuilder()`; classes arrive in F2.
   pub(crate) fn new_expr(&mut self, path: &Path, args: &[Expr]) -> Type {
     let name = path.segments.last().map_or("", |segment| segment.name.as_str());
-    let user_type = path.segments.len() == 1 && self.resolution.type_names.contains_key(name);
+    let resolved = self.resolution.type_paths.get(&path.id).copied();
+    let user_type = matches!(resolved, Some(TypeRes::Item(_)));
 
     if path.segments.len() == 1 && name == "StringBuilder" && !user_type {
       self.args(path.span, "constructor", &[], args);
@@ -178,6 +181,10 @@ impl Checker<'_> {
     }
 
     self.unchecked_args(args);
+
+    if resolved == Some(TypeRes::Error) {
+      return Type::Error;
+    }
 
     if user_type {
       self.diagnostics.push(

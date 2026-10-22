@@ -12,11 +12,11 @@ use std::collections::HashMap;
 use std::fmt;
 
 use sagitario_ast::{
-  ArrayLen, BinaryOp, Block, Expr, ExprKind, FieldInit, FnDecl, Ident, Module, NodeId, Path, Stmt, TemplatePart, TypeExpr, TypeExprKind, UnaryOp,
+  ArrayLen, BinaryOp, Block, Expr, ExprKind, FieldInit, FnDecl, Ident, NodeId, Package, Path, Stmt, TemplatePart, TypeExpr, TypeExprKind, UnaryOp,
   Visibility,
 };
 use sagitario_diagnostics::{Code, Diagnostic, Diagnostics, codes};
-use sagitario_resolve::{Builtin, EnumId, EnumKind, FnId, LocalId, LocalKind, Res, Resolution, StructId, TypeItem, VariantRef};
+use sagitario_resolve::{Builtin, EnumId, EnumKind, FnId, LocalId, LocalKind, Res, Resolution, StructId, TypeItem, TypeRes, VariantRef};
 use sagitario_span::Span;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -328,9 +328,9 @@ impl TypedModule {
   }
 }
 
-pub fn check(module: &Module, resolution: &Resolution, diagnostics: &mut Diagnostics) -> TypedModule {
+pub fn check(package: &Package, resolution: &Resolution, diagnostics: &mut Diagnostics) -> TypedModule {
   let mut checker = Checker {
-    module,
+    package,
     resolution,
     diagnostics,
     typed: TypedModule::default(),
@@ -346,7 +346,7 @@ pub fn check(module: &Module, resolution: &Resolution, diagnostics: &mut Diagnos
   checker.enum_defs();
   checker.check_recursive_types();
 
-  let decls = resolution.fn_decls(module);
+  let decls = resolution.fn_decls(package);
 
   for (id, decl) in &decls {
     checker.owner = resolution.owner(*id);
@@ -397,7 +397,7 @@ struct LoopCx {
 }
 
 struct Checker<'a> {
-  module: &'a Module,
+  package: &'a Package,
   resolution: &'a Resolution,
   diagnostics: &'a mut Diagnostics,
   typed: TypedModule,
@@ -419,7 +419,7 @@ impl Checker<'_> {
   }
 
   fn struct_ref(&self, id: StructId) -> Type {
-    let name = self.resolution.struct_decl(self.module, id).map_or_else(String::new, |decl| decl.name.name.clone());
+    let name = self.resolution.struct_decl(self.package, id).map_or_else(String::new, |decl| decl.name.name.clone());
 
     Type::Struct(StructRef { id, name })
   }
@@ -427,7 +427,7 @@ impl Checker<'_> {
   fn type_ref(&self, item: TypeItem) -> Type {
     match item {
       TypeItem::Struct(id) => self.struct_ref(id),
-      TypeItem::Enum(id) => Type::Enum(EnumRef { id, name: self.resolution.type_name(self.module, item) }),
+      TypeItem::Enum(id) => Type::Enum(EnumRef { id, name: self.resolution.type_name(self.package, item) }),
     }
   }
 
@@ -435,7 +435,7 @@ impl Checker<'_> {
   fn enum_defs(&mut self) {
     for index in 0..self.resolution.enums.len() {
       let id = EnumId(index as u32);
-      let Some(decl) = self.resolution.enum_decl(self.module, id) else { continue };
+      let Some(decl) = self.resolution.enum_decl(self.package, id) else { continue };
 
       self.owner = Some(TypeItem::Enum(id));
 
@@ -463,7 +463,7 @@ impl Checker<'_> {
   fn struct_defs(&mut self) {
     for index in 0..self.resolution.structs.len() {
       let id = StructId(index as u32);
-      let Some(decl) = self.resolution.struct_decl(self.module, id) else { continue };
+      let Some(decl) = self.resolution.struct_decl(self.package, id) else { continue };
 
       self.owner = Some(TypeItem::Struct(id));
 
@@ -492,7 +492,7 @@ impl Checker<'_> {
       let fields = self.typed.struct_def(id).map(|def| def.fields.clone()).unwrap_or_default();
       let recursive = fields.iter().find(|field| self.contains_type(&field.ty, TypeItem::Struct(id), &mut Vec::new()));
 
-      if let (Some(field), Some(decl)) = (recursive, self.resolution.struct_decl(self.module, id)) {
+      if let (Some(field), Some(decl)) = (recursive, self.resolution.struct_decl(self.package, id)) {
         let (name, span) = (decl.name.name.clone(), decl.name.span);
 
         self.recursive_type_error("struct", &name, span, field.span);
@@ -501,7 +501,7 @@ impl Checker<'_> {
 
     for index in 0..self.typed.enums.len() {
       let id = EnumId(index as u32);
-      let Some(decl) = self.resolution.enum_decl(self.module, id) else { continue };
+      let Some(decl) = self.resolution.enum_decl(self.package, id) else { continue };
       let types = self.typed.enums.get(index).map(|def| def.variants.iter().map(VariantDef::field_types).collect::<Vec<_>>()).unwrap_or_default();
       let recursive = types.iter().position(|fields| fields.iter().any(|ty| self.contains_type(ty, TypeItem::Enum(id), &mut Vec::new())));
 
@@ -554,14 +554,14 @@ impl Checker<'_> {
     FnSig { receiver, params, ret }
   }
 
-  /// `pub fn main()` or `pub fn main() -> Result<(), String>` (docs/spec/07-errors.md).
+  /// `fn main()` or `fn main() -> Result<(), String>`, with any visibility (docs/spec/07-errors.md).
   fn check_main(&mut self, id: FnId, main: &FnDecl) {
     let ret = self.typed.sig(id).map_or(Type::Unit, |sig| sig.ret.clone());
     let valid_ret = matches!(&ret, Type::Unit | Type::Error) || ret == Type::Result(Box::new(Type::Unit), Box::new(Type::String));
 
-    if main.visibility != Visibility::Public || !main.params.is_empty() || !valid_ret {
+    if !main.params.is_empty() || !valid_ret {
       let mut diagnostic =
-        Diagnostic::error(codes::INVALID_MAIN, main.name.span, "`main` must be declared as `pub fn main()` or `pub fn main() -> Result<(), String>`");
+        Diagnostic::error(codes::INVALID_MAIN, main.name.span, "`main` must be declared as `fn main()` or `fn main() -> Result<(), String>`");
 
       if let Type::Result(..) = ret {
         diagnostic = diagnostic.with_note("in F1 the error type of `main` must be `String`");
@@ -642,7 +642,8 @@ impl Checker<'_> {
       TypeExprKind::Generic { path, args } => {
         let name = path.segments.last().map_or("", |segment| segment.name.as_str());
         let arity = match name {
-          _ if path.segments.len() != 1 || self.resolution.type_names.contains_key(name) => None,
+          _ if self.resolution.type_paths.get(&path.id) == Some(&TypeRes::Error) => return Type::Error,
+          _ if path.segments.len() != 1 || matches!(self.resolution.type_paths.get(&path.id), Some(TypeRes::Item(_))) => None,
           "Option" => Some(1),
           "Result" => Some(2),
           _ => None,
@@ -672,8 +673,15 @@ impl Checker<'_> {
         }
       }
       TypeExprKind::Path(path) => {
+        // The resolver reports unknown types and resolves program types and module paths.
+        match self.resolution.type_paths.get(&path.id) {
+          Some(TypeRes::Item(item)) => return self.type_ref(*item),
+          Some(TypeRes::Error) => return Type::Error,
+          _ => {}
+        }
+
         let [segment] = path.segments.as_slice() else {
-          self.error(codes::NOT_IMPLEMENTED, path.span, "paths with `::` are not implemented yet");
+          self.error(codes::UNRESOLVED_NAME, path.span, "cannot find this type");
 
           return Type::Error;
         };
@@ -698,10 +706,6 @@ impl Checker<'_> {
           };
         }
 
-        if let Some(item) = self.resolution.type_names.get(name) {
-          return self.type_ref(*item);
-        }
-
         match name {
           "bool" => Type::Bool,
           "char" => Type::Char,
@@ -717,10 +721,9 @@ impl Checker<'_> {
           _ => {
             let primitives =
               IntTy::ALL.iter().map(|ty| ty.name()).chain(["f32", "f64", "bool", "char", "String", "StringBuilder", "Option", "Result"]);
-            let known = primitives.chain(self.resolution.type_names.keys().map(String::as_str));
             let mut diagnostic = Diagnostic::error(codes::UNRESOLVED_NAME, segment.span, format!("cannot find type `{name}`"));
 
-            if let Some(similar) = sagitario_diagnostics::closest_match(name, known) {
+            if let Some(similar) = sagitario_diagnostics::closest_match(name, primitives) {
               diagnostic = diagnostic.with_help(format!("a type with a similar name exists: `{similar}`"));
             }
 
@@ -1491,12 +1494,12 @@ impl Checker<'_> {
         return Type::Error;
       }
     };
-    let found = self.resolution.type_function(self.module, owner, name);
-    let (Some(function), Some(decl)) = (found, found.and_then(|function| self.resolution.fn_decl(self.module, function))) else {
+    let found = self.resolution.type_function(self.package, owner, name);
+    let (Some(function), Some(decl)) = (found, found.and_then(|function| self.resolution.fn_decl(self.package, function))) else {
       let mut diagnostic = Diagnostic::error(codes::UNKNOWN_MEMBER, method.span, format!("no method `{name}` on type `{receiver_ty}`"));
       let functions = match owner {
-        TypeItem::Struct(id) => self.resolution.struct_decl(self.module, id).map(|decl| &decl.functions),
-        TypeItem::Enum(id) => self.resolution.enum_decl(self.module, id).map(|decl| &decl.functions),
+        TypeItem::Struct(id) => self.resolution.struct_decl(self.package, id).map(|decl| &decl.functions),
+        TypeItem::Enum(id) => self.resolution.enum_decl(self.package, id).map(|decl| &decl.functions),
       };
       let methods: Vec<String> =
         functions.into_iter().flatten().filter(|function| function.self_param.is_some()).map(|function| function.name.name.clone()).collect();
@@ -1555,7 +1558,7 @@ impl Checker<'_> {
     let Some(field) = def.fields.iter().find(|field| field.name == field_name) else {
       let mut diagnostic = Diagnostic::error(codes::UNKNOWN_MEMBER, name.span, format!("no field `{field_name}` on type `{base_ty}`"));
 
-      if self.resolution.type_function(self.module, TypeItem::Struct(owner.id), field_name).is_some() {
+      if self.resolution.type_function(self.package, TypeItem::Struct(owner.id), field_name).is_some() {
         diagnostic = diagnostic.with_help(format!("`{field_name}` is a function; call it with `{field_name}(...)`"));
       } else if let Some(similar) = sagitario_diagnostics::closest_match(field_name, def.fields.iter().map(|field| field.name.as_str())) {
         diagnostic = diagnostic.with_help(format!("a field with a similar name exists: `{similar}`"));
@@ -1681,7 +1684,7 @@ impl Checker<'_> {
   fn variant_path(&self, variant: VariantRef) -> String {
     match variant.owner {
       EnumKind::User(id) => {
-        let enum_name = self.resolution.type_name(self.module, TypeItem::Enum(id));
+        let enum_name = self.resolution.type_name(self.package, TypeItem::Enum(id));
         let variant_name = self.typed.enums.get(id.0 as usize).and_then(|def| def.variants.get(variant.index as usize)).map(|def| def.name.clone());
 
         format!("{enum_name}::{}", variant_name.unwrap_or_default())
@@ -1985,12 +1988,12 @@ mod tests {
     let file = sources.add(PathBuf::from("test.sag"), text.to_string());
     let mut diagnostics = Diagnostics::new();
     let tokens = sagitario_lexer::lex(file, text, &mut diagnostics);
-    let module = sagitario_parser::parse_module(file, tokens, &mut diagnostics);
-    let resolution = sagitario_resolve::resolve(&module, &mut diagnostics);
+    let package = Package::single(sagitario_parser::parse_module(file, tokens, &mut diagnostics));
+    let resolution = sagitario_resolve::resolve(&package, &mut diagnostics);
 
     assert!(!diagnostics.has_errors(), "front end failed: {:?}", diagnostics.take());
 
-    check(&module, &resolution, &mut diagnostics);
+    check(&package, &resolution, &mut diagnostics);
 
     // Warnings are covered by the `flow` tests.
     diagnostics.take().iter().filter(|diagnostic| diagnostic.severity == Severity::Error).map(|diagnostic| diagnostic.code.0).collect()
@@ -2094,8 +2097,10 @@ mod tests {
 
   #[test]
   fn validates_main_signature() {
-    assert_eq!(diagnostics("fn main() {}"), vec!["E0204"]);
+    assert_eq!(diagnostics("fn main() {}"), Vec::<&str>::new());
+    assert_eq!(diagnostics("pub(pkg) fn main() -> Result<(), String> { Ok(()) }"), Vec::<&str>::new());
     assert_eq!(diagnostics("pub fn main(x: i32) {}"), vec!["E0204"]);
+    assert_eq!(diagnostics("fn main() -> i32 { 0 }"), vec!["E0204"]);
   }
 
   const POINT: &str = "

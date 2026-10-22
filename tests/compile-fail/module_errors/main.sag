@@ -1,0 +1,21 @@
+use pkg::vault::hidden; //~ ERROR E0207
+use pkg::vault::missing; //~ ERROR E0200
+use pkg::vault::Lock; //~ WARN W0005
+use pkg::vault::Lock::new; //~ ERROR E0900
+use util::helper; //~ ERROR E0200
+use std::io; //~ ERROR E0900
+use pkg::vault::open_door;
+use pkg::vault::open_door; //~ ERROR E0201
+
+fn main() {
+  open_door();
+  hidden();
+  pkg::vault::hidden(); //~ ERROR E0207
+  vault::open_door(); //~ ERROR E0200
+  pkg::nowhere::f(); //~ ERROR E0200
+  super::f(); //~ ERROR E0200
+  const _x: pkg::vault = 1; //~ ERROR E0200
+  const _k: pkg::vault::Key = pkg::vault::make(); //~ ERROR E0207
+}
+
+fn vault() {} //~ ERROR E0201

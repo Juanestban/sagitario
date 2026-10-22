@@ -18,9 +18,9 @@
 mod matching;
 mod text;
 
-use sagitario_ast::{BinaryOp, Block, Expr, ExprKind, FnDecl, Module, Stmt as AstStmt, TemplatePart, UnaryOp};
+use sagitario_ast::{BinaryOp, Block, Expr, ExprKind, FnDecl, Package, Stmt as AstStmt, TemplatePart, UnaryOp};
 use sagitario_resolve::{Builtin, FnId, Res, Resolution};
-use sagitario_span::SourceFile;
+use sagitario_span::{SourceMap, Span};
 use sagitario_types::{BuiltinMethod, FloatTy, IntTy, Receiver, Type, TypedModule};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -29,8 +29,8 @@ pub struct Program {
   pub functions: Vec<Function>,
   pub layouts: Layouts,
   pub entry: FnId,
-  /// Path of the source file, for `#line` directives.
-  pub source_path: String,
+  /// Path of each source file, by `FileId` index, for `#line` directives.
+  pub source_paths: Vec<String>,
 }
 
 /// The fields of the program's structs and enums.
@@ -124,7 +124,10 @@ pub enum Projection {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
   /// The following statements come from this 1-based source line.
-  Line(u32),
+  Line {
+    file: u32,
+    line: u32,
+  },
   Assign {
     dest: Local,
     value: Rvalue,
@@ -288,7 +291,7 @@ fn error<T>(message: impl Into<String>) -> LResult<T> {
   Err(LowerError(message.into()))
 }
 
-pub fn lower(module: &Module, resolution: &Resolution, typed: &TypedModule, source: &SourceFile) -> LResult<Program> {
+pub fn lower(package: &Package, resolution: &Resolution, typed: &TypedModule, sources: &SourceMap) -> LResult<Program> {
   let entry = resolution.main.ok_or_else(|| LowerError("program without `main`".to_string()))?;
   let structs = typed
     .structs
@@ -303,11 +306,13 @@ pub fn lower(module: &Module, resolution: &Resolution, typed: &TypedModule, sour
   let layouts = Layouts { structs, enums };
   let mut functions = Vec::new();
 
-  for (id, decl) in resolution.fn_decls(module) {
-    functions.push(lower_function(id, decl, resolution, typed, &layouts, source)?);
+  for (id, decl) in resolution.fn_decls(package) {
+    functions.push(lower_function(id, decl, resolution, typed, &layouts, sources)?);
   }
 
-  Ok(Program { functions, layouts, entry, source_path: source.path().display().to_string() })
+  let source_paths = sources.files().iter().map(|source| source.path().display().to_string()).collect();
+
+  Ok(Program { functions, layouts, entry, source_paths })
 }
 
 fn lower_function(
@@ -316,7 +321,7 @@ fn lower_function(
   resolution: &Resolution,
   typed: &TypedModule,
   layouts: &Layouts,
-  source: &SourceFile,
+  sources: &SourceMap,
 ) -> LResult<Function> {
   let sig = typed.sig(id).ok_or_else(|| LowerError(format!("no signature for `{}`", decl.name.name)))?;
   let locals = typed.local_types.get(id.0 as usize).cloned().ok_or_else(|| LowerError("missing local types".to_string()))?;
@@ -324,7 +329,7 @@ fn lower_function(
     resolution,
     typed,
     layouts,
-    source,
+    sources,
     ret: sig.ret.clone(),
     locals,
     buffers: vec![Vec::new()],
@@ -368,7 +373,7 @@ struct FnLowering<'a> {
   resolution: &'a Resolution,
   typed: &'a TypedModule,
   layouts: &'a Layouts,
-  source: &'a SourceFile,
+  sources: &'a SourceMap,
   /// The function's return type, for `?`.
   ret: Type,
   locals: Vec<Type>,
@@ -415,8 +420,10 @@ impl FnLowering<'_> {
     self.resolution.bindings.get(&id).map(|local| Local(local.0)).ok_or_else(|| LowerError("unresolved binding".to_string()))
   }
 
-  fn line(&self, expr_start: u32) -> Stmt {
-    Stmt::Line(self.source.line_col(expr_start).line)
+  fn line(&self, span: Span) -> Stmt {
+    let line = self.sources.get(span.file).map_or(1, |source| source.line_col(span.start).line);
+
+    Stmt::Line { file: span.file.index() as u32, line }
   }
 
   /// Runs `f` with a new statement buffer and returns its statements. Temporaries created
@@ -492,8 +499,7 @@ impl FnLowering<'_> {
     }
 
     if let Some(tail) = &block.tail {
-      let start = tail.span.start;
-      let line = self.line(start);
+      let line = self.line(tail.span);
 
       self.emit(line);
 
@@ -519,12 +525,12 @@ impl FnLowering<'_> {
   }
 
   fn stmt(&mut self, stmt: &AstStmt) -> LResult<()> {
-    let start = match stmt {
-      AstStmt::Let(stmt) => stmt.span.start,
-      AstStmt::Assign { span, .. } => span.start,
-      AstStmt::Expr(expr) => expr.span.start,
+    let span = match stmt {
+      AstStmt::Let(stmt) => stmt.span,
+      AstStmt::Assign { span, .. } => *span,
+      AstStmt::Expr(expr) => expr.span,
     };
-    let line = self.line(start);
+    let line = self.line(span);
 
     self.emit(line);
 

@@ -11,6 +11,10 @@ Rationale: [ADR-0016](adr/0016-engineering-process.md).
 | `compile-fail` | `tests/compile-fail/*.sag` | Compiler rejects the program with the expected diagnostic codes at the expected lines. |
 | `run-panic` | `tests/run-panic/*.sag` | Program panics with the expected message and exit code 101. |
 
+A case is a single `.sag` file, or a directory holding a multi-file program whose entry file
+is `main.sag` (for example `tests/run-pass/modules/main.sag` with `geometry.sag` and
+`util/strings.sag` beside it).
+
 The end-to-end suites run through an own harness (in the style of rustc's `compiletest`),
 `crates/sagitario_cli/tests/suites.rs`, invoked by `cargo test --workspace`. It runs the built
 `sag` binary: `sag run <file>` for `run-pass` and `run-panic`, and
@@ -24,7 +28,7 @@ Annotations are line comments inside the `.sag` test file.
 ```sag
 // expect-stdout: total = 6
 // expect-exit: 0
-pub fn main() { ... }
+fn main() { ... }
 ```
 
 ```sag
@@ -33,10 +37,12 @@ const x: i32 = "hello";   //~ ERROR E0042
 
 ```sag
 // expect-panic: index out of bounds
-pub fn main() { ... }
+fn main() { ... }
 ```
 
-- `expect-stdout` may appear several times; lines are matched in order.
+- `expect-stdout` may appear several times; lines are matched in order. In a multi-file case,
+  `expect-*` and `sag-flags` annotations are read from `main.sag`, and `//~` annotations
+  from every file of the program (each one matched against its own file).
 - `// sag-flags: --release` passes extra options to `sag run` (e.g. to test release-mode
   wrapping).
 - Panics print `panic at <file>:<line>: <message>`; `expect-panic` matches a substring.

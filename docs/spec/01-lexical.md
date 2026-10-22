@@ -24,12 +24,13 @@ treated as comments. A documentation tool (`sag doc`) is post-MVP.
 abstract  as        break     class     const     continue  else      enum
 extends   extern    false     fn        for       if        impl      in
 interface loop      match     new       override  pkg       prv       pub
-return    self      Self      struct    true      unsafe    use       var
-weak      where     while     zod
+return    self      Self      struct    super     true      unsafe    use
+var       weak      where     while     zod
 ```
 
-`zod` refers to the parent class (the role `super` has in other languages). `Self` refers to
-the type being declared (see [types](02-types.md#self)).
+`zod` refers to the parent class (the role `super` has in other languages); `super` refers to
+the parent module (see [modules](09-modules.md#paths)), and `pkg` to the package root. `Self`
+refers to the type being declared (see [types](02-types.md#self)).
 
 ## Reserved for future phases (post-MVP)
 

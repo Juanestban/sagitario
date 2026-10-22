@@ -551,10 +551,10 @@ mod tests {
     let file = sources.add(PathBuf::from("test.sag"), text.clone());
     let mut diagnostics = Diagnostics::new();
     let tokens = sagitario_lexer::lex(file, &text, &mut diagnostics);
-    let module = sagitario_parser::parse_module(file, tokens, &mut diagnostics);
-    let resolution = sagitario_resolve::resolve(&module, &mut diagnostics);
+    let package = sagitario_ast::Package::single(sagitario_parser::parse_module(file, tokens, &mut diagnostics));
+    let resolution = sagitario_resolve::resolve(&package, &mut diagnostics);
 
-    crate::check(&module, &resolution, &mut diagnostics);
+    crate::check(&package, &resolution, &mut diagnostics);
 
     diagnostics.take().iter().map(|diagnostic| diagnostic.code.0).collect()
   }

@@ -6,6 +6,13 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FileId(u32);
 
+impl FileId {
+  /// The position of the file in its `SourceMap`.
+  pub fn index(self) -> usize {
+    self.0 as usize
+  }
+}
+
 /// A byte range `[start, end)` inside one source file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Span {
@@ -108,6 +115,11 @@ impl SourceMap {
 
   pub fn get(&self, id: FileId) -> Option<&SourceFile> {
     self.files.get(id.0 as usize)
+  }
+
+  /// Every file, in the order they were added.
+  pub fn files(&self) -> &[SourceFile] {
+    &self.files
   }
 }
 

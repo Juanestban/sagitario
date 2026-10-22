@@ -1,0 +1,41 @@
+// A program split into modules: `pkg::geometry` is `geometry.sag`, `pkg::util::strings` is
+// `util/strings.sag`. `unused.sag` is never referenced, so it is not compiled.
+// expect-stdout: == modules ==
+// expect-stdout: 25
+// expect-stdout: 0
+// expect-stdout: 4
+// expect-stdout: at 1,2
+// expect-stdout: 42
+// expect-stdout: HOLA! (42)
+// expect-stdout: not the entry
+use pkg::geometry::{self, Point, distance2};
+use pkg::shapes;
+use pkg::text::{banner as title, main as text_main};
+
+fn main() {
+  println(title("modules"));
+
+  const a = Point::origin();
+  const b = Point { x: 3, y: 4 };
+  println(`${distance2(a, b)}`);
+
+  const q: geometry::Point = geometry::Point::origin();
+  println(`${q.x}`);
+
+  println(`${shapes::area(shapes::Shape::Square(2))}`);
+
+  const at = shapes::Shape::At(Point { x: 1, y: 2 });
+  match at {
+    shapes::Shape::Square(_) => println("square"),
+    shapes::Shape::At(p) => println(`at ${p.x},${p.y}`),
+  }
+
+  println(`${pkg::answer()}`);
+  println(pkg::util::strings::shout("hola"));
+  println(text_main());
+}
+
+// Private, yet visible to every submodule: they are inside the root module.
+fn answer() -> i32 {
+  42
+}

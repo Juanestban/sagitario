@@ -176,6 +176,7 @@ pub enum Keyword {
   SelfValue,
   SelfType,
   Struct,
+  Super,
   True,
   Unsafe,
   Use,
@@ -219,6 +220,7 @@ const KEYWORDS: &[(&str, Keyword)] = &[
   ("self", Keyword::SelfValue),
   ("Self", Keyword::SelfType),
   ("struct", Keyword::Struct),
+  ("super", Keyword::Super),
   ("true", Keyword::True),
   ("unsafe", Keyword::Unsafe),
   ("use", Keyword::Use),
@@ -843,10 +845,11 @@ mod tests {
   #[test]
   fn distinguishes_keywords_and_identifiers() {
     assert_eq!(
-      kinds("self Self zod await selfish _x ñandú"),
+      kinds("self Self super zod await selfish _x ñandú"),
       vec![
         TokenKind::Keyword(Keyword::SelfValue),
         TokenKind::Keyword(Keyword::SelfType),
+        TokenKind::Keyword(Keyword::Super),
         TokenKind::Keyword(Keyword::Zod),
         TokenKind::Keyword(Keyword::Await),
         TokenKind::Ident("selfish".to_string()),
