@@ -215,28 +215,18 @@ impl Checker<'_> {
     }
   }
 
-  /// Integer, character and boolean literals; floats and (until `String` comparison exists)
-  /// strings are rejected.
+  /// Integer, character, boolean and string literals; floats are rejected.
   fn literal_pattern(&mut self, expr: &Expr, ty: &Type) {
     let inner = match &expr.kind {
       ExprKind::Unary { op: UnaryOp::Neg, operand } => &operand.kind,
       kind => kind,
     };
 
-    match inner {
-      ExprKind::Float { .. } => {
-        self.expr(expr, None);
-        self.invalid_pattern(expr.span, "float literals cannot be used in patterns".to_string(), "compare the value with `if` instead".to_string());
+    if let ExprKind::Float { .. } = inner {
+      self.expr(expr, None);
+      self.invalid_pattern(expr.span, "float literals cannot be used in patterns".to_string(), "compare the value with `if` instead".to_string());
 
-        return;
-      }
-      ExprKind::Str(_) => {
-        self.expr(expr, None);
-        self.error(codes::NOT_IMPLEMENTED, expr.span, "string patterns are not implemented yet (F1 increment 6)");
-
-        return;
-      }
-      _ => {}
+      return;
     }
 
     let hint = matches!(ty, Type::Int(_)).then_some(ty);
@@ -342,6 +332,7 @@ impl Checker<'_> {
       Ctor::Bool(value) => value.to_string(),
       Ctor::Int(value) => value.to_string(),
       Ctor::Char(value) => format!("{value:?}"),
+      Ctor::Str(value) => format!("{value:?}"),
       Ctor::Variant(index) => {
         let Some(kind) = ty.enum_kind() else { return "_".to_string() };
         let path = self.variant_path(VariantRef { owner: kind, index: *index });
@@ -377,6 +368,7 @@ fn literal_ctor(expr: &Expr) -> Option<Ctor> {
     },
     ExprKind::Bool(value) => Some(Ctor::Bool(*value)),
     ExprKind::Char(value) => Some(Ctor::Char(*value)),
+    ExprKind::Str(value) => Some(Ctor::Str(value.clone())),
     _ => None,
   }
 }

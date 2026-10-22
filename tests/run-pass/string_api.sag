@@ -1,0 +1,65 @@
+// The `String` API: methods, `+`/`+=`, comparisons, string patterns, `chars()`/`bytes()`,
+// `char` methods, parsing, and `StringBuilder` (a reference). Checked for leaks.
+// expect-stdout: Hola, Mundo
+// expect-stdout: 11 false true true false
+// expect-stdout: HOLA, MUNDO / hola, mundo
+// expect-stdout: H0la, Mund0!
+// expect-stdout: ababab
+// expect-stdout: 6 true
+// expect-stdout: true true true
+// expect-stdout: bye usage unknown
+// expect-stdout: 3 795
+// expect-stdout: 0-1-2- 6 shared
+// expect-stdout: true
+// expect-stdout: 7 true A true
+// expect-stdout: 255 number too large to fit in target type -3 2.5
+// expect-stdout: 42 invalid digit found in string
+fn command(word: String) -> String {
+  match word {
+    "quit" | "exit" => "bye",
+    "help" => "usage",
+    _ => "unknown",
+  }
+}
+
+fn sum(text: String) -> Result<i32, String> {
+  const a = text.substring(0, 2).parse_i32()?;
+  const b = text.substring(3, 5).parse_i32()?;
+  Ok(a + b)
+}
+
+pub fn main() {
+  var text = "  Hola, Mundo  ".trim();
+  println(text);
+  println(`${text.len()} ${text.is_empty()} ${text.contains("Mun")} ${text.starts_with("Ho")} ${text.ends_with("x")}`);
+  println(text.to_ascii_uppercase() + " / " + text.to_ascii_lowercase());
+  text += "!";
+  println(text.replace("o", "0"));
+  println("ab".repeat(3));
+  println(`${text.find("Mundo").unwrap_or(99)} ${text.find("zz").is_none()}`);
+  println(`${"a" < "b"} ${"abc" == "abc"} ${"b" >= "abc"}`);
+  println(`${command("quit")} ${command("help")} ${command("x")}`);
+
+  var vowels = 0;
+  for c in "héllo wörld".chars() {
+    if c == 'é' || c == 'ö' || c == 'o' { vowels += 1; }
+  }
+  var bytes = 0;
+  for b in "héllo".bytes() { bytes += b as i32; }
+  println(`${vowels} ${bytes}`);
+
+  const builder = new StringBuilder();
+  const alias = builder;
+  for i in 0..3 {
+    builder.append(`${i}`);
+    builder.append_char('-');
+  }
+  alias.append("shared");
+  println(`${builder.to_string().replace("shared", "")} ${builder.len() - 6} ${builder.to_string().substring(6, 12)}`);
+  builder.clear();
+  println(`${builder.is_empty()}`);
+
+  println(`${'7'.to_digit(10).unwrap()} ${'z'.to_digit(10).is_none()} ${'a'.to_ascii_uppercase()} ${' '.is_ascii_whitespace()}`);
+  println(`${"255".parse_u8().unwrap()} ${"256".parse_u8().unwrap_err()} ${"-3".parse_i64().unwrap()} ${"2.5".parse_f64().unwrap()}`);
+  println(`${sum("12+30").unwrap()} ${sum("1x+30").unwrap_err()}`);
+}

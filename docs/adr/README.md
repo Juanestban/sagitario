@@ -31,6 +31,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0020](0020-expressions-bindings-and-build-modes.md) | Operators, bindings, control flow, interpolation and build modes | Accepted |
 | [0021](0021-structs-and-fixed-arrays.md) | Structs, methods and fixed arrays | Accepted |
 | [0022](0022-enums-match-option-result.md) | Enums, `match`, `Option`/`Result` and `?` | Accepted |
+| [0023](0023-string-api-and-panic.md) | The `String` API, `StringBuilder` and `panic` | Accepted |
 
 ## Template
 

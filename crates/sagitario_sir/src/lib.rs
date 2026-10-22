@@ -16,11 +16,12 @@
 //! compiler error, reported as `LowerError`.
 
 mod matching;
+mod text;
 
 use sagitario_ast::{BinaryOp, Block, Expr, ExprKind, FnDecl, Module, Stmt as AstStmt, TemplatePart, UnaryOp};
 use sagitario_resolve::{Builtin, FnId, Res, Resolution};
 use sagitario_span::SourceFile;
-use sagitario_types::{FloatTy, IntTy, Receiver, Type, TypedModule};
+use sagitario_types::{BuiltinMethod, FloatTy, IntTy, Receiver, Type, TypedModule};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
@@ -45,7 +46,7 @@ impl Layouts {
   /// Whether values of `ty` hold `String`s, so copies must be retained and released.
   pub fn is_managed(&self, ty: &Type) -> bool {
     match ty {
-      Type::String => true,
+      Type::String | Type::StringBuilder => true,
       Type::Array(elem, _) => self.is_managed(elem),
       Type::Struct(inner) => self.structs.get(inner.id.0 as usize).is_some_and(|layout| layout.fields.iter().any(|field| self.is_managed(field))),
       Type::Enum(_) | Type::Option(_) | Type::Result(..) => self.variants(ty).iter().flatten().flatten().any(|field| self.is_managed(field)),
@@ -169,6 +170,13 @@ pub enum Stmt {
     len: u64,
     body: Vec<Stmt>,
   },
+  /// `for var in text.chars()` (each `char`) or `text.bytes()` (each `u8`).
+  ForText {
+    var: Local,
+    text: Local,
+    bytes: bool,
+    body: Vec<Stmt>,
+  },
   Break,
   Continue,
   Return(Option<Operand>),
@@ -234,6 +242,11 @@ pub enum TemplatePiece {
 pub enum Callee {
   Fn(FnId),
   Builtin(Builtin),
+  /// A runtime function; `located` ones also receive the source location (to report panics).
+  Runtime {
+    function: &'static str,
+    located: bool,
+  },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -543,6 +556,11 @@ impl FnLowering<'_> {
         let value = self.expr(value)?;
         let place = self.place(target)?;
         let ty = place.ty.clone();
+        // `text += more` is `text = text + more`.
+        let (op, value) = match op {
+          Some(BinaryOp::Add) if ty == Type::String => (&None, self.binary(BinaryOp::Add, Type::String, Operand::Place(place.clone()), value)),
+          _ => (op, value),
+        };
 
         match op {
           None if self.managed(&ty) => {
@@ -566,6 +584,10 @@ impl FnLowering<'_> {
         let local = Local(id.0);
         let ty = self.local_type(local);
         let value = self.expr(value)?;
+        let (op, value) = match op {
+          Some(BinaryOp::Add) if ty == Type::String => (&None, self.binary(BinaryOp::Add, Type::String, Operand::Local(local), value)),
+          _ => (op, value),
+        };
 
         match op {
           None if self.managed(&ty) => {
@@ -680,6 +702,8 @@ impl FnLowering<'_> {
         other => error(format!("unsupported path operand {other:?}")),
       },
       ExprKind::Try(inner) => self.try_expr(inner),
+      ExprKind::New { .. } if ty == Type::StringBuilder => Ok(self.new_string_builder()),
+      ExprKind::New { .. } => error("`new` of a type other than `StringBuilder`"),
       ExprKind::Match { scrutinee, arms } => self.match_expr(&ty, scrutinee, arms),
       ExprKind::Field { .. } | ExprKind::Index { .. } => {
         let place = self.place(expr)?;
@@ -727,6 +751,7 @@ impl FnLowering<'_> {
         let params = match callee {
           Callee::Fn(id) => self.typed.sig(id).map(|sig| sig.params.clone()),
           Callee::Builtin(builtin) => Some(sagitario_types::builtin_sig(builtin).params),
+          Callee::Runtime { .. } => None,
         }
         .unwrap_or_default();
         let mut operands = Vec::new();
@@ -738,9 +763,14 @@ impl FnLowering<'_> {
         Ok(self.call(callee, operands, ty))
       }
       ExprKind::MethodCall { receiver, args, .. } if self.typed.builtin_methods.contains_key(&expr.id) => {
-        let method = self.typed.builtin_methods.get(&expr.id).copied().ok_or_else(|| LowerError("missing built-in method".to_string()))?;
+        let method = self.typed.builtin_methods.get(&expr.id).cloned().ok_or_else(|| LowerError("missing built-in method".to_string()))?;
 
-        self.builtin_method(method, &ty, receiver, args)
+        match method {
+          BuiltinMethod::Runtime { .. } | BuiltinMethod::Find | BuiltinMethod::ToDigit | BuiltinMethod::Parse(_) => {
+            self.text_method(method, &ty, receiver, args)
+          }
+          _ => self.builtin_method(method, &ty, receiver, args),
+        }
       }
       ExprKind::MethodCall { receiver, args, .. } => {
         let Some(function) = self.typed.method_calls.get(&expr.id).copied() else {
@@ -892,7 +922,7 @@ impl FnLowering<'_> {
           return Ok(self.new_value(ty, Rvalue::Binary { op: *op, ty: TAG_TYPE, lhs, rhs }));
         }
 
-        Ok(self.new_value(ty, Rvalue::Binary { op: *op, ty: operand_ty, lhs, rhs }))
+        Ok(self.binary(*op, operand_ty, lhs, rhs))
       }
       ExprKind::Cast { expr: inner, .. } => {
         let from = self.type_of(inner)?;
@@ -954,6 +984,13 @@ impl FnLowering<'_> {
       }
       ExprKind::For { iter, body, .. } => {
         let var = self.binding(expr.id)?;
+
+        match self.typed.builtin_methods.get(&iter.id) {
+          Some(BuiltinMethod::Chars) => return self.for_text(var, iter, false, body).map(|()| UNIT),
+          Some(BuiltinMethod::Bytes) => return self.for_text(var, iter, true, body).map(|()| UNIT),
+          _ => {}
+        }
+
         let iter_ty = self.type_of(iter)?;
 
         if let Type::Array(_, len) = iter_ty {

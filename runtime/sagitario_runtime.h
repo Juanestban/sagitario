@@ -63,6 +63,85 @@ _Noreturn void sag_panic_str_at(sag_string message, const char *file, int line);
 /* Prints the error returned by `main` (`error: ...`) to stderr. */
 void sag_report_main_error(sag_string message);
 
+/* ---- String API (docs/spec/02-types.md#string-f1) -------------------------------------
+ * Byte indices; strings are always valid UTF-8. Functions returning `sag_string` return it
+ * with one reference owned by the caller. */
+
+static inline size_t sag_string_len(sag_string s) {
+  return s.len;
+}
+static inline bool sag_string_is_empty(sag_string s) {
+  return s.len == 0;
+}
+sag_string sag_string_concat(sag_string a, sag_string b);
+/* Byte-wise lexicographic order: negative, zero or positive. */
+int sag_string_cmp(sag_string a, sag_string b);
+bool sag_string_contains(sag_string s, sag_string pattern);
+bool sag_string_starts_with(sag_string s, sag_string prefix);
+bool sag_string_ends_with(sag_string s, sag_string suffix);
+/* The byte index of the first occurrence, or SIZE_MAX. */
+size_t sag_string_find(sag_string s, sag_string pattern);
+sag_string sag_string_trim(sag_string s);
+sag_string sag_string_trim_start(sag_string s);
+sag_string sag_string_trim_end(sag_string s);
+sag_string sag_string_to_ascii_uppercase(sag_string s);
+sag_string sag_string_to_ascii_lowercase(sag_string s);
+sag_string sag_string_replace(sag_string s, sag_string from, sag_string to);
+sag_string sag_string_repeat_at(sag_string s, size_t count, const char *file, int line);
+sag_string sag_string_substring_at(sag_string s, size_t start, size_t end, const char *file, int line);
+/* Decodes the character at `*index` and advances `*index` past it. */
+uint32_t sag_utf8_next(sag_string s, size_t *index);
+
+/* Parsing: on success the value is stored and `*error` is the empty string; otherwise
+ * `*error` holds Rust's message (owned by the caller). */
+bool sag_parse_signed(sag_string s, int64_t min, int64_t max, int64_t *value, sag_string *error);
+bool sag_parse_unsigned(sag_string s, uint64_t max, uint64_t *value, sag_string *error);
+bool sag_parse_float(sag_string s, double *value, sag_string *error);
+
+/* ---- char (ASCII) ------------------------------------------------------------------------ */
+
+static inline bool sag_char_is_ascii_digit(uint32_t c) {
+  return c >= '0' && c <= '9';
+}
+static inline bool sag_char_is_ascii_uppercase(uint32_t c) {
+  return c >= 'A' && c <= 'Z';
+}
+static inline bool sag_char_is_ascii_lowercase(uint32_t c) {
+  return c >= 'a' && c <= 'z';
+}
+static inline bool sag_char_is_ascii_alphabetic(uint32_t c) {
+  return sag_char_is_ascii_uppercase(c) || sag_char_is_ascii_lowercase(c);
+}
+static inline bool sag_char_is_ascii_alphanumeric(uint32_t c) {
+  return sag_char_is_ascii_alphabetic(c) || sag_char_is_ascii_digit(c);
+}
+/* Rust's definition: space, tab, line feed, form feed, carriage return. */
+static inline bool sag_char_is_ascii_whitespace(uint32_t c) {
+  return c == ' ' || c == '\t' || c == '\n' || c == '\f' || c == '\r';
+}
+static inline uint32_t sag_char_to_ascii_uppercase(uint32_t c) {
+  return sag_char_is_ascii_lowercase(c) ? c - 32 : c;
+}
+static inline uint32_t sag_char_to_ascii_lowercase(uint32_t c) {
+  return sag_char_is_ascii_uppercase(c) ? c + 32 : c;
+}
+/* The digit's value in `radix` (2 to 36), or UINT32_MAX; panics on an invalid radix. */
+uint32_t sag_char_to_digit_at(uint32_t c, uint32_t radix, const char *file, int line);
+
+/* ---- StringBuilder (ARC reference) -------------------------------------------------------- */
+
+typedef struct sag_builder_obj *sag_builder;
+
+sag_builder sag_builder_new(void);
+void sag_builder_retain(sag_builder builder);
+void sag_builder_release(sag_builder builder);
+void sag_builder_append(sag_builder builder, sag_string s);
+void sag_builder_append_char(sag_builder builder, uint32_t c);
+size_t sag_builder_len(sag_builder builder);
+bool sag_builder_is_empty(sag_builder builder);
+void sag_builder_clear(sag_builder builder);
+sag_string sag_builder_to_string(sag_builder builder);
+
 /* ---- Arrays ------------------------------------------------------------------------------ */
 
 _Noreturn void sag_index_out_of_bounds(size_t index, size_t len, const char *file, int line);

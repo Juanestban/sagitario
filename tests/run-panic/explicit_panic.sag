@@ -1,0 +1,15 @@
+// expect-panic: invalid state: 3
+fn step(state: i32) -> i32 {
+  match state {
+    0 | 1 | 2 => state + 1,
+    other => panic(`invalid state: ${other}`),
+  }
+}
+
+pub fn main() {
+  var state = 0;
+
+  loop {
+    state = step(state);
+  }
+}

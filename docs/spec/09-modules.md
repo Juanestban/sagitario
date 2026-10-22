@@ -32,8 +32,8 @@ Every module implicitly sees these names, without `use`:
 
 | Kind | Names | Milestone |
 |---|---|---|
-| Types and variants | `Option`, `Some`, `None`, `Result`, `Ok`, `Err`, `String` | F1 |
-| Functions | `print(s: String)`, `println(s: String)`, `eprintln(s: String)` | F1 |
+| Types and variants | `Option`, `Some`, `None`, `Result`, `Ok`, `Err`, `String`, `StringBuilder` | F1 |
+| Functions | `print(s: String)`, `println(s: String)`, `eprintln(s: String)`, `panic(message: String)` | F1 |
 | Types | `List`, `Map`, `Error` | F2 |
 
 - `print` and `println` write to stdout, `eprintln` to stderr (`println`/`eprintln` add a
