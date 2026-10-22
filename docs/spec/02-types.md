@@ -37,9 +37,29 @@ MVP; they may be added later.
 ## Conversions
 
 - There are **no implicit numeric conversions**. `i32 + i64` is a compile error.
-- Explicit conversion uses `as`: `x as i64`.
-- `bool` never converts to or from integers. Conditions of `if` and `while` must have type
-  `bool`; there is no "truthiness".
+- Explicit conversion uses `as`: `x as i64`. `as` never panics, in any build mode.
+- Conditions of `if` and `while` must have type `bool`; there is no "truthiness".
+
+| Conversion | Result |
+|---|---|
+| integer → narrower integer | truncates to the low bits: `300 as u8` is `44` |
+| signed ↔ unsigned of the same size | reinterprets the bits: `-1i32 as u32` is `4294967295` |
+| integer → float | rounds to nearest |
+| float → integer | **saturates**: truncates toward zero, clamps out-of-range values to the type's min/max, `NaN` becomes `0` |
+| `f64` ↔ `f32` | rounds to nearest (values beyond `f32` range become infinity) |
+| `bool` → integer | `true` is `1`, `false` is `0` |
+| `char` → integer | the Unicode scalar value (`'A' as u32` is `65`) |
+| `u8` → `char` | allowed (always a valid character); no other integer converts to `char` |
+| anything else | compile error (e.g. `i32 as bool`; write `x != 0`) |
+
+## Build modes
+
+| | Debug (default) | Release (`--release`) |
+|---|---|---|
+| Integer overflow | panics | wraps |
+| C optimization | `-O0 -g` | `-O2` |
+
+Division by zero, out-of-bounds indexing and every other panic behave the same in both modes.
 
 ## Integer arithmetic
 
@@ -54,6 +74,19 @@ MVP; they may be added later.
 - Always valid UTF-8 and **immutable**.
 - Managed by ARC: copying a `String` value only increments its reference count.
 - `+` and template strings create a new `String`. `StringBuilder` builds strings efficiently.
+- Template strings interpolate any expression with `${expr}`:
+  `` `total = ${a + b * 2}` ``. Interpolable types and their format:
+
+  | Type | Format |
+  |---|---|
+  | integers | decimal (`-42`) |
+  | `f32`, `f64` | the shortest decimal that converts back to the same value, without exponent: `1.5`, `2` (for `2.0`), `0.30000000000000004`; `NaN`, `inf`, `-inf` |
+  | `bool` | `true` / `false` |
+  | `char` | the character |
+  | `String` | as is |
+
+  User-defined types (structs, enums, classes) cannot be interpolated until a `Display`
+  interface exists (post-MVP).
 - Byte indexing (`s[i]`) is not allowed; use `s.chars()` or `s.bytes()`.
 
 ## Equality (F1/F2)

@@ -29,6 +29,8 @@ struct Expectations {
   stdout: Vec<String>,
   exit: Option<i32>,
   panic: Option<String>,
+  /// Extra `sag` options, e.g. `--release`.
+  flags: Vec<String>,
   errors: Vec<ExpectedError>,
 }
 
@@ -53,6 +55,8 @@ fn parse_expectations(source: &str) -> Result<Expectations, String> {
       expectations.exit = Some(code);
     } else if let Some(rest) = trimmed.strip_prefix("// expect-panic:") {
       expectations.panic = Some(rest.trim().to_string());
+    } else if let Some(rest) = trimmed.strip_prefix("// sag-flags:") {
+      expectations.flags.extend(rest.split_whitespace().map(str::to_string));
     }
 
     if let Some((_, annotation)) = line.split_once("//~") {
@@ -112,8 +116,23 @@ fn discover(root: &Path, suite: Suite) -> Result<Vec<PathBuf>, String> {
   Ok(cases)
 }
 
+/// `sag run <flags> <file>`.
+fn run(flags: &[String], file: &Path) -> Result<Output, String> {
+  let mut args = vec!["run"];
+
+  args.extend(flags.iter().map(String::as_str));
+
+  sag(&args, file)
+}
+
 fn sag(args: &[&str], file: &Path) -> Result<Output, String> {
-  Command::new(env!("CARGO_BIN_EXE_sag")).args(args).arg(file).output().map_err(|error| format!("cannot run `sag`: {error}"))
+  // Programs fail with exit code 102 if ARC objects leak (docs/testing.md#memory-checks).
+  Command::new(env!("CARGO_BIN_EXE_sag"))
+    .args(args)
+    .arg(file)
+    .env("SAG_LEAK_CHECK", "1")
+    .output()
+    .map_err(|error| format!("cannot run `sag`: {error}"))
 }
 
 fn exit_code(output: &Output) -> Result<i32, String> {
@@ -139,7 +158,7 @@ fn run_case(suite: Suite, file: &Path) -> Result<(), String> {
       if !expectations.errors.is_empty() || expectations.panic.is_some() {
         return Err("run-pass tests cannot use `//~ ERROR` or `expect-panic`".to_string());
       }
-      let output = sag(&["run"], file)?;
+      let output = run(&expectations.flags, file)?;
       expect_exit(&output, expectations.exit.unwrap_or(0))?;
 
       if !expectations.stdout.is_empty() {
@@ -157,7 +176,7 @@ fn run_case(suite: Suite, file: &Path) -> Result<(), String> {
       let Some(message) = &expectations.panic else {
         return Err("run-panic tests need an `expect-panic` annotation".to_string());
       };
-      let output = sag(&["run"], file)?;
+      let output = run(&expectations.flags, file)?;
 
       expect_exit(&output, 101)?;
 

@@ -1,7 +1,8 @@
 //! Registry of diagnostic codes. Every diagnostic the compiler emits uses one of these codes.
 //!
-//! Ranges: `E0001`–`E0099` lexical, `E0100`–`E0199` syntax, `E0200`–`E0299` names,
-//! `E0300`–`E0399` types, `E0900`–`E0999` language features not implemented yet.
+//! Errors: `E0001`–`E0099` lexical, `E0100`–`E0199` syntax, `E0200`–`E0299` names,
+//! `E0300`–`E0399` types and control flow, `E0900`–`E0999` language features not implemented
+//! yet. Warnings: `W0001`–`W0999`.
 
 use crate::Code;
 
@@ -22,6 +23,8 @@ pub const INVALID_CHAR_LITERAL: Code = Code("E0006");
 pub const UNEXPECTED_TOKEN: Code = Code("E0100");
 /// A keyword reserved for a future phase (`async`, `await`) used in the program.
 pub const RESERVED_KEYWORD: Code = Code("E0101");
+/// Chained non-associative operators, such as `a < b < c`.
+pub const CHAINED_OPERATORS: Code = Code("E0102");
 
 /// A name that does not refer to anything in scope.
 pub const UNRESOLVED_NAME: Code = Code("E0200");
@@ -40,9 +43,34 @@ pub const MISMATCHED_TYPES: Code = Code("E0300");
 pub const WRONG_ARGUMENT_COUNT: Code = Code("E0301");
 /// An integer literal that does not fit its type.
 pub const INTEGER_OUT_OF_RANGE: Code = Code("E0302");
+/// `break` or `continue` outside of a loop.
+pub const BREAK_OUTSIDE_LOOP: Code = Code("E0303");
+/// `break` with a value inside `while` or `for`.
+pub const BREAK_WITH_VALUE: Code = Code("E0304");
+/// An `as` conversion between types that cannot be converted.
+pub const INVALID_CAST: Code = Code("E0305");
+/// A value of a type that cannot be interpolated in a template string.
+pub const NOT_INTERPOLABLE: Code = Code("E0306");
+/// An assignment whose target is not a binding.
+pub const INVALID_ASSIGNMENT_TARGET: Code = Code("E0307");
+/// An assignment to a `const` that may already hold a value, or to a parameter.
+pub const ASSIGN_TO_CONST: Code = Code("E0308");
+/// A binding read before it is definitely assigned.
+pub const UNASSIGNED_BINDING: Code = Code("E0309");
+/// An operator applied to operands of a type it does not support.
+pub const INVALID_OPERAND: Code = Code("E0310");
+/// A binding declared without type and value that is never assigned.
+pub const UNKNOWN_TYPE: Code = Code("E0311");
 
 /// A language feature that is specified but not implemented yet.
 pub const NOT_IMPLEMENTED: Code = Code("E0900");
+
+/// A binding that is never read (names starting with `_` are exempt).
+pub const UNUSED_BINDING: Code = Code("W0001");
+/// A `var` that is never reassigned.
+pub const UNNEEDED_VAR: Code = Code("W0002");
+/// A statement that can never run.
+pub const UNREACHABLE_CODE: Code = Code("W0003");
 
 pub const ALL: &[Code] = &[
   UNEXPECTED_CHARACTER,
@@ -53,6 +81,7 @@ pub const ALL: &[Code] = &[
   INVALID_CHAR_LITERAL,
   UNEXPECTED_TOKEN,
   RESERVED_KEYWORD,
+  CHAINED_OPERATORS,
   UNRESOLVED_NAME,
   DUPLICATE_DEFINITION,
   RESERVED_NAME,
@@ -61,7 +90,19 @@ pub const ALL: &[Code] = &[
   MISMATCHED_TYPES,
   WRONG_ARGUMENT_COUNT,
   INTEGER_OUT_OF_RANGE,
+  BREAK_OUTSIDE_LOOP,
+  BREAK_WITH_VALUE,
+  INVALID_CAST,
+  NOT_INTERPOLABLE,
+  INVALID_ASSIGNMENT_TARGET,
+  ASSIGN_TO_CONST,
+  UNASSIGNED_BINDING,
+  INVALID_OPERAND,
+  UNKNOWN_TYPE,
   NOT_IMPLEMENTED,
+  UNUSED_BINDING,
+  UNNEEDED_VAR,
+  UNREACHABLE_CODE,
 ];
 
 #[cfg(test)]
@@ -71,7 +112,7 @@ mod tests {
   #[test]
   fn codes_are_well_formed_and_unique() {
     for (index, code) in ALL.iter().enumerate() {
-      let digits = code.0.strip_prefix('E').unwrap();
+      let digits = code.0.strip_prefix('E').or_else(|| code.0.strip_prefix('W')).unwrap();
 
       assert!(digits.len() == 4 && digits.bytes().all(|byte| byte.is_ascii_digit()), "malformed code {}", code.0);
       assert!(!ALL.iter().skip(index + 1).any(|other| other == code), "duplicate code {}", code.0);

@@ -62,6 +62,12 @@ Sagitario Intermediate Representation: a typed, lower-level form where
   exists),
 - `?`, `match` and closures are lowered to explicit control flow and environments.
 
+SIR is structured (`If`/`Loop`/`ForRange` rather than a control-flow graph), since it is
+emitted as C. ARC is explicit: every `String` binding owns one reference and is released at the
+end of its block, before `break`/`continue`/`return`, or when overwritten (the new value is
+retained first); temporaries are released at the end of the statement or branch that created
+them; parameters are borrowed; return values are owned by the caller.
+
 SIR is the place for ARC optimizations and the boundary behind which other backends (LLVM)
 could be added.
 
@@ -85,7 +91,10 @@ Minimal C, embedded in the `sag` binary and compiled with every program:
 - panic (message, file, line, exit code 101),
 - `String` storage and UTF-8 helpers, allocation,
 - basic I/O used by `std`,
-- in test mode, a live-object counter that fails the run if it is non-zero at exit.
+- overflow-checked integer helpers (`sag_add_i32_at`, ...) that panic in debug and wrap when
+  compiled with `-DSAG_RELEASE` (`sag build --release`), saturating float-to-integer casts,
+- a string builder used by template strings, with shortest round-trip float formatting,
+- a live-object counter checked at exit when `SAG_LEAK_CHECK` is set (exit code 102).
 
 Anything expressible in Sagitario belongs in `std/` instead.
 

@@ -32,6 +32,16 @@ total += x;
 
 - `const` at module level declares a compile-time constant: `const PI: f64 = 3.14159;`.
 - There is no `let` and no `mut`.
+- The type annotation is optional: `const x: i64 = 5;` or `const x = 5;`.
+- A binding may be declared without a value (`var x: i32;`) if the compiler can prove it is
+  assigned before every use (*definite assignment*); a `const` declared this way must be
+  assigned exactly once. Reading a possibly unassigned binding is an error.
+- **Shadowing** is allowed, also in the same block: `const x = 5; const x = x + 1;` declares a
+  new binding.
+- Scope is lexical: a binding lives until the end of the block that declares it.
+- Parameters behave like `const`. Assigning to a `const` or a parameter is an error.
+- Warnings: a `var` that is never reassigned (suggests `const`), and an unused binding unless
+  its name starts with `_`.
 
 ## Struct mutability (F1)
 
