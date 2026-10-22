@@ -26,6 +26,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0015](0015-compiler-architecture-and-toolchain.md) | Compiler architecture and C toolchain | Accepted |
 | [0016](0016-engineering-process.md) | Testing, quality gates, conventions and license | Accepted |
 | [0017](0017-resolution-of-open-questions-q1-q11.md) | Resolution of open questions Q1–Q11 | Accepted |
+| [0018](0018-windows-c-toolchain.md) | Windows C toolchain: official LLVM (MSVC target), MinGW clang tolerated | Accepted |
 
 ## Template
 

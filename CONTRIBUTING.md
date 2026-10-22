@@ -3,8 +3,10 @@
 ## Requirements
 
 - Rust 1.90 or newer (edition 2024).
-- clang (the official C compiler). On Windows: LLVM plus Visual Studio Build Tools (UCRT and
-  the MSVC linker). gcc is optional on Linux.
+- clang (the official C compiler). On Windows: official LLVM (`x86_64-pc-windows-msvc`) plus
+  Visual Studio Build Tools, which the Rust MSVC toolchain already needs. If `clang` on your
+  `PATH` is an MSYS2/MinGW clang, set `SAG_CC` to the LLVM one; MinGW works best-effort,
+  without sanitizers. gcc is optional on Linux.
 
 ## Commands
 
@@ -14,7 +16,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace          # includes the end-to-end .sag suites
 
 sag build main.sag              # compile
-sag run main.sag                # compile and run
+sag run main.sag -- a b         # compile and run, forwarding arguments
 sag check main.sag              # front end only
 sag build main.sag --emit-c     # also write the generated C
 SAG_CC=gcc sag build main.sag   # choose the C compiler (or --cc)

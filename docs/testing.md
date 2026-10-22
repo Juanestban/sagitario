@@ -11,8 +11,10 @@ Rationale: [ADR-0016](adr/0016-engineering-process.md).
 | `compile-fail` | `tests/compile-fail/*.sag` | Compiler rejects the program with the expected diagnostic codes at the expected lines. |
 | `run-panic` | `tests/run-panic/*.sag` | Program panics with the expected message and exit code 101. |
 
-The end-to-end suites run through an own harness (in the style of rustc's `compiletest`)
-invoked by `cargo test --workspace`. They require a C compiler (see
+The end-to-end suites run through an own harness (in the style of rustc's `compiletest`),
+`crates/sagitario_cli/tests/suites.rs`, invoked by `cargo test --workspace`. It runs the built
+`sag` binary: `sag run <file>` for `run-pass` and `run-panic`, and
+`sag check --diagnostic-format short <file>` for `compile-fail` (expected exit code 1). They require a C compiler (see
 [architecture](architecture.md#c-toolchain)).
 
 ## Annotations

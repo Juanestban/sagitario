@@ -96,8 +96,21 @@ Anything expressible in Sagitario belongs in `std/` instead.
 - Detection order: `SAG_CC` environment variable or `--cc` flag, then `clang` on `PATH`, then
   `gcc`. If none is found, `sag` fails with installation instructions per OS.
 - Debug builds of tests use `-fsanitize=address,undefined` where supported.
+- Windows ([ADR-0018](adr/0018-windows-c-toolchain.md)): the supported compiler is official
+  LLVM clang targeting `x86_64-pc-windows-msvc`. MinGW clang (`*-windows-gnu`, detected with
+  `-dumpmachine`) is tolerated with a warning and without sanitizers. When running sanitized
+  programs, the driver adds the sanitizer runtime directory to the child `PATH`.
 
 ## CLI
 
 `sag build`, `sag run`, `sag check` (front end only, no C compilation), with `--emit-c` and
-`--cc`.
+`--cc` (build and run only), `--diagnostic-format human|short`, and `sag run file.sag -- args`
+to forward arguments to the program.
+
+- `human` (default) renders multi-line diagnostics with source excerpts; `short` prints one
+  line per diagnostic, `path:line:column: error[E0001]: message`, for tools and the test
+  harness.
+- Exit codes of `sag` itself: `0` success, `1` compilation failed or input unreadable, `2`
+  invalid command-line usage. `sag run` returns the program's own exit code once it runs.
+
+Crates are created when the phase that needs them starts; F0 only has `sagitario_cli`.
