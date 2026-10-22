@@ -36,6 +36,41 @@ pub struct Module {
 pub enum Item {
   Fn(FnDecl),
   Struct(StructDecl),
+  Enum(EnumDecl),
+}
+
+/// `enum Name { variants, then functions }`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnumDecl {
+  pub visibility: Visibility,
+  pub name: Ident,
+  pub variants: Vec<VariantDecl>,
+  pub functions: Vec<FnDecl>,
+  pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VariantDecl {
+  pub name: Ident,
+  pub fields: VariantFields,
+  pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VariantFields {
+  /// `Empty`
+  Unit,
+  /// `Circle(f64)`
+  Tuple(Vec<TypeExpr>),
+  /// `Rect { w: f64, h: f64 }`
+  Named(Vec<VariantFieldDecl>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VariantFieldDecl {
+  pub name: Ident,
+  pub ty: TypeExpr,
+  pub span: Span,
 }
 
 /// `struct Name { fields and functions }`; members keep their source order within each list.
@@ -94,6 +129,8 @@ pub enum TypeExprKind {
   Unit,
   /// A named type; `Self` is a path with the single segment `Self`.
   Path(Path),
+  /// `Option<T>`, `Result<T, E>`
+  Generic { path: Path, args: Vec<TypeExpr> },
   /// `[T; N]`
   Array { elem: Box<TypeExpr>, len: ArrayLen },
 }
@@ -203,7 +240,10 @@ pub struct Expr {
 impl Expr {
   /// Block-like expressions can be statements without a trailing `;`.
   pub fn is_block_like(&self) -> bool {
-    matches!(self.kind, ExprKind::If { .. } | ExprKind::While { .. } | ExprKind::Loop { .. } | ExprKind::For { .. } | ExprKind::Block(_))
+    matches!(
+      self.kind,
+      ExprKind::If { .. } | ExprKind::While { .. } | ExprKind::Loop { .. } | ExprKind::For { .. } | ExprKind::Match { .. } | ExprKind::Block(_)
+    )
   }
 }
 
@@ -275,6 +315,12 @@ pub enum ExprKind {
     end: Box<Expr>,
     inclusive: bool,
   },
+  /// `expr?`
+  Try(Box<Expr>),
+  Match {
+    scrutinee: Box<Expr>,
+    arms: Vec<MatchArm>,
+  },
   Block(Block),
   If {
     cond: Box<Expr>,
@@ -302,6 +348,48 @@ pub enum ExprKind {
   Return {
     value: Option<Box<Expr>>,
   },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatchArm {
+  pub pattern: Pattern,
+  /// `if condition` after the pattern.
+  pub guard: Option<Expr>,
+  pub body: Expr,
+  pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pattern {
+  pub id: NodeId,
+  pub kind: PatternKind,
+  pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PatternKind {
+  /// `_`
+  Wildcard,
+  /// A single name: a new binding, or a prelude variant without data (`None`).
+  Ident(Ident),
+  /// An integer (possibly negated), character, boolean or string literal.
+  Literal(Box<Expr>),
+  /// A variant without data: `Shape::Empty`.
+  Path(Path),
+  /// `Shape::Circle(r)`, `Some(x)`
+  Tuple { path: Path, elems: Vec<Pattern> },
+  /// `Shape::Rect { w, h: 0.0, .. }`; `rest` is set by `..`.
+  Named { path: Path, fields: Vec<FieldPattern>, rest: bool },
+  /// `a | b`
+  Or(Vec<Pattern>),
+}
+
+/// `name: pattern`; the shorthand `name` is stored with an `Ident` pattern.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldPattern {
+  pub name: Ident,
+  pub pattern: Pattern,
+  pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

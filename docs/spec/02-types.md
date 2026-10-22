@@ -122,9 +122,18 @@ enum Shape impl Display {
 - Methods follow the variants inside the same body, with mandatory `pub`/`prv`, taking
   `self` or `var self`; functions without `self` are static (see
   [static functions](03-memory.md#static-functions)).
-- `enum Name impl I1, I2` implements interfaces (F2).
-- Enums are value types; their mutability comes from the binding, as for structs.
-- Values are inspected with an exhaustive `match` (see [control flow](06-control-flow.md)).
+- A variant without data is written without parentheses (`Empty`): `Empty()`, `Empty {}` and
+  enums without variants are errors. Variants and functions of an enum share one namespace.
+- Variants are always named with their path: `Shape::Circle(1.0)`, `Shape::Rect { w, h }`,
+  `Shape::Empty`, or `Self::Empty` inside the enum. Only the prelude's `Some`, `None`, `Ok` and
+  `Err` are used without one. Named fields are initialized like a struct literal (every field
+  once, shorthand allowed).
+- `enum Name impl I1, I2` implements interfaces (F2). Generic enums arrive with generics (F2).
+- Enums are value types; their mutability comes from the binding, as for structs. Copying an
+  enum retains the `String`s it holds. An enum cannot contain itself by value.
+- Only enums whose variants carry no data support `==` and `!=`. Enums cannot be converted with
+  `as` or interpolated.
+- Values are inspected with an exhaustive `match` (see [control flow](06-control-flow.md#match)).
 
 ## Arrays and lists
 
@@ -158,3 +167,14 @@ enum Shape impl Display {
 - There is no `T?` sugar and no `?.` / `??` operators. Use `match`, `?`, or library methods
   such as `unwrap_or`, `map` and `and_then`.
 - `Result<T, E>` is `Ok(x)` or `Err(e)`. See [errors](07-errors.md).
+- Until user generics exist (F2), `Option` and `Result` are the only generic types; the compiler
+  instantiates them for each combination of types used. `Option` and `Result` without type
+  arguments are errors.
+- The type of `Some(x)` comes from `x`. `None`, `Ok(x)` and `Err(e)` take the missing type from
+  the context (a type annotation, the return type, a parameter, the branch before them);
+  without one, they are an error: `const empty: Option<i32> = None;`.
+- F1 methods: `is_some()`, `is_none()`, `is_ok()`, `is_err()`, `unwrap()`, `expect(message)`,
+  `unwrap_or(default)` and, on `Result`, `unwrap_err()`. `unwrap` and `expect` panic when the
+  value is `None` or `Err`, with Rust's message (``called `Option::unwrap()` on a `None` value``)
+  or the one given to `expect`. Methods taking closures (`map`, `map_err`, `and_then`) arrive in
+  F2.

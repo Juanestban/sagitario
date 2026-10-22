@@ -6,7 +6,7 @@
 //! that state. So `loop { x = 1; break; }` assigns a `const` once, while `while c { x = 1; }`
 //! may assign it twice.
 
-use sagitario_ast::{BinaryOp, Block, Expr, ExprKind, FnDecl, Stmt, TemplatePart};
+use sagitario_ast::{BinaryOp, Block, Expr, ExprKind, FnDecl, Pattern, PatternKind, Stmt, TemplatePart};
 use sagitario_diagnostics::{Diagnostic, Diagnostics, codes};
 use sagitario_resolve::{LocalId, LocalInfo, LocalKind, Res, Resolution};
 use sagitario_span::Span;
@@ -221,12 +221,14 @@ impl Flow<'_> {
       LocalKind::Param => Some(format!("cannot assign to the parameter `{}`", info.name)),
       LocalKind::SelfParam => Some("cannot assign to `self`: it is immutable in this method".to_string()),
       LocalKind::ForVar => Some(format!("cannot assign to the loop variable `{}`", info.name)),
+      LocalKind::Pattern => Some(format!("cannot assign to the pattern binding `{}`", info.name)),
     };
 
     if let Some(message) = error {
       let declared = match info.kind {
         LocalKind::Param => "parameter declared here",
         LocalKind::ForVar => "loop variable declared here",
+        LocalKind::Pattern => "bound by the pattern here",
         LocalKind::SelfParam => "declared as `self` here",
         _ => "declared with `const` here",
       };
@@ -299,6 +301,40 @@ impl Flow<'_> {
       }
       ExprKind::ArrayLit(elems) => self.exprs(elems),
       ExprKind::ArrayRepeat { value, .. } => self.expr(value),
+      ExprKind::Try(inner) => self.expr(inner),
+      ExprKind::Match { scrutinee, arms } => {
+        self.expr(scrutinee);
+
+        // Exactly one arm runs; each starts from the state after the scrutinee.
+        let before = self.state.clone();
+        let mut after: Option<State> = None;
+
+        for arm in arms {
+          self.state = before.clone();
+
+          let mut bound = Vec::new();
+
+          self.pattern_bindings(&arm.pattern, &mut bound);
+
+          for local in bound {
+            self.define(local, true);
+          }
+
+          if let Some(guard) = &arm.guard {
+            self.expr(guard);
+          }
+
+          self.expr(&arm.body);
+
+          if let Some(previous) = after.take() {
+            self.merge(previous);
+          }
+
+          after = Some(self.state.clone());
+        }
+
+        self.state = after.unwrap_or(State { reachable: false, ..before });
+      }
       ExprKind::Template(parts) => {
         for part in parts {
           if let TemplatePart::Expr(part) = part {
@@ -387,6 +423,22 @@ impl Flow<'_> {
         self.state.reachable = false;
       }
       ExprKind::Int { .. } | ExprKind::Float { .. } | ExprKind::Bool(_) | ExprKind::Char(_) | ExprKind::Str(_) | ExprKind::Unit => {}
+    }
+  }
+
+  /// The locals a pattern binds.
+  fn pattern_bindings(&self, pattern: &Pattern, out: &mut Vec<LocalId>) {
+    match &pattern.kind {
+      PatternKind::Ident(_) => {
+        if let Some(local) = self.resolution.bindings.get(&pattern.id) {
+          out.push(*local);
+        }
+      }
+      PatternKind::Tuple { elems: patterns, .. } | PatternKind::Or(patterns) => {
+        patterns.iter().for_each(|pattern| self.pattern_bindings(pattern, out));
+      }
+      PatternKind::Named { fields, .. } => fields.iter().for_each(|field| self.pattern_bindings(&field.pattern, out)),
+      PatternKind::Wildcard | PatternKind::Literal(_) | PatternKind::Path(_) => {}
     }
   }
 
@@ -546,5 +598,14 @@ mod tests {
     assert_eq!(codes_with(point, "var p = P { x: 1 }; println(`${p.get()}`);"), vec!["W0002"]);
     assert_eq!(codes_with(point, "var p: P; p.x = 1;"), vec!["E0309"]);
     assert_eq!(codes_with("struct Q { pub fn f(self) { self = Q {}; } }", ""), vec!["E0308"]);
+  }
+
+  #[test]
+  fn match_arms_are_alternative_paths() {
+    assert_eq!(codes_of("const x: i32; match Some(1) { Some(n) => { x = n; } None => { x = 0; } } println(`${x}`);"), Vec::<&str>::new());
+    assert_eq!(codes_of("const x: i32; match Some(1) { Some(n) => { x = n; } None => {} } println(`${x}`);"), vec!["E0309"]);
+    assert_eq!(codes_of("match Some(1) { Some(n) => {} None => {} }"), vec!["W0001"]);
+    assert_eq!(codes_of("match Some(1) { Some(n) => { n = 2; } None => {} }"), vec!["W0001", "E0308"]);
+    assert_eq!(codes_of("const x = match 1 { _ => return }; println(`${x}`);"), vec!["W0003"]);
   }
 }

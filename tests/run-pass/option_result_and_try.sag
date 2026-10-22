@@ -1,0 +1,84 @@
+// `Option` and `Result`: inference from context, `?` (including inside loops, where it must
+// release what the loop holds), the F1 methods and `main` returning `Ok`. Checked for leaks.
+// expect-stdout: ok 84
+// expect-stdout: bad: x
+// expect-stdout: 8 -1
+// expect-stdout: inner true false
+// expect-stdout: true bad: y 7
+// expect-stdout: joined a-b
+// expect-stdout: stopped at bad: 3
+fn parse(text: String, ok: bool) -> Result<i32, String> {
+  if ok { Ok(42) } else { Err(`bad: ${text}`) }
+}
+
+fn twice(ok: bool) -> Result<i32, String> {
+  const n = parse("x", ok)?;
+
+  Ok(n * 2)
+}
+
+fn first_even(values: [i32; 4]) -> Option<i32> {
+  for value in values {
+    if value % 2 == 0 {
+      return Some(value);
+    }
+  }
+
+  None
+}
+
+fn add_first_evens(a: [i32; 4], b: [i32; 4]) -> Option<i32> {
+  Some(first_even(a)? + first_even(b)?)
+}
+
+fn join(parts: [Option<String>; 2]) -> Option<String> {
+  const first = parts[0]?;
+  const second = parts[1]?;
+
+  Some(`${first}-${second}`)
+}
+
+fn until_bad(limit: i32) -> Result<i32, String> {
+  var total = 0;
+
+  for i in 0..limit {
+    // Released when `?` returns early.
+    const _held = `item ${i}`;
+    const step: Result<i32, String> = if i < 3 { Ok(i) } else { Err(`bad: ${i}`) };
+
+    total += step?;
+  }
+
+  Ok(total)
+}
+
+pub fn main() -> Result<(), String> {
+  match twice(true) {
+    Ok(value) => println(`ok ${value}`),
+    Err(error) => println(error),
+  }
+
+  match twice(false) {
+    Ok(value) => println(`ok ${value}`),
+    Err(error) => println(error),
+  }
+
+  println(`${add_first_evens([1, 2, 3, 4], [5, 6, 7, 8]).unwrap_or(-1)} ${add_first_evens([1, 3, 5, 7], [5, 6, 7, 8]).unwrap_or(-1)}`);
+
+  const maybe: Option<String> = Some(`${"inner"}`);
+  const nothing: Option<String> = None;
+
+  println(`${maybe.unwrap()} ${maybe.is_some()} ${nothing.is_some()}`);
+
+  const failed = parse("y", false);
+
+  println(`${failed.is_err()} ${failed.unwrap_err()} ${parse("z", true).expect("parsed") / 6}`);
+  println(`joined ${join([Some(`${"a"}`), Some(`${"b"}`)]).unwrap_or("none")}`);
+
+  match until_bad(5) {
+    Ok(total) => println(`total ${total}`),
+    Err(error) => println(`stopped at ${error}`),
+  }
+
+  Ok(())
+}

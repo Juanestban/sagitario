@@ -64,10 +64,13 @@ Sagitario Intermediate Representation: a typed, lower-level form where
 
 SIR is structured (`If`/`Loop`/`ForRange`/`ForArray` rather than a control-flow graph), since
 it is emitted as C. Fields and array elements are *places*: a local plus field and
-bounds-checked index projections.
+bounds-checked index projections. Enum values (including `Option` and `Result`) have a tag, the
+index of their variant, and the fields of that variant, read only after testing the tag. A
+`match` tests each arm's pattern without binding anything, then binds copies of the matched
+parts, so a failed arm or guard leaves nothing unreleased.
 
-ARC is explicit. A type is *managed* if it contains a `String` (directly, or inside structs and
-arrays). Every managed binding owns one reference to each string inside it and is released at
+ARC is explicit. A type is *managed* if it contains a `String` (directly, or inside structs,
+enums and arrays). Every managed binding owns one reference to each string inside it and is released at
 the end of its block, before `break`/`continue`/`return`, or when overwritten (the new value is
 retained first); temporaries are released at the end of the statement or branch that created
 them; parameters are borrowed; return values are owned by the caller. Building a struct or
@@ -85,15 +88,18 @@ could be added.
   portable fallback).
 - **No undefined behavior**: signed arithmetic goes through runtime helpers that detect
   overflow (panic in debug, wrap in release); shifts, division and indexing are checked.
-- `#line` directives map C back to `.sag` sources.
+- `#line` directives map C back to `.sag` sources; one is repeated right before each runtime
+  check that reports `__LINE__`, since a statement can span several C lines.
 - `sag build --emit-c` writes the generated C for inspection.
-- Each struct becomes a C struct `sag_sN` (fields `fN`) and each array type a C struct `sag_aN`
-  wrapping a C array, so both are copied by assignment and passed by value; they are emitted
-  in dependency order. Managed ones get `sag_retain_*`/`sag_release_*` functions. A `var self`
-  method receives a pointer to the caller's value.
+- Each struct becomes a C struct `sag_sN` (fields `fN`), each enum a `sag_eN`, and each array,
+  `Option` and `Result` type a `sag_tN`. Arrays wrap a C array; enum-like types hold a `tag` and
+  a union `u` with a struct `vN` per variant with fields. All are copied by assignment and
+  passed by value, and emitted in dependency order. Managed ones get
+  `sag_retain_*`/`sag_release_*` functions. A `var self` method receives a pointer to the
+  caller's value.
 - Indexing goes through `sag_index_at`, which panics when the index is out of bounds.
-- Enums become tagged unions; `Option<ClassRef>` is a nullable pointer; `Result` is a tagged
-  union.
+- When `main` returns `Result<(), String>`, the C `main` prints an `Err` and exits with code 1.
+- Planned (F2): `Option<ClassRef>` as a nullable pointer.
 
 ## Runtime
 

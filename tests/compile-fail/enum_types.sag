@@ -1,0 +1,35 @@
+enum List { //~ ERROR E0317
+  Empty,
+  Node(i32, List),
+}
+
+enum Shape {
+  Circle(f64),
+  Rect { w: f64, h: f64 },
+  Empty,
+  Empty, //~ ERROR E0201
+}
+
+enum Color {
+  Red,
+  Green,
+}
+
+fn wrong_arity(_value: Option<i32, i32>) {} //~ ERROR E0318
+
+fn missing_arguments(_value: Result) {} //~ ERROR E0318
+
+pub fn main() {
+  const _a = None; //~ ERROR E0311
+  const _b = Ok(1); //~ ERROR E0311
+  const _c = Shape::Circle; //~ ERROR E0314
+  const _d = Shape::Empty(); //~ ERROR E0314
+  const _e = Shape::Rect(1.0, 2.0); //~ ERROR E0314
+  const _f = Shape::Rect { w: 1.0 }; //~ ERROR E0315
+  const _g = Shape::Circle(1.0) == Shape::Empty; //~ ERROR E0310
+  const _h = Color::Red == Color::Green;
+  const _i = Shape::Square; //~ ERROR E0200
+  const _j: Option<i32> = Some("text"); //~ ERROR E0300
+  const _k = Color::Red as i32; //~ ERROR E0305
+  const _l = Some(1).map(); //~ ERROR E0316
+}

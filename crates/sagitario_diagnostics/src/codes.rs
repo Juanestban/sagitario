@@ -27,6 +27,8 @@ pub const RESERVED_KEYWORD: Code = Code("E0101");
 pub const CHAINED_OPERATORS: Code = Code("E0102");
 /// A struct member without `pub` or `prv`.
 pub const MISSING_VISIBILITY: Code = Code("E0103");
+/// An enum without variants, or a variant with empty `()` or `{}`.
+pub const EMPTY_DECLARATION: Code = Code("E0104");
 
 /// A name that does not refer to anything in scope.
 pub const UNRESOLVED_NAME: Code = Code("E0200");
@@ -40,6 +42,8 @@ pub const MISSING_MAIN: Code = Code("E0203");
 pub const INVALID_MAIN: Code = Code("E0204");
 /// A `prv` member used outside its struct.
 pub const PRIVATE_MEMBER: Code = Code("E0205");
+/// Alternatives of a `|` pattern that bind different names.
+pub const INCONSISTENT_BINDINGS: Code = Code("E0206");
 
 /// An expression whose type differs from the expected one.
 pub const MISMATCHED_TYPES: Code = Code("E0300");
@@ -77,6 +81,14 @@ pub const MISSING_FIELDS: Code = Code("E0315");
 pub const UNKNOWN_MEMBER: Code = Code("E0316");
 /// A struct that contains itself by value.
 pub const RECURSIVE_TYPE: Code = Code("E0317");
+/// A generic type used with the wrong number of type arguments.
+pub const WRONG_TYPE_ARGUMENTS: Code = Code("E0318");
+/// A `match` that does not cover every possible value.
+pub const NON_EXHAUSTIVE_MATCH: Code = Code("E0319");
+/// A pattern whose shape does not fit the value it matches.
+pub const INVALID_PATTERN: Code = Code("E0320");
+/// `?` on a value or in a function where it cannot propagate.
+pub const INVALID_TRY: Code = Code("E0321");
 
 /// A language feature that is specified but not implemented yet.
 pub const NOT_IMPLEMENTED: Code = Code("E0900");
@@ -87,6 +99,8 @@ pub const UNUSED_BINDING: Code = Code("W0001");
 pub const UNNEEDED_VAR: Code = Code("W0002");
 /// A statement that can never run.
 pub const UNREACHABLE_CODE: Code = Code("W0003");
+/// A `match` arm that can never match because earlier arms cover its values.
+pub const UNREACHABLE_PATTERN: Code = Code("W0004");
 
 pub const ALL: &[Code] = &[
   UNEXPECTED_CHARACTER,
@@ -99,12 +113,14 @@ pub const ALL: &[Code] = &[
   RESERVED_KEYWORD,
   CHAINED_OPERATORS,
   MISSING_VISIBILITY,
+  EMPTY_DECLARATION,
   UNRESOLVED_NAME,
   DUPLICATE_DEFINITION,
   RESERVED_NAME,
   MISSING_MAIN,
   INVALID_MAIN,
   PRIVATE_MEMBER,
+  INCONSISTENT_BINDINGS,
   MISMATCHED_TYPES,
   WRONG_ARGUMENT_COUNT,
   INTEGER_OUT_OF_RANGE,
@@ -123,10 +139,15 @@ pub const ALL: &[Code] = &[
   MISSING_FIELDS,
   UNKNOWN_MEMBER,
   RECURSIVE_TYPE,
+  WRONG_TYPE_ARGUMENTS,
+  NON_EXHAUSTIVE_MATCH,
+  INVALID_PATTERN,
+  INVALID_TRY,
   NOT_IMPLEMENTED,
   UNUSED_BINDING,
   UNNEEDED_VAR,
   UNREACHABLE_CODE,
+  UNREACHABLE_PATTERN,
 ];
 
 #[cfg(test)]

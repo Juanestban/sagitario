@@ -3,26 +3,29 @@
 //! float-to-integer casts go through runtime helpers so the generated C has no undefined
 //! behavior; the helpers receive `__FILE__`/`__LINE__`, which `#line` maps back to the source.
 //!
-//! Structs become C structs `sag_sN` (fields `fN`) and each array type a struct `sag_aN`
-//! wrapping a C array, so both are copied by assignment and passed by value. Managed aggregates
-//! (containing `String`s) get `sag_retain_*`/`sag_release_*` functions.
+//! Structs become C structs `sag_sN` (fields `fN`). Enums become `sag_eN` and each array,
+//! `Option` and `Result` type a `sag_tN`: arrays wrap a C array, enum-like types hold a `tag`
+//! (the variant's index) and a union `u` with one struct `vN` per variant that has fields. All
+//! are copied by assignment and passed by value. Managed aggregates (containing `String`s) get
+//! `sag_retain_*`/`sag_release_*` functions.
 
 use sagitario_ast::{BinaryOp, UnaryOp};
-use sagitario_resolve::{Builtin, FnId};
-use sagitario_sir::{Callee, Const, Function, Local, Operand, Place, Program, Projection, Rvalue, Stmt, StructLayout, TemplatePiece, is_managed};
-use sagitario_types::{FloatTy, IntTy, Type};
+use sagitario_resolve::{Builtin, EnumId, FnId, StructId};
+use sagitario_sir::{Callee, Const, Function, Layouts, Local, Operand, PanicMessage, Place, Program, Projection, Rvalue, Stmt, TemplatePiece};
+use sagitario_types::{EnumRef, FloatTy, IntTy, StructRef, Type};
 
 pub const RUNTIME_HEADER: &str = "sagitario_runtime.h";
 
 pub fn generate(program: &Program) -> String {
   let mut generator = Generator {
-    structs: &program.structs,
-    arrays: Vec::new(),
+    layouts: &program.layouts,
+    instances: Vec::new(),
     out: String::new(),
     indent: 0,
     path: c_string_literal(program.source_path.as_bytes()),
     locals: &[],
     self_by_ref: false,
+    source_line: None,
   };
   let order = generator.aggregate_order(program);
 
@@ -42,25 +45,24 @@ pub fn generate(program: &Program) -> String {
     generator.function(FnId(index as u32), function);
   }
 
-  generator.out.push_str("int main(int argc, char **argv) {\n");
-  generator.out.push_str("  sag_rt_init(argc, argv);\n");
-  generator.out.push_str(&format!("  {}();\n", fn_name(program.entry)));
-  generator.out.push_str("  return sag_rt_finish();\n");
-  generator.out.push_str("}\n");
+  generator.entry_point(program);
   generator.out
 }
 
-/// A C struct to define: a Sagitario struct, or an array type (index in `Generator::arrays`).
+/// A C struct to define: a struct, an enum, or an array, `Option` or `Result` type (index in
+/// `Generator::instances`).
 #[derive(Clone, Copy)]
 enum Aggregate {
   Struct(usize),
-  Array(usize),
+  Enum(usize),
+  Instance(usize),
 }
 
 struct Generator<'a> {
-  structs: &'a [StructLayout],
-  /// Every array type used by the program; `sag_aN` is the one at index `N`.
-  arrays: Vec<Type>,
+  layouts: &'a Layouts,
+  /// Every array, `Option` and `Result` type used by the program; `sag_tN` is the one at index
+  /// `N`.
+  instances: Vec<Type>,
   out: String,
   indent: usize,
   /// The source path as a C string literal, for `#line`.
@@ -69,16 +71,22 @@ struct Generator<'a> {
   locals: &'a [Type],
   /// Whether local 0 of the function being generated is a pointer (`var self`).
   self_by_ref: bool,
+  /// The source line of the statement being generated.
+  source_line: Option<u32>,
 }
 
 impl<'a> Generator<'a> {
   /// Every aggregate type, each after the ones it contains, as C requires.
   fn aggregate_order(&mut self, program: &Program) -> Vec<Aggregate> {
     let mut order = Vec::new();
-    let mut done = vec![false; self.structs.len()];
+    let mut done = vec![false; self.layouts.structs.len() + self.layouts.enums.len()];
 
-    for index in 0..self.structs.len() {
-      self.visit_struct(index, &mut done, &mut order);
+    for index in 0..self.layouts.structs.len() {
+      self.visit_type(&struct_type(index), &mut done, &mut order);
+    }
+
+    for index in 0..self.layouts.enums.len() {
+      self.visit_type(&enum_type(index), &mut done, &mut order);
     }
 
     for function in &program.functions {
@@ -90,58 +98,98 @@ impl<'a> Generator<'a> {
     order
   }
 
-  fn visit_struct(&mut self, index: usize, done: &mut [bool], order: &mut Vec<Aggregate>) {
-    if done.get(index).copied().unwrap_or(true) {
+  /// `done` flags structs first, then enums.
+  fn visit_type(&mut self, ty: &Type, done: &mut [bool], order: &mut Vec<Aggregate>) {
+    let (flag, aggregate) = match ty {
+      Type::Struct(inner) => (inner.id.0 as usize, Aggregate::Struct(inner.id.0 as usize)),
+      Type::Enum(inner) => (self.layouts.structs.len() + inner.id.0 as usize, Aggregate::Enum(inner.id.0 as usize)),
+      Type::Array(..) | Type::Option(_) | Type::Result(..) => {
+        if self.instances.contains(ty) {
+          return;
+        }
+
+        for part in self.parts(ty).iter().flatten() {
+          self.visit_type(part, done, order);
+        }
+
+        self.instances.push(ty.clone());
+        order.push(Aggregate::Instance(self.instances.len() - 1));
+
+        return;
+      }
+      _ => return,
+    };
+
+    if done.get(flag).copied().unwrap_or(true) {
       return;
     }
 
-    if let Some(flag) = done.get_mut(index) {
-      *flag = true;
+    if let Some(slot) = done.get_mut(flag) {
+      *slot = true;
     }
 
-    let fields = self.structs.get(index).map(|layout| layout.fields.clone()).unwrap_or_default();
-
-    for field in &fields {
-      self.visit_type(field, done, order);
+    for part in self.parts(ty).iter().flatten() {
+      self.visit_type(part, done, order);
     }
 
-    order.push(Aggregate::Struct(index));
+    order.push(aggregate);
   }
 
-  fn visit_type(&mut self, ty: &Type, done: &mut [bool], order: &mut Vec<Aggregate>) {
+  /// The types a value of `ty` contains: per variant for enum-like types, else one group.
+  fn parts(&self, ty: &Type) -> Vec<Vec<Type>> {
     match ty {
-      Type::Struct(inner) => self.visit_struct(inner.id.0 as usize, done, order),
-      Type::Array(elem, _) if !self.arrays.contains(ty) => {
-        self.visit_type(elem, done, order);
-        self.arrays.push(ty.clone());
-        order.push(Aggregate::Array(self.arrays.len() - 1));
-      }
-      _ => {}
+      Type::Struct(inner) => vec![self.layouts.struct_fields(inner.id)],
+      Type::Array(elem, _) => vec![vec![elem.as_ref().clone()]],
+      _ => self.layouts.variants(ty).unwrap_or_default(),
+    }
+  }
+
+  fn aggregate_type(&self, aggregate: Aggregate) -> Type {
+    match aggregate {
+      Aggregate::Struct(index) => struct_type(index),
+      Aggregate::Enum(index) => enum_type(index),
+      Aggregate::Instance(index) => self.instances.get(index).cloned().unwrap_or(Type::Error),
     }
   }
 
   fn type_definitions(&mut self, order: &[Aggregate]) {
     for aggregate in order {
-      match *aggregate {
-        Aggregate::Struct(index) => {
-          let fields = self.structs.get(index).map(|layout| layout.fields.clone()).unwrap_or_default();
-          let mut members: Vec<String> = fields.iter().enumerate().map(|(field, ty)| format!("{} f{field};", self.c_type(ty))).collect();
+      let ty = self.aggregate_type(*aggregate);
+      let name = self.c_type(&ty);
+      let members = match &ty {
+        Type::Struct(_) => {
+          let fields = self.parts(&ty).concat();
+          let mut members: Vec<String> = fields.iter().enumerate().map(|(index, field)| format!("{} f{index};", self.c_type(field))).collect();
 
           if members.is_empty() {
             // C has no empty structs.
             members.push("uint8_t sag_unused;".to_string());
           }
 
-          self.out.push_str(&format!("typedef struct sag_s{index} {{ {} }} sag_s{index};\n", members.join(" ")));
+          members.join(" ")
         }
-        Aggregate::Array(index) => {
-          let Some(Type::Array(elem, len)) = self.arrays.get(index).cloned() else { continue };
+        Type::Array(elem, len) => {
           // C has no zero-length arrays; the extra element is never accessed.
-          let c_len = len.max(1);
-
-          self.out.push_str(&format!("typedef struct sag_a{index} {{ {} data[{c_len}]; }} sag_a{index};\n", self.c_type(&elem)));
+          format!("{} data[{}];", self.c_type(elem), len.max(&1))
         }
-      }
+        _ => {
+          let variants: Vec<String> = self
+            .parts(&ty)
+            .iter()
+            .enumerate()
+            .filter(|(_, fields)| !fields.is_empty())
+            .map(|(index, fields)| {
+              let fields: Vec<String> = fields.iter().enumerate().map(|(field, field_ty)| format!("{} f{field};", self.c_type(field_ty))).collect();
+
+              format!("struct {{ {} }} v{index};", fields.join(" "))
+            })
+            .collect();
+
+          if variants.is_empty() { "uint32_t tag;".to_string() } else { format!("uint32_t tag; union {{ {} }} u;", variants.join(" ")) }
+        }
+      };
+
+      self.out.push_str(&format!("typedef struct {name} {{ {members} }} {name};\n"));
     }
 
     for aggregate in order {
@@ -153,29 +201,22 @@ impl<'a> Generator<'a> {
 
   /// `sag_retain_*` and `sag_release_*` for a managed aggregate.
   fn arc_functions(&mut self, aggregate: Aggregate) {
-    let (name, ty) = match aggregate {
-      Aggregate::Struct(index) => {
-        let name = self.structs.get(index).map(|layout| layout.name.clone()).unwrap_or_default();
-        let ty = Type::Struct(sagitario_types::StructRef { id: sagitario_resolve::StructId(index as u32), name });
+    let ty = self.aggregate_type(aggregate);
 
-        (format!("s{index}"), ty)
-      }
-      Aggregate::Array(index) => (format!("a{index}"), self.arrays.get(index).cloned().unwrap_or(Type::Error)),
-    };
-
-    if !is_managed(&ty, self.structs) {
+    if !self.layouts.is_managed(&ty) {
       return;
     }
+
+    let name = self.c_type(&ty);
+    let suffix = name.trim_start_matches("sag_").to_string();
 
     for action in ["retain", "release"] {
       let mut body = Vec::new();
 
       match &ty {
-        Type::Struct(inner) => {
-          let fields = self.structs.get(inner.id.0 as usize).map(|layout| layout.fields.clone()).unwrap_or_default();
-
-          for (index, field) in fields.iter().enumerate() {
-            if is_managed(field, self.structs) {
+        Type::Struct(_) => {
+          for (index, field) in self.parts(&ty).concat().iter().enumerate() {
+            if self.layouts.is_managed(field) {
               body.push(format!("  {};", self.arc_call(action, field, &format!("value->f{index}"))));
             }
           }
@@ -185,10 +226,28 @@ impl<'a> Generator<'a> {
 
           body.push(format!("  for (size_t sag_k = 0; sag_k < {len}; sag_k++) {{ {call}; }}"));
         }
-        _ => {}
+        _ => {
+          body.push("  switch (value->tag) {".to_string());
+
+          for (variant, fields) in self.parts(&ty).iter().enumerate() {
+            let calls: Vec<String> = fields
+              .iter()
+              .enumerate()
+              .filter(|(_, field)| self.layouts.is_managed(field))
+              .map(|(index, field)| format!("{}; ", self.arc_call(action, field, &format!("value->u.v{variant}.f{index}"))))
+              .collect();
+
+            if !calls.is_empty() {
+              body.push(format!("  case {variant}: {}break;", calls.concat()));
+            }
+          }
+
+          body.push("  default: break;".to_string());
+          body.push("  }".to_string());
+        }
       }
 
-      self.out.push_str(&format!("static void sag_{action}_{name}(const sag_{name} *value) {{\n{}\n}}\n", body.join("\n")));
+      self.out.push_str(&format!("static void sag_{action}_{suffix}(const {name} *value) {{\n{}\n}}\n", body.join("\n")));
     }
   }
 
@@ -196,14 +255,12 @@ impl<'a> Generator<'a> {
   fn arc_call(&self, action: &str, ty: &Type, value: &str) -> String {
     match ty {
       Type::String => format!("sag_string_{action}({value})"),
-      Type::Struct(inner) => format!("sag_{action}_s{}(&{value})", inner.id.0),
-      Type::Array(..) => format!("sag_{action}_a{}(&{value})", self.array_index(ty)),
-      _ => String::new(),
+      _ => format!("sag_{action}_{}(&{value})", self.c_type(ty).trim_start_matches("sag_")),
     }
   }
 
-  fn array_index(&self, ty: &Type) -> usize {
-    self.arrays.iter().position(|array| array == ty).unwrap_or(0)
+  fn instance_index(&self, ty: &Type) -> usize {
+    self.instances.iter().position(|instance| instance == ty).unwrap_or(0)
   }
 
   /// The C type of a stored value. `()` has no data but is stored as a byte so it can be a
@@ -218,11 +275,46 @@ impl<'a> Generator<'a> {
       Type::Float(FloatTy::F64) => "double".to_string(),
       Type::String => "sag_string".to_string(),
       Type::Struct(inner) => format!("sag_s{}", inner.id.0),
-      Type::Array(..) => format!("sag_a{}", self.array_index(ty)),
+      Type::Enum(inner) => format!("sag_e{}", inner.id.0),
+      Type::Array(..) | Type::Option(_) | Type::Result(..) => format!("sag_t{}", self.instance_index(ty)),
     }
   }
 
+  /// The C `main`: runs the entry function and turns an `Err` from `main` into exit code 1.
+  fn entry_point(&mut self, program: &Program) {
+    let entry = fn_name(program.entry);
+    let returns_result = program.functions.get(program.entry.0 as usize).is_some_and(|function| matches!(function.ret, Type::Result(..)));
+
+    self.out.push_str("int main(int argc, char **argv) {\n");
+    self.out.push_str("  sag_rt_init(argc, argv);\n");
+
+    if let Some(function) = program.functions.get(program.entry.0 as usize).filter(|_| returns_result) {
+      let ty = self.c_type(&function.ret);
+
+      self.out.push_str(&format!("  {ty} result = {entry}();\n"));
+      self.out.push_str("  if (result.tag == 1) {\n");
+      self.out.push_str("    sag_report_main_error(result.u.v1.f0);\n");
+      self.out.push_str("    sag_string_release(result.u.v1.f0);\n");
+      self.out.push_str("    int code = sag_rt_finish();\n");
+      self.out.push_str("    return code != 0 ? code : 1;\n");
+      self.out.push_str("  }\n");
+    } else {
+      self.out.push_str(&format!("  {entry}();\n"));
+    }
+
+    self.out.push_str("  return sag_rt_finish();\n");
+    self.out.push_str("}\n");
+  }
+
   fn line(&mut self, text: &str) {
+    // One statement may become several C lines; a runtime check reports `__LINE__`, so the
+    // source line is restated right before it.
+    if text.contains("__LINE__")
+      && let Some(line) = self.source_line
+    {
+      self.out.push_str(&format!("#line {line} {}\n", self.path));
+    }
+
     for _ in 0..self.indent {
       self.out.push_str("  ");
     }
@@ -258,7 +350,8 @@ impl<'a> Generator<'a> {
     self.indent = 1;
 
     for (index, ty) in function.locals.iter().enumerate().skip(function.param_count) {
-      let init = if matches!(ty, Type::String | Type::Struct(_) | Type::Array(..)) { "{0}" } else { "0" };
+      let init =
+        if matches!(ty, Type::String | Type::Struct(_) | Type::Enum(_) | Type::Array(..) | Type::Option(_) | Type::Result(..)) { "{0}" } else { "0" };
 
       self.line(&format!("{} {} = {init};", self.c_type(ty), local_name(Local(index as u32))));
     }
@@ -286,6 +379,8 @@ impl<'a> Generator<'a> {
         Projection::Index { index, len } => {
           out.push_str(&format!(".data[sag_index_at({}, {len}, __FILE__, __LINE__)]", self.operand(index)));
         }
+        Projection::Tag => out.push_str(".tag"),
+        Projection::VariantField { variant, field } => out.push_str(&format!(".u.v{variant}.f{field}")),
       }
     }
 
@@ -327,7 +422,10 @@ impl<'a> Generator<'a> {
   fn stmt(&mut self, stmt: &Stmt) {
     match stmt {
       // `#line` must start at column 0 to stay readable; C ignores the indentation anyway.
-      Stmt::Line(line) => self.out.push_str(&format!("#line {line} {}\n", self.path)),
+      Stmt::Line(line) => {
+        self.source_line = Some(*line);
+        self.out.push_str(&format!("#line {line} {}\n", self.path));
+      }
       Stmt::Assign { dest, value } => {
         let ty = self.local_type(*dest);
         let dest = self.local(*dest);
@@ -416,6 +514,16 @@ impl<'a> Generator<'a> {
 
         self.line(&format!("return {value};"));
       }
+      Stmt::Panic(PanicMessage::Static(message)) => {
+        let message = c_string_literal(message.as_bytes());
+
+        self.line(&format!("sag_panic_at({message}, __FILE__, __LINE__);"));
+      }
+      Stmt::Panic(PanicMessage::Value(message)) => {
+        let message = self.operand(message);
+
+        self.line(&format!("sag_panic_str_at({message}, __FILE__, __LINE__);"));
+      }
     }
   }
 
@@ -426,7 +534,7 @@ impl<'a> Generator<'a> {
       Rvalue::Repeat(element) => {
         let Type::Array(elem_ty, len) = ty else { return };
         let element = self.operand(element);
-        let retain = is_managed(elem_ty, self.structs).then(|| self.arc_call("retain", elem_ty, &format!("{dest}.data[sag_k]")));
+        let retain = self.layouts.is_managed(elem_ty).then(|| self.arc_call("retain", elem_ty, &format!("{dest}.data[sag_k]")));
 
         self.line(&format!("for (size_t sag_k = 0; sag_k < {len}; sag_k++) {{"));
         self.indent += 1;
@@ -472,6 +580,15 @@ impl<'a> Generator<'a> {
           _ => format!("({}){{{parts}}}", self.c_type(ty)),
         }
       }
+      Rvalue::Variant { index, fields } => {
+        let fields: Vec<String> = fields.iter().map(|field| self.operand(field)).collect();
+
+        if fields.is_empty() {
+          format!("({}){{.tag = {index}u}}", self.c_type(ty))
+        } else {
+          format!("({}){{.tag = {index}u, .u.v{index} = {{{}}}}}", self.c_type(ty), fields.join(", "))
+        }
+      }
       // Templates and repeats are emitted as statements by `Generator::assign`.
       Rvalue::Template(_) | Rvalue::Repeat(_) => "0".to_string(),
     }
@@ -500,7 +617,9 @@ impl<'a> Generator<'a> {
             Type::Char => format!("sag_sb_push_char(&sag_builder, {value})"),
             Type::String => format!("sag_sb_push_str(&sag_builder, {value})"),
             // Diverging, erroneous or non-interpolable parts never reach code generation.
-            Type::Unit | Type::Struct(_) | Type::Array(..) | Type::Never | Type::Error => continue,
+            Type::Unit | Type::Struct(_) | Type::Enum(_) | Type::Array(..) | Type::Option(_) | Type::Result(..) | Type::Never | Type::Error => {
+              continue;
+            }
           }
         }
       };
@@ -512,6 +631,14 @@ impl<'a> Generator<'a> {
     self.indent -= 1;
     self.line("}");
   }
+}
+
+fn struct_type(index: usize) -> Type {
+  Type::Struct(StructRef { id: StructId(index as u32), name: String::new() })
+}
+
+fn enum_type(index: usize) -> Type {
+  Type::Enum(EnumRef { id: EnumId(index as u32), name: String::new() })
 }
 
 /// Functions are named by id, so any Sagitario identifier (including Unicode) is safe in C.

@@ -3,8 +3,9 @@
 //! diagnostics and the parser recovers at item and statement boundaries.
 
 use sagitario_ast::{
-  ArrayLen, BinaryOp, Block, Expr, ExprKind, FieldDecl, FieldInit, FnDecl, Ident, Item, LetStmt, Module, NodeId, Param, Path, SelfParam, Stmt,
-  StructDecl, TemplatePart, TypeExpr, TypeExprKind, UnaryOp, Visibility,
+  ArrayLen, BinaryOp, Block, EnumDecl, Expr, ExprKind, FieldDecl, FieldInit, FieldPattern, FnDecl, Ident, Item, LetStmt, MatchArm, Module, NodeId,
+  Param, Path, Pattern, PatternKind, SelfParam, Stmt, StructDecl, TemplatePart, TypeExpr, TypeExprKind, UnaryOp, VariantDecl, VariantFieldDecl,
+  VariantFields, Visibility,
 };
 use sagitario_diagnostics::{Diagnostic, Diagnostics, codes};
 use sagitario_lexer::{self as lexer, Keyword, Token, TokenKind};
@@ -248,9 +249,8 @@ impl<'a> Parser<'a> {
     match self.kind().clone() {
       TokenKind::Keyword(Keyword::Fn) => Ok(Some(Item::Fn(self.fn_decl(visibility, start, false)?))),
       TokenKind::Keyword(Keyword::Struct) => Ok(Some(Item::Struct(self.struct_decl(visibility, start)?))),
-      TokenKind::Keyword(
-        keyword @ (Keyword::Enum | Keyword::Class | Keyword::Abstract | Keyword::Interface | Keyword::Use | Keyword::Const | Keyword::Extern),
-      ) => {
+      TokenKind::Keyword(Keyword::Enum) => Ok(Some(Item::Enum(self.enum_decl(visibility, start)?))),
+      TokenKind::Keyword(keyword @ (Keyword::Class | Keyword::Abstract | Keyword::Interface | Keyword::Use | Keyword::Const | Keyword::Extern)) => {
         let span = self.span();
 
         Err(self.not_implemented(span, &format!("`{}` items", keyword.as_str())))
@@ -319,6 +319,150 @@ impl<'a> Parser<'a> {
     let end = self.expect(&TokenKind::RBrace)?.span;
 
     Ok(StructDecl { visibility, name, fields, functions, span: start.to(end) })
+  }
+
+  fn enum_decl(&mut self, visibility: Visibility, start: Span) -> PResult<EnumDecl> {
+    self.expect(&TokenKind::Keyword(Keyword::Enum))?;
+
+    let name = self.ident("an enum name")?;
+
+    if self.at(&TokenKind::Lt) {
+      let span = self.span();
+
+      return Err(self.not_implemented(span, "generic enums"));
+    }
+
+    if self.at(&TokenKind::Keyword(Keyword::Impl)) {
+      let span = self.span();
+
+      return Err(self.not_implemented(span, "interfaces on enums"));
+    }
+
+    self.expect(&TokenKind::LBrace)?;
+
+    let mut variants = Vec::new();
+
+    // Variants come first, separated by commas.
+    while matches!(self.kind(), TokenKind::Ident(_)) {
+      match self.variant() {
+        Ok(variant) => variants.push(variant),
+        Err(ParseError) => self.skip_variant(),
+      }
+
+      if !self.eat(&TokenKind::Comma) {
+        break;
+      }
+    }
+
+    if variants.is_empty() {
+      self.diagnostics.push(
+        Diagnostic::error(codes::EMPTY_DECLARATION, name.span, format!("the enum `{}` has no variants", name.name))
+          .with_help("declare at least one variant: `enum Name { First, Second }`"),
+      );
+    }
+
+    let mut functions = Vec::new();
+
+    while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
+      let before = self.pos;
+
+      match self.member() {
+        Ok(Member::Fn(function)) => functions.push(function),
+        Ok(Member::Field(field)) => {
+          self.diagnostics.push(
+            Diagnostic::error(codes::UNEXPECTED_TOKEN, field.span, "enums cannot have fields")
+              .with_help("store data in the variants: `Variant(Type)` or `Variant { name: Type }`"),
+          );
+        }
+        Err(ParseError) => self.skip_member(),
+      }
+
+      if self.pos == before {
+        self.advance();
+      }
+    }
+
+    let end = self.expect(&TokenKind::RBrace)?.span;
+
+    Ok(EnumDecl { visibility, name, variants, functions, span: start.to(end) })
+  }
+
+  /// `Name`, `Name(T1, T2)` or `Name { a: T1, b: T2 }`.
+  fn variant(&mut self) -> PResult<VariantDecl> {
+    let name = self.ident("a variant name")?;
+    let empty = |parser: &mut Self, span: Span, name: &Ident| {
+      parser.diagnostics.push(
+        Diagnostic::error(codes::EMPTY_DECLARATION, span, format!("the variant `{}` declares no data", name.name))
+          .with_help(format!("write a variant without data as `{}`", name.name)),
+      );
+    };
+
+    if self.eat(&TokenKind::LParen) {
+      let mut types = Vec::new();
+
+      while !self.at(&TokenKind::RParen) {
+        types.push(self.type_expr()?);
+
+        if !self.eat(&TokenKind::Comma) {
+          break;
+        }
+      }
+
+      let end = self.expect(&TokenKind::RParen)?.span;
+
+      if types.is_empty() {
+        empty(self, name.span.to(end), &name);
+      }
+
+      return Ok(VariantDecl { span: name.span.to(end), name, fields: VariantFields::Tuple(types) });
+    }
+
+    if self.eat(&TokenKind::LBrace) {
+      let mut fields = Vec::new();
+
+      while !self.at(&TokenKind::RBrace) {
+        let field_name = self.ident("a field name")?;
+
+        self.expect(&TokenKind::Colon)?;
+
+        let ty = self.type_expr()?;
+
+        fields.push(VariantFieldDecl { span: field_name.span.to(ty.span), name: field_name, ty });
+
+        if !self.eat(&TokenKind::Comma) {
+          break;
+        }
+      }
+
+      let end = self.expect(&TokenKind::RBrace)?.span;
+
+      if fields.is_empty() {
+        empty(self, name.span.to(end), &name);
+      }
+
+      return Ok(VariantDecl { span: name.span.to(end), name, fields: VariantFields::Named(fields) });
+    }
+
+    Ok(VariantDecl { span: name.span, name, fields: VariantFields::Unit })
+  }
+
+  /// Skips a malformed variant: to the next `,` or the `}` closing the enum, at depth zero.
+  fn skip_variant(&mut self) {
+    let mut depth = 0usize;
+
+    loop {
+      match self.kind() {
+        TokenKind::Eof => return,
+        TokenKind::LBrace | TokenKind::LParen => depth += 1,
+        TokenKind::RParen => depth = depth.saturating_sub(1),
+        TokenKind::RBrace if depth == 0 => return,
+        TokenKind::RBrace => depth -= 1,
+        TokenKind::Comma if depth == 0 => return,
+        _ => {}
+      }
+
+      self.advance();
+    }
   }
 
   /// A field `pub name: Type;` or a function, both with a mandatory `pub` or `prv`.
@@ -489,10 +633,20 @@ impl<'a> Parser<'a> {
       TokenKind::Ident(_) => {
         let path = self.path()?;
 
-        if self.at(&TokenKind::Lt) {
-          let span = self.span();
+        if self.eat(&TokenKind::Lt) {
+          let mut args = Vec::new();
 
-          return Err(self.not_implemented(span, "generic types"));
+          loop {
+            args.push(self.type_expr()?);
+
+            if !self.eat(&TokenKind::Comma) {
+              break;
+            }
+          }
+
+          let end = self.expect(&TokenKind::Gt)?.span;
+
+          return Ok(TypeExpr { span: path.span.to(end), kind: TypeExprKind::Generic { path, args } });
         }
 
         Ok(TypeExpr { span: path.span, kind: TypeExprKind::Path(path) })
@@ -600,11 +754,10 @@ impl<'a> Parser<'a> {
   fn stmt(&mut self) -> PResult<Option<StmtOrTail>> {
     match self.kind() {
       TokenKind::Keyword(Keyword::Const | Keyword::Var) => return self.let_stmt().map(|stmt| Some(StmtOrTail::Stmt(stmt))),
-      TokenKind::Keyword(keyword @ (Keyword::Match | Keyword::Unsafe)) => {
-        let what = format!("`{}` expressions", keyword.as_str());
+      TokenKind::Keyword(Keyword::Unsafe) => {
         let span = self.span();
 
-        return Err(self.not_implemented(span, &what));
+        return Err(self.not_implemented(span, "`unsafe` blocks"));
       }
       TokenKind::Semi => {
         // An empty statement is harmless but almost always a typo.
@@ -813,9 +966,10 @@ impl<'a> Parser<'a> {
           expr = self.expr_node(ExprKind::Index { base: Box::new(expr), index: Box::new(index) }, span);
         }
         TokenKind::Question => {
-          let span = self.span();
+          let end = self.advance().span;
+          let span = expr.span.to(end);
 
-          return Err(self.not_implemented(span, "`?` operators"));
+          expr = self.expr_node(ExprKind::Try(Box::new(expr)), span);
         }
         _ => return Ok(expr),
       }
@@ -944,7 +1098,8 @@ impl<'a> Parser<'a> {
       TokenKind::Keyword(keyword) if keyword.is_reserved() => return Err(self.reserved_keyword(keyword)),
       TokenKind::Keyword(Keyword::New) => return Err(self.not_implemented(span, "`new` expressions")),
       TokenKind::Keyword(Keyword::Zod) => return Err(self.not_implemented(span, "`zod` expressions")),
-      TokenKind::Keyword(Keyword::Match | Keyword::Unsafe) => return Err(self.not_implemented(span, "`match` and `unsafe` blocks")),
+      TokenKind::Keyword(Keyword::Match) => return self.match_expr(),
+      TokenKind::Keyword(Keyword::Unsafe) => return Err(self.not_implemented(span, "`unsafe` blocks")),
       _ => return Err(self.unexpected("an expression")),
     };
 
@@ -1011,6 +1166,170 @@ impl<'a> Parser<'a> {
     let span = path.span.to(end);
 
     Ok(self.expr_node(ExprKind::StructLit { path, fields }, span))
+  }
+
+  /// `match scrutinee { pattern if guard => body, ... }`
+  fn match_expr(&mut self) -> PResult<Expr> {
+    let start = self.expect(&TokenKind::Keyword(Keyword::Match))?.span;
+    let scrutinee = self.expr_with_struct_literals(false)?;
+
+    self.expect(&TokenKind::LBrace)?;
+
+    let saved = std::mem::replace(&mut self.no_struct_literal, false);
+    let mut arms = Vec::new();
+    let parsed = self.match_arms(&mut arms);
+
+    self.no_struct_literal = saved;
+
+    // After a malformed arm (already reported), skip the rest of the `match`; the arms parsed so
+    // far keep the tree usable.
+    let end = match parsed {
+      Ok(()) => self.expect(&TokenKind::RBrace)?.span,
+      Err(ParseError) => self.skip_past_close_brace(),
+    };
+
+    Ok(self.expr_node(ExprKind::Match { scrutinee: Box::new(scrutinee), arms }, start.to(end)))
+  }
+
+  /// Skips to just after the `}` closing the current braces.
+  fn skip_past_close_brace(&mut self) -> Span {
+    let mut depth = 0usize;
+
+    loop {
+      match self.kind() {
+        TokenKind::Eof => return self.span(),
+        TokenKind::LBrace => depth += 1,
+        TokenKind::RBrace if depth == 0 => return self.advance().span,
+        TokenKind::RBrace => depth -= 1,
+        _ => {}
+      }
+
+      self.advance();
+    }
+  }
+
+  fn match_arms(&mut self, arms: &mut Vec<MatchArm>) -> PResult<()> {
+    while !self.at(&TokenKind::RBrace) {
+      let pattern = self.pattern()?;
+      let guard = if self.eat(&TokenKind::Keyword(Keyword::If)) { Some(self.expr()?) } else { None };
+
+      self.expect(&TokenKind::FatArrow)?;
+
+      let body = self.expr()?;
+      let span = pattern.span.to(body.span);
+      // A comma separates arms; it is optional after a block-like body and before `}`.
+      let separated = self.eat(&TokenKind::Comma) || self.at(&TokenKind::RBrace) || body.is_block_like();
+
+      arms.push(MatchArm { pattern, guard, body, span });
+
+      if !separated {
+        return Err(self.unexpected("`,` or `}`"));
+      }
+    }
+
+    Ok(())
+  }
+
+  /// A pattern, with alternatives separated by `|`.
+  fn pattern(&mut self) -> PResult<Pattern> {
+    let first = self.pattern_alternative()?;
+
+    if !self.at(&TokenKind::Pipe) {
+      return Ok(first);
+    }
+
+    let mut span = first.span;
+    let mut alternatives = vec![first];
+
+    while self.eat(&TokenKind::Pipe) {
+      let alternative = self.pattern_alternative()?;
+
+      span = span.to(alternative.span);
+      alternatives.push(alternative);
+    }
+
+    Ok(Pattern { id: self.next_id(), kind: PatternKind::Or(alternatives), span })
+  }
+
+  fn pattern_alternative(&mut self) -> PResult<Pattern> {
+    let start = self.span();
+    let literal = match self.kind() {
+      TokenKind::Int { .. }
+      | TokenKind::Float { .. }
+      | TokenKind::Str(_)
+      | TokenKind::Char(_)
+      | TokenKind::Keyword(Keyword::True | Keyword::False) => true,
+      TokenKind::Minus => matches!(self.nth_kind(1), TokenKind::Int { .. } | TokenKind::Float { .. }),
+      _ => false,
+    };
+
+    if literal {
+      let expr = self.unary_expr()?;
+      let span = expr.span;
+
+      return Ok(Pattern { id: self.next_id(), kind: PatternKind::Literal(Box::new(expr)), span });
+    }
+
+    if !matches!(self.kind(), TokenKind::Ident(_) | TokenKind::Keyword(Keyword::SelfType)) {
+      return Err(self.unexpected("a pattern"));
+    }
+
+    let path = self.path()?;
+
+    if self.eat(&TokenKind::LParen) {
+      let mut elems = Vec::new();
+
+      while !self.at(&TokenKind::RParen) {
+        elems.push(self.pattern()?);
+
+        if !self.eat(&TokenKind::Comma) {
+          break;
+        }
+      }
+
+      let end = self.expect(&TokenKind::RParen)?.span;
+
+      return Ok(Pattern { id: self.next_id(), kind: PatternKind::Tuple { path, elems }, span: start.to(end) });
+    }
+
+    if self.eat(&TokenKind::LBrace) {
+      let mut fields = Vec::new();
+      let mut rest = false;
+
+      while !self.at(&TokenKind::RBrace) {
+        if self.eat(&TokenKind::DotDot) {
+          rest = true;
+
+          break;
+        }
+
+        let name = self.ident("a field name or `..`")?;
+        let pattern = if self.eat(&TokenKind::Colon) {
+          self.pattern()?
+        } else {
+          Pattern { id: self.next_id(), kind: PatternKind::Ident(name.clone()), span: name.span }
+        };
+
+        fields.push(FieldPattern { span: name.span.to(pattern.span), name, pattern });
+
+        if !self.eat(&TokenKind::Comma) {
+          break;
+        }
+      }
+
+      let end = self.expect(&TokenKind::RBrace)?.span;
+
+      return Ok(Pattern { id: self.next_id(), kind: PatternKind::Named { path, fields, rest }, span: start.to(end) });
+    }
+
+    let span = path.span;
+    let kind = match path.segments.as_slice() {
+      [segment] if segment.name == "_" => PatternKind::Wildcard,
+      [segment] if segment.name != "Self" => PatternKind::Ident(segment.clone()),
+      _ => PatternKind::Path(path),
+    };
+
+    Ok(Pattern { id: self.next_id(), kind, span })
   }
 
   /// `[a, b, c]` or `[value; N]`.
@@ -1230,7 +1549,8 @@ mod tests {
   fn reports_reserved_keywords_and_later_features() {
     assert_eq!(parse("fn await() {}").1, vec!["E0101"]);
     assert_eq!(parse("fn f() { async; }").1, vec!["E0101"]);
-    assert_eq!(parse("enum E {}\npub fn main() {}").1, vec!["E0900"]);
+    assert_eq!(parse("class C {}\npub fn main() {}").1, vec!["E0900"]);
+    assert_eq!(parse("enum E<T> { A }").1, vec!["E0900"]);
     assert_eq!(parse("struct P<T> {}").1, vec!["E0900"]);
     assert_eq!(parse("struct P impl Show {}").1, vec!["E0900"]);
   }
@@ -1291,6 +1611,39 @@ mod tests {
     assert_eq!(parse("struct P { x: i32; }").1, vec!["E0103"]);
     assert_eq!(parse("fn f(self) {}").1, vec!["E0100"]);
     assert_eq!(parse("struct P { pub fn f(x: i32, self) {} }").1, vec!["E0100"]);
+  }
+
+  #[test]
+  fn parses_enums_match_and_try() {
+    let (module, errors) = parse(
+      "enum Shape { Circle(f64), Rect { w: f64, h: f64 }, Empty, pub fn unit() -> Self { Self::Empty } }
+      fn f(s: Shape) -> Result<Option<i32>, String> {
+        match s {
+          Shape::Circle(r) | Shape::Rect { w: r, .. } if r > 0.0 => {}
+          Shape::Empty => g()?,
+          -1 | 'a' | true => {}
+          _ => {}
+        }
+      }",
+    );
+
+    assert!(errors.is_empty(), "{errors:?}");
+
+    let [Item::Enum(decl), Item::Fn(function)] = module.items.as_slice() else { panic!("expected an enum and a function") };
+
+    assert_eq!(decl.variants.len(), 3);
+    assert!(matches!(&decl.variants[1].fields, VariantFields::Named(fields) if fields.len() == 2));
+    assert_eq!(decl.functions.len(), 1);
+    assert!(matches!(function.return_type.as_ref().map(|ty| &ty.kind), Some(TypeExprKind::Generic { args, .. }) if args.len() == 2));
+
+    let Some(ExprKind::Match { arms, .. }) = function.body.tail.as_deref().map(|tail| &tail.kind) else { panic!("expected a match") };
+
+    assert_eq!(arms.len(), 4);
+    assert!(matches!(&arms[0].pattern.kind, PatternKind::Or(alternatives) if alternatives.len() == 2));
+    assert!(arms[0].guard.is_some());
+    assert!(matches!(arms[1].body.kind, ExprKind::Try(_)));
+    assert!(matches!(arms[3].pattern.kind, PatternKind::Wildcard));
+    assert_eq!(parse("fn f() { match x { A => 1 B => 2 } }").1, vec!["E0100"]);
   }
 
   fn shape_kind(expr: &str) -> ExprKind {

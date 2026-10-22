@@ -22,7 +22,8 @@ fn parse_age(s: String) -> Result<i32, ParseError> {
   to the `Some` value.
 - `?` is only valid inside a function whose return type is compatible.
 - The error type must match the function's `E` **exactly**; there is no automatic
-  conversion. Convert explicitly, and the diagnostic must suggest it:
+  conversion. Convert explicitly, and the diagnostic must suggest it (in F1, with a `match`;
+  from F2, with `map_err`):
 
 ```sag
 const text = fs::read(path).map_err((e) => AppError::Io(e))?;
@@ -40,6 +41,7 @@ Operations that always panic, in every build mode:
 
 - Integer division by zero.
 - Array or list index out of bounds.
+- `unwrap()` and `expect(...)` on `None` or `Err`, and `unwrap_err()` on `Ok`.
 
 Integer overflow panics in debug builds only (see [types](02-types.md#integer-arithmetic)).
 
@@ -60,7 +62,7 @@ Declaring a return type on `main` is optional. When it returns `Result<(), E>`:
 | Outcome | Exit code |
 |---|---|
 | `main` returns normally or returns `Ok` | `0` |
-| `main` returns `Err(e)` (the error is printed to stderr) | `1` |
+| `main` returns `Err(e)` (`error: <e>` is printed to stderr) | `1` |
 | A panic occurs | `101` |
 
 Command-line arguments are read with `std::env::args()`; they are not part of `main`'s

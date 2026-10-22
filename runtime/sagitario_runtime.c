@@ -30,6 +30,13 @@ _Noreturn void sag_index_out_of_bounds(size_t index, size_t len, const char *fil
   sag_panic_at(message, file, line);
 }
 
+_Noreturn void sag_panic_str_at(sag_string message, const char *file, int line) {
+  fflush(stdout);
+  fprintf(stderr, "panic at %s:%d: %.*s\n", file, line, (int)message.len, (const char *)message.ptr);
+  fflush(stderr);
+  exit(101);
+}
+
 /* ---- Strings (ARC) --------------------------------------------------------------------- */
 
 struct sag_string_buf {
@@ -278,6 +285,13 @@ void sag_println(sag_string s) {
 
 void sag_eprintln(sag_string s) {
   sag_write_or_panic(stderr, s.ptr, s.len);
+  sag_write_or_panic(stderr, (const uint8_t *)"\n", 1);
+}
+
+void sag_report_main_error(sag_string message) {
+  fflush(stdout);
+  fputs("error: ", stderr);
+  sag_write_or_panic(stderr, message.ptr, message.len);
   sag_write_or_panic(stderr, (const uint8_t *)"\n", 1);
 }
 

@@ -9,8 +9,13 @@
 //! statement or branch that created them, so the set of pending releases always matches the
 //! values created on the current path.
 //!
+//! Enums, `Option` and `Result` values carry a tag (the variant's index) and the fields of their
+//! variant; `match` and `?` (in `matching`) test the tag before reading those fields.
+//!
 //! Lowering only runs on programs without errors, so an inconsistency it finds is an internal
 //! compiler error, reported as `LowerError`.
+
+mod matching;
 
 use sagitario_ast::{BinaryOp, Block, Expr, ExprKind, FnDecl, Module, Stmt as AstStmt, TemplatePart, UnaryOp};
 use sagitario_resolve::{Builtin, FnId, Res, Resolution};
@@ -21,11 +26,53 @@ use sagitario_types::{FloatTy, IntTy, Receiver, Type, TypedModule};
 pub struct Program {
   /// Indexed by `FnId`.
   pub functions: Vec<Function>,
-  /// Indexed by `StructId`.
-  pub structs: Vec<StructLayout>,
+  pub layouts: Layouts,
   pub entry: FnId,
   /// Path of the source file, for `#line` directives.
   pub source_path: String,
+}
+
+/// The fields of the program's structs and enums.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Layouts {
+  /// Indexed by `StructId`.
+  pub structs: Vec<StructLayout>,
+  /// Indexed by `EnumId`.
+  pub enums: Vec<EnumLayout>,
+}
+
+impl Layouts {
+  /// Whether values of `ty` hold `String`s, so copies must be retained and released.
+  pub fn is_managed(&self, ty: &Type) -> bool {
+    match ty {
+      Type::String => true,
+      Type::Array(elem, _) => self.is_managed(elem),
+      Type::Struct(inner) => self.structs.get(inner.id.0 as usize).is_some_and(|layout| layout.fields.iter().any(|field| self.is_managed(field))),
+      Type::Enum(_) | Type::Option(_) | Type::Result(..) => self.variants(ty).iter().flatten().flatten().any(|field| self.is_managed(field)),
+      _ => false,
+    }
+  }
+
+  /// The field types of each variant of an enum, `Option` or `Result` type.
+  pub fn variants(&self, ty: &Type) -> Option<Vec<Vec<Type>>> {
+    match ty {
+      Type::Enum(inner) => self.enums.get(inner.id.0 as usize).map(|layout| layout.variants.clone()),
+      Type::Option(value) => Some(vec![Vec::new(), vec![value.as_ref().clone()]]),
+      Type::Result(value, error) => Some(vec![vec![value.as_ref().clone()], vec![error.as_ref().clone()]]),
+      _ => None,
+    }
+  }
+
+  pub fn struct_fields(&self, id: sagitario_resolve::StructId) -> Vec<Type> {
+    self.structs.get(id.0 as usize).map(|layout| layout.fields.clone()).unwrap_or_default()
+  }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnumLayout {
+  pub name: String,
+  /// The field types of each variant.
+  pub variants: Vec<Vec<Type>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -67,6 +114,10 @@ pub enum Projection {
   Field(usize),
   /// A bounds-checked element of an array of length `len`.
   Index { index: Operand, len: u64 },
+  /// The tag of an enum value: the index of its variant, as `u32`.
+  Tag,
+  /// A field of the given variant of an enum value; only valid when the tag matches.
+  VariantField { variant: u32, field: usize },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -121,6 +172,15 @@ pub enum Stmt {
   Break,
   Continue,
   Return(Option<Operand>),
+  /// Aborts the program with a message (exit code 101).
+  Panic(PanicMessage),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PanicMessage {
+  Static(String),
+  /// A `String` value.
+  Value(Operand),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -156,6 +216,12 @@ pub enum Rvalue {
   /// An array of the destination's type with every element equal to the operand; each copy is
   /// retained.
   Repeat(Operand),
+  /// An enum value of the destination's type with the given variant; the field operands are
+  /// already retained for the new value.
+  Variant {
+    index: u32,
+    fields: Vec<Operand>,
+  },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -197,6 +263,9 @@ pub enum Const {
 
 const UNIT: Operand = Operand::Const(Const::Unit);
 
+/// The type of enum tags.
+const TAG_TYPE: Type = Type::Int(IntTy::U32);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LowerError(pub String);
 
@@ -206,30 +275,26 @@ fn error<T>(message: impl Into<String>) -> LResult<T> {
   Err(LowerError(message.into()))
 }
 
-/// Whether values of `ty` hold `String`s, so copies must be retained and released.
-pub fn is_managed(ty: &Type, structs: &[StructLayout]) -> bool {
-  match ty {
-    Type::String => true,
-    Type::Array(elem, _) => is_managed(elem, structs),
-    Type::Struct(ty) => structs.get(ty.id.0 as usize).is_some_and(|layout| layout.fields.iter().any(|field| is_managed(field, structs))),
-    _ => false,
-  }
-}
-
 pub fn lower(module: &Module, resolution: &Resolution, typed: &TypedModule, source: &SourceFile) -> LResult<Program> {
   let entry = resolution.main.ok_or_else(|| LowerError("program without `main`".to_string()))?;
-  let structs: Vec<StructLayout> = typed
+  let structs = typed
     .structs
     .iter()
     .map(|def| StructLayout { name: def.name.clone(), fields: def.fields.iter().map(|field| field.ty.clone()).collect() })
     .collect();
+  let enums = typed
+    .enums
+    .iter()
+    .map(|def| EnumLayout { name: def.name.clone(), variants: def.variants.iter().map(|variant| variant.field_types()).collect() })
+    .collect();
+  let layouts = Layouts { structs, enums };
   let mut functions = Vec::new();
 
   for (id, decl) in resolution.fn_decls(module) {
-    functions.push(lower_function(id, decl, resolution, typed, &structs, source)?);
+    functions.push(lower_function(id, decl, resolution, typed, &layouts, source)?);
   }
 
-  Ok(Program { functions, structs, entry, source_path: source.path().display().to_string() })
+  Ok(Program { functions, layouts, entry, source_path: source.path().display().to_string() })
 }
 
 fn lower_function(
@@ -237,13 +302,23 @@ fn lower_function(
   decl: &FnDecl,
   resolution: &Resolution,
   typed: &TypedModule,
-  structs: &[StructLayout],
+  layouts: &Layouts,
   source: &SourceFile,
 ) -> LResult<Function> {
   let sig = typed.sig(id).ok_or_else(|| LowerError(format!("no signature for `{}`", decl.name.name)))?;
   let locals = typed.local_types.get(id.0 as usize).cloned().ok_or_else(|| LowerError("missing local types".to_string()))?;
-  let mut lowering =
-    FnLowering { resolution, typed, structs, source, locals, buffers: vec![Vec::new()], scopes: Vec::new(), pending: Vec::new(), loops: Vec::new() };
+  let mut lowering = FnLowering {
+    resolution,
+    typed,
+    layouts,
+    source,
+    ret: sig.ret.clone(),
+    locals,
+    buffers: vec![Vec::new()],
+    scopes: Vec::new(),
+    pending: Vec::new(),
+    loops: Vec::new(),
+  };
 
   if sig.ret == Type::Unit {
     lowering.block_into(&decl.body, None)?;
@@ -279,8 +354,10 @@ struct LoopCx {
 struct FnLowering<'a> {
   resolution: &'a Resolution,
   typed: &'a TypedModule,
-  structs: &'a [StructLayout],
+  layouts: &'a Layouts,
   source: &'a SourceFile,
+  /// The function's return type, for `?`.
+  ret: Type,
   locals: Vec<Type>,
   /// Statement lists being built, innermost last.
   buffers: Vec<Vec<Stmt>>,
@@ -298,7 +375,7 @@ fn is_valueless(ty: &Type) -> bool {
 
 impl FnLowering<'_> {
   fn managed(&self, ty: &Type) -> bool {
-    is_managed(ty, self.structs)
+    self.layouts.is_managed(ty)
   }
 
   fn emit(&mut self, stmt: Stmt) {
@@ -599,8 +676,11 @@ impl FnLowering<'_> {
       ExprKind::Unit => Ok(UNIT),
       ExprKind::Path(_) => match self.resolution.paths.get(&expr.id) {
         Some(Res::Local(id)) => Ok(Operand::Local(Local(id.0))),
+        Some(Res::Variant(variant)) => Ok(self.variant(ty, variant.index, Vec::new())),
         other => error(format!("unsupported path operand {other:?}")),
       },
+      ExprKind::Try(inner) => self.try_expr(inner),
+      ExprKind::Match { scrutinee, arms } => self.match_expr(&ty, scrutinee, arms),
       ExprKind::Field { .. } | ExprKind::Index { .. } => {
         let place = self.place(expr)?;
 
@@ -632,6 +712,16 @@ impl FnLowering<'_> {
         let callee = match self.resolution.paths.get(&callee.id) {
           Some(Res::Fn(id)) => Callee::Fn(*id),
           Some(Res::Builtin(builtin)) => Callee::Builtin(*builtin),
+          Some(Res::Variant(variant)) => {
+            let fields = self.variant_fields(&ty, variant.index);
+            let mut operands = Vec::new();
+
+            for (arg, field) in args.iter().zip(&fields) {
+              operands.push(self.operand_as(arg, field)?);
+            }
+
+            return Ok(self.variant(ty, variant.index, operands));
+          }
           other => return error(format!("unsupported callee {other:?}")),
         };
         let params = match callee {
@@ -646,6 +736,11 @@ impl FnLowering<'_> {
         }
 
         Ok(self.call(callee, operands, ty))
+      }
+      ExprKind::MethodCall { receiver, args, .. } if self.typed.builtin_methods.contains_key(&expr.id) => {
+        let method = self.typed.builtin_methods.get(&expr.id).copied().ok_or_else(|| LowerError("missing built-in method".to_string()))?;
+
+        self.builtin_method(method, &ty, receiver, args)
       }
       ExprKind::MethodCall { receiver, args, .. } => {
         let Some(function) = self.typed.method_calls.get(&expr.id).copied() else {
@@ -671,11 +766,35 @@ impl FnLowering<'_> {
 
         Ok(self.call(Callee::Fn(function), operands, ty))
       }
+      ExprKind::StructLit { fields, .. } if matches!(ty, Type::Enum(_)) => {
+        let Some(Res::Variant(variant)) = self.resolution.paths.get(&expr.id).copied() else {
+          return error("variant literal without a variant");
+        };
+        let def = self.typed.variants(&ty).and_then(|variants| variants.get(variant.index as usize).cloned());
+        let def = def.ok_or_else(|| LowerError("unknown variant".to_string()))?;
+        let mut operands: Vec<Option<Operand>> = vec![None; def.fields.len()];
+
+        // Field values run in source order and are stored in declaration order.
+        for init in fields {
+          let index = def.field_index(&init.name.name).ok_or_else(|| LowerError("unknown variant field".to_string()))?;
+          let field_ty = def.fields.get(index).map_or(Type::Error, |(_, ty)| ty.clone());
+          let value = self.operand_as(&init.value, &field_ty)?;
+
+          if let Some(slot) = operands.get_mut(index) {
+            *slot = Some(value);
+          }
+        }
+
+        let operands: Option<Vec<Operand>> = operands.into_iter().collect();
+        let operands = operands.ok_or_else(|| LowerError("variant literal with missing fields".to_string()))?;
+
+        Ok(self.variant(ty, variant.index, operands))
+      }
       ExprKind::StructLit { fields, .. } => {
         let Type::Struct(owner) = &ty else {
           return error("struct literal without a struct type");
         };
-        let field_types = self.structs.get(owner.id.0 as usize).map(|layout| layout.fields.clone()).unwrap_or_default();
+        let field_types = self.layouts.struct_fields(owner.id);
         let mut operands: Vec<Option<Operand>> = vec![None; field_types.len()];
 
         // Field values run in source order and are stored in declaration order.
@@ -764,6 +883,14 @@ impl FnLowering<'_> {
         let operand_ty = self.type_of(lhs)?;
         let lhs = self.expr(lhs)?;
         let rhs = self.expr(rhs)?;
+
+        if matches!(operand_ty, Type::Enum(_)) {
+          // Enums without data are equal when their variants are.
+          let lhs = self.tag(lhs, &operand_ty)?;
+          let rhs = self.tag(rhs, &operand_ty)?;
+
+          return Ok(self.new_value(ty, Rvalue::Binary { op: *op, ty: TAG_TYPE, lhs, rhs }));
+        }
 
         Ok(self.new_value(ty, Rvalue::Binary { op: *op, ty: operand_ty, lhs, rhs }))
       }
