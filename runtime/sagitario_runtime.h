@@ -58,6 +58,11 @@ void sag_print(sag_string s);
 void sag_println(sag_string s);
 void sag_eprintln(sag_string s);
 
+/* Like `sag_panic_at`, with a message held in a `String` (`expect`). */
+_Noreturn void sag_panic_str_at(sag_string message, const char *file, int line);
+/* Prints the error returned by `main` (`error: ...`) to stderr. */
+void sag_report_main_error(sag_string message);
+
 /* ---- Arrays ------------------------------------------------------------------------------ */
 
 _Noreturn void sag_index_out_of_bounds(size_t index, size_t len, const char *file, int line);

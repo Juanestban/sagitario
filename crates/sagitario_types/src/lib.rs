@@ -1,8 +1,11 @@
 //! Type checking with local inference (docs/spec/02-types.md, 06-control-flow.md). Records the
-//! type of every expression and local binding for lowering; `flow` then checks definite
-//! assignment and reachability.
+//! type of every expression and local binding for lowering; `patterns` checks `match` (with the
+//! exhaustiveness algorithm in `exhaustive`), and `flow` then checks definite assignment and
+//! reachability.
 
+mod exhaustive;
 mod flow;
+mod patterns;
 
 use std::collections::HashMap;
 use std::fmt;
@@ -12,7 +15,7 @@ use sagitario_ast::{
   Visibility,
 };
 use sagitario_diagnostics::{Code, Diagnostic, Diagnostics, codes};
-use sagitario_resolve::{Builtin, FnId, LocalId, LocalKind, Res, Resolution, StructId};
+use sagitario_resolve::{Builtin, EnumId, EnumKind, FnId, LocalId, LocalKind, Res, Resolution, StructId, TypeItem, VariantRef};
 use sagitario_span::Span;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -99,8 +102,13 @@ pub enum Type {
   Float(FloatTy),
   String,
   Struct(StructRef),
+  Enum(EnumRef),
   /// `[T; N]`
   Array(Box<Type>, u64),
+  /// The prelude's `Option<T>`.
+  Option(Box<Type>),
+  /// The prelude's `Result<T, E>`.
+  Result(Box<Type>, Box<Type>),
   /// The type of expressions that never produce a value (`return`, `break`, ...). Compatible
   /// with every type; programs cannot write it.
   Never,
@@ -116,6 +124,13 @@ pub struct StructRef {
   pub name: String,
 }
 
+/// An enum type of the program; the name is kept for messages.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EnumRef {
+  pub id: EnumId,
+  pub name: String,
+}
+
 impl Type {
   fn is_numeric(&self) -> bool {
     matches!(self, Type::Int(_) | Type::Float(_))
@@ -124,6 +139,16 @@ impl Type {
   /// Whether a value of type `self` can be used where `expected` is required.
   fn fits(&self, expected: &Type) -> bool {
     self == expected || matches!(self, Type::Never | Type::Error) || *expected == Type::Error
+  }
+
+  /// The enum whose variants make up values of this type.
+  pub fn enum_kind(&self) -> Option<EnumKind> {
+    match self {
+      Type::Enum(ty) => Some(EnumKind::User(ty.id)),
+      Type::Option(_) => Some(EnumKind::Option),
+      Type::Result(..) => Some(EnumKind::Result),
+      _ => None,
+    }
   }
 }
 
@@ -137,7 +162,10 @@ impl fmt::Display for Type {
       Type::Float(ty) => f.write_str(ty.name()),
       Type::String => f.write_str("String"),
       Type::Struct(ty) => f.write_str(&ty.name),
+      Type::Enum(ty) => f.write_str(&ty.name),
       Type::Array(elem, len) => write!(f, "[{elem}; {len}]"),
+      Type::Option(value) => write!(f, "Option<{value}>"),
+      Type::Result(value, error) => write!(f, "Result<{value}, {error}>"),
       Type::Never => f.write_str("never"),
       Type::Error => f.write_str("{error}"),
     }
@@ -183,12 +211,58 @@ pub struct StructDef {
   pub fields: Vec<FieldDef>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnumDef {
+  pub name: String,
+  pub variants: Vec<VariantDef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VariantDef {
+  pub name: String,
+  /// Whether the fields are named (`Rect { w, h }`) rather than positional (`Circle(r)`).
+  pub named: bool,
+  /// In declaration order; named fields have a name.
+  pub fields: Vec<(Option<String>, Type)>,
+}
+
+impl VariantDef {
+  fn new(name: &str, fields: Vec<Type>) -> VariantDef {
+    VariantDef { name: name.to_string(), named: false, fields: fields.into_iter().map(|ty| (None, ty)).collect() }
+  }
+
+  pub fn field_types(&self) -> Vec<Type> {
+    self.fields.iter().map(|(_, ty)| ty.clone()).collect()
+  }
+
+  pub fn field_index(&self, name: &str) -> Option<usize> {
+    self.fields.iter().position(|(field, _)| field.as_deref() == Some(name))
+  }
+}
+
+/// A method of `Option` or `Result` implemented by the compiler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinMethod {
+  IsSome,
+  IsNone,
+  IsOk,
+  IsErr,
+  Unwrap,
+  Expect,
+  UnwrapOr,
+  UnwrapErr,
+}
+
 #[derive(Debug, Default)]
 pub struct TypedModule {
   /// Signature of each function, indexed by `FnId`.
   pub sigs: Vec<FnSig>,
   /// Indexed by `StructId`.
   pub structs: Vec<StructDef>,
+  /// Indexed by `EnumId`.
+  pub enums: Vec<EnumDef>,
+  /// Calls to methods of `Option` and `Result`, by node id.
+  pub builtin_methods: HashMap<NodeId, BuiltinMethod>,
   /// Type of each local binding, indexed by `FnId` then `LocalId`.
   pub local_types: Vec<Vec<Type>>,
   pub expr_types: HashMap<NodeId, Type>,
@@ -209,6 +283,18 @@ impl TypedModule {
   /// Position of a field in its struct's declaration.
   pub fn field_index(&self, id: StructId, name: &str) -> Option<usize> {
     self.struct_def(id)?.fields.iter().position(|field| field.name == name)
+  }
+
+  /// The variants of an enum, `Option` or `Result` type, with their field types.
+  pub fn variants(&self, ty: &Type) -> Option<Vec<VariantDef>> {
+    match ty {
+      Type::Enum(ty) => self.enums.get(ty.id.0 as usize).map(|def| def.variants.clone()),
+      Type::Option(value) => Some(vec![VariantDef::new("None", Vec::new()), VariantDef::new("Some", vec![value.as_ref().clone()])]),
+      Type::Result(value, error) => {
+        Some(vec![VariantDef::new("Ok", vec![value.as_ref().clone()]), VariantDef::new("Err", vec![error.as_ref().clone()])])
+      }
+      _ => None,
+    }
   }
 
   pub fn local_type(&self, function: FnId, local: LocalId) -> Option<&Type> {
@@ -235,7 +321,8 @@ pub fn check(module: &Module, resolution: &Resolution, diagnostics: &mut Diagnos
   };
 
   checker.struct_defs();
-  checker.check_recursive_structs();
+  checker.enum_defs();
+  checker.check_recursive_types();
 
   let decls = resolution.fn_decls(module);
 
@@ -247,8 +334,8 @@ pub fn check(module: &Module, resolution: &Resolution, diagnostics: &mut Diagnos
     checker.typed.sigs.push(sig);
   }
 
-  if let Some((_, main)) = decls.iter().find(|(id, _)| Some(*id) == resolution.main) {
-    checker.check_main(main);
+  if let Some((id, main)) = decls.iter().find(|(id, _)| Some(*id) == resolution.main) {
+    checker.check_main(*id, main);
   }
 
   for (id, decl) in &decls {
@@ -299,8 +386,8 @@ struct Checker<'a> {
   /// The current function's return type annotation, for "expected because of" labels.
   ret_span: Option<Span>,
   function: FnId,
-  /// The struct whose function is being checked, for `Self` and `prv` members.
-  owner: Option<StructId>,
+  /// The type whose function is being checked, for `Self` and `prv` members.
+  owner: Option<TypeItem>,
   loops: Vec<LoopCx>,
 }
 
@@ -315,13 +402,48 @@ impl Checker<'_> {
     Type::Struct(StructRef { id, name })
   }
 
+  fn type_ref(&self, item: TypeItem) -> Type {
+    match item {
+      TypeItem::Struct(id) => self.struct_ref(id),
+      TypeItem::Enum(id) => Type::Enum(EnumRef { id, name: self.resolution.type_name(self.module, item) }),
+    }
+  }
+
+  /// Resolves the field types of every enum variant.
+  fn enum_defs(&mut self) {
+    for index in 0..self.resolution.enums.len() {
+      let id = EnumId(index as u32);
+      let Some(decl) = self.resolution.enum_decl(self.module, id) else { continue };
+
+      self.owner = Some(TypeItem::Enum(id));
+
+      let mut variants = Vec::new();
+
+      for variant in &decl.variants {
+        let (named, fields) = match &variant.fields {
+          sagitario_ast::VariantFields::Unit => (false, Vec::new()),
+          sagitario_ast::VariantFields::Tuple(types) => (false, types.iter().map(|ty| (None, self.type_expr(ty))).collect()),
+          sagitario_ast::VariantFields::Named(fields) => {
+            (true, fields.iter().map(|field| (Some(field.name.name.clone()), self.type_expr(&field.ty))).collect())
+          }
+        };
+
+        variants.push(VariantDef { name: variant.name.name.clone(), named, fields });
+      }
+
+      self.typed.enums.push(EnumDef { name: decl.name.name.clone(), variants });
+    }
+
+    self.owner = None;
+  }
+
   /// Resolves the field types of every struct.
   fn struct_defs(&mut self) {
     for index in 0..self.resolution.structs.len() {
       let id = StructId(index as u32);
       let Some(decl) = self.resolution.struct_decl(self.module, id) else { continue };
 
-      self.owner = Some(id);
+      self.owner = Some(TypeItem::Struct(id));
 
       let fields = decl
         .fields
@@ -340,38 +462,66 @@ impl Checker<'_> {
     self.owner = None;
   }
 
-  /// A struct cannot contain itself by value, directly or through other structs and arrays.
-  fn check_recursive_structs(&mut self) {
+  /// A struct or enum cannot contain itself by value, directly or through other structs, enums,
+  /// arrays, `Option` or `Result`.
+  fn check_recursive_types(&mut self) {
     for index in 0..self.typed.structs.len() {
       let id = StructId(index as u32);
       let fields = self.typed.struct_def(id).map(|def| def.fields.clone()).unwrap_or_default();
-      let recursive = fields.iter().find(|field| self.contains_struct(&field.ty, id, &mut Vec::new()));
+      let recursive = fields.iter().find(|field| self.contains_type(&field.ty, TypeItem::Struct(id), &mut Vec::new()));
 
       if let (Some(field), Some(decl)) = (recursive, self.resolution.struct_decl(self.module, id)) {
-        let name = decl.name.name.clone();
+        let (name, span) = (decl.name.name.clone(), decl.name.span);
 
-        self.diagnostics.push(
-          Diagnostic::error(codes::RECURSIVE_TYPE, decl.name.span, format!("the struct `{name}` contains itself, so its size would be infinite"))
-            .with_label(field.span, format!("this field contains a `{name}`"))
-            .with_help("structs are stored inline; keep the recursive value in a `class` (F2), which is a reference"),
-        );
+        self.recursive_type_error("struct", &name, span, field.span);
+      }
+    }
+
+    for index in 0..self.typed.enums.len() {
+      let id = EnumId(index as u32);
+      let Some(decl) = self.resolution.enum_decl(self.module, id) else { continue };
+      let types = self.typed.enums.get(index).map(|def| def.variants.iter().map(VariantDef::field_types).collect::<Vec<_>>()).unwrap_or_default();
+      let recursive = types.iter().position(|fields| fields.iter().any(|ty| self.contains_type(ty, TypeItem::Enum(id), &mut Vec::new())));
+
+      if let Some(variant) = recursive.and_then(|index| decl.variants.get(index)) {
+        self.recursive_type_error("enum", &decl.name.name, decl.name.span, variant.span);
       }
     }
   }
 
-  fn contains_struct(&self, ty: &Type, target: StructId, visited: &mut Vec<StructId>) -> bool {
-    match ty {
-      Type::Array(elem, _) => self.contains_struct(elem, target, visited),
-      Type::Struct(inner) if inner.id == target => true,
-      Type::Struct(inner) if !visited.contains(&inner.id) => {
-        visited.push(inner.id);
+  fn recursive_type_error(&mut self, kind: &str, name: &str, span: Span, part: Span) {
+    self.diagnostics.push(
+      Diagnostic::error(codes::RECURSIVE_TYPE, span, format!("the {kind} `{name}` contains itself, so its size would be infinite"))
+        .with_label(part, format!("this contains a `{name}`"))
+        .with_help(format!("{kind}s are stored inline; keep the recursive value in a `class` (F2), which is a reference")),
+    );
+  }
 
-        let fields = self.typed.struct_def(inner.id).map(|def| def.fields.as_slice()).unwrap_or_default();
+  fn contains_type(&self, ty: &Type, target: TypeItem, visited: &mut Vec<TypeItem>) -> bool {
+    let item = match ty {
+      Type::Array(elem, _) | Type::Option(elem) => return self.contains_type(elem, target, visited),
+      Type::Result(value, error) => return self.contains_type(value, target, visited) || self.contains_type(error, target, visited),
+      Type::Struct(inner) => TypeItem::Struct(inner.id),
+      Type::Enum(inner) => TypeItem::Enum(inner.id),
+      _ => return false,
+    };
 
-        fields.iter().any(|field| self.contains_struct(&field.ty, target, visited))
-      }
-      _ => false,
+    if item == target {
+      return true;
     }
+
+    if visited.contains(&item) {
+      return false;
+    }
+
+    visited.push(item);
+
+    let parts: Vec<Type> = match item {
+      TypeItem::Struct(id) => self.typed.struct_def(id).map(|def| def.fields.iter().map(|field| field.ty.clone()).collect()).unwrap_or_default(),
+      TypeItem::Enum(_) => self.typed.variants(ty).unwrap_or_default().iter().flat_map(VariantDef::field_types).collect(),
+    };
+
+    parts.iter().any(|part| self.contains_type(part, target, visited))
   }
 
   fn signature(&mut self, decl: &FnDecl) -> FnSig {
@@ -382,11 +532,20 @@ impl Checker<'_> {
     FnSig { receiver, params, ret }
   }
 
-  fn check_main(&mut self, main: &FnDecl) {
-    let returns_unit = main.return_type.as_ref().is_none_or(|ty| ty.kind == TypeExprKind::Unit);
+  /// `pub fn main()` or `pub fn main() -> Result<(), String>` (docs/spec/07-errors.md).
+  fn check_main(&mut self, id: FnId, main: &FnDecl) {
+    let ret = self.typed.sig(id).map_or(Type::Unit, |sig| sig.ret.clone());
+    let valid_ret = matches!(&ret, Type::Unit | Type::Error) || ret == Type::Result(Box::new(Type::Unit), Box::new(Type::String));
 
-    if main.visibility != Visibility::Public || !main.params.is_empty() || !returns_unit {
-      self.error(codes::INVALID_MAIN, main.name.span, "`main` must be declared as `pub fn main()`");
+    if main.visibility != Visibility::Public || !main.params.is_empty() || !valid_ret {
+      let mut diagnostic =
+        Diagnostic::error(codes::INVALID_MAIN, main.name.span, "`main` must be declared as `pub fn main()` or `pub fn main() -> Result<(), String>`");
+
+      if let Type::Result(..) = ret {
+        diagnostic = diagnostic.with_note("in F1 the error type of `main` must be `String`");
+      }
+
+      self.diagnostics.push(diagnostic);
     }
   }
 
@@ -401,7 +560,7 @@ impl Checker<'_> {
     self.locals = vec![None; local_count];
 
     // `self` is the first local of a method, followed by the parameters.
-    let self_ty = self.owner.filter(|_| sig.receiver.is_some()).map(|owner| self.struct_ref(owner));
+    let self_ty = self.owner.filter(|_| sig.receiver.is_some()).map(|owner| self.type_ref(owner));
     let param_types = self_ty.into_iter().chain(sig.params.iter().cloned());
 
     for (index, ty) in param_types.enumerate() {
@@ -458,6 +617,38 @@ impl Checker<'_> {
           None => Type::Error,
         }
       }
+      TypeExprKind::Generic { path, args } => {
+        let name = path.segments.last().map_or("", |segment| segment.name.as_str());
+        let arity = match name {
+          _ if path.segments.len() != 1 || self.resolution.type_names.contains_key(name) => None,
+          "Option" => Some(1),
+          "Result" => Some(2),
+          _ => None,
+        };
+        let Some(arity) = arity else {
+          self.error(codes::NOT_IMPLEMENTED, ty.span, "generic types other than `Option` and `Result` are not implemented yet (F2)");
+
+          return Type::Error;
+        };
+
+        if args.len() != arity {
+          self.error(
+            codes::WRONG_TYPE_ARGUMENTS,
+            ty.span,
+            format!("`{name}` takes {arity} type argument{} but {} were supplied", plural(arity), args.len()),
+          );
+
+          return Type::Error;
+        }
+
+        let mut types: Vec<Type> = args.iter().map(|arg| self.type_expr(arg)).collect();
+        let first = Box::new(if types.is_empty() { Type::Error } else { types.remove(0) });
+
+        match types.pop() {
+          Some(error) => Type::Result(first, Box::new(error)),
+          None => Type::Option(first),
+        }
+      }
       TypeExprKind::Path(path) => {
         let [segment] = path.segments.as_slice() else {
           self.error(codes::NOT_IMPLEMENTED, path.span, "paths with `::` are not implemented yet");
@@ -476,26 +667,33 @@ impl Checker<'_> {
 
         if name == "Self" {
           return match self.owner {
-            Some(owner) => self.struct_ref(owner),
+            Some(owner) => self.type_ref(owner),
             None => {
-              self.error(codes::UNRESOLVED_NAME, segment.span, "`Self` is only available inside a struct");
+              self.error(codes::UNRESOLVED_NAME, segment.span, "`Self` is only available inside a struct or enum");
 
               Type::Error
             }
           };
         }
 
-        if let Some(id) = self.resolution.struct_names.get(name) {
-          return self.struct_ref(*id);
+        if let Some(item) = self.resolution.type_names.get(name) {
+          return self.type_ref(*item);
         }
 
         match name {
           "bool" => Type::Bool,
           "char" => Type::Char,
           "String" => Type::String,
+          "Option" | "Result" => {
+            let usage = if name == "Option" { "Option<T>" } else { "Result<T, E>" };
+
+            self.error(codes::WRONG_TYPE_ARGUMENTS, segment.span, format!("`{name}` needs type arguments: `{usage}`"));
+
+            Type::Error
+          }
           _ => {
-            let primitives = IntTy::ALL.iter().map(|ty| ty.name()).chain(["f32", "f64", "bool", "char", "String"]);
-            let known = primitives.chain(self.resolution.struct_names.keys().map(String::as_str));
+            let primitives = IntTy::ALL.iter().map(|ty| ty.name()).chain(["f32", "f64", "bool", "char", "String", "Option", "Result"]);
+            let known = primitives.chain(self.resolution.type_names.keys().map(String::as_str));
             let mut diagnostic = Diagnostic::error(codes::UNRESOLVED_NAME, segment.span, format!("cannot find type `{name}`"));
 
             if let Some(similar) = sagitario_diagnostics::closest_match(name, known) {
@@ -712,6 +910,9 @@ impl Checker<'_> {
       LocalKind::ForVar => {
         ("loop variables are immutable", "loop variable declared here", format!("copy it into a `var` binding: `var {name} = {name};`"))
       }
+      LocalKind::Pattern => {
+        ("pattern bindings are immutable", "bound by the pattern here", format!("copy it into a `var` binding: `var {name} = {name};`"))
+      }
     };
 
     self.diagnostics.push(Diagnostic::error(code, place.span, format!("{action}: {reason}")).with_label(info.span, label).with_help(help));
@@ -783,9 +984,21 @@ impl Checker<'_> {
 
           Type::Error
         }
+        Some(Res::Variant(variant)) => self.variant_value(expr.span, *variant, None, expected),
         Some(Res::Struct(_)) | None => Type::Error,
       },
-      ExprKind::Call { callee, args } => self.call(expr, callee, args),
+      ExprKind::Call { callee, args } => match self.resolution.paths.get(&callee.id).copied() {
+        Some(Res::Variant(variant)) if matches!(callee.kind, ExprKind::Path(_)) => {
+          let ty = self.variant_value(expr.span, variant, Some(args), expected);
+
+          self.typed.expr_types.insert(callee.id, ty.clone());
+
+          ty
+        }
+        _ => self.call(expr, callee, args),
+      },
+      ExprKind::Try(inner) => self.try_expr(inner),
+      ExprKind::Match { scrutinee, arms } => self.match_expr(scrutinee, arms, expected),
       ExprKind::MethodCall { receiver, method, args } => self.method_call(expr, receiver, method, args),
       ExprKind::Field { base, name } => self.field(base, name),
       ExprKind::Index { base, index } => self.index(base, index),
@@ -996,6 +1209,23 @@ impl Checker<'_> {
     let supported = match &ty {
       Type::Int(_) | Type::Float(_) | Type::Char | Type::Error | Type::Never => true,
       Type::Bool => matches!(op, BinaryOp::Eq | BinaryOp::Ne),
+      // Enums without data compare by variant (docs/spec/02-types.md#equality-f1f2).
+      Type::Enum(_) => {
+        let fieldless = self.typed.variants(&ty).is_some_and(|variants| variants.iter().all(|variant| variant.fields.is_empty()));
+
+        if fieldless && matches!(op, BinaryOp::Eq | BinaryOp::Ne) {
+          true
+        } else {
+          let message = format!("cannot compare values of type `{ty}` with `{}`", op.symbol());
+
+          self.diagnostics.push(
+            Diagnostic::error(codes::INVALID_OPERAND, span, message)
+              .with_note("only enums whose variants carry no data support `==` and `!=`; use `match` instead"),
+          );
+
+          return Type::Bool;
+        }
+      }
       Type::String => {
         self.error(codes::NOT_IMPLEMENTED, span, "comparing `String`s is not implemented yet");
 
@@ -1212,7 +1442,9 @@ impl Checker<'_> {
     let receiver_ty = self.expr(receiver, None);
     let name = method.name.as_str();
     let owner = match &receiver_ty {
-      Type::Struct(ty) => ty.id,
+      Type::Struct(ty) => TypeItem::Struct(ty.id),
+      Type::Enum(ty) => TypeItem::Enum(ty.id),
+      Type::Option(_) | Type::Result(..) => return self.builtin_method(expr, &receiver_ty, method, args),
       Type::Array(..) if name == "len" => {
         self.args(expr.span, "method", &[], args);
 
@@ -1242,14 +1474,15 @@ impl Checker<'_> {
         return Type::Error;
       }
     };
-    let found = self.resolution.struct_function(self.module, owner, name);
+    let found = self.resolution.type_function(self.module, owner, name);
     let (Some(function), Some(decl)) = (found, found.and_then(|function| self.resolution.fn_decl(self.module, function))) else {
       let mut diagnostic = Diagnostic::error(codes::UNKNOWN_MEMBER, method.span, format!("no method `{name}` on type `{receiver_ty}`"));
-      let methods: Vec<String> = self
-        .resolution
-        .struct_decl(self.module, owner)
-        .map(|decl| decl.functions.iter().filter(|function| function.self_param.is_some()).map(|function| function.name.name.clone()).collect())
-        .unwrap_or_default();
+      let functions = match owner {
+        TypeItem::Struct(id) => self.resolution.struct_decl(self.module, id).map(|decl| &decl.functions),
+        TypeItem::Enum(id) => self.resolution.enum_decl(self.module, id).map(|decl| &decl.functions),
+      };
+      let methods: Vec<String> =
+        functions.into_iter().flatten().filter(|function| function.self_param.is_some()).map(|function| function.name.name.clone()).collect();
 
       if let Some(similar) = sagitario_diagnostics::closest_match(name, methods.iter().map(String::as_str)) {
         diagnostic = diagnostic.with_help(format!("a method with a similar name exists: `{similar}`"));
@@ -1305,7 +1538,7 @@ impl Checker<'_> {
     let Some(field) = def.fields.iter().find(|field| field.name == field_name) else {
       let mut diagnostic = Diagnostic::error(codes::UNKNOWN_MEMBER, name.span, format!("no field `{field_name}` on type `{base_ty}`"));
 
-      if self.resolution.struct_function(self.module, owner.id, field_name).is_some() {
+      if self.resolution.type_function(self.module, TypeItem::Struct(owner.id), field_name).is_some() {
         diagnostic = diagnostic.with_help(format!("`{field_name}` is a function; call it with `{field_name}(...)`"));
       } else if let Some(similar) = sagitario_diagnostics::closest_match(field_name, def.fields.iter().map(|field| field.name.as_str())) {
         diagnostic = diagnostic.with_help(format!("a field with a similar name exists: `{similar}`"));
@@ -1316,7 +1549,7 @@ impl Checker<'_> {
       return Type::Error;
     };
 
-    if !field.public && self.owner != Some(owner.id) {
+    if !field.public && self.owner != Some(TypeItem::Struct(owner.id)) {
       self.diagnostics.push(
         Diagnostic::error(codes::PRIVATE_MEMBER, name.span, format!("the field `{field_name}` of `{base_ty}` is private"))
           .with_label(field.span, "declared `prv` here"),
@@ -1351,12 +1584,16 @@ impl Checker<'_> {
   }
 
   fn struct_literal(&mut self, expr: &Expr, path: &Path, fields: &[FieldInit]) -> Type {
-    let Some(Res::Struct(id)) = self.resolution.paths.get(&expr.id).copied() else {
-      for field in fields {
-        self.expr(&field.value, None);
-      }
+    let id = match self.resolution.paths.get(&expr.id).copied() {
+      Some(Res::Struct(id)) => id,
+      Some(Res::Variant(variant)) => return self.named_variant_literal(path, variant, fields),
+      _ => {
+        for field in fields {
+          self.expr(&field.value, None);
+        }
 
-      return Type::Error;
+        return Type::Error;
+      }
     };
     let ty = self.struct_ref(id);
     let def = self.typed.struct_def(id).cloned().unwrap_or(StructDef { name: String::new(), fields: Vec::new() });
@@ -1406,7 +1643,7 @@ impl Checker<'_> {
       );
     }
 
-    if self.owner != Some(id)
+    if self.owner != Some(TypeItem::Struct(id))
       && let Some(field) = def.fields.iter().find(|field| !field.public)
     {
       self.diagnostics.push(
@@ -1421,6 +1658,250 @@ impl Checker<'_> {
     }
 
     ty
+  }
+
+  /// The display path of a variant, such as `Shape::Circle` or `Some`.
+  fn variant_path(&self, variant: VariantRef) -> String {
+    match variant.owner {
+      EnumKind::User(id) => {
+        let enum_name = self.resolution.type_name(self.module, TypeItem::Enum(id));
+        let variant_name = self.typed.enums.get(id.0 as usize).and_then(|def| def.variants.get(variant.index as usize)).map(|def| def.name.clone());
+
+        format!("{enum_name}::{}", variant_name.unwrap_or_default())
+      }
+      kind => kind.prelude_variants().get(variant.index as usize).copied().unwrap_or_default().to_string(),
+    }
+  }
+
+  /// The type of `variant` in a context expecting `expected`. Prelude variants take their type
+  /// arguments from it: `None` and the other half of `Ok`/`Err` cannot be inferred otherwise.
+  fn variant_type(&mut self, span: Span, variant: VariantRef, expected: Option<&Type>) -> Type {
+    match (variant.owner, expected) {
+      (EnumKind::User(id), _) => self.type_ref(TypeItem::Enum(id)),
+      (EnumKind::Option, Some(ty @ Type::Option(_))) | (EnumKind::Result, Some(ty @ Type::Result(..))) => ty.clone(),
+      (EnumKind::Option, _) => {
+        self.error(codes::UNKNOWN_TYPE, span, "cannot infer the type of `None`; add a type annotation such as `Option<i32>`");
+
+        Type::Error
+      }
+      (EnumKind::Result, _) => {
+        let missing = if variant.index == 0 { "error" } else { "value" };
+        let path = self.variant_path(variant);
+
+        self.error(
+          codes::UNKNOWN_TYPE,
+          span,
+          format!("cannot infer the {missing} type of `{path}(...)`; add a type annotation such as `Result<i32, String>`"),
+        );
+
+        Type::Error
+      }
+    }
+  }
+
+  /// A variant used as a value: `Shape::Empty`, `None` (no `args`) or `Shape::Circle(r)`,
+  /// `Some(x)` (with `args`).
+  fn variant_value(&mut self, span: Span, variant: VariantRef, args: Option<&[Expr]>, expected: Option<&Type>) -> Type {
+    let path = self.variant_path(variant);
+
+    // `Some(x)` without an expected `Option`: the type comes from `x`.
+    if variant.owner == EnumKind::Option && variant.index == 1 && !matches!(expected, Some(Type::Option(_))) {
+      return match args {
+        Some([arg]) => match self.expr(arg, None) {
+          Type::Never | Type::Error => Type::Error,
+          value => Type::Option(Box::new(value)),
+        },
+        Some(args) => {
+          self.args(span, "variant", &[Type::Error], args);
+
+          Type::Error
+        }
+        None => {
+          self.error(codes::WRONG_CALL_FORM, span, "`Some` carries data; write `Some(...)`");
+
+          Type::Error
+        }
+      };
+    }
+
+    let owner_ty = self.variant_type(span, variant, expected);
+    let def = self.typed.variants(&owner_ty).and_then(|variants| variants.get(variant.index as usize).cloned());
+    let Some(def) = def else {
+      self.unchecked_args(args.unwrap_or_default());
+
+      return Type::Error;
+    };
+    let form_error = match (args, def.fields.is_empty(), def.named) {
+      (Some(_), true, _) => Some(format!("`{path}` carries no data; write `{path}` without parentheses")),
+      (None, false, false) => Some(format!("`{path}` carries data; write `{path}(...)`")),
+      (_, false, true) => Some(format!("`{path}` has named fields; write `{path} {{ ... }}`")),
+      _ => None,
+    };
+
+    if let Some(message) = form_error {
+      self.error(codes::WRONG_CALL_FORM, span, message);
+      self.unchecked_args(args.unwrap_or_default());
+
+      return owner_ty;
+    }
+
+    let Some(args) = args else { return owner_ty };
+
+    self.args(span, "variant", &def.field_types(), args);
+
+    owner_ty
+  }
+
+  /// `Shape::Rect { w: 1.0, h: 2.0 }`
+  fn named_variant_literal(&mut self, path: &Path, variant: VariantRef, fields: &[FieldInit]) -> Type {
+    let name = self.variant_path(variant);
+    let ty = match variant.owner {
+      EnumKind::User(id) => self.type_ref(TypeItem::Enum(id)),
+      EnumKind::Option | EnumKind::Result => Type::Error,
+    };
+    let def = self.typed.variants(&ty).and_then(|variants| variants.get(variant.index as usize).cloned());
+    let Some(def) = def.filter(|def| def.named) else {
+      self.error(codes::WRONG_CALL_FORM, path.span, format!("`{name}` has no named fields"));
+
+      for field in fields {
+        self.expr(&field.value, None);
+      }
+
+      return Type::Error;
+    };
+    let mut seen: Vec<(&str, Span)> = Vec::new();
+
+    for init in fields {
+      let field_name = init.name.name.as_str();
+
+      if let Some((_, previous)) = seen.iter().find(|(seen, _)| *seen == field_name) {
+        self.diagnostics.push(
+          Diagnostic::error(codes::DUPLICATE_DEFINITION, init.name.span, format!("the field `{field_name}` is initialized more than once"))
+            .with_label(*previous, "first initialized here"),
+        );
+        self.expr(&init.value, None);
+
+        continue;
+      }
+
+      seen.push((field_name, init.name.span));
+
+      match def.field_index(field_name).and_then(|index| def.fields.get(index)) {
+        Some((_, field_ty)) => self.expect(&init.value, &field_ty.clone()),
+        None => {
+          self.error(codes::UNKNOWN_MEMBER, init.name.span, format!("the variant `{name}` has no field `{field_name}`"));
+          self.expr(&init.value, None);
+        }
+      }
+    }
+
+    let missing: Vec<String> = def
+      .fields
+      .iter()
+      .filter_map(|(field, _)| field.as_ref())
+      .filter(|field| !seen.iter().any(|(name, _)| name == field))
+      .map(|field| format!("`{field}`"))
+      .collect();
+
+    if !missing.is_empty() {
+      self.error(
+        codes::MISSING_FIELDS,
+        path.span,
+        format!("missing field{} {} in the literal of `{name}`", plural(missing.len()), missing.join(", ")),
+      );
+    }
+
+    ty
+  }
+
+  /// A method of `Option` or `Result` (docs/spec/07-errors.md).
+  fn builtin_method(&mut self, expr: &Expr, receiver_ty: &Type, method: &Ident, args: &[Expr]) -> Type {
+    let found = match (receiver_ty, method.name.as_str()) {
+      (Type::Option(_), "is_some") => Some((BuiltinMethod::IsSome, Vec::new(), Type::Bool)),
+      (Type::Option(_), "is_none") => Some((BuiltinMethod::IsNone, Vec::new(), Type::Bool)),
+      (Type::Result(..), "is_ok") => Some((BuiltinMethod::IsOk, Vec::new(), Type::Bool)),
+      (Type::Result(..), "is_err") => Some((BuiltinMethod::IsErr, Vec::new(), Type::Bool)),
+      (Type::Option(value) | Type::Result(value, _), "unwrap") => Some((BuiltinMethod::Unwrap, Vec::new(), value.as_ref().clone())),
+      (Type::Option(value) | Type::Result(value, _), "expect") => Some((BuiltinMethod::Expect, vec![Type::String], value.as_ref().clone())),
+      (Type::Option(value) | Type::Result(value, _), "unwrap_or") => {
+        Some((BuiltinMethod::UnwrapOr, vec![value.as_ref().clone()], value.as_ref().clone()))
+      }
+      (Type::Result(_, error), "unwrap_err") => Some((BuiltinMethod::UnwrapErr, Vec::new(), error.as_ref().clone())),
+      _ => None,
+    };
+    let Some((builtin, params, ret)) = found else {
+      let available = if matches!(receiver_ty, Type::Option(_)) {
+        "`is_some`, `is_none`, `unwrap`, `expect` and `unwrap_or`"
+      } else {
+        "`is_ok`, `is_err`, `unwrap`, `expect`, `unwrap_or` and `unwrap_err`"
+      };
+
+      self.diagnostics.push(
+        Diagnostic::error(codes::UNKNOWN_MEMBER, method.span, format!("no method `{}` on type `{receiver_ty}`", method.name))
+          .with_note(format!("in F1 its methods are {available}; methods taking closures arrive in F2")),
+      );
+      self.unchecked_args(args);
+
+      return Type::Error;
+    };
+
+    self.args(expr.span, "method", &params, args);
+    self.typed.builtin_methods.insert(expr.id, builtin);
+
+    ret
+  }
+
+  /// `value?` (docs/spec/07-errors.md#the--operator).
+  fn try_expr(&mut self, inner: &Expr) -> Type {
+    let ty = self.expr(inner, None);
+    let ret = self.ret.clone();
+    let fails = |checker: &mut Self, message: String, help: Option<String>| {
+      let mut diagnostic = Diagnostic::error(codes::INVALID_TRY, inner.span, message);
+
+      if let Some(span) = checker.ret_span {
+        diagnostic = diagnostic.with_label(span, format!("this function returns `{ret}`"));
+      }
+
+      if let Some(help) = help {
+        diagnostic = diagnostic.with_help(help);
+      }
+
+      checker.diagnostics.push(diagnostic);
+    };
+
+    match (&ty, &ret) {
+      (Type::Error | Type::Never, _) => Type::Error,
+      (Type::Option(value), Type::Option(_) | Type::Error) => value.as_ref().clone(),
+      (Type::Option(value), _) => {
+        fails(self, "`?` on an `Option` can only be used in a function that returns `Option`".to_string(), None);
+
+        value.as_ref().clone()
+      }
+      (Type::Result(value, error), Type::Result(_, expected)) => {
+        if !error.fits(expected) {
+          fails(
+            self,
+            format!("the error type `{error}` does not match the function's error type `{expected}`"),
+            Some("convert the error explicitly with a `match`; `?` never converts errors (`map_err` arrives with closures in F2)".to_string()),
+          );
+        }
+
+        value.as_ref().clone()
+      }
+      (Type::Result(value, _), Type::Error) => value.as_ref().clone(),
+      (Type::Result(value, _), _) => {
+        let help = (Some(self.function) == self.resolution.main).then(|| "declare `main` as `pub fn main() -> Result<(), String>`".to_string());
+
+        fails(self, "`?` on a `Result` can only be used in a function that returns `Result`".to_string(), help);
+
+        value.as_ref().clone()
+      }
+      (other, _) => {
+        self.error(codes::INVALID_TRY, inner.span, format!("`?` applies to `Option` and `Result` values, found `{other}`"));
+
+        Type::Error
+      }
+    }
   }
 
   fn array_literal(&mut self, span: Span, elems: &[Expr], expected: Option<&Type>) -> Type {
@@ -1639,5 +2120,34 @@ mod tests {
 
     assert_eq!(diagnostics(program), Vec::<&str>::new());
     assert_eq!(diagnostics("fn f() -> Self { }\npub fn main() {}"), vec!["E0200"]);
+  }
+
+  #[test]
+  fn infers_prelude_variants_from_context() {
+    assert!(
+      in_main(
+        "const a = Some(1); const b: Option<u8> = None; const c: Result<u8, String> = Ok(1); const _ = [a, Some(2)]; const _ = b; const _ = c;"
+      )
+      .is_empty()
+    );
+    assert!(in_main("const a: Option<u8> = Some(255); const _ = if true { a } else { None };").is_empty());
+    assert_eq!(in_main("const _ = if true { None } else { Some(1) };"), vec!["E0311"]);
+    assert_eq!(in_main("const _: Option<u8> = Some(256);"), vec!["E0302"]);
+    assert!(diagnostics("fn f() -> Result<i32, String> { Err(\"e\") }\npub fn main() { const _ = f(); }").is_empty());
+  }
+
+  #[test]
+  fn checks_match_exhaustiveness() {
+    let enums = "enum E { A(Option<bool>), B { n: i32 }, C }\n";
+    let with_enum = |body: &str| diagnostics(&format!("{enums}pub fn main() {{ const e = E::C; {body} }}"));
+
+    assert!(
+      with_enum("match e { E::A(Some(true)) => {} E::A(Some(false)) | E::A(None) => {} E::B { n: 0 } => {} E::B { .. } => {} E::C => {} }")
+        .is_empty()
+    );
+    assert_eq!(with_enum("match e { E::A(Some(true)) => {} E::B { .. } | E::C => {} }"), vec!["E0319"]);
+    assert_eq!(with_enum("match e { E::A(_) => {} E::B { n } if n > 0 => {} E::C => {} }"), vec!["E0319"]);
+    assert_eq!(with_enum("const _: i32 = match e { E::A(_) => 1, E::B { n } => n, E::C => true };"), vec!["E0300"]);
+    assert!(with_enum("const _ = match true { true => 1, false => 2 };").is_empty());
   }
 }

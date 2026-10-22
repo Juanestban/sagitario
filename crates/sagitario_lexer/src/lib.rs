@@ -68,6 +68,8 @@ pub enum TokenKind {
   PercentEq,
   AndAnd,
   OrOr,
+  /// `|`, separating the alternatives of a pattern.
+  Pipe,
   Bang,
   At,
   Question,
@@ -127,6 +129,7 @@ impl TokenKind {
       TokenKind::PercentEq => "%=",
       TokenKind::AndAnd => "&&",
       TokenKind::OrOr => "||",
+      TokenKind::Pipe => "|",
       TokenKind::Bang => "!",
       TokenKind::At => "@",
       TokenKind::Question => "?",
@@ -768,6 +771,7 @@ impl Lexer<'_> {
       '%' => TokenKind::Percent,
       '&' if self.eat('&') => TokenKind::AndAnd,
       '|' if self.eat('|') => TokenKind::OrOr,
+      '|' => TokenKind::Pipe,
       other => {
         self.error(codes::UNEXPECTED_CHARACTER, start, format!("unexpected character `{other}`"));
 

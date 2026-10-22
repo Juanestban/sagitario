@@ -61,6 +61,7 @@ Revisit after the MVP: `protected` visibility, `weak` captures in closures, oper
 overloading and derived `Eq`, binding generation, internationalized diagnostics, automatic
 error conversion with `From<T>` (and implementing one generic interface several times),
 `Error::source()` and backtraces, a `Display` interface, slices, open ranges, general tuples,
-raw strings, `@test` / `@deprecated`, static fields and mutable globals, `sag doc`.
+raw strings, `@test` / `@deprecated`, static fields and mutable globals, `sag doc`, `if let` /
+`while let`, inference of `None`/`Ok`/`Err` from later uses.
 Undecided points needed during the MVP are tracked as open questions in the
 [spec index](spec/README.md#open-questions).

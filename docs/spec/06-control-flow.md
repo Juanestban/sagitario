@@ -72,9 +72,28 @@ match s {
 }
 ```
 
-- `match` is an expression.
-- It **must be exhaustive**; a missing case is a compile error.
-- Patterns destructure enum variants (positional and named fields), literals and `_`.
+- `match` is an expression. Arms are separated by commas, optional after a `{ ... }` body.
+  All arms must have the same type, as the branches of `if`.
+- It **must be exhaustive**; a missing case is a compile error that names the values not
+  covered. An arm that can never match because earlier arms cover its values is a warning.
+- Patterns:
+
+  | Pattern | Matches |
+  |---|---|
+  | `_` | anything |
+  | `name` | anything, binding it to `name` |
+  | `0`, `-1`, `'a'`, `true` | that integer, character or boolean |
+  | `None`, `Shape::Empty` | that variant without data |
+  | `Some(p)`, `Shape::Circle(p)` | that variant, with its fields matching the sub-patterns |
+  | `Shape::Rect { w, h: p, .. }` | that variant by field name; `w` is shorthand for `w: w`, `..` ignores the rest (otherwise every field is listed) |
+  | `p1 \| p2` | either pattern |
+
+- A guard, `pattern if condition => ...`, only takes the arm when the condition holds; guarded
+  arms do not count for exhaustiveness.
+- Bindings are new immutable bindings holding a copy of the matched part. Every alternative of
+  `|` must bind the same names with the same types.
+- Float literals are not patterns. String literal patterns arrive with `String` comparison
+  (F1 increment 6); range and struct patterns are post-MVP.
 
 ## Operators
 

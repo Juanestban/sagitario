@@ -1,0 +1,31 @@
+fn parse(ok: bool) -> Result<i32, String> {
+  if ok { Ok(1) } else { Err("bad") }
+}
+
+fn code(ok: bool) -> Result<i32, i32> {
+  if ok { Ok(1) } else { Err(2) }
+}
+
+fn mismatched_error() -> Result<i32, String> {
+  const value = code(true)?; //~ ERROR E0321
+  Ok(value)
+}
+
+fn no_result() -> i32 {
+  parse(true)? //~ ERROR E0321
+}
+
+fn option_in_result() -> Result<i32, String> {
+  const value: Option<i32> = Some(1);
+  Ok(value?) //~ ERROR E0321
+}
+
+fn not_a_result() -> Option<i32> {
+  const n = 5;
+  Some(n?) //~ ERROR E0321
+}
+
+pub fn main() -> Result<(), i32> { //~ ERROR E0204
+  println(`${mismatched_error().is_ok()} ${no_result()} ${option_in_result().is_ok()} ${not_a_result().is_some()}`);
+  Ok(())
+}

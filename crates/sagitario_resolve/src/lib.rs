@@ -1,11 +1,15 @@
-//! Name resolution: builds the module's symbol table and binds every path expression to what it
-//! names. Lookup order: local bindings (innermost scope first, later shadowing earlier), module
-//! items, then the prelude. Functions and structs share one namespace per module; the members of
-//! a struct share another one per struct.
+//! Name resolution: builds the module's symbol table and binds every path expression and pattern
+//! to what it names. Lookup order: local bindings (innermost scope first, later shadowing
+//! earlier), module items, then the prelude. Functions, structs and enums share one namespace
+//! per module; the members of a struct (fields and functions) or of an enum (variants and
+//! functions) share another one per type.
 
 use std::collections::HashMap;
 
-use sagitario_ast::{Block, Expr, ExprKind, FnDecl, Item, Module, NodeId, Path, Stmt, StructDecl, TemplatePart, Visibility};
+use sagitario_ast::{
+  Block, EnumDecl, Expr, ExprKind, FnDecl, Item, Module, NodeId, Path, Pattern, PatternKind, Stmt, StructDecl, TemplatePart, VariantFields,
+  Visibility,
+};
 use sagitario_diagnostics::{Diagnostic, Diagnostics, codes};
 use sagitario_span::Span;
 
@@ -33,14 +37,59 @@ impl Builtin {
   }
 }
 
-/// Index of a function (module function, struct method or static function) in
-/// `Resolution::functions`.
+/// Index of a function (module function, method or static function) in `Resolution::functions`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FnId(pub u32);
 
 /// Index of a struct in `Resolution::structs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct StructId(pub u32);
+
+/// Index of an enum in `Resolution::enums`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct EnumId(pub u32);
+
+/// A type declared by the program, which can have functions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TypeItem {
+  Struct(StructId),
+  Enum(EnumId),
+}
+
+/// The enum a variant belongs to: a program enum or one of the prelude's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EnumKind {
+  User(EnumId),
+  /// Variants `None` (0) and `Some` (1).
+  Option,
+  /// Variants `Ok` (0) and `Err` (1).
+  Result,
+}
+
+impl EnumKind {
+  /// Variant names of the prelude enums, by index.
+  pub fn prelude_variants(self) -> &'static [&'static str] {
+    match self {
+      EnumKind::Option => &["None", "Some"],
+      EnumKind::Result => &["Ok", "Err"],
+      EnumKind::User(_) => &[],
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct VariantRef {
+  pub owner: EnumKind,
+  /// Position of the variant in its enum.
+  pub index: u32,
+}
+
+/// The prelude variant with this name (`Some`, `None`, `Ok`, `Err`).
+fn prelude_variant(name: &str) -> Option<VariantRef> {
+  [EnumKind::Option, EnumKind::Result]
+    .into_iter()
+    .find_map(|owner| owner.prelude_variants().iter().position(|variant| *variant == name).map(|index| VariantRef { owner, index: index as u32 }))
+}
 
 /// A local binding of one function: `self` comes first in methods, then the parameters in order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -57,6 +106,8 @@ pub enum LocalKind {
   Var,
   /// The variable of a `for` loop, a fresh `const` on each iteration.
   ForVar,
+  /// A name bound by a `match` pattern: an immutable copy of part of the value.
+  Pattern,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,29 +117,30 @@ pub struct LocalInfo {
   pub kind: LocalKind,
 }
 
-/// What a path expression refers to. Struct literals resolve to `Struct`.
+/// What a path expression, struct literal or pattern refers to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Res {
   Fn(FnId),
   Builtin(Builtin),
   Local(LocalId),
   Struct(StructId),
+  Variant(VariantRef),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FnInfo {
-  /// Index in `Module::items` of the function, or of the struct that declares it.
+  /// Index in `Module::items` of the function, or of the type that declares it.
   pub item: usize,
-  /// Index in `StructDecl::functions` for struct functions.
+  /// Index in the declaring type's `functions`.
   pub member: Option<usize>,
-  pub owner: Option<StructId>,
+  pub owner: Option<TypeItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StructInfo {
+pub struct TypeInfo {
   /// Index in `Module::items`.
   pub item: usize,
-  /// The struct's functions, in declaration order.
+  /// The type's functions, in declaration order.
   pub functions: Vec<FnId>,
 }
 
@@ -97,12 +149,16 @@ pub struct Resolution {
   /// Indexed by `FnId`.
   pub functions: Vec<FnInfo>,
   /// Indexed by `StructId`.
-  pub structs: Vec<StructInfo>,
-  pub struct_names: HashMap<String, StructId>,
+  pub structs: Vec<TypeInfo>,
+  /// Indexed by `EnumId`.
+  pub enums: Vec<TypeInfo>,
+  /// Structs and enums by name.
+  pub type_names: HashMap<String, TypeItem>,
   /// Local bindings of each function, indexed by `FnId` then `LocalId`.
   pub locals: Vec<Vec<LocalInfo>>,
+  /// Path expressions, struct literals, variant constructors and variant patterns, by node id.
   pub paths: HashMap<NodeId, Res>,
-  /// The local declared by each `const`/`var` statement and `for` expression, by node id.
+  /// The local declared by each `const`/`var` statement, `for` expression and binding pattern.
   pub bindings: HashMap<NodeId, LocalId>,
   pub main: Option<FnId>,
 }
@@ -114,6 +170,7 @@ impl Resolution {
     match (module.items.get(info.item)?, info.member) {
       (Item::Fn(decl), None) => Some(decl),
       (Item::Struct(decl), Some(member)) => decl.functions.get(member),
+      (Item::Enum(decl), Some(member)) => decl.functions.get(member),
       _ => None,
     }
   }
@@ -123,21 +180,40 @@ impl Resolution {
     (0..self.functions.len() as u32).filter_map(|id| self.fn_decl(module, FnId(id)).map(|decl| (FnId(id), decl))).collect()
   }
 
-  /// The struct that declares a function.
-  pub fn owner(&self, id: FnId) -> Option<StructId> {
+  /// The type that declares a function.
+  pub fn owner(&self, id: FnId) -> Option<TypeItem> {
     self.functions.get(id.0 as usize).and_then(|info| info.owner)
   }
 
   pub fn struct_decl<'m>(&self, module: &'m Module, id: StructId) -> Option<&'m StructDecl> {
     match module.items.get(self.structs.get(id.0 as usize)?.item)? {
       Item::Struct(decl) => Some(decl),
-      Item::Fn(_) => None,
+      _ => None,
     }
   }
 
-  /// A struct's function (method or static) by name.
-  pub fn struct_function(&self, module: &Module, id: StructId, name: &str) -> Option<FnId> {
-    let info = self.structs.get(id.0 as usize)?;
+  pub fn enum_decl<'m>(&self, module: &'m Module, id: EnumId) -> Option<&'m EnumDecl> {
+    match module.items.get(self.enums.get(id.0 as usize)?.item)? {
+      Item::Enum(decl) => Some(decl),
+      _ => None,
+    }
+  }
+
+  /// The name of a struct or enum.
+  pub fn type_name(&self, module: &Module, item: TypeItem) -> String {
+    match item {
+      TypeItem::Struct(id) => self.struct_decl(module, id).map(|decl| decl.name.name.clone()),
+      TypeItem::Enum(id) => self.enum_decl(module, id).map(|decl| decl.name.name.clone()),
+    }
+    .unwrap_or_default()
+  }
+
+  /// A type's function (method or static) by name.
+  pub fn type_function(&self, module: &Module, item: TypeItem, name: &str) -> Option<FnId> {
+    let info = match item {
+      TypeItem::Struct(id) => self.structs.get(id.0 as usize),
+      TypeItem::Enum(id) => self.enums.get(id.0 as usize),
+    }?;
 
     info.functions.iter().copied().find(|function| self.fn_decl(module, *function).is_some_and(|decl| decl.name.name == name))
   }
@@ -153,7 +229,7 @@ const RESERVED_NAMES: &[&str] = &["Send", "Sync", "spawn"];
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ItemRef {
   Fn(FnId),
-  Struct(StructId),
+  Type(TypeItem),
 }
 
 pub fn resolve(module: &Module, diagnostics: &mut Diagnostics) -> Resolution {
@@ -170,18 +246,34 @@ pub fn resolve(module: &Module, diagnostics: &mut Diagnostics) -> Resolution {
         (&decl.name, ItemRef::Fn(id))
       }
       Item::Struct(decl) => {
-        let id = StructId(resolution.structs.len() as u32);
-        let mut functions = Vec::new();
+        let owner = TypeItem::Struct(StructId(resolution.structs.len() as u32));
+        let functions = register_functions(&mut resolution, index, decl.functions.len(), owner);
 
-        for member in 0..decl.functions.len() {
-          functions.push(FnId(resolution.functions.len() as u32));
-          resolution.functions.push(FnInfo { item: index, member: Some(member), owner: Some(id) });
+        resolution.structs.push(TypeInfo { item: index, functions });
+
+        let names = decl.fields.iter().map(|field| &field.name).chain(decl.functions.iter().map(|function| &function.name));
+
+        check_members(&decl.name.name, "fields and functions of a struct share one namespace", names, diagnostics);
+
+        (&decl.name, ItemRef::Type(owner))
+      }
+      Item::Enum(decl) => {
+        let owner = TypeItem::Enum(EnumId(resolution.enums.len() as u32));
+        let functions = register_functions(&mut resolution, index, decl.functions.len(), owner);
+
+        resolution.enums.push(TypeInfo { item: index, functions });
+
+        let names = decl.variants.iter().map(|variant| &variant.name).chain(decl.functions.iter().map(|function| &function.name));
+
+        check_members(&decl.name.name, "variants and functions of an enum share one namespace", names, diagnostics);
+
+        for variant in &decl.variants {
+          if let VariantFields::Named(fields) = &variant.fields {
+            check_members(&variant.name.name, "the fields of a variant need different names", fields.iter().map(|field| &field.name), diagnostics);
+          }
         }
 
-        resolution.structs.push(StructInfo { item: index, functions });
-        check_members(decl, diagnostics);
-
-        (&decl.name, ItemRef::Struct(id))
+        (&decl.name, ItemRef::Type(owner))
       }
     };
 
@@ -191,13 +283,13 @@ pub fn resolve(module: &Module, diagnostics: &mut Diagnostics) -> Resolution {
       diagnostics.push(
         Diagnostic::error(codes::DUPLICATE_DEFINITION, name.span, format!("the name `{}` is defined more than once", name.name))
           .with_label(*previous, "previous definition here")
-          .with_note("functions and structs share one namespace per module"),
+          .with_note("functions, structs and enums share one namespace per module"),
       );
     } else {
       items.insert(name.name.clone(), (item_ref, name.span));
 
-      if let ItemRef::Struct(id) = item_ref {
-        resolution.struct_names.insert(name.name.clone(), id);
+      if let ItemRef::Type(item) = item_ref {
+        resolution.type_names.insert(name.name.clone(), item);
       }
     }
   }
@@ -219,8 +311,7 @@ pub fn resolve(module: &Module, diagnostics: &mut Diagnostics) -> Resolution {
     let owner = resolution.owner(id);
     let mut resolver = Resolver {
       module,
-      structs: &resolution.structs,
-      functions: &resolution.functions,
+      resolution: &resolution,
       items: &items,
       owner,
       locals: Vec::new(),
@@ -261,23 +352,29 @@ pub fn resolve(module: &Module, diagnostics: &mut Diagnostics) -> Resolution {
   resolution
 }
 
-/// Fields and functions of a struct share one namespace.
-fn check_members(decl: &StructDecl, diagnostics: &mut Diagnostics) {
+fn register_functions(resolution: &mut Resolution, item: usize, count: usize, owner: TypeItem) -> Vec<FnId> {
+  let mut functions = Vec::new();
+
+  for member in 0..count {
+    functions.push(FnId(resolution.functions.len() as u32));
+    resolution.functions.push(FnInfo { item, member: Some(member), owner: Some(owner) });
+  }
+
+  functions
+}
+
+/// Reports names declared twice among the members of a type.
+fn check_members<'a>(owner: &str, note: &str, names: impl Iterator<Item = &'a sagitario_ast::Ident>, diagnostics: &mut Diagnostics) {
   let mut seen: HashMap<&str, Span> = HashMap::new();
-  let names = decl.fields.iter().map(|field| &field.name).chain(decl.functions.iter().map(|function| &function.name));
 
   for name in names {
     check_reserved(&name.name, name.span, diagnostics);
 
     if let Some(previous) = seen.get(name.name.as_str()) {
       diagnostics.push(
-        Diagnostic::error(
-          codes::DUPLICATE_DEFINITION,
-          name.span,
-          format!("the member `{}` is declared more than once in `{}`", name.name, decl.name.name),
-        )
-        .with_label(*previous, "previous declaration here")
-        .with_note("fields and functions of a struct share one namespace"),
+        Diagnostic::error(codes::DUPLICATE_DEFINITION, name.span, format!("the name `{}` is declared more than once in `{owner}`", name.name))
+          .with_label(*previous, "previous declaration here")
+          .with_note(note),
       );
     } else {
       seen.insert(&name.name, name.span);
@@ -295,13 +392,22 @@ fn check_reserved(name: &str, span: Span, diagnostics: &mut Diagnostics) {
   }
 }
 
+/// The first segment of a two-segment path: a type of the program or a prelude enum.
+#[derive(Clone, Copy)]
+enum PathOwner {
+  Type(TypeItem),
+  Prelude(EnumKind),
+}
+
+/// A name bound by a pattern, for checking the alternatives of `|`.
+type PatternBinding = (String, LocalId, Span);
+
 struct Resolver<'a> {
   module: &'a Module,
-  structs: &'a [StructInfo],
-  functions: &'a [FnInfo],
+  resolution: &'a Resolution,
   items: &'a HashMap<String, ItemRef>,
-  /// The struct whose function is being resolved, for `Self` and `prv` members.
-  owner: Option<StructId>,
+  /// The type whose function is being resolved, for `Self` and `prv` members.
+  owner: Option<TypeItem>,
   locals: Vec<LocalInfo>,
   /// Names visible in each nested block, innermost last.
   scopes: Vec<Vec<(String, LocalId)>>,
@@ -387,8 +493,8 @@ impl Resolver<'_> {
         self.expr(index);
       }
       ExprKind::StructLit { path, fields } => {
-        if let Some(id) = self.struct_path(path) {
-          self.paths.insert(expr.id, Res::Struct(id));
+        if let Some(res) = self.struct_literal_path(path) {
+          self.paths.insert(expr.id, res);
         }
 
         for field in fields {
@@ -397,6 +503,22 @@ impl Resolver<'_> {
       }
       ExprKind::ArrayLit(elems) => self.exprs(elems),
       ExprKind::ArrayRepeat { value, .. } => self.expr(value),
+      ExprKind::Try(inner) => self.expr(inner),
+      ExprKind::Match { scrutinee, arms } => {
+        self.expr(scrutinee);
+
+        for arm in arms {
+          self.scopes.push(Vec::new());
+          self.pattern(&arm.pattern, &mut Vec::new(), None);
+
+          if let Some(guard) = &arm.guard {
+            self.expr(guard);
+          }
+
+          self.expr(&arm.body);
+          self.scopes.pop();
+        }
+      }
       ExprKind::Template(parts) => {
         for part in parts {
           if let TemplatePart::Expr(expr) = part {
@@ -452,6 +574,170 @@ impl Resolver<'_> {
     }
   }
 
+  /// Resolves a pattern, declaring its bindings in the current scope. `binds` collects the
+  /// names it binds; with `reuse`, names must be ones already bound by the first alternative of
+  /// an enclosing `|` pattern, and refer to the same locals.
+  fn pattern(&mut self, pattern: &Pattern, binds: &mut Vec<PatternBinding>, reuse: Option<&[PatternBinding]>) {
+    match &pattern.kind {
+      PatternKind::Wildcard => {}
+      PatternKind::Literal(expr) => self.expr(expr),
+      PatternKind::Ident(name) => {
+        if let Some(variant) = prelude_variant(&name.name).filter(|_| !self.items.contains_key(&name.name)) {
+          self.paths.insert(pattern.id, Res::Variant(variant));
+
+          return;
+        }
+
+        if let Some((_, _, previous)) = binds.iter().find(|(bound, _, _)| *bound == name.name) {
+          self.diagnostics.push(
+            Diagnostic::error(codes::DUPLICATE_DEFINITION, name.span, format!("`{}` is bound more than once in the same pattern", name.name))
+              .with_label(*previous, "first bound here"),
+          );
+
+          return;
+        }
+
+        let id = match reuse {
+          Some(first) => match first.iter().find(|(bound, _, _)| *bound == name.name) {
+            Some((_, id, _)) => *id,
+            None => {
+              self.diagnostics.push(
+                Diagnostic::error(
+                  codes::INCONSISTENT_BINDINGS,
+                  name.span,
+                  format!("`{}` is not bound in every alternative of the pattern", name.name),
+                )
+                .with_note("each alternative of `|` must bind the same names"),
+              );
+
+              return;
+            }
+          },
+          None => self.declare(&name.name, name.span, LocalKind::Pattern),
+        };
+
+        self.bindings.insert(pattern.id, id);
+        binds.push((name.name.clone(), id, name.span));
+      }
+      PatternKind::Path(path) => self.variant_pattern(pattern.id, path),
+      PatternKind::Tuple { path, elems } => {
+        self.variant_pattern(pattern.id, path);
+
+        for elem in elems {
+          self.pattern(elem, binds, reuse);
+        }
+      }
+      PatternKind::Named { path, fields, .. } => {
+        self.variant_pattern(pattern.id, path);
+
+        for field in fields {
+          self.pattern(&field.pattern, binds, reuse);
+        }
+      }
+      PatternKind::Or(alternatives) => {
+        let Some((first, rest)) = alternatives.split_first() else { return };
+        let mut first_binds = Vec::new();
+
+        self.pattern(first, &mut first_binds, reuse);
+
+        for alternative in rest {
+          let mut alternative_binds = Vec::new();
+
+          self.pattern(alternative, &mut alternative_binds, Some(&first_binds));
+
+          for (name, _, _) in &first_binds {
+            if !alternative_binds.iter().any(|(bound, _, _)| bound == name) {
+              self.diagnostics.push(
+                Diagnostic::error(
+                  codes::INCONSISTENT_BINDINGS,
+                  alternative.span,
+                  format!("`{name}` is not bound in every alternative of the pattern"),
+                )
+                .with_note("each alternative of `|` must bind the same names"),
+              );
+            }
+          }
+        }
+
+        binds.extend(first_binds);
+      }
+    }
+  }
+
+  fn variant_pattern(&mut self, id: NodeId, path: &Path) {
+    if let Some(variant) = self.variant_path(path) {
+      self.paths.insert(id, Res::Variant(variant));
+    }
+  }
+
+  /// A path that must name a variant: `Some`, `Shape::Circle`, `Self::Empty`.
+  fn variant_path(&mut self, path: &Path) -> Option<VariantRef> {
+    match path.segments.as_slice() {
+      [segment] => {
+        let variant = prelude_variant(&segment.name).filter(|_| !self.items.contains_key(&segment.name));
+
+        if variant.is_none() {
+          self.error(segment.span, format!("`{}` is not a variant", segment.name));
+        }
+
+        variant
+      }
+      [owner, name] => match self.path_owner(&owner.name, owner.span)? {
+        PathOwner::Type(TypeItem::Enum(id)) => self.user_variant(id, &name.name, name.span),
+        PathOwner::Prelude(kind) => self.prelude_variant_of(kind, &name.name, name.span),
+        PathOwner::Type(TypeItem::Struct(_)) => {
+          self.error(owner.span, format!("`{}` is a struct, not an enum", owner.name));
+
+          None
+        }
+      },
+      _ => {
+        self.not_implemented_path(path.span);
+
+        None
+      }
+    }
+  }
+
+  fn user_variant(&mut self, id: EnumId, name: &str, span: Span) -> Option<VariantRef> {
+    let decl = self.resolution.enum_decl(self.module, id)?;
+    let index = decl.variants.iter().position(|variant| variant.name.name == name);
+
+    if index.is_none() {
+      let enum_name = decl.name.name.clone();
+      let candidates: Vec<String> = decl.variants.iter().map(|variant| variant.name.name.clone()).collect();
+      let mut diagnostic = Diagnostic::error(codes::UNRESOLVED_NAME, span, format!("no variant `{name}` in `{enum_name}`"));
+
+      if let Some(similar) = sagitario_diagnostics::closest_match(name, candidates.iter().map(String::as_str)) {
+        diagnostic = diagnostic.with_help(format!("a variant with a similar name exists: `{similar}`"));
+      }
+
+      self.diagnostics.push(diagnostic);
+    }
+
+    index.map(|index| VariantRef { owner: EnumKind::User(id), index: index as u32 })
+  }
+
+  fn prelude_variant_of(&mut self, kind: EnumKind, name: &str, span: Span) -> Option<VariantRef> {
+    let index = kind.prelude_variants().iter().position(|variant| *variant == name);
+
+    if index.is_none() {
+      let enum_name = if kind == EnumKind::Option { "Option" } else { "Result" };
+
+      self.error(span, format!("no variant `{name}` in `{enum_name}`"));
+    }
+
+    index.map(|index| VariantRef { owner: kind, index: index as u32 })
+  }
+
+  fn not_implemented_path(&mut self, span: Span) {
+    self.diagnostics.push(Diagnostic::error(
+      codes::NOT_IMPLEMENTED,
+      span,
+      "paths with more than two segments are not implemented yet (modules arrive in F1 increment 7)",
+    ));
+  }
+
   fn error(&mut self, span: Span, message: impl Into<String>) {
     self.diagnostics.push(Diagnostic::error(codes::UNRESOLVED_NAME, span, message));
   }
@@ -459,17 +745,21 @@ impl Resolver<'_> {
   fn path(&mut self, path: &Path) -> Option<Res> {
     match path.segments.as_slice() {
       [segment] => self.value_name(&segment.name, segment.span),
-      [owner, function] => {
-        let id = self.struct_name(&owner.name, owner.span)?;
+      [owner, member] => match self.path_owner(&owner.name, owner.span)? {
+        PathOwner::Type(item) => {
+          if let TypeItem::Enum(id) = item
+            && let Some(decl) = self.resolution.enum_decl(self.module, id)
+            && let Some(index) = decl.variants.iter().position(|variant| variant.name.name == member.name)
+          {
+            return Some(Res::Variant(VariantRef { owner: EnumKind::User(id), index: index as u32 }));
+          }
 
-        self.struct_function(id, &function.name, function.span)
-      }
+          self.type_function(item, &member.name, member.span)
+        }
+        PathOwner::Prelude(kind) => self.prelude_variant_of(kind, &member.name, member.span).map(Res::Variant),
+      },
       _ => {
-        self.diagnostics.push(Diagnostic::error(
-          codes::NOT_IMPLEMENTED,
-          path.span,
-          "paths with more than two segments are not implemented yet (modules arrive in F1 increment 7)",
-        ));
+        self.not_implemented_path(path.span);
 
         None
       }
@@ -486,7 +776,7 @@ impl Resolver<'_> {
       ("self", _) => {
         self.diagnostics.push(
           Diagnostic::error(codes::UNRESOLVED_NAME, span, "`self` is only available in methods")
-            .with_help("add a `self` parameter to make this function a method of its struct"),
+            .with_help("add a `self` parameter to make this function a method of its type"),
         );
 
         return None;
@@ -497,10 +787,18 @@ impl Resolver<'_> {
         return None;
       }
       (_, Some(ItemRef::Fn(id))) => return Some(Res::Fn(*id)),
-      (_, Some(ItemRef::Struct(_))) => {
+      (_, Some(ItemRef::Type(TypeItem::Struct(_)))) => {
         self.diagnostics.push(
           Diagnostic::error(codes::UNRESOLVED_NAME, span, format!("`{name}` is a struct, not a value"))
             .with_help(format!("build a value with `{name} {{ ... }}` or call one of its static functions, such as `{name}::new(...)`")),
+        );
+
+        return None;
+      }
+      (_, Some(ItemRef::Type(TypeItem::Enum(_)))) => {
+        self.diagnostics.push(
+          Diagnostic::error(codes::UNRESOLVED_NAME, span, format!("`{name}` is an enum, not a value"))
+            .with_help(format!("name one of its variants: `{name}::Variant`")),
         );
 
         return None;
@@ -510,6 +808,10 @@ impl Resolver<'_> {
 
     if let Some(builtin) = Builtin::from_name(name) {
       return Some(Res::Builtin(builtin));
+    }
+
+    if let Some(variant) = prelude_variant(name) {
+      return Some(Res::Variant(variant));
     }
 
     let mut diagnostic = Diagnostic::error(codes::UNRESOLVED_NAME, span, format!("cannot find `{name}` in this scope"));
@@ -525,29 +827,31 @@ impl Resolver<'_> {
     None
   }
 
-  /// A name used as a struct: `Self` or a struct of the module.
-  fn struct_name(&mut self, name: &str, span: Span) -> Option<StructId> {
+  /// The first segment of `Owner::member`: `Self`, a struct or enum, or a prelude enum.
+  fn path_owner(&mut self, name: &str, span: Span) -> Option<PathOwner> {
     if name == "Self" {
       if self.owner.is_none() {
-        self.error(span, "`Self` is only available inside a struct");
+        self.error(span, "`Self` is only available inside a struct or enum");
       }
 
-      return self.owner;
+      return self.owner.map(PathOwner::Type);
     }
 
     match self.items.get(name) {
-      Some(ItemRef::Struct(id)) => Some(*id),
+      Some(ItemRef::Type(item)) => Some(PathOwner::Type(*item)),
       Some(ItemRef::Fn(_)) => {
-        self.error(span, format!("`{name}` is a function, not a struct"));
+        self.error(span, format!("`{name}` is a function, not a type"));
 
         None
       }
+      None if name == "Option" => Some(PathOwner::Prelude(EnumKind::Option)),
+      None if name == "Result" => Some(PathOwner::Prelude(EnumKind::Result)),
       None => {
-        let mut diagnostic = Diagnostic::error(codes::UNRESOLVED_NAME, span, format!("cannot find struct `{name}` in this scope"));
-        let structs = self.items.iter().filter(|(_, item)| matches!(item, ItemRef::Struct(_))).map(|(name, _)| name.as_str());
+        let mut diagnostic = Diagnostic::error(codes::UNRESOLVED_NAME, span, format!("cannot find type `{name}` in this scope"));
+        let types = self.items.iter().filter(|(_, item)| matches!(item, ItemRef::Type(_))).map(|(name, _)| name.as_str());
 
-        if let Some(similar) = sagitario_diagnostics::closest_match(name, structs) {
-          diagnostic = diagnostic.with_help(format!("a struct with a similar name exists: `{similar}`"));
+        if let Some(similar) = sagitario_diagnostics::closest_match(name, types) {
+          diagnostic = diagnostic.with_help(format!("a type with a similar name exists: `{similar}`"));
         }
 
         self.diagnostics.push(diagnostic);
@@ -557,51 +861,64 @@ impl Resolver<'_> {
     }
   }
 
-  fn struct_path(&mut self, path: &Path) -> Option<StructId> {
+  /// The path of `Name { ... }`: a struct, or an enum variant with named fields.
+  fn struct_literal_path(&mut self, path: &Path) -> Option<Res> {
     match path.segments.as_slice() {
-      [segment] => self.struct_name(&segment.name, segment.span),
+      [segment] => match self.path_owner(&segment.name, segment.span)? {
+        PathOwner::Type(TypeItem::Struct(id)) => Some(Res::Struct(id)),
+        PathOwner::Type(TypeItem::Enum(_)) | PathOwner::Prelude(_) => {
+          self.diagnostics.push(
+            Diagnostic::error(codes::UNRESOLVED_NAME, segment.span, format!("`{}` is an enum, not a struct", segment.name))
+              .with_help("name the variant: `Enum::Variant { ... }`"),
+          );
+
+          None
+        }
+      },
+      [_, _] => self.variant_path(path).map(Res::Variant),
       _ => {
-        self.diagnostics.push(Diagnostic::error(
-          codes::NOT_IMPLEMENTED,
-          path.span,
-          "struct literals with a path are not implemented yet (enums and modules arrive later)",
-        ));
+        self.not_implemented_path(path.span);
 
         None
       }
     }
   }
 
-  fn struct_decl(&self, id: StructId) -> Option<&StructDecl> {
-    match self.module.items.get(self.structs.get(id.0 as usize)?.item)? {
-      Item::Struct(decl) => Some(decl),
-      Item::Fn(_) => None,
-    }
-  }
+  /// `Type::function`: a static function of a struct or enum.
+  fn type_function(&mut self, item: TypeItem, name: &str, span: Span) -> Option<Res> {
+    let type_name = self.resolution.type_name(self.module, item);
+    let Some(function) = self.resolution.type_function(self.module, item, name) else {
+      let functions = match item {
+        TypeItem::Struct(id) => self.resolution.struct_decl(self.module, id).map(|decl| &decl.functions),
+        TypeItem::Enum(id) => self.resolution.enum_decl(self.module, id).map(|decl| &decl.functions),
+      };
+      let mut candidates: Vec<String> = functions.into_iter().flatten().map(|function| function.name.name.clone()).collect();
+      let what = match item {
+        TypeItem::Struct(_) => "function",
+        TypeItem::Enum(id) => {
+          let variants = self.resolution.enum_decl(self.module, id).map(|decl| &decl.variants);
 
-  /// `Type::function`: a static function of a struct.
-  fn struct_function(&mut self, id: StructId, name: &str, span: Span) -> Option<Res> {
-    let decl = self.struct_decl(id)?;
-    let struct_name = decl.name.name.clone();
-    let found = decl.functions.iter().position(|function| function.name.name == name);
-    let Some(member) = found else {
-      let mut diagnostic = Diagnostic::error(codes::UNRESOLVED_NAME, span, format!("no function `{name}` in `{struct_name}`"));
-      let candidates = decl.functions.iter().map(|function| function.name.name.as_str());
+          candidates.extend(variants.into_iter().flatten().map(|variant| variant.name.name.clone()));
 
-      if let Some(similar) = sagitario_diagnostics::closest_match(name, candidates) {
-        diagnostic = diagnostic.with_help(format!("a function with a similar name exists: `{similar}`"));
+          "variant or function"
+        }
+      };
+      let mut diagnostic = Diagnostic::error(codes::UNRESOLVED_NAME, span, format!("no {what} `{name}` in `{type_name}`"));
+
+      if let Some(similar) = sagitario_diagnostics::closest_match(name, candidates.iter().map(String::as_str)) {
+        diagnostic = diagnostic.with_help(format!("a {what} with a similar name exists: `{similar}`"));
       }
 
       self.diagnostics.push(diagnostic);
 
       return None;
     };
-    let function = decl.functions.get(member)?;
-    let (is_method, is_private, declared) = (function.self_param.is_some(), function.visibility == Visibility::Private, function.name.span);
+    let decl = self.resolution.fn_decl(self.module, function)?;
+    let (is_method, is_private, declared) = (decl.self_param.is_some(), decl.visibility == Visibility::Private, decl.name.span);
 
     if is_method {
       self.diagnostics.push(
-        Diagnostic::error(codes::WRONG_CALL_FORM, span, format!("`{name}` is a method of `{struct_name}`, not a static function"))
+        Diagnostic::error(codes::WRONG_CALL_FORM, span, format!("`{name}` is a method of `{type_name}`, not a static function"))
           .with_label(declared, "declared with a `self` parameter here")
           .with_help(format!("call it on a value: `value.{name}(...)`")),
       );
@@ -609,14 +926,14 @@ impl Resolver<'_> {
       return None;
     }
 
-    if is_private && self.owner != Some(id) {
+    if is_private && self.owner != Some(item) {
       self.diagnostics.push(
-        Diagnostic::error(codes::PRIVATE_MEMBER, span, format!("the function `{name}` of `{struct_name}` is private"))
+        Diagnostic::error(codes::PRIVATE_MEMBER, span, format!("the function `{name}` of `{type_name}` is private"))
           .with_label(declared, "declared `prv` here"),
       );
     }
 
-    self.functions.iter().position(|info| info.owner == Some(id) && info.member == Some(member)).map(|index| Res::Fn(FnId(index as u32)))
+    Some(Res::Fn(function))
   }
 }
 
@@ -687,7 +1004,7 @@ mod tests {
 
     assert!(errors.is_empty(), "{errors:?}");
     assert_eq!(resolution.functions.len(), 5);
-    assert_eq!(resolution.struct_function(&module, StructId(0), "get"), Some(FnId(1)));
+    assert_eq!(resolution.type_function(&module, TypeItem::Struct(StructId(0)), "get"), Some(FnId(1)));
     assert_eq!(resolution.main, Some(FnId(4)));
     assert_eq!(resolution.locals(FnId(1)).first().map(|local| local.kind), Some(LocalKind::SelfParam));
   }
@@ -705,5 +1022,52 @@ mod tests {
     assert_eq!(with_struct("self;"), vec!["E0200"]);
     assert_eq!(with_struct("Self::m();"), vec!["E0200"]);
     assert_eq!(with_struct("const q = Q {};"), vec!["E0200"]);
+  }
+
+  #[test]
+  fn resolves_variants_and_patterns() {
+    let program = "
+      enum Shape { Circle(f64), Rect { w: f64, h: f64 }, Empty }
+      pub fn main() {
+        const s = Shape::Circle(1.0);
+        const _o = Some(1);
+        match s {
+          Shape::Circle(r) | Shape::Rect { w: r, .. } => println(`${r}`),
+          Shape::Empty => {}
+        }
+        match Option::Some(2) { None => {}, Some(x) => println(`${x}`) }
+      }";
+    let (_, resolution, errors) = resolve_text(program);
+
+    assert!(errors.is_empty(), "{errors:?}");
+
+    let variants = resolution.paths.values().filter(|res| matches!(res, Res::Variant(_))).count();
+
+    // `Circle(1.0)`, `Some(1)`, three variant patterns, `Option::Some`, `None` and `Some(x)`.
+    assert_eq!(variants, 8);
+
+    let names: Vec<&str> = resolution.locals(FnId(0)).iter().map(|local| local.name.as_str()).collect();
+
+    assert_eq!(names, vec!["s", "_o", "r", "x"]);
+  }
+
+  #[test]
+  fn reports_variant_and_pattern_errors() {
+    let with_enum = |main: &str| resolve_text(&format!("enum E {{ A(i32), B }}\npub fn main() {{ {main} }}")).2;
+
+    assert_eq!(resolve_text("enum E { A, A }\npub fn main() {}").2, vec!["E0201"]);
+    assert_eq!(with_enum("const _ = E::C;"), vec!["E0200"]);
+    assert_eq!(with_enum("const _ = E;"), vec!["E0200"]);
+    assert_eq!(with_enum("match E::B { E::A(x) | E::B => {} }"), vec!["E0206"]);
+    assert_eq!(with_enum("match E::B { E::A(x) | E::A(y) => {} _ => {} }"), vec!["E0206", "E0206"]);
+    assert_eq!(
+      resolve_text(
+        "enum P { Two(i32, i32) }
+pub fn main() { match P::Two(1, 2) { P::Two(x, x) => {} } }"
+      )
+      .2,
+      vec!["E0201"]
+    );
+    assert_eq!(with_enum("match 1 { Foo(x) => {} }"), vec!["E0200"]);
   }
 }

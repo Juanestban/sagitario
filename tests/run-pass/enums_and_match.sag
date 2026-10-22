@@ -1,0 +1,94 @@
+// Enums with positional, named and no data; methods and static functions on enums; `==` on
+// enums without data; `match` with nested patterns, `|`, guards, literals and bindings that
+// hold strings (checked for leaks).
+// expect-stdout: 3 1 7 0
+// expect-stdout: true true false
+// expect-stdout: zero small minus one big other
+// expect-stdout: inner none
+// expect-stdout: label: lbl
+// expect-stdout: guarded 1, plain 2
+enum Shape {
+  Circle(f64),
+  Rect { w: f64, h: f64 },
+  Labeled(String, i32),
+  Empty,
+
+  pub fn area(self) -> f64 {
+    match self {
+      Shape::Circle(r) => 3.0 * r * r,
+      Shape::Rect { w, h } => w * h,
+      Shape::Labeled(_, n) => n as f64,
+      Self::Empty => 0.0,
+    }
+  }
+
+  pub fn unit() -> Self {
+    Self::Rect { w: 1.0, h: 1.0 }
+  }
+}
+
+enum Color {
+  Red,
+  Green,
+  Blue,
+}
+
+fn describe(n: i32) -> String {
+  match n {
+    0 => "zero",
+    1 | 2 | 3 => "small",
+    -1 => "minus one",
+    x if x > 100 => "big",
+    _ => "other",
+  }
+}
+
+pub fn main() {
+  const shapes = [Shape::Circle(1.0), Shape::unit(), Shape::Labeled(`${"lbl"}`, 7), Shape::Empty];
+
+  println(`${shapes[0].area()} ${shapes[1].area()} ${shapes[2].area()} ${shapes[3].area()}`);
+
+  const color = Color::Green;
+
+  println(`${color == Color::Green} ${color != Color::Blue} ${Color::Red == Color::Blue}`);
+  println(`${describe(0)} ${describe(2)} ${describe(-1)} ${describe(500)} ${describe(50)}`);
+
+  const nested: Option<Option<bool>> = Some(None);
+  const label = match nested {
+    Some(Some(true)) => "yes",
+    Some(Some(false)) => "no",
+    Some(None) => "inner none",
+    None => "none",
+  };
+
+  println(label);
+
+  match shapes[2] {
+    Shape::Labeled(text, n) if n > 100 => println(`never ${text}`),
+    Shape::Labeled(text, _) => println(`label: ${text}`),
+    _ => {}
+  }
+
+  var guarded = 0;
+  var plain = 0;
+
+  for value in [Some(`${1}`), None, Some(`${2}`)] {
+    // A failed guard must release the strings its pattern bound.
+    match value {
+      Some(text) if guarded > 5 => println(text),
+      _ => {}
+    }
+
+    match value {
+      Some(_) if guarded == 0 => {
+        guarded += 1;
+      }
+      Some(_) => {
+        plain += 2;
+      }
+      None => {}
+    }
+  }
+
+  println(`guarded ${guarded}, plain ${plain}`);
+}
