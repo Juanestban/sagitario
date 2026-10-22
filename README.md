@@ -23,7 +23,7 @@ class Dog extends Animal {
 
 pub fn main() {
   const dog = new Dog("Rex");
-  std::io::println(dog.speak());
+  println(dog.speak());
 }
 ```
 

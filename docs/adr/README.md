@@ -27,6 +27,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0016](0016-engineering-process.md) | Testing, quality gates, conventions and license | Accepted |
 | [0017](0017-resolution-of-open-questions-q1-q11.md) | Resolution of open questions Q1–Q11 | Accepted |
 | [0018](0018-windows-c-toolchain.md) | Windows C toolchain: official LLVM (MSVC target), MinGW clang tolerated | Accepted |
+| [0019](0019-prelude-and-printing.md) | Prelude and printing | Accepted |
 
 ## Template
 

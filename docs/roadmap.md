@@ -18,6 +18,19 @@ functions, `return`, `if`/`else`, `while`, `loop`, `for` over ranges, `break`/`c
 `struct` with methods, enums with data, exhaustive `match`, `Option`/`Result` with `?`, basic
 UTF-8 `String`, arrays, `extern "C"`/`unsafe`, `panic`, printing.
 
+Built as a vertical slice first, then widened feature by feature through every phase:
+
+1. Vertical slice: `pub fn main()`, prelude `println` with string literals, unit functions.
+2. `const`/`var`, operators with overflow checks, `if`/`else`/`while`/`loop`/`for` over ranges,
+   functions with parameters and return values, basic template-string interpolation.
+3. Diagnostic quality and the first broad `compile-fail` suites.
+4. Structs with methods and static functions; fixed arrays.
+5. Enums, exhaustive `match`, `Option`/`Result` and `?`.
+6. UTF-8 `String`, full template strings, `panic` and `run-panic` suites.
+7. Multi-file modules, `use` and visibility.
+8. FFI: `extern "C"`, `unsafe`, `@export`, `@repr(C)`.
+9. The reference programs below.
+
 **Acceptance:** these reference programs pass as `run-pass` on all three OSes:
 hello world, fibonacci, FizzBuzz, `enum` + `match`, `Result` + `?`, a multi-module program,
 and `extern "C"` calling `puts`.
