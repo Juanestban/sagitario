@@ -26,6 +26,28 @@ use pkg::util::format;
 - `pkg::` refers to the root of the current package; `std::` to the standard library;
   other roots are dependency package names.
 
+## Prelude
+
+Every module implicitly sees these names, without `use`:
+
+| Kind | Names | Milestone |
+|---|---|---|
+| Types and variants | `Option`, `Some`, `None`, `Result`, `Ok`, `Err`, `String` | F1 |
+| Functions | `print(s: String)`, `println(s: String)`, `eprintln(s: String)` | F1 |
+| Types | `List`, `Map`, `Error` | F2 |
+
+- `print` and `println` write to stdout, `eprintln` to stderr (`println`/`eprintln` add a
+  newline). If writing fails they **panic**, like Rust's `println!`. Code that must handle
+  I/O errors uses the `std::io` functions, which return `Result<(), io::Error>`.
+- The prelude cannot be extended by user code. A local declaration with the same name
+  shadows a prelude name.
+
+```sag
+pub fn main() {
+  println("hello");
+}
+```
+
 ## Visibility of items
 
 | Modifier | Visible in |

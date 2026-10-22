@@ -19,10 +19,11 @@ Options:
   --cc <compiler>             C compiler to use; overrides SAG_CC (build, run)
   --diagnostic-format <fmt>   `human` (default) or `short`: one line per diagnostic";
 
-/// Exit code when compilation fails or the input cannot be read.
-pub const EXIT_FAILURE: u8 = 1;
 /// Exit code for invalid command-line usage.
 pub const EXIT_USAGE: u8 = 2;
+
+pub use sagitario_diagnostics::DiagnosticFormat;
+pub use sagitario_driver::CompileOptions;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -31,25 +32,6 @@ pub enum Command {
   Check(CompileOptions),
   Help,
   Version,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct CompileOptions {
-  pub input: PathBuf,
-  pub emit_c: bool,
-  pub cc: Option<String>,
-  pub diagnostic_format: DiagnosticFormat,
-  /// Arguments forwarded to the compiled program (`sag run file.sag -- args`).
-  pub program_args: Vec<String>,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum DiagnosticFormat {
-  /// Multi-line diagnostics with source excerpts, for people.
-  #[default]
-  Human,
-  /// One line per diagnostic, `path:line:column: error[E0001]: message`, for tools and tests.
-  Short,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,25 +140,10 @@ pub fn execute(command: &Command) -> ExitCode {
       println!("sag {}", env!("CARGO_PKG_VERSION"));
       ExitCode::SUCCESS
     }
-    Command::Build(options) | Command::Run(options) | Command::Check(options) => compile(options),
+    Command::Build(options) => ExitCode::from(sagitario_driver::build(options)),
+    Command::Run(options) => ExitCode::from(sagitario_driver::run(options)),
+    Command::Check(options) => ExitCode::from(sagitario_driver::check(options)),
   }
-}
-
-fn compile(options: &CompileOptions) -> ExitCode {
-  let input = options.input.display();
-
-  if options.input.extension().and_then(|extension| extension.to_str()) != Some("sag") {
-    eprintln!("error: `{input}` is not a `.sag` file");
-    return ExitCode::from(EXIT_FAILURE);
-  }
-
-  if !options.input.is_file() {
-    eprintln!("error: cannot find `{input}`");
-    return ExitCode::from(EXIT_FAILURE);
-  }
-
-  eprintln!("error: the compiler pipeline is not implemented yet (phase F1)");
-  ExitCode::from(EXIT_FAILURE)
 }
 
 #[cfg(test)]

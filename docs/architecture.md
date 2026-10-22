@@ -113,4 +113,11 @@ to forward arguments to the program.
 - Exit codes of `sag` itself: `0` success, `1` compilation failed or input unreadable, `2`
   invalid command-line usage. `sag run` returns the program's own exit code once it runs.
 
-Crates are created when the phase that needs them starts; F0 only has `sagitario_cli`.
+- `sag build main.sag` writes the executable next to the source (`main` / `main.exe`);
+  `--emit-c` also writes `main.c` there (it includes `sagitario_runtime.h` from `runtime/`).
+  `sag run` builds into a temporary directory that is removed afterwards.
+- The driver reports diagnostics after each phase (lexing, parsing, resolution, typing) and
+  stops at the first phase with errors. Continuing further to report more errors at once is
+  part of F1 increment 3.
+- Diagnostic codes are registered in `crates/sagitario_diagnostics/src/codes.rs`, with one
+  range per phase.
