@@ -80,12 +80,13 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Command, Us
   let Some(command) = args.next() else {
     return Err(usage_error("missing command"));
   };
+
   match command.as_str() {
     "build" => parse_compile_options(args, Mode::Build).map(Command::Build),
     "run" => parse_compile_options(args, Mode::Run).map(Command::Run),
     "check" => parse_compile_options(args, Mode::Check).map(Command::Check),
     "help" | "--help" | "-h" => Ok(Command::Help),
-    "version" | "--version" | "-V" => Ok(Command::Version),
+    "version" | "--version" | "-v" => Ok(Command::Version),
     other => Err(usage_error(format!("unknown command `{other}`"))),
   }
 }
@@ -93,11 +94,13 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Command, Us
 fn parse_compile_options<I: Iterator<Item = String>>(mut args: I, mode: Mode) -> Result<CompileOptions, UsageError> {
   let mut options = CompileOptions::default();
   let mut input = None;
+
   while let Some(arg) = args.next() {
     let (flag, inline_value) = match arg.split_once('=') {
       Some((flag, value)) if flag.starts_with("--") => (flag.to_string(), Some(value.to_string())),
       _ => (arg.clone(), None),
     };
+
     match flag.as_str() {
       "--emit-c" => {
         require_codegen(mode, &flag)?;
@@ -161,14 +164,17 @@ pub fn execute(command: &Command) -> ExitCode {
 
 fn compile(options: &CompileOptions) -> ExitCode {
   let input = options.input.display();
+
   if options.input.extension().and_then(|extension| extension.to_str()) != Some("sag") {
     eprintln!("error: `{input}` is not a `.sag` file");
     return ExitCode::from(EXIT_FAILURE);
   }
+
   if !options.input.is_file() {
     eprintln!("error: cannot find `{input}`");
     return ExitCode::from(EXIT_FAILURE);
   }
+
   eprintln!("error: the compiler pipeline is not implemented yet (phase F1)");
   ExitCode::from(EXIT_FAILURE)
 }
@@ -197,7 +203,7 @@ mod tests {
     for alias in ["help", "--help", "-h"] {
       assert_eq!(parse(&[alias]), Ok(Command::Help));
     }
-    for alias in ["version", "--version", "-V"] {
+    for alias in ["version", "--version", "-v"] {
       assert_eq!(parse(&[alias]), Ok(Command::Version));
     }
   }

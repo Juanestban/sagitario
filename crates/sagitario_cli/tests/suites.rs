@@ -40,9 +40,11 @@ struct ExpectedError {
 
 fn parse_expectations(source: &str) -> Result<Expectations, String> {
   let mut expectations = Expectations::default();
+
   for (index, line) in source.lines().enumerate() {
     let line_number = index + 1;
     let trimmed = line.trim_start();
+
     if let Some(rest) = trimmed.strip_prefix("// expect-stdout:") {
       expectations.stdout.push(rest.strip_prefix(' ').unwrap_or(rest).to_string());
     } else if let Some(rest) = trimmed.strip_prefix("// expect-exit:") {
@@ -52,6 +54,7 @@ fn parse_expectations(source: &str) -> Result<Expectations, String> {
     } else if let Some(rest) = trimmed.strip_prefix("// expect-panic:") {
       expectations.panic = Some(rest.trim().to_string());
     }
+
     if let Some((_, annotation)) = line.split_once("//~") {
       let annotation = annotation.trim();
       let code = annotation
@@ -59,9 +62,11 @@ fn parse_expectations(source: &str) -> Result<Expectations, String> {
         .map(str::trim)
         .filter(|code| is_diagnostic_code(code))
         .ok_or_else(|| format!("line {line_number}: malformed annotation `//~ {annotation}`; expected `//~ ERROR Ennnn`"))?;
+
       expectations.errors.push(ExpectedError { line: line_number, code: code.to_string() });
     }
   }
+
   Ok(expectations)
 }
 
@@ -93,13 +98,17 @@ fn discover(root: &Path, suite: Suite) -> Result<Vec<PathBuf>, String> {
   let dir = root.join("tests").join(suite.dir_name());
   let entries = fs::read_dir(&dir).map_err(|error| format!("cannot read suite directory `{}`: {error}", dir.display()))?;
   let mut cases = Vec::new();
+
   for entry in entries {
     let path = entry.map_err(|error| format!("cannot read an entry of `{}`: {error}", dir.display()))?.path();
+
     if path.extension().is_some_and(|extension| extension == "sag") {
       cases.push(path);
     }
   }
+
   cases.sort();
+
   Ok(cases)
 }
 
@@ -113,15 +122,18 @@ fn exit_code(output: &Output) -> Result<i32, String> {
 
 fn expect_exit(output: &Output, expected: i32) -> Result<(), String> {
   let actual = exit_code(output)?;
+
   if actual == expected {
     return Ok(());
   }
+
   Err(format!("expected exit code {expected}, got {actual}\nstderr:\n{}", String::from_utf8_lossy(&output.stderr)))
 }
 
 fn run_case(suite: Suite, file: &Path) -> Result<(), String> {
   let source = fs::read_to_string(file).map_err(|error| format!("cannot read file: {error}"))?;
   let expectations = parse_expectations(&source)?;
+
   match suite {
     Suite::RunPass => {
       if !expectations.errors.is_empty() || expectations.panic.is_some() {
@@ -129,13 +141,16 @@ fn run_case(suite: Suite, file: &Path) -> Result<(), String> {
       }
       let output = sag(&["run"], file)?;
       expect_exit(&output, expectations.exit.unwrap_or(0))?;
+
       if !expectations.stdout.is_empty() {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let actual: Vec<&str> = stdout.lines().collect();
+
         if actual != expectations.stdout {
           return Err(format!("stdout mismatch\nexpected: {:?}\nactual:   {actual:?}", expectations.stdout));
         }
       }
+
       Ok(())
     }
     Suite::RunPanic => {
@@ -143,26 +158,36 @@ fn run_case(suite: Suite, file: &Path) -> Result<(), String> {
         return Err("run-panic tests need an `expect-panic` annotation".to_string());
       };
       let output = sag(&["run"], file)?;
+
       expect_exit(&output, 101)?;
+
       let stderr = String::from_utf8_lossy(&output.stderr);
+
       if !stderr.contains(message.as_str()) {
         return Err(format!("panic message `{message}` not found in stderr:\n{stderr}"));
       }
+
       Ok(())
     }
     Suite::CompileFail => {
       if expectations.errors.is_empty() {
         return Err("compile-fail tests need at least one `//~ ERROR Ennnn` annotation".to_string());
       }
+
       let output = sag(&["check", "--diagnostic-format", "short"], file)?;
+
       expect_exit(&output, 1)?;
+
       let mut expected = expectations.errors;
       let mut reported = parse_reported_errors(&String::from_utf8_lossy(&output.stderr));
+
       expected.sort();
       reported.sort();
+
       if reported != expected {
         return Err(format!("diagnostics mismatch\nexpected: {expected:?}\nreported: {reported:?}"));
       }
+
       Ok(())
     }
   }
@@ -173,11 +198,13 @@ fn sag_suites() {
   let root = workspace_root().unwrap();
   let mut total = 0;
   let mut failures = Vec::new();
+
   for suite in Suite::ALL {
     match discover(&root, suite) {
       Ok(cases) => {
         for case in cases {
           total += 1;
+
           if let Err(error) = run_case(suite, &case) {
             failures.push(format!("{}: {error}", case.display()));
           }
@@ -186,6 +213,7 @@ fn sag_suites() {
       Err(error) => failures.push(error),
     }
   }
+
   println!("ran {total} .sag test(s)");
   assert!(failures.is_empty(), "{} of {total} .sag test(s) failed:\n\n{}", failures.len(), failures.join("\n\n"));
 }
@@ -200,6 +228,7 @@ fn parses_all_annotation_kinds() {
 const x: i32 = \"hello\";   //~ ERROR E0042
 ";
   let expectations = parse_expectations(source).unwrap();
+
   assert_eq!(expectations.stdout, vec!["total = 6".to_string(), " indented".to_string()]);
   assert_eq!(expectations.exit, Some(3));
   assert_eq!(expectations.panic.as_deref(), Some("index out of bounds"));
@@ -220,6 +249,7 @@ C:\\work\\main.sag:12:5: error[E0042]: mismatched types
 tests/a.sag:3:1: error[E0001]: unexpected token
 warning: something unrelated
 ";
+
   assert_eq!(
     parse_reported_errors(stderr),
     vec![ExpectedError { line: 12, code: "E0042".to_string() }, ExpectedError { line: 3, code: "E0001".to_string() }]

@@ -10,6 +10,7 @@ fn sag(args: &[&str]) -> io::Result<Output> {
 #[test]
 fn version_prints_the_package_version() {
   let output = sag(&["--version"]).unwrap();
+
   assert!(output.status.success());
   assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), format!("sag {}", env!("CARGO_PKG_VERSION")));
 }
@@ -17,6 +18,7 @@ fn version_prints_the_package_version() {
 #[test]
 fn help_succeeds() {
   let output = sag(&["help"]).unwrap();
+
   assert!(output.status.success());
   assert!(String::from_utf8_lossy(&output.stdout).contains("Usage: sag"));
 }
@@ -25,6 +27,7 @@ fn help_succeeds() {
 fn invalid_usage_exits_with_2() {
   for args in [&[][..], &["compile"][..], &["build"][..]] {
     let output = sag(args).unwrap();
+
     assert_eq!(output.status.code(), Some(2), "args: {args:?}");
     assert!(String::from_utf8_lossy(&output.stderr).contains("Usage: sag"));
   }
@@ -33,6 +36,7 @@ fn invalid_usage_exits_with_2() {
 #[test]
 fn missing_input_exits_with_1() {
   let output = sag(&["check", "does-not-exist.sag"]).unwrap();
+
   assert_eq!(output.status.code(), Some(1));
   assert!(String::from_utf8_lossy(&output.stderr).contains("cannot find"));
 }
@@ -40,6 +44,7 @@ fn missing_input_exits_with_1() {
 #[test]
 fn non_sag_input_exits_with_1() {
   let output = sag(&["check", "Cargo.toml"]).unwrap();
+
   assert_eq!(output.status.code(), Some(1));
   assert!(String::from_utf8_lossy(&output.stderr).contains("is not a `.sag` file"));
 }

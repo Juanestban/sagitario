@@ -3,8 +3,10 @@
 ## Requirements
 
 - Rust 1.90 or newer (edition 2024).
-- clang (the official C compiler). On Windows: LLVM plus Visual Studio Build Tools (UCRT and
-  the MSVC linker). gcc is optional on Linux.
+- clang (the official C compiler). On Windows: official LLVM (`x86_64-pc-windows-msvc`) plus
+  Visual Studio Build Tools, which the Rust MSVC toolchain already needs. If `clang` on your
+  `PATH` is an MSYS2/MinGW clang, set `SAG_CC` to the LLVM one; MinGW works best-effort,
+  without sanitizers. gcc is optional on Linux.
 
 ## Commands
 

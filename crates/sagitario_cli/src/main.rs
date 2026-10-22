@@ -5,6 +5,7 @@ fn main() -> ExitCode {
     Ok(command) => sagitario_cli::execute(&command),
     Err(error) => {
       eprintln!("error: {error}\n\n{}", sagitario_cli::USAGE);
+
       ExitCode::from(sagitario_cli::EXIT_USAGE)
     }
   }
