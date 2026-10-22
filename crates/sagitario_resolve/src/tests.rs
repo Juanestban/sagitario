@@ -166,7 +166,7 @@ fn private_items_are_visible_in_submodules_only() {
   );
   // The root does not see the private items of `a`.
   assert_eq!(resolve_package(&[("", "fn main() { pkg::a::hidden(); }"), ("a", "fn hidden() {}")]), vec!["E0207"]);
-  assert_eq!(resolve_package(&[("", "use pkg::a::P; fn main() { const _p = P {}; }"), ("a", "pub(pkg) struct P {}")]), Vec::<&str>::new());
+  assert_eq!(resolve_package(&[("", "use pkg::a::P; fn main() { const _p = P {}; }"), ("a", "pub struct P {}")]), Vec::<&str>::new());
 }
 
 #[test]

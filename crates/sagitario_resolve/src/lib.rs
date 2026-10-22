@@ -1168,7 +1168,7 @@ impl<'a> Resolver<'a> {
         self.diagnostics.push(
           Diagnostic::error(codes::PRIVATE_ITEM, segment.span, format!("`{name}` is private to the module `{}`", info.display_path()))
             .with_label(declared.span, "declared without `pub` here")
-            .with_help("mark it `pub(pkg)` or `pub` to use it from other modules"),
+            .with_help("mark it `pub` to use it from other modules"),
         );
       }
 

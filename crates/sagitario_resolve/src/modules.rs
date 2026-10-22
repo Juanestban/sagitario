@@ -174,7 +174,7 @@ pub(crate) fn report_unused_imports(resolution: &Resolution, used: &HashSet<(Mod
 /// Warns when an item visible to the whole package mentions, in its signature or fields, a type
 /// that only its own module can see (as Rust's `private_interfaces` lint).
 pub(crate) fn report_private_interfaces(resolution: &Resolution, package: &Package, diagnostics: &mut Diagnostics) {
-  let public = |visibility: Visibility| matches!(visibility, Visibility::Public | Visibility::Package);
+  let public = |visibility: Visibility| visibility == Visibility::Public;
 
   for module in &package.modules {
     for item in &module.items {
@@ -235,7 +235,7 @@ pub(crate) fn report_private_interfaces(resolution: &Resolution, package: &Packa
                 format!("the private type `{name}` appears in the public interface of `{owner}`"),
               )
               .with_label(declared, "declared without `pub` here")
-              .with_help(format!("mark `{name}` as `pub(pkg)` or `pub`, or make `{owner}` private")),
+              .with_help(format!("mark `{name}` as `pub`, or make `{owner}` private")),
             );
           }
         }

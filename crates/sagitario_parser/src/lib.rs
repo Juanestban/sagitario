@@ -342,12 +342,20 @@ impl<'a> Parser<'a> {
       return Visibility::Module;
     }
 
-    let is_package = self.at(&TokenKind::LParen) && *self.nth_kind(1) == TokenKind::Keyword(Keyword::Pkg) && *self.nth_kind(2) == TokenKind::RParen;
+    // `pub(pkg)` and other restricted forms do not exist (ADR-0025); recover as `pub`.
+    let restricted = self.at(&TokenKind::LParen) && *self.nth_kind(2) == TokenKind::RParen && *self.nth_kind(1) != TokenKind::RParen;
 
-    if is_package {
-      self.pos += 3;
+    if restricted {
+      let start = self.advance().span;
 
-      return Visibility::Package;
+      self.advance();
+
+      let end = self.advance().span;
+
+      self.diagnostics.push(
+        Diagnostic::error(codes::UNEXPECTED_TOKEN, start.to(end), "visibility has no restricted forms such as `pub(pkg)`")
+          .with_help("write `pub` to make the item visible outside its module"),
+      );
     }
 
     Visibility::Public
@@ -1644,6 +1652,7 @@ mod tests {
     assert!(matches!(&trees[1].kind, UseTreeKind::Simple { alias: Some(alias) } if alias.name == "C"));
     assert_eq!(shape("pkg::a::f(super::super::x)"), "pkg::a::f(super::super::x)");
     assert_eq!(parse("pub use pkg::a;\nfn main() {}").1, vec!["E0900"]);
+    assert_eq!(parse("pub(pkg) fn f() {}\nfn main() {}").1, vec!["E0100"]);
     assert_eq!(parse("use pkg::{a, ;\nfn main() {}").1, vec!["E0100"]);
   }
 

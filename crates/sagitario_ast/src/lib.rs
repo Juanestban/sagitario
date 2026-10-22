@@ -18,8 +18,6 @@ pub struct Ident {
 pub enum Visibility {
   /// No modifier: visible in the declaring module only.
   Module,
-  /// `pub(pkg)`
-  Package,
   /// `pub`
   Public,
   /// `prv`: a struct member visible only inside its struct.

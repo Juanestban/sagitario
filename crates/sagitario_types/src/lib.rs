@@ -2098,7 +2098,7 @@ mod tests {
   #[test]
   fn validates_main_signature() {
     assert_eq!(diagnostics("fn main() {}"), Vec::<&str>::new());
-    assert_eq!(diagnostics("pub(pkg) fn main() -> Result<(), String> { Ok(()) }"), Vec::<&str>::new());
+    assert_eq!(diagnostics("pub fn main() -> Result<(), String> { Ok(()) }"), Vec::<&str>::new());
     assert_eq!(diagnostics("pub fn main(x: i32) {}"), vec!["E0204"]);
     assert_eq!(diagnostics("fn main() -> i32 { 0 }"), vec!["E0204"]);
   }

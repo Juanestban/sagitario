@@ -1,6 +1,6 @@
 # 0010. File-as-module, logical imports, packages
 
-- Status: Accepted
+- Status: Accepted; amended by [ADR-0024](0024-modules-imports-and-visibility.md) and [ADR-0025](0025-single-pub-visibility.md)
 - Date: 2026-10-21
 
 ## Context

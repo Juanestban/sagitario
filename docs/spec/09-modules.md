@@ -1,7 +1,8 @@
 # 9. Modules and packages (F1)
 
 Rationale: [ADR-0010](../adr/0010-modules-and-packages.md),
-[ADR-0024](../adr/0024-modules-imports-and-visibility.md).
+[ADR-0024](../adr/0024-modules-imports-and-visibility.md),
+[ADR-0025](../adr/0025-single-pub-visibility.md).
 
 ## Packages
 
@@ -92,16 +93,14 @@ fn main() {
 | Modifier | Visible in |
 |---|---|
 | (none) | The declaring module and its submodules |
-| `pub(pkg)` | The whole package |
-| `pub` | Everywhere, including other packages |
+| `pub` | Every module that imports it, including other packages' |
 
 - As in Rust, a submodule sees the private items of all its ancestors: code in
   `net/http.sag` can call a private function of the root with `pkg::helper()` or
   `super::super::helper()`. A private item of `net/http.sag` is not visible in `net.sag`.
-- Until packages can depend on each other, `pub` and `pub(pkg)` are equivalent.
+- There are no restricted forms such as Rust's `pub(crate)`: `pub(pkg)` is a syntax error.
 - Modules themselves are visible in the whole package.
 - Struct members follow their own rules (`pub`/`prv`, mandatory; a `prv` member is visible
   only inside its struct); enum variants have their enum's visibility. Class members follow
   [classes](04-classes.md).
-- An item visible to the whole package whose signature or fields mention a type that only its
-  module can see gets a warning: code elsewhere could receive values of a type it cannot name.
+- A `pub` item whose signature or fields mention a private type gets a warning: code elsewhere could receive values of a type it cannot name.
