@@ -22,7 +22,7 @@ pub fn generate(program: &Program) -> String {
     instances: Vec::new(),
     out: String::new(),
     indent: 0,
-    path: c_string_literal(program.source_path.as_bytes()),
+    paths: program.source_paths.iter().map(|path| c_string_literal(path.as_bytes())).collect(),
     locals: &[],
     self_by_ref: false,
     source_line: None,
@@ -65,14 +65,14 @@ struct Generator<'a> {
   instances: Vec<Type>,
   out: String,
   indent: usize,
-  /// The source path as a C string literal, for `#line`.
-  path: String,
+  /// The source paths as C string literals, by file index, for `#line`.
+  paths: Vec<String>,
   /// Locals of the function being generated.
   locals: &'a [Type],
   /// Whether local 0 of the function being generated is a pointer (`var self`).
   self_by_ref: bool,
-  /// The source line of the statement being generated.
-  source_line: Option<u32>,
+  /// The source file and line of the statement being generated.
+  source_line: Option<(u32, u32)>,
 }
 
 impl<'a> Generator<'a> {
@@ -308,13 +308,19 @@ impl<'a> Generator<'a> {
     self.out.push_str("}\n");
   }
 
+  fn line_directive(&mut self, file: u32, line: u32) {
+    let path = self.paths.get(file as usize).map_or("\"?\"", String::as_str);
+
+    self.out.push_str(&format!("#line {line} {path}\n"));
+  }
+
   fn line(&mut self, text: &str) {
     // One statement may become several C lines; a runtime check reports `__LINE__`, so the
     // source line is restated right before it.
     if text.contains("__LINE__")
-      && let Some(line) = self.source_line
+      && let Some((file, line)) = self.source_line
     {
-      self.out.push_str(&format!("#line {line} {}\n", self.path));
+      self.line_directive(file, line);
     }
 
     for _ in 0..self.indent {
@@ -424,9 +430,9 @@ impl<'a> Generator<'a> {
   fn stmt(&mut self, stmt: &Stmt) {
     match stmt {
       // `#line` must start at column 0 to stay readable; C ignores the indentation anyway.
-      Stmt::Line(line) => {
-        self.source_line = Some(*line);
-        self.out.push_str(&format!("#line {line} {}\n", self.path));
+      Stmt::Line { file, line } => {
+        self.source_line = Some((*file, *line));
+        self.line_directive(*file, *line);
       }
       Stmt::Assign { dest, value } => {
         let ty = self.local_type(*dest);

@@ -14,6 +14,13 @@ How the `sag` compiler is structured. Rationale: [ADR-0001](adr/0001-compile-to-
 Phases communicate only through data structures (tokens, AST, typed AST, SIR). There is no
 global mutable state; each crate can be tested in isolation.
 
+A program is a *package* of modules, one per file (docs/spec/09-modules.md). The driver lexes
+and parses the entry file, asks `sagitario_resolve::module_references` which module paths it
+mentions, loads those that exist as files (`pkg::net::http` is `net/http.sag` next to the
+entry file) and repeats for each new module. Resolution builds the module tree, resolves `use`
+declarations and checks visibility; from then on the package is analyzed as a whole, and
+functions and types are numbered across all modules.
+
 ## Repository layout (target)
 
 ```
@@ -88,8 +95,9 @@ could be added.
   portable fallback).
 - **No undefined behavior**: signed arithmetic goes through runtime helpers that detect
   overflow (panic in debug, wrap in release); shifts, division and indexing are checked.
-- `#line` directives map C back to `.sag` sources; one is repeated right before each runtime
-  check that reports `__LINE__`, since a statement can span several C lines.
+- `#line` directives map C back to `.sag` sources (the file and line of each statement); one is
+  repeated right before each runtime check that reports `__LINE__`, since a statement can span
+  several C lines.
 - `sag build --emit-c` writes the generated C for inspection.
 - Each struct becomes a C struct `sag_sN` (fields `fN`), each enum a `sag_eN`, and each array,
   `Option` and `Result` type a `sag_tN`. Arrays wrap a C array; enum-like types hold a `tag` and
@@ -143,6 +151,8 @@ to forward arguments to the program.
 - Exit codes of `sag` itself: `0` success, `1` compilation failed or input unreadable, `2`
   invalid command-line usage. `sag run` returns the program's own exit code once it runs.
 
+- The file given to `sag` is the program's root module; the modules it uses are loaded from
+  its directory.
 - `sag build main.sag` writes the executable next to the source (`main` / `main.exe`);
   `--emit-c` also writes `main.c` there (it includes `sagitario_runtime.h` from `runtime/`).
   `sag run` builds into a temporary directory that is removed afterwards.
@@ -151,7 +161,8 @@ to forward arguments to the program.
   analysis run together, so one run reports all their errors and warnings.
 - Diagnostics are printed in source order. They carry secondary labels ("previous definition
   here", "expected because of this type"), notes and `help:` suggestions, including "a name
-  with a similar spelling exists" for unresolved names.
+  with a similar spelling exists" for unresolved names. A label in another file (such as a
+  private item's declaration) gets its own excerpt, introduced by `:::`.
 - The human format is colored when stderr is a terminal; `NO_COLOR` disables and
   `CLICOLOR_FORCE=1` forces it. On Windows, colors are only used in terminals known to support
   ANSI codes (Windows Terminal, VS Code, MSYS2/mintty, ConEmu).

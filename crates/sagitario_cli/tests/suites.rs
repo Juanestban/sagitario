@@ -1,5 +1,6 @@
 //! End-to-end harness: runs the `.sag` suites under `tests/` through the `sag` binary.
-//! The annotation format is documented in `docs/testing.md`.
+//! A case is a `.sag` file, or a directory holding a multi-file program whose entry is
+//! `main.sag`. The annotation format is documented in `docs/testing.md`.
 
 use std::collections::HashSet;
 use std::fs;
@@ -38,8 +39,19 @@ struct Expectations {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct ExpectedDiagnostic {
+  /// The file, relative to the case directory and with `/` separators; empty when parsing a
+  /// single source text.
+  file: String,
   line: usize,
   code: String,
+}
+
+/// A test case: the file passed to `sag` and the source files whose annotations count.
+struct Case {
+  entry: PathBuf,
+  /// The directory that file names in diagnostics are relative to.
+  dir: PathBuf,
+  files: Vec<PathBuf>,
 }
 
 fn parse_expectations(source: &str) -> Result<Expectations, String> {
@@ -82,8 +94,8 @@ fn parse_annotation(annotation: &str, line: usize) -> Result<Vec<ExpectedDiagnos
   words
     .chunks(2)
     .map(|pair| match pair {
-      ["ERROR", code] if is_diagnostic_code(code, 'E') => Ok(ExpectedDiagnostic { line, code: code.to_string() }),
-      ["WARN", code] if is_diagnostic_code(code, 'W') => Ok(ExpectedDiagnostic { line, code: code.to_string() }),
+      ["ERROR", code] if is_diagnostic_code(code, 'E') => Ok(ExpectedDiagnostic { file: String::new(), line, code: code.to_string() }),
+      ["WARN", code] if is_diagnostic_code(code, 'W') => Ok(ExpectedDiagnostic { file: String::new(), line, code: code.to_string() }),
       _ => Err(malformed()),
     })
     .collect()
@@ -95,8 +107,10 @@ fn is_diagnostic_code(code: &str, prefix: char) -> bool {
 
 /// Extracts errors and warnings from `--diagnostic-format short` output:
 /// `path:line:column: error[E0001]: message`. The path is split from the right because Windows
-/// paths contain `:`.
-fn parse_reported_diagnostics(stderr: &str) -> Vec<ExpectedDiagnostic> {
+/// paths contain `:`; it is made relative to `dir`.
+fn parse_reported_diagnostics(stderr: &str, dir: &Path) -> Vec<ExpectedDiagnostic> {
+  let dir = format!("{}/", normalize(&dir.display().to_string()));
+
   stderr
     .lines()
     .filter_map(|line| {
@@ -105,32 +119,92 @@ fn parse_reported_diagnostics(stderr: &str) -> Vec<ExpectedDiagnostic> {
       let mut parts = location.rsplitn(3, ':');
       let _column = parts.next()?;
       let line_number = parts.next()?.parse().ok()?;
+      let path = normalize(parts.next()?);
+      let file = path.strip_prefix(&dir).unwrap_or(&path).to_string();
 
-      Some(ExpectedDiagnostic { line: line_number, code: code.to_string() })
+      Some(ExpectedDiagnostic { file, line: line_number, code: code.to_string() })
     })
     .collect()
+}
+
+fn normalize(path: &str) -> String {
+  path.replace('\\', "/")
 }
 
 fn workspace_root() -> Result<PathBuf, String> {
   Path::new(env!("CARGO_MANIFEST_DIR")).ancestors().nth(2).map(Path::to_path_buf).ok_or_else(|| "cannot locate the workspace root".to_string())
 }
 
-fn discover(root: &Path, suite: Suite) -> Result<Vec<PathBuf>, String> {
+fn discover(root: &Path, suite: Suite) -> Result<Vec<Case>, String> {
   let dir = root.join("tests").join(suite.dir_name());
-  let entries = fs::read_dir(&dir).map_err(|error| format!("cannot read suite directory `{}`: {error}", dir.display()))?;
   let mut cases = Vec::new();
 
-  for entry in entries {
-    let path = entry.map_err(|error| format!("cannot read an entry of `{}`: {error}", dir.display()))?.path();
-
+  for path in entries(&dir)? {
     if path.extension().is_some_and(|extension| extension == "sag") {
-      cases.push(path);
+      cases.push(Case { entry: path.clone(), dir: dir.clone(), files: vec![path] });
+    } else if path.join("main.sag").is_file() {
+      let mut files = Vec::new();
+
+      sources_in(&path, &mut files)?;
+      cases.push(Case { entry: path.join("main.sag"), dir: path, files });
     }
   }
 
-  cases.sort();
-
   Ok(cases)
+}
+
+/// The entries of a directory, sorted.
+fn entries(dir: &Path) -> Result<Vec<PathBuf>, String> {
+  let entries = fs::read_dir(dir).map_err(|error| format!("cannot read directory `{}`: {error}", dir.display()))?;
+  let mut paths = Vec::new();
+
+  for entry in entries {
+    paths.push(entry.map_err(|error| format!("cannot read an entry of `{}`: {error}", dir.display()))?.path());
+  }
+
+  paths.sort();
+
+  Ok(paths)
+}
+
+/// Every `.sag` file under `dir`.
+fn sources_in(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
+  for path in entries(dir)? {
+    if path.is_dir() {
+      sources_in(&path, files)?;
+    } else if path.extension().is_some_and(|extension| extension == "sag") {
+      files.push(path);
+    }
+  }
+
+  Ok(())
+}
+
+/// The expectations of a case: those of its entry file, plus the diagnostics annotated in every
+/// file of a multi-file program.
+fn case_expectations(case: &Case) -> Result<Expectations, String> {
+  let mut expectations = Expectations::default();
+
+  for file in &case.files {
+    let source = fs::read_to_string(file).map_err(|error| format!("cannot read `{}`: {error}", file.display()))?;
+    let mut parsed = parse_expectations(&source).map_err(|error| format!("{}: {error}", file.display()))?;
+    let relative = file.strip_prefix(&case.dir).map_or_else(|_| file.display().to_string(), |path| normalize(&path.display().to_string()));
+
+    for diagnostic in &mut parsed.diagnostics {
+      diagnostic.file = relative.clone();
+    }
+
+    expectations.diagnostics.append(&mut parsed.diagnostics);
+
+    if *file == case.entry {
+      expectations.stdout = parsed.stdout;
+      expectations.exit = parsed.exit;
+      expectations.panic = parsed.panic;
+      expectations.flags = parsed.flags;
+    }
+  }
+
+  Ok(expectations)
 }
 
 /// `sag run <flags> <file>`.
@@ -166,9 +240,9 @@ fn expect_exit(output: &Output, expected: i32) -> Result<(), String> {
   Err(format!("expected exit code {expected}, got {actual}\nstderr:\n{}", String::from_utf8_lossy(&output.stderr)))
 }
 
-fn run_case(suite: Suite, file: &Path) -> Result<(), String> {
-  let source = fs::read_to_string(file).map_err(|error| format!("cannot read file: {error}"))?;
-  let expectations = parse_expectations(&source)?;
+fn run_case(suite: Suite, case: &Case) -> Result<(), String> {
+  let expectations = case_expectations(case)?;
+  let file = case.entry.as_path();
 
   match suite {
     Suite::RunPass => {
@@ -218,7 +292,7 @@ fn run_case(suite: Suite, file: &Path) -> Result<(), String> {
 
       // Every reported error and warning must be annotated, and vice versa.
       let mut expected = expectations.diagnostics;
-      let mut reported = parse_reported_diagnostics(&String::from_utf8_lossy(&output.stderr));
+      let mut reported = parse_reported_diagnostics(&String::from_utf8_lossy(&output.stderr), &case.dir);
 
       expected.sort();
       reported.sort();
@@ -245,7 +319,7 @@ fn sag_suites() {
           total += 1;
 
           if let Err(error) = run_case(suite, &case) {
-            failures.push(format!("{}: {error}", case.display()));
+            failures.push(format!("{}: {error}", case.entry.display()));
           }
         }
       }
@@ -265,9 +339,7 @@ fn every_diagnostic_code_has_a_compile_fail_test() {
   let mut covered = HashSet::new();
 
   for case in discover(&root, Suite::CompileFail).unwrap() {
-    let source = fs::read_to_string(&case).unwrap();
-
-    covered.extend(parse_expectations(&source).unwrap().diagnostics.into_iter().map(|diagnostic| diagnostic.code));
+    covered.extend(case_expectations(&case).unwrap().diagnostics.into_iter().map(|diagnostic| diagnostic.code));
   }
 
   let missing: Vec<&str> = sagitario_diagnostics::codes::ALL.iter().map(|code| code.0).filter(|code| !covered.contains(*code)).collect();
@@ -311,7 +383,17 @@ tests/a.sag:3:1: error[E0001]: unexpected token
 tests/a.sag:4:7: warning[W0001]: unused binding `x`
 warning: something unrelated
 ";
-  let codes: Vec<(usize, String)> = parse_reported_diagnostics(stderr).into_iter().map(|diagnostic| (diagnostic.line, diagnostic.code)).collect();
+  let codes: Vec<(String, usize, String)> = parse_reported_diagnostics(stderr, Path::new("tests"))
+    .into_iter()
+    .map(|diagnostic| (diagnostic.file, diagnostic.line, diagnostic.code))
+    .collect();
 
-  assert_eq!(codes, vec![(12, "E0042".to_string()), (3, "E0001".to_string()), (4, "W0001".to_string())]);
+  assert_eq!(
+    codes,
+    vec![
+      ("C:/work/main.sag".to_string(), 12, "E0042".to_string()),
+      ("a.sag".to_string(), 3, "E0001".to_string()),
+      ("a.sag".to_string(), 4, "W0001".to_string())
+    ]
+  );
 }

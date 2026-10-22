@@ -18,18 +18,58 @@ pub struct Ident {
 pub enum Visibility {
   /// No modifier: visible in the declaring module only.
   Module,
-  /// `pub(pkg)`
-  Package,
   /// `pub`
   Public,
   /// `prv`: a struct member visible only inside its struct.
   Private,
 }
 
+/// The modules of a program (docs/spec/09-modules.md): the root module (the entry file) first,
+/// then every module it reaches through paths.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Package {
+  pub modules: Vec<Module>,
+}
+
+impl Package {
+  /// A program made of one file.
+  pub fn single(module: Module) -> Package {
+    Package { modules: vec![module] }
+  }
+}
+
+/// One source file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Module {
   pub file: FileId,
+  /// The logical path from the package root: empty for the root, `["net", "http"]` for
+  /// `net/http.sag`.
+  pub path: Vec<String>,
+  pub uses: Vec<UseDecl>,
   pub items: Vec<Item>,
+}
+
+/// `use tree;`
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UseDecl {
+  pub tree: UseTree,
+  pub span: Span,
+}
+
+/// `a::b`, `a::b as c` or `a::{b, c::d}`; inside braces, `self` names the prefix itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UseTree {
+  pub prefix: Vec<Ident>,
+  pub kind: UseTreeKind,
+  pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UseTreeKind {
+  /// Imports the last segment of the prefix, under `alias` if given.
+  Simple { alias: Option<Ident> },
+  /// `prefix::{trees}`
+  Group(Vec<UseTree>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,9 +183,11 @@ pub struct ArrayLen {
   pub span: Span,
 }
 
-/// `a::b::c`; `self` and `Self` are segments named `self` and `Self`.
+/// `a::b::c`; the keywords `pkg`, `self`, `super` and `Self` are segments with their own names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Path {
+  /// Identifies the path so later phases can find what a type path names.
+  pub id: NodeId,
   pub segments: Vec<Ident>,
   pub span: Span,
 }

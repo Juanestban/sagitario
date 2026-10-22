@@ -21,7 +21,7 @@ class Dog extends Animal {
   pub override fn speak(self) -> String { `${self.display_name()} says woof` }
 }
 
-pub fn main() {
+fn main() {
   const dog = new Dog("Rex");
   println(dog.speak());
 }

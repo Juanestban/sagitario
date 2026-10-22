@@ -79,7 +79,7 @@ fn area(s: Shape) -> f64 {
   }
 }
 
-pub fn main() -> Result<(), io::Error> {
+fn main() -> Result<(), io::Error> {
   const dog = new Dog("Rex");
   const p = Point { x: 1.0, y: 2.0 };
   const doubled = [1, 2, 3, 4].map((x) => x * 2).filter((x) => x > 2);

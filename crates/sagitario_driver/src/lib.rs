@@ -1,6 +1,7 @@
 //! Compilation driver: runs the pipeline (docs/architecture.md#pipeline), prints diagnostics,
 //! writes the generated C with the embedded runtime, and invokes the C compiler.
 
+use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::io;
@@ -9,6 +10,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use sagitario_ast::{Module, Package};
 use sagitario_diagnostics::{DiagnosticFormat, Diagnostics, render};
 use sagitario_span::SourceMap;
 
@@ -88,49 +90,124 @@ fn front_end(options: &CompileOptions, generate: bool) -> Result<FrontEnd, u8> {
     eprintln!("error: cannot find `{}`", input.display());
     return Err(EXIT_FAILURE);
   }
-  let text = match fs::read_to_string(input) {
-    Ok(text) => text,
-    Err(error) => {
-      eprintln!("error: cannot read `{}`: {error}", input.display());
-      return Err(EXIT_FAILURE);
-    }
-  };
-  if u32::try_from(text.len()).is_err() {
-    eprintln!("error: `{}` is too large (the limit is 4 GiB)", input.display());
-    return Err(EXIT_FAILURE);
-  }
-
   let mut sources = SourceMap::new();
-  let file = sources.add(input.clone(), text);
-  let Some(source) = sources.get(file) else {
-    eprintln!("internal compiler error: source file was not registered");
-    return Err(EXIT_ICE);
-  };
   let mut diagnostics = Diagnostics::new();
+  let mut loader = Loader { root: input.parent().map(Path::to_path_buf).unwrap_or_default(), entry: input.clone(), next_id: 0, modules: Vec::new() };
 
-  let tokens = sagitario_lexer::lex(file, source.text(), &mut diagnostics);
+  loader.load(input, Vec::new(), &mut sources, &mut diagnostics)?;
+
+  // Each loaded module may refer to more modules; the ones that exist as files are loaded too.
+  let mut attempted = HashSet::new();
+  let mut index = 0;
+
+  while let Some(module) = loader.modules.get(index) {
+    for path in sagitario_resolve::module_references(module) {
+      if attempted.insert(path.clone())
+        && let Some(file) = loader.module_file(&path)
+      {
+        loader.load(&file, path, &mut sources, &mut diagnostics)?;
+      }
+    }
+
+    index += 1;
+  }
 
   // Malformed tokens or an incomplete syntax tree would only cause confusing follow-up errors,
   // so lexical and syntax errors stop here. Name, type and flow errors are reported together.
   report(&mut diagnostics, &sources, options)?;
 
-  let module = sagitario_parser::parse_module(file, tokens, &mut diagnostics);
-
-  report(&mut diagnostics, &sources, options)?;
-
-  let resolution = sagitario_resolve::resolve(&module, &mut diagnostics);
-  let typed = sagitario_types::check(&module, &resolution, &mut diagnostics);
+  let package = Package { modules: loader.modules };
+  let resolution = sagitario_resolve::resolve(&package, &mut diagnostics);
+  let typed = sagitario_types::check(&package, &resolution, &mut diagnostics);
 
   report(&mut diagnostics, &sources, options)?;
   if !generate {
     return Ok(FrontEnd { c_source: None });
   }
 
-  let program = sagitario_sir::lower(&module, &resolution, &typed, source).map_err(|error| {
+  let program = sagitario_sir::lower(&package, &resolution, &typed, &sources).map_err(|error| {
     eprintln!("internal compiler error: {}", error.0);
     EXIT_ICE
   })?;
   Ok(FrontEnd { c_source: Some(sagitario_codegen_c::generate(&program)) })
+}
+
+/// Reads, lexes and parses the modules of a program (docs/spec/09-modules.md): the entry file is
+/// the root module `pkg`, and `pkg::net::http` is the file `net/http.sag` next to it.
+struct Loader {
+  root: PathBuf,
+  entry: PathBuf,
+  /// Keeps node ids unique across modules.
+  next_id: u32,
+  modules: Vec<Module>,
+}
+
+impl Loader {
+  /// Adds a module unless it has lexical errors, which are reported later with the others.
+  fn load(&mut self, file: &Path, path: Vec<String>, sources: &mut SourceMap, diagnostics: &mut Diagnostics) -> Result<(), u8> {
+    let text = match fs::read_to_string(file) {
+      Ok(text) => text,
+      Err(error) => {
+        eprintln!("error: cannot read `{}`: {error}", file.display());
+        return Err(EXIT_FAILURE);
+      }
+    };
+    if u32::try_from(text.len()).is_err() {
+      eprintln!("error: `{}` is too large (the limit is 4 GiB)", file.display());
+      return Err(EXIT_FAILURE);
+    }
+
+    let id = sources.add(file.to_path_buf(), text);
+    let Some(source) = sources.get(id) else {
+      eprintln!("internal compiler error: source file was not registered");
+      return Err(EXIT_ICE);
+    };
+    let errors = diagnostics.error_count();
+    let tokens = sagitario_lexer::lex(id, source.text(), diagnostics);
+
+    if diagnostics.error_count() == errors {
+      let mut module = sagitario_parser::parse_module_from(id, tokens, &mut self.next_id, diagnostics);
+
+      module.path = path;
+      self.modules.push(module);
+    }
+
+    Ok(())
+  }
+
+  /// The file of the module at `path`, if it exists with exactly these names (also on
+  /// case-insensitive file systems) and is not the entry file.
+  fn module_file(&self, path: &[String]) -> Option<PathBuf> {
+    let (last, dirs) = path.split_last()?;
+    let mut dir = self.root.clone();
+
+    for name in dirs {
+      if !has_entry(&dir, name, true) {
+        return None;
+      }
+
+      dir.push(name);
+    }
+
+    let name = format!("{last}.sag");
+
+    if !has_entry(&dir, &name, false) {
+      return None;
+    }
+
+    let file = dir.join(name);
+    let same = |a: &Path, b: &Path| matches!((fs::canonicalize(a), fs::canonicalize(b)), (Ok(a), Ok(b)) if a == b);
+
+    if same(&file, &self.entry) { None } else { Some(file) }
+  }
+}
+
+/// Whether `dir` has an entry with exactly this name that is a directory (or a file).
+fn has_entry(dir: &Path, name: &str, directory: bool) -> bool {
+  let dir = if dir.as_os_str().is_empty() { Path::new(".") } else { dir };
+  let Ok(entries) = fs::read_dir(dir) else { return false };
+
+  entries.flatten().any(|entry| entry.file_name().to_str() == Some(name) && entry.file_type().is_ok_and(|kind| kind.is_dir() == directory))
 }
 
 /// Prints the collected diagnostics in source order and stops the pipeline if any of them is

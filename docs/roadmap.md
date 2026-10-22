@@ -62,6 +62,7 @@ overloading and derived `Eq`, binding generation, internationalized diagnostics,
 error conversion with `From<T>` (and implementing one generic interface several times),
 `Error::source()` and backtraces, a `Display` interface, slices, open ranges, general tuples,
 raw strings, `@test` / `@deprecated`, static fields and mutable globals, `sag doc`, `if let` /
-`while let`, inference of `None`/`Ok`/`Err` from later uses.
+`while let`, inference of `None`/`Ok`/`Err` from later uses, re-exports (`pub use`), glob
+imports, importing enum variants or a type's functions, `use` inside blocks.
 Undecided points needed during the MVP are tracked as open questions in the
 [spec index](spec/README.md#open-questions).

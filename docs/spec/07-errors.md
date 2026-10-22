@@ -53,11 +53,13 @@ Integer overflow panics in debug builds only (see [types](02-types.md#integer-ar
 ## Program entry point and exit codes
 
 ```sag
-pub fn main() { ... }                    // return type omitted: returns ()
-pub fn main() -> Result<(), E> { ... }   // optional
+fn main() { ... }                    // return type omitted: returns ()
+fn main() -> Result<(), E> { ... }   // optional
 ```
 
-Declaring a return type on `main` is optional. When it returns `Result<(), E>`:
+`main` is declared in the root module (the entry file), with any visibility: `pub fn main()`
+is also valid. A function called `main` in another module is an ordinary function. Declaring
+a return type on `main` is optional. When it returns `Result<(), E>`:
 
 - **F1:** `E` must be `String` (parsing also reports errors as `String`s in F1).
 - **F2:** `E` may be any type implementing `Error`; the error is printed with `message()`.

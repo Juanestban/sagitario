@@ -4,16 +4,21 @@
 
 use sagitario_ast::{
   ArrayLen, BinaryOp, Block, EnumDecl, Expr, ExprKind, FieldDecl, FieldInit, FieldPattern, FnDecl, Ident, Item, LetStmt, MatchArm, Module, NodeId,
-  Param, Path, Pattern, PatternKind, SelfParam, Stmt, StructDecl, TemplatePart, TypeExpr, TypeExprKind, UnaryOp, VariantDecl, VariantFieldDecl,
-  VariantFields, Visibility,
+  Param, Path, Pattern, PatternKind, SelfParam, Stmt, StructDecl, TemplatePart, TypeExpr, TypeExprKind, UnaryOp, UseDecl, UseTree, UseTreeKind,
+  VariantDecl, VariantFieldDecl, VariantFields, Visibility,
 };
 use sagitario_diagnostics::{Diagnostic, Diagnostics, codes};
 use sagitario_lexer::{self as lexer, Keyword, Token, TokenKind};
 use sagitario_span::{FileId, Span};
 
 pub fn parse_module(file: FileId, tokens: Vec<Token>, diagnostics: &mut Diagnostics) -> Module {
-  let mut next_id = 0;
-  let mut parser = Parser::new(file, tokens, &mut next_id, diagnostics);
+  parse_module_from(file, tokens, &mut 0, diagnostics)
+}
+
+/// Parses one module of a package; node ids continue from `next_id`, so they stay unique across
+/// the modules of the package.
+pub fn parse_module_from(file: FileId, tokens: Vec<Token>, next_id: &mut u32, diagnostics: &mut Diagnostics) -> Module {
+  let mut parser = Parser::new(file, tokens, next_id, diagnostics);
 
   parser.module(file)
 }
@@ -193,15 +198,23 @@ impl<'a> Parser<'a> {
   }
 
   fn module(&mut self, file: FileId) -> Module {
+    let mut uses = Vec::new();
     let mut items = Vec::new();
 
     while !self.at(&TokenKind::Eof) {
       let start = self.pos;
 
-      match self.item() {
-        Ok(Some(item)) => items.push(item),
-        Ok(None) => {}
-        Err(ParseError) => self.skip_item(),
+      if self.at(&TokenKind::Keyword(Keyword::Use)) {
+        match self.use_decl() {
+          Ok(decl) => uses.push(decl),
+          Err(ParseError) => self.skip_item(),
+        }
+      } else {
+        match self.item() {
+          Ok(Some(item)) => items.push(item),
+          Ok(None) => {}
+          Err(ParseError) => self.skip_item(),
+        }
       }
 
       if self.pos == start {
@@ -209,7 +222,62 @@ impl<'a> Parser<'a> {
       }
     }
 
-    Module { file, items }
+    Module { file, path: Vec::new(), uses, items }
+  }
+
+  /// `use tree;` (docs/spec/09-modules.md#imports).
+  fn use_decl(&mut self) -> PResult<UseDecl> {
+    let start = self.expect(&TokenKind::Keyword(Keyword::Use))?.span;
+    let tree = self.use_tree()?;
+    let end = self.expect(&TokenKind::Semi)?.span;
+
+    Ok(UseDecl { tree, span: start.to(end) })
+  }
+
+  /// `a::b`, `a::b as c` or `a::{tree, ...}`.
+  fn use_tree(&mut self) -> PResult<UseTree> {
+    let start = self.span();
+    let mut prefix = vec![self.path_segment()?];
+
+    while self.eat(&TokenKind::ColonColon) {
+      if self.at(&TokenKind::LBrace) {
+        self.advance();
+
+        let mut trees = Vec::new();
+
+        while !self.at(&TokenKind::RBrace) {
+          trees.push(self.use_tree()?);
+
+          if !self.eat(&TokenKind::Comma) {
+            break;
+          }
+        }
+
+        let end = self.expect(&TokenKind::RBrace)?.span;
+
+        return Ok(UseTree { prefix, kind: UseTreeKind::Group(trees), span: start.to(end) });
+      }
+
+      prefix.push(self.path_segment()?);
+    }
+
+    let alias = if self.eat(&TokenKind::Keyword(Keyword::As)) { Some(self.ident("a name")?) } else { None };
+    let end = alias.as_ref().or(prefix.last()).map_or(start, |ident| ident.span);
+
+    Ok(UseTree { prefix, kind: UseTreeKind::Simple { alias }, span: start.to(end) })
+  }
+
+  /// A segment of a path: a name, or one of the keywords `pkg`, `self`, `super` and `Self`.
+  fn path_segment(&mut self) -> PResult<Ident> {
+    match self.kind() {
+      TokenKind::Keyword(keyword @ (Keyword::Pkg | Keyword::SelfValue | Keyword::Super | Keyword::SelfType)) => {
+        let name = keyword.as_str().to_string();
+        let span = self.advance().span;
+
+        Ok(Ident { name, span })
+      }
+      _ => self.member_name("a name"),
+    }
   }
 
   /// Skips to the end of the current item: a `;` or a closing `}` at nesting depth zero.
@@ -250,7 +318,12 @@ impl<'a> Parser<'a> {
       TokenKind::Keyword(Keyword::Fn) => Ok(Some(Item::Fn(self.fn_decl(visibility, start, false)?))),
       TokenKind::Keyword(Keyword::Struct) => Ok(Some(Item::Struct(self.struct_decl(visibility, start)?))),
       TokenKind::Keyword(Keyword::Enum) => Ok(Some(Item::Enum(self.enum_decl(visibility, start)?))),
-      TokenKind::Keyword(keyword @ (Keyword::Class | Keyword::Abstract | Keyword::Interface | Keyword::Use | Keyword::Const | Keyword::Extern)) => {
+      TokenKind::Keyword(Keyword::Use) => {
+        let span = self.span();
+
+        Err(self.not_implemented(span, "re-exports (`pub use`)"))
+      }
+      TokenKind::Keyword(keyword @ (Keyword::Class | Keyword::Abstract | Keyword::Interface | Keyword::Const | Keyword::Extern)) => {
         let span = self.span();
 
         Err(self.not_implemented(span, &format!("`{}` items", keyword.as_str())))
@@ -269,12 +342,20 @@ impl<'a> Parser<'a> {
       return Visibility::Module;
     }
 
-    let is_package = self.at(&TokenKind::LParen) && *self.nth_kind(1) == TokenKind::Keyword(Keyword::Pkg) && *self.nth_kind(2) == TokenKind::RParen;
+    // `pub(pkg)` and other restricted forms do not exist (ADR-0025); recover as `pub`.
+    let restricted = self.at(&TokenKind::LParen) && *self.nth_kind(2) == TokenKind::RParen && *self.nth_kind(1) != TokenKind::RParen;
 
-    if is_package {
-      self.pos += 3;
+    if restricted {
+      let start = self.advance().span;
 
-      return Visibility::Package;
+      self.advance();
+
+      let end = self.advance().span;
+
+      self.diagnostics.push(
+        Diagnostic::error(codes::UNEXPECTED_TOKEN, start.to(end), "visibility has no restricted forms such as `pub(pkg)`")
+          .with_help("write `pub` to make the item visible outside its module"),
+      );
     }
 
     Visibility::Public
@@ -630,7 +711,7 @@ impl<'a> Parser<'a> {
 
         Ok(TypeExpr { kind: TypeExprKind::Unit, span: start.to(end) })
       }
-      TokenKind::Ident(_) => {
+      TokenKind::Ident(_) | TokenKind::Keyword(Keyword::Pkg | Keyword::Super | Keyword::SelfValue) => {
         let path = self.path()?;
 
         if self.eat(&TokenKind::Lt) {
@@ -686,30 +767,22 @@ impl<'a> Parser<'a> {
     }
   }
 
-  /// A path; its first segment may be `self` or `Self`.
+  /// A path; its first segment may be `pkg`, `self`, `super` or `Self`, and `super` may repeat.
   fn path(&mut self) -> PResult<Path> {
-    let first = match self.kind() {
-      TokenKind::Keyword(keyword @ (Keyword::SelfValue | Keyword::SelfType)) => {
-        let name = keyword.as_str().to_string();
-        let span = self.advance().span;
-
-        Ident { name, span }
-      }
-      _ => self.ident("a name")?,
-    };
+    let first = self.path_segment()?;
     let mut span = first.span;
     let mut segments = vec![first];
 
-    while self.at(&TokenKind::ColonColon) && matches!(self.nth_kind(1), TokenKind::Ident(_) | TokenKind::Keyword(Keyword::New)) {
+    while self.at(&TokenKind::ColonColon) && matches!(self.nth_kind(1), TokenKind::Ident(_) | TokenKind::Keyword(Keyword::New | Keyword::Super)) {
       self.advance();
 
-      let segment = self.member_name("a name")?;
+      let segment = if self.at(&TokenKind::Keyword(Keyword::Super)) { self.path_segment()? } else { self.member_name("a name")? };
 
       span = span.to(segment.span);
       segments.push(segment);
     }
 
-    Ok(Path { segments, span })
+    Ok(Path { id: self.next_id(), segments, span })
   }
 
   fn block(&mut self) -> PResult<Block> {
@@ -1009,7 +1082,7 @@ impl<'a> Parser<'a> {
 
         ExprKind::Bool(keyword == Keyword::True)
       }
-      TokenKind::Ident(_) | TokenKind::Keyword(Keyword::SelfValue | Keyword::SelfType) => {
+      TokenKind::Ident(_) | TokenKind::Keyword(Keyword::SelfValue | Keyword::SelfType | Keyword::Pkg | Keyword::Super) => {
         let path = self.path()?;
 
         if self.at(&TokenKind::LBrace) && !self.no_struct_literal {
@@ -1166,7 +1239,9 @@ impl<'a> Parser<'a> {
       } else {
         let span = name.span;
 
-        self.expr_node(ExprKind::Path(Path { segments: vec![name.clone()], span }), span)
+        let path = Path { id: self.next_id(), segments: vec![name.clone()], span };
+
+        self.expr_node(ExprKind::Path(path), span)
       };
 
       fields.push(FieldInit { span: name.span.to(value.span), name, value });
@@ -1284,7 +1359,10 @@ impl<'a> Parser<'a> {
       return Ok(Pattern { id: self.next_id(), kind: PatternKind::Literal(Box::new(expr)), span });
     }
 
-    if !matches!(self.kind(), TokenKind::Ident(_) | TokenKind::Keyword(Keyword::SelfType)) {
+    let module_path =
+      matches!(self.kind(), TokenKind::Keyword(Keyword::Pkg | Keyword::Super | Keyword::SelfValue)) && *self.nth_kind(1) == TokenKind::ColonColon;
+
+    if !module_path && !matches!(self.kind(), TokenKind::Ident(_) | TokenKind::Keyword(Keyword::SelfType)) {
       return Err(self.unexpected("a pattern"));
     }
 
@@ -1557,6 +1635,25 @@ mod tests {
 
     assert_eq!(errors, vec!["E0100", "E0100"]);
     assert_eq!(module.items.len(), 3);
+  }
+
+  #[test]
+  fn parses_use_declarations_and_module_paths() {
+    let (module, errors) = parse("use pkg::net::{self, http::Client as C};\nfn main() {}\nuse super::util;");
+
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_eq!(module.uses.len(), 2);
+
+    let UseTreeKind::Group(trees) = &module.uses[0].tree.kind else { panic!("expected a group") };
+    let names = |tree: &UseTree| tree.prefix.iter().map(|segment| segment.name.as_str()).collect::<Vec<_>>().join("::");
+
+    assert_eq!(names(&module.uses[0].tree), "pkg::net");
+    assert_eq!(trees.iter().map(names).collect::<Vec<_>>(), vec!["self", "http::Client"]);
+    assert!(matches!(&trees[1].kind, UseTreeKind::Simple { alias: Some(alias) } if alias.name == "C"));
+    assert_eq!(shape("pkg::a::f(super::super::x)"), "pkg::a::f(super::super::x)");
+    assert_eq!(parse("pub use pkg::a;\nfn main() {}").1, vec!["E0900"]);
+    assert_eq!(parse("pub(pkg) fn f() {}\nfn main() {}").1, vec!["E0100"]);
+    assert_eq!(parse("use pkg::{a, ;\nfn main() {}").1, vec!["E0100"]);
   }
 
   #[test]

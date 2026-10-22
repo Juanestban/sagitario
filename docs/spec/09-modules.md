@@ -1,30 +1,70 @@
 # 9. Modules and packages (F1)
 
+Rationale: [ADR-0010](../adr/0010-modules-and-packages.md),
+[ADR-0024](../adr/0024-modules-imports-and-visibility.md),
+[ADR-0025](../adr/0025-single-pub-visibility.md).
+
 ## Packages
 
-- A package is the unit of compilation and distribution, described by `sagitario.toml`
-  (name, version, kind `bin` or `lib`).
-- Entry points: `src/main.sag` for binaries, `src/lib.sag` for libraries.
+- A package is the unit of compilation and distribution. With the package manager (post-MVP)
+  it is described by `sagitario.toml` (name, version, kind `bin` or `lib`), with the entry
+  points `src/main.sag` for binaries and `src/lib.sag` for libraries.
+- **F1:** a program is built from its entry file, `sag build dir/main.sag`. The entry file is
+  the root module, `pkg`, and its directory is the package root.
 
 ## Modules
 
 - **Each file is a module**, implicitly. There are no `mod` declarations.
-- The directory structure is the module structure: `src/net/http.sag` is the module
-  `net::http`.
+- The directory structure is the module structure: `net/http.sag`, next to the entry file, is
+  the module `pkg::net::http`. A directory without a file of its own (`net/` without
+  `net.sag`) is an empty module that only holds submodules.
+- File and directory names must be identifiers and match the path exactly, also on
+  case-insensitive file systems.
+- Only the modules that the entry file reaches through paths (directly or through other
+  modules) are compiled; other `.sag` files are ignored.
 - Circular imports between modules of the same package are allowed (the whole package is
   analyzed together). Cycles between packages are not allowed.
+- Items, imports and submodules share one namespace per module: a function or type cannot
+  have the name of a submodule, and a name cannot be declared or imported twice.
+
+## Paths
+
+Paths are logical, never relative file paths. Their first segment is one of:
+
+| Root | Refers to |
+|---|---|
+| `pkg` | The root of the current package (Rust's `crate`) |
+| `self` | The current module |
+| `super` | The parent module; it can repeat at the start: `super::super::x` |
+| `std` | The standard library (not available yet) |
+| A name in scope | An item or import of the current module, such as an imported module |
+
+Dependency packages will be further roots once the package manager exists.
+
+Qualified paths can be written wherever a name can: `pkg::util::format(x)`,
+`geo::Point { x: 1, y: 2 }`, `const p: geo::Point = ...`, `shapes::Shape::Circle(r)` in a
+pattern.
 
 ## Imports
 
 ```sag
 use std::io;
-use net::http::{Client, Request};
+use pkg::net::http::{Client, Request};
 use pkg::util::format;
+use pkg::geometry::{self, Point as P};
+use super::shapes;
 ```
 
-- Paths are logical, never relative file paths.
-- `pkg::` refers to the root of the current package; `std::` to the standard library;
-  other roots are dependency package names.
+- `use` brings a module, function, struct or enum into the current module under its last
+  name, or under the name given with `as`. Inside braces, `self` names the module before the
+  braces, and groups can nest: `use pkg::{a::B, c::{self, D}};`.
+- A `use` path starts with `pkg`, `self`, `super` or `std`.
+- `use` declarations appear at module level, in any position, and apply to the whole module.
+- An imported name shadows a prelude name, like a declared one. Importing a name that is
+  already declared or imported in the module is an error; an import that is never used is a
+  warning.
+- Not in the MVP: re-exports (`pub use`), glob imports (`use a::*`), importing the variants
+  or functions of a type (`use Color::Red`) and `use` inside blocks.
 
 ## Prelude
 
@@ -39,11 +79,11 @@ Every module implicitly sees these names, without `use`:
 - `print` and `println` write to stdout, `eprintln` to stderr (`println`/`eprintln` add a
   newline). If writing fails they **panic**, like Rust's `println!`. Code that must handle
   I/O errors uses the `std::io` functions, which return `Result<(), io::Error>`.
-- The prelude cannot be extended by user code. A local declaration with the same name
-  shadows a prelude name.
+- The prelude cannot be extended by user code. A local declaration or an import with the same
+  name shadows a prelude name.
 
 ```sag
-pub fn main() {
+fn main() {
   println("hello");
 }
 ```
@@ -52,8 +92,15 @@ pub fn main() {
 
 | Modifier | Visible in |
 |---|---|
-| (none) | The declaring module (file) only |
-| `pub(pkg)` | The whole package |
-| `pub` | Everywhere, including other packages |
+| (none) | The declaring module and its submodules |
+| `pub` | Every module that imports it, including other packages' |
 
-Class members follow their own rules (`pub`/`prv`, mandatory); see [classes](04-classes.md).
+- As in Rust, a submodule sees the private items of all its ancestors: code in
+  `net/http.sag` can call a private function of the root with `pkg::helper()` or
+  `super::super::helper()`. A private item of `net/http.sag` is not visible in `net.sag`.
+- There are no restricted forms such as Rust's `pub(crate)`: `pub(pkg)` is a syntax error.
+- Modules themselves are visible in the whole package.
+- Struct members follow their own rules (`pub`/`prv`, mandatory; a `prv` member is visible
+  only inside its struct); enum variants have their enum's visibility. Class members follow
+  [classes](04-classes.md).
+- A `pub` item whose signature or fields mention a private type gets a warning: code elsewhere could receive values of a type it cannot name.
