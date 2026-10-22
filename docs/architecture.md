@@ -125,8 +125,16 @@ to forward arguments to the program.
 - `sag build main.sag` writes the executable next to the source (`main` / `main.exe`);
   `--emit-c` also writes `main.c` there (it includes `sagitario_runtime.h` from `runtime/`).
   `sag run` builds into a temporary directory that is removed afterwards.
-- The driver reports diagnostics after each phase (lexing, parsing, resolution, typing) and
-  stops at the first phase with errors. Continuing further to report more errors at once is
-  part of F1 increment 3.
+- The driver stops after lexing or parsing if they report errors (an incomplete syntax tree
+  would only cause confusing follow-up errors); otherwise resolution, type checking and flow
+  analysis run together, so one run reports all their errors and warnings.
+- Diagnostics are printed in source order. They carry secondary labels ("previous definition
+  here", "expected because of this type"), notes and `help:` suggestions, including "a name
+  with a similar spelling exists" for unresolved names.
+- The human format is colored when stderr is a terminal; `NO_COLOR` disables and
+  `CLICOLOR_FORCE=1` forces it. On Windows, colors are only used in terminals known to support
+  ANSI codes (Windows Terminal, VS Code, MSYS2/mintty, ConEmu).
+- A run with errors ends with `error: could not compile ... due to N previous errors`; a run
+  with only warnings ends with `warning: ... generated N warnings`.
 - Diagnostic codes are registered in `crates/sagitario_diagnostics/src/codes.rs`, with one
   range per phase.

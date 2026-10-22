@@ -40,8 +40,13 @@ pub fn main() { ... }
 - `// sag-flags: --release` passes extra options to `sag run` (e.g. to test release-mode
   wrapping).
 - Panics print `panic at <file>:<line>: <message>`; `expect-panic` matches a substring.
-- `//~ ERROR Ennnn` asserts a diagnostic with that code on the same line. Every expected
-  diagnostic must appear and no unexpected error may appear.
+- `//~ ERROR Ennnn` and `//~ WARN Wnnnn` assert a diagnostic with that code on the same line.
+  Several can share a line: `//~ ERROR E0311, WARN W0001 WARN W0002`.
+- In `compile-fail`, every reported error **and warning** must be annotated, and every
+  annotation must be reported. A file with only `WARN` annotations must compile (exit code 0);
+  otherwise the exit code must be 1. Prefix incidental bindings with `_` to keep tests focused.
+- `every_diagnostic_code_has_a_compile_fail_test` fails if a code in
+  `crates/sagitario_diagnostics/src/codes.rs` has no `compile-fail` case.
 
 ## Memory checks
 

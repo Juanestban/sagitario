@@ -199,7 +199,17 @@ impl Flow<'_> {
     };
 
     if let Some(message) = error {
-      self.report(Diagnostic::error(codes::ASSIGN_TO_CONST, span, message).with_note(format!("declare `{}` with `var` to reassign it", info.name)));
+      let declared = match info.kind {
+        LocalKind::Param => "parameter declared here",
+        LocalKind::ForVar => "loop variable declared here",
+        _ => "declared with `const` here",
+      };
+
+      self.report(
+        Diagnostic::error(codes::ASSIGN_TO_CONST, span, message)
+          .with_label(info.span, declared)
+          .with_help(format!("declare `{}` with `var` to reassign it", info.name)),
+      );
     }
 
     set(&mut self.state.assigned, id, true);
@@ -215,14 +225,18 @@ impl Flow<'_> {
 
     set(&mut self.reported, id, true);
 
-    let name = self.info(id).map_or("?", |info| info.name.as_str()).to_string();
+    let Some(info) = self.info(id).cloned() else { return };
     let message = if get(&self.state.maybe, id) {
-      format!("`{name}` may be used before being assigned")
+      format!("`{}` may be used before being assigned", info.name)
     } else {
-      format!("`{name}` is used before being assigned")
+      format!("`{}` is used before being assigned", info.name)
     };
 
-    self.report(Diagnostic::error(codes::UNASSIGNED_BINDING, span, message));
+    self.report(
+      Diagnostic::error(codes::UNASSIGNED_BINDING, span, message)
+        .with_label(info.span, "declared here without a value")
+        .with_help("assign it on every path before this use"),
+    );
   }
 
   fn expr(&mut self, expr: &Expr) {
@@ -391,7 +405,7 @@ impl Flow<'_> {
       if !used && !local.name.starts_with('_') {
         self.diagnostics.push(
           Diagnostic::warning(codes::UNUSED_BINDING, local.span, format!("unused binding `{}`", local.name))
-            .with_note(format!("prefix it with an underscore to silence this warning: `_{}`", local.name)),
+            .with_help(format!("prefix it with an underscore to silence this warning: `_{}`", local.name)),
         );
       }
 
@@ -447,8 +461,8 @@ mod tests {
   fn rejects_reassigning_consts_params_and_loop_variables() {
     assert_eq!(codes_of("const x = 1; x = 2; println(`${x}`);"), vec!["E0308"]);
     assert_eq!(codes_of("const x: i32; while true { x = 1; } println(`${x}`);"), vec!["E0308", "E0309"]);
-    assert_eq!(codes_of("const x: i32; loop { if true { x = 1; continue; } break; }"), vec!["E0308", "W0001"]);
-    assert_eq!(codes_of("for i in 0..3 { i = 1; }"), vec!["E0308", "W0001"]);
+    assert_eq!(codes_of("const x: i32; loop { if true { x = 1; continue; } break; }"), vec!["W0001", "E0308"]);
+    assert_eq!(codes_of("for i in 0..3 { i = 1; }"), vec!["W0001", "E0308"]);
     assert_eq!(codes_of("const x = 1; x += 1;"), vec!["E0308"]);
   }
 

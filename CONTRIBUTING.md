@@ -37,7 +37,8 @@ Formatting is defined by `rustfmt.toml` and lint policy by `Cargo.toml` and `cli
 
 1. The spec section is updated.
 2. A `run-pass` test exists, plus one `compile-fail` test per rule that can be violated.
-3. New diagnostics have a registered code and a clear message.
+3. New diagnostics have a registered code, a clear message and a `compile-fail` case (enforced
+   by the test suite); add labels or `help` when they point to the fix.
 4. `cargo fmt --check`, clippy with `-D warnings` and `cargo test --workspace` pass on all CI
    platforms.
 

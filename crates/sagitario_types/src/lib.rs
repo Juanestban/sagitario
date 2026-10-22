@@ -165,8 +165,16 @@ impl TypedModule {
 }
 
 pub fn check(module: &Module, resolution: &Resolution, diagnostics: &mut Diagnostics) -> TypedModule {
-  let mut checker =
-    Checker { resolution, diagnostics, typed: TypedModule::default(), locals: Vec::new(), ret: Type::Unit, function: FnId(0), loops: Vec::new() };
+  let mut checker = Checker {
+    resolution,
+    diagnostics,
+    typed: TypedModule::default(),
+    locals: Vec::new(),
+    ret: Type::Unit,
+    ret_span: None,
+    function: FnId(0),
+    loops: Vec::new(),
+  };
   let decls = resolution.fn_decls(module);
 
   for (_, decl) in &decls {
@@ -215,6 +223,8 @@ struct Checker<'a> {
   /// is first assigned.
   locals: Vec<Option<Type>>,
   ret: Type,
+  /// The current function's return type annotation, for "expected because of" labels.
+  ret_span: Option<Span>,
   function: FnId,
   loops: Vec<LoopCx>,
 }
@@ -245,6 +255,7 @@ impl Checker<'_> {
 
     self.function = id;
     self.ret = sig.ret.clone();
+    self.ret_span = decl.return_type.as_ref().map(|ty| ty.span);
     self.locals = vec![None; local_count];
 
     for (index, param) in sig.params.iter().enumerate() {
@@ -258,10 +269,14 @@ impl Checker<'_> {
     if !body_ty.fits(&sig.ret) {
       let span = decl.body.tail.as_ref().map_or(decl.body.span, |tail| tail.span);
 
-      self.diagnostics.push(
-        Diagnostic::error(codes::MISMATCHED_TYPES, span, format!("expected `{}`, found `{body_ty}`", sig.ret))
-          .with_note(format!("the function `{}` must return a value of type `{}` on every path", decl.name.name, sig.ret)),
-      );
+      let mut diagnostic = Diagnostic::error(codes::MISMATCHED_TYPES, span, format!("expected `{}`, found `{body_ty}`", sig.ret))
+        .with_note(format!("the function `{}` must return a value of type `{}` on every path", decl.name.name, sig.ret));
+
+      if let Some(ret_span) = self.ret_span {
+        diagnostic = diagnostic.with_label(ret_span, "expected because of the return type");
+      }
+
+      self.diagnostics.push(diagnostic);
     }
 
     let locals = std::mem::take(&mut self.locals);
@@ -310,7 +325,14 @@ impl Checker<'_> {
           "char" => Type::Char,
           "String" => Type::String,
           _ => {
-            self.error(codes::UNRESOLVED_NAME, segment.span, format!("cannot find type `{name}`"));
+            let known = IntTy::ALL.iter().map(|ty| ty.name()).chain(["f32", "f64", "bool", "char", "String"]);
+            let mut diagnostic = Diagnostic::error(codes::UNRESOLVED_NAME, segment.span, format!("cannot find type `{name}`"));
+
+            if let Some(similar) = sagitario_diagnostics::closest_match(name, known) {
+              diagnostic = diagnostic.with_help(format!("a type with a similar name exists: `{similar}`"));
+            }
+
+            self.diagnostics.push(diagnostic);
 
             Type::Error
           }
@@ -361,7 +383,9 @@ impl Checker<'_> {
         let Some(id) = self.resolution.bindings.get(&stmt.id).copied() else { return Type::Error };
         let init_ty = stmt.init.as_ref().map(|init| match &declared {
           Some(declared) => {
-            self.expect(init, declared);
+            let because = stmt.ty.as_ref().map(|ty| (ty.span, "expected because of this type"));
+
+            self.expect_because(init, declared, because);
 
             declared.clone()
           }
@@ -440,11 +464,24 @@ impl Checker<'_> {
   }
 
   fn expect(&mut self, expr: &Expr, expected: &Type) {
+    self.expect_because(expr, expected, None);
+  }
+
+  /// Like `expect`, pointing at what imposes the expected type when it is a mismatch.
+  fn expect_because(&mut self, expr: &Expr, expected: &Type, because: Option<(Span, &str)>) {
     let actual = self.expr(expr, Some(expected));
 
-    if !actual.fits(expected) {
-      self.mismatch(expr.span, expected, &actual);
+    if actual.fits(expected) {
+      return;
     }
+
+    let mut diagnostic = Diagnostic::error(codes::MISMATCHED_TYPES, expr.span, format!("expected `{expected}`, found `{actual}`"));
+
+    if let Some((span, message)) = because {
+      diagnostic = diagnostic.with_label(span, message);
+    }
+
+    self.diagnostics.push(diagnostic);
   }
 
   fn mismatch(&mut self, span: Span, expected: &Type, actual: &Type) {
@@ -543,7 +580,11 @@ impl Checker<'_> {
         let ret = self.ret.clone();
 
         match value {
-          Some(value) => self.expect(value, &ret),
+          Some(value) => {
+            let because = self.ret_span.map(|span| (span, "expected because of the return type"));
+
+            self.expect_because(value, &ret, because);
+          }
           None if !Type::Unit.fits(&ret) => {
             self.error(codes::MISMATCHED_TYPES, expr.span, format!("expected `{ret}`, found `()`: `return` needs a value"));
           }
@@ -744,10 +785,14 @@ impl Checker<'_> {
       (Type::Error, _) | (_, Type::Error) => Type::Error,
       _ if then_ty == else_ty => then_ty,
       _ => {
-        self.diagnostics.push(
-          Diagnostic::error(codes::MISMATCHED_TYPES, else_branch.span, format!("expected `{then_ty}`, found `{else_ty}`"))
-            .with_note("both branches of an `if` must have the same type"),
-        );
+        let mut diagnostic = Diagnostic::error(codes::MISMATCHED_TYPES, else_branch.span, format!("expected `{then_ty}`, found `{else_ty}`"))
+          .with_note("both branches of an `if` must have the same type");
+
+        if let Some(tail) = &then_block.tail {
+          diagnostic = diagnostic.with_label(tail.span, format!("this branch has type `{then_ty}`"));
+        }
+
+        self.diagnostics.push(diagnostic);
 
         Type::Error
       }
