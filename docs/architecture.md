@@ -1,0 +1,103 @@
+# Compiler architecture
+
+How the `sag` compiler is structured. Rationale: [ADR-0001](adr/0001-compile-to-c-via-sir.md),
+[ADR-0015](adr/0015-compiler-architecture-and-toolchain.md).
+
+## Pipeline
+
+```
+.sag files ─▶ lexer ─▶ parser ─▶ AST ─▶ resolve ─▶ types ─▶ SIR ─▶ codegen_c ─▶ .c ─▶ clang/gcc ─▶ executable
+                                                                       ▲
+                                                         runtime/ (C) ─┘ compiled and linked together
+```
+
+Phases communicate only through data structures (tokens, AST, typed AST, SIR). There is no
+global mutable state; each crate can be tested in isolation.
+
+## Repository layout (target)
+
+```
+Cargo.toml          virtual workspace; shared versions in [workspace.dependencies]
+crates/
+  sagitario_span/         source files, file ids, byte offsets, spans, line/column mapping
+  sagitario_diagnostics/  diagnostics (code E0001…, severity, spans, notes) and rendering
+  sagitario_lexer/        hand-written lexer: text → tokens
+  sagitario_ast/          AST definitions
+  sagitario_parser/       recursive descent + Pratt parsing for expressions: tokens → AST
+  sagitario_resolve/      module tree from files, `use`, name resolution, visibility
+  sagitario_types/        type checking, local inference, generics, inheritance, interfaces
+  sagitario_sir/          SIR definition + lowering from typed AST + retain/release insertion
+  sagitario_codegen_c/    SIR → C11 text
+  sagitario_driver/       orchestrates the pipeline, embeds the runtime, invokes the C compiler
+  sagitario_cli/          the `sag` binary
+runtime/            minimal C runtime (ARC, panic, String, allocation, basic I/O)
+std/                standard library written in Sagitario
+tests/              end-to-end suites (see testing.md)
+```
+
+## Crate dependency rule
+
+Dependencies flow strictly forward through the pipeline:
+
+```
+span ◀─ diagnostics ◀─ lexer ◀─ parser ─▶ ast
+                                  ▲
+resolve ◀─ types ◀─ sir ◀─ codegen_c ◀─ driver ◀─ cli
+```
+
+- A crate never depends on a later phase.
+- Core crates (`sagitario_span` through `sagitario_codegen_c`) have **zero external
+  dependencies**. `sagitario_driver` should stay dependency-free too; `sagitario_cli` may use
+  CLI crates. Dev-dependencies (e.g. `insta`) are allowed everywhere.
+- Rust code is written to be portable to Sagitario (F5): plain structs, enums, functions and
+  simple traits; no proc macros or elaborate trait-level generics.
+
+## SIR
+
+Sagitario Intermediate Representation: a typed, lower-level form where
+
+- generics are already monomorphized,
+- ARC retain/release are explicit instructions,
+- method calls are resolved to direct calls or vtable calls (devirtualized when no override
+  exists),
+- `?`, `match` and closures are lowered to explicit control flow and environments.
+
+SIR is the place for ARC optimizations and the boundary behind which other backends (LLVM)
+could be added.
+
+## C code generation
+
+- Output is strict, portable **C11**: no GCC/clang extensions (no statement expressions, no
+  bare `__attribute__`; any compiler-specific feature hides behind a runtime macro with a
+  portable fallback).
+- **No undefined behavior**: signed arithmetic goes through runtime helpers that detect
+  overflow (panic in debug, wrap in release); shifts, division and indexing are checked.
+- `#line` directives map C back to `.sag` sources.
+- `sag build --emit-c` writes the generated C for inspection.
+- Value types become C structs; enums become tagged unions; `Option<ClassRef>` is a nullable
+  pointer; `Result` is a tagged union.
+
+## Runtime
+
+Minimal C, embedded in the `sag` binary and compiled with every program:
+
+- ARC object header and retain/release (non-atomic in the MVP),
+- panic (message, file, line, exit code 101),
+- `String` storage and UTF-8 helpers, allocation,
+- basic I/O used by `std`,
+- in test mode, a live-object counter that fails the run if it is non-zero at exit.
+
+Anything expressible in Sagitario belongs in `std/` instead.
+
+## C toolchain
+
+- Official compiler: **clang** on Windows (UCRT + MSVC linker), Linux and macOS; **gcc** is
+  also tested on Linux.
+- Detection order: `SAG_CC` environment variable or `--cc` flag, then `clang` on `PATH`, then
+  `gcc`. If none is found, `sag` fails with installation instructions per OS.
+- Debug builds of tests use `-fsanitize=address,undefined` where supported.
+
+## CLI
+
+`sag build`, `sag run`, `sag check` (front end only, no C compilation), with `--emit-c` and
+`--cc`.
