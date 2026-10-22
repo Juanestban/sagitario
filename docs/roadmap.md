@@ -44,6 +44,9 @@ zero live ARC objects at exit and clean ASan.
 ## Deferred decisions
 
 Revisit after the MVP: `protected` visibility, `weak` captures in closures, operator
-overloading and derived `Eq`, binding generation, internationalized diagnostics.
+overloading and derived `Eq`, binding generation, internationalized diagnostics, automatic
+error conversion with `From<T>` (and implementing one generic interface several times),
+`Error::source()` and backtraces, a `Display` interface, slices, open ranges, general tuples,
+raw strings, `@test` / `@deprecated`, static fields and mutable globals, `sag doc`.
 Undecided points needed during the MVP are tracked as open questions in the
 [spec index](spec/README.md#open-questions).

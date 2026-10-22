@@ -24,8 +24,8 @@ fn main() {
 extern "C" fn add(a: i32, b: i32) -> i32 { a + b }
 ```
 
-- `extern "C" fn` gives a function the C ABI; an export attribute sets its symbol name.
-  (The attribute syntax is open question Q2.)
+- `extern "C" fn` gives a function the C ABI; `@export("symbol")` sets its exported symbol
+  name.
 - Exported functions allow building Sagitario as a static or dynamic library (build modes
   beyond executables are F3).
 
@@ -38,7 +38,15 @@ extern "C" fn add(a: i32, b: i32) -> i32 { a + b }
 ## C-compatible types
 
 - The `ffi` module provides C types: `c_int`, `c_char`, `CStr`, etc.
-- `#[repr(C)]` gives a struct C layout (attribute syntax: Q2).
+- `@repr(C)` gives a struct C layout:
+
+```sag
+@repr(C)
+struct Timespec {
+  pub tv_sec: i64;
+  pub tv_nsec: i64;
+}
+```
 - Class references do not cross the FFI boundary directly. They are passed as opaque handles,
   with explicit retain/release inside `unsafe`.
 

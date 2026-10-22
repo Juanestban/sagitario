@@ -47,6 +47,17 @@ const dog = new Dog("Rex");
   no field is read before it is assigned.
 - In a subclass, `zod.new(...)` **must be the first statement** of `new` when the parent
   declares a constructor.
+- `new` cannot be called as `ClassName::new(...)`. Other functions without `self` are static
+  and are called as `ClassName::name(...)`:
+
+```sag
+class Dog extends Animal {
+  pub fn new(name: String) { zod.new(name, 0); }
+  pub fn puppy() -> Dog { new Dog("Puppy") }
+}
+
+const d = Dog::puppy();
+```
 
 ## Inheritance
 

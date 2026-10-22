@@ -15,15 +15,37 @@ interface Pet extends Named {
 
 - An interface declares method signatures and may provide default implementations.
 - `interface A extends B, C` composes interfaces.
-- Both `class` and `struct` can implement interfaces. Classes use
-  `class X impl I1, I2`; the struct syntax is open question Q7.
+- `class`, `struct` and `enum` implement interfaces with the same form:
+  `class A extends B impl I1, I2`, `struct P impl I1`, `enum E impl I1`.
 - A type implementing an interface must provide every method without a default.
+- Inside an interface, `Self` names the implementing type:
+
+```sag
+interface Clone {
+  fn clone(self) -> Self;
+}
+```
 
 ## Interfaces as types
 
 An interface can be used as a type (`const shapes: List<Shape> = ...`). Such values are
 references with a vtable and use **dynamic dispatch**, like interface types in Java/C# or
 `dyn Trait` in Rust, but without extra syntax.
+
+An interface that uses `Self` in a parameter or return type cannot be used as a type (e.g.
+`List<Clone>` is an error): the vtable could not know the concrete type to return.
+
+## The `Error` interface (F2)
+
+```sag
+interface Error {
+  fn message(self) -> String;
+}
+```
+
+Standard library error types implement `Error`. Post-MVP: `source()` for error chains,
+backtraces, and a separate `Display` interface designed together with interpolation of
+user types.
 
 ## Generics
 

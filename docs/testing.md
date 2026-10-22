@@ -17,8 +17,7 @@ invoked by `cargo test --workspace`. They require a C compiler (see
 
 ## Annotations
 
-Annotations are comments inside the `.sag` test file. (The comment syntax is still open
-question Q1 in the spec; `//` is assumed here.)
+Annotations are line comments inside the `.sag` test file.
 
 ```sag
 // expect-stdout: total = 6

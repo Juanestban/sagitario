@@ -97,15 +97,6 @@ an ADR when the choice is significant) before the feature that needs them.
 
 | # | Question | Needed by |
 |---|---|---|
-| Q1 | Comment syntax. Examples use `//`; block comments (`/* */`) and doc comments are undecided. | F1 |
-| Q2 | Attribute syntax. Both `@export("name")` and `#[repr(C)]` appeared during design; pick one form. | F1 |
-| Q3 | Are visibility modifiers mandatory on `struct` members (as on class members)? Examples use `pub`. | F1 |
-| Q4 | Range syntax for `for` loops (e.g. `0..10`, inclusive form). | F1 |
-| Q5 | Fixed-size array type syntax vs. `List<T>`; type of the literal `[1, 2, 3]`. | F1 |
-| Q6 | Numeric literal forms: hex/octal/binary prefixes, `_` separators, suffixes. | F1 |
-| Q7 | Methods on `enum`s (there are no `impl` blocks) and how a `struct`/`enum` declares implemented interfaces. | F1/F2 |
-| Q8 | Static/associated functions other than `new` (e.g. `Point::origin()`), and whether structs may declare `fn new`. | F1 |
-| Q9 | A `Self` type and the unit type spelling (examples use `()`). | F1 |
-| Q10 | How `?` converts between error types (a `From`-like interface or exact match only). | F1 |
-| Q11 | Members of the `Error` interface. | F1 |
 | Q12 | Syntax for declaring `weak` references. | F2 |
+
+Q1–Q11 were resolved in [ADR-0017](../adr/0017-resolution-of-open-questions-q1-q11.md).

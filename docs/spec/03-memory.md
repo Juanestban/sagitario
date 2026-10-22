@@ -52,6 +52,36 @@ const q = Point { x: 0.0 };
 q.move_by(1.0);   // error: `q` is not `var`
 ```
 
+## Struct members (F1)
+
+```sag
+struct Point impl Display {
+  pub x: f64;
+  pub y: f64;
+
+  pub fn new(x: f64, y: f64) -> Self { Self { x: x, y: y } }
+  pub fn origin() -> Self { Self { x: 0.0, y: 0.0 } }
+  pub fn len(self) -> f64 { (self.x * self.x + self.y * self.y).sqrt() }
+}
+```
+
+- Fields and methods are declared inside the struct body; every member **must** declare
+  `pub` or `prv`, as in classes. `prv` means visible only inside the struct.
+- A struct literal `Point { ... }` is only valid where **all** its fields are accessible.
+  Structs with `prv` fields are built from outside through a static function.
+- `struct Name impl I1, I2` implements interfaces (F2). Structs never use `extends`.
+
+## Static functions (F1)
+
+- A function declared inside a `struct`, `enum` or `class` without a `self` parameter is
+  **static** and is called as `Type::name(...)`. There is no `static` keyword.
+- In structs and enums, `new` is an ordinary static function by convention (it returns the
+  type and is called `Point::new(...)`).
+- In classes, `new` is the special initializer (see [classes](04-classes.md#construction))
+  and can only be invoked through `new ClassName(...)`, never as `ClassName::new(...)`.
+- There are no static fields and no mutable global variables in the MVP; use module-level
+  `const`.
+
 ## Class field mutability (F2)
 
 - Every class field is declared `const` (immutable after construction) or `var` (mutable).

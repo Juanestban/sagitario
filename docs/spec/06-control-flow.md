@@ -27,8 +27,21 @@ loop { if done() { break; } }
 for item in items { ... }
 ```
 
-- `for` iterates over ranges (syntax: open question Q4) and, from F2, over any iterable.
+- `for` iterates over ranges and arrays (F1) and, from F2, over any iterable.
 - `break` and `continue` apply to the innermost loop.
+
+## Ranges (F1)
+
+```sag
+for i in 0..10 { ... }    // 0 to 9
+for i in 1..=10 { ... }   // 1 to 10
+```
+
+- `a..b` is half-open (includes `a`, excludes `b`); `a..=b` is closed.
+- Both bounds must be integers of the same type (no implicit conversions).
+- If `a > b` the range is empty; it does not panic.
+- F2: `(0..10).step_by(2)` and `(0..10).rev()` through iterators.
+- Open ranges (`..b`, `a..`) are post-MVP.
 
 ## `match`
 
