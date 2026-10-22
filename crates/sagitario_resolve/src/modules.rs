@@ -122,7 +122,7 @@ pub(crate) fn resolve_imports(resolution: &mut Resolution, package: &Package, no
 
     let item = match resolved {
       Some((Named::Item(item), _, [])) => item,
-      Some((Named::Item(ItemRef::Type(_)) | Named::Prelude(_), _, _)) => {
+      Some((Named::Item(ItemRef::Type(_) | ItemRef::Std(crate::StdItem::CString)) | Named::Prelude(_), _, _)) => {
         resolver.diagnostics.push(Diagnostic::error(
           codes::NOT_IMPLEMENTED,
           last.span,
@@ -204,6 +204,13 @@ pub(crate) fn report_private_interfaces(resolution: &Resolution, package: &Packa
             checks.push((&function.name.name, signature_types(function)));
           }
         }
+        Item::Extern(block) => {
+          for function in block.functions.iter().filter(|function| public(function.visibility)) {
+            let types = function.params.iter().map(|param| &param.ty).chain(function.return_type.as_ref()).collect();
+
+            checks.push((&function.name.name, types));
+          }
+        }
         _ => {}
       }
 
@@ -260,7 +267,7 @@ fn type_paths<'a>(ty: &'a TypeExpr, out: &mut Vec<&'a Path>) {
         type_paths(arg, out);
       }
     }
-    TypeExprKind::Array { elem, .. } => type_paths(elem, out),
+    TypeExprKind::Array { elem, .. } | TypeExprKind::Ptr { pointee: elem, .. } => type_paths(elem, out),
   }
 }
 
@@ -314,6 +321,13 @@ pub fn module_references(module: &Module) -> Vec<Vec<String>> {
 
         for function in &decl.functions {
           fn_paths(function, &mut paths);
+        }
+      }
+      Item::Extern(block) => {
+        for function in &block.functions {
+          for ty in function.params.iter().map(|param| &param.ty).chain(function.return_type.as_ref()) {
+            type_paths(ty, &mut paths);
+          }
         }
       }
     }
@@ -470,7 +484,7 @@ fn expr_paths<'a>(expr: &'a Expr, out: &mut Vec<&'a Path>) {
       expr_paths(start, out);
       expr_paths(end, out);
     }
-    ExprKind::Block(block) | ExprKind::Loop { body: block } => block_paths(block, out),
+    ExprKind::Block(block) | ExprKind::Loop { body: block } | ExprKind::Unsafe(block) => block_paths(block, out),
     ExprKind::If { cond, then_block, else_branch } => {
       expr_paths(cond, out);
       block_paths(then_block, out);

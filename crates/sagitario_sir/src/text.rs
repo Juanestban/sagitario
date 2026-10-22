@@ -142,6 +142,31 @@ impl FnLowering<'_> {
     Ok(())
   }
 
+  /// `CString::new(text)`: `Err` with Rust's message when the text contains a NUL byte.
+  pub(crate) fn cstring_new(&mut self, ty: &Type, text: Operand) -> Operand {
+    // Both are always written by the runtime: the C string or null, the message or "".
+    let raw = self.temp(Type::CString);
+    let message = self.temp(Type::String);
+
+    self.pending.push(raw);
+    self.pending.push(message);
+
+    let args = vec![
+      text,
+      Operand::Ref(Place { local: raw, projections: Vec::new(), ty: Type::CString }),
+      Operand::Ref(Place { local: message, projections: Vec::new(), ty: Type::String }),
+    ];
+    let created = self.new_value(Type::Bool, Rvalue::Call { callee: runtime("sag_cstring_new"), args });
+    let dest = self.temp(ty.clone());
+    let then_body =
+      vec![Stmt::Retain(Operand::Local(raw)), Stmt::Assign { dest, value: Rvalue::Variant { index: 0, fields: vec![Operand::Local(raw)] } }];
+    let else_body =
+      vec![Stmt::Retain(Operand::Local(message)), Stmt::Assign { dest, value: Rvalue::Variant { index: 1, fields: vec![Operand::Local(message)] } }];
+
+    self.emit(Stmt::If { cond: created, then_body, else_body });
+    self.owned_result(Some(dest))
+  }
+
   pub(crate) fn new_string_builder(&mut self) -> Operand {
     self.new_value(Type::StringBuilder, Rvalue::Call { callee: runtime("sag_builder_new"), args: Vec::new() })
   }

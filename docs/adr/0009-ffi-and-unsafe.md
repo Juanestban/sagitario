@@ -1,6 +1,6 @@
 # 0009. Rust-style FFI and `unsafe`
 
-- Status: Accepted
+- Status: Accepted; refined by [ADR-0026](0026-ffi-details.md)
 - Date: 2026-10-21
 
 ## Context

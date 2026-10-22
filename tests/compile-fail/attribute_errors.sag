@@ -1,0 +1,24 @@
+@inline //~ ERROR E0105
+fn a() {}
+
+@repr(C) //~ ERROR E0105
+fn b() {}
+
+@export(name) //~ ERROR E0105
+extern "C" fn c() {}
+
+@export("d") //~ ERROR E0105
+fn d() {}
+
+@repr(C) //~ ERROR E0900
+enum E { A }
+
+@test //~ ERROR E0900
+fn f() {}
+
+@repr(C) @repr(C) //~ ERROR E0105
+struct S {}
+
+extern "Rust" fn g() {} //~ ERROR E0900
+
+fn main() {}

@@ -4,6 +4,7 @@
 //! reachability.
 
 mod exhaustive;
+mod ffi;
 mod flow;
 mod patterns;
 mod text;
@@ -16,7 +17,9 @@ use sagitario_ast::{
   Visibility,
 };
 use sagitario_diagnostics::{Code, Diagnostic, Diagnostics, codes};
-use sagitario_resolve::{Builtin, EnumId, EnumKind, FnId, LocalId, LocalKind, Res, Resolution, StructId, TypeItem, TypeRes, VariantRef};
+use sagitario_resolve::{
+  Builtin, CType, EnumId, EnumKind, ExternId, FnId, LocalId, LocalKind, Res, Resolution, StructId, TypeItem, TypeRes, VariantRef,
+};
 use sagitario_span::Span;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -112,6 +115,15 @@ pub enum Type {
   Option(Box<Type>),
   /// The prelude's `Result<T, E>`.
   Result(Box<Type>, Box<Type>),
+  /// `*const T` or `*mut T` (docs/spec/10-ffi.md).
+  Ptr {
+    mutable: bool,
+    pointee: Box<Type>,
+  },
+  /// `std::ffi::c_void`, only behind a pointer.
+  CVoid,
+  /// `std::ffi::CString`: an ARC reference to a NUL-terminated copy of a string.
+  CString,
   /// The type of expressions that never produce a value (`return`, `break`, ...). Compatible
   /// with every type; programs cannot write it.
   Never,
@@ -141,7 +153,11 @@ impl Type {
 
   /// Whether a value of type `self` can be used where `expected` is required.
   fn fits(&self, expected: &Type) -> bool {
-    self == expected || matches!(self, Type::Never | Type::Error) || *expected == Type::Error
+    // A `*mut T` can be used as a `*const T`.
+    let const_pointer =
+      matches!((self, expected), (Type::Ptr { mutable: true, pointee }, Type::Ptr { mutable: false, pointee: expected }) if pointee == expected);
+
+    self == expected || const_pointer || matches!(self, Type::Never | Type::Error) || *expected == Type::Error
   }
 
   /// The enum whose variants make up values of this type.
@@ -170,6 +186,9 @@ impl fmt::Display for Type {
       Type::Option(value) => write!(f, "Option<{value}>"),
       Type::Result(value, error) => write!(f, "Result<{value}, {error}>"),
       Type::StringBuilder => f.write_str("StringBuilder"),
+      Type::Ptr { mutable, pointee } => write!(f, "*{} {pointee}", if *mutable { "mut" } else { "const" }),
+      Type::CVoid => f.write_str("c_void"),
+      Type::CString => f.write_str("CString"),
       Type::Never => f.write_str("never"),
       Type::Error => f.write_str("{error}"),
     }
@@ -198,6 +217,8 @@ pub fn builtin_sig(builtin: Builtin) -> FnSig {
   match builtin {
     Builtin::Print | Builtin::Println | Builtin::Eprintln => FnSig { receiver: None, params: vec![Type::String], ret: Type::Unit },
     Builtin::Panic => FnSig { receiver: None, params: vec![Type::String], ret: Type::Never },
+    Builtin::CStringNew => FnSig { receiver: None, params: vec![Type::String], ret: Type::Result(Box::new(Type::CString), Box::new(Type::String)) },
+    Builtin::StringFromC => FnSig { receiver: None, params: vec![ffi::c_string_ptr()], ret: Type::String },
   }
 }
 
@@ -279,6 +300,8 @@ pub enum BuiltinMethod {
 pub struct TypedModule {
   /// Signature of each function, indexed by `FnId`.
   pub sigs: Vec<FnSig>,
+  /// Signature of each C function of the `extern` blocks, indexed by `ExternId`.
+  pub extern_sigs: Vec<FnSig>,
   /// Indexed by `StructId`.
   pub structs: Vec<StructDef>,
   /// Indexed by `EnumId`.
@@ -296,6 +319,10 @@ pub struct TypedModule {
 impl TypedModule {
   pub fn sig(&self, id: FnId) -> Option<&FnSig> {
     self.sigs.get(id.0 as usize)
+  }
+
+  pub fn extern_sig(&self, id: ExternId) -> Option<&FnSig> {
+    self.extern_sigs.get(id.0 as usize)
   }
 
   pub fn struct_def(&self, id: StructId) -> Option<&StructDef> {
@@ -340,11 +367,15 @@ pub fn check(package: &Package, resolution: &Resolution, diagnostics: &mut Diagn
     function: FnId(0),
     owner: None,
     loops: Vec::new(),
+    unsafe_blocks: Vec::new(),
+    pointees: Vec::new(),
   };
 
   checker.struct_defs();
   checker.enum_defs();
   checker.check_recursive_types();
+  checker.check_repr_c_structs();
+  checker.extern_sigs();
 
   let decls = resolution.fn_decls(package);
 
@@ -353,8 +384,14 @@ pub fn check(package: &Package, resolution: &Resolution, diagnostics: &mut Diagn
 
     let sig = checker.signature(decl);
 
+    if decl.extern_c {
+      checker.check_exported(decl, &sig);
+    }
+
     checker.typed.sigs.push(sig);
   }
+
+  checker.check_symbols();
 
   if let Some((id, main)) = decls.iter().find(|(id, _)| Some(*id) == resolution.main) {
     checker.check_main(*id, main);
@@ -363,6 +400,8 @@ pub fn check(package: &Package, resolution: &Resolution, diagnostics: &mut Diagn
   for (id, decl) in &decls {
     checker.function(*id, decl);
   }
+
+  checker.check_pointees();
 
   let typed = checker.typed;
 
@@ -411,6 +450,10 @@ struct Checker<'a> {
   /// The type whose function is being checked, for `Self` and `prv` members.
   owner: Option<TypeItem>,
   loops: Vec<LoopCx>,
+  /// The enclosing `unsafe` blocks, innermost last, with whether each one was needed.
+  unsafe_blocks: Vec<bool>,
+  /// Pointee types, checked once every type is known.
+  pointees: Vec<(Span, Type)>,
 }
 
 impl Checker<'_> {
@@ -629,7 +672,13 @@ impl Checker<'_> {
   }
 
   fn type_expr(&mut self, ty: &TypeExpr) -> Type {
+    self.type_expr_at(ty, false)
+  }
+
+  /// A type, possibly behind a pointer, the only place `c_void` can appear.
+  fn type_expr_at(&mut self, ty: &TypeExpr, behind_pointer: bool) -> Type {
     match &ty.kind {
+      TypeExprKind::Ptr { mutable, pointee } => self.pointer_type(*mutable, pointee),
       TypeExprKind::Unit => Type::Unit,
       TypeExprKind::Array { elem, len } => {
         let elem = self.type_expr(elem);
@@ -643,7 +692,7 @@ impl Checker<'_> {
         let name = path.segments.last().map_or("", |segment| segment.name.as_str());
         let arity = match name {
           _ if self.resolution.type_paths.get(&path.id) == Some(&TypeRes::Error) => return Type::Error,
-          _ if path.segments.len() != 1 || matches!(self.resolution.type_paths.get(&path.id), Some(TypeRes::Item(_))) => None,
+          _ if path.segments.len() != 1 || !matches!(self.resolution.type_paths.get(&path.id), Some(TypeRes::Builtin) | None) => None,
           "Option" => Some(1),
           "Result" => Some(2),
           _ => None,
@@ -676,6 +725,9 @@ impl Checker<'_> {
         // The resolver reports unknown types and resolves program types and module paths.
         match self.resolution.type_paths.get(&path.id) {
           Some(TypeRes::Item(item)) => return self.type_ref(*item),
+          Some(TypeRes::CType(CType::Void)) if !behind_pointer => return self.bare_c_void(path.span),
+          Some(TypeRes::CType(c)) => return ffi::c_type(*c),
+          Some(TypeRes::CString) => return Type::CString,
           Some(TypeRes::Error) => return Type::Error,
           _ => {}
         }
@@ -823,7 +875,7 @@ impl Checker<'_> {
   }
 
   fn assign(&mut self, target: &Expr, op: Option<BinaryOp>, value: &Expr) -> Type {
-    if matches!(target.kind, ExprKind::Field { .. } | ExprKind::Index { .. }) {
+    if matches!(target.kind, ExprKind::Field { .. } | ExprKind::Index { .. } | ExprKind::Unary { op: UnaryOp::Deref, .. }) {
       let target_ty = self.expr(target, None);
 
       self.check_mutable_place(target, PlaceUse::Assign);
@@ -908,6 +960,13 @@ impl Checker<'_> {
       PlaceUse::Assign => codes::IMMUTABLE_PLACE,
       PlaceUse::Receiver(_) => codes::IMMUTABLE_RECEIVER,
     };
+
+    if let Some(pointer) = self.deref_pointer(place) {
+      self.check_pointer_write(place, pointer);
+
+      return;
+    }
+
     let Some(root) = self.place_root(place) else {
       if matches!(place.kind, ExprKind::Path(_)) {
         // Not a binding (an unresolved name or a function): already reported or rejected.
@@ -1006,7 +1065,7 @@ impl Checker<'_> {
       ExprKind::Path(_) => match self.resolution.paths.get(&expr.id) {
         // An unassigned binding without a known type is reported by the flow analysis.
         Some(Res::Local(id)) => self.locals.get(id.0 as usize).cloned().flatten().unwrap_or(Type::Error),
-        Some(Res::Fn(_) | Res::Builtin(_)) => {
+        Some(Res::Fn(_) | Res::Extern(_) | Res::Builtin(_)) => {
           self.error(codes::NOT_IMPLEMENTED, expr.span, "functions used as values are not implemented yet");
 
           Type::Error
@@ -1053,6 +1112,7 @@ impl Checker<'_> {
         Type::Error
       }
       ExprKind::Block(block) => self.block(block, expected),
+      ExprKind::Unsafe(block) => self.unsafe_block(expr, block, expected),
       ExprKind::If { cond, then_block, else_branch } => self.if_expr(cond, then_block, else_branch.as_deref(), expected),
       ExprKind::While { cond, body } => {
         self.expect(cond, &Type::Bool);
@@ -1152,6 +1212,7 @@ impl Checker<'_> {
     }
 
     match op {
+      UnaryOp::Deref => self.deref(expr, operand),
       UnaryOp::Not => {
         self.expect(operand, &Type::Bool);
 
@@ -1252,6 +1313,8 @@ impl Checker<'_> {
       }
       // Byte-wise lexicographic order.
       Type::String => true,
+      // Pointers compare by address.
+      Type::Ptr { .. } => matches!(op, BinaryOp::Eq | BinaryOp::Ne),
       _ => false,
     };
 
@@ -1263,11 +1326,14 @@ impl Checker<'_> {
   }
 
   fn cast(&mut self, inner: &Expr, ty: &TypeExpr) -> Type {
-    let from = self.expr(inner, None);
     let to = self.type_expr(ty);
+    // `0 as *const T` is the null pointer: the literal is a `usize`.
+    let hint = matches!(to, Type::Ptr { .. }).then_some(Type::Int(IntTy::Usize));
+    let from = self.expr(inner, hint.as_ref());
     let valid = match (&from, &to) {
       (Type::Error | Type::Never, _) | (_, Type::Error) => true,
       (from, to) if from == to => true,
+      (Type::Ptr { .. }, Type::Ptr { .. } | Type::Int(IntTy::Usize)) | (Type::Int(IntTy::Usize), Type::Ptr { .. }) => true,
       (Type::Int(_) | Type::Float(_), Type::Int(_) | Type::Float(_)) => true,
       (Type::Bool | Type::Char, Type::Int(_)) => true,
       (Type::Int(IntTy::U8), Type::Char) => true,
@@ -1419,7 +1485,14 @@ impl Checker<'_> {
   fn call(&mut self, expr: &Expr, callee: &Expr, args: &[Expr]) -> Type {
     let sig = match (&callee.kind, self.resolution.paths.get(&callee.id).copied()) {
       (ExprKind::Path(_), Some(Res::Fn(id))) => self.typed.sig(id).cloned(),
-      (ExprKind::Path(_), Some(Res::Builtin(builtin))) => Some(builtin_sig(builtin)),
+      (ExprKind::Path(_), Some(Res::Extern(id))) => self.extern_call_sig(callee, id),
+      (ExprKind::Path(_), Some(Res::Builtin(builtin))) => {
+        if builtin == Builtin::StringFromC {
+          self.require_unsafe(callee.span, "reading a C string");
+        }
+
+        Some(builtin_sig(builtin))
+      }
       (ExprKind::Path(_), None) => None,
       _ => {
         self.error(codes::NOT_IMPLEMENTED, callee.span, "calling values other than functions is not implemented yet");
@@ -1466,6 +1539,11 @@ impl Checker<'_> {
   fn method_call(&mut self, expr: &Expr, receiver: &Expr, method: &Ident, args: &[Expr]) -> Type {
     let receiver_ty = self.expr(receiver, None);
     let name = method.name.as_str();
+
+    if let Some(ty) = self.ffi_method(expr, receiver, &receiver_ty, method, args) {
+      return ty;
+    }
+
     let owner = match &receiver_ty {
       Type::Struct(ty) => TypeItem::Struct(ty.id),
       Type::Enum(ty) => TypeItem::Enum(ty.id),
@@ -1485,7 +1563,7 @@ impl Checker<'_> {
         let mut diagnostic = Diagnostic::error(codes::UNKNOWN_MEMBER, method.span, format!("no method `{name}` on type `{receiver_ty}`"));
 
         if matches!(receiver_ty, Type::Array(..)) {
-          diagnostic = diagnostic.with_help("arrays have the method `len()`");
+          diagnostic = diagnostic.with_help("arrays have the methods `len()`, `as_ptr()` and `as_mut_ptr()`");
         }
 
         self.diagnostics.push(diagnostic);

@@ -29,6 +29,8 @@ pub const CHAINED_OPERATORS: Code = Code("E0102");
 pub const MISSING_VISIBILITY: Code = Code("E0103");
 /// An enum without variants, or a variant with empty `()` or `{}`.
 pub const EMPTY_DECLARATION: Code = Code("E0104");
+/// An unknown, repeated or misplaced attribute, or one with the wrong arguments.
+pub const INVALID_ATTRIBUTE: Code = Code("E0105");
 
 /// A name that does not refer to anything in scope.
 pub const UNRESOLVED_NAME: Code = Code("E0200");
@@ -46,6 +48,8 @@ pub const PRIVATE_MEMBER: Code = Code("E0205");
 pub const INCONSISTENT_BINDINGS: Code = Code("E0206");
 /// An item used outside the modules that can see it.
 pub const PRIVATE_ITEM: Code = Code("E0207");
+/// A C symbol that is not a valid C identifier, is reserved, or is declared incompatibly twice.
+pub const INVALID_SYMBOL: Code = Code("E0208");
 
 /// An expression whose type differs from the expected one.
 pub const MISMATCHED_TYPES: Code = Code("E0300");
@@ -91,6 +95,10 @@ pub const NON_EXHAUSTIVE_MATCH: Code = Code("E0319");
 pub const INVALID_PATTERN: Code = Code("E0320");
 /// `?` on a value or in a function where it cannot propagate.
 pub const INVALID_TRY: Code = Code("E0321");
+/// A type that cannot cross the C boundary (or a pointer to a managed type).
+pub const NOT_FFI_SAFE: Code = Code("E0322");
+/// An operation that needs an `unsafe` block: calling C, dereferencing or offsetting a pointer.
+pub const UNSAFE_REQUIRED: Code = Code("E0323");
 
 /// A language feature that is specified but not implemented yet.
 pub const NOT_IMPLEMENTED: Code = Code("E0900");
@@ -107,6 +115,8 @@ pub const UNREACHABLE_PATTERN: Code = Code("W0004");
 pub const UNUSED_IMPORT: Code = Code("W0005");
 /// A type in the signature or fields of an item that is visible in more places than the type.
 pub const PRIVATE_INTERFACE: Code = Code("W0006");
+/// An `unsafe` block without unsafe operations.
+pub const UNUSED_UNSAFE: Code = Code("W0007");
 
 pub const ALL: &[Code] = &[
   UNEXPECTED_CHARACTER,
@@ -120,6 +130,7 @@ pub const ALL: &[Code] = &[
   CHAINED_OPERATORS,
   MISSING_VISIBILITY,
   EMPTY_DECLARATION,
+  INVALID_ATTRIBUTE,
   UNRESOLVED_NAME,
   DUPLICATE_DEFINITION,
   RESERVED_NAME,
@@ -128,6 +139,7 @@ pub const ALL: &[Code] = &[
   PRIVATE_MEMBER,
   INCONSISTENT_BINDINGS,
   PRIVATE_ITEM,
+  INVALID_SYMBOL,
   MISMATCHED_TYPES,
   WRONG_ARGUMENT_COUNT,
   INTEGER_OUT_OF_RANGE,
@@ -150,6 +162,8 @@ pub const ALL: &[Code] = &[
   NON_EXHAUSTIVE_MATCH,
   INVALID_PATTERN,
   INVALID_TRY,
+  NOT_FFI_SAFE,
+  UNSAFE_REQUIRED,
   NOT_IMPLEMENTED,
   UNUSED_BINDING,
   UNNEEDED_VAR,
@@ -157,6 +171,7 @@ pub const ALL: &[Code] = &[
   UNREACHABLE_PATTERN,
   UNUSED_IMPORT,
   PRIVATE_INTERFACE,
+  UNUSED_UNSAFE,
 ];
 
 #[cfg(test)]

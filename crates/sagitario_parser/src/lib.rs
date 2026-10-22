@@ -3,9 +3,9 @@
 //! diagnostics and the parser recovers at item and statement boundaries.
 
 use sagitario_ast::{
-  ArrayLen, BinaryOp, Block, EnumDecl, Expr, ExprKind, FieldDecl, FieldInit, FieldPattern, FnDecl, Ident, Item, LetStmt, MatchArm, Module, NodeId,
-  Param, Path, Pattern, PatternKind, SelfParam, Stmt, StructDecl, TemplatePart, TypeExpr, TypeExprKind, UnaryOp, UseDecl, UseTree, UseTreeKind,
-  VariantDecl, VariantFieldDecl, VariantFields, Visibility,
+  ArrayLen, BinaryOp, Block, EnumDecl, Export, Expr, ExprKind, ExternBlock, ExternFn, FieldDecl, FieldInit, FieldPattern, FnDecl, Ident, Item,
+  LetStmt, MatchArm, Module, NodeId, Param, Path, Pattern, PatternKind, SelfParam, Stmt, StructDecl, TemplatePart, TypeExpr, TypeExprKind, UnaryOp,
+  UseDecl, UseTree, UseTreeKind, VariantDecl, VariantFieldDecl, VariantFields, Visibility,
 };
 use sagitario_diagnostics::{Diagnostic, Diagnostics, codes};
 use sagitario_lexer::{self as lexer, Keyword, Token, TokenKind};
@@ -21,6 +21,29 @@ pub fn parse_module_from(file: FileId, tokens: Vec<Token>, next_id: &mut u32, di
   let mut parser = Parser::new(file, tokens, next_id, diagnostics);
 
   parser.module(file)
+}
+
+/// An attribute as written; `Parser::apply_attributes` checks it against its item.
+struct Attribute {
+  name: Ident,
+  args: Vec<AttributeArg>,
+  span: Span,
+}
+
+enum AttributeArg {
+  Str(String),
+  Name(String),
+}
+
+/// What an attribute is written before.
+enum AttributeTarget {
+  Fn,
+  /// `extern "C" fn`
+  ExternFn,
+  Struct,
+  Enum,
+  ExternBlock,
+  Member,
 }
 
 /// Marker for a syntax error that has already been reported.
@@ -312,29 +335,257 @@ impl<'a> Parser<'a> {
 
   fn item(&mut self) -> PResult<Option<Item>> {
     let start = self.span();
+    let attributes = self.attributes()?;
     let visibility = self.visibility();
 
     match self.kind().clone() {
-      TokenKind::Keyword(Keyword::Fn) => Ok(Some(Item::Fn(self.fn_decl(visibility, start, false)?))),
-      TokenKind::Keyword(Keyword::Struct) => Ok(Some(Item::Struct(self.struct_decl(visibility, start)?))),
-      TokenKind::Keyword(Keyword::Enum) => Ok(Some(Item::Enum(self.enum_decl(visibility, start)?))),
+      TokenKind::Keyword(Keyword::Fn) => {
+        let decl = self.fn_decl(visibility, start, false)?;
+
+        self.apply_attributes(attributes, AttributeTarget::Fn, None, None);
+
+        Ok(Some(Item::Fn(decl)))
+      }
+      TokenKind::Keyword(Keyword::Struct) => {
+        let mut decl = self.struct_decl(visibility, start)?;
+
+        self.apply_attributes(attributes, AttributeTarget::Struct, None, Some(&mut decl.repr_c));
+
+        Ok(Some(Item::Struct(decl)))
+      }
+      TokenKind::Keyword(Keyword::Enum) => {
+        let decl = self.enum_decl(visibility, start)?;
+
+        self.apply_attributes(attributes, AttributeTarget::Enum, None, None);
+
+        Ok(Some(Item::Enum(decl)))
+      }
+      TokenKind::Keyword(Keyword::Extern) => self.extern_item(visibility, start, attributes).map(Some),
       TokenKind::Keyword(Keyword::Use) => {
         let span = self.span();
 
         Err(self.not_implemented(span, "re-exports (`pub use`)"))
       }
-      TokenKind::Keyword(keyword @ (Keyword::Class | Keyword::Abstract | Keyword::Interface | Keyword::Const | Keyword::Extern)) => {
+      TokenKind::Keyword(keyword @ (Keyword::Class | Keyword::Abstract | Keyword::Interface | Keyword::Const)) => {
         let span = self.span();
 
         Err(self.not_implemented(span, &format!("`{}` items", keyword.as_str())))
       }
-      TokenKind::At => {
-        let span = self.span();
-
-        Err(self.not_implemented(span, "attributes"))
-      }
       _ => Err(self.unexpected("an item")),
     }
+  }
+
+  /// `@name` or `@name(arg, ...)` before an item; the arguments are string literals or names
+  /// (docs/spec/01-lexical.md#attributes).
+  fn attributes(&mut self) -> PResult<Vec<Attribute>> {
+    let mut attributes = Vec::new();
+
+    while self.at(&TokenKind::At) {
+      let start = self.advance().span;
+      let name = self.ident("an attribute name")?;
+      let mut args = Vec::new();
+      let mut end = name.span;
+
+      if self.eat(&TokenKind::LParen) {
+        while !self.at(&TokenKind::RParen) {
+          let arg = match self.kind().clone() {
+            TokenKind::Str(text) => AttributeArg::Str(text),
+            TokenKind::Ident(name) => AttributeArg::Name(name),
+            _ => return Err(self.unexpected("a string or a name")),
+          };
+
+          self.advance();
+          args.push(arg);
+
+          if !self.eat(&TokenKind::Comma) {
+            break;
+          }
+        }
+
+        end = self.expect(&TokenKind::RParen)?.span;
+      }
+
+      attributes.push(Attribute { name, args, span: start.to(end) });
+    }
+
+    Ok(attributes)
+  }
+
+  /// Checks the attributes of an item: `@export("symbol")` on an `extern "C" fn`, `@repr(C)` on
+  /// a struct. Errors are reported and the attribute is ignored.
+  fn apply_attributes(
+    &mut self,
+    attributes: Vec<Attribute>,
+    target: AttributeTarget,
+    mut export: Option<&mut Option<Export>>,
+    mut repr_c: Option<&mut bool>,
+  ) {
+    let mut seen: Vec<String> = Vec::new();
+
+    for attribute in attributes {
+      let name = attribute.name.name.as_str();
+
+      if seen.iter().any(|previous| previous == name) {
+        self.attribute_error(attribute.span, format!("the attribute `@{name}` is repeated"), None);
+
+        continue;
+      }
+
+      seen.push(name.to_string());
+
+      match (name, &target) {
+        ("export", AttributeTarget::ExternFn) => match (attribute.args.as_slice(), export.as_deref_mut()) {
+          ([AttributeArg::Str(symbol)], Some(slot)) => *slot = Some(Export { symbol: symbol.clone(), span: attribute.span }),
+          _ => self.attribute_error(attribute.span, "`@export` takes the exported symbol as a string: `@export(\"name\")`".to_string(), None),
+        },
+        ("repr", AttributeTarget::Struct) => match (attribute.args.as_slice(), repr_c.as_deref_mut()) {
+          ([AttributeArg::Name(repr)], Some(slot)) if repr == "C" => *slot = true,
+          _ => self.attribute_error(attribute.span, "the only representation is `@repr(C)`".to_string(), None),
+        },
+        ("repr", AttributeTarget::Enum) => {
+          self.diagnostics.push(Diagnostic::error(codes::NOT_IMPLEMENTED, attribute.span, "`@repr(C)` on enums is not implemented yet"));
+        }
+        ("test" | "deprecated", _) => {
+          self.diagnostics.push(Diagnostic::error(codes::NOT_IMPLEMENTED, attribute.span, format!("the attribute `@{name}` is not implemented yet")));
+        }
+        ("export", _) => {
+          let help = "write `@export(\"name\") extern \"C\" fn ...`";
+
+          self.attribute_error(attribute.span, "`@export` applies to `extern \"C\"` functions".to_string(), Some(help));
+        }
+        ("repr", _) => self.attribute_error(attribute.span, "`@repr(C)` applies to structs".to_string(), None),
+        _ => self.attribute_error(
+          attribute.span,
+          format!("unknown attribute `@{name}`"),
+          Some("the attributes are `@export(\"symbol\")` and `@repr(C)`"),
+        ),
+      }
+    }
+  }
+
+  fn attribute_error(&mut self, span: Span, message: String, help: Option<&str>) {
+    let mut diagnostic = Diagnostic::error(codes::INVALID_ATTRIBUTE, span, message);
+
+    if let Some(help) = help {
+      diagnostic = diagnostic.with_help(help);
+    }
+
+    self.diagnostics.push(diagnostic);
+  }
+
+  /// `extern "C" fn ...` (a function C can call) or `extern "C" { ... }` (C functions to call).
+  fn extern_item(&mut self, visibility: Visibility, start: Span, attributes: Vec<Attribute>) -> PResult<Item> {
+    self.expect(&TokenKind::Keyword(Keyword::Extern))?;
+
+    match self.kind().clone() {
+      TokenKind::Str(abi) => {
+        let span = self.advance().span;
+
+        if abi != "C" {
+          self.diagnostics.push(Diagnostic::error(codes::NOT_IMPLEMENTED, span, format!("the ABI \"{abi}\" is not supported; write `extern \"C\"`")));
+        }
+      }
+      _ => return Err(self.unexpected("an ABI string such as `\"C\"`")),
+    }
+
+    if self.at(&TokenKind::Keyword(Keyword::Fn)) {
+      let mut decl = self.fn_decl(visibility, start, false)?;
+
+      decl.extern_c = true;
+      self.apply_attributes(attributes, AttributeTarget::ExternFn, Some(&mut decl.export), None);
+
+      return Ok(Item::Fn(decl));
+    }
+
+    self.apply_attributes(attributes, AttributeTarget::ExternBlock, None, None);
+
+    if visibility != Visibility::Module {
+      self.diagnostics.push(
+        Diagnostic::error(codes::UNEXPECTED_TOKEN, start, "an `extern` block has no visibility")
+          .with_help("write `pub` on each function of the block instead"),
+      );
+    }
+
+    self.expect(&TokenKind::LBrace)?;
+
+    let mut functions = Vec::new();
+
+    while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
+      let before = self.pos;
+
+      match self.extern_fn() {
+        Ok(function) => functions.push(function),
+        Err(ParseError) => self.skip_member(),
+      }
+
+      if self.pos == before {
+        self.advance();
+      }
+    }
+
+    let end = self.expect(&TokenKind::RBrace)?.span;
+
+    Ok(Item::Extern(ExternBlock { functions, span: start.to(end) }))
+  }
+
+  /// `fn name(params) -> Ret;` inside an `extern "C"` block.
+  fn extern_fn(&mut self) -> PResult<ExternFn> {
+    let start = self.span();
+    let visibility = self.visibility();
+
+    self.expect(&TokenKind::Keyword(Keyword::Fn))?;
+
+    let name = self.ident("a function name")?;
+
+    self.expect(&TokenKind::LParen)?;
+
+    let params = self.params()?;
+
+    if self.at(&TokenKind::DotDot) || self.at(&TokenKind::DotDotEq) {
+      let span = self.span();
+
+      return Err(self.not_implemented(span, "variadic C functions"));
+    }
+
+    self.expect(&TokenKind::RParen)?;
+
+    let return_type = if self.eat(&TokenKind::Arrow) { Some(self.type_expr()?) } else { None };
+
+    if self.at(&TokenKind::LBrace) {
+      let span = self.span();
+
+      self.diagnostics.push(
+        Diagnostic::error(codes::UNEXPECTED_TOKEN, span, "functions in an `extern` block have no body")
+          .with_help("end the declaration with `;`; to write a function C can call, use `extern \"C\" fn` outside the block"),
+      );
+
+      return Err(ParseError);
+    }
+
+    let end = self.expect(&TokenKind::Semi)?.span;
+
+    Ok(ExternFn { visibility, name, params, return_type, span: start.to(end) })
+  }
+
+  /// The parameters `name: Type, ...` up to the closing `)`, which is not consumed.
+  fn params(&mut self) -> PResult<Vec<Param>> {
+    let mut params = Vec::new();
+
+    while !self.at(&TokenKind::RParen) && !self.at(&TokenKind::DotDot) && !self.at(&TokenKind::DotDotEq) {
+      let param_name = self.ident("a parameter name")?;
+
+      self.expect(&TokenKind::Colon)?;
+
+      let ty = self.type_expr()?;
+
+      params.push(Param { span: param_name.span.to(ty.span), name: param_name, ty });
+
+      if !self.eat(&TokenKind::Comma) {
+        break;
+      }
+    }
+
+    Ok(params)
   }
 
   fn visibility(&mut self) -> Visibility {
@@ -399,7 +650,7 @@ impl<'a> Parser<'a> {
 
     let end = self.expect(&TokenKind::RBrace)?.span;
 
-    Ok(StructDecl { visibility, name, fields, functions, span: start.to(end) })
+    Ok(StructDecl { repr_c: false, visibility, name, fields, functions, span: start.to(end) })
   }
 
   fn enum_decl(&mut self, visibility: Visibility, start: Span) -> PResult<EnumDecl> {
@@ -551,7 +802,9 @@ impl<'a> Parser<'a> {
     let start = self.span();
 
     if self.at(&TokenKind::At) {
-      return Err(self.not_implemented(start, "attributes"));
+      let attributes = self.attributes()?;
+
+      self.apply_attributes(attributes, AttributeTarget::Member, None, None);
     }
 
     let visibility = match self.kind() {
@@ -652,28 +905,14 @@ impl<'a> Parser<'a> {
       }
     }
 
-    let mut params = Vec::new();
-
-    while !self.at(&TokenKind::RParen) {
-      let param_name = self.ident("a parameter name")?;
-
-      self.expect(&TokenKind::Colon)?;
-
-      let ty = self.type_expr()?;
-
-      params.push(Param { span: param_name.span.to(ty.span), name: param_name, ty });
-
-      if !self.eat(&TokenKind::Comma) {
-        break;
-      }
-    }
+    let params = self.params()?;
 
     self.expect(&TokenKind::RParen)?;
 
     let return_type = if self.eat(&TokenKind::Arrow) { Some(self.type_expr()?) } else { None };
     let body = self.block()?;
 
-    Ok(FnDecl { id, visibility, name, self_param, params, return_type, span: start.to(body.span), body })
+    Ok(FnDecl { id, extern_c: false, export: None, visibility, name, self_param, params, return_type, span: start.to(body.span), body })
   }
 
   fn ident(&mut self, expected: &str) -> PResult<Ident> {
@@ -748,6 +987,21 @@ impl<'a> Parser<'a> {
         let path = self.path()?;
 
         Ok(TypeExpr { span: path.span, kind: TypeExprKind::Path(path) })
+      }
+      TokenKind::Star => {
+        self.advance();
+
+        let mutable = match self.kind() {
+          TokenKind::Keyword(Keyword::Const) => false,
+          TokenKind::Ident(name) if name == "mut" => true,
+          _ => return Err(self.unexpected("`const` or `mut` after `*`")),
+        };
+
+        self.advance();
+
+        let pointee = self.type_expr()?;
+
+        Ok(TypeExpr { span: start.to(pointee.span), kind: TypeExprKind::Ptr { mutable, pointee: Box::new(pointee) } })
       }
       _ => Err(self.unexpected("a type")),
     }
@@ -827,11 +1081,6 @@ impl<'a> Parser<'a> {
   fn stmt(&mut self) -> PResult<Option<StmtOrTail>> {
     match self.kind() {
       TokenKind::Keyword(Keyword::Const | Keyword::Var) => return self.let_stmt().map(|stmt| Some(StmtOrTail::Stmt(stmt))),
-      TokenKind::Keyword(Keyword::Unsafe) => {
-        let span = self.span();
-
-        return Err(self.not_implemented(span, "`unsafe` blocks"));
-      }
       TokenKind::Semi => {
         // An empty statement is harmless but almost always a typo.
         return Err(self.unexpected("a statement"));
@@ -993,6 +1242,7 @@ impl<'a> Parser<'a> {
     let op = match self.kind() {
       TokenKind::Minus => UnaryOp::Neg,
       TokenKind::Bang => UnaryOp::Not,
+      TokenKind::Star => UnaryOp::Deref,
       _ => return self.postfix_expr(),
     };
     let start = self.advance().span;
@@ -1134,6 +1384,14 @@ impl<'a> Parser<'a> {
 
         return Ok(self.expr_node(ExprKind::Loop { body }, span));
       }
+      TokenKind::Keyword(Keyword::Unsafe) => {
+        self.advance();
+
+        let body = self.block()?;
+        let span = span.to(body.span);
+
+        return Ok(self.expr_node(ExprKind::Unsafe(body), span));
+      }
       TokenKind::Keyword(Keyword::For) => {
         self.advance();
 
@@ -1186,7 +1444,6 @@ impl<'a> Parser<'a> {
       }
       TokenKind::Keyword(Keyword::Zod) => return Err(self.not_implemented(span, "`zod` expressions")),
       TokenKind::Keyword(Keyword::Match) => return self.match_expr(),
-      TokenKind::Keyword(Keyword::Unsafe) => return Err(self.not_implemented(span, "`unsafe` blocks")),
       _ => return Err(self.unexpected("an expression")),
     };
 
@@ -1654,6 +1911,28 @@ mod tests {
     assert_eq!(parse("pub use pkg::a;\nfn main() {}").1, vec!["E0900"]);
     assert_eq!(parse("pub(pkg) fn f() {}\nfn main() {}").1, vec!["E0100"]);
     assert_eq!(parse("use pkg::{a, ;\nfn main() {}").1, vec!["E0100"]);
+  }
+
+  #[test]
+  fn parses_ffi_declarations() {
+    let (module, errors) = parse(
+      "extern \"C\" { pub fn puts(s: *const c_char) -> c_int; fn free(p: *mut c_void); }
+      @export(\"demo_add\") extern \"C\" fn add(a: i32, b: i32) -> i32 { a + b }
+      @repr(C) struct P { pub x: i32; }
+      fn f(p: *mut i32) { unsafe { *p = *p + 1; } }",
+    );
+
+    assert!(errors.is_empty(), "{errors:?}");
+
+    let [Item::Extern(block), Item::Fn(add), Item::Struct(point), Item::Fn(f)] = module.items.as_slice() else { panic!("unexpected items") };
+
+    assert_eq!(block.functions.len(), 2);
+    assert!(matches!(block.functions[0].params[0].ty.kind, TypeExprKind::Ptr { mutable: false, .. }));
+    assert!(add.extern_c && add.export.as_ref().is_some_and(|export| export.symbol == "demo_add"));
+    assert!(point.repr_c);
+    assert!(matches!(f.body.tail.as_deref().map(|tail| &tail.kind), Some(ExprKind::Unsafe(_))));
+    assert_eq!(parse("extern \"C\" { fn f(x: i32, ...); }").1, vec!["E0900"]);
+    assert_eq!(parse("extern \"C\" { fn f() {} }").1, vec!["E0100"]);
   }
 
   #[test]

@@ -661,6 +661,126 @@ sag_string sag_builder_to_string(sag_builder builder) {
   return sag_string_copy(builder->sb.data, builder->sb.len);
 }
 
+/* ---- FFI --------------------------------------------------------------------------------- */
+
+struct sag_cstring_obj {
+  size_t refcount;
+  char bytes[];
+};
+
+_Noreturn void sag_null_pointer_at(const char *file, int line) {
+  sag_panic_at("null pointer dereference", file, line);
+}
+
+bool sag_cstring_new(sag_string text, sag_cstring *out, sag_string *error) {
+  const void *nul = text.len == 0 ? NULL : memchr(text.ptr, 0, text.len);
+  if (nul != NULL) {
+    static const char prefix[] = "nul byte found in provided data at position: ";
+    sag_sb sb;
+    sag_sb_init(&sb);
+    sag_sb_push_bytes(&sb, prefix, sizeof prefix - 1);
+    sag_sb_push_u64(&sb, (uint64_t)((const uint8_t *)nul - text.ptr));
+    *out = NULL;
+    *error = sag_sb_finish(&sb);
+    return false;
+  }
+  if (text.len > SIZE_MAX - sizeof(struct sag_cstring_obj) - 1) {
+    sag_panic("capacity overflow");
+  }
+  sag_cstring c = sag_alloc(sizeof(struct sag_cstring_obj) + text.len + 1);
+  c->refcount = 1;
+  if (text.len > 0) {
+    memcpy(c->bytes, text.ptr, text.len);
+  }
+  c->bytes[text.len] = '\0';
+  sag_live_objects++;
+  *out = c;
+  *error = sag_string_empty();
+  return true;
+}
+
+void sag_cstring_retain(sag_cstring c) {
+  if (c != NULL) {
+    c->refcount++;
+  }
+}
+
+void sag_cstring_release(sag_cstring c) {
+  if (c != NULL && --c->refcount == 0) {
+    free(c);
+    sag_live_objects--;
+  }
+}
+
+const sag_c_char *sag_cstring_ptr(sag_cstring c) {
+  return (const sag_c_char *)c->bytes;
+}
+
+/* The length of the UTF-8 sequence at the start of `b`: the whole character when `*valid`, or
+ * the maximal ill-formed prefix that one U+FFFD replaces (as Rust's `from_utf8_lossy`). */
+static size_t sag_utf8_sequence(const uint8_t *b, size_t len, bool *valid) {
+  uint8_t first = b[0];
+  uint8_t low = 0x80;
+  uint8_t high = 0xBF;
+  size_t need;
+  *valid = false;
+  if (first < 0x80) {
+    *valid = true;
+    return 1;
+  } else if (first >= 0xC2 && first <= 0xDF) {
+    need = 1;
+  } else if (first == 0xE0) {
+    need = 2;
+    low = 0xA0;
+  } else if (first == 0xED) {
+    need = 2;
+    high = 0x9F;
+  } else if (first >= 0xE1 && first <= 0xEF) {
+    need = 2;
+  } else if (first == 0xF0) {
+    need = 3;
+    low = 0x90;
+  } else if (first == 0xF4) {
+    need = 3;
+    high = 0x8F;
+  } else if (first >= 0xF1 && first <= 0xF3) {
+    need = 3;
+  } else {
+    return 1;
+  }
+  for (size_t i = 1; i <= need; i++) {
+    uint8_t min = i == 1 ? low : 0x80;
+    uint8_t max = i == 1 ? high : 0xBF;
+    if (i >= len || b[i] < min || b[i] > max) {
+      return i;
+    }
+  }
+  *valid = true;
+  return need + 1;
+}
+
+sag_string sag_string_from_c_at(const sag_c_char *p, const char *file, int line) {
+  if (p == NULL) {
+    sag_panic_at("null pointer passed to string_from_c", file, line);
+  }
+  const uint8_t *bytes = (const uint8_t *)p;
+  size_t len = strlen((const char *)p);
+  sag_sb sb;
+  sag_sb_init(&sb);
+  size_t index = 0;
+  while (index < len) {
+    bool valid;
+    size_t count = sag_utf8_sequence(bytes + index, len - index, &valid);
+    if (valid) {
+      sag_sb_push_bytes(&sb, (const char *)bytes + index, count);
+    } else {
+      sag_sb_push_bytes(&sb, "\xEF\xBF\xBD", 3);
+    }
+    index += count;
+  }
+  return sag_sb_finish(&sb);
+}
+
 /* ---- Program lifecycle ----------------------------------------------------------------- */
 
 void sag_rt_init(int argc, char **argv) {

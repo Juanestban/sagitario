@@ -19,7 +19,7 @@ mod matching;
 mod text;
 
 use sagitario_ast::{BinaryOp, Block, Expr, ExprKind, FnDecl, Package, Stmt as AstStmt, TemplatePart, UnaryOp};
-use sagitario_resolve::{Builtin, FnId, Res, Resolution};
+use sagitario_resolve::{Builtin, ExternId, FnId, Res, Resolution};
 use sagitario_span::{SourceMap, Span};
 use sagitario_types::{BuiltinMethod, FloatTy, IntTy, Receiver, Type, TypedModule};
 
@@ -31,6 +31,16 @@ pub struct Program {
   pub entry: FnId,
   /// Path of each source file, by `FileId` index, for `#line` directives.
   pub source_paths: Vec<String>,
+  /// The C functions of the `extern` blocks, indexed by `ExternId`.
+  pub externs: Vec<ExternDecl>,
+}
+
+/// A C function the program calls.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExternDecl {
+  pub symbol: String,
+  pub params: Vec<Type>,
+  pub ret: Type,
 }
 
 /// The fields of the program's structs and enums.
@@ -46,7 +56,7 @@ impl Layouts {
   /// Whether values of `ty` hold `String`s, so copies must be retained and released.
   pub fn is_managed(&self, ty: &Type) -> bool {
     match ty {
-      Type::String | Type::StringBuilder => true,
+      Type::String | Type::StringBuilder | Type::CString => true,
       Type::Array(elem, _) => self.is_managed(elem),
       Type::Struct(inner) => self.structs.get(inner.id.0 as usize).is_some_and(|layout| layout.fields.iter().any(|field| self.is_managed(field))),
       Type::Enum(_) | Type::Option(_) | Type::Result(..) => self.variants(ty).iter().flatten().flatten().any(|field| self.is_managed(field)),
@@ -90,6 +100,8 @@ pub struct Function {
   pub param_count: usize,
   /// A `var self` method: local 0 refers to the caller's value instead of holding a copy.
   pub self_by_ref: bool,
+  /// The C symbol of an `extern "C" fn`.
+  pub export: Option<String>,
   pub ret: Type,
   /// Type of every local: source bindings first (same numbering as `LocalId`), then
   /// temporaries.
@@ -119,6 +131,8 @@ pub enum Projection {
   Tag,
   /// A field of the given variant of an enum value; only valid when the tag matches.
   VariantField { variant: u32, field: usize },
+  /// The value a pointer points to; a null pointer panics.
+  Deref,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -244,6 +258,8 @@ pub enum TemplatePiece {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Callee {
   Fn(FnId),
+  /// A C function of an `extern` block.
+  Extern(ExternId),
   Builtin(Builtin),
   /// A runtime function; `located` ones also receive the source location (to report panics).
   Runtime {
@@ -311,8 +327,15 @@ pub fn lower(package: &Package, resolution: &Resolution, typed: &TypedModule, so
   }
 
   let source_paths = sources.files().iter().map(|source| source.path().display().to_string()).collect();
+  let mut externs = Vec::new();
 
-  Ok(Program { functions, layouts, entry, source_paths })
+  for (id, decl) in resolution.extern_decls(package) {
+    let sig = typed.extern_sig(id).ok_or_else(|| LowerError(format!("no signature for the C function `{}`", decl.name.name)))?;
+
+    externs.push(ExternDecl { symbol: decl.name.name.clone(), params: sig.params.clone(), ret: sig.ret.clone() });
+  }
+
+  Ok(Program { functions, layouts, entry, source_paths, externs })
 }
 
 fn lower_function(
@@ -354,6 +377,7 @@ fn lower_function(
     name: decl.name.name.clone(),
     param_count: decl.params.len() + usize::from(sig.receiver.is_some()),
     self_by_ref: sig.receiver == Some(Receiver::Var),
+    export: decl.extern_c.then(|| decl.export.as_ref().map_or_else(|| decl.name.name.clone(), |export| export.symbol.clone())),
     ret: sig.ret.clone(),
     locals: lowering.locals,
     body,
@@ -558,7 +582,9 @@ impl FnLowering<'_> {
           scope.push(local);
         }
       }
-      AstStmt::Assign { target, op, value, .. } if matches!(target.kind, ExprKind::Field { .. } | ExprKind::Index { .. }) => {
+      AstStmt::Assign { target, op, value, .. }
+        if matches!(target.kind, ExprKind::Field { .. } | ExprKind::Index { .. } | ExprKind::Unary { op: UnaryOp::Deref, .. }) =>
+      {
         let value = self.expr(value)?;
         let place = self.place(target)?;
         let ty = place.ty.clone();
@@ -652,6 +678,16 @@ impl FnLowering<'_> {
 
         Ok(place)
       }
+      ExprKind::Unary { op: UnaryOp::Deref, operand } => {
+        let pointer_ty = self.type_of(operand)?;
+        let pointer = self.expr(operand)?;
+        let mut place = self.operand_place(pointer, pointer_ty)?;
+
+        place.projections.push(Projection::Deref);
+        place.ty = ty;
+
+        Ok(place)
+      }
       _ => {
         let value = self.expr(expr)?;
 
@@ -662,7 +698,7 @@ impl FnLowering<'_> {
 
   fn base_place(&mut self, base: &Expr) -> LResult<Place> {
     match &base.kind {
-      ExprKind::Path(_) | ExprKind::Field { .. } | ExprKind::Index { .. } => self.place(base),
+      ExprKind::Path(_) | ExprKind::Field { .. } | ExprKind::Index { .. } | ExprKind::Unary { op: UnaryOp::Deref, .. } => self.place(base),
       _ => {
         let ty = self.type_of(base)?;
         let value = self.expr(base)?;
@@ -741,6 +777,13 @@ impl FnLowering<'_> {
       ExprKind::Call { callee, args } => {
         let callee = match self.resolution.paths.get(&callee.id) {
           Some(Res::Fn(id)) => Callee::Fn(*id),
+          Some(Res::Extern(id)) => Callee::Extern(*id),
+          Some(Res::Builtin(Builtin::CStringNew)) => {
+            let [text] = args.as_slice() else { return error("`CString::new` without one argument") };
+            let text = self.operand_as(text, &Type::String)?;
+
+            return Ok(self.cstring_new(&ty, text));
+          }
           Some(Res::Builtin(builtin)) => Callee::Builtin(*builtin),
           Some(Res::Variant(variant)) => {
             let fields = self.variant_fields(&ty, variant.index);
@@ -756,6 +799,7 @@ impl FnLowering<'_> {
         };
         let params = match callee {
           Callee::Fn(id) => self.typed.sig(id).map(|sig| sig.params.clone()),
+          Callee::Extern(id) => self.typed.extern_sig(id).map(|sig| sig.params.clone()),
           Callee::Builtin(builtin) => Some(sagitario_types::builtin_sig(builtin).params),
           Callee::Runtime { .. } => None,
         }
@@ -871,6 +915,12 @@ impl FnLowering<'_> {
 
         Ok(self.new_value(ty, Rvalue::Repeat(value)))
       }
+      ExprKind::Unary { op: UnaryOp::Deref, .. } => {
+        // The pointee is never managed: its value is copied now.
+        let place = self.place(expr)?;
+
+        Ok(self.new_value(ty, Rvalue::Use(Operand::Place(place))))
+      }
       ExprKind::Unary { op, operand } => {
         // A negated literal is a single constant, so `-128i8` never overflows.
         if *op == UnaryOp::Neg {
@@ -936,7 +986,7 @@ impl FnLowering<'_> {
 
         Ok(self.new_value(ty.clone(), Rvalue::Cast { from, to: ty, operand: value }))
       }
-      ExprKind::Block(block) => {
+      ExprKind::Block(block) | ExprKind::Unsafe(block) => {
         let dest = (!is_valueless(&ty)).then(|| self.temp(ty.clone()));
 
         self.block_into(block, dest)?;
