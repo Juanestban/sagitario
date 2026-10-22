@@ -109,13 +109,18 @@ fn front_end(options: &CompileOptions, generate: bool) -> Result<FrontEnd, u8> {
   let mut diagnostics = Diagnostics::new();
 
   let tokens = sagitario_lexer::lex(file, source.text(), &mut diagnostics);
-  // Malformed tokens would only cause confusing syntax errors, so lexical errors stop here.
+
+  // Malformed tokens or an incomplete syntax tree would only cause confusing follow-up errors,
+  // so lexical and syntax errors stop here. Name, type and flow errors are reported together.
   report(&mut diagnostics, &sources, options)?;
+
   let module = sagitario_parser::parse_module(file, tokens, &mut diagnostics);
+
   report(&mut diagnostics, &sources, options)?;
+
   let resolution = sagitario_resolve::resolve(&module, &mut diagnostics);
-  report(&mut diagnostics, &sources, options)?;
   let typed = sagitario_types::check(&module, &resolution, &mut diagnostics);
+
   report(&mut diagnostics, &sources, options)?;
   if !generate {
     return Ok(FrontEnd { c_source: None });
@@ -128,20 +133,57 @@ fn front_end(options: &CompileOptions, generate: bool) -> Result<FrontEnd, u8> {
   Ok(FrontEnd { c_source: Some(sagitario_codegen_c::generate(&program)) })
 }
 
-/// Prints the collected diagnostics and stops the pipeline if any of them is an error.
+/// Prints the collected diagnostics in source order and stops the pipeline if any of them is
+/// an error.
 fn report(diagnostics: &mut Diagnostics, sources: &SourceMap, options: &CompileOptions) -> Result<(), u8> {
   let errors = diagnostics.error_count();
+  let warnings = diagnostics.warning_count();
+  let color = use_color(options.diagnostic_format);
+
   for diagnostic in diagnostics.take() {
-    eprintln!("{}", render(&diagnostic, sources, options.diagnostic_format));
+    eprintln!("{}", render(&diagnostic, sources, options.diagnostic_format, color));
   }
-  if errors == 0 {
-    return Ok(());
-  }
+
   if options.diagnostic_format == DiagnosticFormat::Human {
-    let plural = if errors == 1 { "" } else { "s" };
-    eprintln!("error: could not compile `{}` due to {errors} previous error{plural}", options.input.display());
+    let input = options.input.display();
+    let warnings_text = format!("{warnings} warning{}", plural(warnings));
+
+    if errors > 0 {
+      let also = if warnings > 0 { format!("; {warnings_text} emitted") } else { String::new() };
+
+      eprintln!("error: could not compile `{input}` due to {errors} previous error{}{also}", plural(errors));
+    } else if warnings > 0 {
+      eprintln!("warning: `{input}` generated {warnings_text}");
+    }
   }
-  Err(EXIT_FAILURE)
+
+  if errors > 0 { Err(EXIT_FAILURE) } else { Ok(()) }
+}
+
+fn plural(count: usize) -> &'static str {
+  if count == 1 { "" } else { "s" }
+}
+
+/// Colors only the human format on an interactive stderr, honoring `NO_COLOR` and
+/// `CLICOLOR_FORCE`. Classic Windows consoles do not interpret ANSI codes unless asked through
+/// the Windows API (which would need `unsafe`), so on Windows colors are used only in terminals
+/// known to support them.
+fn use_color(format: DiagnosticFormat) -> bool {
+  use std::io::IsTerminal;
+
+  let set = |name: &str| env::var_os(name).is_some_and(|value| !value.is_empty());
+
+  if format != DiagnosticFormat::Human || set("NO_COLOR") {
+    return false;
+  }
+
+  if env::var("CLICOLOR_FORCE").is_ok_and(|value| value != "0") {
+    return true;
+  }
+
+  let ansi_terminal = !cfg!(windows) || ["WT_SESSION", "TERM", "TERM_PROGRAM", "ConEmuANSI"].into_iter().any(set);
+
+  ansi_terminal && std::io::stderr().is_terminal()
 }
 
 fn compile_to(options: &CompileOptions, executable: &Path) -> Result<(), u8> {

@@ -111,12 +111,13 @@ pub fn resolve(module: &Module, diagnostics: &mut Diagnostics) -> Resolution {
 
     resolution.functions.push(index);
 
-    if by_name.contains_key(&decl.name.name) {
-      diagnostics.push(Diagnostic::error(
-        codes::DUPLICATE_DEFINITION,
-        decl.name.span,
-        format!("the function `{}` is defined more than once", decl.name.name),
-      ));
+    let previous = by_name.get(&decl.name.name).and_then(|previous| resolution.fn_decl(module, *previous));
+
+    if let Some(previous) = previous {
+      diagnostics.push(
+        Diagnostic::error(codes::DUPLICATE_DEFINITION, decl.name.span, format!("the function `{}` is defined more than once", decl.name.name))
+          .with_label(previous.name.span, "previous definition here"),
+      );
     } else {
       by_name.insert(decl.name.name.clone(), id);
     }
@@ -141,14 +142,13 @@ pub fn resolve(module: &Module, diagnostics: &mut Diagnostics) -> Resolution {
     };
 
     for param in &decl.params {
-      let duplicate = resolver.scopes.last().is_some_and(|scope| scope.iter().any(|(name, _)| *name == param.name.name));
+      let previous = resolver.lookup_local(&param.name.name).and_then(|id| resolver.locals.get(id.0 as usize)).map(|info| info.span);
 
-      if duplicate {
-        resolver.diagnostics.push(Diagnostic::error(
-          codes::DUPLICATE_DEFINITION,
-          param.name.span,
-          format!("the parameter `{}` is declared more than once", param.name.name),
-        ));
+      if let Some(previous) = previous {
+        resolver.diagnostics.push(
+          Diagnostic::error(codes::DUPLICATE_DEFINITION, param.name.span, format!("the parameter `{}` is declared more than once", param.name.name))
+            .with_label(previous, "previous declaration here"),
+        );
       }
 
       resolver.declare(&param.name.name, param.name.span, LocalKind::Param);
@@ -327,7 +327,15 @@ impl Resolver<'_> {
       return Some(Res::Builtin(builtin));
     }
 
-    self.diagnostics.push(Diagnostic::error(codes::UNRESOLVED_NAME, segment.span, format!("cannot find `{name}` in this scope")));
+    let mut diagnostic = Diagnostic::error(codes::UNRESOLVED_NAME, segment.span, format!("cannot find `{name}` in this scope"));
+    let visible = self.scopes.iter().flatten().map(|(local, _)| local.as_str());
+    let candidates = visible.chain(self.functions.keys().map(String::as_str)).chain(Builtin::ALL.iter().map(|builtin| builtin.name()));
+
+    if let Some(similar) = sagitario_diagnostics::closest_match(name, candidates) {
+      diagnostic = diagnostic.with_help(format!("a name with a similar spelling exists: `{similar}`"));
+    }
+
+    self.diagnostics.push(diagnostic);
 
     None
   }

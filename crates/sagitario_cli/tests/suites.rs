@@ -1,6 +1,7 @@
 //! End-to-end harness: runs the `.sag` suites under `tests/` through the `sag` binary.
 //! The annotation format is documented in `docs/testing.md`.
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -31,11 +32,12 @@ struct Expectations {
   panic: Option<String>,
   /// Extra `sag` options, e.g. `--release`.
   flags: Vec<String>,
-  errors: Vec<ExpectedError>,
+  /// `//~ ERROR Ennnn` and `//~ WARN Wnnnn` annotations.
+  diagnostics: Vec<ExpectedDiagnostic>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct ExpectedError {
+struct ExpectedDiagnostic {
   line: usize,
   code: String,
 }
@@ -60,36 +62,51 @@ fn parse_expectations(source: &str) -> Result<Expectations, String> {
     }
 
     if let Some((_, annotation)) = line.split_once("//~") {
-      let annotation = annotation.trim();
-      let code = annotation
-        .strip_prefix("ERROR")
-        .map(str::trim)
-        .filter(|code| is_diagnostic_code(code))
-        .ok_or_else(|| format!("line {line_number}: malformed annotation `//~ {annotation}`; expected `//~ ERROR Ennnn`"))?;
-
-      expectations.errors.push(ExpectedError { line: line_number, code: code.to_string() });
+      expectations.diagnostics.extend(parse_annotation(annotation, line_number)?);
     }
   }
 
   Ok(expectations)
 }
 
-fn is_diagnostic_code(code: &str) -> bool {
-  code.strip_prefix('E').is_some_and(|digits| digits.len() == 4 && digits.bytes().all(|byte| byte.is_ascii_digit()))
+/// Parses `ERROR E0300` / `WARN W0001` pairs, optionally separated by commas:
+/// `//~ ERROR E0311, WARN W0001`.
+fn parse_annotation(annotation: &str, line: usize) -> Result<Vec<ExpectedDiagnostic>, String> {
+  let malformed = || format!("line {line}: malformed annotation `//~{annotation}`; expected `//~ ERROR Ennnn` or `//~ WARN Wnnnn`");
+  let words: Vec<&str> = annotation.split([' ', ',']).filter(|word| !word.is_empty()).collect();
+
+  if words.is_empty() || !words.len().is_multiple_of(2) {
+    return Err(malformed());
+  }
+
+  words
+    .chunks(2)
+    .map(|pair| match pair {
+      ["ERROR", code] if is_diagnostic_code(code, 'E') => Ok(ExpectedDiagnostic { line, code: code.to_string() }),
+      ["WARN", code] if is_diagnostic_code(code, 'W') => Ok(ExpectedDiagnostic { line, code: code.to_string() }),
+      _ => Err(malformed()),
+    })
+    .collect()
 }
 
-/// Extracts errors from `--diagnostic-format short` output: `path:line:column: error[E0001]: message`.
-/// The path is split from the right because Windows paths contain `:`.
-fn parse_reported_errors(stderr: &str) -> Vec<ExpectedError> {
+fn is_diagnostic_code(code: &str, prefix: char) -> bool {
+  code.strip_prefix(prefix).is_some_and(|digits| digits.len() == 4 && digits.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+/// Extracts errors and warnings from `--diagnostic-format short` output:
+/// `path:line:column: error[E0001]: message`. The path is split from the right because Windows
+/// paths contain `:`.
+fn parse_reported_diagnostics(stderr: &str) -> Vec<ExpectedDiagnostic> {
   stderr
     .lines()
     .filter_map(|line| {
-      let (location, rest) = line.split_once(": error[")?;
+      let (location, rest) = line.split_once(": error[").or_else(|| line.split_once(": warning["))?;
       let (code, _) = rest.split_once(']')?;
       let mut parts = location.rsplitn(3, ':');
       let _column = parts.next()?;
       let line_number = parts.next()?.parse().ok()?;
-      Some(ExpectedError { line: line_number, code: code.to_string() })
+
+      Some(ExpectedDiagnostic { line: line_number, code: code.to_string() })
     })
     .collect()
 }
@@ -155,8 +172,8 @@ fn run_case(suite: Suite, file: &Path) -> Result<(), String> {
 
   match suite {
     Suite::RunPass => {
-      if !expectations.errors.is_empty() || expectations.panic.is_some() {
-        return Err("run-pass tests cannot use `//~ ERROR` or `expect-panic`".to_string());
+      if !expectations.diagnostics.is_empty() || expectations.panic.is_some() {
+        return Err("run-pass tests cannot use `//~` annotations or `expect-panic`".to_string());
       }
       let output = run(&expectations.flags, file)?;
       expect_exit(&output, expectations.exit.unwrap_or(0))?;
@@ -189,16 +206,19 @@ fn run_case(suite: Suite, file: &Path) -> Result<(), String> {
       Ok(())
     }
     Suite::CompileFail => {
-      if expectations.errors.is_empty() {
-        return Err("compile-fail tests need at least one `//~ ERROR Ennnn` annotation".to_string());
+      if expectations.diagnostics.is_empty() {
+        return Err("compile-fail tests need at least one `//~ ERROR` or `//~ WARN` annotation".to_string());
       }
 
       let output = sag(&["check", "--diagnostic-format", "short"], file)?;
+      // A file with only warnings compiles.
+      let has_errors = expectations.diagnostics.iter().any(|diagnostic| diagnostic.code.starts_with('E'));
 
-      expect_exit(&output, 1)?;
+      expect_exit(&output, if has_errors { 1 } else { 0 })?;
 
-      let mut expected = expectations.errors;
-      let mut reported = parse_reported_errors(&String::from_utf8_lossy(&output.stderr));
+      // Every reported error and warning must be annotated, and vice versa.
+      let mut expected = expectations.diagnostics;
+      let mut reported = parse_reported_diagnostics(&String::from_utf8_lossy(&output.stderr));
 
       expected.sort();
       reported.sort();
@@ -237,6 +257,24 @@ fn sag_suites() {
   assert!(failures.is_empty(), "{} of {total} .sag test(s) failed:\n\n{}", failures.len(), failures.join("\n\n"));
 }
 
+/// The Definition of Done asks for a `compile-fail` test per rule; this keeps every registered
+/// diagnostic code covered.
+#[test]
+fn every_diagnostic_code_has_a_compile_fail_test() {
+  let root = workspace_root().unwrap();
+  let mut covered = HashSet::new();
+
+  for case in discover(&root, Suite::CompileFail).unwrap() {
+    let source = fs::read_to_string(&case).unwrap();
+
+    covered.extend(parse_expectations(&source).unwrap().diagnostics.into_iter().map(|diagnostic| diagnostic.code));
+  }
+
+  let missing: Vec<&str> = sagitario_diagnostics::codes::ALL.iter().map(|code| code.0).filter(|code| !covered.contains(*code)).collect();
+
+  assert!(missing.is_empty(), "diagnostic codes without a compile-fail test: {missing:?}");
+}
+
 #[test]
 fn parses_all_annotation_kinds() {
   let source = "\
@@ -245,19 +283,23 @@ fn parses_all_annotation_kinds() {
 // expect-exit: 3
 // expect-panic: index out of bounds
 const x: i32 = \"hello\";   //~ ERROR E0042
+var y; //~ ERROR E0311, WARN W0001 WARN W0002
 ";
   let expectations = parse_expectations(source).unwrap();
-
   assert_eq!(expectations.stdout, vec!["total = 6".to_string(), " indented".to_string()]);
   assert_eq!(expectations.exit, Some(3));
   assert_eq!(expectations.panic.as_deref(), Some("index out of bounds"));
-  assert_eq!(expectations.errors, vec![ExpectedError { line: 5, code: "E0042".to_string() }]);
+
+  let codes: Vec<(usize, &str)> = expectations.diagnostics.iter().map(|diagnostic| (diagnostic.line, diagnostic.code.as_str())).collect();
+  assert_eq!(codes, vec![(5, "E0042"), (6, "E0311"), (6, "W0001"), (6, "W0002")]);
 }
 
 #[test]
 fn rejects_malformed_annotations() {
   assert!(parse_expectations("x; //~ ERROR 42").is_err());
   assert!(parse_expectations("x; //~ WARN E0042").is_err());
+  assert!(parse_expectations("x; //~ ERROR W0001").is_err());
+  assert!(parse_expectations("x; //~ ERROR").is_err());
   assert!(parse_expectations("// expect-exit: zero").is_err());
 }
 
@@ -266,11 +308,10 @@ fn parses_short_diagnostics_including_windows_paths() {
   let stderr = "\
 C:\\work\\main.sag:12:5: error[E0042]: mismatched types
 tests/a.sag:3:1: error[E0001]: unexpected token
+tests/a.sag:4:7: warning[W0001]: unused binding `x`
 warning: something unrelated
 ";
+  let codes: Vec<(usize, String)> = parse_reported_diagnostics(stderr).into_iter().map(|diagnostic| (diagnostic.line, diagnostic.code)).collect();
 
-  assert_eq!(
-    parse_reported_errors(stderr),
-    vec![ExpectedError { line: 12, code: "E0042".to_string() }, ExpectedError { line: 3, code: "E0001".to_string() }]
-  );
+  assert_eq!(codes, vec![(12, "E0042".to_string()), (3, "E0001".to_string()), (4, "W0001".to_string())]);
 }
