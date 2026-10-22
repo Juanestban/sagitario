@@ -14,7 +14,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace          # includes the end-to-end .sag suites
 
 sag build main.sag              # compile
-sag run main.sag                # compile and run
+sag run main.sag -- a b         # compile and run, forwarding arguments
 sag check main.sag              # front end only
 sag build main.sag --emit-c     # also write the generated C
 SAG_CC=gcc sag build main.sag   # choose the C compiler (or --cc)

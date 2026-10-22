@@ -100,4 +100,13 @@ Anything expressible in Sagitario belongs in `std/` instead.
 ## CLI
 
 `sag build`, `sag run`, `sag check` (front end only, no C compilation), with `--emit-c` and
-`--cc`.
+`--cc` (build and run only), `--diagnostic-format human|short`, and `sag run file.sag -- args`
+to forward arguments to the program.
+
+- `human` (default) renders multi-line diagnostics with source excerpts; `short` prints one
+  line per diagnostic, `path:line:column: error[E0001]: message`, for tools and the test
+  harness.
+- Exit codes of `sag` itself: `0` success, `1` compilation failed or input unreadable, `2`
+  invalid command-line usage. `sag run` returns the program's own exit code once it runs.
+
+Crates are created when the phase that needs them starts; F0 only has `sagitario_cli`.
