@@ -1,0 +1,82 @@
+// Fixed arrays: literals, `[value; N]`, indexing and assignment, `len()`, nested arrays, value
+// semantics, `for` over a copy, arrays of structs and of strings (checked for leaks).
+// expect-stdout: 10 4
+// expect-stdout: 7 2 3
+// expect-stdout: original 1, copy 9
+// expect-stdout: 0 1 2
+// expect-stdout: b!
+// expect-stdout: aza
+// expect-stdout: 2x
+// expect-stdout: 3 0
+struct Cell {
+  pub value: i32;
+}
+
+fn sum(values: [i32; 4]) -> i32 {
+  var total = 0;
+
+  for value in values {
+    total += value;
+  }
+
+  total
+}
+
+fn doubled(values: [i32; 3]) -> [i32; 3] {
+  var result = values;
+  var i: usize = 0;
+
+  while i < result.len() {
+    result[i] *= 2;
+    i += 1;
+  }
+
+  result
+}
+
+pub fn main() {
+  const numbers = [1, 2, 3, 4];
+
+  println(`${sum(numbers)} ${numbers.len()}`);
+
+  var grid = [[0; 3]; 2];
+
+  grid[1][2] = 7;
+  println(`${grid[1][2]} ${grid.len()} ${grid[0].len()}`);
+
+  const original = [1, 2, 3];
+  var copy = original;
+
+  copy[0] = 9;
+  println(`original ${original[0]}, copy ${copy[0]}`);
+
+  const halves = doubled([0, 1, 2]);
+
+  println(`${halves[0] / 2} ${halves[1] / 2} ${halves[2] / 2}`);
+
+  var words = ["a", `${"b"}`];
+
+  words[1] = `${words[1]}!`;
+  println(words[1]);
+
+  const names = ["a"; 3];
+  var renamed = names;
+
+  renamed[0] = "z";
+  println(`${names[0]}${renamed[0]}${renamed[2]}`);
+
+  // The loop runs over a copy taken before the first iteration.
+  var parts = [`${1}`, `${2}`];
+
+  for part in parts {
+    parts[0] = `${part}x`;
+  }
+
+  println(parts[0]);
+
+  var cells = [Cell { value: 0 }; 2];
+  const empty: [i32; 0] = [];
+
+  cells[0].value = 3;
+  println(`${cells[0].value} ${empty.len()}`);
+}

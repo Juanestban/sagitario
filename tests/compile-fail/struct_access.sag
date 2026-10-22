@@ -1,0 +1,36 @@
+struct Account {
+  pub owner: String;
+  prv balance: i64;
+
+  pub fn open(owner: String) -> Self {
+    Self { owner, balance: 0 }
+  }
+
+  pub fn get_balance(self) -> i64 {
+    self.balance
+  }
+
+  prv fn audit() {}
+  prv fn secret(self) {}
+}
+
+struct Point {
+  pub x: f64;
+  pub y: f64;
+}
+
+pub fn main() {
+  const account = Account::open("Ana");
+  const _a = account.balance; //~ ERROR E0205
+  account.secret(); //~ ERROR E0205
+  Account::audit(); //~ ERROR E0205
+  const _b = Account { owner: "Luis", balance: 5 }; //~ ERROR E0205
+  const _c = account.bal; //~ ERROR E0316
+  account.close(); //~ ERROR E0316
+  const _d = Point { x: 1.0 }; //~ ERROR E0315
+  const _e = Point { x: 1.0, y: 2.0, x: 3.0 }; //~ ERROR E0201
+  const _f = Point { x: 1.0, y: 2.0, z: 3.0 }; //~ ERROR E0316
+  Account::get_balance(); //~ ERROR E0314
+  account.open("x"); //~ ERROR E0314
+  const _g = Point; //~ ERROR E0200
+}

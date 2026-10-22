@@ -13,7 +13,7 @@ pub struct Ident {
   pub span: Span,
 }
 
-/// Visibility of module-level items (docs/spec/09-modules.md).
+/// Visibility of module-level items (docs/spec/09-modules.md) and of struct members.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Visibility {
   /// No modifier: visible in the declaring module only.
@@ -22,6 +22,8 @@ pub enum Visibility {
   Package,
   /// `pub`
   Public,
+  /// `prv`: a struct member visible only inside its struct.
+  Private,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +35,25 @@ pub struct Module {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Item {
   Fn(FnDecl),
+  Struct(StructDecl),
+}
+
+/// `struct Name { fields and functions }`; members keep their source order within each list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StructDecl {
+  pub visibility: Visibility,
+  pub name: Ident,
+  pub fields: Vec<FieldDecl>,
+  pub functions: Vec<FnDecl>,
+  pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldDecl {
+  pub visibility: Visibility,
+  pub name: Ident,
+  pub ty: TypeExpr,
+  pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,9 +61,17 @@ pub struct FnDecl {
   pub id: NodeId,
   pub visibility: Visibility,
   pub name: Ident,
+  /// `self` or `var self`, only in struct methods.
+  pub self_param: Option<SelfParam>,
   pub params: Vec<Param>,
   pub return_type: Option<TypeExpr>,
   pub body: Block,
+  pub span: Span,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelfParam {
+  pub mutable: bool,
   pub span: Span,
 }
 
@@ -63,10 +92,21 @@ pub struct TypeExpr {
 pub enum TypeExprKind {
   /// `()`
   Unit,
+  /// A named type; `Self` is a path with the single segment `Self`.
   Path(Path),
+  /// `[T; N]`
+  Array { elem: Box<TypeExpr>, len: ArrayLen },
 }
 
-/// `a::b::c`
+/// The length of an array type or repeat expression: an integer literal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArrayLen {
+  pub value: u128,
+  pub suffix: Option<String>,
+  pub span: Span,
+}
+
+/// `a::b::c`; `self` and `Self` are segments named `self` and `Self`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Path {
   pub segments: Vec<Ident>,
@@ -188,6 +228,34 @@ pub enum ExprKind {
     callee: Box<Expr>,
     args: Vec<Expr>,
   },
+  /// `receiver.method(args)`
+  MethodCall {
+    receiver: Box<Expr>,
+    method: Ident,
+    args: Vec<Expr>,
+  },
+  /// `base.name`
+  Field {
+    base: Box<Expr>,
+    name: Ident,
+  },
+  /// `base[index]`
+  Index {
+    base: Box<Expr>,
+    index: Box<Expr>,
+  },
+  /// `Name { field: value, ... }`; the shorthand `{ x }` is stored as `{ x: x }`.
+  StructLit {
+    path: Path,
+    fields: Vec<FieldInit>,
+  },
+  /// `[a, b, c]`
+  ArrayLit(Vec<Expr>),
+  /// `[value; N]`
+  ArrayRepeat {
+    value: Box<Expr>,
+    len: ArrayLen,
+  },
   Unary {
     op: UnaryOp,
     operand: Box<Expr>,
@@ -234,6 +302,13 @@ pub enum ExprKind {
   Return {
     value: Option<Box<Expr>>,
   },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldInit {
+  pub name: Ident,
+  pub value: Expr,
+  pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

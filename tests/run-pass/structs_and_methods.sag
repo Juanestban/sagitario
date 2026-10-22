@@ -1,0 +1,97 @@
+// Structs: literals (including the shorthand), static functions, `self` and `var self` methods,
+// private members, value semantics and ARC fields. The harness fails the test on any leak.
+// expect-stdout: 25
+// expect-stdout: 4 1
+// expect-stdout: origin 0
+// expect-stdout: Ana: 31
+// expect-stdout: copy: Ana, original: Ana López
+// expect-stdout: inner 6 5
+// expect-stdout: kept
+// expect-stdout: tmp
+struct Point {
+  pub x: f64;
+  pub y: f64;
+
+  pub fn new(x: f64, y: f64) -> Self {
+    Self { x, y }
+  }
+
+  pub fn origin() -> Point {
+    Point { y: 0.0, x: 0.0 }
+  }
+
+  pub fn len_squared(self) -> f64 {
+    self.x * self.x + self.y * self.y
+  }
+
+  pub fn move_by(var self, dx: f64) {
+    self.x += dx;
+  }
+}
+
+struct Person {
+  pub name: String;
+  prv age: u32;
+
+  pub fn new(name: String, age: u32) -> Self {
+    Self { name, age }
+  }
+
+  pub fn get_age(self) -> u32 {
+    self.age
+  }
+
+  pub fn birthday(var self) {
+    self.grow();
+  }
+
+  pub fn rename(var self, name: String) {
+    self.name = name;
+  }
+
+  prv fn grow(var self) {
+    self.age += 1;
+  }
+}
+
+struct Pair {
+  pub inner: Point;
+  pub count: i32;
+}
+
+fn make() -> Person {
+  Person::new(`${"tmp"}`, 0)
+}
+
+pub fn main() {
+  var p = Point::new(3.0, 4.0);
+
+  println(`${p.len_squared()}`);
+  p.move_by(1.0);
+  p.y = 1.0;
+  println(`${p.x} ${p.y}`);
+  println(`origin ${Point::origin().len_squared()}`);
+
+  var ana = Person::new(`${"Ana"}`, 30);
+
+  ana.birthday();
+  println(`${ana.name}: ${ana.get_age()}`);
+
+  // Copies are independent; renaming with the old name must not free it while it is in use.
+  const copy = ana;
+
+  ana.rename(ana.name);
+  ana.rename(`${ana.name} López`);
+  println(`copy: ${copy.name}, original: ${ana.name}`);
+
+  var pair = Pair { inner: Point::origin(), count: 5 };
+
+  pair.inner.move_by(6.0);
+  println(`inner ${pair.inner.x} ${pair.count}`);
+
+  var keep = Person::new("kept", 1);
+
+  keep.name = keep.name;
+  println(keep.name);
+  println(make().name);
+}

@@ -3,8 +3,8 @@
 //! diagnostics and the parser recovers at item and statement boundaries.
 
 use sagitario_ast::{
-  BinaryOp, Block, Expr, ExprKind, FnDecl, Ident, Item, LetStmt, Module, NodeId, Param, Path, Stmt, TemplatePart, TypeExpr, TypeExprKind, UnaryOp,
-  Visibility,
+  ArrayLen, BinaryOp, Block, Expr, ExprKind, FieldDecl, FieldInit, FnDecl, Ident, Item, LetStmt, Module, NodeId, Param, Path, SelfParam, Stmt,
+  StructDecl, TemplatePart, TypeExpr, TypeExprKind, UnaryOp, Visibility,
 };
 use sagitario_diagnostics::{Diagnostic, Diagnostics, codes};
 use sagitario_lexer::{self as lexer, Keyword, Token, TokenKind};
@@ -76,7 +76,12 @@ fn assignment_op(kind: &TokenKind) -> Option<Option<BinaryOp>> {
 
 /// Tokens that end an expression, so `break`/`return` before them carry no value.
 fn ends_expression(kind: &TokenKind) -> bool {
-  matches!(kind, TokenKind::Semi | TokenKind::RBrace | TokenKind::RParen | TokenKind::Comma | TokenKind::Eof)
+  matches!(kind, TokenKind::Semi | TokenKind::RBrace | TokenKind::RParen | TokenKind::RBracket | TokenKind::Comma | TokenKind::Eof)
+}
+
+enum Member {
+  Field(FieldDecl),
+  Fn(FnDecl),
 }
 
 struct Parser<'a> {
@@ -85,6 +90,9 @@ struct Parser<'a> {
   eof: Token,
   next_id: &'a mut u32,
   diagnostics: &'a mut Diagnostics,
+  /// Set in the condition of `if`/`while` and the iterable of `for`, where `{` starts the body:
+  /// `if x == Point { ... }` is not a struct literal there (as in Rust).
+  no_struct_literal: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -93,7 +101,7 @@ impl<'a> Parser<'a> {
     let tokens: Vec<Token> = tokens.into_iter().filter(|token| !matches!(token.kind, TokenKind::DocComment { .. })).collect();
     let eof_span = tokens.last().map_or(Span::new(file, 0, 0), |token| token.span);
 
-    Parser { tokens, pos: 0, eof: Token { kind: TokenKind::Eof, span: eof_span }, next_id, diagnostics }
+    Parser { tokens, pos: 0, eof: Token { kind: TokenKind::Eof, span: eof_span }, next_id, diagnostics, no_struct_literal: false }
   }
 
   fn current(&self) -> &Token {
@@ -238,16 +246,10 @@ impl<'a> Parser<'a> {
     let visibility = self.visibility();
 
     match self.kind().clone() {
-      TokenKind::Keyword(Keyword::Fn) => Ok(Some(Item::Fn(self.fn_decl(visibility, start)?))),
+      TokenKind::Keyword(Keyword::Fn) => Ok(Some(Item::Fn(self.fn_decl(visibility, start, false)?))),
+      TokenKind::Keyword(Keyword::Struct) => Ok(Some(Item::Struct(self.struct_decl(visibility, start)?))),
       TokenKind::Keyword(
-        keyword @ (Keyword::Struct
-        | Keyword::Enum
-        | Keyword::Class
-        | Keyword::Abstract
-        | Keyword::Interface
-        | Keyword::Use
-        | Keyword::Const
-        | Keyword::Extern),
+        keyword @ (Keyword::Enum | Keyword::Class | Keyword::Abstract | Keyword::Interface | Keyword::Use | Keyword::Const | Keyword::Extern),
       ) => {
         let span = self.span();
 
@@ -278,14 +280,152 @@ impl<'a> Parser<'a> {
     Visibility::Public
   }
 
-  fn fn_decl(&mut self, visibility: Visibility, start: Span) -> PResult<FnDecl> {
+  fn struct_decl(&mut self, visibility: Visibility, start: Span) -> PResult<StructDecl> {
+    self.expect(&TokenKind::Keyword(Keyword::Struct))?;
+
+    let name = self.ident("a struct name")?;
+
+    if self.at(&TokenKind::Lt) {
+      let span = self.span();
+
+      return Err(self.not_implemented(span, "generic structs"));
+    }
+
+    if self.at(&TokenKind::Keyword(Keyword::Impl)) {
+      let span = self.span();
+
+      return Err(self.not_implemented(span, "interfaces on structs"));
+    }
+
+    self.expect(&TokenKind::LBrace)?;
+
+    let mut fields = Vec::new();
+    let mut functions = Vec::new();
+
+    while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
+      let before = self.pos;
+
+      match self.member() {
+        Ok(Member::Field(field)) => fields.push(field),
+        Ok(Member::Fn(function)) => functions.push(function),
+        Err(ParseError) => self.skip_member(),
+      }
+
+      if self.pos == before {
+        self.advance();
+      }
+    }
+
+    let end = self.expect(&TokenKind::RBrace)?.span;
+
+    Ok(StructDecl { visibility, name, fields, functions, span: start.to(end) })
+  }
+
+  /// A field `pub name: Type;` or a function, both with a mandatory `pub` or `prv`.
+  fn member(&mut self) -> PResult<Member> {
+    let start = self.span();
+
+    if self.at(&TokenKind::At) {
+      return Err(self.not_implemented(start, "attributes"));
+    }
+
+    let visibility = match self.kind() {
+      TokenKind::Keyword(Keyword::Pub) => {
+        self.advance();
+
+        Visibility::Public
+      }
+      TokenKind::Keyword(Keyword::Prv) => {
+        self.advance();
+
+        Visibility::Private
+      }
+      _ => {
+        self.diagnostics.push(
+          Diagnostic::error(codes::MISSING_VISIBILITY, start, "struct members must be declared `pub` or `prv`")
+            .with_help("add `pub` to make it visible outside the struct, or `prv` to keep it private"),
+        );
+
+        Visibility::Public
+      }
+    };
+
+    if self.at(&TokenKind::Keyword(Keyword::Fn)) {
+      return Ok(Member::Fn(self.fn_decl(visibility, start, true)?));
+    }
+
+    let name = self.ident("a field name or `fn`")?;
+
+    self.expect(&TokenKind::Colon)?;
+
+    let ty = self.type_expr()?;
+    let end = self.expect(&TokenKind::Semi)?.span;
+
+    Ok(Member::Field(FieldDecl { visibility, name, ty, span: start.to(end) }))
+  }
+
+  /// Skips a malformed struct member: to just after a `;` or a `{ ... }` body at depth zero, or
+  /// to the `}` closing the struct.
+  fn skip_member(&mut self) {
+    let mut depth = 0usize;
+
+    loop {
+      match self.kind() {
+        TokenKind::Eof => return,
+        TokenKind::LBrace => depth += 1,
+        TokenKind::RBrace if depth == 0 => return,
+        TokenKind::RBrace => {
+          depth -= 1;
+
+          if depth == 0 {
+            self.advance();
+
+            return;
+          }
+        }
+        TokenKind::Semi if depth == 0 => {
+          self.advance();
+
+          return;
+        }
+        _ => {}
+      }
+
+      self.advance();
+    }
+  }
+
+  fn fn_decl(&mut self, visibility: Visibility, start: Span, in_struct: bool) -> PResult<FnDecl> {
     let id = self.next_id();
 
     self.expect(&TokenKind::Keyword(Keyword::Fn))?;
 
-    let name = self.ident("a function name")?;
+    let name = if in_struct { self.member_name("a function name")? } else { self.ident("a function name")? };
 
     self.expect(&TokenKind::LParen)?;
+
+    let mut self_param = None;
+    let at_self = self.at(&TokenKind::Keyword(Keyword::SelfValue))
+      || (self.at(&TokenKind::Keyword(Keyword::Var)) && *self.nth_kind(1) == TokenKind::Keyword(Keyword::SelfValue));
+
+    if at_self {
+      let self_start = self.span();
+      let mutable = self.eat(&TokenKind::Keyword(Keyword::Var));
+      let span = self_start.to(self.advance().span);
+
+      if in_struct {
+        self_param = Some(SelfParam { mutable, span });
+      } else {
+        self.diagnostics.push(
+          Diagnostic::error(codes::UNEXPECTED_TOKEN, span, "a `self` parameter is only allowed in struct methods")
+            .with_help("declare the function inside a `struct` to make it a method"),
+        );
+      }
+
+      if !self.at(&TokenKind::RParen) {
+        self.expect(&TokenKind::Comma)?;
+      }
+    }
 
     let mut params = Vec::new();
 
@@ -308,7 +448,7 @@ impl<'a> Parser<'a> {
     let return_type = if self.eat(&TokenKind::Arrow) { Some(self.type_expr()?) } else { None };
     let body = self.block()?;
 
-    Ok(FnDecl { id, visibility, name, params, return_type, span: start.to(body.span), body })
+    Ok(FnDecl { id, visibility, name, self_param, params, return_type, span: start.to(body.span), body })
   }
 
   fn ident(&mut self, expected: &str) -> PResult<Ident> {
@@ -321,6 +461,18 @@ impl<'a> Parser<'a> {
       TokenKind::Keyword(keyword) if keyword.is_reserved() => Err(self.reserved_keyword(keyword)),
       _ => Err(self.unexpected(expected)),
     }
+  }
+
+  /// The name of a struct member, which may be `new` (the conventional constructor name,
+  /// docs/spec/03-memory.md#static-functions).
+  fn member_name(&mut self, expected: &str) -> PResult<Ident> {
+    if self.at(&TokenKind::Keyword(Keyword::New)) {
+      let span = self.advance().span;
+
+      return Ok(Ident { name: "new".to_string(), span });
+    }
+
+    self.ident(expected)
   }
 
   fn type_expr(&mut self) -> PResult<TypeExpr> {
@@ -345,21 +497,59 @@ impl<'a> Parser<'a> {
 
         Ok(TypeExpr { span: path.span, kind: TypeExprKind::Path(path) })
       }
-      TokenKind::LBracket => Err(self.not_implemented(start, "array types")),
-      TokenKind::Keyword(Keyword::SelfType) => Err(self.not_implemented(start, "`Self` types")),
+      TokenKind::LBracket => {
+        self.advance();
+
+        let elem = self.type_expr()?;
+
+        self.expect(&TokenKind::Semi)?;
+
+        let len = self.array_len()?;
+        let end = self.expect(&TokenKind::RBracket)?.span;
+
+        Ok(TypeExpr { kind: TypeExprKind::Array { elem: Box::new(elem), len }, span: start.to(end) })
+      }
+      TokenKind::Keyword(Keyword::SelfType) => {
+        let path = self.path()?;
+
+        Ok(TypeExpr { span: path.span, kind: TypeExprKind::Path(path) })
+      }
       _ => Err(self.unexpected("a type")),
     }
   }
 
+  /// The `N` of `[T; N]` and `[value; N]`: an integer literal in F1.
+  fn array_len(&mut self) -> PResult<ArrayLen> {
+    let span = self.span();
+
+    match self.kind().clone() {
+      TokenKind::Int { value, suffix } => {
+        self.advance();
+
+        Ok(ArrayLen { value, suffix, span })
+      }
+      _ => Err(self.not_implemented(span, "array lengths other than integer literals")),
+    }
+  }
+
+  /// A path; its first segment may be `self` or `Self`.
   fn path(&mut self) -> PResult<Path> {
-    let first = self.ident("a name")?;
+    let first = match self.kind() {
+      TokenKind::Keyword(keyword @ (Keyword::SelfValue | Keyword::SelfType)) => {
+        let name = keyword.as_str().to_string();
+        let span = self.advance().span;
+
+        Ident { name, span }
+      }
+      _ => self.ident("a name")?,
+    };
     let mut span = first.span;
     let mut segments = vec![first];
 
-    while self.at(&TokenKind::ColonColon) && matches!(self.nth_kind(1), TokenKind::Ident(_)) {
+    while self.at(&TokenKind::ColonColon) && matches!(self.nth_kind(1), TokenKind::Ident(_) | TokenKind::Keyword(Keyword::New)) {
       self.advance();
 
-      let segment = self.ident("a name")?;
+      let segment = self.member_name("a name")?;
 
       span = span.to(segment.span);
       segments.push(segment);
@@ -369,6 +559,15 @@ impl<'a> Parser<'a> {
   }
 
   fn block(&mut self) -> PResult<Block> {
+    let saved = std::mem::replace(&mut self.no_struct_literal, false);
+    let block = self.block_inner();
+
+    self.no_struct_literal = saved;
+
+    block
+  }
+
+  fn block_inner(&mut self) -> PResult<Block> {
     let start = self.expect(&TokenKind::LBrace)?.span;
     let mut stmts = Vec::new();
     let mut tail = None;
@@ -483,6 +682,35 @@ impl<'a> Parser<'a> {
     self.binary_expr(PREC_RANGE)
   }
 
+  /// Parses an expression with struct literals allowed or not.
+  fn expr_with_struct_literals(&mut self, allowed: bool) -> PResult<Expr> {
+    let saved = std::mem::replace(&mut self.no_struct_literal, !allowed);
+    let expr = self.expr();
+
+    self.no_struct_literal = saved;
+
+    expr
+  }
+
+  /// `(a, b, c)` after a callee or method name.
+  fn call_args(&mut self) -> PResult<(Vec<Expr>, Span)> {
+    self.expect(&TokenKind::LParen)?;
+
+    let mut args = Vec::new();
+
+    while !self.at(&TokenKind::RParen) {
+      args.push(self.expr_with_struct_literals(true)?);
+
+      if !self.eat(&TokenKind::Comma) {
+        break;
+      }
+    }
+
+    let end = self.expect(&TokenKind::RParen)?.span;
+
+    Ok((args, end))
+  }
+
   fn binary_expr(&mut self, min_prec: u8) -> PResult<Expr> {
     let mut lhs = self.unary_expr()?;
 
@@ -554,37 +782,40 @@ impl<'a> Parser<'a> {
     loop {
       match self.kind() {
         TokenKind::LParen => {
-          self.advance();
-
-          let mut args = Vec::new();
-
-          while !self.at(&TokenKind::RParen) {
-            args.push(self.expr()?);
-
-            if !self.eat(&TokenKind::Comma) {
-              break;
-            }
-          }
-
-          let end = self.expect(&TokenKind::RParen)?.span;
+          let (args, end) = self.call_args()?;
           let span = expr.span.to(end);
 
           expr = self.expr_node(ExprKind::Call { callee: Box::new(expr), args }, span);
         }
         TokenKind::Dot => {
-          let span = self.span();
+          self.advance();
 
-          return Err(self.not_implemented(span, "methods and fields"));
+          let name = self.member_name("a field or method name")?;
+
+          if self.at(&TokenKind::LParen) {
+            let (args, end) = self.call_args()?;
+            let span = expr.span.to(end);
+
+            expr = self.expr_node(ExprKind::MethodCall { receiver: Box::new(expr), method: name, args }, span);
+          } else {
+            let span = expr.span.to(name.span);
+
+            expr = self.expr_node(ExprKind::Field { base: Box::new(expr), name }, span);
+          }
+        }
+        TokenKind::LBracket => {
+          self.advance();
+
+          let index = self.expr_with_struct_literals(true)?;
+          let end = self.expect(&TokenKind::RBracket)?.span;
+          let span = expr.span.to(end);
+
+          expr = self.expr_node(ExprKind::Index { base: Box::new(expr), index: Box::new(index) }, span);
         }
         TokenKind::Question => {
           let span = self.span();
 
           return Err(self.not_implemented(span, "`?` operators"));
-        }
-        TokenKind::LBracket => {
-          let span = self.span();
-
-          return Err(self.not_implemented(span, "index expressions"));
         }
         _ => return Ok(expr),
       }
@@ -624,12 +855,18 @@ impl<'a> Parser<'a> {
 
         ExprKind::Bool(keyword == Keyword::True)
       }
-      TokenKind::Ident(_) => {
+      TokenKind::Ident(_) | TokenKind::Keyword(Keyword::SelfValue | Keyword::SelfType) => {
         let path = self.path()?;
+
+        if self.at(&TokenKind::LBrace) && !self.no_struct_literal {
+          return self.struct_literal(path);
+        }
+
         let span = path.span;
 
         return Ok(self.expr_node(ExprKind::Path(path), span));
       }
+      TokenKind::LBracket => return self.array_literal(),
       TokenKind::LParen if *self.nth_kind(1) == TokenKind::RParen => {
         self.advance();
 
@@ -640,7 +877,7 @@ impl<'a> Parser<'a> {
       TokenKind::LParen => {
         self.advance();
 
-        let inner = self.expr()?;
+        let inner = self.expr_with_struct_literals(true)?;
 
         self.expect(&TokenKind::RParen)?;
 
@@ -656,7 +893,7 @@ impl<'a> Parser<'a> {
       TokenKind::Keyword(Keyword::While) => {
         self.advance();
 
-        let cond = self.expr()?;
+        let cond = self.expr_with_struct_literals(false)?;
         let body = self.block()?;
         let span = span.to(body.span);
 
@@ -677,7 +914,7 @@ impl<'a> Parser<'a> {
 
         self.expect(&TokenKind::Keyword(Keyword::In))?;
 
-        let iter = self.expr()?;
+        let iter = self.expr_with_struct_literals(false)?;
         let body = self.block()?;
         let span = span.to(body.span);
 
@@ -706,9 +943,8 @@ impl<'a> Parser<'a> {
       }
       TokenKind::Keyword(keyword) if keyword.is_reserved() => return Err(self.reserved_keyword(keyword)),
       TokenKind::Keyword(Keyword::New) => return Err(self.not_implemented(span, "`new` expressions")),
-      TokenKind::Keyword(Keyword::SelfValue | Keyword::Zod) => return Err(self.not_implemented(span, "methods")),
+      TokenKind::Keyword(Keyword::Zod) => return Err(self.not_implemented(span, "`zod` expressions")),
       TokenKind::Keyword(Keyword::Match | Keyword::Unsafe) => return Err(self.not_implemented(span, "`match` and `unsafe` blocks")),
-      TokenKind::LBracket => return Err(self.not_implemented(span, "array literals")),
       _ => return Err(self.unexpected("an expression")),
     };
 
@@ -725,7 +961,7 @@ impl<'a> Parser<'a> {
 
   fn if_expr(&mut self) -> PResult<Expr> {
     let start = self.expect(&TokenKind::Keyword(Keyword::If))?.span;
-    let cond = self.expr()?;
+    let cond = self.expr_with_struct_literals(false)?;
     let then_block = self.block()?;
     let mut span = start.to(then_block.span);
     let else_branch = if self.eat(&TokenKind::Keyword(Keyword::Else)) {
@@ -746,6 +982,69 @@ impl<'a> Parser<'a> {
     };
 
     Ok(self.expr_node(ExprKind::If { cond: Box::new(cond), then_block, else_branch }, span))
+  }
+
+  /// `Name { a: 1, b }` after its path.
+  fn struct_literal(&mut self, path: Path) -> PResult<Expr> {
+    self.expect(&TokenKind::LBrace)?;
+
+    let mut fields = Vec::new();
+
+    while !self.at(&TokenKind::RBrace) {
+      let name = self.ident("a field name")?;
+      let value = if self.eat(&TokenKind::Colon) {
+        self.expr_with_struct_literals(true)?
+      } else {
+        let span = name.span;
+
+        self.expr_node(ExprKind::Path(Path { segments: vec![name.clone()], span }), span)
+      };
+
+      fields.push(FieldInit { span: name.span.to(value.span), name, value });
+
+      if !self.eat(&TokenKind::Comma) {
+        break;
+      }
+    }
+
+    let end = self.expect(&TokenKind::RBrace)?.span;
+    let span = path.span.to(end);
+
+    Ok(self.expr_node(ExprKind::StructLit { path, fields }, span))
+  }
+
+  /// `[a, b, c]` or `[value; N]`.
+  fn array_literal(&mut self) -> PResult<Expr> {
+    let start = self.expect(&TokenKind::LBracket)?.span;
+
+    if self.at(&TokenKind::RBracket) {
+      let end = self.advance().span;
+
+      return Ok(self.expr_node(ExprKind::ArrayLit(Vec::new()), start.to(end)));
+    }
+
+    let first = self.expr_with_struct_literals(true)?;
+
+    if self.eat(&TokenKind::Semi) {
+      let len = self.array_len()?;
+      let end = self.expect(&TokenKind::RBracket)?.span;
+
+      return Ok(self.expr_node(ExprKind::ArrayRepeat { value: Box::new(first), len }, start.to(end)));
+    }
+
+    let mut elems = vec![first];
+
+    while self.eat(&TokenKind::Comma) {
+      if self.at(&TokenKind::RBracket) {
+        break;
+      }
+
+      elems.push(self.expr_with_struct_literals(true)?);
+    }
+
+    let end = self.expect(&TokenKind::RBracket)?.span;
+
+    Ok(self.expr_node(ExprKind::ArrayLit(elems), start.to(end)))
   }
 
   /// Parses each `${...}` interpolation with a sub-parser that shares node ids and diagnostics.
@@ -931,8 +1230,75 @@ mod tests {
   fn reports_reserved_keywords_and_later_features() {
     assert_eq!(parse("fn await() {}").1, vec!["E0101"]);
     assert_eq!(parse("fn f() { async; }").1, vec!["E0101"]);
-    assert_eq!(parse("struct P {}\npub fn main() {}").1, vec!["E0900"]);
-    assert_eq!(parse("fn f() { x.len(); }").1, vec!["E0900"]);
+    assert_eq!(parse("enum E {}\npub fn main() {}").1, vec!["E0900"]);
+    assert_eq!(parse("struct P<T> {}").1, vec!["E0900"]);
+    assert_eq!(parse("struct P impl Show {}").1, vec!["E0900"]);
+  }
+
+  #[test]
+  fn parses_structs_and_their_members() {
+    let (module, errors) = parse(
+      "pub struct Point {
+        pub x: f64;
+        prv y: [f64; 2];
+        pub fn new() -> Self { Self { x: 0.0, y: [0.0; 2] } }
+        pub fn move_by(var self, dx: f64) { self.x += dx; }
+        prv fn len(self) -> f64 { self.x }
+      }",
+    );
+
+    assert!(errors.is_empty(), "{errors:?}");
+
+    let [Item::Struct(decl)] = module.items.as_slice() else { panic!("expected one struct") };
+
+    assert_eq!(decl.fields.len(), 2);
+    assert_eq!(decl.fields[1].visibility, Visibility::Private);
+    assert!(matches!(decl.fields[1].ty.kind, TypeExprKind::Array { .. }));
+    assert_eq!(decl.functions.len(), 3);
+    assert_eq!(decl.functions[0].name.name, "new");
+    assert_eq!(decl.functions[0].self_param, None);
+    assert!(decl.functions[1].self_param.is_some_and(|param| param.mutable));
+    assert!(decl.functions[2].self_param.is_some_and(|param| !param.mutable));
+  }
+
+  #[test]
+  fn parses_member_access_and_array_expressions() {
+    let (module, errors) = parse("fn f() { a.b[0].c(1).d }");
+
+    assert!(errors.is_empty(), "{errors:?}");
+
+    let tail = only_fn(&module).body.tail.as_deref().expect("tail");
+    let ExprKind::Field { base, name } = &tail.kind else { panic!("expected a field, got {tail:?}") };
+
+    assert_eq!(name.name, "d");
+    assert!(matches!(&base.kind, ExprKind::MethodCall { method, args, .. } if method.name == "c" && args.len() == 1));
+    assert!(matches!(shape_kind("[1, 2, 3,]"), ExprKind::ArrayLit(elems) if elems.len() == 3));
+    assert!(matches!(shape_kind("[0; 16]"), ExprKind::ArrayRepeat { len, .. } if len.value == 16));
+    assert!(matches!(shape_kind("P { x, y: 1 }"), ExprKind::StructLit { fields, .. } if fields.len() == 2));
+    assert_eq!(parse("fn f() { [0; n]; }").1, vec!["E0900"]);
+  }
+
+  #[test]
+  fn struct_literals_are_not_parsed_in_conditions() {
+    let (module, errors) = parse("fn f() { if x == P { } while ok { } for i in xs { } if (P { a: 1 }).a == 1 { } }");
+
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_eq!(only_fn(&module).body.stmts.len(), 3);
+  }
+
+  #[test]
+  fn reports_struct_syntax_errors() {
+    assert_eq!(parse("struct P { x: i32; }").1, vec!["E0103"]);
+    assert_eq!(parse("fn f(self) {}").1, vec!["E0100"]);
+    assert_eq!(parse("struct P { pub fn f(x: i32, self) {} }").1, vec!["E0100"]);
+  }
+
+  fn shape_kind(expr: &str) -> ExprKind {
+    let (module, errors) = parse(&format!("fn f() {{ {expr} }}"));
+
+    assert!(errors.is_empty(), "{errors:?}");
+
+    only_fn(&module).body.tail.as_deref().expect("a tail expression").kind.clone()
   }
 
   #[test]

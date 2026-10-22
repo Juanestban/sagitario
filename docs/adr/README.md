@@ -29,6 +29,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0018](0018-windows-c-toolchain.md) | Windows C toolchain: official LLVM (MSVC target), MinGW clang tolerated | Accepted |
 | [0019](0019-prelude-and-printing.md) | Prelude and printing | Accepted |
 | [0020](0020-expressions-bindings-and-build-modes.md) | Operators, bindings, control flow, interpolation and build modes | Accepted |
+| [0021](0021-structs-and-fixed-arrays.md) | Structs, methods and fixed arrays | Accepted |
 
 ## Template
 

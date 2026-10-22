@@ -58,6 +58,18 @@ void sag_print(sag_string s);
 void sag_println(sag_string s);
 void sag_eprintln(sag_string s);
 
+/* ---- Arrays ------------------------------------------------------------------------------ */
+
+_Noreturn void sag_index_out_of_bounds(size_t index, size_t len, const char *file, int line);
+
+/* Returns `index` if it is below `len`; panics otherwise, in every build mode. */
+static inline size_t sag_index_at(size_t index, size_t len, const char *file, int line) {
+  if (index >= len) {
+    sag_index_out_of_bounds(index, len, file, line);
+  }
+  return index;
+}
+
 /* ---- Integer arithmetic -----------------------------------------------------------------
  * Results are computed modulo 2^64 through uint64_t, so they never overflow in C; converting
  * back to a signed type keeps the low bits (two's complement on every supported target). The
