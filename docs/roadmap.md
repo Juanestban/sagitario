@@ -35,6 +35,9 @@ Built as a vertical slice first, then widened feature by feature through every p
 **Acceptance:** these reference programs pass as `run-pass` on all three OSes:
 hello world, fibonacci, FizzBuzz, `enum` + `match`, `Result` + `?`, a multi-module program,
 and `extern "C"` calling `puts`.
+They are `tests/run-pass/reference_*`: `reference_hello.sag`, `reference_fibonacci.sag`,
+`reference_fizzbuzz.sag`, `reference_shapes.sag`, `reference_result.sag`,
+`reference_modules/` and `reference_puts.sag`.
 
 ## F2: OOP and functional core (MVP)
 

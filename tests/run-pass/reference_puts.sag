@@ -1,0 +1,16 @@
+// F1 reference program: `extern "C"` calling `puts`.
+// expect-stdout: hola desde C
+// expect-stdout: puts returned a non-negative value
+use std::ffi::{c_char, c_int, CString};
+
+extern "C" {
+  fn puts(text: *const c_char) -> c_int;
+}
+
+fn main() {
+  const text = CString::new("hola desde C").unwrap();
+  const status = unsafe { puts(text.as_ptr()) };
+  if status >= 0 {
+    println("puts returned a non-negative value");
+  }
+}

@@ -1,0 +1,31 @@
+// F1 reference program: a program split into modules. `pkg::bank` is `bank.sag` and
+// `pkg::bank::account` is `bank/account.sag`.
+// expect-stdout: error: insufficient funds: bob has 30, needs 50
+// expect-stdout: alice: 110
+// expect-stdout: bob: 40
+// expect-stdout: 2 transfers, 1 rejected
+use pkg::bank::Bank;
+use pkg::bank::account::Account;
+
+fn main() {
+  var bank = Bank::new(Account::open("alice", 100), Account::open("bob", 50));
+  var done = 0;
+
+  if bank.transfer(1, 0, 20).is_ok() {
+    done += 1;
+  }
+
+  match bank.transfer(1, 0, 50) {
+    Ok(_) => {
+      done += 1;
+    }
+    Err(message) => println(`error: ${message}`),
+  }
+
+  if bank.transfer(0, 1, 10).is_ok() {
+    done += 1;
+  }
+
+  bank.report();
+  println(`${done} transfers, ${bank.failures()} rejected`);
+}
