@@ -278,7 +278,13 @@ impl Flow<'_> {
       ExprKind::Call { callee, args } => {
         self.expr(callee);
         self.exprs(args);
+
+        // A call that never returns (`panic`) ends the path.
+        if self.typed.expr_types.get(&expr.id) == Some(&crate::Type::Never) {
+          self.state.reachable = false;
+        }
       }
+      ExprKind::New { args, .. } => self.exprs(args),
       ExprKind::MethodCall { receiver, args, .. } => {
         self.expr(receiver);
         self.exprs(args);
@@ -598,6 +604,12 @@ mod tests {
     assert_eq!(codes_with(point, "var p = P { x: 1 }; println(`${p.get()}`);"), vec!["W0002"]);
     assert_eq!(codes_with(point, "var p: P; p.x = 1;"), vec!["E0309"]);
     assert_eq!(codes_with("struct Q { pub fn f(self) { self = Q {}; } }", ""), vec!["E0308"]);
+  }
+
+  #[test]
+  fn panic_ends_the_path() {
+    assert_eq!(codes_of("panic(\"stop\"); println(\"never\");"), vec!["W0003"]);
+    assert_eq!(codes_of("const x: i32; if true { x = 1; } else { panic(\"no\"); } println(`${x}`);"), Vec::<&str>::new());
   }
 
   #[test]

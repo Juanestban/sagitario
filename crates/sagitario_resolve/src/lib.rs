@@ -19,16 +19,18 @@ pub enum Builtin {
   Print,
   Println,
   Eprintln,
+  Panic,
 }
 
 impl Builtin {
-  const ALL: [Builtin; 3] = [Builtin::Print, Builtin::Println, Builtin::Eprintln];
+  const ALL: [Builtin; 4] = [Builtin::Print, Builtin::Println, Builtin::Eprintln, Builtin::Panic];
 
   pub fn name(self) -> &'static str {
     match self {
       Builtin::Print => "print",
       Builtin::Println => "println",
       Builtin::Eprintln => "eprintln",
+      Builtin::Panic => "panic",
     }
   }
 
@@ -504,6 +506,8 @@ impl Resolver<'_> {
       ExprKind::ArrayLit(elems) => self.exprs(elems),
       ExprKind::ArrayRepeat { value, .. } => self.expr(value),
       ExprKind::Try(inner) => self.expr(inner),
+      // The type is checked by the type checker: in F1 only `new StringBuilder()` exists.
+      ExprKind::New { args, .. } => self.exprs(args),
       ExprKind::Match { scrutinee, arms } => {
         self.expr(scrutinee);
 

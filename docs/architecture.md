@@ -113,6 +113,8 @@ Minimal C, embedded in the `sag` binary and compiled with every program:
 - overflow-checked integer helpers (`sag_add_i32_at`, ...) that panic in debug and wrap when
   compiled with `-DSAG_RELEASE` (`sag build --release`), saturating float-to-integer casts,
 - a string builder used by template strings, with shortest round-trip float formatting,
+- the `String` API (`sag_string_*`; `trim` and `substring` return views sharing the buffer),
+  parsing (`sag_parse_*`), ASCII `char` helpers and the ARC `StringBuilder` (`sag_builder_*`),
 - a live-object counter checked at exit when `SAG_LEAK_CHECK` is set (exit code 102).
 
 Anything expressible in Sagitario belongs in `std/` instead.

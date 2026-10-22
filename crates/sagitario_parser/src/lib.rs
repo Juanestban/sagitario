@@ -1096,7 +1096,21 @@ impl<'a> Parser<'a> {
         return Ok(self.expr_node(ExprKind::Return { value: value.map(Box::new) }, span));
       }
       TokenKind::Keyword(keyword) if keyword.is_reserved() => return Err(self.reserved_keyword(keyword)),
-      TokenKind::Keyword(Keyword::New) => return Err(self.not_implemented(span, "`new` expressions")),
+      TokenKind::Keyword(Keyword::New) => {
+        self.advance();
+
+        let path = self.path()?;
+
+        if self.at(&TokenKind::Lt) {
+          let span = self.span();
+
+          return Err(self.not_implemented(span, "generic types"));
+        }
+
+        let (args, end) = self.call_args()?;
+
+        return Ok(self.expr_node(ExprKind::New { path, args }, span.to(end)));
+      }
       TokenKind::Keyword(Keyword::Zod) => return Err(self.not_implemented(span, "`zod` expressions")),
       TokenKind::Keyword(Keyword::Match) => return self.match_expr(),
       TokenKind::Keyword(Keyword::Unsafe) => return Err(self.not_implemented(span, "`unsafe` blocks")),

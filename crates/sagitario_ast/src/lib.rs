@@ -317,6 +317,11 @@ pub enum ExprKind {
   },
   /// `expr?`
   Try(Box<Expr>),
+  /// `new Type(args)`; in F1 only `new StringBuilder()`.
+  New {
+    path: Path,
+    args: Vec<Expr>,
+  },
   Match {
     scrutinee: Box<Expr>,
     arms: Vec<MatchArm>,

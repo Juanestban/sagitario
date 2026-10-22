@@ -14,6 +14,7 @@ pub(crate) enum Ctor {
   Bool(bool),
   Int(i128),
   Char(char),
+  Str(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

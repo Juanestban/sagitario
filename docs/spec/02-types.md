@@ -88,6 +88,44 @@ Division by zero, out-of-bounds indexing and every other panic behave the same i
   User-defined types (structs, enums, classes) cannot be interpolated until a `Display`
   interface exists (post-MVP).
 - Byte indexing (`s[i]`) is not allowed; use `s.chars()` or `s.bytes()`.
+- `a + b` creates a new `String`; `s += t` is `s = s + t`. `==`, `!=`, `<`, `<=`, `>`, `>=`
+  compare the bytes lexicographically.
+- Methods (F1). Indices and lengths count **bytes**; an index outside the string or inside a
+  UTF-8 character panics (`byte index 2 is not a char boundary`):
+
+  | Method | Result |
+  |---|---|
+  | `len()`, `is_empty()` | `usize` bytes, `bool` |
+  | `contains(p)`, `starts_with(p)`, `ends_with(p)` | `bool` |
+  | `find(p)` | `Option<usize>`: byte index of the first occurrence |
+  | `trim()`, `trim_start()`, `trim_end()` | `String` without leading/trailing Unicode whitespace |
+  | `to_ascii_uppercase()`, `to_ascii_lowercase()` | `String`; only ASCII letters change |
+  | `replace(from, to)`, `repeat(n)`, `substring(start, end)` | `String` |
+  | `parse_i32()` (every integer type), `parse_f32()`, `parse_f64()` | `Result<T, String>` with Rust's messages (`invalid digit found in string`) |
+
+- `for c in s.chars()` iterates the characters (`char`) and `for b in s.bytes()` the bytes
+  (`u8`) of the string as it was before the loop. In F1 both are only valid there; they
+  become iterators in F2. `split` and `lines` arrive with `List` (F2).
+- `char` methods (ASCII): `is_ascii_digit()`, `is_ascii_alphabetic()`,
+  `is_ascii_alphanumeric()`, `is_ascii_whitespace()`, `is_ascii_uppercase()`,
+  `is_ascii_lowercase()`, `to_ascii_uppercase()`, `to_ascii_lowercase()`, and
+  `to_digit(radix) -> Option<u32>` (panics unless `radix` is 2 to 36).
+
+## `StringBuilder` (F1)
+
+```sag
+const builder = new StringBuilder();
+builder.append("total: ");
+builder.append_char('=');
+const text = builder.to_string();
+```
+
+- A reference type managed by ARC (a standard library class from F2): copies share the same
+  builder, and it can be modified through a `const` binding. `new StringBuilder()` is the only
+  `new` expression in F1.
+- Methods: `append(s: String)`, `append_char(c: char)`, `len()` (bytes), `is_empty()`,
+  `clear()`, `to_string()` (a new `String`; the builder stays usable).
+- It cannot be compared with `==` or interpolated.
 
 ## Equality (F1/F2)
 

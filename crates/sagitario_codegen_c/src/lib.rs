@@ -255,6 +255,7 @@ impl<'a> Generator<'a> {
   fn arc_call(&self, action: &str, ty: &Type, value: &str) -> String {
     match ty {
       Type::String => format!("sag_string_{action}({value})"),
+      Type::StringBuilder => format!("sag_builder_{action}({value})"),
       _ => format!("sag_{action}_{}(&{value})", self.c_type(ty).trim_start_matches("sag_")),
     }
   }
@@ -274,6 +275,7 @@ impl<'a> Generator<'a> {
       Type::Float(FloatTy::F32) => "float".to_string(),
       Type::Float(FloatTy::F64) => "double".to_string(),
       Type::String => "sag_string".to_string(),
+      Type::StringBuilder => "sag_builder".to_string(),
       Type::Struct(inner) => format!("sag_s{}", inner.id.0),
       Type::Enum(inner) => format!("sag_e{}", inner.id.0),
       Type::Array(..) | Type::Option(_) | Type::Result(..) => format!("sag_t{}", self.instance_index(ty)),
@@ -506,6 +508,25 @@ impl<'a> Generator<'a> {
         self.indent -= 1;
         self.line("}");
       }
+      Stmt::ForText { var, text, bytes, body } => {
+        let counter = format!("sag_i{}", var.0);
+        let (text, var) = (self.local(*text), self.local(*var));
+
+        // `sag_utf8_next` advances the index, so `continue` needs no increment step.
+        if *bytes {
+          self.line(&format!("for (size_t {counter} = 0; {counter} < {text}.len; {counter}++) {{"));
+          self.indent += 1;
+          self.line(&format!("{var} = {text}.ptr[{counter}];"));
+        } else {
+          self.line(&format!("for (size_t {counter} = 0; {counter} < {text}.len;) {{"));
+          self.indent += 1;
+          self.line(&format!("{var} = sag_utf8_next({text}, &{counter});"));
+        }
+
+        self.stmts(body);
+        self.indent -= 1;
+        self.line("}");
+      }
       Stmt::Break => self.line("break;"),
       Stmt::Continue => self.line("continue;"),
       Stmt::Return(None) => self.line("return;"),
@@ -567,7 +588,13 @@ impl<'a> Generator<'a> {
       Rvalue::Binary { op, ty, lhs, rhs } => binary(*op, ty, &self.operand(lhs), &self.operand(rhs)),
       Rvalue::Cast { from, to, operand: value } => cast(from, to, &self.operand(value)),
       Rvalue::Call { callee, args } => {
-        let args: Vec<String> = args.iter().map(|arg| self.operand(arg)).collect();
+        let mut args: Vec<String> = args.iter().map(|arg| self.operand(arg)).collect();
+
+        // Runtime functions that can panic report the source location.
+        if matches!(callee, Callee::Runtime { located: true, .. } | Callee::Builtin(Builtin::Panic)) {
+          args.push("__FILE__".to_string());
+          args.push("__LINE__".to_string());
+        }
 
         format!("{}({})", callee_name(*callee), args.join(", "))
       }
@@ -597,27 +624,35 @@ impl<'a> Generator<'a> {
   fn template(&mut self, dest: &str, pieces: &[TemplatePiece]) {
     self.line("{");
     self.indent += 1;
-    self.line("sag_sb sag_builder;");
-    self.line("sag_sb_init(&sag_builder);");
+    self.line("sag_sb sag_template;");
+    self.line("sag_sb_init(&sag_template);");
 
     for piece in pieces {
       let push = match piece {
         TemplatePiece::Text(text) => {
-          format!("sag_sb_push_bytes(&sag_builder, {}, {})", c_string_literal(text.as_bytes()), text.len())
+          format!("sag_sb_push_bytes(&sag_template, {}, {})", c_string_literal(text.as_bytes()), text.len())
         }
         TemplatePiece::Value(ty, value) => {
           let value = self.operand(value);
 
           match ty {
-            Type::Int(int) if int.is_signed() => format!("sag_sb_push_i64(&sag_builder, (int64_t)({value}))"),
-            Type::Int(_) => format!("sag_sb_push_u64(&sag_builder, (uint64_t)({value}))"),
-            Type::Float(FloatTy::F32) => format!("sag_sb_push_f32(&sag_builder, {value})"),
-            Type::Float(FloatTy::F64) => format!("sag_sb_push_f64(&sag_builder, {value})"),
-            Type::Bool => format!("sag_sb_push_bool(&sag_builder, {value})"),
-            Type::Char => format!("sag_sb_push_char(&sag_builder, {value})"),
-            Type::String => format!("sag_sb_push_str(&sag_builder, {value})"),
+            Type::Int(int) if int.is_signed() => format!("sag_sb_push_i64(&sag_template, (int64_t)({value}))"),
+            Type::Int(_) => format!("sag_sb_push_u64(&sag_template, (uint64_t)({value}))"),
+            Type::Float(FloatTy::F32) => format!("sag_sb_push_f32(&sag_template, {value})"),
+            Type::Float(FloatTy::F64) => format!("sag_sb_push_f64(&sag_template, {value})"),
+            Type::Bool => format!("sag_sb_push_bool(&sag_template, {value})"),
+            Type::Char => format!("sag_sb_push_char(&sag_template, {value})"),
+            Type::String => format!("sag_sb_push_str(&sag_template, {value})"),
             // Diverging, erroneous or non-interpolable parts never reach code generation.
-            Type::Unit | Type::Struct(_) | Type::Enum(_) | Type::Array(..) | Type::Option(_) | Type::Result(..) | Type::Never | Type::Error => {
+            Type::Unit
+            | Type::StringBuilder
+            | Type::Struct(_)
+            | Type::Enum(_)
+            | Type::Array(..)
+            | Type::Option(_)
+            | Type::Result(..)
+            | Type::Never
+            | Type::Error => {
               continue;
             }
           }
@@ -627,7 +662,7 @@ impl<'a> Generator<'a> {
       self.line(&format!("{push};"));
     }
 
-    self.line(&format!("{dest} = sag_sb_finish(&sag_builder);"));
+    self.line(&format!("{dest} = sag_sb_finish(&sag_template);"));
     self.indent -= 1;
     self.line("}");
   }
@@ -706,6 +741,8 @@ fn callee_name(callee: Callee) -> String {
     Callee::Builtin(Builtin::Print) => "sag_print".to_string(),
     Callee::Builtin(Builtin::Println) => "sag_println".to_string(),
     Callee::Builtin(Builtin::Eprintln) => "sag_eprintln".to_string(),
+    Callee::Builtin(Builtin::Panic) => "sag_panic_str_at".to_string(),
+    Callee::Runtime { function, .. } => function.to_string(),
   }
 }
 

@@ -3,7 +3,7 @@
 ## Recoverable errors: `Result<T, E>`
 
 ```sag
-fn parse_age(s: String) -> Result<i32, ParseError> {
+fn parse_age(s: String) -> Result<i32, String> {
   const n = s.parse_i32()?;
   Ok(n)
 }
@@ -37,11 +37,16 @@ with implementing the same generic interface several times on one type.
 `panic` is for unrecoverable errors (bugs, broken invariants). In the MVP a panic prints a
 message with the source file and line to stderr and **aborts the process**.
 
+`panic(message)` (prelude) panics explicitly; it never returns, so it fits where any type is
+expected: `_ => panic("unsupported shape"),`.
+
 Operations that always panic, in every build mode:
 
 - Integer division by zero.
 - Array or list index out of bounds.
 - `unwrap()` and `expect(...)` on `None` or `Err`, and `unwrap_err()` on `Ok`.
+- `substring` with an index outside the string or inside a character, `repeat` beyond the
+  maximum size, and `to_digit` with a radix outside 2 to 36.
 
 Integer overflow panics in debug builds only (see [types](02-types.md#integer-arithmetic)).
 
@@ -54,8 +59,7 @@ pub fn main() -> Result<(), E> { ... }   // optional
 
 Declaring a return type on `main` is optional. When it returns `Result<(), E>`:
 
-- **F1:** `E` must be `String` or a standard library error type known to the compiler
-  (`io::Error`, `ParseError`, ...), which the compiler knows how to print.
+- **F1:** `E` must be `String` (parsing also reports errors as `String`s in F1).
 - **F2:** `E` may be any type implementing `Error`; the error is printed with `message()`.
   F1 programs keep compiling unchanged.
 

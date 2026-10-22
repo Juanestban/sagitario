@@ -6,6 +6,7 @@
 mod exhaustive;
 mod flow;
 mod patterns;
+mod text;
 
 use std::collections::HashMap;
 use std::fmt;
@@ -101,6 +102,8 @@ pub enum Type {
   Int(IntTy),
   Float(FloatTy),
   String,
+  /// The prelude's `StringBuilder`, a reference type (a class from F2).
+  StringBuilder,
   Struct(StructRef),
   Enum(EnumRef),
   /// `[T; N]`
@@ -166,6 +169,7 @@ impl fmt::Display for Type {
       Type::Array(elem, len) => write!(f, "[{elem}; {len}]"),
       Type::Option(value) => write!(f, "Option<{value}>"),
       Type::Result(value, error) => write!(f, "Result<{value}, {error}>"),
+      Type::StringBuilder => f.write_str("StringBuilder"),
       Type::Never => f.write_str("never"),
       Type::Error => f.write_str("{error}"),
     }
@@ -193,6 +197,7 @@ pub struct FnSig {
 pub fn builtin_sig(builtin: Builtin) -> FnSig {
   match builtin {
     Builtin::Print | Builtin::Println | Builtin::Eprintln => FnSig { receiver: None, params: vec![Type::String], ret: Type::Unit },
+    Builtin::Panic => FnSig { receiver: None, params: vec![Type::String], ret: Type::Never },
   }
 }
 
@@ -240,8 +245,9 @@ impl VariantDef {
   }
 }
 
-/// A method of `Option` or `Result` implemented by the compiler.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A method of `Option`, `Result`, `String`, `char` or `StringBuilder`, implemented by the
+/// compiler and the runtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BuiltinMethod {
   IsSome,
   IsNone,
@@ -251,6 +257,22 @@ pub enum BuiltinMethod {
   Expect,
   UnwrapOr,
   UnwrapErr,
+  /// A runtime function taking the receiver and the arguments in order; `located` functions
+  /// also receive the source location, to report panics.
+  Runtime {
+    function: &'static str,
+    located: bool,
+  },
+  /// `String::find`: an `Option<usize>`.
+  Find,
+  /// `char::to_digit`: an `Option<u32>`.
+  ToDigit,
+  /// `String::parse_<type>`: a `Result<type, String>`.
+  Parse(Type),
+  /// `String::chars` as the iterable of `for`.
+  Chars,
+  /// `String::bytes` as the iterable of `for`.
+  Bytes,
 }
 
 #[derive(Debug, Default)]
@@ -684,6 +706,7 @@ impl Checker<'_> {
           "bool" => Type::Bool,
           "char" => Type::Char,
           "String" => Type::String,
+          "StringBuilder" => Type::StringBuilder,
           "Option" | "Result" => {
             let usage = if name == "Option" { "Option<T>" } else { "Result<T, E>" };
 
@@ -692,7 +715,8 @@ impl Checker<'_> {
             Type::Error
           }
           _ => {
-            let primitives = IntTy::ALL.iter().map(|ty| ty.name()).chain(["f32", "f64", "bool", "char", "String", "Option", "Result"]);
+            let primitives =
+              IntTy::ALL.iter().map(|ty| ty.name()).chain(["f32", "f64", "bool", "char", "String", "StringBuilder", "Option", "Result"]);
             let known = primitives.chain(self.resolution.type_names.keys().map(String::as_str));
             let mut diagnostic = Diagnostic::error(codes::UNRESOLVED_NAME, segment.span, format!("cannot find type `{name}`"));
 
@@ -859,9 +883,9 @@ impl Checker<'_> {
   }
 
   fn check_compound_operand(&mut self, target: &Expr, op: BinaryOp, ty: &Type) {
-    if *ty == Type::String {
-      self.error(codes::NOT_IMPLEMENTED, target.span, format!("`{}=` on `String` is not implemented yet", op.symbol()));
-    } else if !ty.is_numeric() && *ty != Type::Error {
+    let concatenation = *ty == Type::String && op == BinaryOp::Add;
+
+    if !concatenation && !ty.is_numeric() && *ty != Type::Error {
       self.error(codes::INVALID_OPERAND, target.span, format!("cannot apply `{}=` to a value of type `{ty}`", op.symbol()));
     }
   }
@@ -998,6 +1022,7 @@ impl Checker<'_> {
         _ => self.call(expr, callee, args),
       },
       ExprKind::Try(inner) => self.try_expr(inner),
+      ExprKind::New { path, args } => self.new_expr(path, args),
       ExprKind::Match { scrutinee, arms } => self.match_expr(scrutinee, arms, expected),
       ExprKind::MethodCall { receiver, method, args } => self.method_call(expr, receiver, method, args),
       ExprKind::Field { base, name } => self.field(base, name),
@@ -1193,11 +1218,7 @@ impl Checker<'_> {
     if op.is_arithmetic() {
       return match ty {
         Type::Int(_) | Type::Float(_) | Type::Error | Type::Never => ty,
-        Type::String if op == BinaryOp::Add => {
-          self.error(codes::NOT_IMPLEMENTED, span, "concatenating `String`s with `+` is not implemented yet");
-
-          Type::Error
-        }
+        Type::String if op == BinaryOp::Add => Type::String,
         other => {
           self.error(codes::INVALID_OPERAND, span, format!("cannot apply `{}` to values of type `{other}`", op.symbol()));
 
@@ -1226,11 +1247,8 @@ impl Checker<'_> {
           return Type::Bool;
         }
       }
-      Type::String => {
-        self.error(codes::NOT_IMPLEMENTED, span, "comparing `String`s is not implemented yet");
-
-        true
-      }
+      // Byte-wise lexicographic order.
+      Type::String => true,
       _ => false,
     };
 
@@ -1315,6 +1333,10 @@ impl Checker<'_> {
   }
 
   fn for_iter(&mut self, iter: &Expr) -> Type {
+    if let Some(elem) = self.text_iterable(iter) {
+      return elem;
+    }
+
     let ExprKind::Range { start, end, .. } = &iter.kind else {
       return match self.expr(iter, None) {
         Type::Array(elem, _) => *elem,
@@ -1455,12 +1477,7 @@ impl Checker<'_> {
 
         return Type::Error;
       }
-      Type::String => {
-        self.error(codes::NOT_IMPLEMENTED, method.span, "methods on `String` are not implemented yet (F1 increment 6)");
-        self.unchecked_args(args);
-
-        return Type::Error;
-      }
+      Type::String | Type::Char | Type::StringBuilder => return self.text_method(expr, &receiver_ty, method, args),
       _ => {
         let mut diagnostic = Diagnostic::error(codes::UNKNOWN_MEMBER, method.span, format!("no method `{name}` on type `{receiver_ty}`"));
 
@@ -2134,6 +2151,21 @@ mod tests {
     assert_eq!(in_main("const _ = if true { None } else { Some(1) };"), vec!["E0311"]);
     assert_eq!(in_main("const _: Option<u8> = Some(256);"), vec!["E0302"]);
     assert!(diagnostics("fn f() -> Result<i32, String> { Err(\"e\") }\npub fn main() { const _ = f(); }").is_empty());
+  }
+
+  #[test]
+  fn checks_strings_and_text_methods() {
+    assert!(
+      in_main("var s = \"a\" + \"b\"; s += \"c\"; const _: bool = s < \"z\"; const _: usize = s.len(); const _: Option<usize> = s.find(\"b\");")
+        .is_empty()
+    );
+    assert!(
+      in_main("const _: Result<u8, String> = \"1\".parse_u8(); const _: char = 'a'.to_ascii_uppercase(); for _c in \"x\".chars() {}").is_empty()
+    );
+    assert_eq!(in_main("const _ = match \"a\" { \"a\" => 1, \"b\" => 2 };"), vec!["E0319"]);
+    assert!(in_main("const _ = match \"a\" { \"a\" => 1, _ => 2 };").is_empty());
+    assert!(in_main("const b = new StringBuilder(); b.append(\"x\"); const _: String = b.to_string();").is_empty());
+    assert_eq!(in_main("const _: i32 = panic(\"no\");"), Vec::<&str>::new());
   }
 
   #[test]

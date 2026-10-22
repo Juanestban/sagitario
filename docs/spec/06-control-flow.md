@@ -35,7 +35,8 @@ for i in 0..10 { ... }
 - `loop` may produce a value with `break value;`; every `break` of one `loop` must agree on
   the type. A `loop` without any `break` never finishes.
 - `break` and `continue` apply to the innermost loop. Labels are post-MVP.
-- `for` iterates over ranges and arrays (F1) and, from F2, over any iterable. The loop
+- `for` iterates over ranges, arrays and `s.chars()`/`s.bytes()` (F1) and, from F2, over any
+  iterable. The loop
   variable is a new `const` binding on each iteration. An array is iterated through a copy
   taken before the loop, so assigning to it inside the body does not change the iteration.
 - The condition of `if`/`while` and the iterable of `for` cannot be a struct literal written
@@ -82,7 +83,7 @@ match s {
   |---|---|
   | `_` | anything |
   | `name` | anything, binding it to `name` |
-  | `0`, `-1`, `'a'`, `true` | that integer, character or boolean |
+  | `0`, `-1`, `'a'`, `true`, `"quit"` | that integer, character, boolean or string |
   | `None`, `Shape::Empty` | that variant without data |
   | `Some(p)`, `Shape::Circle(p)` | that variant, with its fields matching the sub-patterns |
   | `Shape::Rect { w, h: p, .. }` | that variant by field name; `w` is shorthand for `w: w`, `..` ignores the rest (otherwise every field is listed) |
@@ -92,8 +93,7 @@ match s {
   arms do not count for exhaustiveness.
 - Bindings are new immutable bindings holding a copy of the matched part. Every alternative of
   `|` must bind the same names with the same types.
-- Float literals are not patterns. String literal patterns arrive with `String` comparison
-  (F1 increment 6); range and struct patterns are post-MVP.
+- Float literals are not patterns; range and struct patterns are post-MVP.
 
 ## Operators
 
@@ -117,8 +117,9 @@ match s {
 - Unary `-` applies to signed integers and floats; it is an error on unsigned types. A negative
   literal such as `-128i8` is a single value and fits its type.
 - `!`, `&&` and `||` apply only to `bool`. There are no bitwise operators in the MVP.
-- `==` and `!=` apply to integers, floats, `char` and `bool`; `<` `<=` `>` `>=` to integers,
-  floats and `char`. Comparing `String`s arrives with the rest of the `String` API.
+- `==` and `!=` apply to integers, floats, `char`, `bool` and `String`; `<` `<=` `>` `>=` to
+  integers, floats, `char` and `String` (byte-wise lexicographic order). `+` also concatenates
+  `String`s.
 - Assignments (`=` and compound forms) are statements: they have no value, so `x = y = 0` is
   an error. Their target is a `var` binding, or a field or array element of one (see
   [struct mutability](03-memory.md#struct-mutability-f1)).

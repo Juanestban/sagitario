@@ -131,6 +131,7 @@ impl FnLowering<'_> {
 
         Ok(self.owned_result(Some(dest)))
       }
+      other => error(format!("`{other:?}` is not a method of `Option` or `Result`")),
     }
   }
 
@@ -302,7 +303,7 @@ impl FnLowering<'_> {
       PatternKind::Literal(expr) => {
         let literal = self.expr(expr)?;
 
-        Ok(self.new_value(Type::Bool, Rvalue::Binary { op: BinaryOp::Eq, ty: place.ty.clone(), lhs: Operand::Place(place.clone()), rhs: literal }))
+        Ok(self.binary(BinaryOp::Eq, place.ty.clone(), Operand::Place(place.clone()), literal))
       }
       PatternKind::Or(alternatives) => {
         let result = self.temp(Type::Bool);
