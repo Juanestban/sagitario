@@ -36,7 +36,11 @@ for i in 0..10 { ... }
   the type. A `loop` without any `break` never finishes.
 - `break` and `continue` apply to the innermost loop. Labels are post-MVP.
 - `for` iterates over ranges and arrays (F1) and, from F2, over any iterable. The loop
-  variable is a new `const` binding on each iteration.
+  variable is a new `const` binding on each iteration. An array is iterated through a copy
+  taken before the loop, so assigning to it inside the body does not change the iteration.
+- The condition of `if`/`while` and the iterable of `for` cannot be a struct literal written
+  directly, because `{` starts the body; wrap it in parentheses:
+  `if (Point { x: 0.0, y: 0.0 }).len() > 1.0 { ... }`.
 
 ## Divergence
 
@@ -97,9 +101,11 @@ match s {
 - `==` and `!=` apply to integers, floats, `char` and `bool`; `<` `<=` `>` `>=` to integers,
   floats and `char`. Comparing `String`s arrives with the rest of the `String` API.
 - Assignments (`=` and compound forms) are statements: they have no value, so `x = y = 0` is
-  an error. Their target must be a `var` binding.
+  an error. Their target is a `var` binding, or a field or array element of one (see
+  [struct mutability](03-memory.md#struct-mutability-f1)).
 
 ## Function calls and methods
 
-- `f(a, b)`, `value.method(a)`.
+- `f(a, b)`, `value.method(a)`, `Type::function(a)`; fields are read with `value.field` and
+  array elements with `array[index]`.
 - Paths use `::`: `Shape::Circle(1.0)`, `std::io::println`.

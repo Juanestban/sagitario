@@ -138,6 +138,16 @@ enum Shape impl Display {
 | Length | `a.len()` | `list.len()` |
 
 - The literal `[1, 2, 3]` is always a fixed array; lists are built explicitly.
+- All elements have the same type; unsuffixed literals take the element type from context
+  (`const a: [u8; 3] = [1, 2, 3];`). An empty literal `[]` needs a type from context.
+- In F1 the length `N` of `[T; N]` and `[value; N]` is an integer literal of type `usize`;
+  `[value; N]` holds N copies of `value`.
+- Indices have type `usize` and `a.len()` returns `usize`. An index out of bounds panics in
+  every build mode: `index out of bounds: the len is 3 but the index is 5`.
+- Arrays are copied when assigned, passed or returned (copying retains the `String`s inside).
+  They are not compared with `==` and cannot be interpolated.
+- `for x in a` iterates over a copy of `a` taken before the first iteration (see
+  [control flow](06-control-flow.md#loops)).
 - From F2, arrays expose iterators: `[1, 2, 3].map((x) => x * 2)` returns an iterator that can
   be consumed by `for` or gathered with `.collect()`.
 - Slices (copy-free views such as `xs[1..3]`) are post-MVP.

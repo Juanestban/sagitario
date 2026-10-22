@@ -11,11 +11,14 @@ use sagitario_diagnostics::{Diagnostic, Diagnostics, codes};
 use sagitario_resolve::{LocalId, LocalInfo, LocalKind, Res, Resolution};
 use sagitario_span::Span;
 
-pub(crate) fn check_function(decl: &FnDecl, locals: &[LocalInfo], resolution: &Resolution, diagnostics: &mut Diagnostics) {
+use crate::{Receiver, TypedModule};
+
+pub(crate) fn check_function(decl: &FnDecl, locals: &[LocalInfo], resolution: &Resolution, typed: &TypedModule, diagnostics: &mut Diagnostics) {
   let count = locals.len();
   let mut flow = Flow {
     locals,
     resolution,
+    typed,
     diagnostics,
     silent: 0,
     state: State { assigned: vec![false; count], maybe: vec![false; count], reachable: true },
@@ -26,7 +29,7 @@ pub(crate) fn check_function(decl: &FnDecl, locals: &[LocalInfo], resolution: &R
   };
 
   for (index, local) in locals.iter().enumerate() {
-    if local.kind == LocalKind::Param {
+    if matches!(local.kind, LocalKind::Param | LocalKind::SelfParam | LocalKind::VarSelf) {
       flow.define(LocalId(index as u32), true);
     }
   }
@@ -58,6 +61,7 @@ struct LoopExits {
 struct Flow<'a> {
   locals: &'a [LocalInfo],
   resolution: &'a Resolution,
+  typed: &'a TypedModule,
   diagnostics: &'a mut Diagnostics,
   /// While positive, diagnostics are not reported (first pass over a loop body).
   silent: usize,
@@ -160,6 +164,12 @@ impl Flow<'_> {
           self.define(id, stmt.init.is_some());
         }
       }
+      Stmt::Assign { target, value, .. } if matches!(target.kind, ExprKind::Field { .. } | ExprKind::Index { .. }) => {
+        // Modifying a part of a binding reads the binding and counts as reassigning it.
+        self.expr(target);
+        self.expr(value);
+        self.mutate(target);
+      }
       Stmt::Assign { target, op, value, .. } => {
         let local = match self.resolution.paths.get(&target.id) {
           Some(Res::Local(id)) => Some(*id),
@@ -181,6 +191,19 @@ impl Flow<'_> {
     }
   }
 
+  /// Marks the binding a place belongs to as modified, for the unneeded-`var` warning.
+  fn mutate(&mut self, place: &Expr) {
+    match &place.kind {
+      ExprKind::Path(_) => {
+        if let Some(Res::Local(id)) = self.resolution.paths.get(&place.id).copied() {
+          set(&mut self.reassigned, id, true);
+        }
+      }
+      ExprKind::Field { base, .. } | ExprKind::Index { base, .. } => self.mutate(base),
+      _ => {}
+    }
+  }
+
   fn assign(&mut self, id: LocalId, span: Span, compound: bool) {
     let Some(info) = self.info(id).cloned() else { return };
     let again = compound || get(&self.state.maybe, id);
@@ -194,7 +217,9 @@ impl Flow<'_> {
       }
       LocalKind::Const if again => Some(format!("cannot assign twice to the `const` binding `{}`", info.name)),
       LocalKind::Const => None,
+      LocalKind::VarSelf => None,
       LocalKind::Param => Some(format!("cannot assign to the parameter `{}`", info.name)),
+      LocalKind::SelfParam => Some("cannot assign to `self`: it is immutable in this method".to_string()),
       LocalKind::ForVar => Some(format!("cannot assign to the loop variable `{}`", info.name)),
     };
 
@@ -202,14 +227,16 @@ impl Flow<'_> {
       let declared = match info.kind {
         LocalKind::Param => "parameter declared here",
         LocalKind::ForVar => "loop variable declared here",
+        LocalKind::SelfParam => "declared as `self` here",
         _ => "declared with `const` here",
       };
+      let help = if info.kind == LocalKind::SelfParam {
+        "declare the method with `var self` to modify the value".to_string()
+      } else {
+        format!("declare `{}` with `var` to reassign it", info.name)
+      };
 
-      self.report(
-        Diagnostic::error(codes::ASSIGN_TO_CONST, span, message)
-          .with_label(info.span, declared)
-          .with_help(format!("declare `{}` with `var` to reassign it", info.name)),
-      );
+      self.report(Diagnostic::error(codes::ASSIGN_TO_CONST, span, message).with_label(info.span, declared).with_help(help));
     }
 
     set(&mut self.state.assigned, id, true);
@@ -248,11 +275,30 @@ impl Flow<'_> {
       }
       ExprKind::Call { callee, args } => {
         self.expr(callee);
+        self.exprs(args);
+      }
+      ExprKind::MethodCall { receiver, args, .. } => {
+        self.expr(receiver);
+        self.exprs(args);
 
-        for arg in args {
-          self.expr(arg);
+        let function = self.typed.method_calls.get(&expr.id).copied();
+
+        if function.and_then(|function| self.typed.sig(function)).is_some_and(|sig| sig.receiver == Some(Receiver::Var)) {
+          self.mutate(receiver);
         }
       }
+      ExprKind::Field { base, .. } => self.expr(base),
+      ExprKind::Index { base, index } => {
+        self.expr(base);
+        self.expr(index);
+      }
+      ExprKind::StructLit { fields, .. } => {
+        for field in fields {
+          self.expr(&field.value);
+        }
+      }
+      ExprKind::ArrayLit(elems) => self.exprs(elems),
+      ExprKind::ArrayRepeat { value, .. } => self.expr(value),
       ExprKind::Template(parts) => {
         for part in parts {
           if let TemplatePart::Expr(part) = part {
@@ -344,6 +390,12 @@ impl Flow<'_> {
     }
   }
 
+  fn exprs(&mut self, exprs: &[Expr]) {
+    for expr in exprs {
+      self.expr(expr);
+    }
+  }
+
   /// Analyzes one run of a loop body starting from `start`, returning the state at its end and
   /// what left or repeated it.
   fn body_pass(&mut self, start: State, body: &Block, var: Option<LocalId>) -> (State, LoopExits) {
@@ -399,6 +451,10 @@ impl Flow<'_> {
 
   fn warn_bindings(&mut self) {
     for (index, local) in self.locals.iter().enumerate() {
+      if matches!(local.kind, LocalKind::SelfParam | LocalKind::VarSelf) {
+        continue;
+      }
+
       let used = self.used.get(index).copied().unwrap_or(true);
       let reassigned = self.reassigned.get(index).copied().unwrap_or(true);
 
@@ -427,7 +483,12 @@ mod tests {
   use std::path::PathBuf;
 
   fn codes_of(body: &str) -> Vec<&'static str> {
-    let text = format!("pub fn main() {{ {body} }}");
+    codes_with("", body)
+  }
+
+  /// Like `codes_of`, with `items` declared before `main`.
+  fn codes_with(items: &str, body: &str) -> Vec<&'static str> {
+    let text = format!("{items}\npub fn main() {{ {body} }}");
     let mut sources = SourceMap::new();
     let file = sources.add(PathBuf::from("test.sag"), text.clone());
     let mut diagnostics = Diagnostics::new();
@@ -473,5 +534,17 @@ mod tests {
     assert_eq!(codes_of("var x = 1; println(`${x}`);"), vec!["W0002"]);
     assert_eq!(codes_of("var x: i32; x = 1; println(`${x}`);"), vec!["W0002"]);
     assert_eq!(codes_of("return; println(\"never\");"), vec!["W0003"]);
+  }
+
+  #[test]
+  fn modifying_parts_of_a_var_counts_as_reassigning_it() {
+    let point = "struct P { pub x: i32; pub fn bump(var self) { self.x += 1; } pub fn get(self) -> i32 { self.x } }";
+
+    assert_eq!(codes_with(point, "var p = P { x: 1 }; p.x = 2;"), Vec::<&str>::new());
+    assert_eq!(codes_with(point, "var p = P { x: 1 }; p.bump();"), Vec::<&str>::new());
+    assert_eq!(codes_with(point, "var a = [1, 2]; a[0] += 1;"), Vec::<&str>::new());
+    assert_eq!(codes_with(point, "var p = P { x: 1 }; println(`${p.get()}`);"), vec!["W0002"]);
+    assert_eq!(codes_with(point, "var p: P; p.x = 1;"), vec!["E0309"]);
+    assert_eq!(codes_with("struct Q { pub fn f(self) { self = Q {}; } }", ""), vec!["E0308"]);
   }
 }

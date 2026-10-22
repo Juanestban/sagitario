@@ -24,6 +24,12 @@ _Noreturn void sag_panic_at(const char *message, const char *file, int line) {
   exit(101);
 }
 
+_Noreturn void sag_index_out_of_bounds(size_t index, size_t len, const char *file, int line) {
+  char message[96];
+  snprintf(message, sizeof message, "index out of bounds: the len is %zu but the index is %zu", len, index);
+  sag_panic_at(message, file, line);
+}
+
 /* ---- Strings (ARC) --------------------------------------------------------------------- */
 
 struct sag_string_buf {

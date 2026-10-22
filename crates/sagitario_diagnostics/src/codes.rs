@@ -25,6 +25,8 @@ pub const UNEXPECTED_TOKEN: Code = Code("E0100");
 pub const RESERVED_KEYWORD: Code = Code("E0101");
 /// Chained non-associative operators, such as `a < b < c`.
 pub const CHAINED_OPERATORS: Code = Code("E0102");
+/// A struct member without `pub` or `prv`.
+pub const MISSING_VISIBILITY: Code = Code("E0103");
 
 /// A name that does not refer to anything in scope.
 pub const UNRESOLVED_NAME: Code = Code("E0200");
@@ -36,6 +38,8 @@ pub const RESERVED_NAME: Code = Code("E0202");
 pub const MISSING_MAIN: Code = Code("E0203");
 /// A `main` function with the wrong signature.
 pub const INVALID_MAIN: Code = Code("E0204");
+/// A `prv` member used outside its struct.
+pub const PRIVATE_MEMBER: Code = Code("E0205");
 
 /// An expression whose type differs from the expected one.
 pub const MISMATCHED_TYPES: Code = Code("E0300");
@@ -61,6 +65,18 @@ pub const UNASSIGNED_BINDING: Code = Code("E0309");
 pub const INVALID_OPERAND: Code = Code("E0310");
 /// A binding declared without type and value that is never assigned.
 pub const UNKNOWN_TYPE: Code = Code("E0311");
+/// An assignment to a field or element of a value that is not mutable.
+pub const IMMUTABLE_PLACE: Code = Code("E0312");
+/// A `var self` method called on a value that is not mutable.
+pub const IMMUTABLE_RECEIVER: Code = Code("E0313");
+/// A static function called as a method, or a method called as a static function.
+pub const WRONG_CALL_FORM: Code = Code("E0314");
+/// A struct literal that does not initialize every field.
+pub const MISSING_FIELDS: Code = Code("E0315");
+/// A field or method that the type does not have.
+pub const UNKNOWN_MEMBER: Code = Code("E0316");
+/// A struct that contains itself by value.
+pub const RECURSIVE_TYPE: Code = Code("E0317");
 
 /// A language feature that is specified but not implemented yet.
 pub const NOT_IMPLEMENTED: Code = Code("E0900");
@@ -82,11 +98,13 @@ pub const ALL: &[Code] = &[
   UNEXPECTED_TOKEN,
   RESERVED_KEYWORD,
   CHAINED_OPERATORS,
+  MISSING_VISIBILITY,
   UNRESOLVED_NAME,
   DUPLICATE_DEFINITION,
   RESERVED_NAME,
   MISSING_MAIN,
   INVALID_MAIN,
+  PRIVATE_MEMBER,
   MISMATCHED_TYPES,
   WRONG_ARGUMENT_COUNT,
   INTEGER_OUT_OF_RANGE,
@@ -99,6 +117,12 @@ pub const ALL: &[Code] = &[
   UNASSIGNED_BINDING,
   INVALID_OPERAND,
   UNKNOWN_TYPE,
+  IMMUTABLE_PLACE,
+  IMMUTABLE_RECEIVER,
+  WRONG_CALL_FORM,
+  MISSING_FIELDS,
+  UNKNOWN_MEMBER,
+  RECURSIVE_TYPE,
   NOT_IMPLEMENTED,
   UNUSED_BINDING,
   UNNEEDED_VAR,

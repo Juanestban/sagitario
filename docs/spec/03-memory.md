@@ -49,6 +49,12 @@ total += x;
   that holds it: everything inside a `const` struct is immutable; a `var` struct is mutable.
 - Methods that mutate the struct declare `var self`; they can only be called on a `var`
   binding.
+- A field or array element can be assigned (`p.x = v`, `a[i] += 1`, `p.pos.x = 0`) and a
+  `var self` method can be called on it only if it belongs to a `var` binding or to `var self`.
+  `self` is immutable in methods declared with `self`; `const` bindings, parameters, loop
+  variables and temporaries (`Point::new(0.0).move_by(1.0)`) cannot be modified.
+- A `var` modified only through its fields, elements or `var self` methods counts as
+  reassigned for the unneeded-`var` warning.
 
 ```sag
 struct Point {
@@ -79,14 +85,29 @@ struct Point impl Display {
   `pub` or `prv`, as in classes. `prv` means visible only inside the struct.
 - A struct literal `Point { ... }` is only valid where **all** its fields are accessible.
   Structs with `prv` fields are built from outside through a static function.
-- `struct Name impl I1, I2` implements interfaces (F2). Structs never use `extends`.
+- A struct literal initializes every field exactly once, in any order; there are no default
+  values and no `..base` syntax. `Point { x, y }` is shorthand for `Point { x: x, y: y }`.
+- Fields and functions of a struct share one namespace: a field and a method cannot have the
+  same name.
+- Structs are copied when assigned, passed or returned; copying retains the `String`s they
+  contain. There is no move.
+- A struct cannot contain itself by value, directly or through other structs or arrays: its
+  size would be infinite. Recursive data needs a reference type (`class`, F2).
+- Structs are not compared with `==` and cannot be interpolated (see
+  [types](02-types.md#equality-f1f2)).
+- `struct Name impl I1, I2` implements interfaces (F2). Structs never use `extends`. Generic
+  structs arrive with generics (F2).
 
 ## Static functions (F1)
 
 - A function declared inside a `struct`, `enum` or `class` without a `self` parameter is
   **static** and is called as `Type::name(...)`. There is no `static` keyword.
+- Methods are called on a value, `p.len()`; static functions only through the type,
+  `Point::origin()`. Calling a static function as `p.origin()` or a method as `Point::len(p)`
+  is an error.
 - In structs and enums, `new` is an ordinary static function by convention (it returns the
-  type and is called `Point::new(...)`).
+  type and is called `Point::new(...)`). `new` is a keyword, but it may name a struct or enum
+  function.
 - In classes, `new` is the special initializer (see [classes](04-classes.md#construction))
   and can only be invoked through `new ClassName(...)`, never as `ClassName::new(...)`.
 - There are no static fields and no mutable global variables in the MVP; use module-level
