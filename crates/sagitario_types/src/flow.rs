@@ -1,5 +1,7 @@
 //! Flow analysis of one function: definite assignment, `const` bindings assigned at most once,
-//! reachability, and the binding warnings of docs/spec/03-memory.md.
+//! reachability, and the binding warnings of docs/spec/03-memory.md. In a class's initializer
+//! the fields of `self` are tracked like bindings: each must be assigned before it is read,
+//! before `self` is used and before `new` returns (docs/spec/04-classes.md#construction).
 //!
 //! Loop bodies are analyzed twice: a silent first pass finds what may already be assigned when
 //! the body repeats (at the end of the body or at a `continue`), and the second pass starts from
@@ -11,30 +13,57 @@ use sagitario_diagnostics::{Diagnostic, Diagnostics, codes};
 use sagitario_resolve::{LocalId, LocalInfo, LocalKind, Res, Resolution};
 use sagitario_span::Span;
 
-use crate::{BuiltinMethod, Receiver, TypedModule};
+use crate::{BuiltinMethod, FieldDef, Receiver, Type, TypedModule};
 
-pub(crate) fn check_function(decl: &FnDecl, locals: &[LocalInfo], resolution: &Resolution, typed: &TypedModule, diagnostics: &mut Diagnostics) {
-  let count = locals.len();
+/// The kind of type a function belongs to, for the rules about `self`.
+pub(crate) enum Owner<'a> {
+  /// A module function, or a function of a struct or enum: their `self` can be reassigned.
+  Value,
+  /// A function of a class; for its initializer, the class name and the fields `new` assigns.
+  Class { initializer: Option<(&'a str, &'a [FieldDef])> },
+}
+
+pub(crate) fn check_function(
+  decl: &FnDecl,
+  locals: &[LocalInfo],
+  owner: Owner,
+  resolution: &Resolution,
+  typed: &TypedModule,
+  diagnostics: &mut Diagnostics,
+) {
+  let fields = match owner {
+    Owner::Class { initializer: Some((_, fields)) } => fields.len(),
+    _ => 0,
+  };
+  // The fields of an initializer's `self` follow the locals.
+  let count = locals.len() + fields;
   let mut flow = Flow {
     locals,
+    owner,
     resolution,
     typed,
     diagnostics,
     silent: 0,
     state: State { assigned: vec![false; count], maybe: vec![false; count], reachable: true },
-    used: vec![false; count],
-    reassigned: vec![false; count],
+    used: vec![false; locals.len()],
+    reassigned: vec![false; locals.len()],
     reported: vec![false; count],
+    self_reported: false,
     loops: Vec::new(),
   };
 
   for (index, local) in locals.iter().enumerate() {
-    if matches!(local.kind, LocalKind::Param | LocalKind::SelfParam | LocalKind::VarSelf) {
+    if matches!(local.kind, LocalKind::Param | LocalKind::SelfParam) {
       flow.define(LocalId(index as u32), true);
     }
   }
 
   flow.block(&decl.body);
+
+  if flow.state.reachable {
+    flow.report_missing_fields(decl.name.span, false);
+  }
+
   flow.warn_bindings();
 }
 
@@ -60,6 +89,7 @@ struct LoopExits {
 
 struct Flow<'a> {
   locals: &'a [LocalInfo],
+  owner: Owner<'a>,
   resolution: &'a Resolution,
   typed: &'a TypedModule,
   diagnostics: &'a mut Diagnostics,
@@ -68,8 +98,10 @@ struct Flow<'a> {
   state: State,
   used: Vec<bool>,
   reassigned: Vec<bool>,
-  /// Whether an unassigned use was already reported for each binding.
+  /// Whether an unassigned use was already reported for each binding or field.
   reported: Vec<bool>,
+  /// Whether a use of `self` before every field is assigned was already reported.
+  self_reported: bool,
   loops: Vec<LoopExits>,
 }
 
@@ -98,7 +130,7 @@ fn or_into(target: &mut Option<Vec<bool>>, value: &[bool]) {
   });
 }
 
-impl Flow<'_> {
+impl<'a> Flow<'a> {
   fn report(&mut self, diagnostic: Diagnostic) {
     if self.silent == 0 {
       self.diagnostics.push(diagnostic);
@@ -112,6 +144,121 @@ impl Flow<'_> {
 
   fn info(&self, id: LocalId) -> Option<&LocalInfo> {
     self.locals.get(id.0 as usize)
+  }
+
+  fn initializer(&self) -> Option<(&'a str, &'a [FieldDef])> {
+    match self.owner {
+      Owner::Class { initializer } => initializer,
+      Owner::Value => None,
+    }
+  }
+
+  fn is_self(&self, expr: &Expr) -> bool {
+    match self.resolution.paths.get(&expr.id) {
+      Some(Res::Local(id)) => self.info(*id).is_some_and(|info| info.kind == LocalKind::SelfParam),
+      _ => false,
+    }
+  }
+
+  /// `self.name` in an initializer: the slot that tracks the field, and the field.
+  fn self_field(&self, expr: &Expr) -> Option<(LocalId, &'a FieldDef)> {
+    let (_, fields) = self.initializer()?;
+    let ExprKind::Field { base, name } = &expr.kind else { return None };
+
+    if !self.is_self(base) {
+      return None;
+    }
+
+    let index = fields.iter().position(|field| field.name == name.name)?;
+
+    Some((LocalId((self.locals.len() + index) as u32), fields.get(index)?))
+  }
+
+  /// The fields of an initializer's `self` that may still be unassigned.
+  fn missing_fields(&self) -> Vec<&'a FieldDef> {
+    let Some((_, fields)) = self.initializer() else { return Vec::new() };
+
+    fields
+      .iter()
+      .enumerate()
+      .filter(|(index, _)| !get(&self.state.assigned, LocalId((self.locals.len() + index) as u32)))
+      .map(|(_, field)| field)
+      .collect()
+  }
+
+  /// Reports fields an initializer has not assigned when it returns, at a `return` or at the
+  /// end of its body.
+  fn report_missing_fields(&mut self, span: Span, at_return: bool) {
+    let missing = self.missing_fields();
+
+    if missing.is_empty() {
+      return;
+    }
+
+    let names: Vec<String> = missing.iter().map(|field| format!("`{}`", field.name)).collect();
+    let fields = format!("field{} {}", if names.len() == 1 { "" } else { "s" }, names.join(", "));
+    let message =
+      if at_return { format!("`new` returns before assigning the {fields}") } else { format!("`new` does not assign the {fields} on every path") };
+    let mut diagnostic = Diagnostic::error(codes::UNINITIALIZED_FIELD, span, message);
+
+    for field in missing {
+      diagnostic = diagnostic.with_label(field.span, "declared here");
+    }
+
+    self.report(diagnostic.with_help("assign every field of `self` in `new`"));
+  }
+
+  /// Reading `self.name` in an initializer.
+  fn read_field(&mut self, slot: LocalId, field: &FieldDef, span: Span) {
+    if self.silent > 0 || !self.state.reachable || get(&self.state.assigned, slot) || get(&self.reported, slot) {
+      return;
+    }
+
+    set(&mut self.reported, slot, true);
+
+    let message = if get(&self.state.maybe, slot) {
+      format!("the field `{}` may be read before being assigned", field.name)
+    } else {
+      format!("the field `{}` is read before being assigned", field.name)
+    };
+
+    self.report(Diagnostic::error(codes::UNINITIALIZED_FIELD, span, message).with_label(field.span, "declared here"));
+  }
+
+  /// `self.name = value` in an initializer; a `const` field is assigned exactly once.
+  fn assign_field(&mut self, target: &Expr, compound: bool) {
+    let Some((slot, field)) = self.self_field(target) else { return };
+
+    if !field.mutable && (compound || get(&self.state.maybe, slot)) {
+      self.report(
+        Diagnostic::error(codes::ASSIGN_TO_CONST, target.span, format!("cannot assign twice to the `const` field `{}`", field.name))
+          .with_label(field.span, "declared `const` here")
+          .with_help(format!("declare it `var {}` to assign it more than once", field.name)),
+      );
+    }
+
+    set(&mut self.state.assigned, slot, true);
+    set(&mut self.state.maybe, slot, true);
+  }
+
+  /// Using `self` in an initializer requires every field to be assigned.
+  fn use_self(&mut self, span: Span) {
+    if self.self_reported || self.silent > 0 || !self.state.reachable {
+      return;
+    }
+
+    let missing: Vec<String> = self.missing_fields().iter().map(|field| format!("`{}`", field.name)).collect();
+
+    if missing.is_empty() {
+      return;
+    }
+
+    self.self_reported = true;
+    self.report(
+      Diagnostic::error(codes::UNINITIALIZED_FIELD, span, "`self` is used before every field is assigned")
+        .with_note(format!("still unassigned here: {}", missing.join(", ")))
+        .with_help("assign every field before calling methods on `self` or passing it along"),
+    );
   }
 
   /// Joins the states of two paths that meet.
@@ -164,6 +311,15 @@ impl Flow<'_> {
           self.define(id, stmt.init.is_some());
         }
       }
+      Stmt::Assign { target, op, value, .. } if self.self_field(target).is_some() => {
+        if op.is_some() {
+          // A compound assignment reads the field first.
+          self.expr(target);
+        }
+
+        self.expr(value);
+        self.assign_field(target, op.is_some());
+      }
       Stmt::Assign { target, value, .. }
         if matches!(target.kind, ExprKind::Field { .. } | ExprKind::Index { .. } | ExprKind::Unary { op: UnaryOp::Deref, .. }) =>
       {
@@ -193,7 +349,8 @@ impl Flow<'_> {
     }
   }
 
-  /// Marks the binding a place belongs to as modified, for the unneeded-`var` warning.
+  /// Marks the binding a place belongs to as modified, for the unneeded-`var` warning. The
+  /// fields of a class instance belong to the instance, not to the binding referring to it.
   fn mutate(&mut self, place: &Expr) {
     match &place.kind {
       ExprKind::Path(_) => {
@@ -201,7 +358,9 @@ impl Flow<'_> {
           set(&mut self.reassigned, id, true);
         }
       }
-      ExprKind::Field { base, .. } | ExprKind::Index { base, .. } => self.mutate(base),
+      ExprKind::Field { base, .. } | ExprKind::Index { base, .. } if !matches!(self.typed.expr_types.get(&base.id), Some(Type::Class(_))) => {
+        self.mutate(base);
+      }
       _ => {}
     }
   }
@@ -219,9 +378,10 @@ impl Flow<'_> {
       }
       LocalKind::Const if again => Some(format!("cannot assign twice to the `const` binding `{}`", info.name)),
       LocalKind::Const => None,
-      LocalKind::VarSelf => None,
+      LocalKind::SelfParam if matches!(self.owner, Owner::Class { .. }) => Some("cannot assign to `self` in a class".to_string()),
+      // A struct or enum method that replaces `self` modifies the caller's value.
+      LocalKind::SelfParam => None,
       LocalKind::Param => Some(format!("cannot assign to the parameter `{}`", info.name)),
-      LocalKind::SelfParam => Some("cannot assign to `self`: it is immutable in this method".to_string()),
       LocalKind::ForVar => Some(format!("cannot assign to the loop variable `{}`", info.name)),
       LocalKind::Pattern => Some(format!("cannot assign to the pattern binding `{}`", info.name)),
     };
@@ -231,11 +391,11 @@ impl Flow<'_> {
         LocalKind::Param => "parameter declared here",
         LocalKind::ForVar => "loop variable declared here",
         LocalKind::Pattern => "bound by the pattern here",
-        LocalKind::SelfParam => "declared as `self` here",
+        LocalKind::SelfParam => "`self` is the instance itself",
         _ => "declared with `const` here",
       };
       let help = if info.kind == LocalKind::SelfParam {
-        "declare the method with `var self` to modify the value".to_string()
+        "assign the fields of `self` instead".to_string()
       } else {
         format!("declare `{}` with `var` to reassign it", info.name)
       };
@@ -275,6 +435,10 @@ impl Flow<'_> {
       ExprKind::Path(_) => {
         if let Some(Res::Local(id)) = self.resolution.paths.get(&expr.id).copied() {
           self.read(id, expr.span);
+
+          if self.initializer().is_some() && self.is_self(expr) {
+            self.use_self(expr.span);
+          }
         }
       }
       ExprKind::Call { callee, args } => {
@@ -299,7 +463,10 @@ impl Flow<'_> {
           self.mutate(receiver);
         }
       }
-      ExprKind::Field { base, .. } => self.expr(base),
+      ExprKind::Field { base, .. } => match self.self_field(expr) {
+        Some((slot, field)) => self.read_field(slot, field, expr.span),
+        None => self.expr(base),
+      },
       ExprKind::Index { base, index } => {
         self.expr(base);
         self.expr(index);
@@ -430,6 +597,10 @@ impl Flow<'_> {
           self.expr(value);
         }
 
+        if self.state.reachable {
+          self.report_missing_fields(expr.span, true);
+        }
+
         self.state.reachable = false;
       }
       ExprKind::Int { .. } | ExprKind::Float { .. } | ExprKind::Bool(_) | ExprKind::Char(_) | ExprKind::Str(_) | ExprKind::Unit => {}
@@ -513,7 +684,7 @@ impl Flow<'_> {
 
   fn warn_bindings(&mut self) {
     for (index, local) in self.locals.iter().enumerate() {
-      if matches!(local.kind, LocalKind::SelfParam | LocalKind::VarSelf) {
+      if local.kind == LocalKind::SelfParam {
         continue;
       }
 
@@ -600,14 +771,29 @@ mod tests {
 
   #[test]
   fn modifying_parts_of_a_var_counts_as_reassigning_it() {
-    let point = "struct P { pub x: i32; pub fn bump(var self) { self.x += 1; } pub fn get(self) -> i32 { self.x } }";
+    let point = "struct P { pub x: i32; pub fn bump(self) { self.x += 1; } pub fn get(self) -> i32 { self.x } }";
 
     assert_eq!(codes_with(point, "var p = P { x: 1 }; p.x = 2;"), Vec::<&str>::new());
     assert_eq!(codes_with(point, "var p = P { x: 1 }; p.bump();"), Vec::<&str>::new());
     assert_eq!(codes_with(point, "var a = [1, 2]; a[0] += 1;"), Vec::<&str>::new());
     assert_eq!(codes_with(point, "var p = P { x: 1 }; println(`${p.get()}`);"), vec!["W0002"]);
     assert_eq!(codes_with(point, "var p: P; p.x = 1;"), vec!["E0309"]);
-    assert_eq!(codes_with("struct Q { pub fn f(self) { self = Q {}; } }", ""), vec!["E0308"]);
+    assert_eq!(codes_with("struct Q { pub fn f(self) { self = Q {}; } }", ""), Vec::<&str>::new());
+    assert_eq!(codes_with("class C { pub fn f(self) { self = new C(); } }", ""), vec!["E0308"]);
+  }
+
+  #[test]
+  fn initializers_assign_every_field() {
+    let class =
+      |init: &str| codes_with(&format!("class C {{ pub const a: i32; pub var b: i32; pub fn new() {{ {init} }} pub fn m(self) {{}} }}"), "");
+
+    assert_eq!(class("self.a = 1; self.b = self.a; self.b += 1; self.m();"), Vec::<&str>::new());
+    assert_eq!(class("self.a = 1;"), vec!["E0325"]);
+    assert_eq!(class("self.b = self.a; self.a = 1;"), vec!["E0325"]);
+    assert_eq!(class("self.a = 1; self.m(); self.b = 2;"), vec!["E0325"]);
+    assert_eq!(class("self.a = 1; if true { return; } self.b = 2;"), vec!["E0325"]);
+    assert_eq!(class("self.a = 1; self.b = 2; self.a = 3;"), vec!["E0308"]);
+    assert_eq!(class("if true { self.a = 1; } else { self.a = 2; } self.b = 0;"), Vec::<&str>::new());
   }
 
   #[test]

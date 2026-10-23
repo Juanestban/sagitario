@@ -5,8 +5,8 @@ use std::collections::{BTreeSet, HashSet};
 
 use crate::{Imported, ItemRef, ModId, ModuleInfo, Named, Resolution, Resolver, TypeItem, TypeRes};
 use sagitario_ast::{
-  Block, Expr, ExprKind, FnDecl, Ident, Item, Module, Package, Path, Pattern, PatternKind, Stmt, TemplatePart, TypeExpr, TypeExprKind, UseTree,
-  UseTreeKind, VariantFields, Visibility,
+  Block, ClassDecl, Expr, ExprKind, FnDecl, Ident, Item, Module, Package, Path, Pattern, PatternKind, Stmt, StructDecl, TemplatePart, TypeExpr,
+  TypeExprKind, UseTree, UseTreeKind, VariantFields, Visibility,
 };
 use sagitario_diagnostics::{Diagnostic, Diagnostics, codes};
 
@@ -191,6 +191,15 @@ pub(crate) fn report_private_interfaces(resolution: &Resolution, package: &Packa
             checks.push((&function.name.name, signature_types(function)));
           }
         }
+        Item::Class(decl) if public(decl.visibility) => {
+          let fields = decl.fields.iter().filter(|field| field.visibility != Visibility::Private).map(|field| &field.ty).collect();
+
+          checks.push((&decl.name.name, fields));
+
+          for function in decl.functions.iter().filter(|function| function.visibility != Visibility::Private) {
+            checks.push((&function.name.name, signature_types(function)));
+          }
+        }
         Item::Enum(decl) if public(decl.visibility) => {
           let fields = decl.variants.iter().flat_map(|variant| match &variant.fields {
             VariantFields::Unit => Vec::new(),
@@ -229,6 +238,10 @@ pub(crate) fn report_private_interfaces(resolution: &Resolution, package: &Packa
               None => continue,
             },
             TypeItem::Enum(id) => match resolution.enum_decl(package, *id) {
+              Some(decl) => (decl.visibility, &decl.name.name, decl.name.span),
+              None => continue,
+            },
+            TypeItem::Class(id) => match resolution.class_decl(package, *id) {
               Some(decl) => (decl.visibility, &decl.name.name, decl.name.span),
               None => continue,
             },
@@ -301,12 +314,12 @@ pub fn module_references(module: &Module) -> Vec<Vec<String>> {
   for item in &module.items {
     match item {
       Item::Fn(decl) => fn_paths(decl, &mut paths),
-      Item::Struct(decl) => {
-        for field in &decl.fields {
+      Item::Struct(StructDecl { fields, functions, .. }) | Item::Class(ClassDecl { fields, functions, .. }) => {
+        for field in fields {
           type_paths(&field.ty, &mut paths);
         }
 
-        for function in &decl.functions {
+        for function in functions {
           fn_paths(function, &mut paths);
         }
       }

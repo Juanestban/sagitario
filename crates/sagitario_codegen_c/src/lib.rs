@@ -8,13 +8,18 @@
 //! (the variant's index) and a union `u` with one struct `vN` per variant that has fields. All
 //! are copied by assignment and passed by value. Managed aggregates (containing `String`s) get
 //! `sag_retain_*`/`sag_release_*` functions.
+//!
+//! A class is a heap object `sag_cN` whose first member is the runtime's `sag_object` header
+//! (reference counts and a drop function); values of the class are `sag_cN *`. `sag_new_cN`
+//! allocates a zeroed instance and `sag_drop_cN` releases its fields when the last reference
+//! goes away.
 
 use sagitario_ast::{BinaryOp, UnaryOp};
-use sagitario_resolve::{Builtin, EnumId, FnId, StructId};
+use sagitario_resolve::{Builtin, ClassId, EnumId, FnId, StructId};
 use sagitario_sir::{
   Callee, Const, ExternDecl, Function, Layouts, Local, Operand, PanicMessage, Place, Program, Projection, Rvalue, Stmt, TemplatePiece,
 };
-use sagitario_types::{EnumRef, FloatTy, IntTy, StructRef, Type};
+use sagitario_types::{ClassRef, EnumRef, FloatTy, IntTy, StructRef, Type};
 
 pub const RUNTIME_HEADER: &str = "sagitario_runtime.h";
 
@@ -39,6 +44,7 @@ pub fn generate(program: &Program) -> GeneratedC {
     self_by_ref: false,
     source_line: None,
     pointees: Vec::new(),
+    classes: Vec::new(),
   };
   let order = generator.aggregate_order(program);
 
@@ -76,12 +82,13 @@ fn linkage(function: &Function) -> &'static str {
   if function.export.is_some() { "" } else { "static " }
 }
 
-/// A C struct to define: a struct, an enum, or an array, `Option` or `Result` type (index in
-/// `Generator::instances`).
+/// A C struct to define: a struct, an enum, a class's objects, or an array, `Option` or
+/// `Result` type (index in `Generator::instances`).
 #[derive(Clone, Copy)]
 enum Aggregate {
   Struct(usize),
   Enum(usize),
+  Class(usize),
   Instance(usize),
 }
 
@@ -102,13 +109,15 @@ struct Generator<'a> {
   source_line: Option<(u32, u32)>,
   /// Types behind pointers, given a C type after the aggregate being visited.
   pointees: Vec<Type>,
+  /// Classes whose objects are referenced, defined after the aggregate being visited.
+  classes: Vec<usize>,
 }
 
 impl<'a> Generator<'a> {
   /// Every aggregate type, each after the ones it contains, as C requires.
   fn aggregate_order(&mut self, program: &Program) -> Vec<Aggregate> {
     let mut order = Vec::new();
-    let mut done = vec![false; self.layouts.structs.len() + self.layouts.enums.len()];
+    let mut done = vec![false; self.layouts.structs.len() + self.layouts.enums.len() + self.layouts.classes.len()];
 
     for index in 0..self.layouts.structs.len() {
       self.visit_type(&struct_type(index), &mut done, &mut order);
@@ -116,6 +125,10 @@ impl<'a> Generator<'a> {
 
     for index in 0..self.layouts.enums.len() {
       self.visit_type(&enum_type(index), &mut done, &mut order);
+    }
+
+    for index in 0..self.layouts.classes.len() {
+      self.classes.push(index);
     }
 
     for function in &program.functions {
@@ -130,20 +143,50 @@ impl<'a> Generator<'a> {
       }
     }
 
-    // A pointer only needs its pointee declared, so pointees may come in any order (and a
-    // struct may point to itself).
-    while let Some(pointee) = self.pointees.pop() {
-      self.visit_type(&pointee, &mut done, &mut order);
+    // A pointer only needs its pointee declared, so pointees and classes may come in any order
+    // (and a struct or class may point to itself).
+    loop {
+      if let Some(pointee) = self.pointees.pop() {
+        self.visit_type(&pointee, &mut done, &mut order);
+      } else if let Some(class) = self.classes.pop() {
+        self.visit_class(class, &mut done, &mut order);
+      } else {
+        break;
+      }
     }
 
     order
   }
 
-  /// `done` flags structs first, then enums.
+  /// Defines a class's objects after the types of its fields.
+  fn visit_class(&mut self, index: usize, done: &mut [bool], order: &mut Vec<Aggregate>) {
+    let flag = self.layouts.structs.len() + self.layouts.enums.len() + index;
+
+    if done.get(flag).copied().unwrap_or(true) {
+      return;
+    }
+
+    if let Some(slot) = done.get_mut(flag) {
+      *slot = true;
+    }
+
+    for field in self.layouts.class_fields(ClassId(index as u32)) {
+      self.visit_type(&field, done, order);
+    }
+
+    order.push(Aggregate::Class(index));
+  }
+
+  /// `done` flags structs first, then enums, then classes.
   fn visit_type(&mut self, ty: &Type, done: &mut [bool], order: &mut Vec<Aggregate>) {
     let (flag, aggregate) = match ty {
       Type::Struct(inner) => (inner.id.0 as usize, Aggregate::Struct(inner.id.0 as usize)),
       Type::Enum(inner) => (self.layouts.structs.len() + inner.id.0 as usize, Aggregate::Enum(inner.id.0 as usize)),
+      Type::Class(inner) => {
+        self.classes.push(inner.id.0 as usize);
+
+        return;
+      }
       Type::Array(..) | Type::Option(_) | Type::Result(..) => {
         if self.instances.contains(ty) {
           return;
@@ -185,6 +228,7 @@ impl<'a> Generator<'a> {
   fn parts(&self, ty: &Type) -> Vec<Vec<Type>> {
     match ty {
       Type::Struct(inner) => vec![self.layouts.struct_fields(inner.id)],
+      Type::Class(inner) => vec![self.layouts.class_fields(inner.id)],
       Type::Array(elem, _) => vec![vec![elem.as_ref().clone()]],
       _ => self.layouts.variants(ty).unwrap_or_default(),
     }
@@ -194,14 +238,23 @@ impl<'a> Generator<'a> {
     match aggregate {
       Aggregate::Struct(index) => struct_type(index),
       Aggregate::Enum(index) => enum_type(index),
+      Aggregate::Class(index) => class_type(index),
       Aggregate::Instance(index) => self.instances.get(index).cloned().unwrap_or(Type::Error),
+    }
+  }
+
+  /// The C struct of an aggregate: for a class, the struct of its objects.
+  fn struct_name(&self, ty: &Type) -> String {
+    match ty {
+      Type::Class(inner) => format!("sag_c{}", inner.id.0),
+      _ => self.c_type(ty),
     }
   }
 
   fn type_definitions(&mut self, order: &[Aggregate]) {
     // Declared first, so pointers can refer to any of them.
     for aggregate in order {
-      let name = self.c_type(&self.aggregate_type(*aggregate));
+      let name = self.struct_name(&self.aggregate_type(*aggregate));
 
       self.out.push_str(&format!("typedef struct {name} {name};\n"));
     }
@@ -217,13 +270,53 @@ impl<'a> Generator<'a> {
       self.arc_functions(*aggregate);
     }
 
+    for aggregate in order {
+      if let Aggregate::Class(index) = aggregate {
+        self.class_functions(*index);
+      }
+    }
+
     self.out.push('\n');
+  }
+
+  /// `sag_drop_cN`, which releases the fields of an object, and `sag_new_cN`.
+  fn class_functions(&mut self, index: usize) {
+    let name = format!("sag_c{index}");
+    let releases: Vec<String> = self
+      .layouts
+      .class_fields(ClassId(index as u32))
+      .iter()
+      .enumerate()
+      .filter(|(_, field)| self.layouts.is_managed(field))
+      .map(|(field, ty)| format!("  {};\n", self.arc_call("release", ty, &format!("value->f{field}"))))
+      .collect();
+
+    self.out.push_str(&format!("static void sag_drop_c{index}(sag_object *object) {{\n"));
+
+    if releases.is_empty() {
+      self.out.push_str("  (void)object;\n");
+    } else {
+      self.out.push_str(&format!("  {name} *value = ({name} *)object;\n{}", releases.concat()));
+    }
+
+    self.out.push_str("}\n");
+    self.out.push_str(&format!("static {name} *sag_new_c{index}(void) {{\n"));
+    self.out.push_str(&format!("  {name} *value = sag_object_alloc(sizeof({name}));\n"));
+    self.out.push_str(&format!("  *value = ({name}){{0}};\n"));
+    self.out.push_str(&format!("  sag_object_init(&value->header, sag_drop_c{index});\n"));
+    self.out.push_str("  return value;\n}\n");
   }
 
   /// `struct sag_xN { ... };` for an aggregate type.
   fn definition(&self, ty: &Type) -> String {
-    let name = self.c_type(ty);
+    let name = self.struct_name(ty);
     let members = match ty {
+      Type::Class(_) => {
+        let fields = self.parts(ty).concat();
+        let members: Vec<String> = fields.iter().enumerate().map(|(index, field)| format!(" {} f{index};", self.c_type(field))).collect();
+
+        format!("sag_object header;{}", members.concat())
+      }
       Type::Struct(_) => {
         let fields = self.parts(ty).concat();
         let mut members: Vec<String> = fields.iter().enumerate().map(|(index, field)| format!("{} f{index};", self.c_type(field))).collect();
@@ -263,7 +356,8 @@ impl<'a> Generator<'a> {
   fn arc_functions(&mut self, aggregate: Aggregate) {
     let ty = self.aggregate_type(aggregate);
 
-    if !self.layouts.is_managed(&ty) {
+    // Class references use the runtime's `sag_object_retain`/`sag_object_release`.
+    if !self.layouts.is_managed(&ty) || matches!(aggregate, Aggregate::Class(_)) {
       return;
     }
 
@@ -317,6 +411,7 @@ impl<'a> Generator<'a> {
       Type::String => format!("sag_string_{action}({value})"),
       Type::StringBuilder => format!("sag_builder_{action}({value})"),
       Type::CString => format!("sag_cstring_{action}({value})"),
+      Type::Class(_) => format!("sag_object_{action}({value})"),
       _ => format!("sag_{action}_{}(&{value})", self.c_type(ty).trim_start_matches("sag_")),
     }
   }
@@ -339,6 +434,7 @@ impl<'a> Generator<'a> {
       Type::StringBuilder => "sag_builder".to_string(),
       Type::Struct(inner) => format!("sag_s{}", inner.id.0),
       Type::Enum(inner) => format!("sag_e{}", inner.id.0),
+      Type::Class(inner) => format!("sag_c{} *", inner.id.0),
       Type::Array(..) | Type::Option(_) | Type::Result(..) => format!("sag_t{}", self.instance_index(ty)),
       Type::CString => "sag_cstring".to_string(),
       Type::CVoid => "void".to_string(),
@@ -545,6 +641,7 @@ impl<'a> Generator<'a> {
     for projection in &place.projections {
       match projection {
         Projection::Field(index) => out.push_str(&format!(".f{index}")),
+        Projection::ClassField(index) => out.push_str(&format!("->f{index}")),
         Projection::Index { index, len } => {
           out.push_str(&format!(".data[sag_index_at({}, {len}, __FILE__, __LINE__)]", self.operand(index)));
         }
@@ -791,6 +888,7 @@ impl<'a> Generator<'a> {
           format!("({}){{.tag = {index}u, .u.v{index} = {{{}}}}}", self.c_type(ty), fields.join(", "))
         }
       }
+      Rvalue::Alloc(class) => format!("sag_new_c{}()", class.0),
       // Templates and repeats are emitted as statements by `Generator::assign`.
       Rvalue::Template(_) | Rvalue::Repeat(_) => "0".to_string(),
     }
@@ -823,6 +921,7 @@ impl<'a> Generator<'a> {
             | Type::StringBuilder
             | Type::Struct(_)
             | Type::Enum(_)
+            | Type::Class(_)
             | Type::Array(..)
             | Type::Option(_)
             | Type::Result(..)
@@ -852,6 +951,10 @@ fn struct_type(index: usize) -> Type {
 
 fn enum_type(index: usize) -> Type {
   Type::Enum(EnumRef { id: EnumId(index as u32), name: String::new() })
+}
+
+fn class_type(index: usize) -> Type {
+  Type::Class(ClassRef { id: ClassId(index as u32), name: String::new() })
 }
 
 /// Functions are named by id, so any Sagitario identifier (including Unicode) is safe in C.

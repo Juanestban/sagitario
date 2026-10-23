@@ -158,8 +158,10 @@ enum Shape impl Display {
 - Variants come first, separated by commas. They take no visibility modifier and are always
   as visible as the enum (so `match` can be exhaustive anywhere), as are their fields.
 - Methods follow the variants inside the same body, with mandatory `pub`/`prv`, taking
-  `self` or `var self`; functions without `self` are static (see
-  [static functions](03-memory.md#static-functions)).
+  `self`; functions without `self` are static (see
+  [static functions](03-memory.md#static-functions)). A method may replace `self`
+  (`self = Shape::Empty;`), which makes it modify the caller's value
+  (see [struct mutability](03-memory.md#struct-mutability-f1)).
 - A variant without data is written without parentheses (`Empty`): `Empty()`, `Empty {}` and
   enums without variants are errors. Variants and functions of an enum share one namespace.
 - Variants are always named with their path: `Shape::Circle(1.0)`, `Shape::Rect { w, h }`,

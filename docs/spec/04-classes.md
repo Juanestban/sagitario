@@ -27,9 +27,12 @@ class Dog extends Animal {
 const dog = new Dog("Rex");
 ```
 
-- Fields and methods are declared inside the class body. There are no `impl` blocks.
-- Methods take `self` explicitly as their first parameter; inside them, members are accessed
-  through `self`.
+- Fields and methods are declared inside the class body. There are no `impl` blocks. Every
+  field is `const` or `var` (see [mutability](03-memory.md#class-field-mutability-f2)).
+- Methods take `self` explicitly as their first parameter, never `var self`; inside them,
+  members are accessed through `self`. `self` is a reference to the instance: methods can
+  modify its `var` fields, and `self` itself cannot be reassigned.
+- Fields and functions of a class share one namespace.
 
 ## Visibility of members
 
@@ -41,10 +44,15 @@ const dog = new Dog("Rex");
 ## Construction
 
 - The constructor is `pub fn new(...)` (or `prv fn new`). It is an **initializer**: `self`
-  is implicit and already allocated, and `new` has no return type.
-- Objects are created with `new ClassName(args)`, which allocates and calls `new`.
-- The compiler verifies that every `const` field is assigned exactly once in `new` and that
-  no field is read before it is assigned.
+  is implicit and already allocated, and `new` declares neither `self` nor a return type.
+- Objects are created with `new ClassName(args)`, which allocates and calls `new`. A `prv`
+  initializer can only be used inside the class.
+- A class without fields may omit `new`; it then has an implicit `new()` without parameters. A
+  class with fields must declare it. Fields have no initializers in their declaration.
+- Every field, `const` and `var`, must be assigned before `new` returns: at the end of its body
+  and at every `return`. A `const` field is assigned exactly once. No field is read before it is
+  assigned, and `self` cannot be used otherwise (calling its methods, passing it along) until
+  every field is assigned.
 - In a subclass, `zod.new(...)` **must be the first statement** of `new` when the parent
   declares a constructor.
 - `new` cannot be called as `ClassName::new(...)`. Other functions without `self` are static
@@ -69,6 +77,27 @@ const d = Dog::puppy();
 - `zod.method(...)` calls the parent implementation.
 - Dispatch: methods are virtual by default. The compiler sees the whole program and must
   devirtualize calls to methods that no subclass overrides.
+
+## Values and destruction
+
+- Class values are references: assigning or passing one shares the instance (ARC).
+- `==` and `!=` compare identity. Classes cannot be interpolated or compared with `<`.
+- Instances are destroyed when their last strong reference goes away (see
+  [memory](03-memory.md#automatic-reference-counting-f2)). There are no destructors in the MVP.
+
+## Weak references
+
+```sag
+class Person {
+  pub weak var team: Option<Team>;
+}
+```
+
+- `weak` marks a `var` field of type `Option<C>`, where `C` is a class or an interface. It does
+  not keep the instance alive.
+- Reading the field gives a strong `Option<C>`: `None` once the instance has been destroyed.
+  Assigning it works like any other field.
+- There are no `weak` local bindings in the MVP. `weak` captures in closures are post-MVP.
 
 ## Abstract classes
 

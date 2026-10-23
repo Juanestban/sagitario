@@ -48,7 +48,7 @@ struct Point {
   pub y: f64;
 
   pub fn len(self) -> f64 { (self.x * self.x + self.y * self.y).sqrt() }
-  pub fn move_by(var self, dx: f64) { self.x += dx; }
+  pub fn move_by(self, dx: f64) { self.x += dx; }
 }
 
 abstract class Animal impl Named {
@@ -97,6 +97,7 @@ an ADR when the choice is significant) before the feature that needs them.
 
 | # | Question | Needed by |
 |---|---|---|
-| Q12 | Syntax for declaring `weak` references. | F2 |
+| — | None at the moment. | |
 
-Q1–Q11 were resolved in [ADR-0017](../adr/0017-resolution-of-open-questions-q1-q11.md).
+Q1–Q11 were resolved in [ADR-0017](../adr/0017-resolution-of-open-questions-q1-q11.md), and Q12
+(`weak` syntax) in [ADR-0027](../adr/0027-classes-and-arc.md).

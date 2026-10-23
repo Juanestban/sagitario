@@ -19,7 +19,11 @@
 - An object is destroyed deterministically when its count reaches zero. There is no
   tracing garbage collector and no pauses.
 - Reference cycles are not collected. `weak` references break cycles; a `weak` reference
-  does not keep its target alive (declaration syntax: open question Q12).
+  does not keep its target alive (see [classes](04-classes.md#weak-references)).
+- When the last reference to an instance goes away, its fields are released; there are no
+  destructors in the MVP. Chains of instances (a long linked list) are destroyed iteratively,
+  without exhausting the stack.
+- Class instances are compared with `==`/`!=` by identity (the same instance).
 - In the MVP the program is single-threaded and reference counting is **non-atomic**.
 
 ## Bindings: `const` and `var` (F1)
@@ -47,19 +51,22 @@ total += x;
 
 - Struct fields do **not** take `const`/`var`. A struct's mutability comes from the binding
   that holds it: everything inside a `const` struct is immutable; a `var` struct is mutable.
-- Methods that mutate the struct declare `var self`; they can only be called on a `var`
-  binding.
-- A field or array element can be assigned (`p.x = v`, `a[i] += 1`, `p.pos.x = 0`) and a
-  `var self` method can be called on it only if it belongs to a `var` binding or to `var self`.
-  `self` is immutable in methods declared with `self`; `const` bindings, parameters, loop
-  variables and temporaries (`Point::new(0.0).move_by(1.0)`) cannot be modified.
-- A `var` modified only through its fields, elements or `var self` methods counts as
+- Methods take `self`, never `var self` (ADR-0028). Every method may modify `self`: assign its
+  fields and elements, call methods that modify it, or replace it (`self = Point::origin();`).
+- The compiler infers which methods **modify `self`**: those that do any of the above to `self`
+  or a part of it, directly or through the methods they call on it. They receive the caller's
+  value; the others receive a copy.
+- A field or array element can be assigned (`p.x = v`, `a[i] += 1`, `p.pos.x = 0`), and a
+  method that modifies `self` can be called on it, only if it belongs to a `var` binding, to
+  `self`, or to a `var` field of a class instance. `const` bindings, parameters, loop variables,
+  pattern bindings and temporaries (`Point::new(0.0).move_by(1.0)`) cannot be modified.
+- A `var` modified only through its fields, elements or methods that modify `self` counts as
   reassigned for the unneeded-`var` warning.
 
 ```sag
 struct Point {
   pub x: f64;
-  pub fn move_by(var self, dx: f64) { self.x += dx; }
+  pub fn move_by(self, dx: f64) { self.x += dx; }   // modifies `self`
 }
 
 var p = Point { x: 0.0 };
@@ -116,7 +123,13 @@ struct Point impl Display {
 ## Class field mutability (F2)
 
 - Every class field is declared `const` (immutable after construction) or `var` (mutable).
-- A `var` field can be modified through **any** reference to the object.
-- `const` fields must be assigned exactly once in the constructor, before use.
+  Struct fields take neither.
+- A `var` field can be modified through **any** reference to the object, including a `const`
+  binding or a parameter: the binding holds the reference, not the object. The same holds for
+  the parts of a `var` field (`obj.pos.x = 1`, `obj.pos.move_by(1.0)`).
+- `const` fields must be assigned exactly once in the initializer, before use; afterwards
+  neither they nor their parts can change.
+- A `var` binding holding an instance counts as reassigned only when the binding itself is
+  assigned, not when the instance's fields change.
 - Protection against data races is delegated to the future concurrency model
   (`Send`/`Sync`, post-MVP); in the MVP there is a single thread.

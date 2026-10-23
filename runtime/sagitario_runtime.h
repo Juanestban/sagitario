@@ -143,6 +143,27 @@ bool sag_builder_is_empty(sag_builder builder);
 void sag_builder_clear(sag_builder builder);
 sag_string sag_builder_to_string(sag_builder builder);
 
+/* ---- Class instances (ARC, docs/spec/03-memory.md) ---------------------------------------- */
+
+/* The header every class instance starts with. `strong` counts the references to the object;
+ * when it reaches zero, `drop` releases the object's fields. The memory is freed once no weak
+ * reference remains either. */
+typedef struct sag_object {
+  size_t strong;
+  size_t weak;
+  void (*drop)(struct sag_object *object);
+} sag_object;
+
+/* Allocates `size` bytes for an object; panics when out of memory. */
+void *sag_object_alloc(size_t size);
+/* Gives a new object one reference and its drop function. */
+void sag_object_init(sag_object *object, void (*drop)(sag_object *object));
+/* Both take a pointer to an object (whose first member is its `sag_object`), or NULL. */
+void sag_object_retain(void *object);
+/* Objects whose last reference goes away while another is being destroyed are destroyed after
+ * it, in a loop, so long chains of objects do not exhaust the stack. */
+void sag_object_release(void *object);
+
 /* ---- FFI (docs/spec/10-ffi.md) ----------------------------------------------------------- */
 
 /* C's `char`, the type `std::ffi::c_char` stands for. */

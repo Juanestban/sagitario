@@ -1,0 +1,89 @@
+struct Point {
+  pub x: i32;
+
+  pub fn reset(self) {
+    self.x = 0;
+  }
+}
+
+class Account {
+  prv const owner: String;
+  pub const origin: Point;
+  pub var balance: i64;
+
+  pub fn new(owner: String) {
+    self.owner = owner;
+    self.origin = Point { x: 0 };
+    self.balance = 0;
+    self.owner = "again"; //~ ERROR E0308
+  }
+
+  pub fn owner(self) -> String { //~ ERROR E0201
+    self.owner
+  }
+
+  pub fn close(self) {
+    self.balance = 0;
+    self.origin.x = 1; //~ ERROR E0312
+    self.origin.reset(); //~ ERROR E0313
+    self = new Account("other"); //~ ERROR E0308
+  }
+}
+
+class Unfinished {
+  pub const a: i32;
+  pub var b: i32;
+
+  pub fn new(a: i32) {
+    self.a = a;
+    self.check(); //~ ERROR E0325
+    if a > 0 {
+      return; //~ ERROR E0325
+    }
+    self.b = self.a;
+  }
+
+  pub fn check(self) {}
+}
+
+class Early {
+  pub var value: i32;
+
+  pub fn new() {
+    self.value = self.value + 1; //~ ERROR E0325
+  }
+}
+
+class Missing { //~ ERROR E0324
+  pub var count: i32;
+}
+
+class Typed {
+  pub fn new() -> Typed { //~ ERROR E0324
+  }
+}
+
+class Hidden {
+  prv fn new() {}
+
+  pub fn make() -> Hidden {
+    new Hidden()
+  }
+}
+
+pub fn main() {
+  const account = new Account("Ada");
+  account.balance = 10;
+  account.origin = Point { x: 1 }; //~ ERROR E0312
+  const _o = account.owner; //~ ERROR E0205
+  const _h = new Hidden(); //~ ERROR E0205
+  const _m = Hidden::make();
+  const _w = new Account(); //~ ERROR E0301
+  const _n = Account::new("Bo"); //~ ERROR E0314
+  account.new("Bo"); //~ ERROR E0314
+  const _x = account.missing; //~ ERROR E0316
+  const _l = Account { balance: 1 }; //~ ERROR E0200
+  const _p: Point = Hidden::make(); //~ ERROR E0300
+  const _c = account < account; //~ ERROR E0310
+  println(`${account}`); //~ ERROR E0306
+}

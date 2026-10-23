@@ -1,0 +1,165 @@
+// Classes: `const`/`var` fields, the initializer, methods and static functions, shared
+// references, identity, fields holding structs, strings and other instances, and destruction of
+// long chains. The harness fails the test on any leak.
+// expect-stdout: Ada has 0 points
+// expect-stdout: Ada has 15 points
+// expect-stdout: same: true, other: true
+// expect-stdout: Grace has 3 points
+// expect-stdout: at (2, -1)
+// expect-stdout: counted 100000 nodes, last 0
+// expect-stdout: marker
+// expect-stdout: team: Ada, Grace
+// expect-stdout: 2 6 left
+
+struct Point {
+  pub x: i32;
+  pub y: i32;
+
+  // Modifies `self`, which the compiler detects.
+  pub fn move_by(self, dx: i32, dy: i32) {
+    self.x += dx;
+    self.y += dy;
+  }
+}
+
+class Player {
+  prv const name: String;
+  pub var points: i32;
+  pub var position: Point;
+
+  pub fn new(name: String) {
+    self.name = name;
+    self.points = 0;
+    self.position = Point { x: 0, y: 0 };
+  }
+
+  pub fn named(name: String, points: i32) -> Player {
+    const player = new Player(name);
+    player.points = points;
+    player
+  }
+
+  pub fn display_name(self) -> String {
+    self.name
+  }
+
+  pub fn score(self, amount: i32) {
+    self.points += amount;
+  }
+
+  pub fn walk(self) {
+    self.position.move_by(2, -1);
+  }
+
+  pub fn describe(self) -> String {
+    `${self.name} has ${self.points} points`
+  }
+}
+
+class Node {
+  pub const value: i32;
+  pub var next: Option<Node>;
+
+  pub fn new(value: i32, next: Option<Node>) {
+    self.value = value;
+    self.next = next;
+  }
+}
+
+class Marker {
+  pub fn label(self) -> String {
+    "marker"
+  }
+}
+
+struct Team {
+  pub members: [Player; 2];
+
+  pub fn names(self) -> String {
+    `${self.members[0].display_name()}, ${self.members[1].display_name()}`
+  }
+}
+
+enum Light {
+  Red,
+  Green,
+
+  // Replaces `self`, so it modifies the caller's value.
+  pub fn toggle(self) {
+    self = match self {
+      Light::Red => Light::Green,
+      Light::Green => Light::Red,
+    };
+  }
+
+  pub fn is_red(self) -> bool {
+    match self {
+      Light::Red => true,
+      Light::Green => false,
+    }
+  }
+}
+
+fn reward(player: Player) {
+  // Parameters cannot be reassigned, but the instance they refer to can change.
+  player.score(5);
+}
+
+fn count(list: Option<Node>) -> String {
+  var total = 0;
+  var last = 0;
+  var current = list;
+
+  loop {
+    match current {
+      Some(node) => {
+        total += 1;
+        last = node.value;
+        current = node.next;
+      }
+      None => break,
+    }
+  }
+
+  `counted ${total} nodes, last ${last}`
+}
+
+fn main() {
+  const ada = new Player("Ada");
+  println(ada.describe());
+
+  const alias = ada;
+  alias.score(10);
+  reward(ada);
+  println(ada.describe());
+
+  const grace = Player::named("Grace", 3);
+  println(`same: ${alias == ada}, other: ${ada != grace}`);
+  println(grace.describe());
+
+  ada.walk();
+  println(`at (${ada.position.x}, ${ada.position.y})`);
+
+  var list: Option<Node> = None;
+
+  for i in 0..100000 {
+    list = Some(new Node(i, list));
+  }
+
+  // The list starts at the most recent node.
+  println(count(list));
+
+  println(new Marker().label());
+
+  const team = Team { members: [ada, grace] };
+  println(`team: ${team.names()}`);
+
+  var light = Light::Red;
+  light.toggle();
+  var moves = 0;
+  if !light.is_red() {
+    moves += 2;
+  }
+  const scores = [ada.points, grace.points];
+  println(`${moves} ${scores[1] * 2} left`);
+}

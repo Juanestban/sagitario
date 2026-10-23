@@ -3,11 +3,15 @@
 //!
 //! SIR is structured (`If`/`Loop` instead of a control-flow graph) because it is emitted as C.
 //! Every intermediate value lives in a numbered local; fields and array elements are reached
-//! through places. ARC is explicit: locals of a *managed* type (one that contains a `String`)
-//! own one reference to each string inside, released at the end of their block, on
-//! `break`/`continue`/`return`, or when overwritten. Temporaries are released at the end of the
-//! statement or branch that created them, so the set of pending releases always matches the
-//! values created on the current path.
+//! through places. ARC is explicit: locals of a *managed* type (one that contains a `String` or
+//! another reference: a class instance, a `StringBuilder`, a `CString`) own one reference to each
+//! one inside, released at the end of their block, on `break`/`continue`/`return`, or when
+//! overwritten. Temporaries are released at the end of the statement or branch that created them,
+//! so the set of pending releases always matches the values created on the current path.
+//!
+//! A class instance is a reference to a heap object; its fields are places behind it. Any call
+//! may change a `var` field through another reference, so reading a managed value from a field of
+//! an instance takes an owned copy instead of borrowing it.
 //!
 //! Enums, `Option` and `Result` values carry a tag (the variant's index) and the fields of their
 //! variant; `match` and `?` (in `matching`) test the tag before reading those fields.
@@ -19,7 +23,7 @@ mod matching;
 mod text;
 
 use sagitario_ast::{BinaryOp, Block, Expr, ExprKind, FnDecl, Package, Stmt as AstStmt, TemplatePart, UnaryOp};
-use sagitario_resolve::{Builtin, ExternId, FnId, Res, Resolution};
+use sagitario_resolve::{Builtin, ClassId, ExternId, FnId, Res, Resolution};
 use sagitario_span::{SourceMap, Span};
 use sagitario_types::{BuiltinMethod, FloatTy, IntTy, Receiver, Type, TypedModule};
 
@@ -43,20 +47,22 @@ pub struct ExternDecl {
   pub ret: Type,
 }
 
-/// The fields of the program's structs and enums.
+/// The fields of the program's structs, enums and classes.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Layouts {
   /// Indexed by `StructId`.
   pub structs: Vec<StructLayout>,
   /// Indexed by `EnumId`.
   pub enums: Vec<EnumLayout>,
+  /// Indexed by `ClassId`.
+  pub classes: Vec<StructLayout>,
 }
 
 impl Layouts {
-  /// Whether values of `ty` hold `String`s, so copies must be retained and released.
+  /// Whether values of `ty` hold references, so copies must be retained and released.
   pub fn is_managed(&self, ty: &Type) -> bool {
     match ty {
-      Type::String | Type::StringBuilder | Type::CString => true,
+      Type::String | Type::StringBuilder | Type::CString | Type::Class(_) => true,
       Type::Array(elem, _) => self.is_managed(elem),
       Type::Struct(inner) => self.structs.get(inner.id.0 as usize).is_some_and(|layout| layout.fields.iter().any(|field| self.is_managed(field))),
       Type::Enum(_) | Type::Option(_) | Type::Result(..) => self.variants(ty).iter().flatten().flatten().any(|field| self.is_managed(field)),
@@ -76,6 +82,10 @@ impl Layouts {
 
   pub fn struct_fields(&self, id: sagitario_resolve::StructId) -> Vec<Type> {
     self.structs.get(id.0 as usize).map(|layout| layout.fields.clone()).unwrap_or_default()
+  }
+
+  pub fn class_fields(&self, id: ClassId) -> Vec<Type> {
+    self.classes.get(id.0 as usize).map(|layout| layout.fields.clone()).unwrap_or_default()
   }
 }
 
@@ -98,7 +108,8 @@ pub struct Function {
   pub name: String,
   /// The first locals are the parameters, starting with `self` in methods.
   pub param_count: usize,
-  /// A `var self` method: local 0 refers to the caller's value instead of holding a copy.
+  /// A method that modifies a struct's or enum's `self`: local 0 refers to the caller's value
+  /// instead of holding a copy.
   pub self_by_ref: bool,
   /// The C symbol of an `extern "C" fn`.
   pub export: Option<String>,
@@ -125,6 +136,8 @@ pub struct Place {
 pub enum Projection {
   /// The field at this position of a struct.
   Field(usize),
+  /// The field at this position of the class instance a reference points to.
+  ClassField(usize),
   /// A bounds-checked element of an array of length `len`.
   Index { index: Operand, len: u64 },
   /// The tag of an enum value: the index of its variant, as `u32`.
@@ -247,6 +260,9 @@ pub enum Rvalue {
     index: u32,
     fields: Vec<Operand>,
   },
+  /// A new instance of a class with one reference and every field zeroed, which its
+  /// initializer then assigns.
+  Alloc(ClassId),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -273,7 +289,7 @@ pub enum Operand {
   Local(Local),
   /// Reads a field or element.
   Place(Place),
-  /// The address of a place: the receiver of a `var self` method.
+  /// The address of a place: the receiver of a method that modifies `self`.
   Ref(Place),
   Const(Const),
 }
@@ -319,7 +335,12 @@ pub fn lower(package: &Package, resolution: &Resolution, typed: &TypedModule, so
     .iter()
     .map(|def| EnumLayout { name: def.name.clone(), variants: def.variants.iter().map(|variant| variant.field_types()).collect() })
     .collect();
-  let layouts = Layouts { structs, enums };
+  let classes = typed
+    .classes
+    .iter()
+    .map(|def| StructLayout { name: def.name.clone(), fields: def.fields.iter().map(|field| field.ty.clone()).collect() })
+    .collect();
+  let layouts = Layouts { structs, enums, classes };
   let mut functions = Vec::new();
 
   for (id, decl) in resolution.fn_decls(package) {
@@ -655,13 +676,26 @@ impl FnLowering<'_> {
         other => error(format!("place of unsupported path {other:?}")),
       },
       ExprKind::Field { base, name } => {
-        let Type::Struct(owner) = self.type_of(base)? else {
-          return error("field of a value that is not a struct");
+        let projection = match self.type_of(base)? {
+          Type::Struct(owner) => self.typed.field_index(owner.id, &name.name).map(Projection::Field),
+          Type::Class(owner) => self.typed.class_field_index(owner.id, &name.name).map(Projection::ClassField),
+          _ => return error("field of a value that is not a struct or a class instance"),
         };
-        let index = self.typed.field_index(owner.id, &name.name).ok_or_else(|| LowerError(format!("unknown field `{}`", name.name)))?;
+        let projection = projection.ok_or_else(|| LowerError(format!("unknown field `{}`", name.name)))?;
         let mut place = self.base_place(base)?;
 
-        place.projections.push(Projection::Field(index));
+        // An instance reached through another place stays alive for the statement, even if a
+        // call in it replaces that place.
+        if matches!(projection, Projection::ClassField(_)) && !place.projections.is_empty() {
+          let base_ty = place.ty.clone();
+
+          place = match self.owned_copy(base_ty.clone(), Operand::Place(place)) {
+            Operand::Local(local) => Place { local, projections: Vec::new(), ty: base_ty },
+            _ => return error("instance reference without a local"),
+          };
+        }
+
+        place.projections.push(projection);
         place.ty = ty;
 
         Ok(place)
@@ -745,12 +779,17 @@ impl FnLowering<'_> {
       },
       ExprKind::Try(inner) => self.try_expr(inner),
       ExprKind::New { .. } if ty == Type::StringBuilder => Ok(self.new_string_builder()),
-      ExprKind::New { .. } => error("`new` of a type other than `StringBuilder`"),
+      ExprKind::New { args, .. } => self.new_instance(&ty, args),
       ExprKind::Match { scrutinee, arms } => self.match_expr(&ty, scrutinee, arms),
       ExprKind::Field { .. } | ExprKind::Index { .. } => {
         let place = self.place(expr)?;
 
         if self.managed(&ty) {
+          // A field of an instance can change during the statement through another reference.
+          if place.projections.iter().any(|projection| matches!(projection, Projection::ClassField(_))) {
+            return Ok(self.owned_copy(ty, Operand::Place(place)));
+          }
+
           return Ok(Operand::Place(place));
         }
 
@@ -1152,6 +1191,27 @@ impl FnLowering<'_> {
     }
 
     Ok(value)
+  }
+
+  /// `new C(args)`: allocates the instance and runs the initializer on it.
+  fn new_instance(&mut self, ty: &Type, args: &[Expr]) -> LResult<Operand> {
+    let Type::Class(class) = ty else {
+      return error("`new` of a type other than a class or `StringBuilder`");
+    };
+    let instance = self.new_value(ty.clone(), Rvalue::Alloc(class.id));
+    let Some(initializer) = self.typed.class_def(class.id).and_then(|def| def.initializer) else {
+      return Ok(instance);
+    };
+    let params = self.typed.sig(initializer).map(|sig| sig.params.clone()).unwrap_or_default();
+    let mut operands = vec![instance.clone()];
+
+    for (arg, param) in args.iter().zip(&params) {
+      operands.push(self.operand_as(arg, param)?);
+    }
+
+    self.call(Callee::Fn(initializer), operands, Type::Unit);
+
+    Ok(instance)
   }
 
   fn call(&mut self, callee: Callee, args: Vec<Operand>, ty: Type) -> Operand {

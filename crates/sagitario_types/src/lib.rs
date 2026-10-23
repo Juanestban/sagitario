@@ -1,8 +1,9 @@
 //! Type checking with local inference (docs/spec/02-types.md, 06-control-flow.md). Records the
 //! type of every expression and local binding for lowering; `patterns` checks `match` (with the
-//! exhaustiveness algorithm in `exhaustive`), and `flow` then checks definite assignment and
-//! reachability.
+//! exhaustiveness algorithm in `exhaustive`), `classes` checks classes and which methods modify
+//! `self`, and `flow` then checks definite assignment and reachability.
 
+mod classes;
 mod exhaustive;
 mod ffi;
 mod flow;
@@ -18,7 +19,7 @@ use sagitario_ast::{
 };
 use sagitario_diagnostics::{Code, Diagnostic, Diagnostics, codes};
 use sagitario_resolve::{
-  Builtin, CType, EnumId, EnumKind, ExternId, FnId, LocalId, LocalKind, Res, Resolution, StructId, TypeItem, TypeRes, VariantRef,
+  Builtin, CType, ClassId, EnumId, EnumKind, ExternId, FnId, LocalId, LocalKind, Res, Resolution, StructId, TypeItem, TypeRes, VariantRef,
 };
 use sagitario_span::Span;
 
@@ -109,6 +110,8 @@ pub enum Type {
   StringBuilder,
   Struct(StructRef),
   Enum(EnumRef),
+  /// A reference to an instance of a class, managed by ARC.
+  Class(ClassRef),
   /// `[T; N]`
   Array(Box<Type>, u64),
   /// The prelude's `Option<T>`.
@@ -136,6 +139,13 @@ pub enum Type {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct StructRef {
   pub id: StructId,
+  pub name: String,
+}
+
+/// A class type; the name is kept for messages.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ClassRef {
+  pub id: ClassId,
   pub name: String,
 }
 
@@ -182,6 +192,7 @@ impl fmt::Display for Type {
       Type::String => f.write_str("String"),
       Type::Struct(ty) => f.write_str(&ty.name),
       Type::Enum(ty) => f.write_str(&ty.name),
+      Type::Class(ty) => f.write_str(&ty.name),
       Type::Array(elem, len) => write!(f, "[{elem}; {len}]"),
       Type::Option(value) => write!(f, "Option<{value}>"),
       Type::Result(value, error) => write!(f, "Result<{value}, {error}>"),
@@ -198,10 +209,12 @@ impl fmt::Display for Type {
 /// How a method receives `self`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Receiver {
-  /// `self`: a read-only copy.
+  /// A copy of a struct or enum value, or a class reference.
   Value,
-  /// `var self`: the caller's value, which the method may modify.
+  /// The caller's struct or enum value: the method modifies `self` (inferred, ADR-0028).
   Var,
+  /// The instance a class's initializer `new` initializes.
+  Init,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -227,6 +240,8 @@ pub struct FieldDef {
   pub name: String,
   pub ty: Type,
   pub public: bool,
+  /// Whether the field can change after construction: struct fields and `var` class fields.
+  pub mutable: bool,
   pub span: Span,
 }
 
@@ -235,6 +250,15 @@ pub struct StructDef {
   pub name: String,
   /// In declaration order.
   pub fields: Vec<FieldDef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassDef {
+  pub name: String,
+  /// In declaration order.
+  pub fields: Vec<FieldDef>,
+  /// The function `new` that initializes instances; classes without fields may have none.
+  pub initializer: Option<FnId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -306,6 +330,8 @@ pub struct TypedModule {
   pub structs: Vec<StructDef>,
   /// Indexed by `EnumId`.
   pub enums: Vec<EnumDef>,
+  /// Indexed by `ClassId`.
+  pub classes: Vec<ClassDef>,
   /// Calls to methods of `Option` and `Result`, by node id.
   pub builtin_methods: HashMap<NodeId, BuiltinMethod>,
   /// Type of each local binding, indexed by `FnId` then `LocalId`.
@@ -332,6 +358,15 @@ impl TypedModule {
   /// Position of a field in its struct's declaration.
   pub fn field_index(&self, id: StructId, name: &str) -> Option<usize> {
     self.struct_def(id)?.fields.iter().position(|field| field.name == name)
+  }
+
+  pub fn class_def(&self, id: ClassId) -> Option<&ClassDef> {
+    self.classes.get(id.0 as usize)
+  }
+
+  /// Position of a field in its class's declaration.
+  pub fn class_field_index(&self, id: ClassId, name: &str) -> Option<usize> {
+    self.class_def(id)?.fields.iter().position(|field| field.name == name)
   }
 
   /// The variants of an enum, `Option` or `Result` type, with their field types.
@@ -369,10 +404,14 @@ pub fn check(package: &Package, resolution: &Resolution, diagnostics: &mut Diagn
     loops: Vec::new(),
     unsafe_blocks: Vec::new(),
     pointees: Vec::new(),
+    mutates_self: vec![false; resolution.functions.len()],
+    self_calls: Vec::new(),
+    receiver_checks: Vec::new(),
   };
 
   checker.struct_defs();
   checker.enum_defs();
+  checker.class_defs();
   checker.check_recursive_types();
   checker.check_repr_c_structs();
   checker.extern_sigs();
@@ -382,7 +421,7 @@ pub fn check(package: &Package, resolution: &Resolution, diagnostics: &mut Diagn
   for (id, decl) in &decls {
     checker.owner = resolution.owner(*id);
 
-    let sig = checker.signature(decl);
+    let sig = checker.signature(*id, decl);
 
     if decl.extern_c {
       checker.check_exported(decl, &sig);
@@ -392,6 +431,7 @@ pub fn check(package: &Package, resolution: &Resolution, diagnostics: &mut Diagn
   }
 
   checker.check_symbols();
+  checker.check_classes();
 
   if let Some((id, main)) = decls.iter().find(|(id, _)| Some(*id) == resolution.main) {
     checker.check_main(*id, main);
@@ -402,11 +442,21 @@ pub fn check(package: &Package, resolution: &Resolution, diagnostics: &mut Diagn
   }
 
   checker.check_pointees();
+  checker.infer_mutating_methods();
 
   let typed = checker.typed;
 
   for (id, decl) in &decls {
-    flow::check_function(decl, resolution.locals(*id), resolution, &typed, diagnostics);
+    let owner = match resolution.owner(*id) {
+      Some(TypeItem::Class(class)) => {
+        let initializer = typed.class_def(class).filter(|def| def.initializer == Some(*id));
+
+        flow::Owner::Class { initializer: initializer.map(|def| (def.name.as_str(), def.fields.as_slice())) }
+      }
+      _ => flow::Owner::Value,
+    };
+
+    flow::check_function(decl, resolution.locals(*id), owner, resolution, &typed, diagnostics);
   }
 
   typed
@@ -416,7 +466,7 @@ pub fn check(package: &Package, resolution: &Resolution, diagnostics: &mut Diagn
 #[derive(Clone, Copy)]
 enum PlaceUse<'a> {
   Assign,
-  /// The receiver of the named `var self` method.
+  /// The receiver of the named method, which modifies it.
   Receiver(&'a str),
 }
 
@@ -454,6 +504,14 @@ struct Checker<'a> {
   unsafe_blocks: Vec<bool>,
   /// Pointee types, checked once every type is known.
   pointees: Vec<(Span, Type)>,
+  /// Whether each struct or enum method modifies `self` directly, by `FnId`.
+  mutates_self: Vec<bool>,
+  /// Methods called on `self` (or a part of it) inside a method, as (caller, callee): the
+  /// caller modifies `self` if the callee does.
+  self_calls: Vec<(FnId, FnId)>,
+  /// Methods called on values that cannot be modified, with the error to report if the method
+  /// turns out to modify `self`.
+  receiver_checks: Vec<(FnId, Diagnostic)>,
 }
 
 impl Checker<'_> {
@@ -471,6 +529,7 @@ impl Checker<'_> {
     match item {
       TypeItem::Struct(id) => self.struct_ref(id),
       TypeItem::Enum(id) => Type::Enum(EnumRef { id, name: self.resolution.type_name(self.package, item) }),
+      TypeItem::Class(id) => Type::Class(ClassRef { id, name: self.resolution.type_name(self.package, item) }),
     }
   }
 
@@ -517,6 +576,7 @@ impl Checker<'_> {
           name: field.name.name.clone(),
           ty: self.type_expr(&field.ty),
           public: field.visibility != Visibility::Private,
+          mutable: true,
           span: field.span,
         })
         .collect();
@@ -584,15 +644,26 @@ impl Checker<'_> {
     let parts: Vec<Type> = match item {
       TypeItem::Struct(id) => self.typed.struct_def(id).map(|def| def.fields.iter().map(|field| field.ty.clone()).collect()).unwrap_or_default(),
       TypeItem::Enum(_) => self.typed.variants(ty).unwrap_or_default().iter().flat_map(VariantDef::field_types).collect(),
+      // Classes are references, so they never contain values inline.
+      TypeItem::Class(_) => Vec::new(),
     };
 
     parts.iter().any(|part| self.contains_type(part, target, visited))
   }
 
-  fn signature(&mut self, decl: &FnDecl) -> FnSig {
-    let receiver = decl.self_param.map(|param| if param.mutable { Receiver::Var } else { Receiver::Value });
+  fn signature(&mut self, id: FnId, decl: &FnDecl) -> FnSig {
+    // Methods that modify `self` become `Receiver::Var` once every body is checked.
+    let receiver = match decl.self_param {
+      Some(_) => Some(Receiver::Value),
+      None if self.resolution.is_initializer(self.package, id) => Some(Receiver::Init),
+      None => None,
+    };
     let params = decl.params.iter().map(|param| self.type_expr(&param.ty)).collect();
-    let ret = decl.return_type.as_ref().map_or(Type::Unit, |ty| self.type_expr(ty));
+    // An initializer's return type is an error reported by `check_classes`.
+    let ret = match &decl.return_type {
+      Some(ty) if receiver != Some(Receiver::Init) => self.type_expr(ty),
+      _ => Type::Unit,
+    };
 
     FnSig { receiver, params, ret }
   }
@@ -751,7 +822,7 @@ impl Checker<'_> {
           return match self.owner {
             Some(owner) => self.type_ref(owner),
             None => {
-              self.error(codes::UNRESOLVED_NAME, segment.span, "`Self` is only available inside a struct or enum");
+              self.error(codes::UNRESOLVED_NAME, segment.span, "`Self` is only available inside a struct, enum or class");
 
               Type::Error
             }
@@ -904,6 +975,13 @@ impl Checker<'_> {
     };
     let current = self.locals.get(id.0 as usize).cloned().flatten();
 
+    // `self = value` in a class method is reported by the flow analysis.
+    if self.resolution.locals(self.function).get(id.0 as usize).is_some_and(|info| info.kind == LocalKind::SelfParam)
+      && !matches!(self.owner, Some(TypeItem::Class(_)))
+    {
+      self.mark_self_modified();
+    }
+
     self.typed.expr_types.insert(target.id, current.clone().unwrap_or(Type::Error));
 
     let value_ty = match (&current, op) {
@@ -943,65 +1021,6 @@ impl Checker<'_> {
     if !concatenation && !ty.is_numeric() && *ty != Type::Error {
       self.error(codes::INVALID_OPERAND, target.span, format!("cannot apply `{}=` to a value of type `{ty}`", op.symbol()));
     }
-  }
-
-  /// The binding a place expression (`p`, `p.x`, `a[i].y`) belongs to; `None` for temporaries.
-  fn place_root(&self, expr: &Expr) -> Option<LocalId> {
-    match &expr.kind {
-      ExprKind::Path(_) => self.local(expr),
-      ExprKind::Field { base, .. } | ExprKind::Index { base, .. } => self.place_root(base),
-      _ => None,
-    }
-  }
-
-  /// Fields and elements can only be modified through `var` bindings and `var self`.
-  fn check_mutable_place(&mut self, place: &Expr, place_use: PlaceUse) {
-    let code = match place_use {
-      PlaceUse::Assign => codes::IMMUTABLE_PLACE,
-      PlaceUse::Receiver(_) => codes::IMMUTABLE_RECEIVER,
-    };
-
-    if let Some(pointer) = self.deref_pointer(place) {
-      self.check_pointer_write(place, pointer);
-
-      return;
-    }
-
-    let Some(root) = self.place_root(place) else {
-      if matches!(place.kind, ExprKind::Path(_)) {
-        // Not a binding (an unresolved name or a function): already reported or rejected.
-        return;
-      }
-
-      let (code, message) = match place_use {
-        PlaceUse::Assign => (codes::INVALID_ASSIGNMENT_TARGET, "cannot assign to a part of a temporary value".to_string()),
-        PlaceUse::Receiver(method) => (code, format!("cannot call the `var self` method `{method}` on a temporary value")),
-      };
-
-      self.diagnostics.push(Diagnostic::error(code, place.span, message).with_help("store the value in a `var` binding first"));
-
-      return;
-    };
-    let Some(info) = self.resolution.locals(self.function).get(root.0 as usize).cloned() else { return };
-    let name = &info.name;
-    let action = match place_use {
-      PlaceUse::Assign => format!("cannot modify `{name}`"),
-      PlaceUse::Receiver(method) => format!("cannot call the `var self` method `{method}` on `{name}`"),
-    };
-    let (reason, label, help) = match info.kind {
-      LocalKind::Var | LocalKind::VarSelf => return,
-      LocalKind::Const => ("it is not declared with `var`", "declared with `const` here", format!("declare `{name}` with `var` to modify it")),
-      LocalKind::Param => ("parameters are immutable", "parameter declared here", format!("copy it into a `var` binding: `var {name} = {name};`")),
-      LocalKind::SelfParam => ("`self` is immutable in this method", "declared as `self` here", "declare the method with `var self`".to_string()),
-      LocalKind::ForVar => {
-        ("loop variables are immutable", "loop variable declared here", format!("copy it into a `var` binding: `var {name} = {name};`"))
-      }
-      LocalKind::Pattern => {
-        ("pattern bindings are immutable", "bound by the pattern here", format!("copy it into a `var` binding: `var {name} = {name};`"))
-      }
-    };
-
-    self.diagnostics.push(Diagnostic::error(code, place.span, format!("{action}: {reason}")).with_label(info.span, label).with_help(help));
   }
 
   fn expect(&mut self, expr: &Expr, expected: &Type) {
@@ -1313,8 +1332,8 @@ impl Checker<'_> {
       }
       // Byte-wise lexicographic order.
       Type::String => true,
-      // Pointers compare by address.
-      Type::Ptr { .. } => matches!(op, BinaryOp::Eq | BinaryOp::Ne),
+      // Pointers compare by address, and class instances by identity.
+      Type::Ptr { .. } | Type::Class(_) => matches!(op, BinaryOp::Eq | BinaryOp::Ne),
       _ => false,
     };
 
@@ -1547,6 +1566,7 @@ impl Checker<'_> {
     let owner = match &receiver_ty {
       Type::Struct(ty) => TypeItem::Struct(ty.id),
       Type::Enum(ty) => TypeItem::Enum(ty.id),
+      Type::Class(ty) => TypeItem::Class(ty.id),
       Type::Option(_) | Type::Result(..) => return self.builtin_method(expr, &receiver_ty, method, args),
       Type::Array(..) if name == "len" => {
         self.args(expr.span, "method", &[], args);
@@ -1575,12 +1595,9 @@ impl Checker<'_> {
     let found = self.resolution.type_function(self.package, owner, name);
     let (Some(function), Some(decl)) = (found, found.and_then(|function| self.resolution.fn_decl(self.package, function))) else {
       let mut diagnostic = Diagnostic::error(codes::UNKNOWN_MEMBER, method.span, format!("no method `{name}` on type `{receiver_ty}`"));
-      let functions = match owner {
-        TypeItem::Struct(id) => self.resolution.struct_decl(self.package, id).map(|decl| &decl.functions),
-        TypeItem::Enum(id) => self.resolution.enum_decl(self.package, id).map(|decl| &decl.functions),
-      };
+      let functions = self.resolution.type_functions(self.package, owner);
       let methods: Vec<String> =
-        functions.into_iter().flatten().filter(|function| function.self_param.is_some()).map(|function| function.name.name.clone()).collect();
+        functions.iter().filter(|function| function.self_param.is_some()).map(|function| function.name.name.clone()).collect();
 
       if let Some(similar) = sagitario_diagnostics::closest_match(name, methods.iter().map(String::as_str)) {
         diagnostic = diagnostic.with_help(format!("a method with a similar name exists: `{similar}`"));
@@ -1594,6 +1611,12 @@ impl Checker<'_> {
     let Some(sig) = self.typed.sig(function).cloned() else { return Type::Error };
 
     match sig.receiver {
+      Some(Receiver::Init) => {
+        self.diagnostics.push(
+          Diagnostic::error(codes::WRONG_CALL_FORM, method.span, format!("the initializer of `{receiver_ty}` cannot be called as a method"))
+            .with_help(format!("create a new instance with `new {receiver_ty}(...)`")),
+        );
+      }
       None => {
         self.diagnostics.push(
           Diagnostic::error(codes::WRONG_CALL_FORM, method.span, format!("`{name}` is a static function of `{receiver_ty}`, not a method"))
@@ -1601,7 +1624,7 @@ impl Checker<'_> {
             .with_help(format!("call it as `{receiver_ty}::{name}(...)`")),
         );
       }
-      Some(receiver_kind) => {
+      Some(_) => {
         if decl.visibility == Visibility::Private && self.owner != Some(owner) {
           self.diagnostics.push(
             Diagnostic::error(codes::PRIVATE_MEMBER, method.span, format!("the method `{name}` of `{receiver_ty}` is private"))
@@ -1609,8 +1632,9 @@ impl Checker<'_> {
           );
         }
 
-        if receiver_kind == Receiver::Var {
-          self.check_mutable_place(receiver, PlaceUse::Receiver(name));
+        // Whether the method modifies `self` is only known once every body is checked.
+        if !matches!(owner, TypeItem::Class(_)) {
+          self.receiver_use(receiver, function, name);
         }
 
         self.typed.method_calls.insert(expr.id, function);
@@ -1625,6 +1649,11 @@ impl Checker<'_> {
   fn field(&mut self, base: &Expr, name: &Ident) -> Type {
     let base_ty = self.expr(base, None);
     let field_name = name.name.as_str();
+
+    if let Type::Class(class) = &base_ty {
+      return self.class_field(class.id, &base_ty, name);
+    }
+
     let Type::Struct(owner) = &base_ty else {
       if !matches!(base_ty, Type::Error | Type::Never) {
         self.error(codes::UNKNOWN_MEMBER, name.span, format!("no field `{field_name}` on type `{base_ty}`"));
@@ -2187,7 +2216,7 @@ mod tests {
       prv tag: u8;
       pub fn new(x: i32) -> Self { Self { x, tag: 0 } }
       pub fn get(self) -> i32 { self.x + self.tag as i32 }
-      pub fn set(var self, x: i32) { self.x = x; }
+      pub fn set(self, x: i32) { self.x = x; }
     }";
 
   fn with_point(body: &str) -> Vec<&'static str> {
@@ -2197,6 +2226,8 @@ mod tests {
   #[test]
   fn checks_struct_members() {
     assert!(with_point("var p = Point::new(1); p.set(p.get() + 1); p.x += 1; const a = [p; 2]; const _ = a[1].x;").is_empty());
+    assert_eq!(with_point("const p = Point::new(1); p.set(2);"), vec!["E0313"]);
+    assert!(with_point("const p = Point::new(1); const _ = p.get();").is_empty());
     assert_eq!(with_point("const _ = Point::new(1).tag;"), vec!["E0205"]);
     assert_eq!(with_point("const _ = Point::new(1).get(2);"), vec!["E0301"]);
     assert_eq!(with_point("const _: u8 = Point::new(1).x;"), vec!["E0300"]);

@@ -1,6 +1,6 @@
 # 0002. ARC memory model with value and reference types
 
-- Status: Accepted
+- Status: Accepted; refined by [ADR-0027](0027-classes-and-arc.md)
 - Date: 2026-10-21
 
 ## Context

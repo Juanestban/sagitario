@@ -76,14 +76,20 @@ index of their variant, and the fields of that variant, read only after testing 
 `match` tests each arm's pattern without binding anything, then binds copies of the matched
 parts, so a failed arm or guard leaves nothing unreleased.
 
-ARC is explicit. A type is *managed* if it contains a `String` (directly, or inside structs,
-enums and arrays). Every managed binding owns one reference to each string inside it and is released at
+ARC is explicit. A type is *managed* if it contains a `String` or another reference (a class
+instance, a `StringBuilder`, a `CString`), directly or inside structs, enums and arrays. Every
+managed binding owns one reference to each one inside it and is released at
 the end of its block, before `break`/`continue`/`return`, or when overwritten (the new value is
 retained first); temporaries are released at the end of the statement or branch that created
 them; parameters are borrowed; return values are owned by the caller. Building a struct or
 array retains its parts. Reading a managed field or element borrows it; reading an unmanaged
-one copies it at that point. Arguments of a `var self` call that borrow a managed value are
-copied first, since the method may modify the receiver they borrow from.
+one copies it at that point. Arguments of a call to a method that modifies `self` (inferred by
+the type checker, ADR-0028) that borrow a managed value are copied first, since the method may
+modify the receiver they borrow from. Fields of class instances are places behind a
+`ClassField` projection; since any call may change them through another reference, reading a
+managed value from one takes an owned copy, and an instance reached through another place is
+retained for the statement. `new C(args)` allocates the instance (`Alloc`) and calls the
+initializer on it.
 
 SIR is the place for ARC optimizations and the boundary behind which other backends (LLVM)
 could be added.
@@ -103,8 +109,13 @@ could be added.
   `Option` and `Result` type a `sag_tN`. Arrays wrap a C array; enum-like types hold a `tag` and
   a union `u` with a struct `vN` per variant with fields. All are copied by assignment and
   passed by value, and emitted in dependency order. Managed ones get
-  `sag_retain_*`/`sag_release_*` functions. A `var self` method receives a pointer to the
-  caller's value.
+  `sag_retain_*`/`sag_release_*` functions. A method that modifies a struct's or enum's `self`
+  receives a pointer to the caller's value.
+- Each class becomes a C struct `sag_cN` whose first member is the runtime's `sag_object`
+  header (strong and weak counts, drop function), followed by its fields; class values are
+  `sag_cN *`. `sag_new_cN` allocates a zeroed instance with one reference, and `sag_drop_cN`
+  releases its fields when `sag_object_release` drops the last reference. Destruction is
+  iterative: objects released while another is being destroyed wait on an explicit stack.
 - Indexing goes through `sag_index_at`, which panics when the index is out of bounds.
 - When `main` returns `Result<(), String>`, the C `main` prints an `Err` and exits with code 1.
 - Every aggregate is declared (`typedef struct sag_sN sag_sN;`) before any is defined, so raw
