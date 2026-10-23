@@ -46,12 +46,18 @@ impl Checker<'_> {
       let fields = decl
         .fields
         .iter()
-        .map(|field| FieldDef {
-          name: field.name.name.clone(),
-          ty: self.type_expr(&field.ty),
-          public: field.visibility != Visibility::Private,
-          mutable: field.mutable == Some(true),
-          span: field.span,
+        .map(|field| {
+          let ty = self.type_expr(&field.ty);
+          let weak = field.weak && self.check_weak_field(field, &ty);
+
+          FieldDef {
+            name: field.name.name.clone(),
+            ty,
+            public: field.visibility != Visibility::Private,
+            mutable: field.mutable == Some(true),
+            weak,
+            span: field.span,
+          }
         })
         .collect();
       let initializer = self.resolution.initializer(self.package, id);
@@ -68,6 +74,24 @@ impl Checker<'_> {
 
     self.owner = None;
     self.check_inheritance_cycles();
+  }
+
+  /// A `weak` field is `var` and holds an `Option` of a class; returns whether it is valid.
+  fn check_weak_field(&mut self, field: &sagitario_ast::FieldDecl, ty: &Type) -> bool {
+    let problem = match ty {
+      _ if field.mutable == Some(false) => Some("a `weak` field must be `var`: it becomes `None` when its instance is destroyed".to_string()),
+      Type::Option(inner) if matches!(**inner, Type::Class(_)) => None,
+      Type::Error => return false,
+      other => Some(format!("a `weak` field holds an `Option` of a class, not `{other}`")),
+    };
+    let Some(message) = problem else { return true };
+
+    self.diagnostics.push(
+      Diagnostic::error(codes::INVALID_WEAK, field.name.span, message)
+        .with_help(format!("declare it as `weak var {}: Option<ClassName>;`", field.name.name)),
+    );
+
+    false
   }
 
   /// The initializer of each class: present if the class has fields or its parent's initializer

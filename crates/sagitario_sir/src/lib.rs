@@ -14,7 +14,9 @@
 //! an instance takes an owned copy instead of borrowing it. Methods that some subclass overrides
 //! (or abstract ones) are called through the instance's vtable; every initializer first points
 //! the vtable at its own class (after `zod.new(...)`), so methods called during the parent's
-//! initialization run the parent's implementations.
+//! initialization run the parent's implementations. A `weak` field stores a bare reference that
+//! counts as weak: reading it (`WeakLoad`) gives an owned `Option`, `None` once the instance is
+//! destroyed, and assigning it goes through `WeakStore`.
 //!
 //! Enums, `Option` and `Result` values carry a tag (the variant's index) and the fields of their
 //! variant; `match` and `?` (in `matching`) test the tag before reading those fields.
@@ -104,6 +106,8 @@ pub struct ClassLayout {
   pub parent: Option<ClassId>,
   /// The types of the class's own fields, in declaration order.
   pub fields: Vec<Type>,
+  /// Which of those fields are `weak`: stored as a bare reference instead of an `Option`.
+  pub weak: Vec<bool>,
   /// The methods called through the vtable, by slot.
   pub vtable: Vec<FnId>,
 }
@@ -183,6 +187,12 @@ pub enum Stmt {
   AssignPlace {
     dest: Place,
     value: Rvalue,
+  },
+  /// Makes the `weak` field `dest` refer weakly to the instance in the `Option` `value`,
+  /// dropping its previous weak reference.
+  WeakStore {
+    dest: Place,
+    value: Operand,
   },
   /// Evaluates for side effects (a call returning `()`).
   Eval(Rvalue),
@@ -288,6 +298,8 @@ pub enum Rvalue {
   /// A new instance of a class with one reference and every field zeroed, which its
   /// initializer then assigns.
   Alloc(ClassId),
+  /// The `Option` in a `weak` field: `Some` with a new reference while the instance is alive.
+  WeakLoad(Place),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -373,6 +385,7 @@ pub fn lower(package: &Package, resolution: &Resolution, typed: &TypedModule, so
       name: def.name.clone(),
       parent: def.parent,
       fields: def.fields.iter().map(|field| field.ty.clone()).collect(),
+      weak: def.fields.iter().map(|field| field.weak).collect(),
       vtable: def.vtable.clone(),
     })
     .collect();
@@ -678,6 +691,12 @@ impl FnLowering<'_> {
           scope.push(local);
         }
       }
+      AstStmt::Assign { target, value, .. } if self.is_weak_field(target) => {
+        let value = self.expr(value)?;
+        let dest = self.field_place(target)?;
+
+        self.emit(Stmt::WeakStore { dest, value });
+      }
       AstStmt::Assign { target, op, value, .. }
         if matches!(target.kind, ExprKind::Field { .. } | ExprKind::Index { .. } | ExprKind::Unary { op: UnaryOp::Deref, .. }) =>
       {
@@ -761,28 +780,15 @@ impl FnLowering<'_> {
         Some(Res::Local(id)) => Ok(Place { local: Local(id.0), projections: Vec::new(), ty }),
         other => error(format!("place of unsupported path {other:?}")),
       },
-      ExprKind::Field { base, name } => {
-        let projection = match self.type_of(base)? {
-          Type::Struct(owner) => self.typed.field_index(owner.id, &name.name).map(Projection::Field),
-          Type::Class(owner) => self.typed.class_field(owner.id, &name.name).map(|(class, index, _)| Projection::ClassField { class, index }),
-          _ => return error("field of a value that is not a struct or a class instance"),
-        };
-        let projection = projection.ok_or_else(|| LowerError(format!("unknown field `{}`", name.name)))?;
-        let mut place = self.base_place(base)?;
+      ExprKind::Field { .. } => {
+        let place = self.field_place(expr)?;
 
-        // An instance reached through another place stays alive for the statement, even if a
-        // call in it replaces that place.
-        if matches!(projection, Projection::ClassField { .. }) && !place.projections.is_empty() {
-          let base_ty = place.ty.clone();
+        if self.is_weak_field(expr) {
+          // The field holds no reference: reading it takes one, if the instance is alive.
+          let value = self.new_value(ty.clone(), Rvalue::WeakLoad(place));
 
-          place = match self.owned_copy(base_ty.clone(), Operand::Place(place)) {
-            Operand::Local(local) => Place { local, projections: Vec::new(), ty: base_ty },
-            _ => return error("instance reference without a local"),
-          };
+          return self.operand_place(value, ty);
         }
-
-        place.projections.push(projection);
-        place.ty = ty;
 
         Ok(place)
       }
@@ -814,6 +820,48 @@ impl FnLowering<'_> {
         self.operand_place(value, ty)
       }
     }
+  }
+
+  /// Whether an expression is a `weak` field of a class instance.
+  fn is_weak_field(&self, expr: &Expr) -> bool {
+    let ExprKind::Field { base, name } = &expr.kind else { return false };
+
+    match self.typed.expr_type(base) {
+      Some(Type::Class(owner)) => self.typed.class_field(owner.id, &name.name).is_some_and(|(_, _, field)| field.weak),
+      _ => false,
+    }
+  }
+
+  /// The place of a field as stored, without loading a `weak` one.
+  fn field_place(&mut self, expr: &Expr) -> LResult<Place> {
+    let ty = self.type_of(expr)?;
+    let ExprKind::Field { base, name } = &expr.kind else {
+      return error("field place of an expression that is not a field");
+    };
+
+    let projection = match self.type_of(base)? {
+      Type::Struct(owner) => self.typed.field_index(owner.id, &name.name).map(Projection::Field),
+      Type::Class(owner) => self.typed.class_field(owner.id, &name.name).map(|(class, index, _)| Projection::ClassField { class, index }),
+      _ => return error("field of a value that is not a struct or a class instance"),
+    };
+    let projection = projection.ok_or_else(|| LowerError(format!("unknown field `{}`", name.name)))?;
+    let mut place = self.base_place(base)?;
+
+    // An instance reached through another place stays alive for the statement, even if a
+    // call in it replaces that place.
+    if matches!(projection, Projection::ClassField { .. }) && !place.projections.is_empty() {
+      let base_ty = place.ty.clone();
+
+      place = match self.owned_copy(base_ty.clone(), Operand::Place(place)) {
+        Operand::Local(local) => Place { local, projections: Vec::new(), ty: base_ty },
+        _ => return error("instance reference without a local"),
+      };
+    }
+
+    place.projections.push(projection);
+    place.ty = ty;
+
+    Ok(place)
   }
 
   fn base_place(&mut self, base: &Expr) -> LResult<Place> {

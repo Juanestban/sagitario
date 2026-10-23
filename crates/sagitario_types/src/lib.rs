@@ -243,6 +243,8 @@ pub struct FieldDef {
   pub public: bool,
   /// Whether the field can change after construction: struct fields and `var` class fields.
   pub mutable: bool,
+  /// A `weak` class field: an `Option<C>` that does not keep its instance alive.
+  pub weak: bool,
   pub span: Span,
 }
 
@@ -627,12 +629,22 @@ impl Checker<'_> {
       let fields = decl
         .fields
         .iter()
-        .map(|field| FieldDef {
-          name: field.name.name.clone(),
-          ty: self.type_expr(&field.ty),
-          public: field.visibility != Visibility::Private,
-          mutable: true,
-          span: field.span,
+        .map(|field| {
+          if field.weak {
+            self.diagnostics.push(
+              Diagnostic::error(codes::INVALID_WEAK, field.name.span, "only class fields can be `weak`")
+                .with_note("a struct is a value; keep the weak reference in a class field"),
+            );
+          }
+
+          FieldDef {
+            name: field.name.name.clone(),
+            ty: self.type_expr(&field.ty),
+            public: field.visibility != Visibility::Private,
+            mutable: true,
+            weak: false,
+            span: field.span,
+          }
         })
         .collect();
 

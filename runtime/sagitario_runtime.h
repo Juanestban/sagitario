@@ -168,6 +168,12 @@ void sag_object_retain(void *object);
 /* Objects whose last reference goes away while another is being destroyed are destroyed after
  * it, in a loop, so long chains of objects do not exhaust the stack. */
 void sag_object_release(void *object);
+/* Weak references: they keep the memory of an object, not the object, alive. */
+void sag_object_weak_release(sag_object *object);
+/* Makes `*slot` refer weakly to `object` (or NULL), dropping its previous weak reference. */
+void sag_object_weak_set(sag_object **slot, sag_object *object);
+/* A new strong reference to `object` while it is alive, or NULL. */
+sag_object *sag_object_upgrade(sag_object *object);
 
 /* ---- FFI (docs/spec/10-ffi.md) ----------------------------------------------------------- */
 

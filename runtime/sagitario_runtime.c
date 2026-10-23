@@ -718,13 +718,39 @@ void sag_object_release(void *pointer) {
   sag_dropping = true;
   while (sag_drop_len > 0) {
     sag_object *next = sag_drop_stack[--sag_drop_len];
+    /* Held while the fields are released, which may drop weak references to the object itself. */
+    next->weak++;
     next->drop(next);
-    if (next->weak == 0) {
-      free(next);
-      sag_live_objects--;
-    }
+    sag_object_weak_release(next);
   }
   sag_dropping = false;
+}
+
+static void sag_object_weak_retain(sag_object *object) {
+  if (object != NULL) {
+    object->weak++;
+  }
+}
+
+void sag_object_weak_release(sag_object *object) {
+  if (object != NULL && --object->weak == 0 && object->strong == 0) {
+    free(object);
+    sag_live_objects--;
+  }
+}
+
+void sag_object_weak_set(sag_object **slot, sag_object *object) {
+  sag_object_weak_retain(object);
+  sag_object_weak_release(*slot);
+  *slot = object;
+}
+
+sag_object *sag_object_upgrade(sag_object *object) {
+  if (object == NULL || object->strong == 0) {
+    return NULL;
+  }
+  object->strong++;
+  return object;
 }
 
 /* ---- FFI --------------------------------------------------------------------------------- */

@@ -120,11 +120,16 @@ class Person {
 }
 ```
 
-- `weak` marks a `var` field of type `Option<C>`, where `C` is a class or an interface. It does
-  not keep the instance alive.
+- `weak` marks a `var` field of a class with type `Option<C>`, where `C` is a class (or, from
+  F2 increment 4, an interface). It does not keep the instance alive. Struct fields, `const`
+  fields and other types cannot be `weak`.
+- Like every field, a `weak` field is assigned in `new` (usually `None`).
 - Reading the field gives a strong `Option<C>`: `None` once the instance has been destroyed.
-  Assigning it works like any other field.
-- There are no `weak` local bindings in the MVP. `weak` captures in closures are post-MVP.
+  Assigning `Some(x)` makes the field refer weakly to `x`.
+- An instance's fields are released when its last strong reference goes away; its memory is
+  freed once no weak reference to it remains.
+- There are no `weak` local bindings in the MVP, and no warnings about cycles between class
+  fields. `weak` captures in closures are post-MVP.
 
 ## Abstract classes
 

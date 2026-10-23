@@ -171,6 +171,8 @@ pub struct FieldDecl {
   pub visibility: Visibility,
   /// `const` (false) or `var` (true) before the name: required in classes, rejected in structs.
   pub mutable: Option<bool>,
+  /// `weak var`: a class field that does not keep the instance it refers to alive.
+  pub weak: bool,
   pub name: Ident,
   pub ty: TypeExpr,
   pub span: Span,

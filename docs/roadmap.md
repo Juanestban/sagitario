@@ -52,7 +52,7 @@ Increments ([ADR-0027](adr/0027-classes-and-arc.md)):
    methods that modify a struct's `self` are inferred ([ADR-0028](adr/0028-inferred-self-mutation.md)).
 2. Inheritance: `extends`, `zod`, `override`, `abstract`, dynamic dispatch and
    devirtualization ([ADR-0029](adr/0029-inheritance.md)).
-3. `weak` references.
+3. `weak` references ([ADR-0030](adr/0030-weak-references.md)).
 4. Interfaces: default methods, `impl` on classes, structs and enums, interfaces as types,
    the `Error` interface.
 5. Monomorphized generics with bounds.

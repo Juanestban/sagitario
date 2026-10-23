@@ -911,12 +911,6 @@ impl<'a> Parser<'a> {
       }
     };
 
-    if self.at(&TokenKind::Keyword(Keyword::Weak)) {
-      let span = self.span();
-
-      return Err(self.not_implemented(span, "`weak` fields"));
-    }
-
     let is_abstract = self.eat(&TokenKind::Keyword(Keyword::Abstract));
     let is_override = self.eat(&TokenKind::Keyword(Keyword::Override));
 
@@ -928,6 +922,8 @@ impl<'a> Parser<'a> {
       return Ok(Member::Fn(decl));
     }
 
+    // The type checker decides where `weak` is allowed.
+    let weak = self.eat(&TokenKind::Keyword(Keyword::Weak));
     let mutable = match self.kind() {
       TokenKind::Keyword(Keyword::Const) => Some(false),
       TokenKind::Keyword(Keyword::Var) => Some(true),
@@ -945,7 +941,7 @@ impl<'a> Parser<'a> {
     let ty = self.type_expr()?;
     let end = self.expect(&TokenKind::Semi)?.span;
 
-    Ok(Member::Field(FieldDecl { visibility, mutable, name, ty, span: start.to(end) }))
+    Ok(Member::Field(FieldDecl { visibility, mutable, weak, name, ty, span: start.to(end) }))
   }
 
   /// Skips a malformed struct member: to just after a `;` or a `{ ... }` body at depth zero, or
@@ -2128,7 +2124,6 @@ mod tests {
   fn reports_reserved_keywords_and_later_features() {
     assert_eq!(parse("fn await() {}").1, vec!["E0101"]);
     assert_eq!(parse("fn f() { async; }").1, vec!["E0101"]);
-    assert_eq!(parse("class C { pub weak var c: Option<C>; }").1, vec!["E0900"]);
     assert_eq!(parse("enum E<T> { A }").1, vec!["E0900"]);
     assert_eq!(parse("struct P<T> {}").1, vec!["E0900"]);
     assert_eq!(parse("struct P impl Show {}").1, vec!["E0900"]);
@@ -2201,6 +2196,7 @@ mod tests {
     assert_eq!(decl.functions[0].self_param, None);
     assert!(decl.functions[1].self_param.is_some());
     assert_eq!(parse("class C { pub n: i32; }").1, vec!["E0100"]);
+    assert!(matches!(parse("class C { pub weak var c: Option<C>; }").0.items.as_slice(), [Item::Class(decl)] if decl.fields[0].weak));
     assert_eq!(parse("struct P { pub override fn f(self) {} }").1, vec!["E0100"]);
     assert_eq!(parse("abstract class A { pub abstract fn f(self) {} }").1, vec!["E0100"]);
     assert_eq!(parse("struct P { pub var n: i32; }").1, vec!["E0100"]);

@@ -15,7 +15,8 @@
 //! ancestors; a field is read by converting the pointer to the struct of the class that declares
 //! it, which C allows because each struct starts with its parent's. `sag_new_cN` allocates a
 //! zeroed instance, `sag_drop_cN` releases the class's fields and then its parent's, and
-//! `sag_vtable_cN` lists the methods called through the vtable.
+//! `sag_vtable_cN` lists the methods called through the vtable. A `weak` field is a bare
+//! `sag_object *` (NULL for `None`) holding a weak reference.
 
 use sagitario_ast::{BinaryOp, UnaryOp};
 use sagitario_resolve::{Builtin, ClassId, EnumId, FnId, StructId};
@@ -324,13 +325,17 @@ impl<'a> Generator<'a> {
   fn class_functions(&mut self, index: usize) {
     let name = format!("sag_c{index}");
     let parent = self.layouts.class(ClassId(index as u32)).and_then(|layout| layout.parent);
+    let weak = self.layouts.class(ClassId(index as u32)).map(|layout| layout.weak.clone()).unwrap_or_default();
     let releases: Vec<String> = self
       .layouts
       .class_fields(ClassId(index as u32))
       .iter()
       .enumerate()
-      .filter(|(_, field)| self.layouts.is_managed(field))
-      .map(|(field, ty)| format!("  {};\n", self.arc_call("release", ty, &format!("value->f{field}"))))
+      .filter_map(|(field, ty)| match weak.get(field) {
+        Some(true) => Some(format!("  sag_object_weak_release(value->f{field});\n")),
+        _ if self.layouts.is_managed(ty) => Some(format!("  {};\n", self.arc_call("release", ty, &format!("value->f{field}")))),
+        _ => None,
+      })
       .collect();
 
     self.out.push_str(&format!("static void sag_drop_c{index}(sag_object *object) {{\n"));
@@ -361,7 +366,16 @@ impl<'a> Generator<'a> {
     let members = match ty {
       Type::Class(inner) => {
         let fields = self.parts(ty).concat();
-        let members: Vec<String> = fields.iter().enumerate().map(|(index, field)| format!(" {} f{index};", self.c_type(field))).collect();
+        let weak = self.layouts.class(inner.id).map(|layout| layout.weak.clone()).unwrap_or_default();
+        let members: Vec<String> = fields
+          .iter()
+          .enumerate()
+          .map(|(index, field)| {
+            let c_type = if weak.get(index) == Some(&true) { "sag_object *".to_string() } else { self.c_type(field) };
+
+            format!(" {c_type} f{index};")
+          })
+          .collect();
         let base = match self.layouts.class(inner.id).and_then(|layout| layout.parent) {
           Some(parent) => format!("sag_c{} base;", parent.0),
           None => "sag_object header;".to_string(),
@@ -852,6 +866,11 @@ impl<'a> Generator<'a> {
         self.indent -= 1;
         self.line("}");
       }
+      Stmt::WeakStore { dest, value } => {
+        let (dest, value) = (self.place(dest), self.operand(value));
+
+        self.line(&format!("sag_object_weak_set(&{dest}, {value}.tag == 1u ? {value}.u.v1.f0 : NULL);"));
+      }
       Stmt::SetVtable { object, class } => {
         let vtable = self.vtable(*class);
 
@@ -882,6 +901,16 @@ impl<'a> Generator<'a> {
   fn assign(&mut self, dest: &str, ty: &Type, value: &Rvalue) {
     match value {
       Rvalue::Template(pieces) => self.template(dest, pieces),
+      Rvalue::WeakLoad(source) => {
+        let (source, c_type) = (self.place(source), self.c_type(ty));
+
+        self.line("{");
+        self.indent += 1;
+        self.line(&format!("sag_object *sag_strong = sag_object_upgrade({source});"));
+        self.line(&format!("{dest} = sag_strong != NULL ? ({c_type}){{.tag = 1u, .u.v1 = {{sag_strong}}}} : ({c_type}){{.tag = 0u}};"));
+        self.indent -= 1;
+        self.line("}");
+      }
       Rvalue::Repeat(element) => {
         let Type::Array(elem_ty, len) = ty else { return };
         let element = self.operand(element);
@@ -960,8 +989,8 @@ impl<'a> Generator<'a> {
         }
       }
       Rvalue::Alloc(class) => format!("sag_new_c{}()", class.0),
-      // Templates and repeats are emitted as statements by `Generator::assign`.
-      Rvalue::Template(_) | Rvalue::Repeat(_) => "0".to_string(),
+      // Templates, repeats and weak loads are emitted as statements by `Generator::assign`.
+      Rvalue::Template(_) | Rvalue::Repeat(_) | Rvalue::WeakLoad(_) => "0".to_string(),
     }
   }
 
