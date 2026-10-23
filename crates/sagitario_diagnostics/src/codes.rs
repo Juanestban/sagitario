@@ -103,6 +103,12 @@ pub const UNSAFE_REQUIRED: Code = Code("E0323");
 pub const INVALID_INITIALIZER: Code = Code("E0324");
 /// A class field not assigned by the initializer before `self` is used or `new` returns.
 pub const UNINITIALIZED_FIELD: Code = Code("E0325");
+/// Extending something that is not a class, a cycle of `extends`, an abstract class instantiated
+/// or abstract methods left unimplemented.
+pub const INVALID_INHERITANCE: Code = Code("E0326");
+/// An `override` without a method to override or with another signature, a method replaced
+/// without `override`, or a malformed abstract method.
+pub const INVALID_OVERRIDE: Code = Code("E0327");
 
 /// A language feature that is specified but not implemented yet.
 pub const NOT_IMPLEMENTED: Code = Code("E0900");
@@ -170,6 +176,8 @@ pub const ALL: &[Code] = &[
   UNSAFE_REQUIRED,
   INVALID_INITIALIZER,
   UNINITIALIZED_FIELD,
+  INVALID_INHERITANCE,
+  INVALID_OVERRIDE,
   NOT_IMPLEMENTED,
   UNUSED_BINDING,
   UNNEEDED_VAR,

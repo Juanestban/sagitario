@@ -111,11 +111,18 @@ could be added.
   passed by value, and emitted in dependency order. Managed ones get
   `sag_retain_*`/`sag_release_*` functions. A method that modifies a struct's or enum's `self`
   receives a pointer to the caller's value.
-- Each class becomes a C struct `sag_cN` whose first member is the runtime's `sag_object`
-  header (strong and weak counts, drop function), followed by its fields; class values are
-  `sag_cN *`. `sag_new_cN` allocates a zeroed instance with one reference, and `sag_drop_cN`
-  releases its fields when `sag_object_release` drops the last reference. Destruction is
-  iterative: objects released while another is being destroyed wait on an explicit stack.
+- Each class becomes a C struct `sag_cN` whose first member is its parent's struct (`base`) or,
+  without parent, the runtime's `sag_object` header (strong and weak counts, drop function,
+  vtable), followed by its own fields. Every class value is a `sag_object *`, so an instance
+  passes for any ancestor without conversions; a field is read through the struct of the class
+  that declares it. `sag_new_cN` allocates a zeroed instance with one reference, and
+  `sag_drop_cN` releases its own fields and then its parent's when `sag_object_release` drops the
+  last reference. Destruction is iterative: objects released while another is being destroyed
+  wait on an explicit stack.
+- Methods that are abstract or overridden somewhere (decided by the type checker) get a slot in
+  the vtables `sag_vtable_cN`; calls to them convert the entry back to the method's own function
+  type. Other methods and `zod` calls are direct. Every initializer sets the instance's vtable to
+  its class's after `zod.new(...)` (SIR `SetVtable`), and an abstract method's body panics.
 - Indexing goes through `sag_index_at`, which panics when the index is out of bounds.
 - When `main` returns `Result<(), String>`, the C `main` prints an `Err` and exits with code 1.
 - Every aggregate is declared (`typedef struct sag_sN sag_sN;`) before any is defined, so raw

@@ -544,6 +544,21 @@ pub fn resolve(package: &Package, diagnostics: &mut Diagnostics) -> Resolution {
     }
   }
 
+  // The parent of each class, named after `extends`.
+  for index in 0..resolution.classes.len() {
+    let id = ClassId(index as u32);
+    let (Some(decl), Some(info)) = (resolution.class_decl(package, id), resolution.classes.get(index)) else { continue };
+    let Some(parent) = &decl.parent else { continue };
+    let mut resolver = Resolver::new(package, &resolution, module_of(&module_ids, info.module), Some(TypeItem::Class(id)), diagnostics);
+
+    resolver.type_path(parent);
+
+    let output = resolver.finish();
+
+    used.extend(output.used);
+    resolution.type_paths.extend(output.type_paths);
+  }
+
   for (owner, source, types) in declarations {
     let mut resolver = Resolver::new(package, &resolution, module_of(&module_ids, source), Some(owner), diagnostics);
 
@@ -1000,6 +1015,17 @@ impl<'a> Resolver<'a> {
           self.expr(value);
         }
       }
+      ExprKind::Zod => match self.lookup_local("self") {
+        Some(id) if matches!(self.owner, Some(TypeItem::Class(_))) => {
+          self.paths.insert(expr.id, Res::Local(id));
+        }
+        _ => {
+          self.diagnostics.push(
+            Diagnostic::error(codes::UNRESOLVED_NAME, expr.span, "`zod` is only available in the methods and initializer of a class")
+              .with_note("`zod.method(...)` calls the parent class's method, and `zod.new(...)` its initializer"),
+          );
+        }
+      },
       ExprKind::Int { .. }
       | ExprKind::Float { .. }
       | ExprKind::Bool(_)

@@ -1,0 +1,89 @@
+struct Point {
+  pub x: i32;
+}
+
+abstract class Animal {
+  pub const name: String;
+  prv var secret: i32;
+
+  pub fn new(name: String) {
+    self.name = name;
+    self.secret = 0;
+  }
+
+  pub fn speak(self) -> String {
+    "..."
+  }
+
+  prv fn hidden(self) {}
+
+  pub abstract fn legs(self) -> i32;
+  prv abstract fn private_rule(self); //~ ERROR E0327
+  pub abstract fn helper(); //~ ERROR E0327
+}
+
+class Dog extends Animal { //~ ERROR E0326
+  pub var name: String; //~ ERROR E0201
+
+  pub fn new() { //~ ERROR E0324
+    self.name = "x";
+    zod.new("Rex"); //~ ERROR E0324
+  }
+
+  pub fn speak(self) -> String { //~ ERROR E0327
+    "woof"
+  }
+
+  pub override fn fly(self) {} //~ ERROR E0327
+
+  pub override fn hidden(self) {} //~ ERROR E0327
+
+  pub fn peek(self) -> i32 {
+    self.secret //~ ERROR E0205
+  }
+}
+
+class Cat extends Animal {
+  pub fn new(name: String) {
+    zod.new(name);
+  }
+
+  pub override fn legs(self) -> String { //~ ERROR E0327
+    "four"
+  }
+
+  pub fn count(self) -> i32 {
+    zod.legs() //~ ERROR E0327
+  }
+}
+
+class Lazy extends Animal { //~ ERROR E0324, ERROR E0326
+}
+
+class Concrete {
+  pub abstract fn run(self); //~ ERROR E0326
+}
+
+class Wrong extends Point { //~ ERROR E0326
+}
+
+class Loop extends Again { //~ ERROR E0326
+}
+
+class Again extends Loop { //~ ERROR E0326
+}
+
+class Orphan {
+  pub fn call(self) {
+    zod.call(); //~ ERROR E0326
+  }
+}
+
+pub fn main() {
+  const _a = new Animal("Generic"); //~ ERROR E0326
+  const cat = new Cat("Tom");
+  const animal: Animal = cat;
+  const _same = animal == cat;
+  const _c: Cat = animal; //~ ERROR E0300
+  const _z = zod; //~ ERROR E0200
+}

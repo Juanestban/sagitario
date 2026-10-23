@@ -179,6 +179,7 @@ pub(crate) fn report_private_interfaces(resolution: &Resolution, package: &Packa
   for module in &package.modules {
     for item in &module.items {
       let mut checks: Vec<(&str, Vec<&TypeExpr>)> = Vec::new();
+      let mut parents: Vec<(&str, &Path)> = Vec::new();
 
       match item {
         Item::Fn(decl) if public(decl.visibility) => checks.push((&decl.name.name, signature_types(decl))),
@@ -195,6 +196,10 @@ pub(crate) fn report_private_interfaces(resolution: &Resolution, package: &Packa
           let fields = decl.fields.iter().filter(|field| field.visibility != Visibility::Private).map(|field| &field.ty).collect();
 
           checks.push((&decl.name.name, fields));
+
+          if let Some(parent) = &decl.parent {
+            parents.push((&decl.name.name, parent));
+          }
 
           for function in decl.functions.iter().filter(|function| function.visibility != Visibility::Private) {
             checks.push((&function.name.name, signature_types(function)));
@@ -223,6 +228,8 @@ pub(crate) fn report_private_interfaces(resolution: &Resolution, package: &Packa
         _ => {}
       }
 
+      let mut entries: Vec<(&str, Vec<&Path>)> = parents.into_iter().map(|(owner, parent)| (owner, vec![parent])).collect();
+
       for (owner, types) in checks {
         let mut paths = Vec::new();
 
@@ -230,6 +237,10 @@ pub(crate) fn report_private_interfaces(resolution: &Resolution, package: &Packa
           type_paths(ty, &mut paths);
         }
 
+        entries.push((owner, paths));
+      }
+
+      for (owner, paths) in entries {
         for path in paths {
           let Some(TypeRes::Item(item)) = resolution.type_paths.get(&path.id) else { continue };
           let (visibility, name, declared) = match item {
@@ -315,6 +326,10 @@ pub fn module_references(module: &Module) -> Vec<Vec<String>> {
     match item {
       Item::Fn(decl) => fn_paths(decl, &mut paths),
       Item::Struct(StructDecl { fields, functions, .. }) | Item::Class(ClassDecl { fields, functions, .. }) => {
+        if let Item::Class(ClassDecl { parent: Some(parent), .. }) = item {
+          paths.push(parent);
+        }
+
         for field in fields {
           type_paths(&field.ty, &mut paths);
         }
@@ -439,6 +454,7 @@ fn expr_paths<'a>(expr: &'a Expr, out: &mut Vec<&'a Path>) {
 
   match &expr.kind {
     ExprKind::Path(path) => out.push(path),
+    ExprKind::Zod => {}
     ExprKind::Call { callee, args } => {
       expr_paths(callee, out);
       exprs(args, out);

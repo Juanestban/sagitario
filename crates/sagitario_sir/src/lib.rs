@@ -11,7 +11,10 @@
 //!
 //! A class instance is a reference to a heap object; its fields are places behind it. Any call
 //! may change a `var` field through another reference, so reading a managed value from a field of
-//! an instance takes an owned copy instead of borrowing it.
+//! an instance takes an owned copy instead of borrowing it. Methods that some subclass overrides
+//! (or abstract ones) are called through the instance's vtable; every initializer first points
+//! the vtable at its own class (after `zod.new(...)`), so methods called during the parent's
+//! initialization run the parent's implementations.
 //!
 //! Enums, `Option` and `Result` values carry a tag (the variant's index) and the fields of their
 //! variant; `match` and `?` (in `matching`) test the tag before reading those fields.
@@ -23,7 +26,7 @@ mod matching;
 mod text;
 
 use sagitario_ast::{BinaryOp, Block, Expr, ExprKind, FnDecl, Package, Stmt as AstStmt, TemplatePart, UnaryOp};
-use sagitario_resolve::{Builtin, ClassId, ExternId, FnId, Res, Resolution};
+use sagitario_resolve::{Builtin, ClassId, ExternId, FnId, Res, Resolution, TypeItem};
 use sagitario_span::{SourceMap, Span};
 use sagitario_types::{BuiltinMethod, FloatTy, IntTy, Receiver, Type, TypedModule};
 
@@ -55,7 +58,7 @@ pub struct Layouts {
   /// Indexed by `EnumId`.
   pub enums: Vec<EnumLayout>,
   /// Indexed by `ClassId`.
-  pub classes: Vec<StructLayout>,
+  pub classes: Vec<ClassLayout>,
 }
 
 impl Layouts {
@@ -84,9 +87,25 @@ impl Layouts {
     self.structs.get(id.0 as usize).map(|layout| layout.fields.clone()).unwrap_or_default()
   }
 
+  /// The fields a class declares itself, after those of its ancestors.
   pub fn class_fields(&self, id: ClassId) -> Vec<Type> {
     self.classes.get(id.0 as usize).map(|layout| layout.fields.clone()).unwrap_or_default()
   }
+
+  pub fn class(&self, id: ClassId) -> Option<&ClassLayout> {
+    self.classes.get(id.0 as usize)
+  }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClassLayout {
+  pub name: String,
+  /// Objects of the class start with the parent's part.
+  pub parent: Option<ClassId>,
+  /// The types of the class's own fields, in declaration order.
+  pub fields: Vec<Type>,
+  /// The methods called through the vtable, by slot.
+  pub vtable: Vec<FnId>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -136,8 +155,9 @@ pub struct Place {
 pub enum Projection {
   /// The field at this position of a struct.
   Field(usize),
-  /// The field at this position of the class instance a reference points to.
-  ClassField(usize),
+  /// The field at position `index` among those `class` declares, in the instance a reference
+  /// points to (an instance of `class` or of a subclass).
+  ClassField { class: ClassId, index: usize },
   /// A bounds-checked element of an array of length `len`.
   Index { index: Operand, len: u64 },
   /// The tag of an enum value: the index of its variant, as `u32`.
@@ -207,6 +227,11 @@ pub enum Stmt {
     bytes: bool,
     body: Vec<Stmt>,
   },
+  /// Makes the instance in `object` dispatch through the vtable of `class`.
+  SetVtable {
+    object: Local,
+    class: ClassId,
+  },
   Break,
   Continue,
   Return(Option<Operand>),
@@ -274,6 +299,12 @@ pub enum TemplatePiece {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Callee {
   Fn(FnId),
+  /// The method in `slot` of the vtable of the first argument, an instance; `function` is the
+  /// method the call names, which gives the signature.
+  Virtual {
+    slot: usize,
+    function: FnId,
+  },
   /// A C function of an `extern` block.
   Extern(ExternId),
   Builtin(Builtin),
@@ -338,7 +369,12 @@ pub fn lower(package: &Package, resolution: &Resolution, typed: &TypedModule, so
   let classes = typed
     .classes
     .iter()
-    .map(|def| StructLayout { name: def.name.clone(), fields: def.fields.iter().map(|field| field.ty.clone()).collect() })
+    .map(|def| ClassLayout {
+      name: def.name.clone(),
+      parent: def.parent,
+      fields: def.fields.iter().map(|field| field.ty.clone()).collect(),
+      vtable: def.vtable.clone(),
+    })
     .collect();
   let layouts = Layouts { structs, enums, classes };
   let mut functions = Vec::new();
@@ -357,6 +393,25 @@ pub fn lower(package: &Package, resolution: &Resolution, typed: &TypedModule, so
   }
 
   Ok(Program { functions, layouts, entry, source_paths, externs })
+}
+
+fn typed_class_name(typed: &TypedModule, owner: TypeItem) -> String {
+  match owner {
+    TypeItem::Class(id) => typed.class_def(id).map(|def| def.name.clone()).unwrap_or_default(),
+    _ => String::new(),
+  }
+}
+
+/// The `zod.new(...)` call that starts an initializer.
+fn first_zod_new(decl: &FnDecl, typed: &TypedModule) -> Option<sagitario_ast::NodeId> {
+  let first = match decl.body.stmts.first() {
+    Some(AstStmt::Expr(expr)) => expr,
+    Some(_) => return None,
+    None => decl.body.tail.as_deref()?,
+  };
+
+  (matches!(&first.kind, ExprKind::MethodCall { receiver, .. } if receiver.kind == ExprKind::Zod) && typed.zod_calls.contains(&first.id))
+    .then_some(first.id)
 }
 
 fn lower_function(
@@ -380,9 +435,25 @@ fn lower_function(
     scopes: Vec::new(),
     pending: Vec::new(),
     loops: Vec::new(),
+    vtable_after: None,
   };
 
-  if sig.ret == Type::Unit {
+  if decl.is_abstract {
+    // Only reachable while the class's own initializer runs (ADR-0029).
+    let owner = resolution.owner(id).map_or_else(String::new, |owner| typed_class_name(typed, owner));
+
+    lowering.emit(Stmt::Panic(PanicMessage::Static(format!("called the abstract method `{}` of `{owner}` while initializing it", decl.name.name))));
+  } else if let (Some(Receiver::Init), Some(TypeItem::Class(class))) = (sig.receiver, resolution.owner(id)) {
+    // The instance dispatches as this class once its parent part is initialized.
+    match first_zod_new(decl, typed) {
+      Some(call) => lowering.vtable_after = Some((call, class)),
+      None => lowering.emit(Stmt::SetVtable { object: Local(0), class }),
+    }
+  }
+
+  if decl.is_abstract {
+    // The panic ends the function.
+  } else if sig.ret == Type::Unit {
     lowering.block_into(&decl.body, None)?;
   } else {
     // The result is owned by the caller, so it is not released here.
@@ -429,6 +500,8 @@ struct FnLowering<'a> {
   /// Managed temporaries created on the current path and not yet released.
   pending: Vec<Local>,
   loops: Vec<LoopCx>,
+  /// In an initializer, the `zod.new(...)` after which the instance takes this class's vtable.
+  vtable_after: Option<(sagitario_ast::NodeId, ClassId)>,
 }
 
 /// Types without a runtime value: nothing needs to be stored.
@@ -551,6 +624,8 @@ impl FnLowering<'_> {
       let mark = self.pending.len();
       let value = self.expr(tail)?;
 
+      self.after_expr(tail.id);
+
       if let Some(dest) = dest
         && !is_valueless(&self.type_of(tail)?)
       {
@@ -657,12 +732,23 @@ impl FnLowering<'_> {
       }
       AstStmt::Expr(expr) => {
         self.expr(expr)?;
+        self.after_expr(expr.id);
       }
     }
 
     self.release_pending_from(mark);
 
     Ok(())
+  }
+
+  /// Points the instance at its class's vtable right after the initializer's `zod.new(...)`.
+  fn after_expr(&mut self, id: sagitario_ast::NodeId) {
+    if let Some((call, class)) = self.vtable_after
+      && call == id
+    {
+      self.emit(Stmt::SetVtable { object: Local(0), class });
+      self.vtable_after = None;
+    }
   }
 
   /// The place a binding, field or element expression designates. Its base is lowered first;
@@ -678,7 +764,7 @@ impl FnLowering<'_> {
       ExprKind::Field { base, name } => {
         let projection = match self.type_of(base)? {
           Type::Struct(owner) => self.typed.field_index(owner.id, &name.name).map(Projection::Field),
-          Type::Class(owner) => self.typed.class_field_index(owner.id, &name.name).map(Projection::ClassField),
+          Type::Class(owner) => self.typed.class_field(owner.id, &name.name).map(|(class, index, _)| Projection::ClassField { class, index }),
           _ => return error("field of a value that is not a struct or a class instance"),
         };
         let projection = projection.ok_or_else(|| LowerError(format!("unknown field `{}`", name.name)))?;
@@ -686,7 +772,7 @@ impl FnLowering<'_> {
 
         // An instance reached through another place stays alive for the statement, even if a
         // call in it replaces that place.
-        if matches!(projection, Projection::ClassField(_)) && !place.projections.is_empty() {
+        if matches!(projection, Projection::ClassField { .. }) && !place.projections.is_empty() {
           let base_ty = place.ty.clone();
 
           place = match self.owned_copy(base_ty.clone(), Operand::Place(place)) {
@@ -772,7 +858,7 @@ impl FnLowering<'_> {
       ExprKind::Char(value) => Ok(Operand::Const(Const::Char(*value))),
       ExprKind::Str(value) => Ok(Operand::Const(Const::Str(value.clone()))),
       ExprKind::Unit => Ok(UNIT),
-      ExprKind::Path(_) => match self.resolution.paths.get(&expr.id) {
+      ExprKind::Path(_) | ExprKind::Zod => match self.resolution.paths.get(&expr.id) {
         Some(Res::Local(id)) => Ok(Operand::Local(Local(id.0))),
         Some(Res::Variant(variant)) => Ok(self.variant(ty, variant.index, Vec::new())),
         other => error(format!("unsupported path operand {other:?}")),
@@ -786,7 +872,7 @@ impl FnLowering<'_> {
 
         if self.managed(&ty) {
           // A field of an instance can change during the statement through another reference.
-          if place.projections.iter().any(|projection| matches!(projection, Projection::ClassField(_))) {
+          if place.projections.iter().any(|projection| matches!(projection, Projection::ClassField { .. })) {
             return Ok(self.owned_copy(ty, Operand::Place(place)));
           }
 
@@ -837,7 +923,7 @@ impl FnLowering<'_> {
           other => return error(format!("unsupported callee {other:?}")),
         };
         let params = match callee {
-          Callee::Fn(id) => self.typed.sig(id).map(|sig| sig.params.clone()),
+          Callee::Fn(id) | Callee::Virtual { function: id, .. } => self.typed.sig(id).map(|sig| sig.params.clone()),
           Callee::Extern(id) => self.typed.extern_sig(id).map(|sig| sig.params.clone()),
           Callee::Builtin(builtin) => Some(sagitario_types::builtin_sig(builtin).params),
           Callee::Runtime { .. } => None,
@@ -874,6 +960,11 @@ impl FnLowering<'_> {
         };
         let sig = self.typed.sig(function).cloned().ok_or_else(|| LowerError("method without a signature".to_string()))?;
         let by_ref = sig.receiver == Some(Receiver::Var);
+        // `zod` calls name their implementation; others go through the vtable when it varies.
+        let callee = match self.typed.slots.get(&function) {
+          Some(slot) if !self.typed.zod_calls.contains(&expr.id) => Callee::Virtual { slot: *slot, function },
+          _ => Callee::Fn(function),
+        };
         let mut operands = vec![if by_ref { Operand::Ref(self.base_place(receiver)?) } else { self.expr(receiver)? }];
 
         for (arg, param) in args.iter().zip(&sig.params) {
@@ -883,7 +974,7 @@ impl FnLowering<'_> {
           operands.push(if by_ref { self.owned_copy(param.clone(), value) } else { value });
         }
 
-        Ok(self.call(Callee::Fn(function), operands, ty))
+        Ok(self.call(callee, operands, ty))
       }
       ExprKind::StructLit { fields, .. } if matches!(ty, Type::Enum(_)) => {
         let Some(Res::Variant(variant)) = self.resolution.paths.get(&expr.id).copied() else {
@@ -1193,12 +1284,23 @@ impl FnLowering<'_> {
     Ok(value)
   }
 
-  /// `new C(args)`: allocates the instance and runs the initializer on it.
+  /// `new C(args)`: allocates the instance and runs the initializer on it: the class's own, or
+  /// the one it inherits (without arguments), after which the vtable is the class's again.
   fn new_instance(&mut self, ty: &Type, args: &[Expr]) -> LResult<Operand> {
     let Type::Class(class) = ty else {
       return error("`new` of a type other than a class or `StringBuilder`");
     };
     let instance = self.new_value(ty.clone(), Rvalue::Alloc(class.id));
+
+    if self.typed.class_def(class.id).is_some_and(|def| def.initializer.is_none()) {
+      if let (Some(initializer), Operand::Local(object)) = (self.typed.inherited_initializer(class.id), &instance) {
+        self.call(Callee::Fn(initializer), vec![instance.clone()], Type::Unit);
+        self.emit(Stmt::SetVtable { object: *object, class: class.id });
+      }
+
+      return Ok(instance);
+    }
+
     let Some(initializer) = self.typed.class_def(class.id).and_then(|def| def.initializer) else {
       return Ok(instance);
     };

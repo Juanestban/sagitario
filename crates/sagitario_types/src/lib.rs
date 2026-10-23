@@ -7,10 +7,11 @@ mod classes;
 mod exhaustive;
 mod ffi;
 mod flow;
+mod inheritance;
 mod patterns;
 mod text;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use sagitario_ast::{
@@ -255,10 +256,15 @@ pub struct StructDef {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClassDef {
   pub name: String,
-  /// In declaration order.
+  /// The class after `extends`.
+  pub parent: Option<ClassId>,
+  pub is_abstract: bool,
+  /// The class's own fields in declaration order; inherited ones belong to its ancestors.
   pub fields: Vec<FieldDef>,
-  /// The function `new` that initializes instances; classes without fields may have none.
+  /// The class's own function `new` that initializes instances, if it declares one.
   pub initializer: Option<FnId>,
+  /// The methods called through the vtable of instances of this class, by slot.
+  pub vtable: Vec<FnId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -340,6 +346,11 @@ pub struct TypedModule {
   /// The function called by each method call expression; absent for built-in methods such as
   /// the `len()` of arrays.
   pub method_calls: HashMap<NodeId, FnId>,
+  /// Calls through `zod`, which run the named implementation without dynamic dispatch.
+  pub zod_calls: HashSet<NodeId>,
+  /// The vtable slot of each method dispatched dynamically: one that is abstract, or is
+  /// overridden in some subclass, and its overrides. Other methods are called directly.
+  pub slots: HashMap<FnId, usize>,
 }
 
 impl TypedModule {
@@ -364,9 +375,41 @@ impl TypedModule {
     self.classes.get(id.0 as usize)
   }
 
-  /// Position of a field in its class's declaration.
-  pub fn class_field_index(&self, id: ClassId, name: &str) -> Option<usize> {
-    self.class_def(id)?.fields.iter().position(|field| field.name == name)
+  /// A class followed by its ancestors, nearest first.
+  pub fn class_chain(&self, id: ClassId) -> Vec<ClassId> {
+    let mut chain = vec![id];
+
+    // Cycles are reported and removed when the classes are defined; the bound is a safeguard.
+    while let Some(parent) = chain.last().and_then(|last| self.class_def(*last)).and_then(|def| def.parent) {
+      if chain.len() > self.classes.len() {
+        break;
+      }
+
+      chain.push(parent);
+    }
+
+    chain
+  }
+
+  /// Whether `sub` is `sup` or one of its subclasses.
+  pub fn is_subclass(&self, sub: ClassId, sup: ClassId) -> bool {
+    self.class_chain(sub).contains(&sup)
+  }
+
+  /// A field of a class or one of its ancestors: the declaring class, its position there, and
+  /// the field.
+  pub fn class_field(&self, id: ClassId, name: &str) -> Option<(ClassId, usize, &FieldDef)> {
+    self.class_chain(id).into_iter().find_map(|class| {
+      let def = self.class_def(class)?;
+      let index = def.fields.iter().position(|field| field.name == name)?;
+
+      Some((class, index, def.fields.get(index)?))
+    })
+  }
+
+  /// The initializer `zod.new(...)` runs for a class: the nearest ancestor's.
+  pub fn inherited_initializer(&self, id: ClassId) -> Option<FnId> {
+    self.class_chain(id).into_iter().skip(1).find_map(|class| self.class_def(class).and_then(|def| def.initializer))
   }
 
   /// The variants of an enum, `Option` or `Result` type, with their field types.
@@ -407,6 +450,7 @@ pub fn check(package: &Package, resolution: &Resolution, diagnostics: &mut Diagn
     mutates_self: vec![false; resolution.functions.len()],
     self_calls: Vec::new(),
     receiver_checks: Vec::new(),
+    zod_new_calls: Vec::new(),
   };
 
   checker.struct_defs();
@@ -446,7 +490,7 @@ pub fn check(package: &Package, resolution: &Resolution, diagnostics: &mut Diagn
 
   let typed = checker.typed;
 
-  for (id, decl) in &decls {
+  for (id, decl) in decls.iter().filter(|(_, decl)| !decl.is_abstract) {
     let owner = match resolution.owner(*id) {
       Some(TypeItem::Class(class)) => {
         let initializer = typed.class_def(class).filter(|def| def.initializer == Some(*id));
@@ -512,11 +556,22 @@ struct Checker<'a> {
   /// Methods called on values that cannot be modified, with the error to report if the method
   /// turns out to modify `self`.
   receiver_checks: Vec<(FnId, Diagnostic)>,
+  /// The `zod.new(...)` calls that start an initializer, the only place they are allowed.
+  zod_new_calls: Vec<NodeId>,
 }
 
 impl Checker<'_> {
   fn error(&mut self, code: Code, span: Span, message: impl Into<String>) {
     self.diagnostics.push(Diagnostic::error(code, span, message));
+  }
+
+  /// Whether a value of type `actual` can be used where `expected` is required; an instance of
+  /// a class can be used as one of its ancestors.
+  fn fits(&self, actual: &Type, expected: &Type) -> bool {
+    match (actual, expected) {
+      (Type::Class(actual), Type::Class(expected)) => self.typed.is_subclass(actual.id, expected.id),
+      _ => actual.fits(expected),
+    }
   }
 
   fn struct_ref(&self, id: StructId) -> Type {
@@ -705,9 +760,10 @@ impl Checker<'_> {
       }
     }
 
-    let body_ty = self.block(&decl.body, Some(&sig.ret));
+    // An abstract method has no body to check.
+    let body_ty = if decl.is_abstract { sig.ret.clone() } else { self.block(&decl.body, Some(&sig.ret)) };
 
-    if !body_ty.fits(&sig.ret) {
+    if !self.fits(&body_ty, &sig.ret) {
       let span = decl.body.tail.as_ref().map_or(decl.body.span, |tail| tail.span);
 
       let mut diagnostic = Diagnostic::error(codes::MISMATCHED_TYPES, span, format!("expected `{}`, found `{body_ty}`", sig.ret))
@@ -1031,7 +1087,7 @@ impl Checker<'_> {
   fn expect_because(&mut self, expr: &Expr, expected: &Type, because: Option<(Span, &str)>) {
     let actual = self.expr(expr, Some(expected));
 
-    if actual.fits(expected) {
+    if self.fits(&actual, expected) {
       return;
     }
 
@@ -1065,6 +1121,16 @@ impl Checker<'_> {
       ExprKind::Char(_) => Type::Char,
       ExprKind::Str(_) => Type::String,
       ExprKind::Unit => Type::Unit,
+      ExprKind::Zod => {
+        if self.resolution.paths.contains_key(&expr.id) {
+          self.diagnostics.push(
+            Diagnostic::error(codes::WRONG_CALL_FORM, expr.span, "`zod` can only call a method of the parent class")
+              .with_help("write `zod.method(...)`, or use `self` to reach the instance"),
+          );
+        }
+
+        Type::Error
+      }
       ExprKind::Template(parts) => {
         for part in parts {
           if let TemplatePart::Expr(part) = part {
@@ -1276,6 +1342,9 @@ impl Checker<'_> {
       (Type::Error, _) | (_, Type::Error) => Type::Error,
       (Type::Never, other) | (other, Type::Never) => other.clone(),
       _ if lhs_ty == rhs_ty => lhs_ty,
+      // Instances of related classes compare by identity.
+      _ if self.fits(&lhs_ty, &rhs_ty) => rhs_ty,
+      _ if self.fits(&rhs_ty, &lhs_ty) => lhs_ty,
       _ => {
         let (expected, found) = if mismatch_span == rhs.span { (&lhs_ty, &rhs_ty) } else { (&rhs_ty, &lhs_ty) };
 
@@ -1391,6 +1460,9 @@ impl Checker<'_> {
       (Type::Never, other) | (other, Type::Never) => other.clone(),
       (Type::Error, _) | (_, Type::Error) => Type::Error,
       _ if then_ty == else_ty => then_ty,
+      _ if expected.is_some_and(|expected| self.fits(&then_ty, expected) && self.fits(&else_ty, expected)) => expected.cloned().unwrap_or(then_ty),
+      _ if self.fits(&else_ty, &then_ty) => then_ty,
+      _ if self.fits(&then_ty, &else_ty) => else_ty,
       _ => {
         let mut diagnostic = Diagnostic::error(codes::MISMATCHED_TYPES, else_branch.span, format!("expected `{then_ty}`, found `{else_ty}`"))
           .with_note("both branches of an `if` must have the same type");
@@ -1556,6 +1628,10 @@ impl Checker<'_> {
   }
 
   fn method_call(&mut self, expr: &Expr, receiver: &Expr, method: &Ident, args: &[Expr]) -> Type {
+    if receiver.kind == ExprKind::Zod {
+      return self.zod_call(expr, receiver, method, args);
+    }
+
     let receiver_ty = self.expr(receiver, None);
     let name = method.name.as_str();
 
@@ -1592,7 +1668,10 @@ impl Checker<'_> {
         return Type::Error;
       }
     };
-    let found = self.resolution.type_function(self.package, owner, name);
+    let found = match owner {
+      TypeItem::Class(id) => self.class_method(id, name),
+      _ => self.resolution.type_function(self.package, owner, name),
+    };
     let (Some(function), Some(decl)) = (found, found.and_then(|function| self.resolution.fn_decl(self.package, function))) else {
       let mut diagnostic = Diagnostic::error(codes::UNKNOWN_MEMBER, method.span, format!("no method `{name}` on type `{receiver_ty}`"));
       let functions = self.resolution.type_functions(self.package, owner);
@@ -1625,7 +1704,8 @@ impl Checker<'_> {
         );
       }
       Some(_) => {
-        if decl.visibility == Visibility::Private && self.owner != Some(owner) {
+        // An inherited method is private to the class that declares it.
+        if decl.visibility == Visibility::Private && self.owner != self.resolution.owner(function) {
           self.diagnostics.push(
             Diagnostic::error(codes::PRIVATE_MEMBER, method.span, format!("the method `{name}` of `{receiver_ty}` is private"))
               .with_label(decl.name.span, "declared `prv` here"),
@@ -2046,7 +2126,12 @@ impl Checker<'_> {
         }
       };
     };
-    let mut elem_ty = self.expr(first, expected_elem.as_ref());
+    let first_ty = self.expr(first, expected_elem.as_ref());
+    // With a known element type, elements may be instances of its subclasses.
+    let mut elem_ty = match &expected_elem {
+      Some(expected) if self.fits(&first_ty, expected) && first_ty != Type::Never => expected.clone(),
+      _ => first_ty,
+    };
 
     for elem in elems.iter().skip(1) {
       if elem_ty == Type::Never {

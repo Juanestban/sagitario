@@ -9,10 +9,13 @@
 //! are copied by assignment and passed by value. Managed aggregates (containing `String`s) get
 //! `sag_retain_*`/`sag_release_*` functions.
 //!
-//! A class is a heap object `sag_cN` whose first member is the runtime's `sag_object` header
-//! (reference counts and a drop function); values of the class are `sag_cN *`. `sag_new_cN`
-//! allocates a zeroed instance and `sag_drop_cN` releases its fields when the last reference
-//! goes away.
+//! A class is a heap object `sag_cN` whose first member is its parent's struct (`base`) or, for
+//! a class without parent, the runtime's `sag_object` header (reference counts, drop function,
+//! vtable). Values of every class are `sag_object *`, so an instance passes for any of its
+//! ancestors; a field is read by converting the pointer to the struct of the class that declares
+//! it, which C allows because each struct starts with its parent's. `sag_new_cN` allocates a
+//! zeroed instance, `sag_drop_cN` releases the class's fields and then its parent's, and
+//! `sag_vtable_cN` lists the methods called through the vtable.
 
 use sagitario_ast::{BinaryOp, UnaryOp};
 use sagitario_resolve::{Builtin, ClassId, EnumId, FnId, StructId};
@@ -45,6 +48,7 @@ pub fn generate(program: &Program) -> GeneratedC {
     source_line: None,
     pointees: Vec::new(),
     classes: Vec::new(),
+    functions: &program.functions,
   };
   let order = generator.aggregate_order(program);
 
@@ -65,6 +69,7 @@ pub fn generate(program: &Program) -> GeneratedC {
   }
 
   generator.out.push('\n');
+  generator.class_support(&order);
 
   for (index, function) in program.functions.iter().enumerate() {
     generator.function(FnId(index as u32), function);
@@ -111,6 +116,8 @@ struct Generator<'a> {
   pointees: Vec<Type>,
   /// Classes whose objects are referenced, defined after the aggregate being visited.
   classes: Vec<usize>,
+  /// The program's functions, for the signatures of calls through vtables.
+  functions: &'a [Function],
 }
 
 impl<'a> Generator<'a> {
@@ -168,6 +175,11 @@ impl<'a> Generator<'a> {
 
     if let Some(slot) = done.get_mut(flag) {
       *slot = true;
+    }
+
+    // An object contains its parent's part by value.
+    if let Some(parent) = self.layouts.class(ClassId(index as u32)).and_then(|layout| layout.parent) {
+      self.visit_class(parent.0 as usize, done, order);
     }
 
     for field in self.layouts.class_fields(ClassId(index as u32)) {
@@ -270,6 +282,26 @@ impl<'a> Generator<'a> {
       self.arc_functions(*aggregate);
     }
 
+    self.out.push('\n');
+  }
+
+  /// The vtables, then the functions that create and destroy instances, after the prototypes
+  /// of the methods the vtables list.
+  fn class_support(&mut self, order: &[Aggregate]) {
+    for aggregate in order {
+      if let Aggregate::Class(index) = aggregate {
+        let methods: Vec<String> = self
+          .layouts
+          .class(ClassId(*index as u32))
+          .map(|layout| layout.vtable.iter().map(|function| format!("(sag_method){}", fn_name(*function))).collect())
+          .unwrap_or_default();
+
+        if !methods.is_empty() {
+          self.out.push_str(&format!("static const sag_method sag_vtable_c{index}[] = {{ {} }};\n", methods.join(", ")));
+        }
+      }
+    }
+
     for aggregate in order {
       if let Aggregate::Class(index) = aggregate {
         self.class_functions(*index);
@@ -279,9 +311,19 @@ impl<'a> Generator<'a> {
     self.out.push('\n');
   }
 
-  /// `sag_drop_cN`, which releases the fields of an object, and `sag_new_cN`.
+  /// The vtable of a class as a C expression: `sag_vtable_cN`, or `NULL` when it is empty.
+  fn vtable(&self, class: ClassId) -> String {
+    match self.layouts.class(class) {
+      Some(layout) if !layout.vtable.is_empty() => format!("sag_vtable_c{}", class.0),
+      _ => "NULL".to_string(),
+    }
+  }
+
+  /// `sag_drop_cN`, which releases the fields of an object (its own, then its parent's), and
+  /// `sag_new_cN`.
   fn class_functions(&mut self, index: usize) {
     let name = format!("sag_c{index}");
+    let parent = self.layouts.class(ClassId(index as u32)).and_then(|layout| layout.parent);
     let releases: Vec<String> = self
       .layouts
       .class_fields(ClassId(index as u32))
@@ -299,23 +341,33 @@ impl<'a> Generator<'a> {
       self.out.push_str(&format!("  {name} *value = ({name} *)object;\n{}", releases.concat()));
     }
 
+    if let Some(parent) = parent {
+      self.out.push_str(&format!("  sag_drop_c{}(object);\n", parent.0));
+    }
+
+    let vtable = self.vtable(ClassId(index as u32));
+
     self.out.push_str("}\n");
-    self.out.push_str(&format!("static {name} *sag_new_c{index}(void) {{\n"));
+    self.out.push_str(&format!("static sag_object *sag_new_c{index}(void) {{\n"));
     self.out.push_str(&format!("  {name} *value = sag_object_alloc(sizeof({name}));\n"));
     self.out.push_str(&format!("  *value = ({name}){{0}};\n"));
-    self.out.push_str(&format!("  sag_object_init(&value->header, sag_drop_c{index});\n"));
-    self.out.push_str("  return value;\n}\n");
+    self.out.push_str(&format!("  sag_object_init((sag_object *)value, sag_drop_c{index}, {vtable});\n"));
+    self.out.push_str("  return (sag_object *)value;\n}\n");
   }
 
   /// `struct sag_xN { ... };` for an aggregate type.
   fn definition(&self, ty: &Type) -> String {
     let name = self.struct_name(ty);
     let members = match ty {
-      Type::Class(_) => {
+      Type::Class(inner) => {
         let fields = self.parts(ty).concat();
         let members: Vec<String> = fields.iter().enumerate().map(|(index, field)| format!(" {} f{index};", self.c_type(field))).collect();
+        let base = match self.layouts.class(inner.id).and_then(|layout| layout.parent) {
+          Some(parent) => format!("sag_c{} base;", parent.0),
+          None => "sag_object header;".to_string(),
+        };
 
-        format!("sag_object header;{}", members.concat())
+        format!("{base}{}", members.concat())
       }
       Type::Struct(_) => {
         let fields = self.parts(ty).concat();
@@ -434,7 +486,7 @@ impl<'a> Generator<'a> {
       Type::StringBuilder => "sag_builder".to_string(),
       Type::Struct(inner) => format!("sag_s{}", inner.id.0),
       Type::Enum(inner) => format!("sag_e{}", inner.id.0),
-      Type::Class(inner) => format!("sag_c{} *", inner.id.0),
+      Type::Class(_) => "sag_object *".to_string(),
       Type::Array(..) | Type::Option(_) | Type::Result(..) => format!("sag_t{}", self.instance_index(ty)),
       Type::CString => "sag_cstring".to_string(),
       Type::CVoid => "void".to_string(),
@@ -588,6 +640,14 @@ impl<'a> Generator<'a> {
     self.out.push('\n');
   }
 
+  /// The C type of a pointer to a method, to call one taken from a vtable.
+  fn method_pointer(&self, id: FnId) -> String {
+    let Some(function) = self.functions.get(id.0 as usize) else { return "void (*)(void)".to_string() };
+    let params: Vec<String> = function.locals.iter().take(function.param_count).map(|ty| self.c_type(ty)).collect();
+
+    format!("{} (*)({})", self.return_type(&function.ret), params.join(", "))
+  }
+
   fn signature(&self, id: FnId, function: &Function) -> String {
     let params: Vec<String> = function
       .locals
@@ -641,7 +701,7 @@ impl<'a> Generator<'a> {
     for projection in &place.projections {
       match projection {
         Projection::Field(index) => out.push_str(&format!(".f{index}")),
-        Projection::ClassField(index) => out.push_str(&format!("->f{index}")),
+        Projection::ClassField { class, index } => out = format!("((sag_c{} *){out})->f{index}", class.0),
         Projection::Index { index, len } => {
           out.push_str(&format!(".data[sag_index_at({}, {len}, __FILE__, __LINE__)]", self.operand(index)));
         }
@@ -792,6 +852,11 @@ impl<'a> Generator<'a> {
         self.indent -= 1;
         self.line("}");
       }
+      Stmt::SetVtable { object, class } => {
+        let vtable = self.vtable(*class);
+
+        self.line(&format!("{}->vtable = {vtable};", self.local(*object)));
+      }
       Stmt::Break => self.line("break;"),
       Stmt::Continue => self.line("continue;"),
       Stmt::Return(None) => self.line("return;"),
@@ -859,6 +924,12 @@ impl<'a> Generator<'a> {
         (Type::Ptr { .. }, Type::Int(int)) => format!("(({})(uintptr_t){})", int_c_type(*int), self.operand(value)),
         _ => cast(from, to, &self.operand(value)),
       },
+      Rvalue::Call { callee: Callee::Virtual { slot, function }, args } => {
+        let args: Vec<String> = args.iter().map(|arg| self.operand(arg)).collect();
+        let receiver = args.first().cloned().unwrap_or_default();
+
+        format!("(({})({receiver}->vtable[{slot}]))({})", self.method_pointer(*function), args.join(", "))
+      }
       Rvalue::Call { callee, args } => {
         let mut args: Vec<String> = args.iter().map(|arg| self.operand(arg)).collect();
 
@@ -1023,7 +1094,7 @@ fn cast(from: &Type, to: &Type, value: &str) -> String {
 
 fn callee_name(callee: Callee) -> String {
   match callee {
-    Callee::Fn(id) => fn_name(id),
+    Callee::Fn(id) | Callee::Virtual { function: id, .. } => fn_name(id),
     Callee::Extern(id) => ffi_name(id.0 as usize),
     Callee::Builtin(Builtin::Print) => "sag_print".to_string(),
     Callee::Builtin(Builtin::Println) => "sag_println".to_string(),

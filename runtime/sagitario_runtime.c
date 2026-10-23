@@ -674,10 +674,11 @@ void *sag_object_alloc(size_t size) {
   return sag_alloc(size);
 }
 
-void sag_object_init(sag_object *object, void (*drop)(sag_object *object)) {
+void sag_object_init(sag_object *object, void (*drop)(sag_object *object), const sag_method *vtable) {
   object->strong = 1;
   object->weak = 0;
   object->drop = drop;
+  object->vtable = vtable;
   sag_live_objects++;
 }
 

@@ -12,7 +12,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0001](0001-compile-to-c-via-sir.md) | Compile to C11 through an own IR (SIR) | Accepted |
 | [0002](0002-arc-memory-model.md) | ARC memory model with value and reference types | Accepted (refined by 0027) |
 | [0003](0003-static-typing-and-generics.md) | Static typing, local inference, monomorphized generics | Accepted |
-| [0004](0004-class-model.md) | Class model: single inheritance, interfaces, no open/final | Accepted (refined by 0027) |
+| [0004](0004-class-model.md) | Class model: single inheritance, interfaces, no open/final | Accepted (refined by 0027, 0029) |
 | [0005](0005-result-error-handling.md) | Errors as values with `Result` and `?` | Accepted |
 | [0006](0006-no-null-option.md) | No null; `Option<T>` only | Accepted |
 | [0007](0007-mutability-const-var.md) | Mutability with `const` / `var` | Accepted (amended by 0028) |
@@ -37,6 +37,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0026](0026-ffi-details.md) | FFI details: pointers, `unsafe`, `std::ffi` and exports | Accepted |
 | [0027](0027-classes-and-arc.md) | Classes, construction, ARC objects and `weak` references | Accepted |
 | [0028](0028-inferred-self-mutation.md) | `self` without `var`: methods that modify `self` are inferred | Accepted |
+| [0029](0029-inheritance.md) | Inheritance: construction, overriding, subtyping and dispatch | Accepted |
 
 ## Template
 

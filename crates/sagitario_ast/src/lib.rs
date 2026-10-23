@@ -81,12 +81,15 @@ pub enum Item {
   Extern(ExternBlock),
 }
 
-/// `class Name { fields and functions }` (docs/spec/04-classes.md): a reference type managed by
-/// ARC. A function named `new` without `self` is the initializer.
+/// `abstract class Name extends Parent { fields and functions }` (docs/spec/04-classes.md): a
+/// reference type managed by ARC. A function named `new` without `self` is the initializer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClassDecl {
+  pub is_abstract: bool,
   pub visibility: Visibility,
   pub name: Ident,
+  /// The class after `extends`.
+  pub parent: Option<Path>,
   pub fields: Vec<FieldDecl>,
   pub functions: Vec<FnDecl>,
   pub span: Span,
@@ -180,6 +183,10 @@ pub struct FnDecl {
   pub extern_c: bool,
   pub export: Option<Export>,
   pub visibility: Visibility,
+  /// `abstract fn`: a class method without a body (the body is empty).
+  pub is_abstract: bool,
+  /// `override fn`: replaces a method of the parent class.
+  pub is_override: bool,
   pub name: Ident,
   /// `self`, only in methods of structs, enums and classes.
   pub self_param: Option<SelfParam>,
@@ -413,6 +420,9 @@ pub enum ExprKind {
   },
   /// `expr?`
   Try(Box<Expr>),
+  /// `zod`, the parent class's view of `self`: only as the receiver of `zod.method(...)` and
+  /// `zod.new(...)`.
+  Zod,
   /// `new Type(args)`: a class instance, or a `StringBuilder`.
   New {
     path: Path,

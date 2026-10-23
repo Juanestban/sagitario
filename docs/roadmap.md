@@ -51,7 +51,7 @@ Increments ([ADR-0027](adr/0027-classes-and-arc.md)):
    functions, iterative destruction, identity `==`. With it, `self` loses `var` and the
    methods that modify a struct's `self` are inferred ([ADR-0028](adr/0028-inferred-self-mutation.md)).
 2. Inheritance: `extends`, `zod`, `override`, `abstract`, dynamic dispatch and
-   devirtualization.
+   devirtualization ([ADR-0029](adr/0029-inheritance.md)).
 3. `weak` references.
 4. Interfaces: default methods, `impl` on classes, structs and enums, interfaces as types,
    the `Error` interface.

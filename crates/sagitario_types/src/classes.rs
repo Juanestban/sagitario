@@ -1,10 +1,11 @@
 //! Classes (docs/spec/04-classes.md): their fields, the initializer `new`, `new C(...)` and field
-//! access. Also which places can be modified (docs/spec/03-memory.md), including the fields of
+//! access, with inherited fields looked up through the ancestors (`inheritance` checks the
+//! hierarchy itself). Also which places can be modified (docs/spec/03-memory.md), including the fields of
 //! class instances, and which struct and enum methods modify `self` (ADR-0028): a method does if
 //! it assigns to `self` or a part of it, or calls such a method on it. Calls to those methods on
 //! values that cannot be modified are reported once every method is known.
 
-use sagitario_ast::{Expr, ExprKind, Ident, Path, Visibility};
+use sagitario_ast::{Expr, ExprKind, Ident, Path, Stmt, Visibility};
 use sagitario_diagnostics::{Diagnostic, codes};
 use sagitario_resolve::{ClassId, FnId, LocalId, LocalKind, TypeItem};
 
@@ -32,13 +33,15 @@ enum PlaceAccess {
 }
 
 impl Checker<'_> {
-  /// Resolves the field types of every class.
+  /// Resolves the parent and the field types of every class.
   pub(crate) fn class_defs(&mut self) {
     for index in 0..self.resolution.classes.len() {
       let id = ClassId(index as u32);
       let Some(decl) = self.resolution.class_decl(self.package, id) else { continue };
 
       self.owner = Some(TypeItem::Class(id));
+
+      let parent = decl.parent.as_ref().and_then(|path| self.parent_class(path));
 
       let fields = decl
         .fields
@@ -53,19 +56,30 @@ impl Checker<'_> {
         .collect();
       let initializer = self.resolution.initializer(self.package, id);
 
-      self.typed.classes.push(ClassDef { name: decl.name.name.clone(), fields, initializer });
+      self.typed.classes.push(ClassDef {
+        name: decl.name.name.clone(),
+        parent,
+        is_abstract: decl.is_abstract,
+        fields,
+        initializer,
+        vtable: Vec::new(),
+      });
     }
 
     self.owner = None;
+    self.check_inheritance_cycles();
   }
 
-  /// The initializer of each class: present if the class has fields, without a return type,
-  /// and never a method.
+  /// The initializer of each class: present if the class has fields or its parent's initializer
+  /// takes arguments, starting with `zod.new(...)` when an ancestor has one, without a return
+  /// type, and never a method. Then the rules of inheritance.
   pub(crate) fn check_classes(&mut self) {
     for index in 0..self.resolution.classes.len() {
       let id = ClassId(index as u32);
       let Some(decl) = self.resolution.class_decl(self.package, id) else { continue };
       let name = &decl.name.name;
+      let inherited = self.typed.inherited_initializer(id);
+      let own = self.typed.class_def(id).and_then(|def| def.initializer);
 
       for function in decl.functions.iter().filter(|function| function.name.name == "new") {
         if let Some(param) = function.self_param {
@@ -81,18 +95,68 @@ impl Checker<'_> {
         }
       }
 
-      if !decl.fields.is_empty() && self.typed.class_def(id).is_some_and(|def| def.initializer.is_none()) {
+      match (own, inherited) {
+        (None, _) if !decl.fields.is_empty() => {
+          self.diagnostics.push(
+            Diagnostic::error(codes::INVALID_INITIALIZER, decl.name.span, format!("the class `{name}` has fields but no initializer"))
+              .with_help("declare `pub fn new(...) { ... }` and assign every field in it"),
+          );
+        }
+        (None, Some(inherited)) if self.typed.sig(inherited).is_some_and(|sig| !sig.params.is_empty()) => {
+          let parent = self.resolution.owner(inherited).map(|owner| self.resolution.type_name(self.package, owner)).unwrap_or_default();
+
+          self.diagnostics.push(
+            Diagnostic::error(codes::INVALID_INITIALIZER, decl.name.span, format!("the class `{name}` must declare an initializer"))
+              .with_note(format!("the initializer of `{parent}` takes arguments, which `new {name}()` cannot pass"))
+              .with_help("declare `pub fn new(...) { zod.new(...); }`"),
+          );
+        }
+        (Some(own), Some(inherited)) => self.require_zod_new(own, inherited),
+        _ => {}
+      }
+    }
+
+    self.check_members();
+    self.check_abstract_methods();
+    self.build_vtables();
+  }
+
+  /// The initializer of a class whose ancestor has one must start with `zod.new(...)`.
+  fn require_zod_new(&mut self, own: FnId, inherited: FnId) {
+    let Some(decl) = self.resolution.fn_decl(self.package, own) else { return };
+    let first = match decl.body.stmts.first() {
+      Some(Stmt::Expr(expr)) => Some(expr),
+      Some(_) => None,
+      None => decl.body.tail.as_deref(),
+    };
+
+    match first {
+      Some(expr @ Expr { kind: ExprKind::MethodCall { receiver, method, .. }, .. }) if receiver.kind == ExprKind::Zod && method.name == "new" => {
+        self.zod_new_calls.push(expr.id);
+      }
+      _ => {
+        let parent = self.resolution.owner(inherited).map(|owner| self.resolution.type_name(self.package, owner)).unwrap_or_default();
+
         self.diagnostics.push(
-          Diagnostic::error(codes::INVALID_INITIALIZER, decl.name.span, format!("the class `{name}` has fields but no initializer"))
-            .with_help("declare `pub fn new(...) { ... }` and assign every field in it"),
+          Diagnostic::error(codes::INVALID_INITIALIZER, decl.name.span, "this initializer must start with `zod.new(...)`")
+            .with_note(format!("`{parent}` has an initializer, which runs before the fields of the subclass are assigned"))
+            .with_help("make `zod.new(...)` the first statement"),
         );
       }
     }
   }
 
-  /// `new C(args)`: runs the initializer of `C`, if it has one.
+  /// `new C(args)`: runs the initializer of `C`, if it has one, or else the one it inherits.
   pub(crate) fn new_instance(&mut self, path: &Path, id: ClassId, args: &[Expr]) -> Type {
     let ty = self.type_ref(TypeItem::Class(id));
+
+    if self.typed.class_def(id).is_some_and(|def| def.is_abstract) {
+      self.diagnostics.push(
+        Diagnostic::error(codes::INVALID_INHERITANCE, path.span, format!("cannot create an instance of the abstract class `{ty}`"))
+          .with_help(format!("create an instance of a concrete subclass of `{ty}`")),
+      );
+    }
+
     let Some(initializer) = self.typed.class_def(id).and_then(|def| def.initializer) else {
       self.args(path.span, "initializer", &[], args);
 
@@ -117,16 +181,22 @@ impl Checker<'_> {
     ty
   }
 
-  /// `instance.name`, a field of a class instance.
+  /// `instance.name`, a field of a class instance or one it inherits.
   pub(crate) fn class_field(&mut self, id: ClassId, base_ty: &Type, name: &Ident) -> Type {
     let field_name = name.name.as_str();
-    let Some(def) = self.typed.class_def(id).cloned() else { return Type::Error };
-    let Some(field) = def.fields.iter().find(|field| field.name == field_name) else {
+    let Some((declaring, _, field)) = self.typed.class_field(id, field_name).map(|(class, index, field)| (class, index, field.clone())) else {
       let mut diagnostic = Diagnostic::error(codes::UNKNOWN_MEMBER, name.span, format!("no field `{field_name}` on type `{base_ty}`"));
+      let fields: Vec<String> = self
+        .typed
+        .class_chain(id)
+        .into_iter()
+        .filter_map(|class| self.typed.class_def(class))
+        .flat_map(|def| def.fields.iter().map(|field| field.name.clone()))
+        .collect();
 
-      if self.resolution.type_function(self.package, TypeItem::Class(id), field_name).is_some() {
+      if self.class_method(id, field_name).is_some() {
         diagnostic = diagnostic.with_help(format!("`{field_name}` is a function; call it with `{field_name}(...)`"));
-      } else if let Some(similar) = sagitario_diagnostics::closest_match(field_name, def.fields.iter().map(|field| field.name.as_str())) {
+      } else if let Some(similar) = sagitario_diagnostics::closest_match(field_name, fields.iter().map(String::as_str)) {
         diagnostic = diagnostic.with_help(format!("a field with a similar name exists: `{similar}`"));
       }
 
@@ -135,9 +205,12 @@ impl Checker<'_> {
       return Type::Error;
     };
 
-    if !field.public && self.owner != Some(TypeItem::Class(id)) {
+    // An inherited field is private to the class that declares it.
+    if !field.public && self.owner != Some(TypeItem::Class(declaring)) {
+      let owner = self.resolution.type_name(self.package, TypeItem::Class(declaring));
+
       self.diagnostics.push(
-        Diagnostic::error(codes::PRIVATE_MEMBER, name.span, format!("the field `{field_name}` of `{base_ty}` is private"))
+        Diagnostic::error(codes::PRIVATE_MEMBER, name.span, format!("the field `{field_name}` of `{owner}` is private"))
           .with_label(field.span, "declared `prv` here"),
       );
     }
@@ -187,8 +260,9 @@ impl Checker<'_> {
         PlaceAccess::Immutable(Diagnostic::error(code, place.span, message).with_help("store the value in a `var` binding first"))
       }
       PlaceBase::ClassField { class, name, base } => {
-        let def = self.typed.class_def(class);
-        let Some(field) = def.and_then(|def| def.fields.iter().find(|field| field.name == name.name)) else { return PlaceAccess::Mutable };
+        let Some((declaring, _, field)) = self.typed.class_field(class, &name.name) else { return PlaceAccess::Mutable };
+        let def = self.typed.class_def(declaring);
+        // Only the initializer of the declaring class assigns a `const` field.
         let initializing = def.and_then(|def| def.initializer) == Some(self.function) && self.is_self(base);
 
         if field.mutable || initializing {

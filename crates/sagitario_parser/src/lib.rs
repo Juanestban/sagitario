@@ -361,7 +361,7 @@ impl<'a> Parser<'a> {
 
         Ok(Some(Item::Enum(decl)))
       }
-      TokenKind::Keyword(Keyword::Class) => {
+      TokenKind::Keyword(Keyword::Class | Keyword::Abstract) => {
         let decl = self.class_decl(visibility, start)?;
 
         self.apply_attributes(attributes, AttributeTarget::Class, None, None);
@@ -373,11 +373,6 @@ impl<'a> Parser<'a> {
         let span = self.span();
 
         Err(self.not_implemented(span, "re-exports (`pub use`)"))
-      }
-      TokenKind::Keyword(Keyword::Abstract) => {
-        let span = self.span();
-
-        Err(self.not_implemented(span, "abstract classes"))
       }
       TokenKind::Keyword(keyword @ (Keyword::Interface | Keyword::Const)) => {
         let span = self.span();
@@ -661,7 +656,10 @@ impl<'a> Parser<'a> {
 
           fields.push(field);
         }
-        Ok(Member::Fn(function)) => functions.push(function),
+        Ok(Member::Fn(function)) => {
+          self.class_only_modifiers(&function);
+          functions.push(function);
+        }
         Err(ParseError) => self.skip_member(),
       }
 
@@ -675,8 +673,11 @@ impl<'a> Parser<'a> {
     Ok(StructDecl { repr_c: false, visibility, name, fields, functions, span: start.to(end) })
   }
 
-  /// `class Name { fields and functions }`; every field is `const` or `var`.
+  /// `abstract class Name extends Parent { fields and functions }`; every field is `const` or
+  /// `var`.
   fn class_decl(&mut self, visibility: Visibility, start: Span) -> PResult<ClassDecl> {
+    let is_abstract = self.eat(&TokenKind::Keyword(Keyword::Abstract));
+
     self.expect(&TokenKind::Keyword(Keyword::Class))?;
 
     let name = self.ident("a class name")?;
@@ -687,11 +688,7 @@ impl<'a> Parser<'a> {
       return Err(self.not_implemented(span, "generic classes"));
     }
 
-    if self.at(&TokenKind::Keyword(Keyword::Extends)) {
-      let span = self.span();
-
-      return Err(self.not_implemented(span, "class inheritance (`extends`)"));
-    }
+    let parent = if self.eat(&TokenKind::Keyword(Keyword::Extends)) { Some(self.path()?) } else { None };
 
     if self.at(&TokenKind::Keyword(Keyword::Impl)) {
       let span = self.span();
@@ -733,7 +730,7 @@ impl<'a> Parser<'a> {
 
     let end = self.expect(&TokenKind::RBrace)?.span;
 
-    Ok(ClassDecl { visibility, name, fields, functions, span: start.to(end) })
+    Ok(ClassDecl { is_abstract, visibility, name, parent, fields, functions, span: start.to(end) })
   }
 
   fn enum_decl(&mut self, visibility: Visibility, start: Span) -> PResult<EnumDecl> {
@@ -782,7 +779,10 @@ impl<'a> Parser<'a> {
       let before = self.pos;
 
       match self.member() {
-        Ok(Member::Fn(function)) => functions.push(function),
+        Ok(Member::Fn(function)) => {
+          self.class_only_modifiers(&function);
+          functions.push(function);
+        }
         Ok(Member::Field(field)) => {
           self.diagnostics.push(
             Diagnostic::error(codes::UNEXPECTED_TOKEN, field.span, "enums cannot have fields")
@@ -911,27 +911,21 @@ impl<'a> Parser<'a> {
       }
     };
 
-    match self.kind().clone() {
-      TokenKind::Keyword(Keyword::Abstract) => {
-        let span = self.span();
+    if self.at(&TokenKind::Keyword(Keyword::Weak)) {
+      let span = self.span();
 
-        return Err(self.not_implemented(span, "abstract methods"));
-      }
-      TokenKind::Keyword(Keyword::Override) => {
-        let span = self.span();
-
-        return Err(self.not_implemented(span, "`override` methods"));
-      }
-      TokenKind::Keyword(Keyword::Weak) => {
-        let span = self.span();
-
-        return Err(self.not_implemented(span, "`weak` fields"));
-      }
-      _ => {}
+      return Err(self.not_implemented(span, "`weak` fields"));
     }
 
-    if self.at(&TokenKind::Keyword(Keyword::Fn)) {
-      return Ok(Member::Fn(self.fn_decl(visibility, start, true)?));
+    let is_abstract = self.eat(&TokenKind::Keyword(Keyword::Abstract));
+    let is_override = self.eat(&TokenKind::Keyword(Keyword::Override));
+
+    if is_abstract || is_override || self.at(&TokenKind::Keyword(Keyword::Fn)) {
+      let mut decl = self.method_decl(visibility, start, is_abstract)?;
+
+      decl.is_override = is_override;
+
+      return Ok(Member::Fn(decl));
     }
 
     let mutable = match self.kind() {
@@ -985,8 +979,65 @@ impl<'a> Parser<'a> {
     }
   }
 
+  /// `abstract` and `override` only apply to the methods of classes.
+  fn class_only_modifiers(&mut self, function: &FnDecl) {
+    for (present, modifier) in [(function.is_abstract, "abstract"), (function.is_override, "override")] {
+      if present {
+        self.diagnostics.push(
+          Diagnostic::error(codes::UNEXPECTED_TOKEN, function.name.span, format!("only class methods can be `{modifier}`"))
+            .with_help(format!("remove `{modifier}`; structs and enums have no inheritance")),
+        );
+      }
+    }
+  }
+
+  /// A function of a struct, enum or class; an abstract one ends with `;` instead of a body.
+  fn method_decl(&mut self, visibility: Visibility, start: Span, is_abstract: bool) -> PResult<FnDecl> {
+    if !is_abstract {
+      return self.fn_decl(visibility, start, true);
+    }
+
+    self
+      .signature_then(visibility, start, true, |parser| {
+        if parser.at(&TokenKind::LBrace) {
+          let span = parser.span();
+
+          parser.diagnostics.push(
+            Diagnostic::error(codes::UNEXPECTED_TOKEN, span, "abstract methods have no body")
+              .with_help("end the declaration with `;`, or remove `abstract` to give it a body"),
+          );
+
+          let mut body = parser.block()?;
+
+          body.stmts.clear();
+          body.tail = None;
+
+          return Ok(body);
+        }
+
+        let span = parser.expect(&TokenKind::Semi)?.span;
+
+        Ok(Block { stmts: Vec::new(), tail: None, span })
+      })
+      .map(|mut decl| {
+        decl.is_abstract = true;
+        decl
+      })
+  }
+
   /// A function; `in_type` for the functions of a struct, enum or class, which can be methods.
   fn fn_decl(&mut self, visibility: Visibility, start: Span, in_type: bool) -> PResult<FnDecl> {
+    self.signature_then(visibility, start, in_type, Self::block)
+  }
+
+  /// A function's signature followed by what `body` parses.
+  fn signature_then(
+    &mut self,
+    visibility: Visibility,
+    start: Span,
+    in_type: bool,
+    body: impl FnOnce(&mut Self) -> PResult<Block>,
+  ) -> PResult<FnDecl> {
     let id = self.next_id();
 
     self.expect(&TokenKind::Keyword(Keyword::Fn))?;
@@ -1031,9 +1082,22 @@ impl<'a> Parser<'a> {
     self.expect(&TokenKind::RParen)?;
 
     let return_type = if self.eat(&TokenKind::Arrow) { Some(self.type_expr()?) } else { None };
-    let body = self.block()?;
+    let body = body(self)?;
 
-    Ok(FnDecl { id, extern_c: false, export: None, visibility, name, self_param, params, return_type, span: start.to(body.span), body })
+    Ok(FnDecl {
+      id,
+      extern_c: false,
+      export: None,
+      visibility,
+      is_abstract: false,
+      is_override: false,
+      name,
+      self_param,
+      params,
+      return_type,
+      span: start.to(body.span),
+      body,
+    })
   }
 
   fn ident(&mut self, expected: &str) -> PResult<Ident> {
@@ -1563,7 +1627,11 @@ impl<'a> Parser<'a> {
 
         return Ok(self.expr_node(ExprKind::New { path, args }, span.to(end)));
       }
-      TokenKind::Keyword(Keyword::Zod) => return Err(self.not_implemented(span, "`zod` expressions")),
+      TokenKind::Keyword(Keyword::Zod) => {
+        self.advance();
+
+        ExprKind::Zod
+      }
       TokenKind::Keyword(Keyword::Match) => return self.match_expr(),
       _ => return Err(self.unexpected("an expression")),
     };
@@ -2060,8 +2128,6 @@ mod tests {
   fn reports_reserved_keywords_and_later_features() {
     assert_eq!(parse("fn await() {}").1, vec!["E0101"]);
     assert_eq!(parse("fn f() { async; }").1, vec!["E0101"]);
-    assert_eq!(parse("class C extends B {}\npub fn main() {}").1, vec!["E0900"]);
-    assert_eq!(parse("abstract class C {}\npub fn main() {}").1, vec!["E0900"]);
     assert_eq!(parse("class C { pub weak var c: Option<C>; }").1, vec!["E0900"]);
     assert_eq!(parse("enum E<T> { A }").1, vec!["E0900"]);
     assert_eq!(parse("struct P<T> {}").1, vec!["E0900"]);
@@ -2095,6 +2161,28 @@ mod tests {
   }
 
   #[test]
+  fn parses_inheritance() {
+    let (module, errors) = parse(
+      "abstract class Animal { pub abstract fn speak(self) -> String; }
+      class Dog extends pkg::Animal {
+        pub fn new() { zod.new(); }
+        pub override fn speak(self) -> String { zod.speak() }
+      }",
+    );
+
+    assert!(errors.is_empty(), "{errors:?}");
+
+    let [Item::Class(animal), Item::Class(dog)] = module.items.as_slice() else { panic!("expected two classes") };
+
+    assert!(animal.is_abstract && animal.functions[0].is_abstract && animal.functions[0].body.stmts.is_empty());
+    assert_eq!(dog.parent.as_ref().map(|path| path.segments.len()), Some(2));
+    assert!(dog.functions[1].is_override);
+    assert!(
+      matches!(&dog.functions[0].body.stmts[0], Stmt::Expr(Expr { kind: ExprKind::MethodCall { receiver, .. }, .. }) if receiver.kind == ExprKind::Zod)
+    );
+  }
+
+  #[test]
   fn parses_classes() {
     let (module, errors) = parse(
       "pub class Counter {
@@ -2113,6 +2201,8 @@ mod tests {
     assert_eq!(decl.functions[0].self_param, None);
     assert!(decl.functions[1].self_param.is_some());
     assert_eq!(parse("class C { pub n: i32; }").1, vec!["E0100"]);
+    assert_eq!(parse("struct P { pub override fn f(self) {} }").1, vec!["E0100"]);
+    assert_eq!(parse("abstract class A { pub abstract fn f(self) {} }").1, vec!["E0100"]);
     assert_eq!(parse("struct P { pub var n: i32; }").1, vec!["E0100"]);
     assert_eq!(parse("struct P { pub fn f(var self) {} }").1, vec!["E0100"]);
   }

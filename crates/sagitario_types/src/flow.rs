@@ -451,8 +451,12 @@ impl<'a> Flow<'a> {
         }
       }
       ExprKind::New { args, .. } => self.exprs(args),
-      ExprKind::MethodCall { receiver, args, .. } => {
-        self.expr(receiver);
+      ExprKind::MethodCall { receiver, method, args } => {
+        // `zod.new(...)` runs before the fields of `self` are assigned.
+        if !(receiver.kind == ExprKind::Zod && method.name == "new") {
+          self.expr(receiver);
+        }
+
         self.exprs(args);
 
         let function = self.typed.method_calls.get(&expr.id).copied();
@@ -461,6 +465,12 @@ impl<'a> Flow<'a> {
 
         if as_mut_ptr || function.and_then(|function| self.typed.sig(function)).is_some_and(|sig| sig.receiver == Some(Receiver::Var)) {
           self.mutate(receiver);
+        }
+      }
+      // `zod.method(...)` uses `self`.
+      ExprKind::Zod => {
+        if self.initializer().is_some() {
+          self.use_self(expr.span);
         }
       }
       ExprKind::Field { base, .. } => match self.self_field(expr) {
