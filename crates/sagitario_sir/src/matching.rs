@@ -150,13 +150,22 @@ impl FnLowering<'_> {
     };
     let then_body = self.buffer(|lowering| {
       // The returned value is owned by the caller, so it is not a pending temporary.
-      let result = lowering.temp(ret);
-      let fields: Vec<Operand> = error_field.iter().cloned().map(Operand::Place).collect();
+      let result = lowering.temp(ret.clone());
+      let mut fields: Vec<Operand> = Vec::new();
 
-      for (field, place) in fields.iter().zip(&error_field) {
-        if lowering.managed(&place.ty) {
+      // The error becomes the function's error type (an interface, or `Error` from a `String`).
+      if let Some(place) = &error_field {
+        let to = match &ret {
+          Type::Result(_, error) => error.as_ref().clone(),
+          _ => place.ty.clone(),
+        };
+        let field = lowering.convert_error(Operand::Place(place.clone()), &place.ty, &to)?;
+
+        if lowering.managed(&to) {
           lowering.emit(Stmt::Retain(field.clone()));
         }
+
+        fields.push(field);
       }
 
       lowering.emit(Stmt::Assign { dest: result, value: Rvalue::Variant { index: failure, fields } });
@@ -240,11 +249,12 @@ impl FnLowering<'_> {
 
     let mark = self.pending.len();
     let value = self.expr(&arm.body)?;
+    let body_ty = self.type_of(&arm.body)?;
 
     if let Some(dest) = dest
-      && !is_valueless(&self.type_of(&arm.body)?)
+      && !is_valueless(&body_ty)
     {
-      self.store(dest, value);
+      self.store_from(dest, value, &body_ty);
     }
 
     self.release_pending_from(mark);

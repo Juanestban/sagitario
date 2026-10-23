@@ -123,6 +123,19 @@ could be added.
   the vtables `sag_vtable_cN`; calls to them convert the entry back to the method's own function
   type. Other methods and `zod` calls are direct. Every initializer sets the instance's vtable to
   its class's after `zod.new(...)` (SIR `SetVtable`), and an abstract method's body panics.
+- A `weak` field is a bare `sag_object *` (NULL for `None`) holding a weak reference. SIR reads it
+  with `WeakLoad` (`sag_object_upgrade`: a strong reference while the instance is alive) and
+  writes it with `WeakStore` (`sag_object_weak_set`). An object's memory is freed when both its
+  strong and weak counts reach zero.
+- An interface value is a `sag_dyn`: an object (an instance, or a box `sag_bN` holding a copy of
+  a struct or enum) and an itable `sag_it_K` for the interface and the object's type. SIR builds
+  the itables while lowering (`ToDyn` converts a value, `DynUpcast` moves to an ancestor
+  interface, `Callee::Dyn` calls an entry). An itable lists thunks calling the type's methods
+  (through the vtable when they vary), the interface's default methods, a getter and a setter per
+  field, and the itables of the parent interfaces.
+- The prelude part written in Sagitario (`crates/sagitario_driver/src/prelude.sag`) is embedded
+  by the driver as a module outside the package tree; the resolver looks names up there after a
+  module's own items and imports.
 - Indexing goes through `sag_index_at`, which panics when the index is out of bounds.
 - When `main` returns `Result<(), String>`, the C `main` prints an `Err` and exits with code 1.
 - Every aggregate is declared (`typedef struct sag_sN sag_sN;`) before any is defined, so raw

@@ -1,6 +1,6 @@
 # 0027. Classes, construction, ARC objects and `weak` references
 
-- Status: Accepted
+- Status: Accepted; refined by [ADR-0030](0030-weak-references.md)
 - Date: 2026-10-23
 - Refines: [ADR-0002](0002-arc-memory-model.md) and [ADR-0004](0004-class-model.md);
   resolves open question Q12

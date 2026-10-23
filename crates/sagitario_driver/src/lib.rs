@@ -116,7 +116,11 @@ fn front_end(options: &CompileOptions, generate: bool) -> Result<FrontEnd, u8> {
   // so lexical and syntax errors stop here. Name, type and flow errors are reported together.
   report(&mut diagnostics, &sources, options)?;
 
-  let package = Package { modules: loader.modules };
+  let prelude = loader.load_prelude(&mut sources, &mut diagnostics)?;
+
+  report(&mut diagnostics, &sources, options)?;
+
+  let package = Package { modules: loader.modules, prelude: Some(prelude) };
   let resolution = sagitario_resolve::resolve(&package, &mut diagnostics);
   let typed = sagitario_types::check(&package, &resolution, &mut diagnostics);
 
@@ -131,6 +135,9 @@ fn front_end(options: &CompileOptions, generate: bool) -> Result<FrontEnd, u8> {
   })?;
   Ok(FrontEnd { c_source: Some(sagitario_codegen_c::generate(&program)) })
 }
+
+/// The part of the prelude written in Sagitario.
+const PRELUDE: &str = include_str!("prelude.sag");
 
 /// Reads, lexes and parses the modules of a program (docs/spec/09-modules.md): the entry file is
 /// the root module `pkg`, and `pkg::net::http` is the file `net/http.sag` next to it.
@@ -173,6 +180,22 @@ impl Loader {
     }
 
     Ok(())
+  }
+
+  /// Adds the prelude module, which every program sees, and returns its index.
+  fn load_prelude(&mut self, sources: &mut SourceMap, diagnostics: &mut Diagnostics) -> Result<usize, u8> {
+    let id = sources.add(PathBuf::from("<prelude>"), PRELUDE.to_string());
+    let Some(source) = sources.get(id) else {
+      eprintln!("internal compiler error: the prelude was not registered");
+      return Err(EXIT_ICE);
+    };
+    let tokens = sagitario_lexer::lex(id, source.text(), diagnostics);
+    let mut module = sagitario_parser::parse_module_from(id, tokens, &mut self.next_id, diagnostics);
+
+    module.path = vec!["std".to_string(), "prelude".to_string()];
+    self.modules.push(module);
+
+    Ok(self.modules.len() - 1)
   }
 
   /// The file of the module at `path`, if it exists with exactly these names (also on

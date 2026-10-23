@@ -1,0 +1,201 @@
+// Interfaces: required fields and methods, default methods, `extends` between interfaces,
+// implementations by classes (inherited too), structs and enums, interfaces as types (arrays,
+// parameters, results, fields), conversions to parent interfaces, mutation through interface
+// values, and copies of structs into boxes. The harness fails the test on any leak.
+// expect-stdout: Rex: woof (4 legs)
+// expect-stdout: Tom: meow (4 legs)
+// expect-stdout: Polly: hello (2 legs)
+// expect-stdout: Hi, I am Rex
+// expect-stdout: Hi, I am Polly the parrot
+// expect-stdout: point 1,2 has 2 legs
+// expect-stdout: area 6, area 3
+// expect-stdout: shapes: square, triangle
+// expect-stdout: renamed: Max
+// expect-stdout: copy: boxed, original: point at 11
+// expect-stdout: loudest: Polly
+// expect-stdout: kind: Large (9)
+
+interface Named {
+  var name: String;
+
+  fn greet(self) -> String {
+    `Hi, I am ${self.name}`
+  }
+}
+
+interface Pet extends Named {
+  fn sound(self) -> String;
+  fn legs(self) -> i32 {
+    4
+  }
+
+  fn describe(self) -> String {
+    `${self.name}: ${self.sound()} (${self.legs()} legs)`
+  }
+}
+
+interface Shape {
+  fn area(self) -> i32;
+  fn label(self) -> String;
+}
+
+abstract class Animal impl Pet {
+  pub var name: String;
+
+  pub fn new(name: String) {
+    self.name = name;
+  }
+}
+
+class Dog extends Animal {
+  pub fn new(name: String) {
+    zod.new(name);
+  }
+
+  pub fn sound(self) -> String {
+    "woof"
+  }
+}
+
+class Cat extends Animal {
+  pub fn new(name: String) {
+    zod.new(name);
+  }
+
+  pub fn sound(self) -> String {
+    "meow"
+  }
+}
+
+class Parrot extends Animal {
+  pub fn new(name: String) {
+    zod.new(name);
+  }
+
+  pub fn sound(self) -> String {
+    "hello"
+  }
+
+  pub fn legs(self) -> i32 {
+    2
+  }
+
+  pub fn greet(self) -> String {
+    `Hi, I am ${self.name} the parrot`
+  }
+}
+
+struct Point impl Pet {
+  pub name: String;
+  pub x: i32;
+  pub y: i32;
+
+  pub fn sound(self) -> String {
+    "..."
+  }
+
+  pub fn legs(self) -> i32 {
+    2
+  }
+
+  pub fn shift(self) {
+    self.x += 10;
+  }
+}
+
+struct Rect impl Shape {
+  pub w: i32;
+  pub h: i32;
+
+  pub fn area(self) -> i32 {
+    self.w * self.h
+  }
+
+  pub fn label(self) -> String {
+    "square"
+  }
+}
+
+enum Size impl Shape {
+  Small,
+  Large,
+
+  pub fn area(self) -> i32 {
+    match self {
+      Size::Small => 1,
+      Size::Large => 9,
+    }
+  }
+
+  pub fn label(self) -> String {
+    match self {
+      Size::Small => "Small",
+      Size::Large => "Large",
+    }
+  }
+}
+
+class Triangle impl Shape {
+  pub fn area(self) -> i32 {
+    3
+  }
+
+  pub fn label(self) -> String {
+    "triangle"
+  }
+}
+
+class Owner {
+  pub var favorite: Named;
+
+  pub fn new(favorite: Named) {
+    self.favorite = favorite;
+  }
+}
+
+fn loudest(pets: [Pet; 3]) -> Named {
+  var best: Named = pets[0];
+
+  for pet in pets {
+    if pet.legs() < 4 {
+      best = pet;
+    }
+  }
+
+  best
+}
+
+fn main() {
+  const pets: [Pet; 3] = [new Dog("Rex"), new Cat("Tom"), new Parrot("Polly")];
+
+  for pet in pets {
+    println(pet.describe());
+  }
+
+  const rex = new Dog("Rex");
+  println(rex.greet());
+  const named: Named = pets[2];
+  println(named.greet());
+
+  var point = Point { name: "point", x: 1, y: 2 };
+  println(`${point.name} ${point.x},${point.y} has ${point.legs()} legs`);
+
+  const shapes: [Shape; 2] = [Rect { w: 2, h: 3 }, new Triangle()];
+  println(`area ${shapes[0].area()}, area ${shapes[1].area()}`);
+  println(`shapes: ${shapes[0].label()}, ${shapes[1].label()}`);
+
+  const owner = new Owner(rex);
+  owner.favorite.name = "Max";
+  println(`renamed: ${rex.name}`);
+
+  // A struct becomes an interface value as a copy.
+  const boxed: Named = point;
+  boxed.name = "boxed";
+  point.shift();
+  println(`copy: ${boxed.name}, original: ${point.name} at ${point.x}`);
+
+  println(`loudest: ${loudest(pets).name}`);
+
+  const size: Shape = Size::Large;
+  println(`kind: ${size.label()} (${size.area()})`);
+}

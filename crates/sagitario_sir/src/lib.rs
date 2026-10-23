@@ -14,7 +14,9 @@
 //! an instance takes an owned copy instead of borrowing it. Methods that some subclass overrides
 //! (or abstract ones) are called through the instance's vtable; every initializer first points
 //! the vtable at its own class (after `zod.new(...)`), so methods called during the parent's
-//! initialization run the parent's implementations.
+//! initialization run the parent's implementations. A `weak` field stores a bare reference that
+//! counts as weak: reading it (`WeakLoad`) gives an owned `Option`, `None` once the instance is
+//! destroyed, and assigning it goes through `WeakStore`.
 //!
 //! Enums, `Option` and `Result` values carry a tag (the variant's index) and the fields of their
 //! variant; `match` and `?` (in `matching`) test the tag before reading those fields.
@@ -22,11 +24,16 @@
 //! Lowering only runs on programs without errors, so an inconsistency it finds is an internal
 //! compiler error, reported as `LowerError`.
 
+mod interfaces;
 mod matching;
 mod text;
 
+pub use interfaces::{FieldAt, Itable, ItableEntry};
+
 use sagitario_ast::{BinaryOp, Block, Expr, ExprKind, FnDecl, Package, Stmt as AstStmt, TemplatePart, UnaryOp};
 use sagitario_resolve::{Builtin, ClassId, ExternId, FnId, Res, Resolution, TypeItem};
+
+use crate::interfaces::Registry;
 use sagitario_span::{SourceMap, Span};
 use sagitario_types::{BuiltinMethod, FloatTy, IntTy, Receiver, Type, TypedModule};
 
@@ -40,6 +47,21 @@ pub struct Program {
   pub source_paths: Vec<String>,
   /// The C functions of the `extern` blocks, indexed by `ExternId`.
   pub externs: Vec<ExternDecl>,
+  /// The itables of the interface values the program creates.
+  pub itables: Vec<Itable>,
+  /// The struct and enum types boxed to become interface values.
+  pub boxes: Vec<Type>,
+  /// How to get the message of an `Err` returned by `main`, when its error is not a `String`.
+  pub main_error: Option<MainError>,
+}
+
+/// The message of `main`'s error: converted to `Error` with `itable` if its type is concrete,
+/// then `message()` is the method `slot` of the itable reached through `path`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MainError {
+  pub itable: Option<usize>,
+  pub path: Vec<usize>,
+  pub slot: usize,
 }
 
 /// A C function the program calls.
@@ -65,7 +87,7 @@ impl Layouts {
   /// Whether values of `ty` hold references, so copies must be retained and released.
   pub fn is_managed(&self, ty: &Type) -> bool {
     match ty {
-      Type::String | Type::StringBuilder | Type::CString | Type::Class(_) => true,
+      Type::String | Type::StringBuilder | Type::CString | Type::Class(_) | Type::Interface(_) => true,
       Type::Array(elem, _) => self.is_managed(elem),
       Type::Struct(inner) => self.structs.get(inner.id.0 as usize).is_some_and(|layout| layout.fields.iter().any(|field| self.is_managed(field))),
       Type::Enum(_) | Type::Option(_) | Type::Result(..) => self.variants(ty).iter().flatten().flatten().any(|field| self.is_managed(field)),
@@ -104,6 +126,8 @@ pub struct ClassLayout {
   pub parent: Option<ClassId>,
   /// The types of the class's own fields, in declaration order.
   pub fields: Vec<Type>,
+  /// Which of those fields are `weak`: stored as a bare reference instead of an `Option`.
+  pub weak: Vec<bool>,
   /// The methods called through the vtable, by slot.
   pub vtable: Vec<FnId>,
 }
@@ -183,6 +207,12 @@ pub enum Stmt {
   AssignPlace {
     dest: Place,
     value: Rvalue,
+  },
+  /// Makes the `weak` field `dest` refer weakly to the instance in the `Option` `value`,
+  /// dropping its previous weak reference.
+  WeakStore {
+    dest: Place,
+    value: Operand,
   },
   /// Evaluates for side effects (a call returning `()`).
   Eval(Rvalue),
@@ -288,6 +318,20 @@ pub enum Rvalue {
   /// A new instance of a class with one reference and every field zeroed, which its
   /// initializer then assigns.
   Alloc(ClassId),
+  /// The `Option` in a `weak` field: `Some` with a new reference while the instance is alive.
+  WeakLoad(Place),
+  /// A value of a class, struct or enum as an interface value with the given itable: a new
+  /// reference to the instance, or a box holding a copy of the value.
+  ToDyn {
+    value: Operand,
+    itable: usize,
+  },
+  /// An interface value as a value of an ancestor interface, whose itable is reached through
+  /// `path`; a new reference.
+  DynUpcast {
+    value: Operand,
+    path: Vec<usize>,
+  },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -296,7 +340,7 @@ pub enum TemplatePiece {
   Value(Type, Operand),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Callee {
   Fn(FnId),
   /// The method in `slot` of the vtable of the first argument, an instance; `function` is the
@@ -304,6 +348,14 @@ pub enum Callee {
   Virtual {
     slot: usize,
     function: FnId,
+  },
+  /// The entry `slot` of the itable reached through `path` from the first argument, an
+  /// interface value, which it receives followed by arguments of types `params`.
+  Dyn {
+    path: Vec<usize>,
+    slot: usize,
+    params: Vec<Type>,
+    ret: Type,
   },
   /// A C function of an `extern` block.
   Extern(ExternId),
@@ -373,15 +425,22 @@ pub fn lower(package: &Package, resolution: &Resolution, typed: &TypedModule, so
       name: def.name.clone(),
       parent: def.parent,
       fields: def.fields.iter().map(|field| field.ty.clone()).collect(),
+      weak: def.fields.iter().map(|field| field.weak).collect(),
       vtable: def.vtable.clone(),
     })
     .collect();
   let layouts = Layouts { structs, enums, classes };
   let mut functions = Vec::new();
 
+  let mut registry = Registry::default();
+
   for (id, decl) in resolution.fn_decls(package) {
-    functions.push(lower_function(id, decl, resolution, typed, &layouts, sources)?);
+    let mut cx = Context { package, resolution, typed, layouts: &layouts, sources, registry: &mut registry };
+
+    functions.push(lower_function(id, decl, &mut cx)?);
   }
+
+  let main_error = main_error(entry, package, resolution, typed, &layouts, sources, &mut registry);
 
   let source_paths = sources.files().iter().map(|source| source.path().display().to_string()).collect();
   let mut externs = Vec::new();
@@ -392,7 +451,43 @@ pub fn lower(package: &Package, resolution: &Resolution, typed: &TypedModule, so
     externs.push(ExternDecl { symbol: decl.name.name.clone(), params: sig.params.clone(), ret: sig.ret.clone() });
   }
 
-  Ok(Program { functions, layouts, entry, source_paths, externs })
+  Ok(Program { functions, layouts, entry, source_paths, externs, itables: registry.itables, boxes: registry.boxes, main_error })
+}
+
+/// What lowering a function needs from the whole program.
+struct Context<'a> {
+  package: &'a Package,
+  resolution: &'a Resolution,
+  typed: &'a TypedModule,
+  layouts: &'a Layouts,
+  sources: &'a SourceMap,
+  registry: &'a mut Registry,
+}
+
+/// How the C `main` gets the message of an error that `main` returns, when it is not a `String`.
+fn main_error(
+  entry: FnId,
+  package: &Package,
+  resolution: &Resolution,
+  typed: &TypedModule,
+  layouts: &Layouts,
+  sources: &SourceMap,
+  registry: &mut Registry,
+) -> Option<MainError> {
+  let Some(Type::Result(_, error_ty)) = typed.sig(entry).map(|sig| sig.ret.clone()) else { return None };
+  let (error, _) = typed.error_types?;
+  let slot = typed.interface_def(error)?.methods.first().and(Some(0))?;
+
+  match error_ty.as_ref() {
+    Type::String => None,
+    Type::Interface(interface) => Some(MainError { itable: None, path: typed.interface_path(interface.id, error)?, slot }),
+    concrete => {
+      let mut cx = Context { package, resolution, typed, layouts, sources, registry };
+      let mut lowering = FnLowering::new(&mut cx, Type::Unit, Vec::new());
+
+      Some(MainError { itable: Some(lowering.itable(error, concrete)), path: Vec::new(), slot })
+    }
+  }
 }
 
 fn typed_class_name(typed: &TypedModule, owner: TypeItem) -> String {
@@ -414,29 +509,11 @@ fn first_zod_new(decl: &FnDecl, typed: &TypedModule) -> Option<sagitario_ast::No
     .then_some(first.id)
 }
 
-fn lower_function(
-  id: FnId,
-  decl: &FnDecl,
-  resolution: &Resolution,
-  typed: &TypedModule,
-  layouts: &Layouts,
-  sources: &SourceMap,
-) -> LResult<Function> {
+fn lower_function(id: FnId, decl: &FnDecl, cx: &mut Context) -> LResult<Function> {
+  let (resolution, typed) = (cx.resolution, cx.typed);
   let sig = typed.sig(id).ok_or_else(|| LowerError(format!("no signature for `{}`", decl.name.name)))?;
   let locals = typed.local_types.get(id.0 as usize).cloned().ok_or_else(|| LowerError("missing local types".to_string()))?;
-  let mut lowering = FnLowering {
-    resolution,
-    typed,
-    layouts,
-    sources,
-    ret: sig.ret.clone(),
-    locals,
-    buffers: vec![Vec::new()],
-    scopes: Vec::new(),
-    pending: Vec::new(),
-    loops: Vec::new(),
-    vtable_after: None,
-  };
+  let mut lowering = FnLowering::new(cx, sig.ret.clone(), locals);
 
   if decl.is_abstract {
     // Only reachable while the class's own initializer runs (ADR-0029).
@@ -486,6 +563,8 @@ struct LoopCx {
 }
 
 struct FnLowering<'a> {
+  package: &'a Package,
+  registry: &'a mut Registry,
   resolution: &'a Resolution,
   typed: &'a TypedModule,
   layouts: &'a Layouts,
@@ -502,6 +581,26 @@ struct FnLowering<'a> {
   loops: Vec<LoopCx>,
   /// In an initializer, the `zod.new(...)` after which the instance takes this class's vtable.
   vtable_after: Option<(sagitario_ast::NodeId, ClassId)>,
+}
+
+impl<'a> FnLowering<'a> {
+  fn new(cx: &'a mut Context, ret: Type, locals: Vec<Type>) -> FnLowering<'a> {
+    FnLowering {
+      package: cx.package,
+      registry: cx.registry,
+      resolution: cx.resolution,
+      typed: cx.typed,
+      layouts: cx.layouts,
+      sources: cx.sources,
+      ret,
+      locals,
+      buffers: vec![Vec::new()],
+      scopes: Vec::new(),
+      pending: Vec::new(),
+      loops: Vec::new(),
+      vtable_after: None,
+    }
+  }
 }
 
 /// Types without a runtime value: nothing needs to be stored.
@@ -578,6 +677,14 @@ impl FnLowering<'_> {
     }
   }
 
+  /// Like `store`, converting `value` from type `from` to the type of `dest`.
+  fn store_from(&mut self, dest: Local, value: Operand, from: &Type) {
+    let to = self.local_type(dest);
+    let value = self.convert(value, from, &to);
+
+    self.store(dest, value);
+  }
+
   /// Stores an owned copy of `value` in `dest`, which holds nothing that needs releasing.
   fn store(&mut self, dest: Local, value: Operand) {
     if self.managed(&self.local_type(dest)) {
@@ -626,10 +733,12 @@ impl FnLowering<'_> {
 
       self.after_expr(tail.id);
 
+      let tail_ty = self.type_of(tail)?;
+
       if let Some(dest) = dest
-        && !is_valueless(&self.type_of(tail)?)
+        && !is_valueless(&tail_ty)
       {
-        self.store(dest, value);
+        self.store_from(dest, value, &tail_ty);
       }
 
       self.release_pending_from(mark);
@@ -665,9 +774,10 @@ impl FnLowering<'_> {
         match &stmt.init {
           Some(init) => {
             let value = self.expr(init)?;
+            let init_ty = self.type_of(init)?;
 
-            if !is_valueless(&self.type_of(init)?) {
-              self.store(local, value);
+            if !is_valueless(&init_ty) {
+              self.store_from(local, value, &init_ty);
             }
           }
           None if managed => self.emit(Stmt::Reset(local)),
@@ -678,12 +788,37 @@ impl FnLowering<'_> {
           scope.push(local);
         }
       }
+      AstStmt::Assign { target, op, value, .. } if self.is_interface_field(target) => {
+        let ExprKind::Field { base, name } = &target.kind else { return error("interface field without a base") };
+        let Type::Interface(interface) = self.type_of(base)? else { return error("interface field of another type") };
+        let ty = self.type_of(target)?;
+        let receiver = self.expr(base)?;
+        let receiver = self.owned_copy(Type::Interface(interface.clone()), receiver);
+        let mut new_value = self.operand_as(value, &ty)?;
+
+        if let Some(op) = op {
+          let getter = self.dyn_field(interface.id, &name.name, false)?;
+          let current = self.call(getter, vec![receiver.clone()], ty.clone());
+
+          new_value = self.binary(*op, ty, current, new_value);
+        }
+
+        self.set_dyn_field(receiver, interface.id, &name.name, new_value)?;
+      }
+      AstStmt::Assign { target, value, .. } if self.is_weak_field(target) => {
+        let value = self.expr(value)?;
+        let dest = self.field_place(target)?;
+
+        self.emit(Stmt::WeakStore { dest, value });
+      }
       AstStmt::Assign { target, op, value, .. }
         if matches!(target.kind, ExprKind::Field { .. } | ExprKind::Index { .. } | ExprKind::Unary { op: UnaryOp::Deref, .. }) =>
       {
+        let value_ty = self.type_of(value)?;
         let value = self.expr(value)?;
         let place = self.place(target)?;
         let ty = place.ty.clone();
+        let value = self.convert(value, &value_ty, &ty);
         // `text += more` is `text = text + more`.
         let (op, value) = match op {
           Some(BinaryOp::Add) if ty == Type::String => (&None, self.binary(BinaryOp::Add, Type::String, Operand::Place(place.clone()), value)),
@@ -711,7 +846,7 @@ impl FnLowering<'_> {
         };
         let local = Local(id.0);
         let ty = self.local_type(local);
-        let value = self.expr(value)?;
+        let value = self.operand_as(value, &ty)?;
         let (op, value) = match op {
           Some(BinaryOp::Add) if ty == Type::String => (&None, self.binary(BinaryOp::Add, Type::String, Operand::Local(local), value)),
           _ => (op, value),
@@ -761,28 +896,24 @@ impl FnLowering<'_> {
         Some(Res::Local(id)) => Ok(Place { local: Local(id.0), projections: Vec::new(), ty }),
         other => error(format!("place of unsupported path {other:?}")),
       },
-      ExprKind::Field { base, name } => {
-        let projection = match self.type_of(base)? {
-          Type::Struct(owner) => self.typed.field_index(owner.id, &name.name).map(Projection::Field),
-          Type::Class(owner) => self.typed.class_field(owner.id, &name.name).map(|(class, index, _)| Projection::ClassField { class, index }),
-          _ => return error("field of a value that is not a struct or a class instance"),
-        };
-        let projection = projection.ok_or_else(|| LowerError(format!("unknown field `{}`", name.name)))?;
-        let mut place = self.base_place(base)?;
+      ExprKind::Field { base, name } if self.is_interface_field(expr) => {
+        let Type::Interface(interface) = self.type_of(base)? else { return error("interface field of another type") };
+        let receiver = self.expr(base)?;
+        let getter = self.dyn_field(interface.id, &name.name, false)?;
+        // The getter returns a new reference.
+        let value = self.call(getter, vec![receiver], ty.clone());
 
-        // An instance reached through another place stays alive for the statement, even if a
-        // call in it replaces that place.
-        if matches!(projection, Projection::ClassField { .. }) && !place.projections.is_empty() {
-          let base_ty = place.ty.clone();
+        self.operand_place(value, ty)
+      }
+      ExprKind::Field { .. } => {
+        let place = self.field_place(expr)?;
 
-          place = match self.owned_copy(base_ty.clone(), Operand::Place(place)) {
-            Operand::Local(local) => Place { local, projections: Vec::new(), ty: base_ty },
-            _ => return error("instance reference without a local"),
-          };
+        if self.is_weak_field(expr) {
+          // The field holds no reference: reading it takes one, if the instance is alive.
+          let value = self.new_value(ty.clone(), Rvalue::WeakLoad(place));
+
+          return self.operand_place(value, ty);
         }
-
-        place.projections.push(projection);
-        place.ty = ty;
 
         Ok(place)
       }
@@ -814,6 +945,55 @@ impl FnLowering<'_> {
         self.operand_place(value, ty)
       }
     }
+  }
+
+  /// Whether an expression is a field reached through an interface value.
+  fn is_interface_field(&self, expr: &Expr) -> bool {
+    let ExprKind::Field { base, .. } = &expr.kind else { return false };
+
+    matches!(self.typed.expr_type(base), Some(Type::Interface(_)))
+  }
+
+  /// Whether an expression is a `weak` field of a class instance.
+  fn is_weak_field(&self, expr: &Expr) -> bool {
+    let ExprKind::Field { base, name } = &expr.kind else { return false };
+
+    match self.typed.expr_type(base) {
+      Some(Type::Class(owner)) => self.typed.class_field(owner.id, &name.name).is_some_and(|(_, _, field)| field.weak),
+      _ => false,
+    }
+  }
+
+  /// The place of a field as stored, without loading a `weak` one.
+  fn field_place(&mut self, expr: &Expr) -> LResult<Place> {
+    let ty = self.type_of(expr)?;
+    let ExprKind::Field { base, name } = &expr.kind else {
+      return error("field place of an expression that is not a field");
+    };
+
+    let projection = match self.type_of(base)? {
+      Type::Struct(owner) => self.typed.field_index(owner.id, &name.name).map(Projection::Field),
+      Type::Class(owner) => self.typed.class_field(owner.id, &name.name).map(|(class, index, _)| Projection::ClassField { class, index }),
+      _ => return error("field of a value that is not a struct or a class instance"),
+    };
+    let projection = projection.ok_or_else(|| LowerError(format!("unknown field `{}`", name.name)))?;
+    let mut place = self.base_place(base)?;
+
+    // An instance reached through another place stays alive for the statement, even if a
+    // call in it replaces that place.
+    if matches!(projection, Projection::ClassField { .. }) && !place.projections.is_empty() {
+      let base_ty = place.ty.clone();
+
+      place = match self.owned_copy(base_ty.clone(), Operand::Place(place)) {
+        Operand::Local(local) => Place { local, projections: Vec::new(), ty: base_ty },
+        _ => return error("instance reference without a local"),
+      };
+    }
+
+    place.projections.push(projection);
+    place.ty = ty;
+
+    Ok(place)
   }
 
   fn base_place(&mut self, base: &Expr) -> LResult<Place> {
@@ -903,6 +1083,12 @@ impl FnLowering<'_> {
         let callee = match self.resolution.paths.get(&callee.id) {
           Some(Res::Fn(id)) => Callee::Fn(*id),
           Some(Res::Extern(id)) => Callee::Extern(*id),
+          Some(Res::Builtin(Builtin::ErrorNew)) => {
+            let [text] = args.as_slice() else { return error("`Error` without one argument") };
+            let text = self.operand_as(text, &Type::String)?;
+
+            return self.message_error(text);
+          }
           Some(Res::Builtin(Builtin::CStringNew)) => {
             let [text] = args.as_slice() else { return error("`CString::new` without one argument") };
             let text = self.operand_as(text, &Type::String)?;
@@ -922,10 +1108,11 @@ impl FnLowering<'_> {
           }
           other => return error(format!("unsupported callee {other:?}")),
         };
-        let params = match callee {
-          Callee::Fn(id) | Callee::Virtual { function: id, .. } => self.typed.sig(id).map(|sig| sig.params.clone()),
-          Callee::Extern(id) => self.typed.extern_sig(id).map(|sig| sig.params.clone()),
-          Callee::Builtin(builtin) => Some(sagitario_types::builtin_sig(builtin).params),
+        let params = match &callee {
+          Callee::Fn(id) | Callee::Virtual { function: id, .. } => self.typed.sig(*id).map(|sig| sig.params.clone()),
+          Callee::Extern(id) => self.typed.extern_sig(*id).map(|sig| sig.params.clone()),
+          Callee::Builtin(builtin) => Some(sagitario_types::builtin_sig(*builtin).params),
+          Callee::Dyn { params, .. } => Some(params.clone()),
           Callee::Runtime { .. } => None,
         }
         .unwrap_or_default();
@@ -960,12 +1147,18 @@ impl FnLowering<'_> {
         };
         let sig = self.typed.sig(function).cloned().ok_or_else(|| LowerError("method without a signature".to_string()))?;
         let by_ref = sig.receiver == Some(Receiver::Var);
-        // `zod` calls name their implementation; others go through the vtable when it varies.
-        let callee = match self.typed.slots.get(&function) {
-          Some(slot) if !self.typed.zod_calls.contains(&expr.id) => Callee::Virtual { slot: *slot, function },
+        let receiver_ty = self.type_of(receiver)?;
+        // `zod` calls name their implementation; methods of interface values go through the
+        // itable; others go through the vtable when it varies.
+        let callee = match (&receiver_ty, self.typed.slots.get(&function)) {
+          (Type::Interface(interface), _) => self.dyn_method(interface.id, function)?,
+          (_, Some(slot)) if !self.typed.zod_calls.contains(&expr.id) => Callee::Virtual { slot: *slot, function },
           _ => Callee::Fn(function),
         };
-        let mut operands = vec![if by_ref { Operand::Ref(self.base_place(receiver)?) } else { self.expr(receiver)? }];
+        let receiver_value = if by_ref { Operand::Ref(self.base_place(receiver)?) } else { self.expr(receiver)? };
+        // A default method receives the value as its interface.
+        let receiver_value = self.default_receiver(function, receiver_value, &receiver_ty);
+        let mut operands = vec![receiver_value];
 
         for (arg, param) in args.iter().zip(&sig.params) {
           let value = self.operand_as(arg, param)?;
@@ -1225,7 +1418,7 @@ impl FnLowering<'_> {
           let operand = self.expr(value)?;
 
           if let Some(result) = result.filter(|_| !is_valueless(&value_ty)) {
-            self.store(result, operand);
+            self.store_from(result, operand, &value_ty);
           }
         }
 
@@ -1247,9 +1440,10 @@ impl FnLowering<'_> {
       ExprKind::Return { value } => {
         let operand = match value {
           Some(value) if !is_valueless(&self.type_of(value)?) => {
-            let operand = self.expr(value)?;
+            let ret = self.ret.clone();
+            let operand = self.operand_as(value, &ret)?;
 
-            if self.managed(&self.type_of(value)?) {
+            if self.managed(&ret) {
               self.emit(Stmt::Retain(operand.clone()));
             }
 
@@ -1277,11 +1471,13 @@ impl FnLowering<'_> {
   fn operand_as(&mut self, expr: &Expr, ty: &Type) -> LResult<Operand> {
     let value = self.expr(expr)?;
 
-    if self.type_of(expr)? == Type::Never && !is_valueless(ty) {
+    let from = self.type_of(expr)?;
+
+    if from == Type::Never && !is_valueless(ty) {
       return Ok(Operand::Local(self.temp(ty.clone())));
     }
 
-    Ok(value)
+    Ok(self.convert(value, &from, ty))
   }
 
   /// `new C(args)`: allocates the instance and runs the initializer on it: the class's own, or

@@ -1,0 +1,30 @@
+class Person {
+  pub weak var friend: Option<Person>;
+  pub weak const boss: Option<Person>; //~ ERROR E0328
+  pub weak var name: String; //~ ERROR E0328
+  pub weak var count: Option<i32>; //~ ERROR E0328
+
+  pub fn new() {
+    self.friend = None;
+    self.boss = None;
+    self.name = "";
+    self.count = None;
+  }
+}
+
+struct Pair {
+  pub weak first: Option<Person>; //~ ERROR E0328
+}
+
+class Lazy {
+  pub weak var other: Option<Lazy>;
+
+  pub fn new() {} //~ ERROR E0325
+}
+
+pub fn main() {
+  const person = new Person();
+  person.friend = Some(person);
+  person.friend = person; //~ ERROR E0300
+  const _lazy = new Lazy();
+}

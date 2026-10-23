@@ -1,13 +1,15 @@
 //! Type checking with local inference (docs/spec/02-types.md, 06-control-flow.md). Records the
 //! type of every expression and local binding for lowering; `patterns` checks `match` (with the
 //! exhaustiveness algorithm in `exhaustive`), `classes` checks classes and which methods modify
-//! `self`, and `flow` then checks definite assignment and reachability.
+//! `self`, `inheritance` the class hierarchy, `interfaces` interfaces and their implementations,
+//! and `flow` then checks definite assignment and reachability.
 
 mod classes;
 mod exhaustive;
 mod ffi;
 mod flow;
 mod inheritance;
+mod interfaces;
 mod patterns;
 mod text;
 
@@ -20,7 +22,8 @@ use sagitario_ast::{
 };
 use sagitario_diagnostics::{Code, Diagnostic, Diagnostics, codes};
 use sagitario_resolve::{
-  Builtin, CType, ClassId, EnumId, EnumKind, ExternId, FnId, LocalId, LocalKind, Res, Resolution, StructId, TypeItem, TypeRes, VariantRef,
+  Builtin, CType, ClassId, EnumId, EnumKind, ExternId, FnId, InterfaceId, LocalId, LocalKind, Res, Resolution, StructId, TypeItem, TypeRes,
+  VariantRef,
 };
 use sagitario_span::Span;
 
@@ -113,6 +116,11 @@ pub enum Type {
   Enum(EnumRef),
   /// A reference to an instance of a class, managed by ARC.
   Class(ClassRef),
+  /// A value of any type implementing an interface: a reference with its methods
+  /// (docs/spec/05-interfaces-generics.md#interfaces-as-types).
+  Interface(InterfaceRef),
+  /// `Self` in the signature of an interface method: the implementing type.
+  SelfType,
   /// `[T; N]`
   Array(Box<Type>, u64),
   /// The prelude's `Option<T>`.
@@ -147,6 +155,13 @@ pub struct StructRef {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ClassRef {
   pub id: ClassId,
+  pub name: String,
+}
+
+/// An interface type; the name is kept for messages.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct InterfaceRef {
+  pub id: InterfaceId,
   pub name: String,
 }
 
@@ -194,6 +209,8 @@ impl fmt::Display for Type {
       Type::Struct(ty) => f.write_str(&ty.name),
       Type::Enum(ty) => f.write_str(&ty.name),
       Type::Class(ty) => f.write_str(&ty.name),
+      Type::Interface(ty) => f.write_str(&ty.name),
+      Type::SelfType => f.write_str("Self"),
       Type::Array(elem, len) => write!(f, "[{elem}; {len}]"),
       Type::Option(value) => write!(f, "Option<{value}>"),
       Type::Result(value, error) => write!(f, "Result<{value}, {error}>"),
@@ -233,6 +250,8 @@ pub fn builtin_sig(builtin: Builtin) -> FnSig {
     Builtin::Panic => FnSig { receiver: None, params: vec![Type::String], ret: Type::Never },
     Builtin::CStringNew => FnSig { receiver: None, params: vec![Type::String], ret: Type::Result(Box::new(Type::CString), Box::new(Type::String)) },
     Builtin::StringFromC => FnSig { receiver: None, params: vec![ffi::c_string_ptr()], ret: Type::String },
+    // The result is the prelude's `Error`, which the type checker knows.
+    Builtin::ErrorNew => FnSig { receiver: None, params: vec![Type::String], ret: Type::Error },
   }
 }
 
@@ -243,6 +262,8 @@ pub struct FieldDef {
   pub public: bool,
   /// Whether the field can change after construction: struct fields and `var` class fields.
   pub mutable: bool,
+  /// A `weak` class field: an `Option<C>` that does not keep its instance alive.
+  pub weak: bool,
   pub span: Span,
 }
 
@@ -265,6 +286,19 @@ pub struct ClassDef {
   pub initializer: Option<FnId>,
   /// The methods called through the vtable of instances of this class, by slot.
   pub vtable: Vec<FnId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterfaceDef {
+  pub name: String,
+  /// The interfaces after `extends`.
+  pub parents: Vec<InterfaceId>,
+  /// The fields an implementing type must have.
+  pub fields: Vec<FieldDef>,
+  /// The interface's own methods, required and default, in declaration order.
+  pub methods: Vec<FnId>,
+  /// Whether the interface or an ancestor mentions `Self`, so it cannot be a type.
+  pub uses_self: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -338,6 +372,12 @@ pub struct TypedModule {
   pub enums: Vec<EnumDef>,
   /// Indexed by `ClassId`.
   pub classes: Vec<ClassDef>,
+  /// Indexed by `InterfaceId`.
+  pub interfaces: Vec<InterfaceDef>,
+  /// The interfaces each struct, enum and class declares with `impl`.
+  pub impls: HashMap<TypeItem, Vec<InterfaceId>>,
+  /// The prelude's `Error` interface and the class `Error(message)` creates.
+  pub error_types: Option<(InterfaceId, ClassId)>,
   /// Calls to methods of `Option` and `Result`, by node id.
   pub builtin_methods: HashMap<NodeId, BuiltinMethod>,
   /// Type of each local binding, indexed by `FnId` then `LocalId`.
@@ -407,6 +447,124 @@ impl TypedModule {
     })
   }
 
+  pub fn interface_def(&self, id: InterfaceId) -> Option<&InterfaceDef> {
+    self.interfaces.get(id.0 as usize)
+  }
+
+  /// An interface followed by its ancestors, breadth first, without repetitions.
+  pub fn interface_ancestors(&self, id: InterfaceId) -> Vec<InterfaceId> {
+    let mut found = vec![id];
+    let mut next = 0;
+
+    while let Some(current) = found.get(next).copied() {
+      next += 1;
+
+      for parent in self.interface_def(current).map(|def| def.parents.clone()).unwrap_or_default() {
+        if !found.contains(&parent) {
+          found.push(parent);
+        }
+      }
+    }
+
+    found
+  }
+
+  /// The positions in `parents` leading from interface `from` to its ancestor `to`.
+  pub fn interface_path(&self, from: InterfaceId, to: InterfaceId) -> Option<Vec<usize>> {
+    let mut queue: Vec<(InterfaceId, Vec<usize>)> = vec![(from, Vec::new())];
+    let mut next = 0;
+
+    while let Some((current, path)) = queue.get(next).cloned() {
+      next += 1;
+
+      if current == to {
+        return Some(path);
+      }
+
+      if queue.len() > self.interfaces.len() * self.interfaces.len() + 1 {
+        break;
+      }
+
+      for (index, parent) in self.interface_def(current).map(|def| def.parents.clone()).unwrap_or_default().into_iter().enumerate() {
+        let mut path = path.clone();
+
+        path.push(index);
+        queue.push((parent, path));
+      }
+    }
+
+    None
+  }
+
+  /// The interfaces a struct, enum or class implements, with their ancestors (for a class, also
+  /// those of its ancestors).
+  pub fn implemented(&self, item: TypeItem) -> Vec<InterfaceId> {
+    let owners: Vec<TypeItem> = match item {
+      TypeItem::Class(id) => self.class_chain(id).into_iter().map(TypeItem::Class).collect(),
+      TypeItem::Interface(id) => return self.interface_ancestors(id),
+      other => vec![other],
+    };
+    let mut found = Vec::new();
+
+    for owner in owners {
+      for interface in self.impls.get(&owner).cloned().unwrap_or_default() {
+        for ancestor in self.interface_ancestors(interface) {
+          if !found.contains(&ancestor) {
+            found.push(ancestor);
+          }
+        }
+      }
+    }
+
+    found
+  }
+
+  /// A method of an interface or one of its ancestors: the declaring interface and the method.
+  pub fn interface_method(&self, id: InterfaceId, name: &str, resolution: &Resolution, package: &Package) -> Option<(InterfaceId, FnId)> {
+    self.interface_ancestors(id).into_iter().find_map(|interface| {
+      let methods = self.interface_def(interface)?.methods.clone();
+
+      methods
+        .into_iter()
+        .find(|method| resolution.fn_decl(package, *method).is_some_and(|decl| decl.name.name == name))
+        .map(|method| (interface, method))
+    })
+  }
+
+  /// A field of an interface or one of its ancestors: the declaring interface, its position and
+  /// the field.
+  pub fn interface_field(&self, id: InterfaceId, name: &str) -> Option<(InterfaceId, usize, &FieldDef)> {
+    self.interface_ancestors(id).into_iter().find_map(|interface| {
+      let def = self.interface_def(interface)?;
+      let index = def.fields.iter().position(|field| field.name == name)?;
+
+      Some((interface, index, def.fields.get(index)?))
+    })
+  }
+
+  /// The type item of a struct, enum, class or interface type.
+  pub fn type_item(ty: &Type) -> Option<TypeItem> {
+    match ty {
+      Type::Struct(inner) => Some(TypeItem::Struct(inner.id)),
+      Type::Enum(inner) => Some(TypeItem::Enum(inner.id)),
+      Type::Class(inner) => Some(TypeItem::Class(inner.id)),
+      Type::Interface(inner) => Some(TypeItem::Interface(inner.id)),
+      _ => None,
+    }
+  }
+
+  /// Whether a value of type `actual` can be used where `expected` is required, converting it if
+  /// needed: an instance as one of its ancestors, a value as an interface its type implements.
+  pub fn fits(&self, actual: &Type, expected: &Type) -> bool {
+    match (actual, expected) {
+      (Type::Class(actual), Type::Class(expected)) => self.is_subclass(actual.id, expected.id),
+      (actual, Type::Interface(expected)) if TypedModule::type_item(actual).is_some() => {
+        TypedModule::type_item(actual).is_some_and(|item| self.implemented(item).contains(&expected.id))
+      }
+      _ => actual.fits(expected),
+    }
+  }
+
   /// The initializer `zod.new(...)` runs for a class: the nearest ancestor's.
   pub fn inherited_initializer(&self, id: ClassId) -> Option<FnId> {
     self.class_chain(id).into_iter().skip(1).find_map(|class| self.class_def(class).and_then(|def| def.initializer))
@@ -448,6 +606,7 @@ pub fn check(package: &Package, resolution: &Resolution, diagnostics: &mut Diagn
     unsafe_blocks: Vec::new(),
     pointees: Vec::new(),
     mutates_self: vec![false; resolution.functions.len()],
+    interface_types: Vec::new(),
     self_calls: Vec::new(),
     receiver_checks: Vec::new(),
     zod_new_calls: Vec::new(),
@@ -456,6 +615,7 @@ pub fn check(package: &Package, resolution: &Resolution, diagnostics: &mut Diagn
   checker.struct_defs();
   checker.enum_defs();
   checker.class_defs();
+  checker.interface_defs();
   checker.check_recursive_types();
   checker.check_repr_c_structs();
   checker.extern_sigs();
@@ -476,6 +636,7 @@ pub fn check(package: &Package, resolution: &Resolution, diagnostics: &mut Diagn
 
   checker.check_symbols();
   checker.check_classes();
+  checker.check_interfaces();
 
   if let Some((id, main)) = decls.iter().find(|(id, _)| Some(*id) == resolution.main) {
     checker.check_main(*id, main);
@@ -497,6 +658,8 @@ pub fn check(package: &Package, resolution: &Resolution, diagnostics: &mut Diagn
 
         flow::Owner::Class { initializer: initializer.map(|def| (def.name.as_str(), def.fields.as_slice())) }
       }
+      // In a default method, `self` is a reference to the implementing value.
+      Some(TypeItem::Interface(_)) => flow::Owner::Class { initializer: None },
       _ => flow::Owner::Value,
     };
 
@@ -548,6 +711,8 @@ struct Checker<'a> {
   unsafe_blocks: Vec<bool>,
   /// Pointee types, checked once every type is known.
   pointees: Vec<(Span, Type)>,
+  /// Interfaces used as types, checked once it is known whether they mention `Self`.
+  interface_types: Vec<(Span, InterfaceId)>,
   /// Whether each struct or enum method modifies `self` directly, by `FnId`.
   mutates_self: Vec<bool>,
   /// Methods called on `self` (or a part of it) inside a method, as (caller, callee): the
@@ -565,13 +730,10 @@ impl Checker<'_> {
     self.diagnostics.push(Diagnostic::error(code, span, message));
   }
 
-  /// Whether a value of type `actual` can be used where `expected` is required; an instance of
-  /// a class can be used as one of its ancestors.
+  /// Whether a value of type `actual` can be used where `expected` is required (see
+  /// `TypedModule::fits`).
   fn fits(&self, actual: &Type, expected: &Type) -> bool {
-    match (actual, expected) {
-      (Type::Class(actual), Type::Class(expected)) => self.typed.is_subclass(actual.id, expected.id),
-      _ => actual.fits(expected),
-    }
+    self.typed.fits(actual, expected)
   }
 
   fn struct_ref(&self, id: StructId) -> Type {
@@ -585,6 +747,7 @@ impl Checker<'_> {
       TypeItem::Struct(id) => self.struct_ref(id),
       TypeItem::Enum(id) => Type::Enum(EnumRef { id, name: self.resolution.type_name(self.package, item) }),
       TypeItem::Class(id) => Type::Class(ClassRef { id, name: self.resolution.type_name(self.package, item) }),
+      TypeItem::Interface(id) => Type::Interface(InterfaceRef { id, name: self.resolution.type_name(self.package, item) }),
     }
   }
 
@@ -627,12 +790,22 @@ impl Checker<'_> {
       let fields = decl
         .fields
         .iter()
-        .map(|field| FieldDef {
-          name: field.name.name.clone(),
-          ty: self.type_expr(&field.ty),
-          public: field.visibility != Visibility::Private,
-          mutable: true,
-          span: field.span,
+        .map(|field| {
+          if field.weak {
+            self.diagnostics.push(
+              Diagnostic::error(codes::INVALID_WEAK, field.name.span, "only class fields can be `weak`")
+                .with_note("a struct is a value; keep the weak reference in a class field"),
+            );
+          }
+
+          FieldDef {
+            name: field.name.name.clone(),
+            ty: self.type_expr(&field.ty),
+            public: field.visibility != Visibility::Private,
+            mutable: true,
+            weak: false,
+            span: field.span,
+          }
         })
         .collect();
 
@@ -699,8 +872,8 @@ impl Checker<'_> {
     let parts: Vec<Type> = match item {
       TypeItem::Struct(id) => self.typed.struct_def(id).map(|def| def.fields.iter().map(|field| field.ty.clone()).collect()).unwrap_or_default(),
       TypeItem::Enum(_) => self.typed.variants(ty).unwrap_or_default().iter().flat_map(VariantDef::field_types).collect(),
-      // Classes are references, so they never contain values inline.
-      TypeItem::Class(_) => Vec::new(),
+      // Classes and interfaces are references, so they never contain values inline.
+      TypeItem::Class(_) | TypeItem::Interface(_) => Vec::new(),
     };
 
     parts.iter().any(|part| self.contains_type(part, target, visited))
@@ -726,14 +899,19 @@ impl Checker<'_> {
   /// `fn main()` or `fn main() -> Result<(), String>`, with any visibility (docs/spec/07-errors.md).
   fn check_main(&mut self, id: FnId, main: &FnDecl) {
     let ret = self.typed.sig(id).map_or(Type::Unit, |sig| sig.ret.clone());
-    let valid_ret = matches!(&ret, Type::Unit | Type::Error) || ret == Type::Result(Box::new(Type::Unit), Box::new(Type::String));
+    // The error is a `String` or implements `Error` (docs/spec/07-errors.md).
+    let valid_ret = match &ret {
+      Type::Unit | Type::Error => true,
+      Type::Result(value, error) => **value == Type::Unit && (**error == Type::String || self.implements_error(error)),
+      _ => false,
+    };
 
     if !main.params.is_empty() || !valid_ret {
       let mut diagnostic =
-        Diagnostic::error(codes::INVALID_MAIN, main.name.span, "`main` must be declared as `fn main()` or `fn main() -> Result<(), String>`");
+        Diagnostic::error(codes::INVALID_MAIN, main.name.span, "`main` must be declared as `fn main()` or `fn main() -> Result<(), E>`");
 
       if let Type::Result(..) = ret {
-        diagnostic = diagnostic.with_note("in F1 the error type of `main` must be `String`");
+        diagnostic = diagnostic.with_note("the error type of `main` must be `String` or implement `Error`");
       }
 
       self.diagnostics.push(diagnostic);
@@ -851,6 +1029,11 @@ impl Checker<'_> {
       TypeExprKind::Path(path) => {
         // The resolver reports unknown types and resolves program types and module paths.
         match self.resolution.type_paths.get(&path.id) {
+          Some(TypeRes::Item(TypeItem::Interface(id))) => {
+            self.interface_types.push((path.span, *id));
+
+            return self.type_ref(TypeItem::Interface(*id));
+          }
           Some(TypeRes::Item(item)) => return self.type_ref(*item),
           Some(TypeRes::CType(CType::Void)) if !behind_pointer => return self.bare_c_void(path.span),
           Some(TypeRes::CType(c)) => return ffi::c_type(*c),
@@ -876,6 +1059,8 @@ impl Checker<'_> {
 
         if name == "Self" {
           return match self.owner {
+            // Inside an interface, `Self` is the type implementing it.
+            Some(TypeItem::Interface(_)) => Type::SelfType,
             Some(owner) => self.type_ref(owner),
             None => {
               self.error(codes::UNRESOLVED_NAME, segment.span, "`Self` is only available inside a struct, enum or class");
@@ -1033,7 +1218,7 @@ impl Checker<'_> {
 
     // `self = value` in a class method is reported by the flow analysis.
     if self.resolution.locals(self.function).get(id.0 as usize).is_some_and(|info| info.kind == LocalKind::SelfParam)
-      && !matches!(self.owner, Some(TypeItem::Class(_)))
+      && !matches!(self.owner, Some(TypeItem::Class(_) | TypeItem::Interface(_)))
     {
       self.mark_self_modified();
     }
@@ -1577,6 +1762,11 @@ impl Checker<'_> {
     let sig = match (&callee.kind, self.resolution.paths.get(&callee.id).copied()) {
       (ExprKind::Path(_), Some(Res::Fn(id))) => self.typed.sig(id).cloned(),
       (ExprKind::Path(_), Some(Res::Extern(id))) => self.extern_call_sig(callee, id),
+      (ExprKind::Path(_), Some(Res::Builtin(Builtin::ErrorNew))) => {
+        let ret = self.typed.error_types.map_or(Type::Error, |(error, _)| self.type_ref(TypeItem::Interface(error)));
+
+        Some(FnSig { receiver: None, params: vec![Type::String], ret })
+      }
       (ExprKind::Path(_), Some(Res::Builtin(builtin))) => {
         if builtin == Builtin::StringFromC {
           self.require_unsafe(callee.span, "reading a C string");
@@ -1643,6 +1833,7 @@ impl Checker<'_> {
       Type::Struct(ty) => TypeItem::Struct(ty.id),
       Type::Enum(ty) => TypeItem::Enum(ty.id),
       Type::Class(ty) => TypeItem::Class(ty.id),
+      Type::Interface(ty) => TypeItem::Interface(ty.id),
       Type::Option(_) | Type::Result(..) => return self.builtin_method(expr, &receiver_ty, method, args),
       Type::Array(..) if name == "len" => {
         self.args(expr.span, "method", &[], args);
@@ -1670,8 +1861,11 @@ impl Checker<'_> {
     };
     let found = match owner {
       TypeItem::Class(id) => self.class_method(id, name),
+      TypeItem::Interface(id) => self.typed.interface_method(id, name, self.resolution, self.package).map(|(_, method)| method),
       _ => self.resolution.type_function(self.package, owner, name),
-    };
+    }
+    // A default method of an interface the type implements.
+    .or_else(|| self.default_method(owner, name));
     let (Some(function), Some(decl)) = (found, found.and_then(|function| self.resolution.fn_decl(self.package, function))) else {
       let mut diagnostic = Diagnostic::error(codes::UNKNOWN_MEMBER, method.span, format!("no method `{name}` on type `{receiver_ty}`"));
       let functions = self.resolution.type_functions(self.package, owner);
@@ -1712,8 +1906,9 @@ impl Checker<'_> {
           );
         }
 
-        // Whether the method modifies `self` is only known once every body is checked.
-        if !matches!(owner, TypeItem::Class(_)) {
+        // Whether the method modifies `self` is only known once every body is checked. Default
+        // methods of interfaces receive the value as a reference instead.
+        if matches!(owner, TypeItem::Struct(_) | TypeItem::Enum(_)) && !matches!(self.resolution.owner(function), Some(TypeItem::Interface(_))) {
           self.receiver_use(receiver, function, name);
         }
 
@@ -1732,6 +1927,10 @@ impl Checker<'_> {
 
     if let Type::Class(class) = &base_ty {
       return self.class_field(class.id, &base_ty, name);
+    }
+
+    if let Type::Interface(interface) = &base_ty {
+      return self.interface_field_type(interface.id, &base_ty, name);
     }
 
     let Type::Struct(owner) = &base_ty else {
@@ -2085,7 +2284,11 @@ impl Checker<'_> {
         value.as_ref().clone()
       }
       (Type::Result(value, error), Type::Result(_, expected)) => {
-        if !error.fits(expected) {
+        // Like Rust's `?` into `Box<dyn Error>`, a `String` error becomes an `Error`.
+        let into_error =
+          **error == Type::String && self.typed.error_types.is_some_and(|(id, _)| matches!(&**expected, Type::Interface(e) if e.id == id));
+
+        if !self.fits(error, expected) && !into_error {
           fails(
             self,
             format!("the error type `{error}` does not match the function's error type `{expected}`"),

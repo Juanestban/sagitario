@@ -1,0 +1,109 @@
+// `weak` fields: cycles between owners and their pets, and between tree nodes and their parents,
+// are reclaimed; a weak field reads `None` once its instance is destroyed. The harness fails the
+// test on any leak.
+// expect-stdout: Rex belongs to Ada
+// expect-stdout: Ada has Rex
+// expect-stdout: root has 3 children
+// expect-stdout: leaf 2 -> root
+// expect-stdout: owner gone: true
+// expect-stdout: replaced: Grace
+// expect-stdout: self: true
+
+class Person {
+  pub const name: String;
+  pub var pet: Option<Pet>;
+
+  pub fn new(name: String) {
+    self.name = name;
+    self.pet = None;
+  }
+
+  pub fn adopt(self, pet: Pet) {
+    self.pet = Some(pet);
+    pet.owner = Some(self);
+  }
+}
+
+class Pet {
+  pub const name: String;
+  pub weak var owner: Option<Person>;
+
+  pub fn new(name: String) {
+    self.name = name;
+    self.owner = None;
+  }
+
+  pub fn owner_name(self) -> String {
+    match self.owner {
+      Some(owner) => owner.name,
+      None => "nobody",
+    }
+  }
+}
+
+class Node {
+  pub const label: String;
+  pub weak var parent: Option<Node>;
+  pub var children: [Option<Node>; 3];
+
+  pub fn new(label: String) {
+    self.label = label;
+    self.parent = None;
+    self.children = [None, None, None];
+  }
+
+  pub fn add(self, index: usize, child: Node) {
+    child.parent = Some(self);
+    self.children[index] = Some(child);
+  }
+}
+
+// Points weakly at itself.
+class Mirror {
+  pub weak var me: Option<Mirror>;
+
+  pub fn new() {
+    self.me = None;
+  }
+}
+
+fn main() {
+  const ada = new Person("Ada");
+  const rex = new Pet("Rex");
+  ada.adopt(rex);
+  println(`${rex.name} belongs to ${rex.owner_name()}`);
+  println(`${ada.name} has ${ada.pet.unwrap().name}`);
+
+  const root = new Node("root");
+  root.add(0, new Node("leaf 0"));
+  root.add(1, new Node("leaf 1"));
+  root.add(2, new Node("leaf 2"));
+
+  var count = 0;
+  for child in root.children {
+    if child.is_some() {
+      count += 1;
+    }
+  }
+  println(`${root.label} has ${count} children`);
+
+  const leaf = root.children[2].unwrap();
+  println(`${leaf.label} -> ${leaf.parent.unwrap().label}`);
+
+  // The pet outlives its owner: the weak field becomes `None`.
+  const stray = new Pet("Stray");
+  {
+    const temporary = new Person("Temporary");
+    stray.owner = Some(temporary);
+  }
+  println(`owner gone: ${stray.owner.is_none()}`);
+
+  stray.owner = Some(new Person("Bo"));
+  const grace = new Person("Grace");
+  stray.owner = Some(grace);
+  println(`replaced: ${stray.owner_name()}`);
+
+  const mirror = new Mirror();
+  mirror.me = Some(mirror);
+  println(`self: ${mirror.me.is_some()}`);
+}

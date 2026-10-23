@@ -109,6 +109,11 @@ pub const INVALID_INHERITANCE: Code = Code("E0326");
 /// An `override` without a method to override or with another signature, a method replaced
 /// without `override`, or a malformed abstract method.
 pub const INVALID_OVERRIDE: Code = Code("E0327");
+/// `weak` on something other than a `var` class field of type `Option<C>`, with `C` a class.
+pub const INVALID_WEAK: Code = Code("E0328");
+/// An `impl` or interface that breaks the rules of interfaces: not an interface, a missing or
+/// mismatched member, a cycle of `extends`, or an interface mentioning `Self` used as a type.
+pub const INVALID_IMPL: Code = Code("E0329");
 
 /// A language feature that is specified but not implemented yet.
 pub const NOT_IMPLEMENTED: Code = Code("E0900");
@@ -178,6 +183,8 @@ pub const ALL: &[Code] = &[
   UNINITIALIZED_FIELD,
   INVALID_INHERITANCE,
   INVALID_OVERRIDE,
+  INVALID_WEAK,
+  INVALID_IMPL,
   NOT_IMPLEMENTED,
   UNUSED_BINDING,
   UNNEEDED_VAR,

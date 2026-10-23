@@ -1,0 +1,104 @@
+struct Plain {
+  pub x: i32;
+}
+
+interface Named {
+  var name: String;
+  const id: i32;
+
+  fn greet(self) -> String;
+  fn shout(self) -> String {
+    self.greet()
+  }
+}
+
+interface Loop extends Again { //~ ERROR E0329
+}
+
+interface Again extends Loop { //~ ERROR E0329
+}
+
+interface Clone {
+  fn clone(self) -> Self;
+}
+
+interface Broken {
+  fn make() -> i32; //~ ERROR E0329
+  weak var other: Option<Plain>; //~ ERROR E0328
+}
+
+interface Loud extends Named {
+  fn greet(self) -> i32; //~ ERROR E0329
+}
+
+struct Wrong impl Plain { //~ ERROR E0329
+}
+
+class Person impl Named { //~ ERROR E0329
+  pub var name: String;
+  pub const id: String; //~ ERROR E0329
+
+  pub fn new() {
+    self.name = "";
+    self.id = "";
+  }
+}
+
+class Robot impl Named {
+  pub const name: String; //~ ERROR E0329
+  prv var id: i32; //~ ERROR E0329
+
+  pub fn new() {
+    self.name = "";
+    self.id = 0;
+  }
+
+  prv fn greet(self) -> String { //~ ERROR E0329
+    "beep"
+  }
+}
+
+class Echo impl Named {
+  pub var name: String;
+  pub const id: i32;
+
+  pub fn new() {
+    self.name = "";
+    self.id = 0;
+  }
+
+  pub fn greet(self, _loud: bool) -> String { //~ ERROR E0329
+    ""
+  }
+}
+
+struct Sheep impl Clone {
+  pub wool: i32;
+
+  pub fn clone(self) -> Sheep {
+    self
+  }
+}
+
+fn take(_named: Named) {}
+
+fn copy(_value: Clone) {} //~ ERROR E0329
+
+fn parse() -> Result<i32, Error> {
+  const plain: Result<i32, Plain> = Ok(1);
+  const value = plain?; //~ ERROR E0321
+  Ok(value)
+}
+
+pub fn main() {
+  const echo = new Echo();
+  const named: Named = echo;
+  take(echo);
+  named.name = "x";
+  named.id = 2; //~ ERROR E0312
+  const _same = named == named; //~ ERROR E0310
+  const _new = new Named(); //~ ERROR E0314
+  const _error: Error = "text"; //~ ERROR E0300
+  const _sheep = Sheep { wool: 1 }.clone();
+  const _parsed = parse();
+}
