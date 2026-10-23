@@ -175,6 +175,29 @@ void sag_object_weak_set(sag_object **slot, sag_object *object);
 /* A new strong reference to `object` while it is alive, or NULL. */
 sag_object *sag_object_upgrade(sag_object *object);
 
+/* ---- Interface values (docs/spec/05-interfaces-generics.md) ------------------------------ */
+
+/* The entries of an interface for one type: thunks calling its methods, default methods and
+ * field getters and setters, and the itables of the interface's parents for the same type. */
+typedef struct sag_itable {
+  const struct sag_itable *const *parents;
+  const sag_method *methods;
+} sag_itable;
+
+/* A value of an interface type: a reference to an object (an instance, or a box holding a
+ * struct or enum) with its itable. */
+typedef struct sag_dyn {
+  sag_object *object;
+  const sag_itable *itable;
+} sag_dyn;
+
+static inline void sag_dyn_retain(sag_dyn value) {
+  sag_object_retain(value.object);
+}
+static inline void sag_dyn_release(sag_dyn value) {
+  sag_object_release(value.object);
+}
+
 /* ---- FFI (docs/spec/10-ffi.md) ----------------------------------------------------------- */
 
 /* C's `char`, the type `std::ffi::c_char` stands for. */

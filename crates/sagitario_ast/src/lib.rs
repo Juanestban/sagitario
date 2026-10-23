@@ -29,12 +29,15 @@ pub enum Visibility {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Package {
   pub modules: Vec<Module>,
+  /// Index in `modules` of the prelude written in Sagitario, whose public items every module
+  /// sees; it is not part of the module tree.
+  pub prelude: Option<usize>,
 }
 
 impl Package {
   /// A program made of one file.
   pub fn single(module: Module) -> Package {
-    Package { modules: vec![module] }
+    Package { modules: vec![module], prelude: None }
   }
 }
 
@@ -78,7 +81,20 @@ pub enum Item {
   Struct(StructDecl),
   Enum(EnumDecl),
   Class(ClassDecl),
+  Interface(InterfaceDecl),
   Extern(ExternBlock),
+}
+
+/// `interface Name extends A, B { fields and methods }` (docs/spec/05-interfaces-generics.md).
+/// Members are public; a method without body is required, one with a body is a default.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterfaceDecl {
+  pub visibility: Visibility,
+  pub name: Ident,
+  pub parents: Vec<Path>,
+  pub fields: Vec<FieldDecl>,
+  pub functions: Vec<FnDecl>,
+  pub span: Span,
 }
 
 /// `abstract class Name extends Parent { fields and functions }` (docs/spec/04-classes.md): a
@@ -90,6 +106,8 @@ pub struct ClassDecl {
   pub name: Ident,
   /// The class after `extends`.
   pub parent: Option<Path>,
+  /// The interfaces after `impl`.
+  pub impls: Vec<Path>,
   pub fields: Vec<FieldDecl>,
   pub functions: Vec<FnDecl>,
   pub span: Span,
@@ -125,6 +143,8 @@ pub struct Export {
 pub struct EnumDecl {
   pub visibility: Visibility,
   pub name: Ident,
+  /// The interfaces after `impl`.
+  pub impls: Vec<Path>,
   pub variants: Vec<VariantDecl>,
   pub functions: Vec<FnDecl>,
   pub span: Span,
@@ -161,6 +181,8 @@ pub struct StructDecl {
   pub repr_c: bool,
   pub visibility: Visibility,
   pub name: Ident,
+  /// The interfaces after `impl`.
+  pub impls: Vec<Path>,
   pub fields: Vec<FieldDecl>,
   pub functions: Vec<FnDecl>,
   pub span: Span,
@@ -185,7 +207,8 @@ pub struct FnDecl {
   pub extern_c: bool,
   pub export: Option<Export>,
   pub visibility: Visibility,
-  /// `abstract fn`: a class method without a body (the body is empty).
+  /// `abstract fn` in a class, or an interface method without a default: no body (the body is
+  /// empty).
   pub is_abstract: bool,
   /// `override fn`: replaces a method of the parent class.
   pub is_override: bool,

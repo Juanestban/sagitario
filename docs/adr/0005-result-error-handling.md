@@ -1,6 +1,6 @@
 # 0005. Errors as values with `Result` and `?`
 
-- Status: Accepted
+- Status: Accepted; refined by [ADR-0031](0031-interfaces.md)
 - Date: 2026-10-21
 
 ## Context

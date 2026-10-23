@@ -1,0 +1,75 @@
+// The `Error` interface: `Error(message)`, error types implementing `Error`, `?` converting a
+// concrete error or a `String` into `Error`, and `main` returning an `Error`, whose message is
+// printed before exiting with code 1. The harness fails the test on any leak.
+// expect-stdout: 42
+// expect-stdout: error: invalid digit found in string
+// expect-stdout: error: config: missing 'port'
+// expect-stdout: error: negative: -3
+// expect-exit: 1
+
+struct ConfigError impl Error {
+  pub key: String;
+
+  pub fn message(self) -> String {
+    `config: missing '${self.key}'`
+  }
+}
+
+class RangeError impl Error {
+  prv const value: i32;
+
+  pub fn new(value: i32) {
+    self.value = value;
+  }
+
+  pub fn message(self) -> String {
+    `negative: ${self.value}`
+  }
+}
+
+fn lookup(key: String) -> Result<String, ConfigError> {
+  if key == "answer" {
+    return Ok("42");
+  }
+
+  if key == "count" {
+    return Ok("x");
+  }
+
+  if key == "offset" {
+    return Ok("-3");
+  }
+
+  Err(ConfigError { key })
+}
+
+fn parse(key: String) -> Result<i32, Error> {
+  // A `ConfigError` and a `String` error both become `Error`.
+  const text = lookup(key)?;
+  const value = text.parse_i32()?;
+
+  if value < 0 {
+    return Err(new RangeError(value));
+  }
+
+  Ok(value)
+}
+
+fn show(result: Result<i32, Error>) {
+  match result {
+    Ok(value) => println(`${value}`),
+    Err(error) => println(`error: ${error.message()}`),
+  }
+}
+
+fn main() -> Result<(), Error> {
+  show(parse("answer"));
+  show(parse("count"));
+  show(parse("port"));
+  show(parse("offset"));
+
+  // `main` fails: `error: invalid digit found in string` goes to stderr.
+  const _ = parse("count")?;
+
+  Ok(())
+}

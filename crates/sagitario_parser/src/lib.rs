@@ -4,8 +4,8 @@
 
 use sagitario_ast::{
   ArrayLen, BinaryOp, Block, ClassDecl, EnumDecl, Export, Expr, ExprKind, ExternBlock, ExternFn, FieldDecl, FieldInit, FieldPattern, FnDecl, Ident,
-  Item, LetStmt, MatchArm, Module, NodeId, Param, Path, Pattern, PatternKind, SelfParam, Stmt, StructDecl, TemplatePart, TypeExpr, TypeExprKind,
-  UnaryOp, UseDecl, UseTree, UseTreeKind, VariantDecl, VariantFieldDecl, VariantFields, Visibility,
+  InterfaceDecl, Item, LetStmt, MatchArm, Module, NodeId, Param, Path, Pattern, PatternKind, SelfParam, Stmt, StructDecl, TemplatePart, TypeExpr,
+  TypeExprKind, UnaryOp, UseDecl, UseTree, UseTreeKind, VariantDecl, VariantFieldDecl, VariantFields, Visibility,
 };
 use sagitario_diagnostics::{Diagnostic, Diagnostics, codes};
 use sagitario_lexer::{self as lexer, Keyword, Token, TokenKind};
@@ -43,6 +43,7 @@ enum AttributeTarget {
   Struct,
   Enum,
   Class,
+  Interface,
   ExternBlock,
   Member,
 }
@@ -374,7 +375,14 @@ impl<'a> Parser<'a> {
 
         Err(self.not_implemented(span, "re-exports (`pub use`)"))
       }
-      TokenKind::Keyword(keyword @ (Keyword::Interface | Keyword::Const)) => {
+      TokenKind::Keyword(Keyword::Interface) => {
+        let decl = self.interface_decl(visibility, start)?;
+
+        self.apply_attributes(attributes, AttributeTarget::Interface, None, None);
+
+        Ok(Some(Item::Interface(decl)))
+      }
+      TokenKind::Keyword(keyword @ Keyword::Const) => {
         let span = self.span();
 
         Err(self.not_implemented(span, &format!("`{}` items", keyword.as_str())))
@@ -631,11 +639,7 @@ impl<'a> Parser<'a> {
       return Err(self.not_implemented(span, "generic structs"));
     }
 
-    if self.at(&TokenKind::Keyword(Keyword::Impl)) {
-      let span = self.span();
-
-      return Err(self.not_implemented(span, "interfaces on structs"));
-    }
+    let impls = self.impls()?;
 
     self.expect(&TokenKind::LBrace)?;
 
@@ -670,11 +674,125 @@ impl<'a> Parser<'a> {
 
     let end = self.expect(&TokenKind::RBrace)?.span;
 
-    Ok(StructDecl { repr_c: false, visibility, name, fields, functions, span: start.to(end) })
+    Ok(StructDecl { repr_c: false, visibility, name, impls, fields, functions, span: start.to(end) })
   }
 
-  /// `abstract class Name extends Parent { fields and functions }`; every field is `const` or
-  /// `var`.
+  /// `impl A, B` after a type's name (and its `extends`).
+  fn impls(&mut self) -> PResult<Vec<Path>> {
+    let mut impls = Vec::new();
+
+    if self.eat(&TokenKind::Keyword(Keyword::Impl)) {
+      loop {
+        impls.push(self.path()?);
+
+        if !self.eat(&TokenKind::Comma) {
+          break;
+        }
+      }
+    }
+
+    Ok(impls)
+  }
+
+  /// `interface Name extends A, B { members }`: fields `const`/`var` and methods, all public.
+  fn interface_decl(&mut self, visibility: Visibility, start: Span) -> PResult<InterfaceDecl> {
+    self.expect(&TokenKind::Keyword(Keyword::Interface))?;
+
+    let name = self.ident("an interface name")?;
+
+    if self.at(&TokenKind::Lt) {
+      let span = self.span();
+
+      return Err(self.not_implemented(span, "generic interfaces"));
+    }
+
+    let mut parents = Vec::new();
+
+    if self.eat(&TokenKind::Keyword(Keyword::Extends)) {
+      loop {
+        parents.push(self.path()?);
+
+        if !self.eat(&TokenKind::Comma) {
+          break;
+        }
+      }
+    }
+
+    self.expect(&TokenKind::LBrace)?;
+
+    let mut fields = Vec::new();
+    let mut functions = Vec::new();
+
+    while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
+      let before = self.pos;
+
+      match self.interface_member() {
+        Ok(Member::Field(field)) => {
+          if field.mutable.is_none() {
+            self.diagnostics.push(
+              Diagnostic::error(
+                codes::UNEXPECTED_TOKEN,
+                field.name.span,
+                format!("the interface field `{}` must be declared `const` or `var`", field.name.name),
+              )
+              .with_help("`const` fields can only be read through the interface, `var` fields also assigned"),
+            );
+          }
+
+          fields.push(field);
+        }
+        Ok(Member::Fn(function)) => functions.push(function),
+        Err(ParseError) => self.skip_member(),
+      }
+
+      if self.pos == before {
+        self.advance();
+      }
+    }
+
+    let end = self.expect(&TokenKind::RBrace)?.span;
+
+    Ok(InterfaceDecl { visibility, name, parents, fields, functions, span: start.to(end) })
+  }
+
+  /// A member of an interface: always public, so without `pub`/`prv`. A method without body is
+  /// required.
+  fn interface_member(&mut self) -> PResult<Member> {
+    let start = self.span();
+
+    if matches!(self.kind(), TokenKind::Keyword(Keyword::Pub | Keyword::Prv)) {
+      let span = self.advance().span;
+
+      self.diagnostics.push(
+        Diagnostic::error(codes::UNEXPECTED_TOKEN, span, "interface members take no visibility: they are always public")
+          .with_help("remove `pub` or `prv`"),
+      );
+    }
+
+    if !self.at(&TokenKind::Keyword(Keyword::Fn)) {
+      return self.field_member(Visibility::Public, start);
+    }
+
+    let mut required = false;
+    let mut decl = self.signature_then(Visibility::Public, start, true, |parser| {
+      if parser.at(&TokenKind::LBrace) {
+        return parser.block();
+      }
+
+      required = true;
+
+      let span = parser.expect(&TokenKind::Semi)?.span;
+
+      Ok(Block { stmts: Vec::new(), tail: None, span })
+    })?;
+
+    decl.is_abstract = required;
+
+    Ok(Member::Fn(decl))
+  }
+
+  /// `abstract class Name extends Parent impl I { fields and functions }`; every field is `const`
+  /// or `var`.
   fn class_decl(&mut self, visibility: Visibility, start: Span) -> PResult<ClassDecl> {
     let is_abstract = self.eat(&TokenKind::Keyword(Keyword::Abstract));
 
@@ -690,11 +808,7 @@ impl<'a> Parser<'a> {
 
     let parent = if self.eat(&TokenKind::Keyword(Keyword::Extends)) { Some(self.path()?) } else { None };
 
-    if self.at(&TokenKind::Keyword(Keyword::Impl)) {
-      let span = self.span();
-
-      return Err(self.not_implemented(span, "interfaces on classes"));
-    }
+    let impls = self.impls()?;
 
     self.expect(&TokenKind::LBrace)?;
 
@@ -730,7 +844,7 @@ impl<'a> Parser<'a> {
 
     let end = self.expect(&TokenKind::RBrace)?.span;
 
-    Ok(ClassDecl { is_abstract, visibility, name, parent, fields, functions, span: start.to(end) })
+    Ok(ClassDecl { is_abstract, visibility, name, parent, impls, fields, functions, span: start.to(end) })
   }
 
   fn enum_decl(&mut self, visibility: Visibility, start: Span) -> PResult<EnumDecl> {
@@ -744,11 +858,7 @@ impl<'a> Parser<'a> {
       return Err(self.not_implemented(span, "generic enums"));
     }
 
-    if self.at(&TokenKind::Keyword(Keyword::Impl)) {
-      let span = self.span();
-
-      return Err(self.not_implemented(span, "interfaces on enums"));
-    }
+    let impls = self.impls()?;
 
     self.expect(&TokenKind::LBrace)?;
 
@@ -799,7 +909,7 @@ impl<'a> Parser<'a> {
 
     let end = self.expect(&TokenKind::RBrace)?.span;
 
-    Ok(EnumDecl { visibility, name, variants, functions, span: start.to(end) })
+    Ok(EnumDecl { visibility, name, impls, variants, functions, span: start.to(end) })
   }
 
   /// `Name`, `Name(T1, T2)` or `Name { a: T1, b: T2 }`.
@@ -922,6 +1032,11 @@ impl<'a> Parser<'a> {
       return Ok(Member::Fn(decl));
     }
 
+    self.field_member(visibility, start)
+  }
+
+  /// A field `weak var name: Type;` after its visibility.
+  fn field_member(&mut self, visibility: Visibility, start: Span) -> PResult<Member> {
     // The type checker decides where `weak` is allowed.
     let weak = self.eat(&TokenKind::Keyword(Keyword::Weak));
     let mutable = match self.kind() {
@@ -2126,7 +2241,6 @@ mod tests {
     assert_eq!(parse("fn f() { async; }").1, vec!["E0101"]);
     assert_eq!(parse("enum E<T> { A }").1, vec!["E0900"]);
     assert_eq!(parse("struct P<T> {}").1, vec!["E0900"]);
-    assert_eq!(parse("struct P impl Show {}").1, vec!["E0900"]);
   }
 
   #[test]
@@ -2153,6 +2267,33 @@ mod tests {
     assert_eq!(decl.functions[0].self_param, None);
     assert!(decl.functions[1].self_param.is_some());
     assert!(decl.functions[2].self_param.is_some());
+  }
+
+  #[test]
+  fn parses_interfaces_and_impls() {
+    let (module, errors) = parse(
+      "pub interface Named extends Base, pkg::Other {
+        const name: String;
+        fn greet(self) -> String;
+        fn shout(self) -> String { self.greet() }
+      }
+      struct P impl Named, Show { pub name: String; }
+      class C extends B impl Named {}
+      enum E impl Show { A }",
+    );
+
+    assert!(errors.is_empty(), "{errors:?}");
+
+    let [Item::Interface(named), Item::Struct(point), Item::Class(class), Item::Enum(kind)] = module.items.as_slice() else {
+      panic!("unexpected items")
+    };
+
+    assert_eq!(named.parents.len(), 2);
+    assert_eq!(named.fields[0].mutable, Some(false));
+    assert!(named.functions[0].is_abstract && !named.functions[1].is_abstract);
+    assert_eq!((point.impls.len(), class.impls.len(), kind.impls.len()), (2, 1, 1));
+    assert_eq!(parse("interface I { pub fn f(self); }").1, vec!["E0100"]);
+    assert_eq!(parse("interface I { n: i32; }").1, vec!["E0100"]);
   }
 
   #[test]

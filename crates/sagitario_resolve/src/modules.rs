@@ -5,8 +5,8 @@ use std::collections::{BTreeSet, HashSet};
 
 use crate::{Imported, ItemRef, ModId, ModuleInfo, Named, Resolution, Resolver, TypeItem, TypeRes};
 use sagitario_ast::{
-  Block, ClassDecl, Expr, ExprKind, FnDecl, Ident, Item, Module, Package, Path, Pattern, PatternKind, Stmt, StructDecl, TemplatePart, TypeExpr,
-  TypeExprKind, UseTree, UseTreeKind, VariantFields, Visibility,
+  Block, ClassDecl, Expr, ExprKind, FnDecl, Ident, InterfaceDecl, Item, Module, Package, Path, Pattern, PatternKind, Stmt, StructDecl, TemplatePart,
+  TypeExpr, TypeExprKind, UseTree, UseTreeKind, VariantFields, Visibility,
 };
 use sagitario_diagnostics::{Diagnostic, Diagnostics, codes};
 
@@ -18,6 +18,17 @@ pub(crate) fn build_tree(resolution: &mut Resolution, package: &Package) -> Vec<
   let mut ids = Vec::new();
 
   for (source, module) in package.modules.iter().enumerate() {
+    // The prelude is a module of its own, outside the tree of `pkg`.
+    if package.prelude == Some(source) {
+      let node = ModId(resolution.modules.len() as u32);
+
+      resolution.modules.push(ModuleInfo { path: module.path.clone(), source: Some(source), ..ModuleInfo::default() });
+      resolution.prelude = Some(node);
+      ids.push(node);
+
+      continue;
+    }
+
     let mut node = ModId(0);
 
     for segment in &module.path {
@@ -197,8 +208,8 @@ pub(crate) fn report_private_interfaces(resolution: &Resolution, package: &Packa
 
           checks.push((&decl.name.name, fields));
 
-          if let Some(parent) = &decl.parent {
-            parents.push((&decl.name.name, parent));
+          for supertype in decl.parent.iter().chain(&decl.impls) {
+            parents.push((&decl.name.name, supertype));
           }
 
           for function in decl.functions.iter().filter(|function| function.visibility != Visibility::Private) {
@@ -215,6 +226,17 @@ pub(crate) fn report_private_interfaces(resolution: &Resolution, package: &Packa
           checks.push((&decl.name.name, fields.collect()));
 
           for function in decl.functions.iter().filter(|function| function.visibility != Visibility::Private) {
+            checks.push((&function.name.name, signature_types(function)));
+          }
+        }
+        Item::Interface(decl) if public(decl.visibility) => {
+          checks.push((&decl.name.name, decl.fields.iter().map(|field| &field.ty).collect()));
+
+          for parent in &decl.parents {
+            parents.push((&decl.name.name, parent));
+          }
+
+          for function in &decl.functions {
             checks.push((&function.name.name, signature_types(function)));
           }
         }
@@ -253,6 +275,10 @@ pub(crate) fn report_private_interfaces(resolution: &Resolution, package: &Packa
               None => continue,
             },
             TypeItem::Class(id) => match resolution.class_decl(package, *id) {
+              Some(decl) => (decl.visibility, &decl.name.name, decl.name.span),
+              None => continue,
+            },
+            TypeItem::Interface(id) => match resolution.interface_decl(package, *id) {
               Some(decl) => (decl.visibility, &decl.name.name, decl.name.span),
               None => continue,
             },
@@ -325,10 +351,14 @@ pub fn module_references(module: &Module) -> Vec<Vec<String>> {
   for item in &module.items {
     match item {
       Item::Fn(decl) => fn_paths(decl, &mut paths),
-      Item::Struct(StructDecl { fields, functions, .. }) | Item::Class(ClassDecl { fields, functions, .. }) => {
+      Item::Struct(StructDecl { fields, functions, impls, .. })
+      | Item::Class(ClassDecl { fields, functions, impls, .. })
+      | Item::Interface(InterfaceDecl { fields, functions, parents: impls, .. }) => {
         if let Item::Class(ClassDecl { parent: Some(parent), .. }) = item {
           paths.push(parent);
         }
+
+        paths.extend(impls);
 
         for field in fields {
           type_paths(&field.ty, &mut paths);
@@ -339,6 +369,8 @@ pub fn module_references(module: &Module) -> Vec<Vec<String>> {
         }
       }
       Item::Enum(decl) => {
+        paths.extend(&decl.impls);
+
         for variant in &decl.variants {
           match &variant.fields {
             VariantFields::Unit => {}

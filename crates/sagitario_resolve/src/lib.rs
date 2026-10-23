@@ -1,8 +1,9 @@
 //! Name resolution (docs/spec/09-modules.md): builds the module tree of the package, resolves
 //! `use` declarations and binds every path expression, pattern and type path to what it names.
 //! Lookup order for a single name: local bindings (innermost scope first, later shadowing
-//! earlier), the module's items and imports, then the prelude. Functions, structs, enums,
-//! classes and imports share one namespace per module; the members of a struct or class (fields
+//! earlier), the module's items and imports, then the prelude (the built-in names and the
+//! public items of the prelude module written in Sagitario). Functions, structs, enums, classes,
+//! interfaces and imports share one namespace per module; the members of a struct or class (fields
 //! and functions) or of an enum (variants and functions) share another one per type.
 
 mod modules;
@@ -10,8 +11,8 @@ mod modules;
 use std::collections::{HashMap, HashSet};
 
 use sagitario_ast::{
-  Block, ClassDecl, EnumDecl, Expr, ExprKind, ExternFn, FnDecl, Ident, Item, Module, NodeId, Package, Path, Pattern, PatternKind, Stmt, StructDecl,
-  TemplatePart, TypeExpr, TypeExprKind, VariantFields, Visibility,
+  Block, ClassDecl, EnumDecl, Expr, ExprKind, ExternFn, FnDecl, Ident, InterfaceDecl, Item, Module, NodeId, Package, Path, Pattern, PatternKind,
+  Stmt, StructDecl, TemplatePart, TypeExpr, TypeExprKind, VariantFields, Visibility,
 };
 use sagitario_diagnostics::{Diagnostic, Diagnostics, codes};
 use sagitario_span::Span;
@@ -29,6 +30,8 @@ pub enum Builtin {
   CStringNew,
   /// `std::ffi::string_from_c`, which needs `unsafe`.
   StringFromC,
+  /// `Error(message)`: a basic error with a message, of the prelude's `Error` interface.
+  ErrorNew,
 }
 
 impl Builtin {
@@ -42,6 +45,7 @@ impl Builtin {
       Builtin::Panic => "panic",
       Builtin::CStringNew => "CString::new",
       Builtin::StringFromC => "string_from_c",
+      Builtin::ErrorNew => "Error",
     }
   }
 
@@ -65,6 +69,10 @@ pub struct EnumId(pub u32);
 /// Index of a class in `Resolution::classes`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ClassId(pub u32);
+
+/// Index of an interface in `Resolution::interfaces`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct InterfaceId(pub u32);
 
 /// Index of a C function declared in an `extern` block, in `Resolution::externs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -150,6 +158,7 @@ pub enum TypeItem {
   Struct(StructId),
   Enum(EnumId),
   Class(ClassId),
+  Interface(InterfaceId),
 }
 
 /// The enum a variant belongs to: a program enum or one of the prelude's.
@@ -326,6 +335,12 @@ pub struct Resolution {
   pub enums: Vec<TypeInfo>,
   /// Indexed by `ClassId`.
   pub classes: Vec<TypeInfo>,
+  /// Indexed by `InterfaceId`.
+  pub interfaces: Vec<TypeInfo>,
+  /// The prelude module, whose public items every module sees.
+  pub prelude: Option<ModId>,
+  /// The prelude's `Error` interface.
+  pub error_interface: Option<InterfaceId>,
   /// Indexed by `ExternId`.
   pub externs: Vec<ExternInfo>,
   /// The module tree, indexed by `ModId`.
@@ -350,6 +365,7 @@ impl Resolution {
       (Item::Struct(decl), Some(member)) => decl.functions.get(member),
       (Item::Enum(decl), Some(member)) => decl.functions.get(member),
       (Item::Class(decl), Some(member)) => decl.functions.get(member),
+      (Item::Interface(decl), Some(member)) => decl.functions.get(member),
       _ => None,
     }
   }
@@ -405,12 +421,22 @@ impl Resolution {
     }
   }
 
-  /// The name of a struct, enum or class.
+  pub fn interface_decl<'p>(&self, package: &'p Package, id: InterfaceId) -> Option<&'p InterfaceDecl> {
+    let info = self.interfaces.get(id.0 as usize)?;
+
+    match package.modules.get(info.module)?.items.get(info.item)? {
+      Item::Interface(decl) => Some(decl),
+      _ => None,
+    }
+  }
+
+  /// The name of a struct, enum, class or interface.
   pub fn type_name(&self, package: &Package, item: TypeItem) -> String {
     match item {
       TypeItem::Struct(id) => self.struct_decl(package, id).map(|decl| decl.name.name.clone()),
       TypeItem::Enum(id) => self.enum_decl(package, id).map(|decl| decl.name.name.clone()),
       TypeItem::Class(id) => self.class_decl(package, id).map(|decl| decl.name.name.clone()),
+      TypeItem::Interface(id) => self.interface_decl(package, id).map(|decl| decl.name.name.clone()),
     }
     .unwrap_or_default()
   }
@@ -421,6 +447,7 @@ impl Resolution {
       TypeItem::Struct(id) => self.struct_decl(package, id).map(|decl| decl.functions.as_slice()),
       TypeItem::Enum(id) => self.enum_decl(package, id).map(|decl| decl.functions.as_slice()),
       TypeItem::Class(id) => self.class_decl(package, id).map(|decl| decl.functions.as_slice()),
+      TypeItem::Interface(id) => self.interface_decl(package, id).map(|decl| decl.functions.as_slice()),
     }
     .unwrap_or_default()
   }
@@ -431,6 +458,7 @@ impl Resolution {
       TypeItem::Struct(id) => self.structs.get(id.0 as usize),
       TypeItem::Enum(id) => self.enums.get(id.0 as usize),
       TypeItem::Class(id) => self.classes.get(id.0 as usize),
+      TypeItem::Interface(id) => self.interfaces.get(id.0 as usize),
     }?;
 
     info.functions.iter().copied().find(|function| self.fn_decl(package, *function).is_some_and(|decl| decl.name.name == name))
@@ -492,6 +520,11 @@ pub fn resolve(package: &Package, diagnostics: &mut Diagnostics) -> Resolution {
     declare_items(&mut resolution, source, module_of(&module_ids, source), module, diagnostics);
   }
 
+  resolution.error_interface = match resolution.prelude.and_then(|prelude| resolution.module(prelude)).and_then(|info| info.items.get("Error")) {
+    Some(Declared { item: ItemRef::Type(TypeItem::Interface(id)), .. }) => Some(*id),
+    _ => None,
+  };
+
   resolution.main = match resolution.module(ModId(0)).and_then(|root| root.items.get("main")) {
     Some(Declared { item: ItemRef::Fn(id), .. }) => Some(*id),
     _ => None,
@@ -544,14 +577,48 @@ pub fn resolve(package: &Package, diagnostics: &mut Diagnostics) -> Resolution {
     }
   }
 
-  // The parent of each class, named after `extends`.
-  for index in 0..resolution.classes.len() {
-    let id = ClassId(index as u32);
-    let (Some(decl), Some(info)) = (resolution.class_decl(package, id), resolution.classes.get(index)) else { continue };
-    let Some(parent) = &decl.parent else { continue };
-    let mut resolver = Resolver::new(package, &resolution, module_of(&module_ids, info.module), Some(TypeItem::Class(id)), diagnostics);
+  for index in 0..resolution.interfaces.len() {
+    let id = InterfaceId(index as u32);
 
-    resolver.type_path(parent);
+    if let (Some(decl), Some(info)) = (resolution.interface_decl(package, id), resolution.interfaces.get(index)) {
+      declarations.push((TypeItem::Interface(id), info.module, decl.fields.iter().map(|field| &field.ty).collect()));
+    }
+  }
+
+  // The parent class of each class (`extends`), the interfaces each type implements (`impl`)
+  // and the parents of each interface.
+  let mut supertypes: Vec<(TypeItem, usize, Vec<&Path>)> = Vec::new();
+
+  for (index, info) in resolution.classes.iter().enumerate() {
+    if let Some(decl) = resolution.class_decl(package, ClassId(index as u32)) {
+      supertypes.push((TypeItem::Class(ClassId(index as u32)), info.module, decl.parent.iter().chain(&decl.impls).collect()));
+    }
+  }
+
+  for (index, info) in resolution.structs.iter().enumerate() {
+    if let Some(decl) = resolution.struct_decl(package, StructId(index as u32)) {
+      supertypes.push((TypeItem::Struct(StructId(index as u32)), info.module, decl.impls.iter().collect()));
+    }
+  }
+
+  for (index, info) in resolution.enums.iter().enumerate() {
+    if let Some(decl) = resolution.enum_decl(package, EnumId(index as u32)) {
+      supertypes.push((TypeItem::Enum(EnumId(index as u32)), info.module, decl.impls.iter().collect()));
+    }
+  }
+
+  for (index, info) in resolution.interfaces.iter().enumerate() {
+    if let Some(decl) = resolution.interface_decl(package, InterfaceId(index as u32)) {
+      supertypes.push((TypeItem::Interface(InterfaceId(index as u32)), info.module, decl.parents.iter().collect()));
+    }
+  }
+
+  for (owner, source, paths) in supertypes {
+    let mut resolver = Resolver::new(package, &resolution, module_of(&module_ids, source), Some(owner), diagnostics);
+
+    for path in paths {
+      resolver.type_path(path);
+    }
 
     let output = resolver.finish();
 
@@ -681,6 +748,18 @@ fn declare_items(resolution: &mut Resolution, source: usize, node: ModId, module
         let names = decl.fields.iter().map(|field| &field.name).chain(decl.functions.iter().map(|function| &function.name));
 
         check_members(&decl.name.name, "fields and functions of a class share one namespace", names, diagnostics);
+
+        vec![(&decl.name, ItemRef::Type(owner), decl.visibility)]
+      }
+      Item::Interface(decl) => {
+        let owner = TypeItem::Interface(InterfaceId(resolution.interfaces.len() as u32));
+        let functions = register_functions(resolution, source, index, decl.functions.len(), owner);
+
+        resolution.interfaces.push(TypeInfo { module: source, item: index, functions });
+
+        let names = decl.fields.iter().map(|field| &field.name).chain(decl.functions.iter().map(|function| &function.name));
+
+        check_members(&decl.name.name, "fields and methods of an interface share one namespace", names, diagnostics);
 
         vec![(&decl.name, ItemRef::Type(owner), decl.visibility)]
       }
@@ -852,7 +931,8 @@ impl<'a> Resolver<'a> {
     self.scopes.iter().rev().find_map(|scope| scope.iter().rev().find(|(local, _)| local == name).map(|(_, id)| *id))
   }
 
-  /// A module-level name of the current module: one of its items or imports.
+  /// A module-level name of the current module: one of its items or imports, or else a public
+  /// item of the prelude module.
   fn lookup_item(&mut self, name: &str) -> Option<ItemRef> {
     let info = self.resolution.module(self.module)?;
 
@@ -860,11 +940,15 @@ impl<'a> Resolver<'a> {
       return Some(declared.item);
     }
 
-    let imported = info.imports.get(name)?.item;
+    if let Some(imported) = info.imports.get(name).map(|imported| imported.item) {
+      self.used.insert((self.module, name.to_string()));
 
-    self.used.insert((self.module, name.to_string()));
+      return Some(imported);
+    }
 
-    Some(imported)
+    let prelude = self.resolution.prelude.and_then(|prelude| self.resolution.module(prelude))?;
+
+    prelude.items.get(name).filter(|declared| declared.visibility == Visibility::Public).map(|declared| declared.item)
   }
 
   /// Names of the current module's items and imports, for "similar name" suggestions.
@@ -1270,6 +1354,8 @@ impl<'a> Resolver<'a> {
         .with_help(format!("name one of its variants: `{name}::Variant`")),
       TypeItem::Class(_) => Diagnostic::error(codes::UNRESOLVED_NAME, span, format!("`{name}` is a class, not a value"))
         .with_help(format!("create an instance with `new {name}(...)`")),
+      TypeItem::Interface(_) => Diagnostic::error(codes::UNRESOLVED_NAME, span, format!("`{name}` is an interface, not a value"))
+        .with_help(format!("create a value of a type that implements `{name}`")),
     };
 
     self.diagnostics.push(diagnostic);
@@ -1312,6 +1398,8 @@ impl<'a> Resolver<'a> {
 
         return None;
       }
+      // `Error(message)` builds the prelude's basic error.
+      Some(ItemRef::Type(TypeItem::Interface(id))) if Some(id) == self.resolution.error_interface => return Some(Res::Builtin(Builtin::ErrorNew)),
       Some(ItemRef::Type(item)) => {
         self.not_a_value(name, span, item);
 
@@ -1537,7 +1625,7 @@ impl<'a> Resolver<'a> {
       let functions = self.resolution.type_functions(self.package, item);
       let mut candidates: Vec<String> = functions.iter().map(|function| function.name.name.clone()).collect();
       let what = match item {
-        TypeItem::Struct(_) | TypeItem::Class(_) => "function",
+        TypeItem::Struct(_) | TypeItem::Class(_) | TypeItem::Interface(_) => "function",
         TypeItem::Enum(id) => {
           let variants = self.resolution.enum_decl(self.package, id).map(|decl| &decl.variants);
 

@@ -21,8 +21,11 @@ fn parse_age(s: String) -> Result<i32, String> {
 - On `Option`: if the value is `None`, the function returns `None`; otherwise it evaluates
   to the `Some` value.
 - `?` is only valid inside a function whose return type is compatible.
-- The error type must match the function's `E` **exactly**; there is no automatic
-  conversion. Convert explicitly, and the diagnostic must suggest it (in F1, with a `match`;
+- The error type must match the function's `E`, with two conversions (F2), as in Rust's `?`
+  into `Box<dyn Error>`: an error whose type implements an interface `E` becomes an `E`, and a
+  `String` error becomes an `Error` when `E` is `Error`
+  (`fn parse(s: String) -> Result<i32, Error> { const n = s.parse_i32()?; Ok(n) }`).
+- Any other conversion is explicit, and the diagnostic must suggest it (in F1, with a `match`;
   from F2, with `map_err`):
 
 ```sag
@@ -61,9 +64,8 @@ fn main() -> Result<(), E> { ... }   // optional
 is also valid. A function called `main` in another module is an ordinary function. Declaring
 a return type on `main` is optional. When it returns `Result<(), E>`:
 
-- **F1:** `E` must be `String` (parsing also reports errors as `String`s in F1).
-- **F2:** `E` may be any type implementing `Error`; the error is printed with `message()`.
-  F1 programs keep compiling unchanged.
+- `E` is `String`, printed as is, or any type implementing `Error` (F2), printed with
+  `message()`. F1 programs keep compiling unchanged.
 
 | Outcome | Exit code |
 |---|---|

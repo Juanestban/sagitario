@@ -17,6 +17,8 @@ enum PlaceBase<'e> {
   Local(LocalId),
   /// A field of a class instance: it can be modified through any reference if it is `var`.
   ClassField { class: ClassId, name: &'e Ident, base: &'e Expr },
+  /// A field reached through an interface value: it can be modified if the interface says `var`.
+  InterfaceField { interface: sagitario_resolve::InterfaceId, name: &'e Ident },
   /// A value that is not stored anywhere.
   Temporary,
   /// A name that is not a binding: already reported.
@@ -254,6 +256,7 @@ impl Checker<'_> {
       ExprKind::Path(_) => self.local(expr).map_or(PlaceBase::Unknown, PlaceBase::Local),
       ExprKind::Field { base, name } => match self.typed.expr_types.get(&base.id) {
         Some(Type::Class(class)) => PlaceBase::ClassField { class: class.id, name, base },
+        Some(Type::Interface(interface)) => PlaceBase::InterfaceField { interface: interface.id, name },
         _ => self.place_base(base),
       },
       ExprKind::Index { base, .. } => self.place_base(base),
@@ -282,6 +285,20 @@ impl Checker<'_> {
         };
 
         PlaceAccess::Immutable(Diagnostic::error(code, place.span, message).with_help("store the value in a `var` binding first"))
+      }
+      PlaceBase::InterfaceField { interface, name } => {
+        let Some((owner, _, field)) = self.typed.interface_field(interface, &name.name) else { return PlaceAccess::Mutable };
+
+        if field.mutable {
+          return PlaceAccess::Mutable;
+        }
+
+        let owner = self.typed.interface_def(owner).map_or("", |def| def.name.as_str());
+
+        PlaceAccess::Immutable(
+          Diagnostic::error(code, place.span, format!("cannot modify the field `{}`: it is a `const` field of the interface `{owner}`", name.name))
+            .with_label(field.span, "declared `const` here"),
+        )
       }
       PlaceBase::ClassField { class, name, base } => {
         let Some((declaring, _, field)) = self.typed.class_field(class, &name.name) else { return PlaceAccess::Mutable };
@@ -316,7 +333,7 @@ impl Checker<'_> {
         let (reason, label, help) = match info.kind {
           LocalKind::Var => return PlaceAccess::Mutable,
           // A class's `self` is a reference: its fields are checked as `ClassField`s.
-          LocalKind::SelfParam if matches!(self.owner, Some(TypeItem::Class(_))) => return PlaceAccess::Mutable,
+          LocalKind::SelfParam if matches!(self.owner, Some(TypeItem::Class(_) | TypeItem::Interface(_))) => return PlaceAccess::Mutable,
           LocalKind::SelfParam => return PlaceAccess::OfSelf,
           LocalKind::Const => ("it is not declared with `var`", "declared with `const` here", format!("declare `{name}` with `var` to modify it")),
           LocalKind::Param => ("parameters are immutable", "parameter declared here", copy),

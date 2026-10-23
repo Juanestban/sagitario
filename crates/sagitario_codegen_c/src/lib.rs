@@ -17,11 +17,17 @@
 //! zeroed instance, `sag_drop_cN` releases the class's fields and then its parent's, and
 //! `sag_vtable_cN` lists the methods called through the vtable. A `weak` field is a bare
 //! `sag_object *` (NULL for `None`) holding a weak reference.
+//!
+//! An interface value is a `sag_dyn`: an object (an instance, or a box `sag_bN` holding a copy
+//! of a struct or enum) and an itable `sag_it_K` with the interface's entries for that type:
+//! thunks `sag_th_K_J` calling the type's methods, default methods, and field getters and setters.
+//! `sag_todyn_K` turns a value into an interface value.
 
 use sagitario_ast::{BinaryOp, UnaryOp};
 use sagitario_resolve::{Builtin, ClassId, EnumId, FnId, StructId};
 use sagitario_sir::{
-  Callee, Const, ExternDecl, Function, Layouts, Local, Operand, PanicMessage, Place, Program, Projection, Rvalue, Stmt, TemplatePiece,
+  Callee, Const, ExternDecl, FieldAt, Function, ItableEntry, Layouts, Local, Operand, PanicMessage, Place, Program, Projection, Rvalue, Stmt,
+  TemplatePiece,
 };
 use sagitario_types::{ClassRef, EnumRef, FloatTy, IntTy, StructRef, Type};
 
@@ -71,6 +77,7 @@ pub fn generate(program: &Program) -> GeneratedC {
 
   generator.out.push('\n');
   generator.class_support(&order);
+  generator.interface_support(program);
 
   for (index, function) in program.functions.iter().enumerate() {
     generator.function(FnId(index as u32), function);
@@ -142,6 +149,15 @@ impl<'a> Generator<'a> {
     for function in &program.functions {
       for ty in function.locals.iter().chain([&function.ret]) {
         self.visit_type(ty, &mut done, &mut order);
+      }
+    }
+
+    // Fields read through interfaces, which may be no function's local.
+    for itable in &program.itables {
+      for entry in &itable.entries {
+        if let ItableEntry::Field { ty, .. } = entry {
+          self.visit_type(ty, &mut done, &mut order);
+        }
       }
     }
 
@@ -312,6 +328,140 @@ impl<'a> Generator<'a> {
     self.out.push('\n');
   }
 
+  /// The boxes of struct and enum values held by interface values, then the itables with their
+  /// thunks, then the functions converting values to interface values.
+  fn interface_support(&mut self, program: &Program) {
+    for (index, ty) in program.boxes.iter().enumerate() {
+      let release = if self.layouts.is_managed(ty) { format!("  {};\n", self.arc_call("release", ty, "box->value")) } else { String::new() };
+
+      self.out.push_str(&format!("typedef struct sag_b{index} {{ sag_object header; {} value; }} sag_b{index};\n", self.c_type(ty)));
+      self.out.push_str(&format!("static void sag_drop_b{index}(sag_object *object) {{\n"));
+
+      if release.is_empty() {
+        self.out.push_str("  (void)object;\n");
+      } else {
+        self.out.push_str(&format!("  sag_b{index} *box = (sag_b{index} *)object;\n{release}"));
+      }
+
+      self.out.push_str("}\n");
+    }
+
+    for index in 0..program.itables.len() {
+      self.out.push_str(&format!("static const sag_itable sag_it_{index};\n"));
+    }
+
+    for (index, itable) in program.itables.iter().enumerate() {
+      let boxed = program.boxes.iter().position(|ty| *ty == itable.concrete);
+      let mut methods = Vec::new();
+
+      for (slot, entry) in itable.entries.iter().enumerate() {
+        match entry {
+          ItableEntry::Default(function) => methods.push(format!("(sag_method){}", fn_name(*function))),
+          _ => {
+            self.thunk(program, index, slot, entry, boxed);
+            methods.push(format!("(sag_method)sag_th_{index}_{slot}"));
+          }
+        }
+      }
+
+      let parents: Vec<String> = itable.parents.iter().map(|parent| format!("&sag_it_{parent}")).collect();
+      let methods_name = if methods.is_empty() {
+        "NULL".to_string()
+      } else {
+        self.out.push_str(&format!("static const sag_method sag_itm_{index}[] = {{ {} }};\n", methods.join(", ")));
+        format!("sag_itm_{index}")
+      };
+      let parents_name = if parents.is_empty() {
+        "NULL".to_string()
+      } else {
+        self.out.push_str(&format!("static const sag_itable *const sag_itp_{index}[] = {{ {} }};\n", parents.join(", ")));
+        format!("sag_itp_{index}")
+      };
+
+      self.out.push_str(&format!("static const sag_itable sag_it_{index} = {{ {parents_name}, {methods_name} }};\n"));
+
+      let value_ty = self.c_type(&itable.concrete);
+
+      match boxed {
+        Some(box_index) => {
+          let retain = if self.layouts.is_managed(&itable.concrete) {
+            format!("  {};\n", self.arc_call("retain", &itable.concrete, "box->value"))
+          } else {
+            String::new()
+          };
+
+          self.out.push_str(&format!("static sag_dyn sag_todyn_{index}({value_ty} value) {{\n"));
+          self.out.push_str(&format!("  sag_b{box_index} *box = sag_object_alloc(sizeof(sag_b{box_index}));\n  box->value = value;\n{retain}"));
+          self.out.push_str(&format!("  sag_object_init((sag_object *)box, sag_drop_b{box_index}, NULL);\n"));
+          self.out.push_str(&format!("  return (sag_dyn){{(sag_object *)box, &sag_it_{index}}};\n}}\n"));
+        }
+        None => {
+          self.out.push_str(&format!("static sag_dyn sag_todyn_{index}(sag_object *value) {{\n"));
+          self.out.push_str(&format!("  sag_object_retain(value);\n  return (sag_dyn){{value, &sag_it_{index}}};\n}}\n"));
+        }
+      }
+    }
+
+    self.out.push('\n');
+  }
+
+  /// The function at `slot` of itable `index`: calls the type's method, or reads or writes one
+  /// of its fields.
+  fn thunk(&mut self, program: &Program, index: usize, slot: usize, entry: &ItableEntry, boxed: Option<usize>) {
+    let name = format!("sag_th_{index}_{slot}");
+    let object = match boxed {
+      Some(box_index) => format!("((sag_b{box_index} *)self.object)->value"),
+      None => "self.object".to_string(),
+    };
+
+    match entry {
+      ItableEntry::Method { signature, function, slot: vtable_slot } => {
+        let Some(signature) = program.functions.get(signature.0 as usize) else { return };
+        let target = program.functions.get(function.0 as usize);
+        let params: Vec<Type> = signature.locals.iter().take(signature.param_count).skip(1).cloned().collect();
+        let declared: Vec<String> = std::iter::once("sag_dyn self".to_string())
+          .chain(params.iter().enumerate().map(|(arg, ty)| format!("{} a{arg}", self.c_type(ty))))
+          .collect();
+        let receiver = if target.is_some_and(|target| target.self_by_ref) { format!("&{object}") } else { object };
+        let args: Vec<String> = std::iter::once(receiver).chain((0..params.len()).map(|arg| format!("a{arg}"))).collect();
+        let callee = match vtable_slot {
+          Some(vtable_slot) => format!("(({})(self.object->vtable[{vtable_slot}]))", self.method_pointer(*function)),
+          None => fn_name(*function),
+        };
+        let call = format!("{callee}({})", args.join(", "));
+        let ret = self.return_type(&signature.ret);
+        let body = if ret == "void" { format!("{call};") } else { format!("return {call};") };
+
+        self.out.push_str(&format!("static {ret} {name}({}) {{ {body} }}\n", declared.join(", ")));
+      }
+      ItableEntry::Field { field, ty, set } => {
+        let place = match field {
+          FieldAt::Class { class, index } => format!("((sag_c{} *)self.object)->f{index}", class.0),
+          FieldAt::Struct(index) => format!("{object}.f{index}"),
+        };
+        let c_type = self.c_type(ty);
+        let managed = self.layouts.is_managed(ty);
+
+        if *set {
+          let mut body = Vec::new();
+
+          if managed {
+            body.push(format!("{};", self.arc_call("retain", ty, "value")));
+            body.push(format!("{};", self.arc_call("release", ty, &place)));
+          }
+
+          body.push(format!("{place} = value;"));
+          self.out.push_str(&format!("static void {name}(sag_dyn self, {c_type} value) {{ {} }}\n", body.join(" ")));
+        } else {
+          let retain = if managed { format!(" {};", self.arc_call("retain", ty, "value")) } else { String::new() };
+
+          self.out.push_str(&format!("static {c_type} {name}(sag_dyn self) {{ {c_type} value = {place};{retain} return value; }}\n"));
+        }
+      }
+      ItableEntry::Default(_) => {}
+    }
+  }
+
   /// The vtable of a class as a C expression: `sag_vtable_cN`, or `NULL` when it is empty.
   fn vtable(&self, class: ClassId) -> String {
     match self.layouts.class(class) {
@@ -478,6 +628,7 @@ impl<'a> Generator<'a> {
       Type::StringBuilder => format!("sag_builder_{action}({value})"),
       Type::CString => format!("sag_cstring_{action}({value})"),
       Type::Class(_) => format!("sag_object_{action}({value})"),
+      Type::Interface(_) => format!("sag_dyn_{action}({value})"),
       _ => format!("sag_{action}_{}(&{value})", self.c_type(ty).trim_start_matches("sag_")),
     }
   }
@@ -498,6 +649,9 @@ impl<'a> Generator<'a> {
       Type::Float(FloatTy::F64) => "double".to_string(),
       Type::String => "sag_string".to_string(),
       Type::StringBuilder => "sag_builder".to_string(),
+      Type::Interface(_) => "sag_dyn".to_string(),
+      // Only in interface signatures, which are never generated with it.
+      Type::SelfType => "uint8_t".to_string(),
       Type::Struct(inner) => format!("sag_s{}", inner.id.0),
       Type::Enum(inner) => format!("sag_e{}", inner.id.0),
       Type::Class(_) => "sag_object *".to_string(),
@@ -521,8 +675,35 @@ impl<'a> Generator<'a> {
 
       self.out.push_str(&format!("  {ty} result = {entry}();\n"));
       self.out.push_str("  if (result.tag == 1) {\n");
-      self.out.push_str("    sag_report_main_error(result.u.v1.f0);\n");
-      self.out.push_str("    sag_string_release(result.u.v1.f0);\n");
+
+      match (&program.main_error, &function.ret) {
+        (Some(main_error), Type::Result(_, error_ty)) => {
+          // The message of an `Error`: its `message()`.
+          let error = match main_error.itable {
+            Some(itable) => format!("sag_todyn_{itable}(result.u.v1.f0)"),
+            None => "result.u.v1.f0".to_string(),
+          };
+          let method = itable_path("error.itable", &main_error.path);
+
+          self.out.push_str(&format!("    sag_dyn error = {error};\n"));
+          self.out.push_str(&format!("    sag_string message = ((sag_string (*)(sag_dyn))({method}->methods[{}]))(error);\n", main_error.slot));
+          self.out.push_str("    sag_report_main_error(message);\n");
+          self.out.push_str("    sag_string_release(message);\n");
+
+          if main_error.itable.is_some() {
+            self.out.push_str("    sag_dyn_release(error);\n");
+          }
+
+          let release = self.arc_call("release", error_ty, "result.u.v1.f0");
+
+          self.out.push_str(&format!("    {release};\n"));
+        }
+        _ => {
+          self.out.push_str("    sag_report_main_error(result.u.v1.f0);\n");
+          self.out.push_str("    sag_string_release(result.u.v1.f0);\n");
+        }
+      }
+
       self.out.push_str("    int code = sag_rt_finish();\n");
       self.out.push_str("    return code != 0 ? code : 1;\n");
       self.out.push_str("  }\n");
@@ -690,7 +871,11 @@ impl<'a> Generator<'a> {
 
     for (index, ty) in function.locals.iter().enumerate().skip(function.param_count) {
       let init =
-        if matches!(ty, Type::String | Type::Struct(_) | Type::Enum(_) | Type::Array(..) | Type::Option(_) | Type::Result(..)) { "{0}" } else { "0" };
+        if matches!(ty, Type::String | Type::Interface(_) | Type::Struct(_) | Type::Enum(_) | Type::Array(..) | Type::Option(_) | Type::Result(..)) {
+          "{0}"
+        } else {
+          "0"
+        };
 
       self.line(&format!("{} {} = {init};", self.c_type(ty), local_name(Local(index as u32))));
     }
@@ -901,6 +1086,13 @@ impl<'a> Generator<'a> {
   fn assign(&mut self, dest: &str, ty: &Type, value: &Rvalue) {
     match value {
       Rvalue::Template(pieces) => self.template(dest, pieces),
+      Rvalue::DynUpcast { value, path } => {
+        let value = self.operand(value);
+        let itable = itable_path(&format!("{value}.itable"), path);
+
+        self.line(&format!("{dest} = (sag_dyn){{{value}.object, {itable}}};"));
+        self.line(&format!("sag_object_retain({dest}.object);"));
+      }
       Rvalue::WeakLoad(source) => {
         let (source, c_type) = (self.place(source), self.c_type(ty));
 
@@ -953,6 +1145,14 @@ impl<'a> Generator<'a> {
         (Type::Ptr { .. }, Type::Int(int)) => format!("(({})(uintptr_t){})", int_c_type(*int), self.operand(value)),
         _ => cast(from, to, &self.operand(value)),
       },
+      Rvalue::Call { callee: Callee::Dyn { path, slot, params, ret }, args } => {
+        let args: Vec<String> = args.iter().map(|arg| self.operand(arg)).collect();
+        let receiver = args.first().cloned().unwrap_or_default();
+        let itable = itable_path(&format!("{receiver}.itable"), path);
+        let params: Vec<String> = std::iter::once("sag_dyn".to_string()).chain(params.iter().map(|param| self.c_type(param))).collect();
+
+        format!("(({} (*)({}))({itable}->methods[{slot}]))({})", self.return_type(ret), params.join(", "), args.join(", "))
+      }
       Rvalue::Call { callee: Callee::Virtual { slot, function }, args } => {
         let args: Vec<String> = args.iter().map(|arg| self.operand(arg)).collect();
         let receiver = args.first().cloned().unwrap_or_default();
@@ -968,7 +1168,7 @@ impl<'a> Generator<'a> {
           args.push("__LINE__".to_string());
         }
 
-        format!("{}({})", callee_name(*callee), args.join(", "))
+        format!("{}({})", callee_name(callee), args.join(", "))
       }
       Rvalue::Aggregate(parts) => {
         let parts: Vec<String> = parts.iter().map(|part| self.operand(part)).collect();
@@ -989,8 +1189,10 @@ impl<'a> Generator<'a> {
         }
       }
       Rvalue::Alloc(class) => format!("sag_new_c{}()", class.0),
-      // Templates, repeats and weak loads are emitted as statements by `Generator::assign`.
-      Rvalue::Template(_) | Rvalue::Repeat(_) | Rvalue::WeakLoad(_) => "0".to_string(),
+      Rvalue::ToDyn { value, itable } => format!("sag_todyn_{itable}({})", self.operand(value)),
+      // Templates, repeats, weak loads and conversions between interfaces are emitted as
+      // statements by `Generator::assign`.
+      Rvalue::Template(_) | Rvalue::Repeat(_) | Rvalue::WeakLoad(_) | Rvalue::DynUpcast { .. } => "0".to_string(),
     }
   }
 
@@ -1022,6 +1224,8 @@ impl<'a> Generator<'a> {
             | Type::Struct(_)
             | Type::Enum(_)
             | Type::Class(_)
+            | Type::Interface(_)
+            | Type::SelfType
             | Type::Array(..)
             | Type::Option(_)
             | Type::Result(..)
@@ -1121,9 +1325,16 @@ fn cast(from: &Type, to: &Type, value: &str) -> String {
   }
 }
 
-fn callee_name(callee: Callee) -> String {
-  match callee {
+/// The itable reached from `itable` through the parents at `path`.
+fn itable_path(itable: &str, path: &[usize]) -> String {
+  path.iter().fold(itable.to_string(), |current, parent| format!("{current}->parents[{parent}]"))
+}
+
+fn callee_name(callee: &Callee) -> String {
+  match *callee {
     Callee::Fn(id) | Callee::Virtual { function: id, .. } => fn_name(id),
+    // Calls through itables are generated by `Generator::rvalue`.
+    Callee::Dyn { .. } => String::new(),
     Callee::Extern(id) => ffi_name(id.0 as usize),
     Callee::Builtin(Builtin::Print) => "sag_print".to_string(),
     Callee::Builtin(Builtin::Println) => "sag_println".to_string(),
@@ -1132,6 +1343,8 @@ fn callee_name(callee: Callee) -> String {
     Callee::Builtin(Builtin::StringFromC) => "sag_string_from_c_at".to_string(),
     // Lowered to a call of `sag_cstring_new` with its outputs.
     Callee::Builtin(Builtin::CStringNew) => "sag_cstring_new".to_string(),
+    // Lowered to a `MessageError` converted to `Error`.
+    Callee::Builtin(Builtin::ErrorNew) => String::new(),
     Callee::Runtime { function, .. } => function.to_string(),
   }
 }

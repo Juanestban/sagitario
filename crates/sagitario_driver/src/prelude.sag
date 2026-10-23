@@ -1,0 +1,21 @@
+//! The prelude written in Sagitario (docs/spec/09-modules.md#prelude): its public items are
+//! visible in every module. The rest of the prelude (`println`, `Option`, `String`, ...) is
+//! built into the compiler.
+
+/// The interface of error values (docs/spec/05-interfaces-generics.md#the-error-interface-f2).
+pub interface Error {
+  fn message(self) -> String;
+}
+
+/// The error `Error(message)` creates.
+class MessageError impl Error {
+  prv const text: String;
+
+  pub fn new(text: String) {
+    self.text = text;
+  }
+
+  pub fn message(self) -> String {
+    self.text
+  }
+}
