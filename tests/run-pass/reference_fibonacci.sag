@@ -1,0 +1,31 @@
+// F1 reference program: Fibonacci, recursive and iterative.
+// expect-stdout: 0 1 1 2 3 5 8 13 21 34
+// expect-stdout: fib(20) = 6765
+// expect-stdout: fib(90) = 2880067194370816120
+fn fib_recursive(n: u32) -> u32 {
+  if n < 2 { n } else { fib_recursive(n - 1) + fib_recursive(n - 2) }
+}
+
+fn fib(n: u32) -> u64 {
+  var a: u64 = 0;
+  var b: u64 = 1;
+  for _ in 0..n {
+    const next = a + b;
+    a = b;
+    b = next;
+  }
+  a
+}
+
+fn main() {
+  const first = new StringBuilder();
+  for i in 0u32..10 {
+    if i > 0 {
+      first.append(" ");
+    }
+    first.append(`${fib_recursive(i)}`);
+  }
+  println(first.to_string());
+  println(`fib(20) = ${fib_recursive(20)}`);
+  println(`fib(90) = ${fib(90)}`);
+}

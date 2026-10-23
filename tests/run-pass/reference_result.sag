@@ -1,0 +1,41 @@
+// F1 reference program: errors as values with `Result` and `?`.
+// expect-stdout: width=80 height=24 area=1920
+// expect-stdout: error: missing `=` in `depth`
+// expect-stdout: error: invalid digit found in string
+// expect-stdout: error: `height` must be positive
+struct Size {
+  pub width: i32;
+  pub height: i32;
+}
+
+fn value(entry: String) -> Result<i32, String> {
+  const equals = match entry.find("=") {
+    Some(index) => index,
+    None => return Err(`missing \`=\` in \`${entry}\``),
+  };
+  const number = entry.substring(equals + 1, entry.len()).trim().parse_i32()?;
+  Ok(number)
+}
+
+fn size(width: String, height: String) -> Result<Size, String> {
+  const w = value(width)?;
+  const h = value(height)?;
+  if h <= 0 {
+    return Err("`height` must be positive");
+  }
+  Ok(Size { width: w, height: h })
+}
+
+fn report(width: String, height: String) {
+  match size(width, height) {
+    Ok(size) => println(`width=${size.width} height=${size.height} area=${size.width * size.height}`),
+    Err(message) => println(`error: ${message}`),
+  }
+}
+
+fn main() {
+  report("width=80", "height = 24");
+  report("width=80", "depth");
+  report("width=8O", "height=1");
+  report("width=1", "height=0");
+}

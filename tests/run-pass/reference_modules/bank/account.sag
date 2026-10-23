@@ -1,0 +1,24 @@
+pub struct Account {
+  pub owner: String;
+  prv balance: i64;
+
+  pub fn open(owner: String, balance: i64) -> Self {
+    Self { owner, balance }
+  }
+
+  pub fn funds(self) -> i64 {
+    self.balance
+  }
+
+  pub fn deposit(var self, amount: i64) {
+    self.balance += amount;
+  }
+
+  pub fn withdraw(var self, amount: i64) -> Result<(), String> {
+    if amount > self.balance {
+      return Err(super::insufficient(self.owner, self.balance, amount));
+    }
+    self.balance -= amount;
+    Ok(())
+  }
+}

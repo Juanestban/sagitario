@@ -1,0 +1,38 @@
+use self::account::Account;
+
+pub struct Bank {
+  prv accounts: [Account; 2];
+  prv rejected: i32;
+
+  pub fn new(first: Account, second: Account) -> Self {
+    Self { accounts: [first, second], rejected: 0 }
+  }
+
+  /// Moves `amount` from one account to another, or leaves both unchanged.
+  pub fn transfer(var self, from: usize, to: usize, amount: i64) -> Result<(), String> {
+    match self.accounts[from].withdraw(amount) {
+      Ok(_) => {}
+      Err(message) => {
+        self.rejected += 1;
+        return Err(message);
+      }
+    }
+    self.accounts[to].deposit(amount);
+    Ok(())
+  }
+
+  pub fn report(self) {
+    for account in self.accounts {
+      println(`${account.owner}: ${account.funds()}`);
+    }
+  }
+
+  pub fn failures(self) -> i32 {
+    self.rejected
+  }
+}
+
+// Private to `bank`, and visible to its submodule `bank::account`.
+fn insufficient(owner: String, funds: i64, amount: i64) -> String {
+  `insufficient funds: ${owner} has ${funds}, needs ${amount}`
+}
