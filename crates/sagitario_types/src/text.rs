@@ -5,7 +5,7 @@
 use sagitario_ast::{Expr, Ident, Path};
 use sagitario_diagnostics::{Diagnostic, codes};
 
-use sagitario_resolve::TypeRes;
+use sagitario_resolve::{TypeItem, TypeRes};
 
 use crate::{BuiltinMethod, Checker, FloatTy, IntTy, Type};
 
@@ -169,11 +169,15 @@ impl Checker<'_> {
     Some(elem)
   }
 
-  /// `new Type(args)`: in F1 only `new StringBuilder()`; classes arrive in F2.
+  /// `new Type(args)`: a class instance or a `StringBuilder`.
   pub(crate) fn new_expr(&mut self, path: &Path, args: &[Expr]) -> Type {
     let name = path.segments.last().map_or("", |segment| segment.name.as_str());
     let resolved = self.resolution.type_paths.get(&path.id).copied();
     let user_type = matches!(resolved, Some(TypeRes::Item(_)));
+
+    if let Some(TypeRes::Item(TypeItem::Class(id))) = resolved {
+      return self.new_instance(path, id, args);
+    }
 
     if path.segments.len() == 1 && name == "StringBuilder" && !user_type {
       self.args(path.span, "constructor", &[], args);
@@ -193,7 +197,7 @@ impl Checker<'_> {
           .with_help(format!("build the value with a literal or a static function, such as `{name}::new(...)`")),
       );
     } else {
-      self.error(codes::NOT_IMPLEMENTED, path.span, "`new` with classes is not implemented yet (F2); in F1 only `new StringBuilder()` exists");
+      self.error(codes::UNRESOLVED_NAME, path.span, format!("cannot find the class `{name}`"));
     }
 
     Type::Error

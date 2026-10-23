@@ -1,4 +1,4 @@
-// Structs: literals (including the shorthand), static functions, `self` and `var self` methods,
+// Structs: literals (including the shorthand), static functions, methods that read or modify `self`,
 // private members, value semantics and ARC fields. The harness fails the test on any leak.
 // expect-stdout: 25
 // expect-stdout: 4 1
@@ -24,7 +24,7 @@ struct Point {
     self.x * self.x + self.y * self.y
   }
 
-  pub fn move_by(var self, dx: f64) {
+  pub fn move_by(self, dx: f64) {
     self.x += dx;
   }
 }
@@ -41,15 +41,15 @@ struct Person {
     self.age
   }
 
-  pub fn birthday(var self) {
+  pub fn birthday(self) {
     self.grow();
   }
 
-  pub fn rename(var self, name: String) {
+  pub fn rename(self, name: String) {
     self.name = name;
   }
 
-  prv fn grow(var self) {
+  prv fn grow(self) {
     self.age += 1;
   }
 }

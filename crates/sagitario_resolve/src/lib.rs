@@ -1,16 +1,16 @@
 //! Name resolution (docs/spec/09-modules.md): builds the module tree of the package, resolves
 //! `use` declarations and binds every path expression, pattern and type path to what it names.
 //! Lookup order for a single name: local bindings (innermost scope first, later shadowing
-//! earlier), the module's items and imports, then the prelude. Functions, structs, enums and
-//! imports share one namespace per module; the members of a struct (fields and functions) or of
-//! an enum (variants and functions) share another one per type.
+//! earlier), the module's items and imports, then the prelude. Functions, structs, enums,
+//! classes and imports share one namespace per module; the members of a struct or class (fields
+//! and functions) or of an enum (variants and functions) share another one per type.
 
 mod modules;
 
 use std::collections::{HashMap, HashSet};
 
 use sagitario_ast::{
-  Block, EnumDecl, Expr, ExprKind, ExternFn, FnDecl, Ident, Item, Module, NodeId, Package, Path, Pattern, PatternKind, Stmt, StructDecl,
+  Block, ClassDecl, EnumDecl, Expr, ExprKind, ExternFn, FnDecl, Ident, Item, Module, NodeId, Package, Path, Pattern, PatternKind, Stmt, StructDecl,
   TemplatePart, TypeExpr, TypeExprKind, VariantFields, Visibility,
 };
 use sagitario_diagnostics::{Diagnostic, Diagnostics, codes};
@@ -61,6 +61,10 @@ pub struct StructId(pub u32);
 /// Index of an enum in `Resolution::enums`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct EnumId(pub u32);
+
+/// Index of a class in `Resolution::classes`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ClassId(pub u32);
 
 /// Index of a C function declared in an `extern` block, in `Resolution::externs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -145,6 +149,7 @@ pub struct ModId(pub u32);
 pub enum TypeItem {
   Struct(StructId),
   Enum(EnumId),
+  Class(ClassId),
 }
 
 /// The enum a variant belongs to: a program enum or one of the prelude's.
@@ -189,10 +194,9 @@ pub struct LocalId(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalKind {
   Param,
-  /// `self` in a method declared with `self`: immutable, like a parameter.
+  /// `self` in a method, or in the initializer `new` of a class. It can be modified
+  /// (ADR-0028): methods that modify a struct's or enum's `self` receive the caller's value.
   SelfParam,
-  /// `self` in a method declared with `var self`: the caller's value, mutable.
-  VarSelf,
   Const,
   Var,
   /// The variable of a `for` loop, a fresh `const` on each iteration.
@@ -320,6 +324,8 @@ pub struct Resolution {
   pub structs: Vec<TypeInfo>,
   /// Indexed by `EnumId`.
   pub enums: Vec<TypeInfo>,
+  /// Indexed by `ClassId`.
+  pub classes: Vec<TypeInfo>,
   /// Indexed by `ExternId`.
   pub externs: Vec<ExternInfo>,
   /// The module tree, indexed by `ModId`.
@@ -343,6 +349,7 @@ impl Resolution {
       (Item::Fn(decl), None) => Some(decl),
       (Item::Struct(decl), Some(member)) => decl.functions.get(member),
       (Item::Enum(decl), Some(member)) => decl.functions.get(member),
+      (Item::Class(decl), Some(member)) => decl.functions.get(member),
       _ => None,
     }
   }
@@ -389,11 +396,31 @@ impl Resolution {
     }
   }
 
-  /// The name of a struct or enum.
+  pub fn class_decl<'p>(&self, package: &'p Package, id: ClassId) -> Option<&'p ClassDecl> {
+    let info = self.classes.get(id.0 as usize)?;
+
+    match package.modules.get(info.module)?.items.get(info.item)? {
+      Item::Class(decl) => Some(decl),
+      _ => None,
+    }
+  }
+
+  /// The name of a struct, enum or class.
   pub fn type_name(&self, package: &Package, item: TypeItem) -> String {
     match item {
       TypeItem::Struct(id) => self.struct_decl(package, id).map(|decl| decl.name.name.clone()),
       TypeItem::Enum(id) => self.enum_decl(package, id).map(|decl| decl.name.name.clone()),
+      TypeItem::Class(id) => self.class_decl(package, id).map(|decl| decl.name.name.clone()),
+    }
+    .unwrap_or_default()
+  }
+
+  /// The functions a type declares, in declaration order.
+  pub fn type_functions<'p>(&self, package: &'p Package, item: TypeItem) -> &'p [FnDecl] {
+    match item {
+      TypeItem::Struct(id) => self.struct_decl(package, id).map(|decl| decl.functions.as_slice()),
+      TypeItem::Enum(id) => self.enum_decl(package, id).map(|decl| decl.functions.as_slice()),
+      TypeItem::Class(id) => self.class_decl(package, id).map(|decl| decl.functions.as_slice()),
     }
     .unwrap_or_default()
   }
@@ -403,9 +430,20 @@ impl Resolution {
     let info = match item {
       TypeItem::Struct(id) => self.structs.get(id.0 as usize),
       TypeItem::Enum(id) => self.enums.get(id.0 as usize),
+      TypeItem::Class(id) => self.classes.get(id.0 as usize),
     }?;
 
     info.functions.iter().copied().find(|function| self.fn_decl(package, *function).is_some_and(|decl| decl.name.name == name))
+  }
+
+  /// The initializer of a class: its function `new` without `self` (docs/spec/04-classes.md).
+  pub fn initializer(&self, package: &Package, id: ClassId) -> Option<FnId> {
+    self.type_function(package, TypeItem::Class(id), "new").filter(|function| self.is_initializer(package, *function))
+  }
+
+  /// Whether a function is the initializer `new` of a class.
+  pub fn is_initializer(&self, package: &Package, id: FnId) -> bool {
+    matches!(self.owner(id), Some(TypeItem::Class(_))) && self.fn_decl(package, id).is_some_and(is_initializer_decl)
   }
 
   pub fn locals(&self, id: FnId) -> &[LocalInfo] {
@@ -430,6 +468,11 @@ impl Resolution {
 
     false
   }
+}
+
+/// A class function `new` without `self`: the initializer, where `self` is implicit.
+fn is_initializer_decl(decl: &FnDecl) -> bool {
+  decl.name.name == "new" && decl.self_param.is_none()
 }
 
 /// Names reserved for the future concurrency model (docs/spec/01-lexical.md).
@@ -493,6 +536,29 @@ pub fn resolve(package: &Package, diagnostics: &mut Diagnostics) -> Resolution {
     }
   }
 
+  for index in 0..resolution.classes.len() {
+    let id = ClassId(index as u32);
+
+    if let (Some(decl), Some(info)) = (resolution.class_decl(package, id), resolution.classes.get(index)) {
+      declarations.push((TypeItem::Class(id), info.module, decl.fields.iter().map(|field| &field.ty).collect()));
+    }
+  }
+
+  // The parent of each class, named after `extends`.
+  for index in 0..resolution.classes.len() {
+    let id = ClassId(index as u32);
+    let (Some(decl), Some(info)) = (resolution.class_decl(package, id), resolution.classes.get(index)) else { continue };
+    let Some(parent) = &decl.parent else { continue };
+    let mut resolver = Resolver::new(package, &resolution, module_of(&module_ids, info.module), Some(TypeItem::Class(id)), diagnostics);
+
+    resolver.type_path(parent);
+
+    let output = resolver.finish();
+
+    used.extend(output.used);
+    resolution.type_paths.extend(output.type_paths);
+  }
+
   for (owner, source, types) in declarations {
     let mut resolver = Resolver::new(package, &resolution, module_of(&module_ids, source), Some(owner), diagnostics);
 
@@ -525,9 +591,10 @@ pub fn resolve(package: &Package, diagnostics: &mut Diagnostics) -> Resolution {
     let mut resolver = Resolver::new(package, &resolution, module_of(&module_ids, info.module), info.owner, diagnostics);
 
     if let Some(self_param) = &decl.self_param {
-      let kind = if self_param.mutable { LocalKind::VarSelf } else { LocalKind::SelfParam };
-
-      resolver.declare("self", self_param.span, kind);
+      resolver.declare("self", self_param.span, LocalKind::SelfParam);
+    } else if matches!(info.owner, Some(TypeItem::Class(_))) && is_initializer_decl(decl) {
+      // The instance being initialized.
+      resolver.declare("self", decl.name.span, LocalKind::SelfParam);
     }
 
     for param in &decl.params {
@@ -605,6 +672,18 @@ fn declare_items(resolution: &mut Resolution, source: usize, node: ModId, module
 
         vec![(&decl.name, ItemRef::Type(owner), decl.visibility)]
       }
+      Item::Class(decl) => {
+        let owner = TypeItem::Class(ClassId(resolution.classes.len() as u32));
+        let functions = register_functions(resolution, source, index, decl.functions.len(), owner);
+
+        resolution.classes.push(TypeInfo { module: source, item: index, functions });
+
+        let names = decl.fields.iter().map(|field| &field.name).chain(decl.functions.iter().map(|function| &function.name));
+
+        check_members(&decl.name.name, "fields and functions of a class share one namespace", names, diagnostics);
+
+        vec![(&decl.name, ItemRef::Type(owner), decl.visibility)]
+      }
       Item::Enum(decl) => {
         let owner = TypeItem::Enum(EnumId(resolution.enums.len() as u32));
         let functions = register_functions(resolution, source, index, decl.functions.len(), owner);
@@ -642,7 +721,7 @@ fn declare_item(resolution: &mut Resolution, node: ModId, name: &Ident, item_ref
       diagnostics.push(
         Diagnostic::error(codes::DUPLICATE_DEFINITION, name.span, format!("the name `{}` is defined more than once", name.name))
           .with_label(previous.span, "previous definition here")
-          .with_note("functions, structs and enums share one namespace per module"),
+          .with_note("functions, structs, enums and classes share one namespace per module"),
       );
     } else if info.children.contains_key(&name.name) {
       let module_path = format!("{}::{}", info.display_path(), name.name);
@@ -936,6 +1015,17 @@ impl<'a> Resolver<'a> {
           self.expr(value);
         }
       }
+      ExprKind::Zod => match self.lookup_local("self") {
+        Some(id) if matches!(self.owner, Some(TypeItem::Class(_))) => {
+          self.paths.insert(expr.id, Res::Local(id));
+        }
+        _ => {
+          self.diagnostics.push(
+            Diagnostic::error(codes::UNRESOLVED_NAME, expr.span, "`zod` is only available in the methods and initializer of a class")
+              .with_note("`zod.method(...)` calls the parent class's method, and `zod.new(...)` its initializer"),
+          );
+        }
+      },
       ExprKind::Int { .. }
       | ExprKind::Float { .. }
       | ExprKind::Bool(_)
@@ -1065,6 +1155,11 @@ impl<'a> Resolver<'a> {
 
         None
       }
+      (Named::Item(ItemRef::Type(TypeItem::Class(_))), [_]) => {
+        self.error(owner.span, format!("`{}` is a class, not an enum", owner.name));
+
+        None
+      }
       _ => {
         self.error(path.span, "this path does not name a variant");
 
@@ -1173,6 +1268,8 @@ impl<'a> Resolver<'a> {
         .with_help(format!("build a value with `{name} {{ ... }}` or call one of its static functions, such as `{name}::new(...)`")),
       TypeItem::Enum(_) => Diagnostic::error(codes::UNRESOLVED_NAME, span, format!("`{name}` is an enum, not a value"))
         .with_help(format!("name one of its variants: `{name}::Variant`")),
+      TypeItem::Class(_) => Diagnostic::error(codes::UNRESOLVED_NAME, span, format!("`{name}` is a class, not a value"))
+        .with_help(format!("create an instance with `new {name}(...)`")),
     };
 
     self.diagnostics.push(diagnostic);
@@ -1417,6 +1514,14 @@ impl<'a> Resolver<'a> {
       }
       (Named::Item(ItemRef::Type(TypeItem::Enum(id))), [name]) => self.user_variant(id, &name.name, name.span).map(Res::Variant),
       (Named::Prelude(kind), [name]) => self.prelude_variant_of(kind, &name.name, name.span).map(Res::Variant),
+      (Named::Item(ItemRef::Type(TypeItem::Class(_))), []) => {
+        self.diagnostics.push(
+          Diagnostic::error(codes::UNRESOLVED_NAME, last.span, format!("`{}` is a class, which has no literals", last.name))
+            .with_help(format!("create an instance with `new {}(...)`", last.name)),
+        );
+
+        None
+      }
       _ => {
         self.error(path.span, "this path does not name a struct or a variant");
 
@@ -1425,17 +1530,14 @@ impl<'a> Resolver<'a> {
     }
   }
 
-  /// `Type::function`: a static function of a struct or enum.
+  /// `Type::function`: a static function of a struct, enum or class.
   fn type_function(&mut self, item: TypeItem, name: &str, span: Span) -> Option<Res> {
     let type_name = self.resolution.type_name(self.package, item);
     let Some(function) = self.resolution.type_function(self.package, item, name) else {
-      let functions = match item {
-        TypeItem::Struct(id) => self.resolution.struct_decl(self.package, id).map(|decl| &decl.functions),
-        TypeItem::Enum(id) => self.resolution.enum_decl(self.package, id).map(|decl| &decl.functions),
-      };
-      let mut candidates: Vec<String> = functions.into_iter().flatten().map(|function| function.name.name.clone()).collect();
+      let functions = self.resolution.type_functions(self.package, item);
+      let mut candidates: Vec<String> = functions.iter().map(|function| function.name.name.clone()).collect();
       let what = match item {
-        TypeItem::Struct(_) => "function",
+        TypeItem::Struct(_) | TypeItem::Class(_) => "function",
         TypeItem::Enum(id) => {
           let variants = self.resolution.enum_decl(self.package, id).map(|decl| &decl.variants);
 
@@ -1456,6 +1558,15 @@ impl<'a> Resolver<'a> {
     };
     let decl = self.resolution.fn_decl(self.package, function)?;
     let (is_method, is_private, declared) = (decl.self_param.is_some(), decl.visibility == Visibility::Private, decl.name.span);
+
+    if self.resolution.is_initializer(self.package, function) {
+      self.diagnostics.push(
+        Diagnostic::error(codes::WRONG_CALL_FORM, span, format!("the initializer of `{type_name}` cannot be called as a function"))
+          .with_help(format!("create an instance with `new {type_name}(...)`")),
+      );
+
+      return None;
+    }
 
     if is_method {
       self.diagnostics.push(
@@ -1495,7 +1606,7 @@ impl<'a> Resolver<'a> {
   }
 
   /// The type of `new Type(...)`: recorded only when it names a program type, since the type
-  /// checker reports every other type.
+  /// checker reports every other type (`new StringBuilder()` is the only other valid one).
   fn new_path(&mut self, path: &Path) {
     if path.segments.len() > 1 {
       self.type_path(path);

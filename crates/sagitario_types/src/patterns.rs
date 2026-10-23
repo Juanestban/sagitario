@@ -39,8 +39,16 @@ impl Checker<'_> {
       let ty = self.expr(&arm.body, arm_expected.as_ref());
 
       match &result {
-        None if ty != Type::Never => result = Some((ty, arm.body.span)),
-        Some((first, first_span)) if !ty.fits(first) => {
+        None if ty != Type::Never => {
+          // With a known type, arms may produce instances of its subclasses.
+          let ty = match expected {
+            Some(expected) if self.fits(&ty, expected) => expected.clone(),
+            _ => ty,
+          };
+
+          result = Some((ty, arm.body.span));
+        }
+        Some((first, first_span)) if !self.fits(&ty, first) => {
           self.diagnostics.push(
             Diagnostic::error(codes::MISMATCHED_TYPES, arm.body.span, format!("expected `{first}`, found `{ty}`"))
               .with_label(*first_span, format!("this arm has type `{first}`"))

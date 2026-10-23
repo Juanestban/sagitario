@@ -111,7 +111,7 @@ impl Checker<'_> {
   /// Whether values of `ty` hold `String`s or other ARC references.
   pub(crate) fn is_managed(&self, ty: &Type, visited: &mut Vec<TypeItem>) -> bool {
     match ty {
-      Type::String | Type::StringBuilder | Type::CString => true,
+      Type::String | Type::StringBuilder | Type::CString | Type::Class(_) => true,
       Type::Array(elem, _) | Type::Option(elem) => self.is_managed(elem, visited),
       Type::Result(value, error) => self.is_managed(value, visited) || self.is_managed(error, visited),
       Type::Struct(inner) => {

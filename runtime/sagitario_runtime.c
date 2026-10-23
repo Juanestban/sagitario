@@ -661,6 +661,72 @@ sag_string sag_builder_to_string(sag_builder builder) {
   return sag_string_copy(builder->sb.data, builder->sb.len);
 }
 
+/* ---- Class instances --------------------------------------------------------------------- */
+
+/* Objects whose count reached zero and wait to be destroyed, and whether destruction is under
+ * way. Single-threaded MVP. */
+static sag_object **sag_drop_stack = NULL;
+static size_t sag_drop_len = 0;
+static size_t sag_drop_cap = 0;
+static bool sag_dropping = false;
+
+void *sag_object_alloc(size_t size) {
+  return sag_alloc(size);
+}
+
+void sag_object_init(sag_object *object, void (*drop)(sag_object *object), const sag_method *vtable) {
+  object->strong = 1;
+  object->weak = 0;
+  object->drop = drop;
+  object->vtable = vtable;
+  sag_live_objects++;
+}
+
+void sag_object_retain(void *pointer) {
+  sag_object *object = pointer;
+  if (object != NULL) {
+    object->strong++;
+  }
+}
+
+static void sag_drop_push(sag_object *object) {
+  if (sag_drop_len == sag_drop_cap) {
+    size_t cap = sag_drop_cap == 0 ? 16 : sag_drop_cap;
+    if (cap > SIZE_MAX / 2 / sizeof(sag_object *)) {
+      sag_panic("out of memory");
+    }
+    cap *= 2;
+    sag_object **stack = realloc(sag_drop_stack, cap * sizeof(sag_object *));
+    if (stack == NULL) {
+      sag_panic("out of memory");
+    }
+    sag_drop_stack = stack;
+    sag_drop_cap = cap;
+  }
+  sag_drop_stack[sag_drop_len++] = object;
+}
+
+void sag_object_release(void *pointer) {
+  sag_object *object = pointer;
+  if (object == NULL || --object->strong != 0) {
+    return;
+  }
+  sag_drop_push(object);
+  if (sag_dropping) {
+    return;
+  }
+  sag_dropping = true;
+  while (sag_drop_len > 0) {
+    sag_object *next = sag_drop_stack[--sag_drop_len];
+    next->drop(next);
+    if (next->weak == 0) {
+      free(next);
+      sag_live_objects--;
+    }
+  }
+  sag_dropping = false;
+}
+
 /* ---- FFI --------------------------------------------------------------------------------- */
 
 struct sag_cstring_obj {
@@ -792,6 +858,9 @@ int sag_rt_finish(void) {
   if (fflush(stdout) != 0) {
     sag_panic("failed printing to stdout");
   }
+  free(sag_drop_stack);
+  sag_drop_stack = NULL;
+  sag_drop_cap = 0;
   if (getenv("SAG_LEAK_CHECK") != NULL && sag_live_objects != 0) {
     fprintf(stderr, "leak check: %zu ARC object(s) still alive at exit\n", sag_live_objects);
     return 102;

@@ -20,7 +20,7 @@ pub enum Visibility {
   Module,
   /// `pub`
   Public,
-  /// `prv`: a struct member visible only inside its struct.
+  /// `prv`: a member visible only inside its struct, enum or class.
   Private,
 }
 
@@ -77,7 +77,22 @@ pub enum Item {
   Fn(FnDecl),
   Struct(StructDecl),
   Enum(EnumDecl),
+  Class(ClassDecl),
   Extern(ExternBlock),
+}
+
+/// `abstract class Name extends Parent { fields and functions }` (docs/spec/04-classes.md): a
+/// reference type managed by ARC. A function named `new` without `self` is the initializer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassDecl {
+  pub is_abstract: bool,
+  pub visibility: Visibility,
+  pub name: Ident,
+  /// The class after `extends`.
+  pub parent: Option<Path>,
+  pub fields: Vec<FieldDecl>,
+  pub functions: Vec<FnDecl>,
+  pub span: Span,
 }
 
 /// `extern "C" { fn name(params) -> Ret; ... }`: C functions the program calls
@@ -154,6 +169,8 @@ pub struct StructDecl {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldDecl {
   pub visibility: Visibility,
+  /// `const` (false) or `var` (true) before the name: required in classes, rejected in structs.
+  pub mutable: Option<bool>,
   pub name: Ident,
   pub ty: TypeExpr,
   pub span: Span,
@@ -166,8 +183,12 @@ pub struct FnDecl {
   pub extern_c: bool,
   pub export: Option<Export>,
   pub visibility: Visibility,
+  /// `abstract fn`: a class method without a body (the body is empty).
+  pub is_abstract: bool,
+  /// `override fn`: replaces a method of the parent class.
+  pub is_override: bool,
   pub name: Ident,
-  /// `self` or `var self`, only in struct methods.
+  /// `self`, only in methods of structs, enums and classes.
   pub self_param: Option<SelfParam>,
   pub params: Vec<Param>,
   pub return_type: Option<TypeExpr>,
@@ -177,7 +198,6 @@ pub struct FnDecl {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SelfParam {
-  pub mutable: bool,
   pub span: Span,
 }
 
@@ -400,7 +420,10 @@ pub enum ExprKind {
   },
   /// `expr?`
   Try(Box<Expr>),
-  /// `new Type(args)`; in F1 only `new StringBuilder()`.
+  /// `zod`, the parent class's view of `self`: only as the receiver of `zod.method(...)` and
+  /// `zod.new(...)`.
+  Zod,
+  /// `new Type(args)`: a class instance, or a `StringBuilder`.
   New {
     path: Path,
     args: Vec<Expr>,

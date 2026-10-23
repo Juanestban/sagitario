@@ -1,6 +1,6 @@
 # 0021. Structs, methods and fixed arrays
 
-- Status: Accepted
+- Status: Accepted; amended by [ADR-0028](0028-inferred-self-mutation.md)
 - Date: 2026-10-22
 
 ## Context

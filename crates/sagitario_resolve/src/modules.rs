@@ -5,8 +5,8 @@ use std::collections::{BTreeSet, HashSet};
 
 use crate::{Imported, ItemRef, ModId, ModuleInfo, Named, Resolution, Resolver, TypeItem, TypeRes};
 use sagitario_ast::{
-  Block, Expr, ExprKind, FnDecl, Ident, Item, Module, Package, Path, Pattern, PatternKind, Stmt, TemplatePart, TypeExpr, TypeExprKind, UseTree,
-  UseTreeKind, VariantFields, Visibility,
+  Block, ClassDecl, Expr, ExprKind, FnDecl, Ident, Item, Module, Package, Path, Pattern, PatternKind, Stmt, StructDecl, TemplatePart, TypeExpr,
+  TypeExprKind, UseTree, UseTreeKind, VariantFields, Visibility,
 };
 use sagitario_diagnostics::{Diagnostic, Diagnostics, codes};
 
@@ -179,6 +179,7 @@ pub(crate) fn report_private_interfaces(resolution: &Resolution, package: &Packa
   for module in &package.modules {
     for item in &module.items {
       let mut checks: Vec<(&str, Vec<&TypeExpr>)> = Vec::new();
+      let mut parents: Vec<(&str, &Path)> = Vec::new();
 
       match item {
         Item::Fn(decl) if public(decl.visibility) => checks.push((&decl.name.name, signature_types(decl))),
@@ -186,6 +187,19 @@ pub(crate) fn report_private_interfaces(resolution: &Resolution, package: &Packa
           let fields = decl.fields.iter().filter(|field| field.visibility != Visibility::Private).map(|field| &field.ty).collect();
 
           checks.push((&decl.name.name, fields));
+
+          for function in decl.functions.iter().filter(|function| function.visibility != Visibility::Private) {
+            checks.push((&function.name.name, signature_types(function)));
+          }
+        }
+        Item::Class(decl) if public(decl.visibility) => {
+          let fields = decl.fields.iter().filter(|field| field.visibility != Visibility::Private).map(|field| &field.ty).collect();
+
+          checks.push((&decl.name.name, fields));
+
+          if let Some(parent) = &decl.parent {
+            parents.push((&decl.name.name, parent));
+          }
 
           for function in decl.functions.iter().filter(|function| function.visibility != Visibility::Private) {
             checks.push((&function.name.name, signature_types(function)));
@@ -214,6 +228,8 @@ pub(crate) fn report_private_interfaces(resolution: &Resolution, package: &Packa
         _ => {}
       }
 
+      let mut entries: Vec<(&str, Vec<&Path>)> = parents.into_iter().map(|(owner, parent)| (owner, vec![parent])).collect();
+
       for (owner, types) in checks {
         let mut paths = Vec::new();
 
@@ -221,6 +237,10 @@ pub(crate) fn report_private_interfaces(resolution: &Resolution, package: &Packa
           type_paths(ty, &mut paths);
         }
 
+        entries.push((owner, paths));
+      }
+
+      for (owner, paths) in entries {
         for path in paths {
           let Some(TypeRes::Item(item)) = resolution.type_paths.get(&path.id) else { continue };
           let (visibility, name, declared) = match item {
@@ -229,6 +249,10 @@ pub(crate) fn report_private_interfaces(resolution: &Resolution, package: &Packa
               None => continue,
             },
             TypeItem::Enum(id) => match resolution.enum_decl(package, *id) {
+              Some(decl) => (decl.visibility, &decl.name.name, decl.name.span),
+              None => continue,
+            },
+            TypeItem::Class(id) => match resolution.class_decl(package, *id) {
               Some(decl) => (decl.visibility, &decl.name.name, decl.name.span),
               None => continue,
             },
@@ -301,12 +325,16 @@ pub fn module_references(module: &Module) -> Vec<Vec<String>> {
   for item in &module.items {
     match item {
       Item::Fn(decl) => fn_paths(decl, &mut paths),
-      Item::Struct(decl) => {
-        for field in &decl.fields {
+      Item::Struct(StructDecl { fields, functions, .. }) | Item::Class(ClassDecl { fields, functions, .. }) => {
+        if let Item::Class(ClassDecl { parent: Some(parent), .. }) = item {
+          paths.push(parent);
+        }
+
+        for field in fields {
           type_paths(&field.ty, &mut paths);
         }
 
-        for function in &decl.functions {
+        for function in functions {
           fn_paths(function, &mut paths);
         }
       }
@@ -426,6 +454,7 @@ fn expr_paths<'a>(expr: &'a Expr, out: &mut Vec<&'a Path>) {
 
   match &expr.kind {
     ExprKind::Path(path) => out.push(path),
+    ExprKind::Zod => {}
     ExprKind::Call { callee, args } => {
       expr_paths(callee, out);
       exprs(args, out);

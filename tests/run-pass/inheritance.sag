@@ -1,0 +1,147 @@
+// Inheritance: `extends`, `zod.new(...)`, inherited fields and methods, `override` with dynamic
+// dispatch through the parent type, `zod.method(...)`, abstract classes and methods, implicit
+// initializers, identity between related classes, and the parent's behavior while its
+// initializer runs. The harness fails the test on any leak.
+// expect-stdout: Rex says woof (age 3)
+// expect-stdout: Tom says meow, purring (age 5)
+// expect-stdout: Kit says meow, purring (age 1)
+// expect-stdout: Polly says hello (age 2)
+// expect-stdout: 4 legs, 4 legs, 4 legs, 2 legs
+// expect-stdout: Tom is older: 4
+// expect-stdout: registered as Animal
+// expect-stdout: same: true
+// expect-stdout: plain shape, square with side 2
+// expect-stdout: area 4, area 0
+
+abstract class Animal {
+  prv const name: String;
+  pub var age: i32;
+  pub var label: String;
+
+  pub fn new(name: String, age: i32) {
+    self.name = name;
+    self.age = age;
+    self.label = "";
+    // While this initializer runs, `self` behaves as an `Animal`.
+    self.label = self.kind();
+  }
+
+  pub fn display_name(self) -> String {
+    self.name
+  }
+
+  pub fn kind(self) -> String {
+    "Animal"
+  }
+
+  pub fn legs(self) -> i32 {
+    4
+  }
+
+  pub fn birthday(self) {
+    self.age += 1;
+  }
+
+  pub abstract fn sound(self) -> String;
+
+  pub fn describe(self) -> String {
+    `${self.name} says ${self.sound()} (age ${self.age})`
+  }
+}
+
+class Dog extends Animal {
+  pub fn new(name: String, age: i32) {
+    zod.new(name, age);
+  }
+
+  pub override fn kind(self) -> String {
+    "Dog"
+  }
+
+  pub override fn sound(self) -> String {
+    "woof"
+  }
+}
+
+class Cat extends Animal {
+  prv const purr: String;
+
+  pub fn new(name: String, age: i32) {
+    zod.new(name, age);
+    self.purr = "purring";
+  }
+
+  pub override fn sound(self) -> String {
+    `meow, ${self.purr}`
+  }
+}
+
+// Inherits the initializer of `Cat` and the methods of both.
+class Kitten extends Cat {
+  pub fn new(name: String) {
+    zod.new(name, 1);
+  }
+}
+
+class Parrot extends Animal {
+  pub fn new(name: String) {
+    zod.new(name, 2);
+  }
+
+  pub override fn sound(self) -> String {
+    "hello"
+  }
+
+  pub override fn legs(self) -> i32 {
+    zod.legs() - 2
+  }
+}
+
+class Shape {
+  pub fn describe(self) -> String {
+    "plain shape"
+  }
+
+  pub fn area(self) -> i32 {
+    0
+  }
+}
+
+// No initializer of its own: it inherits the implicit one of `Shape`.
+class Square extends Shape {
+  pub override fn describe(self) -> String {
+    "square with side 2"
+  }
+
+  pub override fn area(self) -> i32 {
+    4
+  }
+}
+
+fn older(a: Animal, b: Animal) -> Animal {
+  if a.age >= b.age { a } else { b }
+}
+
+fn main() {
+  const rex = new Dog("Rex", 3);
+  const tom: Animal = new Cat("Tom", 5);
+  const animals: [Animal; 4] = [rex, tom, new Kitten("Kit"), new Parrot("Polly")];
+
+  for animal in animals {
+    println(animal.describe());
+  }
+
+  println(`${animals[0].legs()} legs, ${animals[1].legs()} legs, ${animals[2].legs()} legs, ${animals[3].legs()} legs`);
+
+  rex.birthday();
+  const winner = older(rex, tom);
+  println(`${winner.display_name()} is older: ${rex.age}`);
+  println(`registered as ${rex.label}`);
+
+  const as_animal: Animal = rex;
+  println(`same: ${as_animal == rex}`);
+
+  const shapes: [Shape; 2] = [new Shape(), new Square()];
+  println(`${shapes[0].describe()}, ${shapes[1].describe()}`);
+  println(`area ${shapes[1].area()}, area ${shapes[0].area()}`);
+}

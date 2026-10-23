@@ -1,6 +1,6 @@
 # 0004. Class model: single inheritance, interfaces, no open/final
 
-- Status: Accepted
+- Status: Accepted; refined by [ADR-0027](0027-classes-and-arc.md) and [ADR-0029](0029-inheritance.md)
 - Date: 2026-10-21
 
 ## Context

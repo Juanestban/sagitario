@@ -1,6 +1,6 @@
 # 0007. Mutability with `const` / `var`
 
-- Status: Accepted
+- Status: Accepted; amended by [ADR-0028](0028-inferred-self-mutation.md)
 - Date: 2026-10-21
 
 ## Context
