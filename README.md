@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/logo.svg" alt="Sagitario logo: an archer's bow shooting an arrow under the Sagittarius constellation" width="160">
+</p>
+
 # Sagitario Language
 
 Sagitario is a compiled systems programming language that combines Rust-like safety
