@@ -35,12 +35,14 @@ pub struct Package {
   /// Indices in `modules` of the standard library modules the program uses, such as `std::io`
   /// with the path `["std", "io"]`; they are not part of the module tree either.
   pub std: Vec<usize>,
+  /// A library: it needs no `main`, and a function called `main` is an ordinary one.
+  pub library: bool,
 }
 
 impl Package {
   /// A program made of one file.
   pub fn single(module: Module) -> Package {
-    Package { modules: vec![module], prelude: None, std: Vec::new() }
+    Package { modules: vec![module], prelude: None, std: Vec::new(), library: false }
   }
 }
 

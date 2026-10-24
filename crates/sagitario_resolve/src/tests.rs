@@ -150,7 +150,7 @@ fn resolve_package(files: &[(&str, &str)]) -> Vec<&'static str> {
 
   assert!(!diagnostics.has_errors(), "parse failed: {:?}", diagnostics.take());
 
-  resolve(&Package { modules, prelude: None, std: Vec::new() }, &mut diagnostics);
+  resolve(&Package { modules, prelude: None, std: Vec::new(), library: false }, &mut diagnostics);
 
   diagnostics.take().iter().map(|diagnostic| diagnostic.code.0).collect()
 }

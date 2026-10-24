@@ -23,6 +23,10 @@ sag run --release main.sag      # optimized; integer overflow wraps
 sag run --sanitize main.sag     # with ASan and UBSan (the test harness always uses it)
 SAG_TEST_SANITIZE=0 cargo test --workspace   # faster local runs without sanitizers
 SAG_CC=gcc sag build main.sag   # choose the C compiler (or --cc)
+
+nova new demo                   # a package (docs/nova.md); then, inside it:
+nova run -- a b                 # build target/debug/demo and run it
+nova check                      # front end only
 ```
 
 Formatting is defined by `rustfmt.toml` and lint policy by `Cargo.toml` and `clippy.toml`.
@@ -33,6 +37,7 @@ Formatting is defined by `rustfmt.toml` and lint policy by `Cargo.toml` and `cli
   [`docs/adr/`](docs/adr/README.md).
 - Compiler structure: [`docs/architecture.md`](docs/architecture.md).
 - Test harness: [`docs/testing.md`](docs/testing.md).
+- Package manager: [`docs/nova.md`](docs/nova.md).
 - Phases and acceptance criteria: [`docs/roadmap.md`](docs/roadmap.md).
 
 ## Definition of Done (every language feature)

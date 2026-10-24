@@ -37,9 +37,17 @@ fn main() {
 }
 ```
 
+Packages are created and built with Nova, the package manager:
+
+```sh
+nova new hello && cd hello
+nova run
+```
+
 ## Documentation
 
 - [Language specification](docs/spec/README.md)
+- [Nova, the package manager](docs/nova.md)
 - [Design decisions (ADRs)](docs/adr/README.md)
 - [Compiler architecture](docs/architecture.md)
 - [Roadmap](docs/roadmap.md)

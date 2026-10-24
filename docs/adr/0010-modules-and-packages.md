@@ -1,6 +1,7 @@
 # 0010. File-as-module, logical imports, packages
 
-- Status: Accepted; amended by [ADR-0024](0024-modules-imports-and-visibility.md) and [ADR-0025](0025-single-pub-visibility.md)
+- Status: Accepted; amended by [ADR-0024](0024-modules-imports-and-visibility.md) and [ADR-0025](0025-single-pub-visibility.md);
+  the manifest superseded by [ADR-0040](0040-nova-package-manager.md) (`Nova.toml`, no `kind`)
 - Date: 2026-10-21
 
 ## Context

@@ -2,15 +2,18 @@
 
 Rationale: [ADR-0010](../adr/0010-modules-and-packages.md),
 [ADR-0024](../adr/0024-modules-imports-and-visibility.md),
-[ADR-0025](../adr/0025-single-pub-visibility.md).
+[ADR-0025](../adr/0025-single-pub-visibility.md), [ADR-0040](../adr/0040-nova-package-manager.md).
 
 ## Packages
 
-- A package is the unit of compilation and distribution. With the package manager (post-MVP)
-  it is described by `sagitario.toml` (name, version, kind `bin` or `lib`), with the entry
-  points `src/main.sag` for binaries and `src/lib.sag` for libraries.
-- **F1:** a program is built from its entry file, `sag build dir/main.sag`. The entry file is
-  the root module, `pkg`, and its directory is the package root.
+- A package is the unit of compilation and distribution. It is described by `Nova.toml` and
+  built by Nova, the package manager ([reference](../nova.md)). Its root module `pkg` is
+  `src/main.sag` for a program or `src/lib.sag` for a library (F3), and its other modules are
+  the files under `src/`.
+- A single program can also be built from its entry file without a package,
+  `sag build dir/main.sag` (F1). The entry file is the root module, `pkg`, and its directory is
+  the package root.
+- A library needs no `main`; a function called `main` in it is an ordinary function (F3).
 
 ## Modules
 

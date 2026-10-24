@@ -35,6 +35,11 @@ pub struct CompileOptions {
   /// Compile with AddressSanitizer and UndefinedBehaviorSanitizer where the C compiler supports
   /// them (docs/testing.md#memory-checks).
   pub sanitize: bool,
+  /// Where `build` and `run` write the executable (and `--emit-c` the C); by default next to
+  /// the input for `build`, and in a temporary directory for `run`.
+  pub output: Option<PathBuf>,
+  /// The input is the root of a library: it needs no `main` and is only checked.
+  pub library: bool,
 }
 
 /// The C compiler flags of `--sanitize`: any undefined behavior aborts the program.
@@ -50,7 +55,7 @@ pub fn check(options: &CompileOptions) -> u8 {
 
 /// `sag build`: writes an executable next to the source file.
 pub fn build(options: &CompileOptions) -> u8 {
-  let executable = options.input.with_extension(env::consts::EXE_EXTENSION);
+  let executable = options.output.clone().unwrap_or_else(|| options.input.with_extension(env::consts::EXE_EXTENSION));
   match compile_to(options, &executable) {
     Ok(compiler) => {
       if let Some(dir) = compiler.sanitizer_runtime_dir() {
@@ -62,7 +67,8 @@ pub fn build(options: &CompileOptions) -> u8 {
   }
 }
 
-/// `sag run`: builds into a temporary directory, runs the program and returns its exit code.
+/// `sag run`: builds into a temporary directory (or `options.output`), runs the program and
+/// returns its exit code.
 pub fn run(options: &CompileOptions) -> u8 {
   let dir = match TempDir::create() {
     Ok(dir) => dir,
@@ -72,7 +78,7 @@ pub fn run(options: &CompileOptions) -> u8 {
     }
   };
   let stem = options.input.file_stem().unwrap_or_default();
-  let executable = dir.path.join(stem).with_extension(env::consts::EXE_EXTENSION);
+  let executable = options.output.clone().unwrap_or_else(|| dir.path.join(stem).with_extension(env::consts::EXE_EXTENSION));
   let compiler = match compile_to(options, &executable) {
     Ok(compiler) => compiler,
     Err(code) => return code,
@@ -161,11 +167,16 @@ fn front_end(options: &CompileOptions, generate: bool) -> Result<FrontEnd, u8> {
 
   report(&mut diagnostics, &sources, options)?;
 
-  let package = Package { modules: loader.modules, prelude: Some(prelude), std: loader.std };
+  let package = Package { modules: loader.modules, prelude: Some(prelude), std: loader.std, library: options.library };
   let resolution = sagitario_resolve::resolve(&package, &mut diagnostics);
   let typed = sagitario_types::check(&package, &resolution, &mut diagnostics);
 
   report(&mut diagnostics, &sources, options)?;
+
+  // A library has no entry point to lower from until library outputs exist.
+  if options.library {
+    return Ok(FrontEnd { c_source: None });
+  }
 
   let program = sagitario_sir::lower(&package, &resolution, &typed, &sources, &mut diagnostics).map_err(|error| {
     eprintln!("internal compiler error: {}", error.0);
@@ -425,7 +436,7 @@ fn plural(count: usize) -> &'static str {
 /// `CLICOLOR_FORCE`. Classic Windows consoles do not interpret ANSI codes unless asked through
 /// the Windows API (which would need `unsafe`), so on Windows colors are used only in terminals
 /// known to support them.
-fn use_color(format: DiagnosticFormat) -> bool {
+pub fn use_color(format: DiagnosticFormat) -> bool {
   use std::io::IsTerminal;
 
   let set = |name: &str| env::var_os(name).is_some_and(|value| !value.is_empty());
@@ -445,13 +456,19 @@ fn use_color(format: DiagnosticFormat) -> bool {
 
 /// Compiles the program into `executable` and returns the C compiler used.
 fn compile_to(options: &CompileOptions, executable: &Path) -> Result<CCompiler, u8> {
+  if options.library {
+    eprintln!("error: `{}` is the root of a library, which has no executable", options.input.display());
+    return Err(EXIT_FAILURE);
+  }
+
   let Some(generated) = front_end(options, true)?.c_source else {
     eprintln!("internal compiler error: no C was generated");
     return Err(EXIT_ICE);
   };
   if options.emit_c {
-    let c_path = options.input.with_extension("c");
-    let ffi_path = c_path.with_file_name(format!("{}_ffi.c", options.input.file_stem().unwrap_or_default().to_string_lossy()));
+    let base = options.output.as_ref().unwrap_or(&options.input);
+    let c_path = base.with_extension("c");
+    let ffi_path = c_path.with_file_name(format!("{}_ffi.c", base.file_stem().unwrap_or_default().to_string_lossy()));
     let written = fs::write(&c_path, &generated.program).and_then(|()| match &generated.ffi {
       Some(ffi) => fs::write(&ffi_path, ffi),
       None => Ok(()),

@@ -643,11 +643,12 @@ pub fn resolve(package: &Package, diagnostics: &mut Diagnostics) -> Resolution {
   };
 
   resolution.main = match resolution.module(ModId(0)).and_then(|root| root.items.get("main")) {
-    Some(Declared { item: ItemRef::Fn(id), .. }) => Some(*id),
+    Some(Declared { item: ItemRef::Fn(id), .. }) if !package.library => Some(*id),
     _ => None,
   };
 
   if resolution.main.is_none()
+    && !package.library
     && let Some(root) = package.modules.first()
   {
     diagnostics.push(

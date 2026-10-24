@@ -37,8 +37,8 @@ crates/
   sagitario_codegen_c/    SIR → C11 text
   sagitario_driver/       orchestrates the pipeline, embeds the runtime, invokes the C compiler
   sagitario_cli/          the `sag` binary
+  sagitario_nova/         the `nova` binary: package manager, `Nova.toml` parser (docs/nova.md)
 runtime/            minimal C runtime (ARC, panic, String, allocation, I/O and the OS calls of std)
-std/                standard library written in Sagitario
 tests/              end-to-end suites (see testing.md)
 ```
 
@@ -50,6 +50,8 @@ Dependencies flow strictly forward through the pipeline:
 span ◀─ diagnostics ◀─ lexer ◀─ parser ─▶ ast
                                   ▲
 resolve ◀─ types ◀─ sir ◀─ codegen_c ◀─ driver ◀─ cli
+                                          ▲
+                                          └──── nova
 ```
 
 - A crate never depends on a later phase.
