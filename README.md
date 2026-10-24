@@ -15,13 +15,13 @@ aims to run on every desktop and mobile platform and eventually compile itself.
 abstract class Animal {
   prv const name: String;
 
-  pub fn new(name: String) { self.name = name; }
+  pub fn new(self, name: String) { self.name = name; }
   pub fn display_name(self) -> String { self.name }
   pub abstract fn speak(self) -> String;
 }
 
 class Dog extends Animal {
-  pub fn new(name: String) { zod.new(name); }
+  pub fn new(self, name: String) { zod.new(name); }
   pub override fn speak(self) -> String { `${self.display_name()} says woof` }
 }
 

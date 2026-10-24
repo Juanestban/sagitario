@@ -1,0 +1,200 @@
+// Iterators, ranges as values, maps and the interfaces `Eq`, `Ord` and `Hash`: iterator
+// methods on iterators, lists and arrays, custom iterators, `for` over iterators and maps,
+// ranges reversed and stepped (also at the limits of their type), string iterators, `split`
+// and `lines`, maps with string, integer and struct keys, and sorting values of a type that
+// implements `Ord`. The harness fails the test on any leak.
+// expect-stdout: evens 2,4,6 squares 1,4,9,16,25 sum 15 count 3
+// expect-stdout: take 5,6,7 step 0,3,6,9 any true all false find Some(4) None
+// expect-stdout: array 2,4,6 iter 1|2|3
+// expect-stdout: fibonacci 1 1 2 3 5 8 13
+// expect-stdout: down 43210 stepped 0369 bytes 255 254 253 range 14,13,12,11,10
+// expect-stdout: i8 -128 -127 126 127 total 256 inclusive 10,8,6,4,2,0
+// expect-stdout: chars 5 bytes 6 split [a||b] [abc] [h|é|y] lines 3 [one;two;three]
+// expect-stdout: the=2 quick=1 brown=1 fox=1 jumps=1 over=1 lazy=1 dog=1
+// expect-stdout: len 8 the 2 cat false insert Some(2) remove Some(1) None
+// expect-stdout: keys the|quick|brown|jumps|over|lazy|dog|cat values 10
+// expect-stdout: big 500 1998 true first 1:2
+// expect-stdout: points 2 c
+// expect-stdout: versions 1.2 1.10 2.0, max 2.0
+// expect-stdout: compare Greater Less Equal, floats true true
+// expect-stdout: equals true false, hashes true
+
+struct Point impl Hash {
+  pub x: i32;
+  pub y: i32;
+
+  pub fn equals(self, other: Point) -> bool {
+    self.x == other.x && self.y == other.y
+  }
+
+  pub fn hash(self) -> u64 {
+    (self.x * 31 + self.y).hash()
+  }
+}
+
+struct Version impl Ord {
+  pub major: i32;
+  pub minor: i32;
+
+  pub fn equals(self, other: Version) -> bool {
+    self.major == other.major && self.minor == other.minor
+  }
+
+  pub fn compare(self, other: Version) -> Ordering {
+    match self.major.compare(other.major) {
+      Ordering::Equal => self.minor.compare(other.minor),
+      order => order,
+    }
+  }
+}
+
+fn max_of<T: Ord>(items: List<T>) -> T {
+  var best = items[0];
+
+  for item in items {
+    if item.compare(best) == Ordering::Greater {
+      best = item;
+    }
+  }
+
+  best
+}
+
+class Pair {
+  pub var first: i32;
+  pub var second: i32;
+
+  pub fn new(self, first: i32, second: i32) {
+    self.first = first;
+    self.second = second;
+  }
+}
+
+fn fibonacci() -> Iter<i32> {
+  const state = new Pair(0, 1);
+
+  new Iter<i32>(() => {
+    const next = state.second;
+
+    state.second = state.first + state.second;
+    state.first = next;
+    Some(next)
+  })
+}
+
+fn show(list: List<i32>) -> String {
+  list.map(n => `${n}`).collect().join(",")
+}
+
+fn show_option(value: Option<i32>) -> String {
+  match value {
+    Some(n) => `Some(${n})`,
+    None => "None",
+  }
+}
+
+fn name(order: Ordering) -> String {
+  match order {
+    Ordering::Less => "Less",
+    Ordering::Equal => "Equal",
+    Ordering::Greater => "Greater",
+  }
+}
+
+fn main() {
+  const numbers = List::from([1, 2, 3, 4, 5, 6]);
+  const evens = numbers.filter(n => n % 2 == 0).collect();
+  const squares = (1..=5).map(n => n * n).collect();
+  println(`evens ${show(evens)} squares ${show(squares)} sum ${(1..6).fold(0, (acc, n) => acc + n)} count ${evens.iter().count()}`);
+  println(
+    `take ${show((0..100).skip(5).take(3).collect())} step ${show((0..10).step_by(3).collect())} any ${numbers.any(n => n > 5)} all ${numbers.all(n => n > 5)} find ${show_option(numbers.find(n => n > 3))} ${show_option(numbers.find(n => n > 9))}`,
+  );
+
+  const array = [1, 2, 3];
+  println(`array ${show(array.map(n => n * 2).collect())} iter ${array.iter().map(n => `${n}`).collect().join("|")}`);
+
+  var fib = "";
+  for n in fibonacci().take(7) {
+    fib += ` ${n}`;
+  }
+  println(`fibonacci${fib}`);
+
+  var down = "";
+  for i in (0..5).rev() {
+    down += `${i}`;
+  }
+  var stepped = "";
+  for i in (0..10).step_by(3) {
+    stepped += `${i}`;
+  }
+  var bytes = "";
+  for b in (253u8..=255u8).rev() {
+    bytes += ` ${b}`;
+  }
+  println(`down ${down} stepped ${stepped} bytes${bytes} range ${show((10..15).rev().collect())}`);
+
+  var ends = "";
+  var total = 0;
+  for i in -128i8..=127i8 {
+    total += 1;
+
+    if i < -126i8 || i > 125i8 {
+      ends += ` ${i}`;
+    }
+  }
+  var inclusive = "";
+  for i in (0..=10).rev() {
+    if i % 2 == 0 {
+      inclusive += if inclusive.is_empty() { `${i}` } else { `,${i}` };
+    }
+  }
+  println(`i8${ends} total ${total} inclusive ${inclusive}`);
+
+  const parts = "a,,b".split(",").join("|");
+  const whole = "abc".split(";").join("|");
+  const letters = "héy".split("").join("|");
+  const lines = "one\r\ntwo\nthree\n".lines();
+  println(`chars ${"héllo".chars().count()} bytes ${"héllo".bytes().count()} split [${parts}] [${whole}] [${letters}] lines ${lines.len()} [${lines.join(";")}]`);
+
+  const counts = new Map<String, i32>();
+  for word in "the quick brown fox jumps over the lazy dog".split(" ") {
+    counts.insert(word, counts.get(word).unwrap_or(0) + 1);
+  }
+  var listed = "";
+  for entry in counts {
+    listed += if listed.is_empty() { `${entry.key}=${entry.value}` } else { ` ${entry.key}=${entry.value}` };
+  }
+  println(listed);
+
+  const previous = counts.insert("the", 3);
+  const removed = counts.remove("fox");
+  const again = counts.remove("fox");
+  println(`len 8 the ${previous.unwrap()} cat ${counts.contains_key("cat")} insert ${show_option(previous)} remove ${show_option(removed)} ${show_option(again)}`);
+  counts.insert("cat", 1);
+  println(`keys ${counts.keys().collect().join("|")} values ${counts.values().fold(0, (acc, n) => acc + n)}`);
+
+  const big = new Map<i32, i32>();
+  for i in 0..1000 {
+    big.insert(i, i * 2);
+  }
+  for i in 0..500 {
+    big.remove(i * 2);
+  }
+  const first = big.entries().next().unwrap();
+  println(`big ${big.len()} ${big.get(999).unwrap()} ${big.get(10).is_none()} first ${first.key}:${first.value}`);
+
+  const points = new Map<Point, String>();
+  const key = Point { x: 1, y: 2 };
+  points.insert(key, "a");
+  points.insert(Point { x: 3, y: 4 }, "b");
+  points.insert(Point { x: 1, y: 2 }, "c");
+  println(`points ${points.len()} ${points.get(key).unwrap()}`);
+
+  const versions = List::from([Version { major: 2, minor: 0 }, Version { major: 1, minor: 10 }, Version { major: 1, minor: 2 }]);
+  versions.sort();
+  const best = max_of(versions);
+  println(`versions ${versions.map(v => `${v.major}.${v.minor}`).collect().join(" ")}, max ${best.major}.${best.minor}`);
+
+  println(`compare ${name(5.compare(3))} ${name("abc".compare("abd"))} ${name('a'.compare('a'))}, floats ${(1.5).total_compare(-0.5) == Ordering::Greater} ${(-0.0).total_compare(0.0) == Ordering::Less}`);
+  println(`equals ${true.equals(true)} ${"a".equals("b")}, hashes ${"same".hash() == "same".hash() && 7u8.hash() == 7u8.hash()}`);
+}

@@ -1,6 +1,6 @@
 # 0011. Surface syntax
 
-- Status: Accepted
+- Status: Accepted; refined by [ADR-0035](0035-explicit-self-in-initializers.md) (`new` declares `self`)
 - Date: 2026-10-21
 
 ## Context

@@ -58,7 +58,8 @@ Increments ([ADR-0027](adr/0027-classes-and-arc.md)):
 5. Monomorphized generics with bounds ([ADR-0032](adr/0032-generics.md)).
 6. Closures: arrow functions, function types, captures
    ([ADR-0033](adr/0033-closures-details.md)).
-7. `List<T>`, `Map<K, V>` and iterators with `map`/`filter`.
+7. `List<T>`, `Map<K, V>`, iterators, and `Eq`/`Ord`/`Hash`
+   ([ADR-0034](adr/0034-collections-and-iterators.md)).
 8. The reference "zoo" program below.
 
 **Acceptance:** a reference "zoo" program using abstract classes, inheritance, `zod`,

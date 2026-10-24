@@ -1,0 +1,37 @@
+struct Point {
+  pub x: i32;
+}
+
+struct Loose impl Ord { //~ ERROR E0329
+  pub value: i32;
+
+  pub fn compare(self, other: Loose) -> Ordering {
+    self.value.compare(other.value)
+  }
+}
+
+fn takes(_list: List) {} //~ ERROR E0318
+
+fn pair(_list: List<i32, i32>) {} //~ ERROR E0318
+
+pub fn main() {
+  const _empty = new List(); //~ ERROR E0311
+  const _from = List::from(5); //~ ERROR E0300
+  const numbers = List::from([1, 2, 3]);
+  numbers.push("four"); //~ ERROR E0300
+  const _missing = numbers.size(); //~ ERROR E0316
+  const _joined = numbers.join(","); //~ ERROR E0316
+  const _bad_index = numbers[-1]; //~ ERROR E0310
+  const points = List::from([Point { x: 1 }]);
+  points[0].x = 2; //~ ERROR E0307
+  const floats = List::from([1.5, 2.5]);
+  const _found = floats.contains(1.5); //~ ERROR E0330
+  floats.sort(); //~ ERROR E0330
+  const _by_float = new Map<f64, i32>(); //~ ERROR E0330
+  const _same = 1.5.equals(1.5); //~ ERROR E0316
+  const iter = numbers.iter();
+  const _reversed = iter.rev(); //~ ERROR E0316
+  const _compared = numbers.iter() == iter; //~ ERROR E0310
+  const _range = 0.5..1.5; //~ ERROR E0310
+  for _x in 5 {} //~ ERROR E0310
+}

@@ -149,9 +149,25 @@ could be added.
   `Callee::Closure` calls a value, casting the pointer to the exact signature and passing the
   environment first. Named functions used as values (`Rvalue::FnValue`) are called through
   wrappers `sag_wrap_N` that ignore the environment.
-- The prelude part written in Sagitario (`crates/sagitario_driver/src/prelude.sag`) is embedded
-  by the driver as a module outside the package tree; the resolver looks names up there after a
-  module's own items and imports.
+- The prelude part written in Sagitario (`crates/sagitario_driver/src/prelude.sag`, followed by
+  one range function per integer type that the driver generates) is embedded by the driver as a
+  module outside the package tree; the resolver looks names up there after a module's own items
+  and imports. The compiler finds the items it relies on by name (`Resolution::prelude_item`,
+  `TypedModule::prelude`): `Iter`, `Map`, `Entry`, `Ordering`, `Eq`, `Ord`, `Hash`, and the
+  private functions behind methods such as `List::sort` or `String::split`
+  (`BuiltinMethod::Prelude`, called with the receiver first). Prelude functions are templates,
+  lowered only when used.
+- A `List<T>` is a `sag_object *` to a `sag_list`: the elements in a buffer with one spare slot,
+  and a function releasing one element (`sag_elem_release_N`) when they are managed. An element
+  is a place behind the list (`Projection::ListElem`, bounds-checked by `sag_list_at`); like a
+  field of a class instance, reading a managed one takes an owned copy. Pushing and inserting
+  store an element the SIR has retained; popping and removing move one out. `for` over a list
+  reads its length at every step; over an `Iter` it calls `next` until `None`, moving each value
+  into the loop variable, which is released at the end of each iteration. `(a..b).rev()` and
+  `(a..b).step_by(n)` in a `for` become a `ForRange` over an unsigned offset, so no value past
+  the type's limits is computed.
+- `equals`, `compare` and `hash` on integers, `bool`, `char` and `String` (directly or through
+  a bound in generic code) are lowered to comparisons and to `sag_hash_u64`/`sag_string_hash`.
 - Indexing goes through `sag_index_at`, which panics when the index is out of bounds.
 - When `main` returns `Result<(), String>`, the C `main` prints an `Err` and exits with code 1.
 - Every aggregate is declared (`typedef struct sag_sN sag_sN;`) before any is defined, so raw

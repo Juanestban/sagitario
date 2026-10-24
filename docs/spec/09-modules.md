@@ -75,15 +75,17 @@ Every module implicitly sees these names, without `use`:
 | Types and variants | `Option`, `Some`, `None`, `Result`, `Ok`, `Err`, `String`, `StringBuilder` | F1 |
 | Functions | `print(s: String)`, `println(s: String)`, `eprintln(s: String)`, `panic(message: String)` | F1 |
 | Types | `Error` (an interface) and `Error(message)` | F2 |
-| Types | `List`, `Map` | F2 |
+| Types | `List`, `Map`, `Iter`, `Entry`, `Ordering`; the interfaces `Eq`, `Ord`, `Hash` | F2 |
 
 - `print` and `println` write to stdout, `eprintln` to stderr (`println`/`eprintln` add a
   newline). If writing fails they **panic**, like Rust's `println!`. Code that must handle
   I/O errors uses the `std::io` functions, which return `Result<(), io::Error>`.
 - The prelude cannot be extended by user code. A local declaration or an import with the same
   name shadows a prelude name.
-- Part of the prelude is written in Sagitario (`Error` and the class behind `Error(...)`). The
-  compiler embeds it as a module outside the package, whose public items every module sees.
+- Part of the prelude is written in Sagitario (`Error` and the class behind `Error(...)`,
+  `Ordering`, `Eq`, `Ord`, `Hash`, `Entry`, `Iter` and `Map`). The compiler embeds it as a module
+  outside the package, whose public items every module sees, and compiles only the parts a
+  program uses.
 
 ```sag
 fn main() {

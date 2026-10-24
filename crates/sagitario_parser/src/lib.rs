@@ -2579,7 +2579,7 @@ mod tests {
     let (module, errors) = parse(
       "abstract class Animal { pub abstract fn speak(self) -> String; }
       class Dog extends pkg::Animal {
-        pub fn new() { zod.new(); }
+        pub fn new(self) { zod.new(); }
         pub override fn speak(self) -> String { zod.speak() }
       }",
     );
@@ -2602,7 +2602,7 @@ mod tests {
       "pub class Counter {
         prv const name: String;
         pub var count: i32;
-        pub fn new(name: String) { self.name = name; self.count = 0; }
+        pub fn new(self, name: String) { self.name = name; self.count = 0; }
         pub fn bump(self) { self.count += 1; }
       }",
     );
@@ -2612,8 +2612,7 @@ mod tests {
     let [Item::Class(decl)] = module.items.as_slice() else { panic!("expected one class") };
 
     assert_eq!(decl.fields.iter().map(|field| field.mutable).collect::<Vec<_>>(), vec![Some(false), Some(true)]);
-    assert_eq!(decl.functions[0].self_param, None);
-    assert!(decl.functions[1].self_param.is_some());
+    assert!(decl.functions.iter().all(|function| function.self_param.is_some()));
     assert_eq!(parse("class C { pub n: i32; }").1, vec!["E0100"]);
     assert!(matches!(parse("class C { pub weak var c: Option<C>; }").0.items.as_slice(), [Item::Class(decl)] if decl.fields[0].weak));
     assert_eq!(parse("struct P { pub override fn f(self) {} }").1, vec!["E0100"]);

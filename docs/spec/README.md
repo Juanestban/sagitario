@@ -55,7 +55,7 @@ abstract class Animal impl Named {
   prv const name: String;
   pub var age: i32;
 
-  pub fn new(name: String, age: i32) {
+  pub fn new(self, name: String, age: i32) {
     self.name = name;
     self.age = age;
   }
@@ -65,7 +65,7 @@ abstract class Animal impl Named {
 }
 
 class Dog extends Animal {
-  pub fn new(name: String) {
+  pub fn new(self, name: String) {
     zod.new(name, 0);
   }
 

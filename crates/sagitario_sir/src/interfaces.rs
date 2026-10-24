@@ -297,6 +297,8 @@ impl FnLowering<'_> {
     let instance = self.new_value(class_ty.clone(), Rvalue::Alloc(instance_index));
 
     if let Some(initializer) = self.typed.class_def(class).and_then(|def| def.initializer) {
+      let initializer = self.instance(initializer, Subst::default());
+
       self.call(Callee::Fn(initializer), vec![instance.clone(), text], Type::Unit);
     }
 

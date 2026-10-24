@@ -1,0 +1,176 @@
+// Lists: creation, indexing and assignment, every method, lists of strings, structs, classes
+// and lists, lists shared by structs and closures and stored in class fields, generic code
+// over lists, and `for` over a list that changes while it runs. The harness fails the test on
+// any leak.
+// expect-stdout: 3 10 2 [10,1,2]
+// expect-stdout: len 4, last d, first a
+// expect-stdout: pop Some(9) None
+// expect-stdout: get 20 none, first 10, last 30
+// expect-stdout: insert [0,10,15,20,30], removed 15 -> [0,10,20,30]
+// expect-stdout: cleared 0 true
+// expect-stdout: sorted [1,2,3,5,8], desc [8,5,3,2,1], reversed [1,2,3,5,8]
+// expect-stdout: contains true false, index Some(3) None
+// expect-stdout: joined a-b-c, words [Ada|Grace]
+// expect-stdout: points 1:2 -> 5:2
+// expect-stdout: counters 1 2, shared 2
+// expect-stdout: grid 1 0 / 0 7, rows 2
+// expect-stdout: captured 3, generic 6 and 12
+// expect-stdout: inventory: apple, pear
+// expect-stdout: growing: 1 2 3 4 5 6
+// expect-stdout: sum 15, tickets 3
+
+struct Point {
+  pub x: i32;
+  pub y: i32;
+}
+
+class Counter {
+  pub var count: i32;
+
+  pub fn new(self) {
+    self.count = 0;
+  }
+}
+
+class Inventory {
+  prv const items: List<String>;
+
+  pub fn new(self) {
+    self.items = new List<String>();
+  }
+
+  pub fn add(self, item: String) {
+    self.items.push(item);
+  }
+
+  pub fn describe(self) -> String {
+    self.items.join(", ")
+  }
+}
+
+struct Bag {
+  pub tickets: List<i32>;
+}
+
+fn show(list: List<i32>) -> String {
+  const parts = new List<String>();
+
+  for value in list {
+    parts.push(`${value}`);
+  }
+
+  `[${parts.join(",")}]`
+}
+
+fn show_option(value: Option<i32>) -> String {
+  match value {
+    Some(n) => `Some(${n})`,
+    None => "None",
+  }
+}
+
+fn total<T>(list: List<T>, measure: fn(T) -> i32) -> i32 {
+  var sum = 0;
+
+  for item in list {
+    sum += measure(item);
+  }
+
+  sum
+}
+
+fn main() {
+  const list = new List<i32>();
+
+  list.push(3);
+  list.push(1);
+  list.push(2);
+  list[0] = 10;
+  println(`${list.len()} ${list[0]} ${list[2]} ${show(list)}`);
+
+  const letters: List<String> = List::from(["a", "b", "c"]);
+
+  letters.push("d");
+  println(`len ${letters.len()}, last ${letters[3]}, first ${letters.first().unwrap()}`);
+
+  const single = List::from([9]);
+  const popped = single.pop();
+  println(`pop ${show_option(popped)} ${show_option(single.pop())}`);
+
+  const numbers = List::from([10, 20, 30]);
+  const missing = if numbers.get(3).is_none() { "none" } else { "some" };
+  println(`get ${numbers.get(1).unwrap()} ${missing}, first ${numbers.first().unwrap()}, last ${numbers.last().unwrap()}`);
+  numbers.insert(0, 0);
+  numbers.insert(2, 15);
+  const before = show(numbers);
+  const removed = numbers.remove(2);
+  println(`insert ${before}, removed ${removed} -> ${show(numbers)}`);
+  numbers.clear();
+  println(`cleared ${numbers.len()} ${numbers.is_empty()}`);
+
+  const values = List::from([5, 3, 8, 1, 2]);
+  values.sort();
+  const sorted = show(values);
+  values.sort_by((a, b) => b.compare(a));
+  const descending = show(values);
+  values.reverse();
+  println(`sorted ${sorted}, desc ${descending}, reversed ${show(values)}`);
+  println(`contains ${values.contains(8)} ${values.contains(4)}, index ${show_option(values.index_of(5).map(i => i as i32))} ${show_option(values.index_of(7).map(i => i as i32))}`);
+
+  const words = new List<String>();
+  words.push("Ada");
+  words.push("Grace");
+  println(`joined ${List::from(["a", "b", "c"]).join("-")}, words [${words.join("|")}]`);
+
+  // Elements are copies: a struct element changes by storing a new value.
+  const points = List::from([Point { x: 1, y: 2 }]);
+  const first = points[0];
+  var moved = points[0];
+  moved.x = 5;
+  points[0] = moved;
+  println(`points ${first.x}:${first.y} -> ${points[0].x}:${points[0].y}`);
+
+  // Class instances are shared: their fields change through the list.
+  const counters = List::from([new Counter(), new Counter()]);
+  counters[0].count += 1;
+  counters[1].count = 2;
+  const bag = Bag { tickets: new List<i32>() };
+  const copy = bag;
+  copy.tickets.push(1);
+  copy.tickets.push(2);
+  println(`counters ${counters[0].count} ${counters[1].count}, shared ${bag.tickets.len()}`);
+
+  const grid = List::from([List::from([0, 0]), List::from([0, 0])]);
+  grid[0][0] = 1;
+  grid[1][1] = 7;
+  println(`grid ${grid[0][0]} ${grid[0][1]} / ${grid[1][0]} ${grid[1][1]}, rows ${grid.len()}`);
+
+  const people = List::from(["Ada", "Grace", "Alan"]);
+  const count = () => people.len();
+  const lengths = total(people, name => name.len() as i32);
+  println(`captured ${count()}, generic ${total(List::from([1, 2, 3]), n => n)} and ${lengths}`);
+
+  const inventory = new Inventory();
+  inventory.add("apple");
+  inventory.add("pear");
+  println(`inventory: ${inventory.describe()}`);
+
+  // The length is read at every step, so elements added while iterating are visited.
+  const growing = List::from([1, 2, 3]);
+  var seen = "";
+  for value in growing {
+    if growing.len() < 6 {
+      growing.push(value + 3);
+    }
+
+    seen += ` ${value}`;
+  }
+  println(`growing:${seen}`);
+
+  var sum = 0;
+  for value in List::from([1, 2, 3, 4, 5]) {
+    sum += value;
+  }
+  bag.tickets.push(3);
+  println(`sum ${sum}, tickets ${bag.tickets.len()}`);
+}

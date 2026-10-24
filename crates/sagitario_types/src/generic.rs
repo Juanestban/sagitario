@@ -84,6 +84,7 @@ impl Type {
       Type::Class(inner) => Type::Class(ClassRef { id: inner.id, name: inner.name.clone(), args: args(&inner.args) }),
       Type::Interface(inner) => Type::Interface(InterfaceRef { id: inner.id, name: inner.name.clone(), args: args(&inner.args) }),
       Type::Array(elem, len) => Type::Array(Box::new(elem.substitute(subst)), *len),
+      Type::List(elem) => Type::List(Box::new(elem.substitute(subst))),
       Type::Option(value) => Type::Option(Box::new(value.substitute(subst))),
       Type::Result(value, error) => Type::Result(Box::new(value.substitute(subst)), Box::new(error.substitute(subst))),
       Type::Ptr { mutable, pointee } => Type::Ptr { mutable: *mutable, pointee: Box::new(pointee.substitute(subst)) },
@@ -100,7 +101,7 @@ impl Type {
       | Type::Enum(EnumRef { args, .. })
       | Type::Class(ClassRef { args, .. })
       | Type::Interface(InterfaceRef { args, .. }) => args.iter().any(Type::has_params),
-      Type::Array(elem, _) | Type::Option(elem) | Type::Ptr { pointee: elem, .. } => elem.has_params(),
+      Type::Array(elem, _) | Type::List(elem) | Type::Option(elem) | Type::Ptr { pointee: elem, .. } => elem.has_params(),
       Type::Result(value, error) => value.has_params() || error.has_params(),
       Type::Function { params, ret } => params.iter().any(Type::has_params) || ret.has_params(),
       _ => false,
@@ -115,7 +116,7 @@ impl Type {
       | Type::Enum(EnumRef { args, .. })
       | Type::Class(ClassRef { args, .. })
       | Type::Interface(InterfaceRef { args, .. }) => args.iter().any(Type::has_self),
-      Type::Array(elem, _) | Type::Option(elem) | Type::Ptr { pointee: elem, .. } => elem.has_self(),
+      Type::Array(elem, _) | Type::List(elem) | Type::Option(elem) | Type::Ptr { pointee: elem, .. } => elem.has_self(),
       Type::Result(value, error) => value.has_self() || error.has_self(),
       Type::Function { params, ret } => params.iter().any(Type::has_self) || ret.has_self(),
       _ => false,
@@ -129,7 +130,7 @@ impl Type {
       | Type::Enum(EnumRef { args, .. })
       | Type::Class(ClassRef { args, .. })
       | Type::Interface(InterfaceRef { args, .. }) => 1 + args.iter().map(Type::depth).max().unwrap_or(0),
-      Type::Array(elem, _) | Type::Option(elem) | Type::Ptr { pointee: elem, .. } => 1 + elem.depth(),
+      Type::Array(elem, _) | Type::List(elem) | Type::Option(elem) | Type::Ptr { pointee: elem, .. } => 1 + elem.depth(),
       Type::Result(value, error) => 1 + value.depth().max(error.depth()),
       Type::Function { params, ret } => 1 + params.iter().chain([ret.as_ref()]).map(Type::depth).max().unwrap_or(0),
       _ => 0,
@@ -167,6 +168,11 @@ impl Unknowns {
     self.groups.is_empty()
   }
 
+  /// Whether `param` is one of the parameters being inferred and its argument is not known yet.
+  fn is_unknown(&self, param: &ParamRef) -> bool {
+    self.groups.iter().any(|(owner, slots)| *owner == param.owner && slots.get(param.index as usize).is_some_and(Option::is_none))
+  }
+
   /// The arguments known so far; unknown ones stay parameters.
   pub(crate) fn subst(&self) -> Subst {
     Subst {
@@ -200,7 +206,9 @@ impl Unknowns {
           *slot = Some(actual.clone());
         }
       }
-      (Type::Option(pattern), Type::Option(actual)) | (Type::Array(pattern, _), Type::Array(actual, _)) => self.unify(pattern, actual),
+      (Type::Option(pattern), Type::Option(actual))
+      | (Type::Array(pattern, _), Type::Array(actual, _))
+      | (Type::List(pattern), Type::List(actual)) => self.unify(pattern, actual),
       (Type::Ptr { pointee: pattern, .. }, Type::Ptr { pointee: actual, .. }) => self.unify(pattern, actual),
       (Type::Result(value, error), Type::Result(actual_value, actual_error)) => {
         self.unify(value, actual_value);
@@ -327,7 +335,7 @@ impl TypedModule {
       Type::Class(inner) => self.class_ancestors(inner).iter().flat_map(|class| self.impls_of(TypeItem::Class(class.id), &class.args)).collect(),
       Type::Interface(inner) => vec![inner.clone()],
       Type::Param(param) => self.param_bounds(param),
-      _ => Vec::new(),
+      _ => self.primitive_impls(ty),
     };
     let mut found: Vec<InterfaceRef> = Vec::new();
 
@@ -462,19 +470,29 @@ impl Checker<'_> {
     let pattern = param.substitute(fixed);
     let known = pattern.substitute(&unknowns.subst());
 
-    if !mentions_unknown(&known, &unknowns.subst()) {
+    if !mentions_unknown(&known, unknowns) {
       self.expect(arg, &known);
 
       return;
     }
 
-    let actual = self.expr(arg, None);
+    // A lambda whose parameter types are known infers the rest from its body.
+    let hint = match &known {
+      Type::Function { params, ret } if matches!(arg.kind, sagitario_ast::ExprKind::Lambda { .. }) => {
+        let params_known = params.iter().all(|param| !mentions_unknown(param, unknowns));
+        let ret = if mentions_unknown(ret, unknowns) { Type::Error } else { ret.as_ref().clone() };
+
+        params_known.then(|| Type::Function { params: params.clone(), ret: Box::new(ret) })
+      }
+      _ => None,
+    };
+    let actual = self.expr(arg, hint.as_ref());
 
     unknowns.unify(&pattern, &actual);
 
     let expected = pattern.substitute(&unknowns.subst());
 
-    if !mentions_unknown(&expected, &unknowns.subst()) && !self.fits(&actual, &expected) {
+    if !mentions_unknown(&expected, unknowns) && !self.fits(&actual, &expected) {
       self.mismatch(arg.span, &expected, &actual);
     }
   }
@@ -621,18 +639,18 @@ impl Checker<'_> {
 }
 
 /// Whether `ty` mentions a parameter that `subst` leaves unchanged.
-fn mentions_unknown(ty: &Type, subst: &Subst) -> bool {
+/// Whether a type mentions a parameter whose argument is still unknown. A parameter given as
+/// its own argument (`new Box<T>(...)` inside `Box<T>`) is known.
+fn mentions_unknown(ty: &Type, unknowns: &Unknowns) -> bool {
   match ty {
-    Type::Param(param) => subst.params.iter().any(|(owner, args)| {
-      *owner == param.owner && args.get(param.index as usize).is_some_and(|arg| matches!(arg, Type::Param(same) if same == param))
-    }),
+    Type::Param(param) => unknowns.is_unknown(param),
     Type::Struct(StructRef { args, .. })
     | Type::Enum(EnumRef { args, .. })
     | Type::Class(ClassRef { args, .. })
-    | Type::Interface(InterfaceRef { args, .. }) => args.iter().any(|arg| mentions_unknown(arg, subst)),
-    Type::Array(elem, _) | Type::Option(elem) | Type::Ptr { pointee: elem, .. } => mentions_unknown(elem, subst),
-    Type::Result(value, error) => mentions_unknown(value, subst) || mentions_unknown(error, subst),
-    Type::Function { params, ret } => params.iter().any(|param| mentions_unknown(param, subst)) || mentions_unknown(ret, subst),
+    | Type::Interface(InterfaceRef { args, .. }) => args.iter().any(|arg| mentions_unknown(arg, unknowns)),
+    Type::Array(elem, _) | Type::List(elem) | Type::Option(elem) | Type::Ptr { pointee: elem, .. } => mentions_unknown(elem, unknowns),
+    Type::Result(value, error) => mentions_unknown(value, unknowns) || mentions_unknown(error, unknowns),
+    Type::Function { params, ret } => params.iter().any(|param| mentions_unknown(param, unknowns)) || mentions_unknown(ret, unknowns),
     _ => false,
   }
 }

@@ -38,8 +38,13 @@ pub(crate) struct Instance {
 const MAX_DEPTH: usize = 64;
 
 /// Whether a function is lowered only through instances: it has type parameters, belongs to a
-/// generic type, or belongs to an interface (its `Self` is the implementing type).
+/// generic type, or belongs to an interface (its `Self` is the implementing type). Prelude
+/// functions are also lowered on demand, so programs only contain those they use.
 pub(crate) fn is_template(resolution: &Resolution, typed: &TypedModule, function: FnId) -> bool {
+  if resolution.in_prelude(function) {
+    return true;
+  }
+
   match resolution.owner(function) {
     Some(TypeItem::Interface(_)) => true,
     Some(owner) if typed.generics.contains_key(&ParamOwner::Item(owner)) => true,
@@ -176,7 +181,7 @@ impl FnLowering<'_> {
           self.register_types(&field);
         }
       }
-      Type::Array(elem, _) | Type::Ptr { pointee: elem, .. } => self.register_types(elem),
+      Type::Array(elem, _) | Type::List(elem) | Type::Ptr { pointee: elem, .. } => self.register_types(elem),
       _ => {}
     }
   }

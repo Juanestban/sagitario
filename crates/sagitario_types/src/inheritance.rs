@@ -74,7 +74,7 @@ impl Checker<'_> {
   pub(crate) fn class_method(&self, id: ClassId, name: &str) -> Option<FnId> {
     for (depth, class) in self.typed.class_chain(id).into_iter().enumerate() {
       if let Some(function) = self.resolution.type_function(self.package, TypeItem::Class(class), name) {
-        let method = self.resolution.fn_decl(self.package, function).is_some_and(|decl| decl.self_param.is_some());
+        let method = self.resolution.is_method(self.package, function);
 
         return (depth == 0 || method).then_some(function);
       }
@@ -133,7 +133,7 @@ impl Checker<'_> {
         let owner = self.resolution.owner(inherited).map(|owner| self.resolution.type_name(self.package, owner)).unwrap_or_default();
         let private = inherited_decl.visibility == Visibility::Private;
 
-        if fn_decl.self_param.is_none() || (private && !fn_decl.is_override) {
+        if !self.resolution.is_method(self.package, function) || (private && !fn_decl.is_override) {
           let note = if private { "private methods cannot be overridden" } else { "static functions cannot reuse the name of an inherited method" };
 
           self.diagnostics.push(
@@ -245,7 +245,7 @@ impl Checker<'_> {
         let Some(abstract_decl) = self
           .resolution
           .fn_decl(self.package, function)
-          .filter(|decl| decl.is_abstract && decl.self_param.is_some() && decl.visibility != Visibility::Private)
+          .filter(|decl| decl.is_abstract && decl.self_param.is_some() && decl.name.name != "new" && decl.visibility != Visibility::Private)
         else {
           continue;
         };
@@ -279,7 +279,9 @@ impl Checker<'_> {
       let functions = self.resolution.classes.get(class.0 as usize).map(|info| info.functions.clone()).unwrap_or_default();
 
       for function in functions {
-        let Some(decl) = self.resolution.fn_decl(self.package, function).filter(|decl| decl.self_param.is_some()) else { continue };
+        let Some(decl) = self.resolution.fn_decl(self.package, function).filter(|_| self.resolution.is_method(self.package, function)) else {
+          continue;
+        };
 
         match methods.iter_mut().find(|(name, _)| *name == decl.name.name) {
           Some(entry) => entry.1 = function,
@@ -320,7 +322,7 @@ impl Checker<'_> {
 
         functions.into_iter().map(move |function| (ClassId(index as u32), function))
       })
-      .filter(|(_, function)| self.resolution.fn_decl(self.package, *function).is_some_and(|decl| decl.self_param.is_some()))
+      .filter(|(_, function)| self.resolution.is_method(self.package, *function))
       .collect();
     let mut dynamic = HashSet::new();
 

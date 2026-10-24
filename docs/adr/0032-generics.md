@@ -1,6 +1,6 @@
 # 0032. Generics: type arguments, inference, bounds and monomorphization
 
-- Status: Accepted
+- Status: Accepted; refined by [ADR-0034](0034-collections-and-iterators.md)
 - Date: 2026-10-23
 - Refines: [ADR-0003](0003-static-typing-and-generics.md); completes
   [ADR-0031](0031-interfaces.md) (Q47)

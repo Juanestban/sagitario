@@ -753,6 +753,181 @@ sag_object *sag_object_upgrade(sag_object *object) {
   return object;
 }
 
+/* ---- Lists ------------------------------------------------------------------------------- */
+
+static void sag_list_drop(sag_object *object) {
+  sag_list *list = (sag_list *)object;
+  if (list->release != NULL) {
+    for (size_t i = 0; i < list->len; i++) {
+      list->release(list->data + i * list->size);
+    }
+  }
+  free(list->data);
+}
+
+/* Makes room for `cap` elements plus the spare slot. */
+static void sag_list_reserve(sag_list *list, size_t cap) {
+  if (cap <= list->cap) {
+    return;
+  }
+  if (cap > SIZE_MAX / list->size - 1) {
+    sag_panic("out of memory");
+  }
+  unsigned char *data = realloc(list->data, (cap + 1) * list->size);
+  if (data == NULL) {
+    sag_panic("out of memory");
+  }
+  list->data = data;
+  list->cap = cap;
+}
+
+/* Room for one more element. */
+static void sag_list_grow(sag_list *list) {
+  if (list->len < list->cap) {
+    return;
+  }
+  sag_list_reserve(list, list->cap == 0 ? 4 : (list->cap > SIZE_MAX / 2 ? SIZE_MAX : list->cap * 2));
+}
+
+sag_object *sag_list_new(size_t size, void (*release)(void *element)) {
+  sag_list *list = sag_alloc(sizeof(sag_list));
+  list->len = 0;
+  list->cap = 0;
+  /* `()` elements still take a byte, as in every other C value. */
+  list->size = size == 0 ? 1 : size;
+  list->data = NULL;
+  list->release = release;
+  sag_object_init(&list->header, sag_list_drop, NULL);
+  return &list->header;
+}
+
+sag_object *sag_list_from(size_t size, void (*release)(void *element), const void *elements, size_t len) {
+  sag_object *object = sag_list_new(size, release);
+  sag_list *list = (sag_list *)object;
+  if (len > 0) {
+    sag_list_reserve(list, len);
+    memcpy(list->data, elements, len * list->size);
+    list->len = len;
+  }
+  return object;
+}
+
+void *sag_list_push(sag_object *object) {
+  sag_list *list = (sag_list *)object;
+  sag_list_grow(list);
+  return list->data + list->len++ * list->size;
+}
+
+void *sag_list_insert(sag_object *object, size_t index, const char *file, int line) {
+  sag_list *list = (sag_list *)object;
+  if (index > list->len) {
+    char message[128];
+    snprintf(message, sizeof message, "insertion index (is %zu) should be <= len (is %zu)", index, list->len);
+    sag_panic_at(message, file, line);
+  }
+  sag_list_grow(list);
+  unsigned char *slot = list->data + index * list->size;
+  memmove(slot + list->size, slot, (list->len - index) * list->size);
+  list->len++;
+  return slot;
+}
+
+void *sag_list_pop(sag_object *object) {
+  sag_list *list = (sag_list *)object;
+  if (list->len == 0) {
+    sag_panic("pop from an empty list");
+  }
+  return list->data + --list->len * list->size;
+}
+
+void *sag_list_remove(sag_object *object, size_t index, const char *file, int line) {
+  sag_list *list = (sag_list *)object;
+  if (index >= list->len) {
+    char message[128];
+    snprintf(message, sizeof message, "removal index (is %zu) should be < len (is %zu)", index, list->len);
+    sag_panic_at(message, file, line);
+  }
+  unsigned char *spare = list->data + list->cap * list->size;
+  unsigned char *slot = list->data + index * list->size;
+  memcpy(spare, slot, list->size);
+  memmove(slot, slot + list->size, (list->len - index - 1) * list->size);
+  list->len--;
+  return spare;
+}
+
+void sag_list_clear(sag_object *object) {
+  sag_list *list = (sag_list *)object;
+  size_t len = list->len;
+  /* Emptied first: releasing an element cannot reach the list again. */
+  list->len = 0;
+  if (list->release != NULL) {
+    for (size_t i = 0; i < len; i++) {
+      list->release(list->data + i * list->size);
+    }
+  }
+}
+
+void sag_list_reverse(sag_object *object) {
+  sag_list *list = (sag_list *)object;
+  if (list->len < 2) {
+    return;
+  }
+  unsigned char *spare = list->data + list->cap * list->size;
+  for (size_t i = 0, j = list->len - 1; i < j; i++, j--) {
+    memcpy(spare, list->data + i * list->size, list->size);
+    memcpy(list->data + i * list->size, list->data + j * list->size, list->size);
+    memcpy(list->data + j * list->size, spare, list->size);
+  }
+}
+
+/* ---- Hashing and order ------------------------------------------------------------------- */
+
+/* The finalizer of SplitMix64: every input bit affects every output bit. */
+uint64_t sag_hash_u64(uint64_t value) {
+  value += UINT64_C(0x9e3779b97f4a7c15);
+  value = (value ^ (value >> 30)) * UINT64_C(0xbf58476d1ce4e5b9);
+  value = (value ^ (value >> 27)) * UINT64_C(0x94d049bb133111eb);
+  return value ^ (value >> 31);
+}
+
+/* FNV-1a. */
+uint64_t sag_string_hash(sag_string text) {
+  uint64_t hash = UINT64_C(0xcbf29ce484222325);
+  for (size_t i = 0; i < text.len; i++) {
+    hash = (hash ^ text.ptr[i]) * UINT64_C(0x100000001b3);
+  }
+  return hash;
+}
+
+/* Maps the bits of a float to an unsigned key with the same total order. */
+static uint64_t sag_total_key64(uint64_t bits) {
+  return (bits >> 63) != 0 ? ~bits : bits | (UINT64_C(1) << 63);
+}
+
+static uint32_t sag_total_key32(uint32_t bits) {
+  return (bits >> 31) != 0 ? ~bits : bits | (UINT32_C(1) << 31);
+}
+
+int32_t sag_f32_total_compare(float a, float b) {
+  uint32_t x;
+  uint32_t y;
+  memcpy(&x, &a, sizeof x);
+  memcpy(&y, &b, sizeof y);
+  x = sag_total_key32(x);
+  y = sag_total_key32(y);
+  return (x > y) - (x < y);
+}
+
+int32_t sag_f64_total_compare(double a, double b) {
+  uint64_t x;
+  uint64_t y;
+  memcpy(&x, &a, sizeof x);
+  memcpy(&y, &b, sizeof y);
+  x = sag_total_key64(x);
+  y = sag_total_key64(y);
+  return (x > y) - (x < y);
+}
+
 /* ---- FFI --------------------------------------------------------------------------------- */
 
 struct sag_cstring_obj {

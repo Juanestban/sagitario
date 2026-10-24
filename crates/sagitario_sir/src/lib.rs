@@ -28,6 +28,7 @@
 //! compiler error, reported as `LowerError`.
 
 mod closures;
+mod collections;
 mod interfaces;
 mod matching;
 mod mono;
@@ -99,7 +100,7 @@ impl Layouts {
   /// Whether values of `ty` hold references, so copies must be retained and released.
   pub fn is_managed(&self, ty: &Type) -> bool {
     match ty {
-      Type::String | Type::StringBuilder | Type::CString | Type::Class(_) | Type::Interface(_) | Type::Function { .. } => true,
+      Type::String | Type::StringBuilder | Type::CString | Type::Class(_) | Type::Interface(_) | Type::Function { .. } | Type::List(_) => true,
       Type::Array(elem, _) => self.is_managed(elem),
       Type::Struct(inner) => self.struct_fields(inner).iter().any(|field| self.is_managed(field)),
       Type::Enum(_) | Type::Option(_) | Type::Result(..) => self.variants(ty).iter().flatten().flatten().any(|field| self.is_managed(field)),
@@ -194,6 +195,8 @@ pub enum Projection {
   EnvField { env: usize, index: usize },
   /// A bounds-checked element of an array of length `len`.
   Index { index: Operand, len: u64 },
+  /// A bounds-checked element, of type `elem`, of the list a reference points to.
+  ListElem { index: Operand, elem: Type },
   /// The tag of an enum value: the index of its variant, as `u32`.
   Tag,
   /// A field of the given variant of an enum value; only valid when the tag matches.
@@ -244,15 +247,34 @@ pub enum Stmt {
   Loop {
     body: Vec<Stmt>,
   },
-  /// `for var in start..end` (or `..=`); `start` and `end` are evaluated once, before the loop.
+  /// `for var in start..end` (or `..=`); `start`, `end` and `step` (a `usize`, 1 if absent)
+  /// are evaluated once, before the loop. `reverse` counts down from the last value.
   ForRange {
     var: Local,
     ty: IntTy,
     start: Operand,
     end: Operand,
     inclusive: bool,
+    reverse: bool,
+    step: Option<Operand>,
     body: Vec<Stmt>,
   },
+  /// Appends an element (already retained) to a list.
+  ListPush {
+    list: Operand,
+    value: Operand,
+  },
+  /// Inserts an element (already retained) at a position of a list, moving the following ones;
+  /// a position past the end panics.
+  ListInsert {
+    list: Operand,
+    index: Operand,
+    value: Operand,
+  },
+  /// Releases every element of a list and empties it.
+  ListClear(Operand),
+  /// Reverses the order of the elements of a list.
+  ListReverse(Operand),
   /// `for var in array`: `var` borrows each element of `array` (a copy taken before the loop).
   ForArray {
     var: Local,
@@ -339,6 +361,23 @@ pub enum Rvalue {
   },
   /// A named function as a value: its wrapper, without environment.
   FnValue(FnId),
+  /// A new empty list of the destination's type.
+  ListNew,
+  /// The number of elements of a list, a `usize`.
+  ListLen(Operand),
+  /// Moves the last element out of a list, which must not be empty.
+  ListPop(Operand),
+  /// Moves the element at a position out of a list, moving the following ones; a position out
+  /// of bounds panics.
+  ListRemove {
+    list: Operand,
+    index: Operand,
+  },
+  /// A new list with the elements of an array of type `array_ty` (already retained for it).
+  ListFromArray {
+    array: Operand,
+    array_ty: Type,
+  },
   /// A value of a class, struct or enum as an interface value with the given itable: a new
   /// reference to the instance, or a box holding a copy of the value.
   ToDyn {
@@ -1047,6 +1086,7 @@ impl FnLowering<'_> {
 
         Ok(place)
       }
+      ExprKind::Index { base, index } if matches!(self.type_of(base)?, Type::List(_)) => self.list_elem_place(base, index, ty),
       ExprKind::Index { base, index } => {
         let Type::Array(_, len) = self.type_of(base)? else {
           return error("index into a value that is not an array");
@@ -1180,14 +1220,17 @@ impl FnLowering<'_> {
       },
       ExprKind::Try(inner) => self.try_expr(inner),
       ExprKind::New { .. } if ty == Type::StringBuilder => Ok(self.new_string_builder()),
+      ExprKind::New { .. } if matches!(ty, Type::List(_)) => Ok(self.new_value(ty, Rvalue::ListNew)),
+      ExprKind::Call { callee, args } if self.is_list_from(callee) => self.list_from(&ty, args),
       ExprKind::New { args, .. } => self.new_instance(&ty, args),
       ExprKind::Match { scrutinee, arms } => self.match_expr(&ty, scrutinee, arms),
       ExprKind::Field { .. } | ExprKind::Index { .. } => {
         let place = self.place(expr)?;
 
         if self.managed(&ty) {
-          // A field of an instance can change during the statement through another reference.
-          if place.projections.iter().any(|projection| matches!(projection, Projection::ClassField { .. })) {
+          // A field of an instance or an element of a list can change during the statement
+          // through another reference.
+          if place.projections.iter().any(|projection| matches!(projection, Projection::ClassField { .. } | Projection::ListElem { .. })) {
             return Ok(self.owned_copy(ty, Operand::Place(place)));
           }
 
@@ -1279,6 +1322,10 @@ impl FnLowering<'_> {
           BuiltinMethod::Map | BuiltinMethod::MapErr | BuiltinMethod::AndThen | BuiltinMethod::UnwrapOrElse | BuiltinMethod::Filter => {
             self.closure_method(&method, &ty, receiver, args)
           }
+          BuiltinMethod::List(op) => self.list_method(op, &ty, receiver, args),
+          BuiltinMethod::Prelude(function) => self.prelude_method(expr, function, &ty, receiver, args),
+          BuiltinMethod::TotalCompare => self.total_compare(&ty, receiver, args),
+          BuiltinMethod::RangeRev => self.range_iter(receiver, true, &ty),
           BuiltinMethod::Runtime { .. } | BuiltinMethod::Find | BuiltinMethod::ToDigit | BuiltinMethod::Parse(_) => {
             self.text_method(method, &ty, receiver, args)
           }
@@ -1296,7 +1343,20 @@ impl FnLowering<'_> {
 
           return Ok(Operand::Const(Const::Int { value: u128::from(len), negative: false, ty: IntTy::Usize }));
         };
-        let receiver_ty = self.type_of(receiver)?;
+        // A list or array calling a method of `Iter` becomes an iterator first.
+        let converted = match self.typed.to_iter.get(&receiver.id).cloned() {
+          Some((to_iter, args)) => Some(self.iter_of(receiver, to_iter, args)?),
+          None => None,
+        };
+        let receiver_ty = match &converted {
+          Some(Operand::Local(local)) => self.local_type(*local),
+          _ => self.type_of(receiver)?,
+        };
+
+        if converted.is_none() && self.is_primitive_method(function, &receiver_ty) {
+          return self.primitive_method(function, &ty, receiver, args);
+        }
+
         let subst = self.call_subst(expr.id, function, Some(&receiver_ty));
         let sig = self.typed.sig(function).ok_or_else(|| LowerError("method without a signature".to_string()))?.substitute(&subst);
         // Methods of interface values go through the itable; interface methods on values of a
@@ -1315,7 +1375,11 @@ impl FnLowering<'_> {
             }
           }
         };
-        let receiver_value = if by_ref { Operand::Ref(self.base_place(receiver)?) } else { self.expr(receiver)? };
+        let receiver_value = match converted {
+          Some(value) => value,
+          None if by_ref => Operand::Ref(self.base_place(receiver)?),
+          None => self.expr(receiver)?,
+        };
         let mut operands = vec![receiver_value];
 
         for (arg, param) in args.iter().zip(&sig.params) {
@@ -1528,6 +1592,10 @@ impl FnLowering<'_> {
           _ => {}
         }
 
+        if self.for_range_method(var, iter, body)? || self.for_collection(var, iter, body)? {
+          return Ok(UNIT);
+        }
+
         let iter_ty = self.type_of(iter)?;
 
         if let Type::Array(_, len) = iter_ty {
@@ -1562,7 +1630,7 @@ impl FnLowering<'_> {
         let end = self.new_value(Type::Int(int), Rvalue::Use(end));
         let loop_body = self.loop_buffer(None, |lowering| lowering.block_into(body, None))?;
 
-        self.emit(Stmt::ForRange { var, ty: int, start, end, inclusive: *inclusive, body: loop_body });
+        self.emit(Stmt::ForRange { var, ty: int, start, end, inclusive: *inclusive, reverse: false, step: None, body: loop_body });
 
         Ok(UNIT)
       }
@@ -1620,7 +1688,7 @@ impl FnLowering<'_> {
 
         Ok(UNIT)
       }
-      ExprKind::Range { .. } => error("range outside of `for`"),
+      ExprKind::Range { .. } => self.range_iter(expr, false, &ty),
     }
   }
 

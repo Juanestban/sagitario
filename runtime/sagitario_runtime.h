@@ -419,6 +419,73 @@ static inline float sag_f64_to_f32(double x) {
   return (float)x;
 }
 
+/* ---- Lists (docs/spec/02-types.md#arrays-and-lists) -------------------------------------- */
+
+/* A `List<T>`: an object holding `len` elements of `size` bytes in `data`, which has room for
+ * `cap` elements plus one, where `sag_list_remove` leaves the removed element. `release`
+ * releases one element, or is NULL when elements hold no references. */
+typedef struct sag_list {
+  sag_object header;
+  size_t len;
+  size_t cap;
+  size_t size;
+  unsigned char *data;
+  void (*release)(void *element);
+} sag_list;
+
+sag_object *sag_list_new(size_t size, void (*release)(void *element));
+/* A list with a copy of `len` elements, whose references the list takes over. */
+sag_object *sag_list_from(size_t size, void (*release)(void *element), const void *elements, size_t len);
+
+static inline size_t sag_list_len(sag_object *list) {
+  return ((sag_list *)list)->len;
+}
+
+/* The element at `index`; panics if it is out of bounds. */
+static inline void *sag_list_at(sag_object *list, size_t index, const char *file, int line) {
+  sag_list *self = (sag_list *)list;
+  return self->data + sag_index_at(index, self->len, file, line) * self->size;
+}
+
+/* The slot of a new last element, which the caller fills. */
+void *sag_list_push(sag_object *list);
+/* The slot of a new element at `index` (after moving the following ones), which the caller
+ * fills; panics if `index` is past the end. */
+void *sag_list_insert(sag_object *list, size_t index, const char *file, int line);
+/* Removes the last element, which must exist, and returns where it is until the list changes. */
+void *sag_list_pop(sag_object *list);
+/* Removes the element at `index` and returns where it is until the list changes; panics if it
+ * is out of bounds. */
+void *sag_list_remove(sag_object *list, size_t index, const char *file, int line);
+void sag_list_clear(sag_object *list);
+void sag_list_reverse(sag_object *list);
+
+/* ---- Hashing and order (docs/spec/05-interfaces-generics.md) ------------------------------ */
+
+uint64_t sag_hash_u64(uint64_t value);
+uint64_t sag_string_hash(sag_string text);
+/* -1, 0 or 1 by the IEEE 754 total order: -NaN < -inf < ... < -0 < +0 < ... < inf < NaN. */
+int32_t sag_f32_total_compare(float a, float b);
+int32_t sag_f64_total_compare(double a, double b);
+
+/* The integer at an offset computed modulo 2^N by `for` loops over ranges with steps; like the
+ * arithmetic above, converting to a signed type keeps the low bits. */
+#define SAG_FROM_UINTMAX(NAME, T)                         \
+  static inline T sag_from_uintmax_##NAME(uintmax_t value) { \
+    return (T)value;                                        \
+  }
+
+SAG_FROM_UINTMAX(i8, int8_t)
+SAG_FROM_UINTMAX(i16, int16_t)
+SAG_FROM_UINTMAX(i32, int32_t)
+SAG_FROM_UINTMAX(i64, int64_t)
+SAG_FROM_UINTMAX(isize, intptr_t)
+SAG_FROM_UINTMAX(u8, uint8_t)
+SAG_FROM_UINTMAX(u16, uint16_t)
+SAG_FROM_UINTMAX(u32, uint32_t)
+SAG_FROM_UINTMAX(u64, uint64_t)
+SAG_FROM_UINTMAX(usize, size_t)
+
 /* ---- Program lifecycle ----------------------------------------------------------------- */
 
 void sag_rt_init(int argc, char **argv);

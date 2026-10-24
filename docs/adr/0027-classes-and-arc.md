@@ -1,6 +1,6 @@
 # 0027. Classes, construction, ARC objects and `weak` references
 
-- Status: Accepted; refined by [ADR-0030](0030-weak-references.md)
+- Status: Accepted; refined by [ADR-0030](0030-weak-references.md), [ADR-0035](0035-explicit-self-in-initializers.md)
 - Date: 2026-10-23
 - Refines: [ADR-0002](0002-arc-memory-model.md) and [ADR-0004](0004-class-model.md);
   resolves open question Q12
@@ -38,7 +38,7 @@ F2 also needed to be split into increments, as F1 was.
 | # | Topic | Decision |
 |---|---|---|
 | 1 | Class without `new` | A class without fields gets an implicit `new()` without parameters. A class with fields must declare `new` (E0324). Fields have no initializers in the MVP (`var n: i32 = 0;` does not exist). |
-| 2 | Inside `new` | `self` is implicit. Every field, `const` and `var`, is assigned before `new` returns: at its end and at every `return`. Before that, `self` is only used to assign fields and to read fields already assigned. Calling methods on `self` or passing it along is an error (E0325). A `const` field is assigned exactly once (E0308). `new` has no return type (E0324). |
+| 2 | Inside `new` | `self` is implicit (superseded by ADR-0035: `new` declares `self`). Every field, `const` and `var`, is assigned before `new` returns: at its end and at every `return`. Before that, `self` is only used to assign fields and to read fields already assigned. Calling methods on `self` or passing it along is an error (E0325). A `const` field is assigned exactly once (E0308). `new` has no return type (E0324). |
 | 3 | `self` in methods | Methods take `self`; class methods never take `var self` (see ADR-0028). A `var` field can be modified through any reference to the instance, including a `const` binding or a parameter. The same holds for the parts of a `var` field: `obj.pos.x = 1` and `obj.pos.move_by(1.0)` work when `pos` is `var`. A `const` field cannot be modified outside `new`, not even in its parts. `self` cannot be reassigned in a class (E0308). |
 | 4 | Destructors | There are none in the MVP. When the last reference goes away, the object releases its fields. Chains of objects are destroyed in a loop, not recursively, so long linked lists do not exhaust the stack. |
 | 5 | Operations | `==` and `!=` compare identity between references of the same class; from increment 2, also between classes related by inheritance. A class cannot be interpolated until a `Display` interface exists. A class may contain itself through `Option<C>`: it is a reference. |

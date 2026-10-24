@@ -1,6 +1,7 @@
 //! The prelude written in Sagitario (docs/spec/09-modules.md#prelude): its public items are
-//! visible in every module. The rest of the prelude (`println`, `Option`, `String`, ...) is
-//! built into the compiler.
+//! visible in every module. The rest of the prelude (`println`, `Option`, `String`, `List`, ...)
+//! is built into the compiler, which also calls some private functions of this module to
+//! implement methods of `List`, strings and ranges. Functions are only compiled when used.
 
 /// The interface of error values (docs/spec/05-interfaces-generics.md#the-error-interface-f2).
 pub interface Error {
@@ -11,11 +12,593 @@ pub interface Error {
 class MessageError impl Error {
   prv const text: String;
 
-  pub fn new(text: String) {
+  pub fn new(self, text: String) {
     self.text = text;
   }
 
   pub fn message(self) -> String {
     self.text
   }
+}
+
+/// The result of comparing two values (docs/spec/05-interfaces-generics.md#equality-order-and-hashing).
+pub enum Ordering {
+  Less,
+  Equal,
+  Greater,
+}
+
+/// Values that can be compared for equality. Integers, `bool`, `char` and `String` implement
+/// it.
+pub interface Eq {
+  fn equals(self, other: Self) -> bool;
+}
+
+/// Values with a total order. Integers, `bool`, `char` and `String` implement it.
+pub interface Ord extends Eq {
+  fn compare(self, other: Self) -> Ordering;
+}
+
+/// Values that can be keys of a `Map`: equal values must have the same hash. Integers, `bool`,
+/// `char` and `String` implement it.
+pub interface Hash extends Eq {
+  fn hash(self) -> u64;
+}
+
+/// A key and its value, as a `Map` lists them.
+pub struct Entry<K, V> {
+  pub key: K;
+  pub value: V;
+}
+
+/// A value that closures can change: their captures are read-only.
+class Cell<T> {
+  pub var value: T;
+
+  pub fn new(self, value: T) {
+    self.value = value;
+  }
+}
+
+/// A lazy sequence of values: each call to `next` computes the following one
+/// (docs/spec/08-closures.md#iterators).
+pub class Iter<T> {
+  prv const step: fn() -> Option<T>;
+
+  /// An iterator whose values `step` returns, until it returns `None`.
+  pub fn new(self, step: fn() -> Option<T>) {
+    self.step = step;
+  }
+
+  /// The next value, or `None` once the iterator is exhausted.
+  pub fn next(self) -> Option<T> {
+    self.step()
+  }
+
+  pub fn map<U>(self, f: fn(T) -> U) -> Iter<U> {
+    const source = self;
+
+    new Iter<U>(() => source.next().map(f))
+  }
+
+  pub fn filter(self, keep: fn(T) -> bool) -> Iter<T> {
+    const source = self;
+
+    new Iter<T>(() => {
+      for value in source {
+        if keep(value) {
+          return Some(value);
+        }
+      }
+
+      None
+    })
+  }
+
+  /// The first `count` values.
+  pub fn take(self, count: usize) -> Iter<T> {
+    const source = self;
+    const taken = new Cell<usize>(0);
+
+    new Iter<T>(() => {
+      if taken.value >= count {
+        return None;
+      }
+
+      taken.value += 1;
+      source.next()
+    })
+  }
+
+  /// The values after the first `count`.
+  pub fn skip(self, count: usize) -> Iter<T> {
+    const source = self;
+    const skipped = new Cell<bool>(false);
+
+    new Iter<T>(() => {
+      if !skipped.value {
+        skipped.value = true;
+
+        for _ in 0..count {
+          if source.next().is_none() {
+            return None;
+          }
+        }
+      }
+
+      source.next()
+    })
+  }
+
+  /// The first value, then every `step`-th one; a `step` of 0 panics.
+  pub fn step_by(self, step: usize) -> Iter<T> {
+    if step == 0 {
+      panic("the step of `step_by` must be greater than 0");
+    }
+
+    const source = self;
+    const started = new Cell<bool>(false);
+
+    new Iter<T>(() => {
+      if started.value {
+        for _ in 1..step {
+          if source.next().is_none() {
+            return None;
+          }
+        }
+      }
+
+      started.value = true;
+      source.next()
+    })
+  }
+
+  /// A new list with the remaining values.
+  pub fn collect(self) -> List<T> {
+    const list = new List<T>();
+
+    for value in self {
+      list.push(value);
+    }
+
+    list
+  }
+
+  /// How many values remain; consumes them.
+  pub fn count(self) -> usize {
+    var count: usize = 0;
+
+    for _ in self {
+      count += 1;
+    }
+
+    count
+  }
+
+  /// Combines the values from left to right, starting with `init`.
+  pub fn fold<A>(self, init: A, f: fn(A, T) -> A) -> A {
+    var result = init;
+
+    for value in self {
+      result = f(result, value);
+    }
+
+    result
+  }
+
+  pub fn for_each(self, f: fn(T)) {
+    for value in self {
+      f(value);
+    }
+  }
+
+  /// Whether some value satisfies `test`; stops at the first one.
+  pub fn any(self, test: fn(T) -> bool) -> bool {
+    for value in self {
+      if test(value) {
+        return true;
+      }
+    }
+
+    false
+  }
+
+  /// Whether every value satisfies `test`; stops at the first that does not.
+  pub fn all(self, test: fn(T) -> bool) -> bool {
+    for value in self {
+      if !test(value) {
+        return false;
+      }
+    }
+
+    true
+  }
+
+  /// The first value that satisfies `test`.
+  pub fn find(self, test: fn(T) -> bool) -> Option<T> {
+    for value in self {
+      if test(value) {
+        return Some(value);
+      }
+    }
+
+    None
+  }
+}
+
+/// A hash map from keys to values that keeps the order in which keys were first inserted
+/// (docs/spec/02-types.md#maps). Removed entries leave a hole in `items` and a tombstone in
+/// `slots` until the table is rebuilt.
+pub class Map<K: Hash, V> {
+  /// The entries in insertion order; `None` where one was removed.
+  prv var items: List<Option<Entry<K, V>>>;
+  /// The open-addressing table: the index of an entry, -1 for a free slot or -2 for a removed
+  /// one.
+  prv var slots: List<i64>;
+  /// The number of entries.
+  prv var count: usize;
+  /// The number of slots that are not free.
+  prv var used: usize;
+
+  pub fn new(self) {
+    self.items = new List<Option<Entry<K, V>>>();
+    self.slots = new List<i64>();
+    self.count = 0;
+    self.used = 0;
+  }
+
+  pub fn len(self) -> usize {
+    self.count
+  }
+
+  pub fn is_empty(self) -> bool {
+    self.count == 0
+  }
+
+  /// A copy of the value of `key`.
+  pub fn get(self, key: K) -> Option<V> {
+    match self.slot_of(key) {
+      Some(slot) => self.items[self.slots[slot] as usize].map(entry => entry.value),
+      None => None,
+    }
+  }
+
+  pub fn contains_key(self, key: K) -> bool {
+    self.slot_of(key).is_some()
+  }
+
+  /// Sets the value of `key`, and returns its previous value. A new key goes last.
+  pub fn insert(self, key: K, value: V) -> Option<V> {
+    match self.slot_of(key) {
+      Some(slot) => {
+        const index = self.slots[slot] as usize;
+        const previous = self.items[index];
+
+        self.items[index] = Some(Entry { key: key, value: value });
+        previous.map(entry => entry.value)
+      }
+      None => {
+        if (self.used + 1) * 4 > self.slots.len() * 3 {
+          self.rebuild();
+        }
+
+        self.place(key.hash(), self.items.len());
+        self.items.push(Some(Entry { key: key, value: value }));
+        self.count += 1;
+        self.used += 1;
+        None
+      }
+    }
+  }
+
+  /// Removes `key`, and returns its value.
+  pub fn remove(self, key: K) -> Option<V> {
+    match self.slot_of(key) {
+      Some(slot) => {
+        const index = self.slots[slot] as usize;
+        const previous = self.items[index];
+
+        self.items[index] = None;
+        self.slots[slot] = -2;
+        self.count -= 1;
+        previous.map(entry => entry.value)
+      }
+      None => None,
+    }
+  }
+
+  pub fn clear(self) {
+    self.items = new List<Option<Entry<K, V>>>();
+    self.slots = new List<i64>();
+    self.count = 0;
+    self.used = 0;
+  }
+
+  /// The entries in insertion order. Changes to the map while iterating are seen.
+  pub fn entries(self) -> Iter<Entry<K, V>> {
+    const map = self;
+    const next = new Cell<usize>(0);
+
+    new Iter<Entry<K, V>>(() => {
+      while next.value < map.items.len() {
+        const entry = map.items[next.value];
+
+        next.value += 1;
+
+        if entry.is_some() {
+          return entry;
+        }
+      }
+
+      None
+    })
+  }
+
+  pub fn keys(self) -> Iter<K> {
+    self.entries().map(entry => entry.key)
+  }
+
+  pub fn values(self) -> Iter<V> {
+    self.entries().map(entry => entry.value)
+  }
+
+  /// The slot holding `key`.
+  prv fn slot_of(self, key: K) -> Option<usize> {
+    const capacity = self.slots.len();
+
+    if capacity == 0 {
+      return None;
+    }
+
+    var slot = (key.hash() % capacity as u64) as usize;
+
+    loop {
+      const index = self.slots[slot];
+
+      if index == -1 {
+        return None;
+      }
+
+      if index >= 0 {
+        match self.items[index as usize] {
+          Some(entry) => {
+            if entry.key.equals(key) {
+              return Some(slot);
+            }
+          }
+          None => {}
+        }
+      }
+
+      slot = (slot + 1) % capacity;
+    }
+  }
+
+  /// Records entry `index`, whose key has hash `hash`, in the first free slot of its chain.
+  prv fn place(self, hash: u64, index: usize) {
+    const capacity = self.slots.len();
+    var slot = (hash % capacity as u64) as usize;
+
+    while self.slots[slot] != -1 {
+      slot = (slot + 1) % capacity;
+    }
+
+    self.slots[slot] = index as i64;
+  }
+
+  /// Drops removed entries and makes the table large enough for one more entry.
+  prv fn rebuild(self) {
+    const live = new List<Option<Entry<K, V>>>();
+
+    for entry in self.items {
+      if entry.is_some() {
+        live.push(entry);
+      }
+    }
+
+    var capacity: usize = 8;
+
+    while capacity < (live.len() + 1) * 2 {
+      capacity *= 2;
+    }
+
+    const slots = new List<i64>();
+
+    for _ in 0..capacity {
+      slots.push(-1);
+    }
+
+    self.items = live;
+    self.slots = slots;
+    self.used = live.len();
+
+    for index in 0..live.len() {
+      match live[index] {
+        Some(entry) => self.place(entry.key.hash(), index),
+        None => {}
+      }
+    }
+  }
+}
+
+/// `list.iter()`: the elements by position, reading the length at every step, so elements
+/// added while iterating are seen.
+fn list_iter<T>(list: List<T>) -> Iter<T> {
+  const next = new Cell<usize>(0);
+
+  new Iter<T>(() => {
+    if next.value >= list.len() {
+      return None;
+    }
+
+    const value = list[next.value];
+
+    next.value += 1;
+    Some(value)
+  })
+}
+
+fn list_index_of<T: Eq>(list: List<T>, value: T) -> Option<usize> {
+  for index in 0..list.len() {
+    if list[index].equals(value) {
+      return Some(index);
+    }
+  }
+
+  None
+}
+
+fn list_contains<T: Eq>(list: List<T>, value: T) -> bool {
+  list_index_of(list, value).is_some()
+}
+
+fn list_sort<T: Ord>(list: List<T>) {
+  list_sort_by(list, (a: T, b: T) => a.compare(b));
+}
+
+/// A stable merge sort.
+fn list_sort_by<T>(list: List<T>, compare: fn(T, T) -> Ordering) {
+  const sorted = merge_sort(list, compare);
+
+  for index in 0..sorted.len() {
+    list[index] = sorted[index];
+  }
+}
+
+fn merge_sort<T>(items: List<T>, compare: fn(T, T) -> Ordering) -> List<T> {
+  const count = items.len();
+
+  if count <= 1 {
+    return items;
+  }
+
+  const left = new List<T>();
+  const right = new List<T>();
+
+  for index in 0..count {
+    if index < count / 2 { left.push(items[index]); } else { right.push(items[index]); }
+  }
+
+  const a = merge_sort(left, compare);
+  const b = merge_sort(right, compare);
+  const merged = new List<T>();
+  var i: usize = 0;
+  var j: usize = 0;
+
+  while i < a.len() && j < b.len() {
+    // Equal elements keep their order: the one from the left goes first.
+    if compare(b[j], a[i]) == Ordering::Less {
+      merged.push(b[j]);
+      j += 1;
+    } else {
+      merged.push(a[i]);
+      i += 1;
+    }
+  }
+
+  while i < a.len() {
+    merged.push(a[i]);
+    i += 1;
+  }
+
+  while j < b.len() {
+    merged.push(b[j]);
+    j += 1;
+  }
+
+  merged
+}
+
+fn list_join(list: List<String>, separator: String) -> String {
+  const builder = new StringBuilder();
+
+  for index in 0..list.len() {
+    if index > 0 {
+      builder.append(separator);
+    }
+
+    builder.append(list[index]);
+  }
+
+  builder.to_string()
+}
+
+/// `text.chars()` outside of `for`.
+fn string_chars(text: String) -> Iter<char> {
+  const chars = new List<char>();
+
+  for c in text.chars() {
+    chars.push(c);
+  }
+
+  list_iter(chars)
+}
+
+/// `text.bytes()` outside of `for`.
+fn string_bytes(text: String) -> Iter<u8> {
+  const bytes = new List<u8>();
+
+  for b in text.bytes() {
+    bytes.push(b);
+  }
+
+  list_iter(bytes)
+}
+
+/// The parts of `text` between occurrences of `separator`; an empty separator splits it into
+/// characters.
+fn string_split(text: String, separator: String) -> List<String> {
+  const parts = new List<String>();
+
+  if separator.is_empty() {
+    for c in text.chars() {
+      parts.push(`${c}`);
+    }
+
+    return parts;
+  }
+
+  var rest = text;
+
+  loop {
+    match rest.find(separator) {
+      Some(index) => {
+        parts.push(rest.substring(0, index));
+        rest = rest.substring(index + separator.len(), rest.len());
+      }
+      None => {
+        parts.push(rest);
+
+        return parts;
+      }
+    }
+  }
+}
+
+/// The lines of `text`, without their `\n` or `\r\n`; a final line break does not start a new
+/// line.
+fn string_lines(text: String) -> List<String> {
+  const lines = new List<String>();
+
+  if text.is_empty() {
+    return lines;
+  }
+
+  const parts = string_split(text, "\n");
+
+  for index in 0..parts.len() {
+    const line = parts[index];
+
+    if index + 1 == parts.len() && line.is_empty() {
+      break;
+    }
+
+    if line.ends_with("\r") {
+      lines.push(line.substring(0, line.len() - 1));
+    } else {
+      lines.push(line);
+    }
+  }
+
+  lines
 }
