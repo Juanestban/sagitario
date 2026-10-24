@@ -4,8 +4,9 @@
 
 use sagitario_ast::{
   ArrayLen, BinaryOp, Block, ClassDecl, EnumDecl, Export, Expr, ExprKind, ExternBlock, ExternFn, FieldDecl, FieldInit, FieldPattern, FnDecl,
-  GenericParam, Ident, InterfaceDecl, Item, LetStmt, MatchArm, Module, NodeId, Param, Path, Pattern, PatternKind, SelfParam, Stmt, StructDecl,
-  TemplatePart, TypeArgs, TypeExpr, TypeExprKind, UnaryOp, UseDecl, UseTree, UseTreeKind, VariantDecl, VariantFieldDecl, VariantFields, Visibility,
+  GenericParam, Ident, InterfaceDecl, Item, LambdaParam, LetStmt, MatchArm, Module, NodeId, Param, Path, Pattern, PatternKind, SelfParam, Stmt,
+  StructDecl, TemplatePart, TypeArgs, TypeExpr, TypeExprKind, UnaryOp, UseDecl, UseTree, UseTreeKind, VariantDecl, VariantFieldDecl, VariantFields,
+  Visibility,
 };
 use sagitario_diagnostics::{Diagnostic, Diagnostics, codes};
 use sagitario_lexer::{self as lexer, Keyword, Token, TokenKind};
@@ -124,6 +125,9 @@ struct Parser<'a> {
   /// Set in the condition of `if`/`while` and the iterable of `for`, where `{` starts the body:
   /// `if x == Point { ... }` is not a struct literal there (as in Rust).
   no_struct_literal: bool,
+  /// Set in the guard of a `match` arm, where `name =>` ends the guard instead of starting a
+  /// lambda.
+  in_guard: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -132,7 +136,7 @@ impl<'a> Parser<'a> {
     let tokens: Vec<Token> = tokens.into_iter().filter(|token| !matches!(token.kind, TokenKind::DocComment { .. })).collect();
     let eof_span = tokens.last().map_or(Span::new(file, 0, 0), |token| token.span);
 
-    Parser { tokens, pos: 0, eof: Token { kind: TokenKind::Eof, span: eof_span }, next_id, diagnostics, no_struct_literal: false }
+    Parser { tokens, pos: 0, eof: Token { kind: TokenKind::Eof, span: eof_span }, next_id, diagnostics, no_struct_literal: false, in_guard: false }
   }
 
   fn current(&self) -> &Token {
@@ -1272,6 +1276,33 @@ impl<'a> Parser<'a> {
 
         Ok(TypeExpr { span: path.span, kind: TypeExprKind::Path(path) })
       }
+      TokenKind::Keyword(Keyword::Fn) => {
+        self.advance();
+        self.expect(&TokenKind::LParen)?;
+
+        let mut params = Vec::new();
+
+        while !self.at(&TokenKind::RParen) {
+          params.push(self.type_expr()?);
+
+          if !self.eat(&TokenKind::Comma) {
+            break;
+          }
+        }
+
+        let mut end = self.expect(&TokenKind::RParen)?.span;
+        let ret = if self.eat(&TokenKind::Arrow) {
+          let ret = self.type_expr()?;
+
+          end = ret.span;
+
+          Some(Box::new(ret))
+        } else {
+          None
+        };
+
+        Ok(TypeExpr { kind: TypeExprKind::Fn { params, ret }, span: start.to(end) })
+      }
       TokenKind::Star => {
         self.advance();
 
@@ -1753,6 +1784,35 @@ impl<'a> Parser<'a> {
 
         ExprKind::Bool(keyword == Keyword::True)
       }
+      // `x => body`
+      TokenKind::Ident(name) if *self.nth_kind(1) == TokenKind::FatArrow && !self.in_guard => {
+        let name = Ident { name, span: self.advance().span };
+        let param = LambdaParam { span: name.span, name, ty: None };
+
+        return self.lambda_body(span, vec![param]);
+      }
+      // `(a, b: T) => body`
+      TokenKind::LParen if !self.in_guard && self.lambda_ahead() => {
+        self.advance();
+
+        let mut params = Vec::new();
+
+        while !self.at(&TokenKind::RParen) {
+          let name = self.ident("a parameter name")?;
+          let ty = if self.eat(&TokenKind::Colon) { Some(self.type_expr()?) } else { None };
+          let param_span = ty.as_ref().map_or(name.span, |ty| name.span.to(ty.span));
+
+          params.push(LambdaParam { name, ty, span: param_span });
+
+          if !self.eat(&TokenKind::Comma) {
+            break;
+          }
+        }
+
+        self.expect(&TokenKind::RParen)?;
+
+        return self.lambda_body(span, params);
+      }
       TokenKind::Ident(_) | TokenKind::Keyword(Keyword::SelfValue | Keyword::SelfType | Keyword::Pkg | Keyword::Super) => {
         let path = self.expr_path()?;
 
@@ -1876,6 +1936,56 @@ impl<'a> Parser<'a> {
     Ok(self.expr_node(kind, span))
   }
 
+  /// Whether the `(` here starts the parameters of a lambda: its matching `)` is followed by `=>`.
+  fn lambda_ahead(&self) -> bool {
+    let mut depth = 0usize;
+    let mut offset = 0;
+
+    loop {
+      match self.nth_kind(offset) {
+        TokenKind::LParen => depth += 1,
+        TokenKind::RParen => {
+          depth = depth.saturating_sub(1);
+
+          if depth == 0 {
+            return *self.nth_kind(offset + 1) == TokenKind::FatArrow;
+          }
+        }
+        TokenKind::Eof => return false,
+        _ => {}
+      }
+
+      offset += 1;
+    }
+  }
+
+  /// `=> body` after the parameters of a lambda; the body is a block or an expression.
+  fn lambda_body(&mut self, start: Span, params: Vec<LambdaParam>) -> PResult<Expr> {
+    self.expect(&TokenKind::FatArrow)?;
+
+    // A lambda's body is a new context, even inside a guard.
+    let saved = std::mem::replace(&mut self.in_guard, false);
+    let body = self.lambda_expr();
+
+    self.in_guard = saved;
+
+    let body = body?;
+    let span = start.to(body.span);
+
+    Ok(self.expr_node(ExprKind::Lambda { params, body: Box::new(body) }, span))
+  }
+
+  fn lambda_expr(&mut self) -> PResult<Expr> {
+    if self.at(&TokenKind::LBrace) {
+      let block = self.block()?;
+      let span = block.span;
+
+      return Ok(self.expr_node(ExprKind::Block(block), span));
+    }
+
+    self.expr_with_struct_literals(true)
+  }
+
   fn optional_value(&mut self) -> PResult<Option<Expr>> {
     if ends_expression(self.kind()) {
       return Ok(None);
@@ -1983,7 +2093,16 @@ impl<'a> Parser<'a> {
   fn match_arms(&mut self, arms: &mut Vec<MatchArm>) -> PResult<()> {
     while !self.at(&TokenKind::RBrace) {
       let pattern = self.pattern()?;
-      let guard = if self.eat(&TokenKind::Keyword(Keyword::If)) { Some(self.expr()?) } else { None };
+      let guard = if self.eat(&TokenKind::Keyword(Keyword::If)) {
+        let saved = std::mem::replace(&mut self.in_guard, true);
+        let guard = self.expr();
+
+        self.in_guard = saved;
+
+        Some(guard?)
+      } else {
+        None
+      };
 
       self.expect(&TokenKind::FatArrow)?;
 
@@ -2391,6 +2510,41 @@ mod tests {
     assert_eq!(decl.functions[0].self_param, None);
     assert!(decl.functions[1].self_param.is_some());
     assert!(decl.functions[2].self_param.is_some());
+  }
+
+  #[test]
+  fn parses_lambdas_and_function_types() {
+    let (module, errors) = parse(
+      "fn f(g: fn(i32, bool) -> i32, h: fn()) {
+        const a = x => x + 1;
+        const b = (x: i32, y) => { x + y };
+        const c = () => 0;
+        const d = (1 + 2);
+        g(1, true);
+      }",
+    );
+
+    assert!(errors.is_empty(), "{errors:?}");
+
+    let function = only_fn(&module);
+
+    assert!(matches!(&function.params[0].ty.kind, TypeExprKind::Fn { params, ret: Some(_) } if params.len() == 2));
+    assert!(matches!(&function.params[1].ty.kind, TypeExprKind::Fn { params, ret: None } if params.is_empty()));
+
+    let inits: Vec<&ExprKind> = function
+      .body
+      .stmts
+      .iter()
+      .filter_map(|stmt| match stmt {
+        Stmt::Let(LetStmt { init: Some(init), .. }) => Some(&init.kind),
+        _ => None,
+      })
+      .collect();
+
+    assert!(matches!(inits[0], ExprKind::Lambda { params, .. } if params.len() == 1 && params[0].ty.is_none()));
+    assert!(matches!(inits[1], ExprKind::Lambda { params, body } if params.len() == 2 && matches!(body.kind, ExprKind::Block(_))));
+    assert!(matches!(inits[2], ExprKind::Lambda { params, .. } if params.is_empty()));
+    assert!(!matches!(inits[3], ExprKind::Lambda { .. }));
   }
 
   #[test]

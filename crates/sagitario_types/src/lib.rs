@@ -5,6 +5,7 @@
 //! and `flow` then checks definite assignment and reachability.
 
 mod classes;
+mod closures;
 mod exhaustive;
 mod ffi;
 mod flow;
@@ -125,6 +126,11 @@ pub enum Type {
   /// A type parameter of a generic declaration, or the `Self` of an interface: replaced by a
   /// concrete type in each instance (docs/spec/05-interfaces-generics.md#generics).
   Param(ParamRef),
+  /// `fn(A, B) -> R`: a function or closure (docs/spec/08-closures.md).
+  Function {
+    params: Vec<Type>,
+    ret: Box<Type>,
+  },
   /// `[T; N]`
   Array(Box<Type>, u64),
   /// The prelude's `Option<T>`.
@@ -323,6 +329,13 @@ impl fmt::Display for Type {
       Type::Class(ty) => write_generic(f, &ty.name, &ty.args),
       Type::Interface(ty) => write_generic(f, &ty.name, &ty.args),
       Type::Param(param) => f.write_str(&param.name),
+      Type::Function { params, ret } => {
+        let params: Vec<String> = params.iter().map(Type::to_string).collect();
+
+        write!(f, "fn({})", params.join(", "))?;
+
+        if **ret != Type::Unit { write!(f, " -> {ret}") } else { Ok(()) }
+      }
       Type::Array(elem, len) => write!(f, "[{elem}; {len}]"),
       Type::Option(value) => write!(f, "Option<{value}>"),
       Type::Result(value, error) => write!(f, "Result<{value}, {error}>"),
@@ -479,6 +492,16 @@ pub enum BuiltinMethod {
   Chars,
   /// `String::bytes` as the iterable of `for`.
   Bytes,
+  /// `Option::map` and `Result::map`, with a closure.
+  Map,
+  /// `Result::map_err`
+  MapErr,
+  /// `Option::and_then` and `Result::and_then`
+  AndThen,
+  /// `Option::unwrap_or_else` and `Result::unwrap_or_else`
+  UnwrapOrElse,
+  /// `Option::filter`
+  Filter,
 }
 
 #[derive(Debug, Default)]
@@ -515,6 +538,8 @@ pub struct TypedModule {
   pub method_calls: HashMap<NodeId, FnId>,
   /// Calls through `zod`, which run the named implementation without dynamic dispatch.
   pub zod_calls: HashSet<NodeId>,
+  /// `value.name(args)` calling a field of a function type, by node id.
+  pub field_calls: HashSet<NodeId>,
   /// The vtable slot of each method dispatched dynamically: one that is abstract, or is
   /// overridden in some subclass, and its overrides. Other methods are called directly.
   pub slots: HashMap<FnId, usize>,
@@ -749,6 +774,8 @@ pub fn check(package: &Package, resolution: &Resolution, diagnostics: &mut Diagn
     mutates_self: vec![false; resolution.functions.len()],
     interface_types: Vec::new(),
     type_bounds: Vec::new(),
+    lambda_stack: Vec::new(),
+    inferring_ret: false,
     self_calls: Vec::new(),
     receiver_checks: Vec::new(),
     zod_new_calls: Vec::new(),
@@ -860,6 +887,11 @@ struct Checker<'a> {
   interface_types: Vec<(Span, InterfaceId)>,
   /// Generic types written with arguments, whose bounds are checked once every bound is known.
   type_bounds: Vec<(Span, Type)>,
+  /// The lambdas being checked, innermost last.
+  lambda_stack: Vec<NodeId>,
+  /// Whether the result of the lambda being checked comes from its body: the first `return`
+  /// sets it.
+  inferring_ret: bool,
   /// Whether each struct or enum method modifies `self` directly, by `FnId`.
   mutates_self: Vec<bool>,
   /// Methods called on `self` (or a part of it) inside a method, as (caller, callee): the
@@ -1156,6 +1188,10 @@ impl Checker<'_> {
   fn type_expr_at(&mut self, ty: &TypeExpr, behind_pointer: bool) -> Type {
     match &ty.kind {
       TypeExprKind::Ptr { mutable, pointee } => self.pointer_type(*mutable, pointee),
+      TypeExprKind::Fn { params, ret } => Type::Function {
+        params: params.iter().map(|param| self.type_expr(param)).collect(),
+        ret: Box::new(ret.as_deref().map_or(Type::Unit, |ret| self.type_expr(ret))),
+      },
       TypeExprKind::Unit => Type::Unit,
       TypeExprKind::Array { elem, len } => {
         let elem = self.type_expr(elem);
@@ -1405,6 +1441,7 @@ impl Checker<'_> {
       }
 
       self.expect(value, &target_ty);
+      self.check_closure_cycle(target, value);
 
       return if self.typed.expr_types.get(&value.id) == Some(&Type::Never) { Type::Never } else { Type::Unit };
     }
@@ -1423,6 +1460,13 @@ impl Checker<'_> {
       return self.expr(value, None);
     };
     let current = self.locals.get(id.0 as usize).cloned().flatten();
+
+    if self.is_captured(id) {
+      let name = self.resolution.locals(self.function).get(id.0 as usize).map(|info| info.name.clone()).unwrap_or_default();
+      let diagnostic = self.captured_error(target.span, &name);
+
+      self.diagnostics.push(diagnostic);
+    }
 
     // `self = value` in a class method is reported by the flow analysis.
     if self.resolution.locals(self.function).get(id.0 as usize).is_some_and(|info| info.kind == LocalKind::SelfParam)
@@ -1514,6 +1558,7 @@ impl Checker<'_> {
       ExprKind::Char(_) => Type::Char,
       ExprKind::Str(_) => Type::String,
       ExprKind::Unit => Type::Unit,
+      ExprKind::Lambda { params, body } => self.lambda(expr, params, body, expected),
       ExprKind::Zod => {
         if self.resolution.paths.contains_key(&expr.id) {
           self.diagnostics.push(
@@ -1543,8 +1588,15 @@ impl Checker<'_> {
       ExprKind::Path(_) => match self.resolution.paths.get(&expr.id) {
         // An unassigned binding without a known type is reported by the flow analysis.
         Some(Res::Local(id)) => self.locals.get(id.0 as usize).cloned().flatten().unwrap_or(Type::Error),
-        Some(Res::Fn(_) | Res::Extern(_) | Res::Builtin(_)) => {
-          self.error(codes::NOT_IMPLEMENTED, expr.span, "functions used as values are not implemented yet");
+        Some(Res::Fn(id)) => match &expr.kind {
+          ExprKind::Path(path) => self.fn_value(expr, path, *id, expected),
+          _ => Type::Error,
+        },
+        Some(Res::Extern(_) | Res::Builtin(_)) => {
+          self.diagnostics.push(
+            Diagnostic::error(codes::WRONG_CALL_FORM, expr.span, "C functions and prelude functions cannot be used as values")
+              .with_help("wrap the call in a lambda, such as `(text) => println(text)`"),
+          );
 
           Type::Error
         }
@@ -1638,6 +1690,19 @@ impl Checker<'_> {
         Type::Never
       }
       ExprKind::Return { value } => {
+        // In a lambda whose result is inferred, the first `return` decides it.
+        if self.inferring_ret && self.ret == Type::Never {
+          self.ret = match value {
+            Some(value) => match self.expr(value, None) {
+              Type::Never => Type::Never,
+              ty => ty,
+            },
+            None => Type::Unit,
+          };
+
+          return Type::Never;
+        }
+
         let ret = self.ret.clone();
 
         match value {
@@ -1994,11 +2059,8 @@ impl Checker<'_> {
         Some(builtin_sig(builtin))
       }
       (ExprKind::Path(_), None) => None,
-      _ => {
-        self.error(codes::NOT_IMPLEMENTED, callee.span, "calling values other than functions is not implemented yet");
-
-        None
-      }
+      // A binding, field, call result or lambda of a function type.
+      _ => return self.call_value(expr, callee, args),
     };
     let Some(sig) = sig else {
       self.unchecked_args(args);
@@ -2100,6 +2162,11 @@ impl Checker<'_> {
     // A default method of an interface the type implements.
     .or_else(|| self.default_method(owner, name));
     let (Some(function), Some(decl)) = (found, found.and_then(|function| self.resolution.fn_decl(self.package, function))) else {
+      // A field of a function type called like a method.
+      if let Some(field_ty) = self.function_field(&receiver_ty, name) {
+        return self.field_call(expr, field_ty, args);
+      }
+
       let mut diagnostic = Diagnostic::error(codes::UNKNOWN_MEMBER, method.span, format!("no method `{name}` on type `{receiver_ty}`"));
       let functions = self.resolution.type_functions(self.package, owner);
       let methods: Vec<String> =
@@ -2176,7 +2243,8 @@ impl Checker<'_> {
       let mut diagnostic = Diagnostic::error(codes::UNKNOWN_MEMBER, name.span, format!("no field `{field_name}` on type `{base_ty}`"));
 
       if self.resolution.type_function(self.package, TypeItem::Struct(owner.id), field_name).is_some() {
-        diagnostic = diagnostic.with_help(format!("`{field_name}` is a function; call it with `{field_name}(...)`"));
+        diagnostic =
+          diagnostic.with_help(format!("`{field_name}` is a method; call it with `{field_name}(...)`, or wrap it in a lambda to use it as a value"));
       } else if let Some(similar) = sagitario_diagnostics::closest_match(field_name, def.fields.iter().map(|field| field.name.as_str())) {
         diagnostic = diagnostic.with_help(format!("a field with a similar name exists: `{similar}`"));
       }
@@ -2510,6 +2578,10 @@ impl Checker<'_> {
 
   /// A method of `Option` or `Result` (docs/spec/07-errors.md).
   fn builtin_method(&mut self, expr: &Expr, receiver_ty: &Type, method: &Ident, args: &[Expr]) -> Type {
+    if let Some(ty) = self.closure_method(expr, receiver_ty, method, args) {
+      return ty;
+    }
+
     let found = match (receiver_ty, method.name.as_str()) {
       (Type::Option(_), "is_some") => Some((BuiltinMethod::IsSome, Vec::new(), Type::Bool)),
       (Type::Option(_), "is_none") => Some((BuiltinMethod::IsNone, Vec::new(), Type::Bool)),

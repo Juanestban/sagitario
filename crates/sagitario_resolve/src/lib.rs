@@ -214,6 +214,24 @@ pub enum LocalKind {
   Pattern,
 }
 
+/// The bindings of a lambda (docs/spec/08-closures.md): its own locals are numbered from
+/// `first_local` to `end_local` (its parameters first), in the enclosing function's numbering, and
+/// it captures the enclosing locals in `captures`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LambdaInfo {
+  pub params: Vec<LocalId>,
+  pub first_local: u32,
+  pub end_local: u32,
+  pub captures: Vec<LocalId>,
+}
+
+impl LambdaInfo {
+  /// Whether a local is declared inside the lambda.
+  pub fn owns(&self, local: LocalId) -> bool {
+    local.0 >= self.first_local && local.0 < self.end_local
+  }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalInfo {
   pub name: String,
@@ -362,6 +380,8 @@ pub struct Resolution {
   pub type_paths: HashMap<NodeId, TypeRes>,
   /// The local declared by each `const`/`var` statement, `for` expression and binding pattern.
   pub bindings: HashMap<NodeId, LocalId>,
+  /// The locals and captures of each lambda, by the node id of the lambda.
+  pub lambdas: HashMap<NodeId, LambdaInfo>,
   pub main: Option<FnId>,
 }
 
@@ -716,6 +736,7 @@ pub fn resolve(package: &Package, diagnostics: &mut Diagnostics) -> Resolution {
     resolution.locals.push(output.locals);
     resolution.paths.extend(output.paths);
     resolution.bindings.extend(output.bindings);
+    resolution.lambdas.extend(output.lambdas);
     resolution.type_paths.extend(output.type_paths);
     used.extend(output.used);
   }
@@ -902,6 +923,7 @@ struct Output {
   locals: Vec<LocalInfo>,
   paths: HashMap<NodeId, Res>,
   bindings: HashMap<NodeId, LocalId>,
+  lambdas: HashMap<NodeId, LambdaInfo>,
   type_paths: HashMap<NodeId, TypeRes>,
   used: HashSet<(ModId, String)>,
 }
@@ -923,6 +945,9 @@ struct Resolver<'a> {
   used: HashSet<(ModId, String)>,
   /// The type parameters in scope: the owner type's, then the function's.
   generics: Vec<(String, ParamOwner, u32)>,
+  /// The lambdas being resolved, innermost last.
+  lambda_stack: Vec<NodeId>,
+  lambdas: HashMap<NodeId, LambdaInfo>,
   diagnostics: &'a mut Diagnostics,
 }
 
@@ -940,6 +965,8 @@ impl<'a> Resolver<'a> {
       type_paths: HashMap::new(),
       used: HashSet::new(),
       generics: Vec::new(),
+      lambda_stack: Vec::new(),
+      lambdas: HashMap::new(),
       diagnostics,
     };
 
@@ -983,7 +1010,7 @@ impl<'a> Resolver<'a> {
   }
 
   fn finish(self) -> Output {
-    Output { locals: self.locals, paths: self.paths, bindings: self.bindings, type_paths: self.type_paths, used: self.used }
+    Output { locals: self.locals, paths: self.paths, bindings: self.bindings, lambdas: self.lambdas, type_paths: self.type_paths, used: self.used }
   }
 
   fn declare(&mut self, name: &str, span: Span, kind: LocalKind) -> LocalId {
@@ -1000,8 +1027,60 @@ impl<'a> Resolver<'a> {
     id
   }
 
-  fn lookup_local(&self, name: &str) -> Option<LocalId> {
-    self.scopes.iter().rev().find_map(|scope| scope.iter().rev().find(|(local, _)| local == name).map(|(_, id)| *id))
+  fn lookup_local(&mut self, name: &str) -> Option<LocalId> {
+    let id = self.scopes.iter().rev().find_map(|scope| scope.iter().rev().find(|(local, _)| local == name).map(|(_, id)| *id))?;
+
+    // Every enclosing lambda declared after the binding captures it.
+    for lambda in &self.lambda_stack {
+      if let Some(info) = self.lambdas.get_mut(lambda)
+        && id.0 < info.first_local
+        && !info.captures.contains(&id)
+      {
+        info.captures.push(id);
+      }
+    }
+
+    Some(id)
+  }
+
+  /// `(params) => body`: the parameters and the body's bindings belong to the lambda.
+  fn lambda(&mut self, id: NodeId, params: &[sagitario_ast::LambdaParam], body: &Expr) {
+    let first_local = self.locals.len() as u32;
+
+    self.lambdas.insert(id, LambdaInfo { params: Vec::new(), first_local, end_local: u32::MAX, captures: Vec::new() });
+    self.lambda_stack.push(id);
+    self.scopes.push(Vec::new());
+
+    let mut declared = Vec::new();
+
+    for param in params {
+      if let Some(ty) = &param.ty {
+        self.type_expr(ty);
+      }
+
+      if params.iter().filter(|other| other.name.name == param.name.name).count() > 1 && !declared.iter().any(|(name, _)| name == &param.name.name) {
+        self.diagnostics.push(Diagnostic::error(
+          codes::DUPLICATE_DEFINITION,
+          param.name.span,
+          format!("the parameter `{}` is declared more than once", param.name.name),
+        ));
+      }
+
+      let local = self.declare(&param.name.name, param.name.span, LocalKind::Param);
+
+      declared.push((param.name.name.clone(), local));
+    }
+
+    self.expr(body);
+    self.scopes.pop();
+    self.lambda_stack.pop();
+
+    let end_local = self.locals.len() as u32;
+
+    if let Some(info) = self.lambdas.get_mut(&id) {
+      info.params = declared.into_iter().map(|(_, local)| local).collect();
+      info.end_local = end_local;
+    }
   }
 
   /// A module-level name of the current module: one of its items or imports, or else a public
@@ -1178,6 +1257,7 @@ impl<'a> Resolver<'a> {
           self.expr(value);
         }
       }
+      ExprKind::Lambda { params, body } => self.lambda(expr.id, params, body),
       ExprKind::Zod => match self.lookup_local("self") {
         Some(id) if matches!(self.owner, Some(TypeItem::Class(_))) => {
           self.paths.insert(expr.id, Res::Local(id));
@@ -1766,6 +1846,11 @@ impl<'a> Resolver<'a> {
     match &ty.kind {
       TypeExprKind::Unit => {}
       TypeExprKind::Path(path) => self.type_path(path),
+      TypeExprKind::Fn { params, ret } => {
+        for ty in params.iter().chain(ret.as_deref()) {
+          self.type_expr(ty);
+        }
+      }
       TypeExprKind::Generic { path, args } => {
         self.type_path(path);
 

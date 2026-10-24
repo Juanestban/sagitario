@@ -1,0 +1,125 @@
+// Closures: arrow functions with and without parentheses, parameter types from the expected
+// function type, captures copied at creation, closures returned and stored in fields, named and
+// generic functions as values, `return` inside a lambda, and the closure methods of `Option` and
+// `Result`. The harness fails the test on any leak.
+// expect-stdout: 6 7 10
+// expect-stdout: hello, Ada!
+// expect-stdout: captured 1, now 2
+// expect-stdout: counter: 3
+// expect-stdout: twice: 20, generic: 9
+// expect-stdout: sign: negative, zero, positive
+// expect-stdout: Some(6) None 5 0 Some(4) None
+// expect-stdout: Ok(8) Err(bad!) 1 -1
+// expect-stdout: button: clicked 2 times
+
+fn apply(f: fn(i32) -> i32, value: i32) -> i32 {
+  f(value)
+}
+
+fn twice(value: i32) -> i32 {
+  value * 2
+}
+
+fn identity<T>(value: T) -> T {
+  value
+}
+
+fn adder(amount: i32) -> fn(i32) -> i32 {
+  (value) => value + amount
+}
+
+fn transform<T>(value: T, f: fn(T) -> T) -> T {
+  f(value)
+}
+
+class Counter {
+  pub var count: i32;
+
+  pub fn new() {
+    self.count = 0;
+  }
+}
+
+class Button {
+  pub var on_click: fn(Counter);
+
+  pub fn new(handler: fn(Counter)) {
+    self.on_click = handler;
+  }
+}
+
+fn minus_three(value: i32) -> Result<i32, String> {
+  Ok(value - 3)
+}
+
+fn show(value: Option<i32>) -> String {
+  match value {
+    Some(n) => `Some(${n})`,
+    None => "None",
+  }
+}
+
+fn show_result(value: Result<i32, String>) -> String {
+  match value {
+    Ok(n) => `Ok(${n})`,
+    Err(message) => `Err(${message})`,
+  }
+}
+
+fn main() {
+  const increment = (x: i32) => x + 1;
+  const add: fn(i32, i32) -> i32 = (a, b) => a + b;
+  println(`${apply(increment, 5)} ${add(3, 4)} ${adder(3)(7)}`);
+
+  const name = "Ada";
+  const greet = (greeting: String) => `${greeting}, ${name}!`;
+  println(greet("hello"));
+
+  var value = 1;
+  const read = () => value;
+  value = 2;
+  println(`captured ${read()}, now ${value}`);
+
+  // A captured instance is shared: its `var` fields can change.
+  const counter = new Counter();
+  const tick = () => {
+    counter.count += 1;
+  };
+  tick();
+  tick();
+  tick();
+  println(`counter: ${counter.count}`);
+
+  const double = twice;
+  const same: fn(i32) -> i32 = identity;
+  println(`twice: ${apply(double, 10)}, generic: ${transform(4, (n) => same(n) + 5)}`);
+
+  const sign = (n: i32) => {
+    if n < 0 {
+      return "negative";
+    }
+
+    if n == 0 { "zero" } else { "positive" }
+  };
+  println(`sign: ${sign(-3)}, ${sign(0)}, ${sign(8)}`);
+
+  const some: Option<i32> = Some(3);
+  const none: Option<i32> = None;
+  const halves = some.and_then((n) => if n > 2 { Some(4) } else { None });
+  println(
+    `${show(some.map(n => n * 2))} ${show(none.map(n => n * 2))} ${some.unwrap_or_else(() => 0) + 2} ${none.unwrap_or_else(() => 0)} ${show(halves)} ${show(some.filter(n => n > 5))}`,
+  );
+
+  const good: Result<i32, String> = Ok(4);
+  const bad: Result<i32, String> = Err("bad");
+  const recovered = bad.unwrap_or_else((message) => message.len() as i32 - 4);
+  println(`${show_result(good.map(n => n * 2))} ${show_result(bad.map_err(message => message + "!"))} ${good.and_then(minus_three).unwrap()} ${recovered}`);
+
+  const clicks = new Counter();
+  const button = new Button((target) => {
+    target.count += 1;
+  });
+  button.on_click(clicks);
+  button.on_click(clicks);
+  println(`button: clicked ${clicks.count} times`);
+}

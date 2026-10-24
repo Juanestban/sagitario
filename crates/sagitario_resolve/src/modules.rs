@@ -313,6 +313,11 @@ fn type_paths<'a>(ty: &'a TypeExpr, out: &mut Vec<&'a Path>) {
       }
     }
     TypeExprKind::Array { elem, .. } | TypeExprKind::Ptr { pointee: elem, .. } => type_paths(elem, out),
+    TypeExprKind::Fn { params, ret } => {
+      for ty in params.iter().chain(ret.as_deref()) {
+        type_paths(ty, out);
+      }
+    }
   }
 }
 
@@ -495,6 +500,13 @@ fn expr_paths<'a>(expr: &'a Expr, out: &mut Vec<&'a Path>) {
   match &expr.kind {
     ExprKind::Path(path) => expr_path(path, out),
     ExprKind::Zod => {}
+    ExprKind::Lambda { params, body } => {
+      for ty in params.iter().filter_map(|param| param.ty.as_ref()) {
+        type_paths(ty, out);
+      }
+
+      expr_paths(body, out);
+    }
     ExprKind::Call { callee, args } => {
       expr_paths(callee, out);
       exprs(args, out);

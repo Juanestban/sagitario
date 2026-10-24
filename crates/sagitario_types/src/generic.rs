@@ -87,6 +87,7 @@ impl Type {
       Type::Option(value) => Type::Option(Box::new(value.substitute(subst))),
       Type::Result(value, error) => Type::Result(Box::new(value.substitute(subst)), Box::new(error.substitute(subst))),
       Type::Ptr { mutable, pointee } => Type::Ptr { mutable: *mutable, pointee: Box::new(pointee.substitute(subst)) },
+      Type::Function { params, ret } => Type::Function { params: args(params), ret: Box::new(ret.substitute(subst)) },
       other => other.clone(),
     }
   }
@@ -101,6 +102,7 @@ impl Type {
       | Type::Interface(InterfaceRef { args, .. }) => args.iter().any(Type::has_params),
       Type::Array(elem, _) | Type::Option(elem) | Type::Ptr { pointee: elem, .. } => elem.has_params(),
       Type::Result(value, error) => value.has_params() || error.has_params(),
+      Type::Function { params, ret } => params.iter().any(Type::has_params) || ret.has_params(),
       _ => false,
     }
   }
@@ -115,6 +117,7 @@ impl Type {
       | Type::Interface(InterfaceRef { args, .. }) => args.iter().any(Type::has_self),
       Type::Array(elem, _) | Type::Option(elem) | Type::Ptr { pointee: elem, .. } => elem.has_self(),
       Type::Result(value, error) => value.has_self() || error.has_self(),
+      Type::Function { params, ret } => params.iter().any(Type::has_self) || ret.has_self(),
       _ => false,
     }
   }
@@ -128,6 +131,7 @@ impl Type {
       | Type::Interface(InterfaceRef { args, .. }) => 1 + args.iter().map(Type::depth).max().unwrap_or(0),
       Type::Array(elem, _) | Type::Option(elem) | Type::Ptr { pointee: elem, .. } => 1 + elem.depth(),
       Type::Result(value, error) => 1 + value.depth().max(error.depth()),
+      Type::Function { params, ret } => 1 + params.iter().chain([ret.as_ref()]).map(Type::depth).max().unwrap_or(0),
       _ => 0,
     }
   }
@@ -206,6 +210,10 @@ impl Unknowns {
       (Type::Enum(pattern), Type::Enum(actual)) if pattern.id == actual.id => self.unify_all(&pattern.args, &actual.args),
       (Type::Class(pattern), Type::Class(actual)) if pattern.id == actual.id => self.unify_all(&pattern.args, &actual.args),
       (Type::Interface(pattern), Type::Interface(actual)) if pattern.id == actual.id => self.unify_all(&pattern.args, &actual.args),
+      (Type::Function { params, ret }, Type::Function { params: actual_params, ret: actual_ret }) if params.len() == actual_params.len() => {
+        self.unify_all(params, actual_params);
+        self.unify(ret, actual_ret);
+      }
       _ => {}
     }
   }
@@ -436,11 +444,14 @@ impl Checker<'_> {
       );
     }
 
-    for (index, arg) in args.iter().enumerate() {
-      match params.get(index) {
-        Some(param) => self.generic_arg(arg, param, fixed, unknowns),
-        None => {
-          self.expr(arg, None);
+    // Lambdas come last, so their parameter types can come from the other arguments.
+    for lambdas in [false, true] {
+      for (index, arg) in args.iter().enumerate().filter(|(_, arg)| matches!(arg.kind, sagitario_ast::ExprKind::Lambda { .. }) == lambdas) {
+        match params.get(index) {
+          Some(param) => self.generic_arg(arg, param, fixed, unknowns),
+          None => {
+            self.expr(arg, None);
+          }
         }
       }
     }
@@ -621,6 +632,7 @@ fn mentions_unknown(ty: &Type, subst: &Subst) -> bool {
     | Type::Interface(InterfaceRef { args, .. }) => args.iter().any(|arg| mentions_unknown(arg, subst)),
     Type::Array(elem, _) | Type::Option(elem) | Type::Ptr { pointee: elem, .. } => mentions_unknown(elem, subst),
     Type::Result(value, error) => mentions_unknown(value, subst) || mentions_unknown(error, subst),
+    Type::Function { params, ret } => params.iter().any(|param| mentions_unknown(param, subst)) || mentions_unknown(ret, subst),
     _ => false,
   }
 }

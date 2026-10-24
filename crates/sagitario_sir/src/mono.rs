@@ -30,6 +30,8 @@ pub struct ClassInstance {
 pub(crate) struct Instance {
   pub(crate) template: FnId,
   pub(crate) subst: Subst,
+  /// A lambda lifted out of `template` (lowered when created) instead of an instance of it.
+  pub(crate) lambda: bool,
 }
 
 /// How deeply type arguments may nest before instances are considered endless.
@@ -53,7 +55,9 @@ impl FnLowering<'_> {
       return function;
     }
 
-    if let Some(index) = self.registry.instances.iter().position(|instance| instance.template == function && instance.subst == subst) {
+    if let Some(index) =
+      self.registry.instances.iter().position(|instance| !instance.lambda && instance.template == function && instance.subst == subst)
+    {
       return FnId(self.registry.first_instance + index as u32);
     }
 
@@ -73,7 +77,7 @@ impl FnLowering<'_> {
 
     let index = self.registry.instances.len();
 
-    self.registry.instances.push(Instance { template: function, subst });
+    self.registry.instances.push(Instance { template: function, subst, lambda: false });
     self.registry.pending.push(index);
 
     FnId(self.registry.first_instance + index as u32)

@@ -430,7 +430,8 @@ impl Checker<'_> {
     let mut diagnostic = Diagnostic::error(codes::UNKNOWN_MEMBER, name.span, format!("no field `{}` on type `{base_ty}`", name.name));
 
     if self.interface_method_of(base_ty, &name.name).is_some() {
-      diagnostic = diagnostic.with_help(format!("`{0}` is a method; call it with `{0}(...)`", name.name));
+      diagnostic =
+        diagnostic.with_help(format!("`{0}` is a method; call it with `{0}(...)`, or wrap it in a lambda to use it as a value", name.name));
     }
 
     self.diagnostics.push(diagnostic);

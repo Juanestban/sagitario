@@ -49,6 +49,7 @@ pub(crate) fn check_function(
     reassigned: vec![false; locals.len()],
     reported: vec![false; count],
     self_reported: false,
+    lambdas: Vec::new(),
     loops: Vec::new(),
   };
 
@@ -102,6 +103,8 @@ struct Flow<'a> {
   reported: Vec<bool>,
   /// Whether a use of `self` before every field is assigned was already reported.
   self_reported: bool,
+  /// The lambdas being analyzed, innermost last.
+  lambdas: Vec<sagitario_resolve::LambdaInfo>,
   loops: Vec<LoopExits>,
 }
 
@@ -366,6 +369,11 @@ impl<'a> Flow<'a> {
   }
 
   fn assign(&mut self, id: LocalId, span: Span, compound: bool) {
+    // Assigning a capture inside a lambda is reported by the type checker.
+    if self.lambdas.last().is_some_and(|lambda| !lambda.owns(id)) {
+      return;
+    }
+
     let Some(info) = self.info(id).cloned() else { return };
     let again = compound || get(&self.state.maybe, id);
     let error = match info.kind {
@@ -466,6 +474,30 @@ impl<'a> Flow<'a> {
         if as_mut_ptr || function.and_then(|function| self.typed.sig(function)).is_some_and(|sig| sig.receiver == Some(Receiver::Var)) {
           self.mutate(receiver);
         }
+      }
+      ExprKind::Lambda { body, .. } => {
+        let Some(info) = self.resolution.lambdas.get(&expr.id).cloned() else { return };
+
+        // The captures are copied when the lambda is created.
+        for capture in &info.captures {
+          self.read(*capture, expr.span);
+        }
+
+        // The body runs later, maybe several times: it is analyzed apart and changes nothing
+        // here.
+        let saved_state = self.state.clone();
+        let saved_loops = std::mem::take(&mut self.loops);
+
+        for param in &info.params {
+          self.define(*param, true);
+        }
+
+        self.state.reachable = true;
+        self.lambdas.push(info);
+        self.expr(body);
+        self.lambdas.pop();
+        self.state = saved_state;
+        self.loops = saved_loops;
       }
       // `zod.method(...)` uses `self`.
       ExprKind::Zod => {
@@ -607,7 +639,8 @@ impl<'a> Flow<'a> {
           self.expr(value);
         }
 
-        if self.state.reachable {
+        // A `return` inside a lambda leaves the lambda, not the initializer.
+        if self.state.reachable && self.lambdas.is_empty() {
           self.report_missing_fields(expr.span, true);
         }
 

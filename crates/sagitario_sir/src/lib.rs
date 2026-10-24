@@ -27,6 +27,7 @@
 //! Lowering only runs on programs without errors, so an inconsistency it finds is an internal
 //! compiler error, reported as `LowerError`.
 
+mod closures;
 mod interfaces;
 mod matching;
 mod mono;
@@ -51,6 +52,10 @@ pub struct Program {
   pub layouts: Layouts,
   /// The class types the program uses, with their type arguments.
   pub classes: Vec<ClassInstance>,
+  /// The types captured by each closure environment `sag_envN`.
+  pub envs: Vec<Vec<Type>>,
+  /// The named functions used as values, which get a wrapper taking an environment.
+  pub wrapped: Vec<FnId>,
   pub entry: FnId,
   /// Path of each source file, by `FileId` index, for `#line` directives.
   pub source_paths: Vec<String>,
@@ -94,7 +99,7 @@ impl Layouts {
   /// Whether values of `ty` hold references, so copies must be retained and released.
   pub fn is_managed(&self, ty: &Type) -> bool {
     match ty {
-      Type::String | Type::StringBuilder | Type::CString | Type::Class(_) | Type::Interface(_) => true,
+      Type::String | Type::StringBuilder | Type::CString | Type::Class(_) | Type::Interface(_) | Type::Function { .. } => true,
       Type::Array(elem, _) => self.is_managed(elem),
       Type::Struct(inner) => self.struct_fields(inner).iter().any(|field| self.is_managed(field)),
       Type::Enum(_) | Type::Option(_) | Type::Result(..) => self.variants(ty).iter().flatten().flatten().any(|field| self.is_managed(field)),
@@ -150,6 +155,8 @@ pub struct Function {
   pub name: String,
   /// A generic template, only used through its instances: it has no code.
   pub template: bool,
+  /// A lambda: its first parameter (local 0) is the environment, a `sag_object *`.
+  pub closure: bool,
   /// The first locals are the parameters, starting with `self` in methods.
   pub param_count: usize,
   /// A method that modifies a struct's or enum's `self`: local 0 refers to the caller's value
@@ -183,6 +190,8 @@ pub enum Projection {
   /// The field at position `index` among those of class instance `class` (the class declaring
   /// it), in the object a reference points to (of that class or a subclass).
   ClassField { class: usize, index: usize },
+  /// The capture at `index` of closure environment `env`, behind the environment pointer.
+  EnvField { env: usize, index: usize },
   /// A bounds-checked element of an array of length `len`.
   Index { index: Operand, len: u64 },
   /// The tag of an enum value: the index of its variant, as `u32`.
@@ -321,6 +330,15 @@ pub enum Rvalue {
   Alloc(usize),
   /// The `Option` in a `weak` field: `Some` with a new reference while the instance is alive.
   WeakLoad(Place),
+  /// A closure of the lambda `function`, with a new environment `env` holding copies of the
+  /// captures (retained), or no environment.
+  Closure {
+    function: FnId,
+    env: Option<usize>,
+    captures: Vec<Operand>,
+  },
+  /// A named function as a value: its wrapper, without environment.
+  FnValue(FnId),
   /// A value of a class, struct or enum as an interface value with the given itable: a new
   /// reference to the instance, or a box holding a copy of the value.
   ToDyn {
@@ -349,6 +367,12 @@ pub enum Callee {
   Virtual {
     slot: usize,
     function: FnId,
+  },
+  /// The function value given as the first argument, called with its environment and the other
+  /// arguments, of types `params`.
+  Closure {
+    params: Vec<Type>,
+    ret: Type,
   },
   /// The entry `slot` of the itable reached through `path` from the first argument, an
   /// interface value, which it receives followed by arguments of types `params`.
@@ -436,6 +460,7 @@ pub fn lower(
       functions.push(Function {
         name: decl.name.name.clone(),
         template: true,
+        closure: false,
         param_count: 0,
         self_by_ref: false,
         export: None,
@@ -471,6 +496,20 @@ pub fn lower(
     }
   }
 
+  for (index, function) in std::mem::take(&mut registry.lambdas) {
+    if instances.len() <= index {
+      instances.resize(index + 1, None);
+    }
+
+    if let Some(slot) = instances.get_mut(index) {
+      *slot = Some(function);
+    }
+  }
+
+  if instances.len() < registry.instances.len() {
+    instances.resize(registry.instances.len(), None);
+  }
+
   for function in instances {
     functions.push(function.ok_or_else(|| LowerError("an instance was not lowered".to_string()))?);
   }
@@ -492,6 +531,8 @@ pub fn lower(
     functions,
     layouts,
     classes: registry.classes,
+    envs: registry.envs,
+    wrapped: registry.wrapped,
     entry,
     source_paths,
     externs,
@@ -566,6 +607,8 @@ fn lower_function(id: FnId, decl: &FnDecl, subst: Subst, cx: &mut Context) -> LR
   let locals: Vec<Type> = locals.iter().map(|ty| ty.substitute(&subst)).collect();
   let mut lowering = FnLowering::new(cx, sig.ret.clone(), locals.clone(), subst, decl.name.span);
 
+  lowering.source_fn = id;
+
   for ty in &locals {
     lowering.register_types(ty);
   }
@@ -602,6 +645,7 @@ fn lower_function(id: FnId, decl: &FnDecl, subst: Subst, cx: &mut Context) -> LR
   Ok(Function {
     name: decl.name.name.clone(),
     template: false,
+    closure: false,
     param_count: decl.params.len() + usize::from(sig.receiver.is_some()),
     self_by_ref: sig.receiver == Some(Receiver::Var),
     export: decl.extern_c.then(|| decl.export.as_ref().map_or_else(|| decl.name.name.clone(), |export| export.symbol.clone())),
@@ -644,6 +688,10 @@ struct FnLowering<'a> {
   subst: Subst,
   /// Where the code being lowered is, for errors found while instantiating.
   span: Span,
+  /// The source function whose bindings are lowered (the enclosing one for a lambda).
+  source_fn: FnId,
+  /// Inside a lambda, the SIR local of each binding of the source function it uses.
+  local_map: Option<std::collections::HashMap<u32, Local>>,
 }
 
 impl<'a> FnLowering<'a> {
@@ -661,6 +709,8 @@ impl<'a> FnLowering<'a> {
     FnLowering {
       subst,
       span,
+      source_fn: FnId(0),
+      local_map: None,
       package: cx.package,
       registry: cx.registry,
       resolution: cx.resolution,
@@ -712,7 +762,7 @@ impl FnLowering<'_> {
   }
 
   fn binding(&self, id: sagitario_ast::NodeId) -> LResult<Local> {
-    self.resolution.bindings.get(&id).map(|local| Local(local.0)).ok_or_else(|| LowerError("unresolved binding".to_string()))
+    self.resolution.bindings.get(&id).map(|local| self.local_id(*local)).ok_or_else(|| LowerError("unresolved binding".to_string()))
   }
 
   fn line(&self, span: Span) -> Stmt {
@@ -924,7 +974,7 @@ impl FnLowering<'_> {
         let Some(Res::Local(id)) = self.resolution.paths.get(&target.id).copied() else {
           return error("assignment to something other than a binding");
         };
-        let local = Local(id.0);
+        let local = self.local_id(id);
         let ty = self.local_type(local);
         let value = self.operand_as(value, &ty)?;
         let (op, value) = match op {
@@ -973,7 +1023,7 @@ impl FnLowering<'_> {
 
     match &expr.kind {
       ExprKind::Path(_) => match self.resolution.paths.get(&expr.id) {
-        Some(Res::Local(id)) => Ok(Place { local: Local(id.0), projections: Vec::new(), ty }),
+        Some(Res::Local(id)) => Ok(Place { local: self.local_id(*id), projections: Vec::new(), ty }),
         other => error(format!("place of unsupported path {other:?}")),
       },
       ExprKind::Field { base, name } if self.is_interface_field(expr) => {
@@ -1121,8 +1171,10 @@ impl FnLowering<'_> {
       ExprKind::Char(value) => Ok(Operand::Const(Const::Char(*value))),
       ExprKind::Str(value) => Ok(Operand::Const(Const::Str(value.clone()))),
       ExprKind::Unit => Ok(UNIT),
+      ExprKind::Lambda { body, .. } => self.lambda(expr, body, &ty),
       ExprKind::Path(_) | ExprKind::Zod => match self.resolution.paths.get(&expr.id) {
-        Some(Res::Local(id)) => Ok(Operand::Local(Local(id.0))),
+        Some(Res::Local(id)) => Ok(Operand::Local(self.local_id(*id))),
+        Some(Res::Fn(id)) => Ok(self.fn_value(expr, *id, &ty)),
         Some(Res::Variant(variant)) => Ok(self.variant(ty, variant.index, Vec::new())),
         other => error(format!("unsupported path operand {other:?}")),
       },
@@ -1200,13 +1252,14 @@ impl FnLowering<'_> {
 
             return Ok(self.variant(ty, variant.index, operands));
           }
-          other => return error(format!("unsupported callee {other:?}")),
+          // A binding, field, call result or lambda of a function type.
+          _ => return self.call_value(callee, args),
         };
         let params = match &callee {
           Callee::Fn(id) | Callee::Virtual { function: id, .. } => self.typed.sig(*id).map(|sig| sig.params.clone()),
           Callee::Extern(id) => self.typed.extern_sig(*id).map(|sig| sig.params.clone()),
           Callee::Builtin(builtin) => Some(sagitario_types::builtin_sig(*builtin).params),
-          Callee::Dyn { params, .. } => Some(params.clone()),
+          Callee::Dyn { params, .. } | Callee::Closure { params, .. } => Some(params.clone()),
           Callee::Runtime { .. } => None,
         }
         .unwrap_or_default();
@@ -1218,10 +1271,14 @@ impl FnLowering<'_> {
 
         Ok(self.call(callee, operands, ty))
       }
+      ExprKind::MethodCall { receiver, method, args } if self.typed.field_calls.contains(&expr.id) => self.field_call(receiver, &method.name, args),
       ExprKind::MethodCall { receiver, args, .. } if self.typed.builtin_methods.contains_key(&expr.id) => {
         let method = self.typed.builtin_methods.get(&expr.id).cloned().ok_or_else(|| LowerError("missing built-in method".to_string()))?;
 
         match method {
+          BuiltinMethod::Map | BuiltinMethod::MapErr | BuiltinMethod::AndThen | BuiltinMethod::UnwrapOrElse | BuiltinMethod::Filter => {
+            self.closure_method(&method, &ty, receiver, args)
+          }
           BuiltinMethod::Runtime { .. } | BuiltinMethod::Find | BuiltinMethod::ToDigit | BuiltinMethod::Parse(_) => {
             self.text_method(method, &ty, receiver, args)
           }

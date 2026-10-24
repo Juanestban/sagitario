@@ -198,6 +198,22 @@ static inline void sag_dyn_release(sag_dyn value) {
   sag_object_release(value.object);
 }
 
+/* ---- Function values (docs/spec/08-closures.md) ----------------------------------------- */
+
+/* A function or closure: the function, called with `env` first, and its environment (an ARC
+ * object holding the captures), or NULL. */
+typedef struct sag_fnval {
+  sag_method fn;
+  sag_object *env;
+} sag_fnval;
+
+static inline void sag_fnval_retain(sag_fnval value) {
+  sag_object_retain(value.env);
+}
+static inline void sag_fnval_release(sag_fnval value) {
+  sag_object_release(value.env);
+}
+
 /* ---- FFI (docs/spec/10-ffi.md) ----------------------------------------------------------- */
 
 /* C's `char`, the type `std::ffi::c_char` stands for. */

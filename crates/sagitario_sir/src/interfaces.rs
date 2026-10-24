@@ -67,6 +67,12 @@ pub(crate) struct Registry {
   pub(crate) diagnostics: Vec<Diagnostic>,
   /// Whether an endless series of instances was reported.
   pub(crate) endless: bool,
+  /// The functions of lambdas, by their position among the instances.
+  pub(crate) lambdas: Vec<(usize, crate::Function)>,
+  /// The types captured by each closure environment.
+  pub(crate) envs: Vec<Vec<Type>>,
+  /// The named functions used as values, which need a wrapper.
+  pub(crate) wrapped: Vec<FnId>,
 }
 
 /// The slot of the getter of a field, after the interface's methods; the setter follows it.

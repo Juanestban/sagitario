@@ -216,5 +216,5 @@ enum Shape impl Display {
 - F1 methods: `is_some()`, `is_none()`, `is_ok()`, `is_err()`, `unwrap()`, `expect(message)`,
   `unwrap_or(default)` and, on `Result`, `unwrap_err()`. `unwrap` and `expect` panic when the
   value is `None` or `Err`, with Rust's message (``called `Option::unwrap()` on a `None` value``)
-  or the one given to `expect`. Methods taking closures (`map`, `map_err`, `and_then`) arrive in
-  F2.
+  or the one given to `expect`. Methods taking closures (`map`, `map_err`, `and_then`,
+  `unwrap_or_else`, `filter`) are described in [08-closures.md](08-closures.md).

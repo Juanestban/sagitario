@@ -117,6 +117,8 @@ pub const INVALID_IMPL: Code = Code("E0329");
 /// A type argument that does not implement a bound of its parameter, a bound that is not an
 /// interface, or generic instances that never end.
 pub const UNSATISFIED_BOUND: Code = Code("E0330");
+/// An assignment inside a closure to a binding it captures (captures are read-only copies).
+pub const CAPTURED_ASSIGNMENT: Code = Code("E0331");
 
 /// A language feature that is specified but not implemented yet.
 pub const NOT_IMPLEMENTED: Code = Code("E0900");
@@ -135,6 +137,8 @@ pub const UNUSED_IMPORT: Code = Code("W0005");
 pub const PRIVATE_INTERFACE: Code = Code("W0006");
 /// An `unsafe` block without unsafe operations.
 pub const UNUSED_UNSAFE: Code = Code("W0007");
+/// A closure stored in a field of the object it captures: a reference cycle ARC never frees.
+pub const CLOSURE_CYCLE: Code = Code("W0008");
 
 pub const ALL: &[Code] = &[
   UNEXPECTED_CHARACTER,
@@ -189,6 +193,7 @@ pub const ALL: &[Code] = &[
   INVALID_WEAK,
   INVALID_IMPL,
   UNSATISFIED_BOUND,
+  CAPTURED_ASSIGNMENT,
   NOT_IMPLEMENTED,
   UNUSED_BINDING,
   UNNEEDED_VAR,
@@ -197,6 +202,7 @@ pub const ALL: &[Code] = &[
   UNUSED_IMPORT,
   PRIVATE_INTERFACE,
   UNUSED_UNSAFE,
+  CLOSURE_CYCLE,
 ];
 
 #[cfg(test)]

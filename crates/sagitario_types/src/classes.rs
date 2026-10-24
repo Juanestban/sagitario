@@ -240,7 +240,8 @@ impl Checker<'_> {
         .collect();
 
       if self.class_method(id, field_name).is_some() {
-        diagnostic = diagnostic.with_help(format!("`{field_name}` is a function; call it with `{field_name}(...)`"));
+        diagnostic =
+          diagnostic.with_help(format!("`{field_name}` is a method; call it with `{field_name}(...)`, or wrap it in a lambda to use it as a value"));
       } else if let Some(similar) = sagitario_diagnostics::closest_match(field_name, fields.iter().map(String::as_str)) {
         diagnostic = diagnostic.with_help(format!("a field with a similar name exists: `{similar}`"));
       }
@@ -344,6 +345,11 @@ impl Checker<'_> {
             .with_label(field.span, "declared `const` here")
             .with_help(format!("declare it `var {}` to modify it after `new`", name.name)),
         )
+      }
+      PlaceBase::Local(root) if self.is_captured(root) => {
+        let name = self.resolution.locals(self.function).get(root.0 as usize).map(|info| info.name.clone()).unwrap_or_default();
+
+        PlaceAccess::Immutable(self.captured_error(place.span, &name))
       }
       PlaceBase::Local(root) => {
         let Some(info) = self.resolution.locals(self.function).get(root.0 as usize) else { return PlaceAccess::Mutable };

@@ -264,6 +264,8 @@ pub enum TypeExprKind {
   Array { elem: Box<TypeExpr>, len: ArrayLen },
   /// `*const T` or `*mut T`
   Ptr { mutable: bool, pointee: Box<TypeExpr> },
+  /// `fn(A, B) -> R`; without `-> R` the result is `()`.
+  Fn { params: Vec<TypeExpr>, ret: Option<Box<TypeExpr>> },
 }
 
 /// The length of an array type or repeat expression: an integer literal.
@@ -472,6 +474,11 @@ pub enum ExprKind {
   /// `zod`, the parent class's view of `self`: only as the receiver of `zod.method(...)` and
   /// `zod.new(...)`.
   Zod,
+  /// `(a, b: T) => body` or `x => body` (docs/spec/08-closures.md).
+  Lambda {
+    params: Vec<LambdaParam>,
+    body: Box<Expr>,
+  },
   /// `new Type(args)`: a class instance, or a `StringBuilder`.
   New {
     path: Path,
@@ -510,6 +517,14 @@ pub enum ExprKind {
   Return {
     value: Option<Box<Expr>>,
   },
+}
+
+/// A parameter of a lambda, with an optional type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LambdaParam {
+  pub name: Ident,
+  pub ty: Option<TypeExpr>,
+  pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
