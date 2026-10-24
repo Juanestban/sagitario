@@ -32,6 +32,8 @@ pub enum Builtin {
   StringFromC,
   /// `Error(message)`: a basic error with a message, of the prelude's `Error` interface.
   ErrorNew,
+  /// `List::from(array)`: a new list holding copies of the elements of an array.
+  ListFrom,
 }
 
 impl Builtin {
@@ -46,6 +48,7 @@ impl Builtin {
       Builtin::CStringNew => "CString::new",
       Builtin::StringFromC => "string_from_c",
       Builtin::ErrorNew => "Error",
+      Builtin::ListFrom => "List::from",
     }
   }
 
@@ -505,7 +508,7 @@ impl Resolution {
     info.functions.iter().copied().find(|function| self.fn_decl(package, *function).is_some_and(|decl| decl.name.name == name))
   }
 
-  /// The initializer of a class: its function `new` without `self` (docs/spec/04-classes.md).
+  /// The initializer of a class: its function `new` (docs/spec/04-classes.md).
   pub fn initializer(&self, package: &Package, id: ClassId) -> Option<FnId> {
     self.type_function(package, TypeItem::Class(id), "new").filter(|function| self.is_initializer(package, *function))
   }
@@ -515,12 +518,47 @@ impl Resolution {
     matches!(self.owner(id), Some(TypeItem::Class(_))) && self.fn_decl(package, id).is_some_and(is_initializer_decl)
   }
 
+  /// Whether a function is a method: it takes `self` and is not an initializer, which receives
+  /// the instance being initialized.
+  pub fn is_method(&self, package: &Package, id: FnId) -> bool {
+    self.fn_decl(package, id).is_some_and(|decl| decl.self_param.is_some()) && !self.is_initializer(package, id)
+  }
+
   pub fn locals(&self, id: FnId) -> &[LocalInfo] {
     self.locals.get(id.0 as usize).map_or(&[], Vec::as_slice)
   }
 
   fn module(&self, id: ModId) -> Option<&ModuleInfo> {
     self.modules.get(id.0 as usize)
+  }
+
+  /// An item of the prelude module by name, public or not: the compiler implements parts of
+  /// the language with them (`Iter`, `Map`, the iterators of lists and ranges).
+  pub fn prelude_item(&self, name: &str) -> Option<ItemRef> {
+    self.prelude.and_then(|prelude| self.module(prelude)).and_then(|module| module.items.get(name)).map(|declared| declared.item)
+  }
+
+  /// A function of the prelude module by name.
+  pub fn prelude_fn(&self, name: &str) -> Option<FnId> {
+    match self.prelude_item(name) {
+      Some(ItemRef::Fn(id)) => Some(id),
+      _ => None,
+    }
+  }
+
+  /// A type of the prelude module by name.
+  pub fn prelude_type(&self, name: &str) -> Option<TypeItem> {
+    match self.prelude_item(name) {
+      Some(ItemRef::Type(item)) => Some(item),
+      _ => None,
+    }
+  }
+
+  /// Whether a function (or the type declaring it) belongs to the prelude module.
+  pub fn in_prelude(&self, id: FnId) -> bool {
+    let source = self.prelude.and_then(|prelude| self.module(prelude)).and_then(|module| module.source);
+
+    source.is_some() && self.functions.get(id.0 as usize).map(|info| info.module) == source
   }
 
   /// Whether `inner` is `outer` or one of its submodules, which see `outer`'s private items.
@@ -539,9 +577,10 @@ impl Resolution {
   }
 }
 
-/// A class function `new` without `self`: the initializer, where `self` is implicit.
+/// A class function `new`: the initializer, whose `self` is the instance being initialized
+/// (ADR-0035). One declared without `self` is reported by the type checker.
 fn is_initializer_decl(decl: &FnDecl) -> bool {
-  decl.name.name == "new" && decl.self_param.is_none()
+  decl.name.name == "new"
 }
 
 /// Names reserved for the future concurrency model (docs/spec/01-lexical.md).
@@ -551,7 +590,7 @@ const RESERVED_NAMES: &[&str] = &["Send", "Sync", "spawn"];
 const NUMERIC_TYPES: &[&str] = &["i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize", "f32", "f64"];
 
 /// Prelude and primitive type names that program types can shadow.
-const PRELUDE_TYPES: &[&str] = &["bool", "char", "String", "StringBuilder", "Option", "Result"];
+const PRELUDE_TYPES: &[&str] = &["bool", "char", "String", "StringBuilder", "Option", "Result", "List"];
 
 pub fn resolve(package: &Package, diagnostics: &mut Diagnostics) -> Resolution {
   let mut resolution = Resolution::default();
@@ -707,7 +746,7 @@ pub fn resolve(package: &Package, diagnostics: &mut Diagnostics) -> Resolution {
     if let Some(self_param) = &decl.self_param {
       resolver.declare("self", self_param.span, LocalKind::SelfParam);
     } else if matches!(info.owner, Some(TypeItem::Class(_))) && is_initializer_decl(decl) {
-      // The instance being initialized.
+      // An initializer missing its `self` (an error) still gets one, to report nothing else.
       resolver.declare("self", decl.name.span, LocalKind::SelfParam);
     }
 
@@ -913,6 +952,8 @@ fn check_reserved(name: &str, span: Span, diagnostics: &mut Diagnostics) {
 enum Named {
   Item(ItemRef),
   Prelude(EnumKind),
+  /// The prelude's `List`, a built-in type with the static function `from`.
+  List,
 }
 
 /// A name bound by a pattern, for checking the alternatives of `|`.
@@ -1486,6 +1527,20 @@ impl<'a> Resolver<'a> {
 
         None
       }
+      (Named::List, []) => {
+        self.error(last.span, "`List` is a type, not a value");
+
+        None
+      }
+      (Named::List, [member]) => {
+        if member.name == "from" {
+          return Some(Res::Builtin(Builtin::ListFrom));
+        }
+
+        self.error(member.span, format!("no function `{}` in `List`", member.name));
+
+        None
+      }
       (Named::Item(ItemRef::Type(item)), [member]) => {
         if let TypeItem::Enum(id) = item
           && let Some(decl) = self.resolution.enum_decl(self.package, id)
@@ -1623,6 +1678,7 @@ impl<'a> Resolver<'a> {
         Some(item) => Named::Item(item),
         None if name == "Option" => Named::Prelude(EnumKind::Option),
         None if name == "Result" => Named::Prelude(EnumKind::Result),
+        None if name == "List" => Named::List,
         None if name == "std" => Named::Item(ItemRef::Std(StdItem::Root)),
         None => {
           let mut diagnostic = Diagnostic::error(codes::UNRESOLVED_NAME, first.span, format!("cannot find `{name}` in this scope"));

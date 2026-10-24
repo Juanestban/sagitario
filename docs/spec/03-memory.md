@@ -115,8 +115,9 @@ struct Point impl Display {
 - In structs and enums, `new` is an ordinary static function by convention (it returns the
   type and is called `Point::new(...)`). `new` is a keyword, but it may name a struct or enum
   function.
-- In classes, `new` is the special initializer (see [classes](04-classes.md#construction))
-  and can only be invoked through `new ClassName(...)`, never as `ClassName::new(...)`.
+- In classes, `new` is the special initializer, declared `fn new(self, ...)` (see
+  [classes](04-classes.md#construction)), and can only be invoked through
+  `new ClassName(...)`, never as `ClassName::new(...)`.
 - There are no static fields and no mutable global variables in the MVP; use module-level
   `const`.
 

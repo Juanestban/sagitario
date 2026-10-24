@@ -11,7 +11,7 @@ class Account {
   pub const origin: Point;
   pub var balance: i64;
 
-  pub fn new(owner: String) {
+  pub fn new(self, owner: String) {
     self.owner = owner;
     self.origin = Point { x: 0 };
     self.balance = 0;
@@ -34,7 +34,7 @@ class Unfinished {
   pub const a: i32;
   pub var b: i32;
 
-  pub fn new(a: i32) {
+  pub fn new(self, a: i32) {
     self.a = a;
     self.check(); //~ ERROR E0325
     if a > 0 {
@@ -49,7 +49,7 @@ class Unfinished {
 class Early {
   pub var value: i32;
 
-  pub fn new() {
+  pub fn new(self) {
     self.value = self.value + 1; //~ ERROR E0325
   }
 }
@@ -59,12 +59,20 @@ class Missing { //~ ERROR E0324
 }
 
 class Typed {
-  pub fn new() -> Typed { //~ ERROR E0324
+  pub fn new(self) -> Typed { //~ ERROR E0324
+  }
+}
+
+class Implicit {
+  pub var count: i32;
+
+  pub fn new() { //~ ERROR E0324
+    self.count = 0;
   }
 }
 
 class Hidden {
-  prv fn new() {}
+  prv fn new(self) {}
 
   pub fn make() -> Hidden {
     new Hidden()

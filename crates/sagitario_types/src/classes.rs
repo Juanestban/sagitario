@@ -20,6 +20,9 @@ enum PlaceBase<'e> {
   ClassField { class: ClassId, name: &'e Ident, base: &'e Expr },
   /// A field reached through an interface value: it can be modified if the interface says `var`.
   InterfaceField { interface: sagitario_resolve::InterfaceId, name: &'e Ident },
+  /// An element of a list, `whole` or a part of one: only whole elements can be assigned,
+  /// since reading an element gives a copy.
+  ListElement { whole: bool },
   /// A value that is not stored anywhere.
   Temporary,
   /// A name that is not a binding: already reported.
@@ -109,10 +112,11 @@ impl Checker<'_> {
       let own = self.typed.class_def(id).and_then(|def| def.initializer);
 
       for function in decl.functions.iter().filter(|function| function.name.name == "new") {
-        if let Some(param) = function.self_param {
+        if function.self_param.is_none() {
           self.diagnostics.push(
-            Diagnostic::error(codes::INVALID_INITIALIZER, param.span, "the initializer `new` does not declare `self`")
-              .with_help("remove `self`: inside `new`, `self` is the instance being initialized"),
+            Diagnostic::error(codes::INVALID_INITIALIZER, function.name.span, "the initializer `new` must take `self` first")
+              .with_note("`self` is the instance being initialized")
+              .with_help("declare it as `pub fn new(self, ...)`"),
           );
         } else if let Some(ret) = &function.return_type {
           self.diagnostics.push(
@@ -126,7 +130,7 @@ impl Checker<'_> {
         (None, _) if !decl.fields.is_empty() => {
           self.diagnostics.push(
             Diagnostic::error(codes::INVALID_INITIALIZER, decl.name.span, format!("the class `{name}` has fields but no initializer"))
-              .with_help("declare `pub fn new(...) { ... }` and assign every field in it"),
+              .with_help("declare `pub fn new(self, ...) { ... }` and assign every field in it"),
           );
         }
         (None, Some(inherited)) if self.typed.sig(inherited).is_some_and(|sig| !sig.params.is_empty()) => {
@@ -135,7 +139,7 @@ impl Checker<'_> {
           self.diagnostics.push(
             Diagnostic::error(codes::INVALID_INITIALIZER, decl.name.span, format!("the class `{name}` must declare an initializer"))
               .with_note(format!("the initializer of `{parent}` takes arguments, which `new {name}()` cannot pass"))
-              .with_help("declare `pub fn new(...) { zod.new(...); }`"),
+              .with_help("declare `pub fn new(self, ...) { zod.new(...); }`"),
           );
         }
         (Some(own), Some(inherited)) => self.require_zod_new(own, inherited),
@@ -281,10 +285,19 @@ impl Checker<'_> {
       ExprKind::Field { base, name } => match self.typed.expr_types.get(&base.id) {
         Some(Type::Class(class)) => PlaceBase::ClassField { class: class.id, name, base },
         Some(Type::Interface(interface)) => PlaceBase::InterfaceField { interface: interface.id, name },
-        _ => self.place_base(base),
+        _ => self.part_of(base),
       },
-      ExprKind::Index { base, .. } => self.place_base(base),
+      ExprKind::Index { base, .. } if matches!(self.typed.expr_types.get(&base.id), Some(Type::List(_))) => PlaceBase::ListElement { whole: true },
+      ExprKind::Index { base, .. } => self.part_of(base),
       _ => PlaceBase::Temporary,
+    }
+  }
+
+  /// The base of a place inside `base`.
+  fn part_of<'e>(&self, base: &'e Expr) -> PlaceBase<'e> {
+    match self.place_base(base) {
+      PlaceBase::ListElement { .. } => PlaceBase::ListElement { whole: false },
+      other => other,
     }
   }
 
@@ -309,6 +322,19 @@ impl Checker<'_> {
         };
 
         PlaceAccess::Immutable(Diagnostic::error(code, place.span, message).with_help("store the value in a `var` binding first"))
+      }
+      PlaceBase::ListElement { whole: true } if matches!(place_use, PlaceUse::Assign) => PlaceAccess::Mutable,
+      PlaceBase::ListElement { .. } => {
+        let (code, message) = match place_use {
+          PlaceUse::Assign => (codes::INVALID_ASSIGNMENT_TARGET, "cannot modify a part of a list element".to_string()),
+          PlaceUse::Receiver(method) => (code, format!("cannot call the method `{method}`, which modifies `self`, on a list element")),
+        };
+
+        PlaceAccess::Immutable(
+          Diagnostic::error(code, place.span, message)
+            .with_note("reading `list[i]` gives a copy of the element")
+            .with_help("modify a copy and store it back: `var item = list[i]; ...; list[i] = item;`"),
+        )
       }
       PlaceBase::InterfaceField { interface, name } => {
         let Some((owner, _, field)) = self.typed.interface_field(interface, &name.name) else { return PlaceAccess::Mutable };

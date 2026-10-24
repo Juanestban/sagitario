@@ -35,10 +35,11 @@ for i in 0..10 { ... }
 - `loop` may produce a value with `break value;`; every `break` of one `loop` must agree on
   the type. A `loop` without any `break` never finishes.
 - `break` and `continue` apply to the innermost loop. Labels are post-MVP.
-- `for` iterates over ranges, arrays and `s.chars()`/`s.bytes()` (F1) and, from F2, over any
-  iterable. The loop
-  variable is a new `const` binding on each iteration. An array is iterated through a copy
-  taken before the loop, so assigning to it inside the body does not change the iteration.
+- `for` iterates over ranges, arrays and `s.chars()`/`s.bytes()` (F1) and, from F2, over lists,
+  maps (their entries) and iterators (`Iter<T>`). The loop variable is a new `const` binding on
+  each iteration. An array is iterated through a copy taken before the loop, so assigning to it
+  inside the body does not change the iteration. A list is read by position at every step, so
+  changes made by the body are seen (see [lists](02-types.md#lists-f2)).
 - The condition of `if`/`while` and the iterable of `for` cannot be a struct literal written
   directly, because `{` starts the body; wrap it in parentheses:
   `if (Point { x: 0.0, y: 0.0 }).len() > 1.0 { ... }`.
@@ -61,8 +62,12 @@ for i in 1..=10 { ... }   // 1 to 10
 - `a..b` is half-open (includes `a`, excludes `b`); `a..=b` is closed.
 - Both bounds must be integers of the same type (no implicit conversions).
 - If `a > b` the range is empty; it does not panic.
-- F2: `(0..10).step_by(2)` and `(0..10).rev()` through iterators.
-- Open ranges (`..b`, `a..`) are post-MVP. In F1, ranges are only valid as the iterable of `for`.
+- Outside of `for`, a range is an iterator (F2): `(1..=5).map((n) => n * n).collect()`.
+- `(a..b).rev()` counts down from the last value; `rev()` is only valid written directly on a
+  range. `step_by(n)` keeps the first value and every `n`-th after it; a step of 0 panics. In a
+  `for`, both compile to a counting loop without an iterator, and never step past the type's
+  limits: `for b in (0u8..=255u8).rev()` visits 256 values.
+- Open ranges (`..b`, `a..`) are post-MVP.
 
 ## `match`
 

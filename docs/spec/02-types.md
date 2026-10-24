@@ -104,8 +104,11 @@ Division by zero, out-of-bounds indexing and every other panic behave the same i
   | `parse_i32()` (every integer type), `parse_f32()`, `parse_f64()` | `Result<T, String>` with Rust's messages (`invalid digit found in string`) |
 
 - `for c in s.chars()` iterates the characters (`char`) and `for b in s.bytes()` the bytes
-  (`u8`) of the string as it was before the loop. In F1 both are only valid there; they
-  become iterators in F2. `split` and `lines` arrive with `List` (F2).
+  (`u8`) of the string as it was before the loop. Elsewhere they are iterators (F2):
+  `Iter<char>` and `Iter<u8>` (see [iterators](08-closures.md#iterators)).
+- `split(sep)` (F2) gives a `List<String>` with the parts between occurrences of `sep`; an
+  empty `sep` splits into characters (`"héy".split("")` is `h`, `é`, `y`). `lines()` (F2) gives
+  the lines without their `\n` or `\r\n`; a final line break does not start a new line.
 - `char` methods (ASCII): `is_ascii_digit()`, `is_ascii_alphabetic()`,
   `is_ascii_alphanumeric()`, `is_ascii_whitespace()`, `is_ascii_uppercase()`,
   `is_ascii_lowercase()`, `to_ascii_uppercase()`, `to_ascii_lowercase()`, and
@@ -131,7 +134,11 @@ const text = builder.to_string();
 
 - `==` is defined between primitives, between `String`s, and between data-less enum values.
 - Between class instances, `==` is **identity** (same instance).
-- Structs are compared with a method (e.g. `a.equals(b)`) until an `Eq` interface exists.
+- Structs, enums with data and classes compare by value through the prelude interfaces `Eq`
+  and `Ord` (F2, [interfaces](05-interfaces-generics.md#equality-order-and-hashing-f2)), which
+  integers, `bool`, `char` and `String` also implement: `a.equals(b)`, `a.compare(b)`.
+- Arrays, lists, maps, iterators, interface values and function values cannot be compared with
+  `==`.
 - Operator overloading is **post-MVP** (planned through interfaces such as `Add`, `Eq`, `Ord`).
 
 ## Enums (F1)
@@ -180,10 +187,10 @@ enum Shape impl Display {
 | | Fixed array `[T; N]` (F1) | `List<T>` (F2) |
 |---|---|---|
 | Size | Fixed, known at compile time | Growable |
-| Semantics | **Value**, like a struct: copied on assignment, stored inline | **ARC reference**: a standard library class |
+| Semantics | **Value**, like a struct: copied on assignment, stored inline | **ARC reference**, a prelude type: copies share the list |
 | Creation | `[1, 2, 3]` is `[i32; 3]`; `[0; 16]` is sixteen zeros | `new List<i32>()`, `List::from([1, 2, 3])` |
-| Mutation | Only through a `var` binding | `push`, `pop`, `set` through any reference |
-| Indexing | `a[i]`, bounds-checked (panics) | `list[i]`, bounds-checked |
+| Mutation | Only through a `var` binding | Through any reference: `push`, `list[i] = v`, ... |
+| Indexing | `a[i]`, bounds-checked (panics) | `list[i]`, bounds-checked (panics) |
 | Length | `a.len()` | `list.len()` |
 
 - The literal `[1, 2, 3]` is always a fixed array; lists are built explicitly.
@@ -198,8 +205,61 @@ enum Shape impl Display {
 - `for x in a` iterates over a copy of `a` taken before the first iteration (see
   [control flow](06-control-flow.md#loops)).
 - From F2, arrays expose iterators: `[1, 2, 3].map((x) => x * 2)` returns an iterator that can
-  be consumed by `for` or gathered with `.collect()`.
+  be consumed by `for` or gathered with `.collect()`. `a.iter()` and the methods of
+  [iterators](08-closures.md#iterators) work on a list holding copies of the elements.
 - Slices (copy-free views such as `xs[1..3]`) are post-MVP.
+
+### Lists (F2)
+
+Rationale: [ADR-0034](../adr/0034-collections-and-iterators.md).
+
+- The element type of `new List<T>()` is written or comes from the expected type
+  (`const names: List<String> = new List();`). `List::from(array)` takes it from the array.
+- Reading `list[i]` gives a copy of the element (structs are copied, references retained).
+  `list[i] = value` replaces it through any binding, `const` included, since the list is a
+  reference. A part of an element cannot be assigned (`list[i].x = 1` is an error): modify a
+  copy and store it back. Fields of class instances in a list can be assigned
+  (`list[i].count += 1`), since the instance is shared.
+- Methods:
+
+  | Method | Result |
+  |---|---|
+  | `len()`, `is_empty()` | `usize`, `bool` |
+  | `push(v)` | `()`: adds `v` at the end |
+  | `pop()` | `Option<T>`: removes the last element |
+  | `get(i)`, `first()`, `last()` | `Option<T>`: a copy, or `None` |
+  | `insert(i, v)` | `()`: moves the elements from `i` on; panics if `i > len()` |
+  | `remove(i)` | `T`: removes it, moving the following ones; panics if `i >= len()` |
+  | `clear()`, `reverse()` | `()` |
+  | `contains(v)`, `index_of(v)` | `bool`, `Option<usize>`; need `T: Eq` |
+  | `sort()` | `()`: stable, ascending; needs `T: Ord` |
+  | `sort_by(f)` | `()`: stable, by `f: fn(T, T) -> Ordering` |
+  | `join(sep)` | `String`; only on `List<String>` |
+  | `iter()` and the methods of `Iter<T>` | see [iterators](08-closures.md#iterators) |
+
+- `for x in list` visits the elements by position and reads the length at every step:
+  elements added or removed by the body are seen, and the loop never reads out of bounds.
+- Lists are not compared with `==` and cannot be interpolated.
+
+### Maps (F2)
+
+```sag
+const ages = new Map<String, i32>();
+ages.insert("Ada", 36);
+const age = ages.get("Ada").unwrap_or(0);
+for entry in ages {
+  println(`${entry.key}: ${entry.value}`);
+}
+```
+
+- `Map<K, V>` is a prelude class: a hash map whose keys implement `Hash` (and so `Eq`). It
+  keeps the order in which keys were first inserted.
+- Methods: `insert(k, v) -> Option<V>` (the previous value), `get(k) -> Option<V>` (a copy),
+  `contains_key(k) -> bool`, `remove(k) -> Option<V>`, `len()`, `is_empty()`, `clear()`, and the
+  iterators `keys()`, `values()` and `entries()`. There is no `map[k]`.
+- `for entry in map` iterates over `entries()`: values of the prelude struct
+  `Entry<K, V> { key: K, value: V }`.
+- Maps are not compared with `==` and cannot be interpolated.
 
 ## `Option<T>` and `Result<T, E>` (F1)
 

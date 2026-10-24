@@ -336,8 +336,7 @@ impl Checker<'_> {
         TypeItem::Class(id) => self.class_method(id, &name),
         _ => self.resolution.type_function(self.package, item, &name),
       };
-      let Some(function) = found.filter(|function| self.resolution.fn_decl(self.package, *function).is_some_and(|decl| decl.self_param.is_some()))
-      else {
+      let Some(function) = found.filter(|function| self.resolution.is_method(self.package, *function)) else {
         if decl.is_abstract && !is_abstract {
           self.diagnostics.push(
             Diagnostic::error(codes::INVALID_IMPL, span, format!("`{type_name}` does not implement the method `{name}` of `{interface_name}`"))

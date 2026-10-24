@@ -7,7 +7,7 @@ abstract class Animal impl Named {
   prv const name: String;
   pub var age: i32;
 
-  pub fn new(name: String, age: i32) {
+  pub fn new(self, name: String, age: i32) {
     self.name = name;
     self.age = age;
   }
@@ -17,7 +17,7 @@ abstract class Animal impl Named {
 }
 
 class Dog extends Animal {
-  pub fn new(name: String) {
+  pub fn new(self, name: String) {
     zod.new(name, 0);
   }
 
@@ -43,11 +43,13 @@ const dog = new Dog("Rex");
 
 ## Construction
 
-- The constructor is `pub fn new(...)` (or `prv fn new`). It is an **initializer**: `self`
-  is implicit and already allocated, and `new` declares neither `self` nor a return type.
+- The constructor is `pub fn new(self, ...)` (or `prv fn new(self, ...)`). It is an
+  **initializer**: like a method, it declares `self` first, which is the instance being
+  initialized, already allocated. It has no return type. A `new` without `self` is an error
+  (E0324) ([ADR-0035](../adr/0035-explicit-self-in-initializers.md)).
 - Objects are created with `new ClassName(args)`, which allocates and calls `new`. A `prv`
   initializer can only be used inside the class.
-- A class without fields may omit `new`; it then has an implicit `new()` without parameters. A
+- A class without fields may omit `new`; it then has an implicit `new(self)` without parameters. A
   class with fields must declare it. Fields have no initializers in their declaration.
 - Every field, `const` and `var`, must be assigned before `new` returns: at the end of its body
   and at every `return`. A `const` field is assigned exactly once. No field is read before it is
@@ -67,7 +69,7 @@ const dog = new Dog("Rex");
 
 ```sag
 class Dog extends Animal {
-  pub fn new(name: String) { zod.new(name, 0); }
+  pub fn new(self, name: String) { zod.new(name, 0); }
   pub fn puppy() -> Dog { new Dog("Puppy") }
 }
 

@@ -828,7 +828,7 @@ mod tests {
   #[test]
   fn initializers_assign_every_field() {
     let class =
-      |init: &str| codes_with(&format!("class C {{ pub const a: i32; pub var b: i32; pub fn new() {{ {init} }} pub fn m(self) {{}} }}"), "");
+      |init: &str| codes_with(&format!("class C {{ pub const a: i32; pub var b: i32; pub fn new(self) {{ {init} }} pub fn m(self) {{}} }}"), "");
 
     assert_eq!(class("self.a = 1; self.b = self.a; self.b += 1; self.m();"), Vec::<&str>::new());
     assert_eq!(class("self.a = 1;"), vec!["E0325"]);

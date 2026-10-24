@@ -19,13 +19,13 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0008](0008-concurrency-deferred.md) | Single-threaded MVP; Rust-style concurrency later | Accepted |
 | [0009](0009-ffi-and-unsafe.md) | Rust-style FFI and `unsafe` | Accepted (refined by 0026) |
 | [0010](0010-modules-and-packages.md) | File-as-module, logical imports, packages | Accepted (amended by 0024, 0025) |
-| [0011](0011-surface-syntax.md) | Surface syntax | Accepted |
+| [0011](0011-surface-syntax.md) | Surface syntax | Accepted (refined by 0035) |
 | [0012](0012-closures.md) | Closures capture by value, read-only | Accepted (refined by 0033) |
-| [0013](0013-primitive-semantics.md) | Semantics of primitives and `String` | Accepted |
+| [0013](0013-primitive-semantics.md) | Semantics of primitives and `String` | Accepted (refined by 0034) |
 | [0014](0014-mvp-scope.md) | MVP scope: F0 + F1 + F2, desktop only | Accepted |
 | [0015](0015-compiler-architecture-and-toolchain.md) | Compiler architecture and C toolchain | Accepted |
 | [0016](0016-engineering-process.md) | Testing, quality gates, conventions and license | Accepted |
-| [0017](0017-resolution-of-open-questions-q1-q11.md) | Resolution of open questions Q1–Q11 | Accepted |
+| [0017](0017-resolution-of-open-questions-q1-q11.md) | Resolution of open questions Q1–Q11 | Accepted (refined by 0034) |
 | [0018](0018-windows-c-toolchain.md) | Windows C toolchain: official LLVM (MSVC target), MinGW clang tolerated | Accepted |
 | [0019](0019-prelude-and-printing.md) | Prelude and printing | Accepted |
 | [0020](0020-expressions-bindings-and-build-modes.md) | Operators, bindings, control flow, interpolation and build modes | Accepted |
@@ -35,13 +35,15 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0024](0024-modules-imports-and-visibility.md) | Modules, imports, visibility and the entry point | Accepted (amended by 0025) |
 | [0025](0025-single-pub-visibility.md) | A single `pub` visibility, without `pub(pkg)` | Accepted |
 | [0026](0026-ffi-details.md) | FFI details: pointers, `unsafe`, `std::ffi` and exports | Accepted |
-| [0027](0027-classes-and-arc.md) | Classes, construction, ARC objects and `weak` references | Accepted (refined by 0030) |
+| [0027](0027-classes-and-arc.md) | Classes, construction, ARC objects and `weak` references | Accepted (refined by 0030, 0035) |
 | [0028](0028-inferred-self-mutation.md) | `self` without `var`: methods that modify `self` are inferred | Accepted |
 | [0029](0029-inheritance.md) | Inheritance: construction, overriding, subtyping and dispatch | Accepted |
 | [0030](0030-weak-references.md) | Weak references: initialization, scope and runtime | Accepted |
 | [0031](0031-interfaces.md) | Interfaces: fields, implementation, interface values and `Error` | Accepted (completed by 0032) |
-| [0032](0032-generics.md) | Generics: type arguments, inference, bounds and monomorphization | Accepted |
+| [0032](0032-generics.md) | Generics: type arguments, inference, bounds and monomorphization | Accepted (refined by 0034) |
 | [0033](0033-closures-details.md) | Closures: arrow functions, function values and their representation | Accepted |
+| [0034](0034-collections-and-iterators.md) | Collections, iterators, and equality, order and hashing | Accepted |
+| [0035](0035-explicit-self-in-initializers.md) | Initializers declare `self` | Accepted |
 
 ## Template
 

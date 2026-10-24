@@ -143,6 +143,73 @@ fn front_end(options: &CompileOptions, generate: bool) -> Result<FrontEnd, u8> {
 /// The part of the prelude written in Sagitario.
 const PRELUDE: &str = include_str!("prelude.sag");
 
+/// The integer types, each with a function `range_<type>` in the prelude.
+const INT_TYPES: [&str; 10] = ["i8", "i16", "i32", "i64", "isize", "u8", "u16", "u32", "u64", "usize"];
+
+/// `start..end` (or `..=`) outside of `for`, forwards or reversed, for integers of type `TYPE`:
+/// the iterator a range is. Steps never overflow, so ranges reaching the type's limits work.
+const RANGE_TEMPLATE: &str = "
+fn range_TYPE(start: TYPE, end: TYPE, inclusive: bool, reverse: bool) -> Iter<TYPE> {
+  const cursor = new Cell<TYPE>(if reverse { end } else { start });
+  const done = new Cell<bool>(false);
+
+  new Iter<TYPE>(() => {
+    if done.value {
+      return None;
+    }
+
+    const value = cursor.value;
+
+    if reverse {
+      if inclusive {
+        if value < start {
+          done.value = true;
+          return None;
+        }
+
+        if value == start { done.value = true; } else { cursor.value = value - 1; }
+        Some(value)
+      } else {
+        if value <= start {
+          done.value = true;
+          return None;
+        }
+
+        cursor.value = value - 1;
+        Some(value - 1)
+      }
+    } else if inclusive {
+      if value > end {
+        done.value = true;
+        return None;
+      }
+
+      if value == end { done.value = true; } else { cursor.value = value + 1; }
+      Some(value)
+    } else {
+      if value >= end {
+        done.value = true;
+        return None;
+      }
+
+      cursor.value = value + 1;
+      Some(value)
+    }
+  })
+}
+";
+
+/// The prelude's source: `prelude.sag` followed by the range functions.
+fn prelude_source() -> String {
+  let mut source = PRELUDE.to_string();
+
+  for ty in INT_TYPES {
+    source.push_str(&RANGE_TEMPLATE.replace("TYPE", ty));
+  }
+
+  source
+}
+
 /// Reads, lexes and parses the modules of a program (docs/spec/09-modules.md): the entry file is
 /// the root module `pkg`, and `pkg::net::http` is the file `net/http.sag` next to it.
 struct Loader {
@@ -188,7 +255,7 @@ impl Loader {
 
   /// Adds the prelude module, which every program sees, and returns its index.
   fn load_prelude(&mut self, sources: &mut SourceMap, diagnostics: &mut Diagnostics) -> Result<usize, u8> {
-    let id = sources.add(PathBuf::from("<prelude>"), PRELUDE.to_string());
+    let id = sources.add(PathBuf::from("<prelude>"), prelude_source());
     let Some(source) = sources.get(id) else {
       eprintln!("internal compiler error: the prelude was not registered");
       return Err(EXIT_ICE);

@@ -63,6 +63,7 @@ pub fn generate(program: &Program) -> GeneratedC {
     classes: &program.classes,
     functions: &program.functions,
     envs: &program.envs,
+    list_elems: Vec::new(),
   };
   let order = generator.aggregate_order(program);
 
@@ -83,6 +84,7 @@ pub fn generate(program: &Program) -> GeneratedC {
   }
 
   generator.out.push('\n');
+  generator.list_support();
   generator.class_support(&order);
   generator.interface_support(program);
   generator.closure_support(program);
@@ -139,6 +141,9 @@ struct Generator<'a> {
   functions: &'a [Function],
   /// The types captured by each closure environment.
   envs: &'a [Vec<Type>],
+  /// The element types of the lists the program uses; `sag_elem_release_N` releases an element
+  /// of the managed one at index `N`.
+  list_elems: Vec<Type>,
 }
 
 impl<'a> Generator<'a> {
@@ -252,6 +257,16 @@ impl<'a> Generator<'a> {
       }
       Type::Ptr { pointee, .. } => {
         self.pointees.push(pointee.as_ref().clone());
+
+        return;
+      }
+      // A list holds its elements behind a reference.
+      Type::List(elem) => {
+        if !self.list_elems.contains(elem) {
+          self.list_elems.push(elem.as_ref().clone());
+        }
+
+        self.pointees.push(elem.as_ref().clone());
 
         return;
       }
@@ -479,6 +494,59 @@ impl<'a> Generator<'a> {
     }
   }
 
+  /// The functions that release an element of each list type with managed elements.
+  fn list_support(&mut self) {
+    for (index, elem) in self.list_elems.clone().iter().enumerate() {
+      if self.layouts.is_managed(elem) {
+        let release = self.arc_call("release", elem, &format!("(*({} *)element)", self.c_type(elem)));
+
+        self.out.push_str(&format!("static void sag_elem_release_{index}(void *element) {{ {release}; }}\n"));
+      }
+    }
+
+    self.out.push('\n');
+  }
+
+  /// The function releasing an element of a list of `elem`, or NULL.
+  fn elem_release(&self, elem: &Type) -> String {
+    match self.list_elems.iter().position(|known| known == elem) {
+      Some(index) if self.layouts.is_managed(elem) => format!("sag_elem_release_{index}"),
+      _ => "NULL".to_string(),
+    }
+  }
+
+  /// The C type of the elements of the list `list`.
+  fn list_elem(&self, list: &Operand) -> String {
+    match self.operand_type(list) {
+      Type::List(elem) => self.c_type(&elem),
+      _ => "uint8_t".to_string(),
+    }
+  }
+
+  /// `for` over a range counting down or by steps: the loop runs over an unsigned offset from
+  /// the first value, so no value outside the range is ever computed.
+  fn for_range_stepped(&mut self, stmt: &Stmt) {
+    let Stmt::ForRange { var, ty, start, end, inclusive, reverse, step, body } = stmt else { return };
+    let n = var.0;
+    let (start, end) = (self.operand(start), self.operand(end));
+    let step = step.as_ref().map_or_else(|| "(uintmax_t)1".to_string(), |step| format!("(uintmax_t){}", self.operand(step)));
+    let empty = if *inclusive { format!("{start} > {end}") } else { format!("{start} >= {end}") };
+    // The distance from the first to the last value.
+    let last = if *inclusive { "0" } else { "1" };
+    let distance = format!("((uintmax_t){end} - (uintmax_t){start} - {last})");
+    let value = if *reverse { format!("(uintmax_t){end} - {last} - sag_o{n}") } else { format!("(uintmax_t){start} + sag_o{n}") };
+
+    self.line(&format!("if ({step} == 0) sag_panic_at(\"the step of `step_by` must be greater than 0\", __FILE__, __LINE__);"));
+    self.line(&format!(
+      "for (uintmax_t sag_o{n} = 0, sag_d{n} = ({empty}); sag_d{n} == 0; sag_d{n} = ({distance} - sag_o{n} < {step}), sag_o{n} = sag_d{n} ? sag_o{n} : sag_o{n} + {step}) {{"
+    ));
+    self.indent += 1;
+    self.line(&format!("{} = sag_from_uintmax_{}({value});", self.local(*var), ty.name()));
+    self.stmts(body);
+    self.indent -= 1;
+    self.line("}");
+  }
+
   /// The closure environments, then the wrappers of named functions used as values.
   fn closure_support(&mut self, program: &Program) {
     for (index, types) in program.envs.iter().enumerate() {
@@ -688,7 +756,7 @@ impl<'a> Generator<'a> {
       Type::String => format!("sag_string_{action}({value})"),
       Type::StringBuilder => format!("sag_builder_{action}({value})"),
       Type::CString => format!("sag_cstring_{action}({value})"),
-      Type::Class(_) => format!("sag_object_{action}({value})"),
+      Type::Class(_) | Type::List(_) => format!("sag_object_{action}({value})"),
       Type::Interface(_) => format!("sag_dyn_{action}({value})"),
       Type::Function { .. } => format!("sag_fnval_{action}({value})"),
       _ => format!("sag_{action}_{}(&{value})", self.c_type(ty).trim_start_matches("sag_")),
@@ -718,7 +786,7 @@ impl<'a> Generator<'a> {
       Type::Struct(inner) if inner.args.is_empty() => format!("sag_s{}", inner.id.0),
       Type::Enum(inner) if inner.args.is_empty() => format!("sag_e{}", inner.id.0),
       Type::Struct(_) | Type::Enum(_) => format!("sag_t{}", self.instance_index(ty)),
-      Type::Class(_) => "sag_object *".to_string(),
+      Type::Class(_) | Type::List(_) => "sag_object *".to_string(),
       Type::Array(..) | Type::Option(_) | Type::Result(..) => format!("sag_t{}", self.instance_index(ty)),
       Type::CString => "sag_cstring".to_string(),
       Type::CVoid => "void".to_string(),
@@ -990,6 +1058,9 @@ impl<'a> Generator<'a> {
         Projection::Index { index, len } => {
           out.push_str(&format!(".data[sag_index_at({}, {len}, __FILE__, __LINE__)]", self.operand(index)));
         }
+        Projection::ListElem { index, elem } => {
+          out = format!("(*({} *)sag_list_at({out}, {}, __FILE__, __LINE__))", self.c_type(elem), self.operand(index));
+        }
         Projection::Tag => out.push_str(".tag"),
         Projection::VariantField { variant, field } => out.push_str(&format!(".u.v{variant}.f{field}")),
         Projection::Deref => out = format!("(*SAG_CHECK_PTR({out}, __FILE__, __LINE__))"),
@@ -1084,7 +1155,21 @@ impl<'a> Generator<'a> {
         }
       }
       Stmt::Loop { body } => self.block("for (;;)", body),
-      Stmt::ForRange { var, ty, start, end, inclusive, body } => {
+      Stmt::ForRange { reverse, step, .. } if *reverse || step.is_some() => self.for_range_stepped(stmt),
+      Stmt::ListPush { list, value } => {
+        let elem = self.list_elem(list);
+
+        self.line(&format!("*({elem} *)sag_list_push({}) = {};", self.operand(list), self.operand(value)));
+      }
+      Stmt::ListInsert { list, index, value } => {
+        let elem = self.list_elem(list);
+        let (list, index, value) = (self.operand(list), self.operand(index), self.operand(value));
+
+        self.line(&format!("*({elem} *)sag_list_insert({list}, {index}, __FILE__, __LINE__) = {value};"));
+      }
+      Stmt::ListClear(list) => self.line(&format!("sag_list_clear({});", self.operand(list))),
+      Stmt::ListReverse(list) => self.line(&format!("sag_list_reverse({});", self.operand(list))),
+      Stmt::ForRange { var, ty, start, end, inclusive, body, .. } => {
         let c_ty = int_c_type(*ty);
         let counter = format!("sag_i{}", var.0);
         let (start, end) = (self.operand(start), self.operand(end));
@@ -1307,6 +1392,20 @@ impl<'a> Generator<'a> {
         }
       }
       Rvalue::Alloc(class) => format!("sag_new_c{class}()"),
+      Rvalue::ListNew => {
+        let Type::List(elem) = ty else { return "NULL".to_string() };
+
+        format!("sag_list_new(sizeof({}), {})", self.c_type(elem), self.elem_release(elem))
+      }
+      Rvalue::ListFromArray { array, array_ty: Type::Array(elem, len) } => {
+        format!("sag_list_from(sizeof({}), {}, {}.data, {len})", self.c_type(elem), self.elem_release(elem), self.operand(array))
+      }
+      Rvalue::ListFromArray { .. } => "NULL".to_string(),
+      Rvalue::ListLen(list) => format!("sag_list_len({})", self.operand(list)),
+      Rvalue::ListPop(list) => format!("(*({} *)sag_list_pop({}))", self.c_type(ty), self.operand(list)),
+      Rvalue::ListRemove { list, index } => {
+        format!("(*({} *)sag_list_remove({}, {}, __FILE__, __LINE__))", self.c_type(ty), self.operand(list), self.operand(index))
+      }
       Rvalue::ToDyn { value, itable } => format!("sag_todyn_{itable}({})", self.operand(value)),
       // Templates, repeats, weak loads and conversions between interfaces are emitted as
       // statements by `Generator::assign`.
@@ -1348,6 +1447,7 @@ impl<'a> Generator<'a> {
             | Type::Function { .. }
             | Type::Param(_)
             | Type::Array(..)
+            | Type::List(_)
             | Type::Option(_)
             | Type::Result(..)
             | Type::Ptr { .. }
@@ -1460,8 +1560,8 @@ fn callee_name(callee: &Callee) -> String {
     Callee::Builtin(Builtin::StringFromC) => "sag_string_from_c_at".to_string(),
     // Lowered to a call of `sag_cstring_new` with its outputs.
     Callee::Builtin(Builtin::CStringNew) => "sag_cstring_new".to_string(),
-    // Lowered to a `MessageError` converted to `Error`.
-    Callee::Builtin(Builtin::ErrorNew) => String::new(),
+    // Lowered to a `MessageError` converted to `Error`, and to `Rvalue::ListFromArray`.
+    Callee::Builtin(Builtin::ErrorNew | Builtin::ListFrom) => String::new(),
     Callee::Runtime { function, .. } => function.to_string(),
   }
 }

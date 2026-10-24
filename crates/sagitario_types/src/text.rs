@@ -101,14 +101,17 @@ impl Checker<'_> {
       return ret;
     }
 
-    if matches!(receiver_ty, Type::String) && matches!(name, "chars" | "bytes") {
-      self.diagnostics.push(
-        Diagnostic::error(codes::NOT_IMPLEMENTED, method.span, format!("`{name}()` can only be the iterable of a `for` loop in F1"))
-          .with_note("iterators arrive in F2; write `for c in text.chars() { ... }`"),
-      );
-      self.unchecked_args(args);
+    // Outside of `for`, implemented by prelude functions.
+    let prelude = match name {
+      "chars" => Some("string_chars"),
+      "bytes" => Some("string_bytes"),
+      "split" => Some("string_split"),
+      "lines" => Some("string_lines"),
+      _ => None,
+    };
 
-      return Type::Error;
+    if let (Type::String, Some(function)) = (receiver_ty, prelude) {
+      return self.prelude_method(expr, function, Vec::new(), args);
     }
 
     let methods = match receiver_ty {
@@ -125,7 +128,7 @@ impl Checker<'_> {
       };
 
       if *receiver_ty == Type::String {
-        names.extend(["find", "chars", "bytes", "parse_i32"]);
+        names.extend(["find", "chars", "bytes", "split", "lines", "parse_i32"]);
       }
 
       if let Some(similar) = sagitario_diagnostics::closest_match(name, names.iter().copied()) {
@@ -177,6 +180,10 @@ impl Checker<'_> {
 
     if let Some(TypeRes::Item(TypeItem::Class(id))) = resolved {
       return self.new_instance(expr, path, id, args, expected);
+    }
+
+    if path.segments.len() == 1 && name == "List" && !user_type {
+      return self.new_list(path, args, expected);
     }
 
     if path.segments.len() == 1 && name == "StringBuilder" && !user_type {

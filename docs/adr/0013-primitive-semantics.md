@@ -1,6 +1,6 @@
 # 0013. Semantics of primitives and `String`
 
-- Status: Accepted
+- Status: Accepted; refined by [ADR-0034](0034-collections-and-iterators.md)
 - Date: 2026-10-21
 
 ## Context

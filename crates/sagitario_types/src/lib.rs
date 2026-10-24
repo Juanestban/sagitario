@@ -6,6 +6,7 @@
 
 mod classes;
 mod closures;
+mod collections;
 mod exhaustive;
 mod ffi;
 mod flow;
@@ -28,6 +29,7 @@ use sagitario_resolve::{
   TypeRes, VariantRef,
 };
 
+pub use collections::{ITER_METHODS, PreludeItems};
 pub use generic::Subst;
 use sagitario_span::Span;
 
@@ -133,6 +135,9 @@ pub enum Type {
   },
   /// `[T; N]`
   Array(Box<Type>, u64),
+  /// The prelude's `List<T>`: a growable list behind an ARC reference
+  /// (docs/spec/02-types.md#arrays-and-lists).
+  List(Box<Type>),
   /// The prelude's `Option<T>`.
   Option(Box<Type>),
   /// The prelude's `Result<T, E>`.
@@ -337,6 +342,7 @@ impl fmt::Display for Type {
         if **ret != Type::Unit { write!(f, " -> {ret}") } else { Ok(()) }
       }
       Type::Array(elem, len) => write!(f, "[{elem}; {len}]"),
+      Type::List(elem) => write!(f, "List<{elem}>"),
       Type::Option(value) => write!(f, "Option<{value}>"),
       Type::Result(value, error) => write!(f, "Result<{value}, {error}>"),
       Type::StringBuilder => f.write_str("StringBuilder"),
@@ -377,6 +383,8 @@ pub fn builtin_sig(builtin: Builtin) -> FnSig {
     Builtin::StringFromC => FnSig { receiver: None, params: vec![ffi::c_string_ptr()], ret: Type::String },
     // The result is the prelude's `Error`, which the type checker knows.
     Builtin::ErrorNew => FnSig { receiver: None, params: vec![Type::String], ret: Type::Error },
+    // Generic over the array: checked by the type checker.
+    Builtin::ListFrom => FnSig { receiver: None, params: Vec::new(), ret: Type::Error },
   }
 }
 
@@ -502,6 +510,31 @@ pub enum BuiltinMethod {
   UnwrapOrElse,
   /// `Option::filter`
   Filter,
+  /// A method of `List` implemented by the compiler.
+  List(ListMethod),
+  /// A method implemented by a prelude function, which receives the receiver first; its type
+  /// arguments are in `TypedModule::call_args`.
+  Prelude(FnId),
+  /// `f32::total_compare` and `f64::total_compare`: IEEE 754 total order, as an `Ordering`.
+  TotalCompare,
+  /// `(start..end).rev()`
+  RangeRev,
+}
+
+/// The methods of `List<T>` implemented by the compiler (docs/spec/02-types.md#arrays-and-lists).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListMethod {
+  Len,
+  IsEmpty,
+  Push,
+  Pop,
+  Get,
+  First,
+  Last,
+  Insert,
+  Remove,
+  Clear,
+  Reverse,
 }
 
 #[derive(Debug, Default)]
@@ -543,6 +576,13 @@ pub struct TypedModule {
   /// The vtable slot of each method dispatched dynamically: one that is abstract, or is
   /// overridden in some subclass, and its overrides. Other methods are called directly.
   pub slots: HashMap<FnId, usize>,
+  /// The prelude items the compiler relies on.
+  pub prelude: PreludeItems,
+  /// Lists and arrays used as iterators (the receivers of `Iter` methods), by node id: the
+  /// prelude function making the iterator and its type arguments.
+  pub to_iter: HashMap<NodeId, (FnId, Vec<Type>)>,
+  /// Ranges used as values, by node id: the prelude function making their iterator.
+  pub ranges: HashMap<NodeId, FnId>,
 }
 
 impl TypedModule {
@@ -781,6 +821,7 @@ pub fn check(package: &Package, resolution: &Resolution, diagnostics: &mut Diagn
     zod_new_calls: Vec::new(),
   };
 
+  checker.prelude_items();
   checker.struct_defs();
   checker.enum_defs();
   checker.class_defs();
@@ -1080,8 +1121,8 @@ impl Checker<'_> {
   fn signature(&mut self, id: FnId, decl: &FnDecl) -> FnSig {
     // Methods that modify `self` become `Receiver::Var` once every body is checked.
     let receiver = match decl.self_param {
+      _ if self.resolution.is_initializer(self.package, id) => Some(Receiver::Init),
       Some(_) => Some(Receiver::Value),
-      None if self.resolution.is_initializer(self.package, id) => Some(Receiver::Init),
       None => None,
     };
     let params = decl.params.iter().map(|param| self.type_expr(&param.ty)).collect();
@@ -1226,12 +1267,12 @@ impl Checker<'_> {
         let arity = match name {
           _ if self.resolution.type_paths.get(&path.id) == Some(&TypeRes::Error) => return Type::Error,
           _ if path.segments.len() != 1 || !matches!(self.resolution.type_paths.get(&path.id), Some(TypeRes::Builtin) | None) => None,
-          "Option" => Some(1),
+          "Option" | "List" => Some(1),
           "Result" => Some(2),
           _ => None,
         };
         let Some(arity) = arity else {
-          self.error(codes::NOT_IMPLEMENTED, ty.span, "generic types other than `Option` and `Result` are not implemented yet (F2)");
+          self.error(codes::WRONG_TYPE_ARGUMENTS, ty.span, format!("`{name}` takes no type arguments"));
 
           return Type::Error;
         };
@@ -1248,6 +1289,10 @@ impl Checker<'_> {
 
         let mut types: Vec<Type> = args.iter().map(|arg| self.type_expr(arg)).collect();
         let first = Box::new(if types.is_empty() { Type::Error } else { types.remove(0) });
+
+        if name == "List" {
+          return Type::List(first);
+        }
 
         match types.pop() {
           Some(error) => Type::Result(first, Box::new(error)),
@@ -1319,8 +1364,12 @@ impl Checker<'_> {
           "char" => Type::Char,
           "String" => Type::String,
           "StringBuilder" => Type::StringBuilder,
-          "Option" | "Result" => {
-            let usage = if name == "Option" { "Option<T>" } else { "Result<T, E>" };
+          "Option" | "Result" | "List" => {
+            let usage = match name {
+              "Option" => "Option<T>",
+              "List" => "List<T>",
+              _ => "Result<T, E>",
+            };
 
             self.error(codes::WRONG_TYPE_ARGUMENTS, segment.span, format!("`{name}` needs type arguments: `{usage}`"));
 
@@ -1328,7 +1377,7 @@ impl Checker<'_> {
           }
           _ => {
             let primitives =
-              IntTy::ALL.iter().map(|ty| ty.name()).chain(["f32", "f64", "bool", "char", "String", "StringBuilder", "Option", "Result"]);
+              IntTy::ALL.iter().map(|ty| ty.name()).chain(["f32", "f64", "bool", "char", "String", "StringBuilder", "Option", "Result", "List"]);
             let mut diagnostic = Diagnostic::error(codes::UNRESOLVED_NAME, segment.span, format!("cannot find type `{name}`"));
 
             if let Some(similar) = sagitario_diagnostics::closest_match(name, primitives) {
@@ -1647,11 +1696,7 @@ impl Checker<'_> {
       ExprKind::Unary { op, operand } => self.unary(expr, *op, operand, expected),
       ExprKind::Binary { op, lhs, rhs } => self.binary(*op, lhs, rhs, expected),
       ExprKind::Cast { expr: inner, ty } => self.cast(inner, ty),
-      ExprKind::Range { .. } => {
-        self.error(codes::NOT_IMPLEMENTED, expr.span, "ranges outside of `for` loops are not implemented yet");
-
-        Type::Error
-      }
+      ExprKind::Range { start, end, .. } => self.range_value(expr, start, end, expected),
       ExprKind::Block(block) => self.block(block, expected),
       ExprKind::Unsafe(block) => self.unsafe_block(expr, block, expected),
       ExprKind::If { cond, then_block, else_branch } => self.if_expr(cond, then_block, else_branch.as_deref(), expected),
@@ -1870,6 +1915,8 @@ impl Checker<'_> {
       }
       // Byte-wise lexicographic order.
       Type::String => true,
+      // Iterators and maps are not compared (docs/spec/02-types.md#equality-f1f2).
+      Type::Class(class) if Some(class.id) == self.typed.prelude.iter || Some(class.id) == self.typed.prelude.map => false,
       // Pointers compare by address, and class instances by identity.
       Type::Ptr { .. } | Type::Class(_) => matches!(op, BinaryOp::Eq | BinaryOp::Ne),
       _ => false,
@@ -1967,13 +2014,19 @@ impl Checker<'_> {
     }
 
     let ExprKind::Range { start, end, .. } = &iter.kind else {
-      return match self.expr(iter, None) {
+      let ty = self.expr(iter, None);
+
+      if let Some(elem) = self.typed.collection_elem(&ty) {
+        return elem;
+      }
+
+      return match ty {
         Type::Array(elem, _) => *elem,
         Type::Error | Type::Never => Type::Error,
         other => {
           self.diagnostics.push(
             Diagnostic::error(codes::INVALID_OPERAND, iter.span, format!("cannot iterate over a value of type `{other}`"))
-              .with_note("`for` iterates over ranges and arrays"),
+              .with_note("`for` iterates over ranges, arrays, lists, maps and iterators"),
           );
 
           Type::Error
@@ -2051,6 +2104,7 @@ impl Checker<'_> {
 
         Some(FnSig { receiver: None, params: vec![Type::String], ret })
       }
+      (ExprKind::Path(_), Some(Res::Builtin(Builtin::ListFrom))) => return self.list_from(expr, callee, args, expected),
       (ExprKind::Path(_), Some(Res::Builtin(builtin))) => {
         if builtin == Builtin::StringFromC {
           self.require_unsafe(callee.span, "reading a C string");
@@ -2110,6 +2164,20 @@ impl Checker<'_> {
       return ty;
     }
 
+    if let Some(ty) = self.primitive_method(expr, &receiver_ty, method, args) {
+      return ty;
+    }
+
+    if let Some(ty) = self.range_rev(expr, receiver, &receiver_ty, method, args) {
+      return ty;
+    }
+
+    if let Type::Array(elem, _) = &receiver_ty
+      && let Some(ty) = self.array_method(expr, receiver, elem, method, args)
+    {
+      return ty;
+    }
+
     // A type parameter has the methods of its bounds.
     if let Type::Param(_) = &receiver_ty {
       let Some(function) = self.interface_method_of(&receiver_ty, name) else {
@@ -2130,6 +2198,7 @@ impl Checker<'_> {
       Type::Class(ty) => TypeItem::Class(ty.id),
       Type::Interface(ty) => TypeItem::Interface(ty.id),
       Type::Option(_) | Type::Result(..) => return self.builtin_method(expr, &receiver_ty, method, args),
+      Type::List(_) => return self.list_method(expr, receiver, &receiver_ty, method, args),
       Type::Array(..) if name == "len" => {
         self.args(expr.span, "method", &[], args);
 
@@ -2145,7 +2214,7 @@ impl Checker<'_> {
         let mut diagnostic = Diagnostic::error(codes::UNKNOWN_MEMBER, method.span, format!("no method `{name}` on type `{receiver_ty}`"));
 
         if matches!(receiver_ty, Type::Array(..)) {
-          diagnostic = diagnostic.with_help("arrays have the methods `len()`, `as_ptr()` and `as_mut_ptr()`");
+          diagnostic = diagnostic.with_help("arrays have the methods `len()`, `iter()` and those of iterators, `as_ptr()` and `as_mut_ptr()`");
         }
 
         self.diagnostics.push(diagnostic);
@@ -2169,8 +2238,11 @@ impl Checker<'_> {
 
       let mut diagnostic = Diagnostic::error(codes::UNKNOWN_MEMBER, method.span, format!("no method `{name}` on type `{receiver_ty}`"));
       let functions = self.resolution.type_functions(self.package, owner);
-      let methods: Vec<String> =
-        functions.iter().filter(|function| function.self_param.is_some()).map(|function| function.name.name.clone()).collect();
+      let methods: Vec<String> = functions
+        .iter()
+        .filter(|function| function.self_param.is_some() && function.name.name != "new")
+        .map(|function| function.name.name.clone())
+        .collect();
 
       if let Some(similar) = sagitario_diagnostics::closest_match(name, methods.iter().map(String::as_str)) {
         diagnostic = diagnostic.with_help(format!("a method with a similar name exists: `{similar}`"));
@@ -2270,7 +2342,7 @@ impl Checker<'_> {
     self.expect(index, &Type::Int(IntTy::Usize));
 
     match base_ty {
-      Type::Array(elem, _) => *elem,
+      Type::Array(elem, _) | Type::List(elem) => *elem,
       Type::Error | Type::Never => Type::Error,
       Type::String => {
         self.diagnostics.push(
@@ -2830,7 +2902,7 @@ mod tests {
   #[test]
   fn checks_interpolation_and_ranges() {
     assert_eq!(in_main("const x = `${()}`;"), vec!["E0306"]);
-    assert_eq!(in_main("const r = 0..10;"), vec!["E0900"]);
+    assert_eq!(in_main("const r = 0.5..1.5;"), vec!["E0310"]);
   }
 
   #[test]

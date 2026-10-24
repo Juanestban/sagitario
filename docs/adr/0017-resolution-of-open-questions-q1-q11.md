@@ -1,6 +1,6 @@
 # 0017. Resolution of open questions Q1–Q11
 
-- Status: Accepted
+- Status: Accepted; refined by [ADR-0034](0034-collections-and-iterators.md)
 - Date: 2026-10-22
 
 ## Context

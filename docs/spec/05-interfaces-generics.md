@@ -18,7 +18,7 @@ interface Pet extends Named {
 class Dog impl Pet {
   pub var name: String;
 
-  pub fn new(name: String) { self.name = name; }
+  pub fn new(self, name: String) { self.name = name; }
   pub fn display_name(self) -> String { self.name }
   pub fn owner(self) -> String { "Ada" }
 }
@@ -92,7 +92,7 @@ interface Error {
 ## Generics
 
 ```sag
-fn max<T: Comparable>(a: T, b: T) -> T { ... }
+fn max<T: Ord>(a: T, b: T) -> T { ... }
 
 fn describe<T, U>(a: T, b: U) -> String
 where
@@ -102,7 +102,7 @@ where
 
 class Box<T> {
   pub const value: T;
-  pub fn new(value: T) { self.value = value; }
+  pub fn new(self, value: T) { self.value = value; }
 }
 ```
 
@@ -123,7 +123,10 @@ Rationale: [ADR-0032](../adr/0032-generics.md).
   There is no `==`, interpolation or arithmetic on an unbounded `T`.
 - A type argument must implement the bounds of its parameter. Classes, structs and enums
   implementing an interface satisfy it, and so do the interface type itself and type parameters
-  bounded by it. Primitives and `String` implement no interfaces in the MVP.
+  bounded by it. Integers, `bool`, `char` and `String` implement the prelude's `Eq`, `Ord` and
+  `Hash`, and no other interface.
+- In a call, a lambda argument whose parameter types are known infers type parameters from its
+  result: `iter.map(n => n * 2)` infers the `U` of `map<U>(f: fn(T) -> U)`.
 - Generic interfaces (`interface Source<T>`) are implemented once per type and, instantiated,
   can be types (`Source<i32>`). Generic classes extend and are extended with arguments
   (`class IntBox extends Box<i32>`). There is no variance: `Box<Dog>` is not a `Box<Animal>`.
@@ -134,6 +137,38 @@ Rationale: [ADR-0032](../adr/0032-generics.md).
 - Not in the MVP: higher-kinded types, specialization, variadic generics, default type
   arguments, constant generics.
 
+## Equality, order and hashing (F2)
+
+Rationale: [ADR-0034](../adr/0034-collections-and-iterators.md).
+
+```sag
+enum Ordering { Less, Equal, Greater }
+
+interface Eq {
+  fn equals(self, other: Self) -> bool;
+}
+
+interface Ord extends Eq {
+  fn compare(self, other: Self) -> Ordering;
+}
+
+interface Hash extends Eq {
+  fn hash(self) -> u64;
+}
+```
+
+- The four are in the prelude. Integers, `bool`, `char` and `String` implement the three
+  interfaces, with their usual equality and order (strings by bytes): `5.compare(3)` is
+  `Ordering::Greater`.
+- Floats implement none of them, since `NaN` is not equal to itself. `x.total_compare(y)`
+  orders them by the IEEE 754 total order (`-NaN < -inf < ... < -0.0 < 0.0 < ... < inf < NaN`).
+- Programs implement them like any interface: `struct Version impl Ord` with `equals` and
+  `compare`. Equal values must have the same `hash`.
+- `==` keeps its meaning (identity for class instances); generic code writes `a.equals(b)`.
+- `List::contains`, `List::index_of` and `List::sort` need `Eq` or `Ord`, and the keys of a
+  `Map` need `Hash`.
+
 ## Standard generic types (F2)
 
-`List<T>` and `Map<K, V>`, with iterators supporting `map` and `filter`.
+`List<T>` (see [lists](02-types.md#lists-f2)), `Map<K, V>` (see [maps](02-types.md#maps-f2)) and
+`Iter<T>` (see [iterators](08-closures.md#iterators)).

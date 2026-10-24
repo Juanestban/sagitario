@@ -1,6 +1,7 @@
 # 8. Closures (F2)
 
-Decisions: [ADR-0012](../adr/0012-closures.md), [ADR-0033](../adr/0033-closures-details.md).
+Decisions: [ADR-0012](../adr/0012-closures.md), [ADR-0033](../adr/0033-closures-details.md);
+iterators: [ADR-0034](../adr/0034-collections-and-iterators.md).
 
 ## Syntax
 
@@ -40,7 +41,7 @@ const evens = nums.filter(n => n % 2 == 0);
 class Button {
   pub var on_click: fn(Counter);
 
-  pub fn new(handler: fn(Counter)) {
+  pub fn new(self, handler: fn(Counter)) {
     self.on_click = handler;
   }
 }
@@ -109,8 +110,41 @@ Cycles through other paths are not detected. `weak` capture syntax is post-MVP.
 | `unwrap_or_else(f)` | `Option<T>`, `Result<T, E>` | the value, or `f()` (`f(error)` for `Result`) |
 | `filter(f)` | `Option<T>` | the value if `f(value)` is `true`, else `None` |
 
-`None` and `Err` pass through unchanged where no function applies. `List` and iterator
-methods come with `List<T>` (F2 increment 7).
+`None` and `Err` pass through unchanged where no function applies.
+
+## Iterators
+
+```sag
+const squares = List::from([1, 2, 3, 4]).filter(n => n % 2 == 0).map(n => n * n).collect();
+const total = (1..=10).fold(0, (sum, n) => sum + n);
+```
+
+- `Iter<T>` is a prelude class: a lazy sequence that computes each value when `next()` is
+  called, giving `None` once it is exhausted. Iterators are references; consuming one through
+  any copy advances it.
+- Lists, arrays, ranges outside of `for`, `s.chars()`, `s.bytes()` and the `keys()`, `values()`
+  and `entries()` of maps are iterators or give them. `list.iter()` reads the list by position
+  at every step, like `for`.
+- `new Iter(step)` makes a custom iterator from a function `step: fn() -> Option<T>`. Its state
+  lives in class instances it captures, since captures cannot be assigned.
+- Lists and arrays have the methods below directly, as shorthands for `.iter().method(...)`.
+
+  | Method | Result |
+  |---|---|
+  | `map(f)` | `Iter<U>`: `f(value)` for each value |
+  | `filter(f)` | `Iter<T>`: the values for which `f` returns `true` |
+  | `take(n)`, `skip(n)` | `Iter<T>`: the first `n` values, or those after them |
+  | `step_by(n)` | `Iter<T>`: the first value and every `n`-th after it; `n == 0` panics |
+  | `collect()` | `List<T>` with the remaining values |
+  | `count()` | `usize` |
+  | `fold(init, f)` | `A`: `f(f(init, v1), v2)...` |
+  | `for_each(f)` | `()` |
+  | `any(f)`, `all(f)` | `bool`; stop at the first value that decides |
+  | `find(f)` | `Option<T>`: the first value for which `f` returns `true` |
+
+- The first five are lazy: nothing runs until the iterator is consumed by one of the others or
+  by `for`.
+- Iterators are not compared with `==` and cannot be interpolated.
 
 ## Representation
 
