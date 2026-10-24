@@ -1,6 +1,6 @@
 # 0019. Prelude and printing
 
-- Status: Accepted
+- Status: Accepted; refined by [ADR-0037](0037-standard-library-env-io-process.md) (`std::io`)
 - Date: 2026-10-22
 
 ## Context

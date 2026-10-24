@@ -150,7 +150,7 @@ fn resolve_package(files: &[(&str, &str)]) -> Vec<&'static str> {
 
   assert!(!diagnostics.has_errors(), "parse failed: {:?}", diagnostics.take());
 
-  resolve(&Package { modules, prelude: None }, &mut diagnostics);
+  resolve(&Package { modules, prelude: None, std: Vec::new() }, &mut diagnostics);
 
   diagnostics.take().iter().map(|diagnostic| diagnostic.code.0).collect()
 }
@@ -175,7 +175,7 @@ fn reports_import_errors_and_warnings() {
   assert_eq!(resolve_package(&[("", "use pkg::a::f; fn f() {} fn main() {}"), ("a", "pub fn f() {}")]), vec!["E0201"]);
   assert_eq!(resolve_package(&[("", "use pkg::a::{self, f as g}; fn main() { a::f(); g(); }"), ("a", "pub fn f() {}")]), Vec::<&str>::new());
   assert_eq!(resolve_package(&[("", "use a::f; fn main() {}")]), vec!["E0200"]);
-  assert_eq!(resolve_package(&[("", "fn main() { std::io::read(); }")]), vec!["E0900"]);
+  assert_eq!(resolve_package(&[("", "fn main() { std::net::read(); }")]), vec!["E0200"]);
   assert_eq!(
     resolve_package(&[("", "use pkg::a; fn main() { const _x: a::K = a::make(); }"), ("a", "struct K {} pub fn make() -> K { K {} }")]),
     vec!["E0207", "W0006"]
@@ -213,4 +213,16 @@ fn finds_the_modules_a_file_refers_to() {
       "util::x::y"
     ]
   );
+}
+
+#[test]
+fn finds_the_standard_library_modules_a_file_names() {
+  let text = "use std::io; use std::{env, process::exit}; fn main() { const _a: std::ffi::c_int = 0; std::time::now(); io::println(\"\"); }";
+  let mut sources = SourceMap::new();
+  let mut diagnostics = Diagnostics::new();
+  let file = sources.add(PathBuf::from("main.sag"), text.to_string());
+  let tokens = sagitario_lexer::lex(file, text, &mut diagnostics);
+  let module = sagitario_parser::parse_module(file, tokens, &mut diagnostics);
+
+  assert_eq!(std_references(&module), vec!["env", "ffi", "io", "process", "time"]);
 }

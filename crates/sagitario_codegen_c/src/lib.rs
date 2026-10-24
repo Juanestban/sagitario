@@ -62,6 +62,7 @@ pub fn generate(program: &Program) -> GeneratedC {
     class_queue: Vec::new(),
     classes: &program.classes,
     functions: &program.functions,
+    externs: &program.externs,
     envs: &program.envs,
     list_elems: Vec::new(),
   };
@@ -71,7 +72,7 @@ pub fn generate(program: &Program) -> GeneratedC {
   generator.out.push_str(&format!("#include \"{RUNTIME_HEADER}\"\n\n"));
   generator.type_definitions(&order);
 
-  for (index, decl) in program.externs.iter().enumerate() {
+  for (index, decl) in program.externs.iter().enumerate().filter(|(_, decl)| !decl.runtime) {
     let prototype = generator.extern_prototype(index, decl);
 
     generator.out.push_str(&format!("{prototype};\n"));
@@ -139,6 +140,8 @@ struct Generator<'a> {
   classes: &'a [ClassInstance],
   /// The program's functions, for the signatures of calls through vtables.
   functions: &'a [Function],
+  /// The C functions the program calls, indexed by `ExternId`.
+  externs: &'a [ExternDecl],
   /// The types captured by each closure environment.
   envs: &'a [Vec<Type>],
   /// The element types of the lists the program uses; `sag_elem_release_N` releases an element
@@ -870,13 +873,15 @@ impl<'a> Generator<'a> {
     let exports: Vec<(usize, &Function, &String)> =
       program.functions.iter().enumerate().filter_map(|(index, function)| function.export.as_ref().map(|symbol| (index, function, symbol))).collect();
 
-    if program.externs.is_empty() && exports.is_empty() {
+    let externs: Vec<(usize, &ExternDecl)> = program.externs.iter().enumerate().filter(|(_, decl)| !decl.runtime).collect();
+
+    if externs.is_empty() && exports.is_empty() {
       return None;
     }
 
     let mut declared = Vec::new();
     let mut defined = Vec::new();
-    let signature_types = program.externs.iter().flat_map(|decl| decl.params.iter().chain([&decl.ret]));
+    let signature_types = externs.iter().flat_map(|(_, decl)| decl.params.iter().chain([&decl.ret]));
     let export_types = exports.iter().flat_map(|(_, function, _)| function.locals.iter().take(function.param_count).chain([&function.ret]));
 
     for ty in signature_types.chain(export_types) {
@@ -895,7 +900,7 @@ impl<'a> Generator<'a> {
       out.push_str(&self.definition(ty));
     }
 
-    for (index, decl) in program.externs.iter().enumerate() {
+    for (index, decl) in externs {
       let args: Vec<String> = (0..decl.params.len()).map(|arg| format!("a{arg}")).collect();
       let call = format!("{}({})", decl.symbol, args.join(", "));
       let body = if matches!(decl.ret, Type::Unit | Type::Never) { format!("{call};") } else { format!("return {call};") };
@@ -1371,7 +1376,12 @@ impl<'a> Generator<'a> {
           args.push("__LINE__".to_string());
         }
 
-        format!("{}({})", callee_name(callee), args.join(", "))
+        let name = match callee {
+          Callee::Extern(id) => self.externs.get(id.0 as usize).filter(|decl| decl.runtime).map(|decl| decl.symbol.clone()),
+          _ => None,
+        };
+
+        format!("{}({})", name.unwrap_or_else(|| callee_name(callee)), args.join(", "))
       }
       Rvalue::Aggregate(parts) => {
         let parts: Vec<String> = parts.iter().map(|part| self.operand(part)).collect();
@@ -1557,6 +1567,7 @@ fn callee_name(callee: &Callee) -> String {
     Callee::Builtin(Builtin::Println) => "sag_println".to_string(),
     Callee::Builtin(Builtin::Eprintln) => "sag_eprintln".to_string(),
     Callee::Builtin(Builtin::Panic) => "sag_panic_str_at".to_string(),
+    Callee::Builtin(Builtin::Exit) => "sag_process_exit".to_string(),
     Callee::Builtin(Builtin::StringFromC) => "sag_string_from_c_at".to_string(),
     // Lowered to a call of `sag_cstring_new` with its outputs.
     Callee::Builtin(Builtin::CStringNew) => "sag_cstring_new".to_string(),

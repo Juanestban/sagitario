@@ -486,6 +486,38 @@ SAG_FROM_UINTMAX(u32, uint32_t)
 SAG_FROM_UINTMAX(u64, uint64_t)
 SAG_FROM_UINTMAX(usize, size_t)
 
+/* ---- Standard library: std::env, std::io, std::process --------------------------------- *
+ * Declared in Sagitario by the standard library modules (docs/spec/11-standard-library.md).
+ * They borrow their string arguments and return new references. */
+
+/* Codes of I/O errors: `errno` values are positive, the runtime's own are negative. */
+#define SAG_IO_INVALID_DATA (-2)
+#define SAG_IO_UNKNOWN (-3)
+/* The status of a read at the end of the input. */
+#define SAG_IO_END (-1)
+/* Indices of the variants of `std::io::ErrorKind`. */
+#define SAG_IO_KIND_NOT_FOUND 0
+#define SAG_IO_KIND_PERMISSION_DENIED 1
+#define SAG_IO_KIND_ALREADY_EXISTS 2
+#define SAG_IO_KIND_INVALID_INPUT 3
+#define SAG_IO_KIND_INVALID_DATA 4
+#define SAG_IO_KIND_OTHER 6
+
+size_t sag_env_arg_count(void);
+/* Arguments and variables that are not valid UTF-8 get each bad sequence replaced by U+FFFD. */
+sag_string sag_env_arg(size_t index);
+sag_string sag_env_var(sag_string name, bool *found);
+/* Writes to stdout (stream 1) or stderr (2); returns 0 or an error code. */
+int32_t sag_io_write(int32_t stream, sag_string text, bool newline);
+int32_t sag_io_flush(void);
+/* `*status` becomes 0, SAG_IO_END or an error code. */
+sag_string sag_io_read_line(int32_t *status);
+sag_string sag_io_read_all(int32_t *status);
+int32_t sag_io_error_kind(int32_t code);
+sag_string sag_io_error_message(int32_t code);
+/* Flushes output and ends the program without running pending releases. */
+_Noreturn void sag_process_exit(int32_t code);
+
 /* ---- Program lifecycle ----------------------------------------------------------------- */
 
 void sag_rt_init(int argc, char **argv);

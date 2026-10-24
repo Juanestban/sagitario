@@ -82,7 +82,7 @@ characters as `u32`.
 
 ## `std::ffi`
 
-The first module of the standard library, provided by the compiler:
+The first module of the [standard library](11-standard-library.md), provided by the compiler:
 
 | Name | Meaning |
 |---|---|

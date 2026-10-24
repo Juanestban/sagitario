@@ -41,10 +41,14 @@ fn main() { ... }
 ```
 
 - `expect-stdout` may appear several times; lines are matched in order. In a multi-file case,
-  `expect-*` and `sag-flags` annotations are read from `main.sag`, and `//~` annotations
+  `expect-*`, `sag-flags`, `args`, `stdin` and `env` annotations are read from `main.sag`, and `//~` annotations
   from every file of the program (each one matched against its own file).
 - `// sag-flags: --release` passes extra options to `sag run` (e.g. to test release-mode
   wrapping).
+- `// args: a b` passes command-line arguments to the program, split on spaces.
+  `// stdin: text` writes a line (`text` and `\n`) to its stdin and may repeat; stdin is closed
+  after the last line, or at once without any. `// env: NAME=value` sets an environment
+  variable for the program and may repeat.
 - Panics print `panic at <file>:<line>: <message>`; `expect-panic` matches a substring.
 - `//~ ERROR Ennnn` and `//~ WARN Wnnnn` assert a diagnostic with that code on the same line.
   Several can share a line: `//~ ERROR E0311, WARN W0001 WARN W0002`.

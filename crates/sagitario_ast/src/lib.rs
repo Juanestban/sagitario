@@ -32,12 +32,15 @@ pub struct Package {
   /// Index in `modules` of the prelude written in Sagitario, whose public items every module
   /// sees; it is not part of the module tree.
   pub prelude: Option<usize>,
+  /// Indices in `modules` of the standard library modules the program uses, such as `std::io`
+  /// with the path `["std", "io"]`; they are not part of the module tree either.
+  pub std: Vec<usize>,
 }
 
 impl Package {
   /// A program made of one file.
   pub fn single(module: Module) -> Package {
-    Package { modules: vec![module], prelude: None }
+    Package { modules: vec![module], prelude: None, std: Vec::new() }
   }
 }
 

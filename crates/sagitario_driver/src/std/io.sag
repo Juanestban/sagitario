@@ -1,0 +1,111 @@
+//! `std::io`: standard input and output with errors as values, and the error type of every
+//! input or output operation (docs/spec/11-standard-library.md#stdio).
+
+extern "C" {
+  fn sag_io_write(stream: i32, text: String, newline: bool) -> i32;
+  fn sag_io_flush() -> i32;
+  fn sag_io_read_line(status: *mut i32) -> String;
+  fn sag_io_read_all(status: *mut i32) -> String;
+  fn sag_io_error_kind(code: i32) -> i32;
+  fn sag_io_error_message(code: i32) -> String;
+}
+
+/// What kind of failure an I/O error is.
+pub enum ErrorKind {
+  NotFound,
+  PermissionDenied,
+  AlreadyExists,
+  InvalidInput,
+  /// The data is not valid, such as input that is not UTF-8.
+  InvalidData,
+  UnexpectedEof,
+  Other,
+}
+
+/// The error of an input or output operation: its kind and the operating system's message.
+pub class Error impl std::prelude::Error {
+  prv const error_kind: ErrorKind;
+  prv const text: String;
+
+  pub fn new(self, kind: ErrorKind, message: String) {
+    self.error_kind = kind;
+    self.text = message;
+  }
+
+  pub fn kind(self) -> ErrorKind {
+    self.error_kind
+  }
+
+  pub fn message(self) -> String {
+    self.text
+  }
+}
+
+/// The error with this runtime code: an `errno` value, or one of the runtime's own codes.
+fn error_from(code: i32) -> Error {
+  const kind = match unsafe { sag_io_error_kind(code) } {
+    0 => ErrorKind::NotFound,
+    1 => ErrorKind::PermissionDenied,
+    2 => ErrorKind::AlreadyExists,
+    3 => ErrorKind::InvalidInput,
+    4 => ErrorKind::InvalidData,
+    5 => ErrorKind::UnexpectedEof,
+    _ => ErrorKind::Other,
+  };
+
+  new Error(kind, unsafe { sag_io_error_message(code) })
+}
+
+/// The result of an operation that returned this runtime code, 0 on success.
+fn done(code: i32) -> Result<(), Error> {
+  if code == 0 { Ok(()) } else { Err(error_from(code)) }
+}
+
+/// Writes `text` to stdout.
+pub fn print(text: String) -> Result<(), Error> {
+  done(unsafe { sag_io_write(1, text, false) })
+}
+
+/// Writes `text` and a newline to stdout.
+pub fn println(text: String) -> Result<(), Error> {
+  done(unsafe { sag_io_write(1, text, true) })
+}
+
+/// Writes `text` to stderr.
+pub fn eprint(text: String) -> Result<(), Error> {
+  done(unsafe { sag_io_write(2, text, false) })
+}
+
+/// Writes `text` and a newline to stderr.
+pub fn eprintln(text: String) -> Result<(), Error> {
+  done(unsafe { sag_io_write(2, text, true) })
+}
+
+/// Writes out what stdout holds in its buffer.
+pub fn flush() -> Result<(), Error> {
+  done(unsafe { sag_io_flush() })
+}
+
+/// The next line of stdin without its `\n` or `\r\n`, or `None` at the end of the input. Input
+/// that is not UTF-8 is an error of kind `InvalidData`.
+pub fn read_line() -> Result<Option<String>, Error> {
+  var status = [0i32; 1];
+  const line = unsafe { sag_io_read_line(status.as_mut_ptr()) };
+
+  if status[0] == 0 {
+    Ok(Some(line))
+  } else if status[0] == -1 {
+    // The end of the input (`SAG_IO_END` in the runtime).
+    Ok(None)
+  } else {
+    Err(error_from(status[0]))
+  }
+}
+
+/// The rest of stdin. Input that is not UTF-8 is an error of kind `InvalidData`.
+pub fn read_to_string() -> Result<String, Error> {
+  var status = [0i32; 1];
+  const text = unsafe { sag_io_read_all(status.as_mut_ptr()) };
+
+  if status[0] == 0 { Ok(text) } else { Err(error_from(status[0])) }
+}

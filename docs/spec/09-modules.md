@@ -36,7 +36,7 @@ Paths are logical, never relative file paths. Their first segment is one of:
 | `pkg` | The root of the current package (Rust's `crate`) |
 | `self` | The current module |
 | `super` | The parent module; it can repeat at the start: `super::super::x` |
-| `std` | The standard library (not available yet) |
+| `std` | The standard library ([chapter 11](11-standard-library.md)) |
 | A name in scope | An item or import of the current module, such as an imported module |
 
 Dependency packages will be further roots once the package manager exists.

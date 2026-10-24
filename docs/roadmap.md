@@ -69,11 +69,36 @@ Increments ([ADR-0027](adr/0027-classes-and-arc.md)):
 interfaces as types, bounded generics, `List`/`Map`, lambdas and `map`/`filter` passes with
 zero live ARC objects at exit and clean ASan.
 
-## Post-MVP
+## F3: Platform (post-MVP)
 
-- **F3 Platform:** extended standard library (fs, process, time), library outputs
-  (`.a`/`.so`/`.dll`) with exports, package manager and dependencies, cross-compilation to
-  Android and iOS, re-evaluate MSVC `cl.exe` and `zig cc`.
+Extended standard library (fs, process, time), library outputs (`.a`/`.so`/`.dll`) with
+exports, package manager and dependencies, cross-compilation to Android and iOS, re-evaluate
+MSVC `cl.exe` and `zig cc`.
+
+Increments:
+
+1. The standard library's foundation, `std::env`, `std::process::exit` and `std::io`
+   ([ADR-0037](adr/0037-standard-library-env-io-process.md)).
+2. `std::fs`: reading, writing and appending files, existence checks, removal, directories
+   and the current directory.
+3. `std::time` (`Instant`, `Duration`, system time) and `std::process::Command` (run a program,
+   capture its output and exit status).
+4. Packages: `sagitario.toml`, `sag new`, `sag build`/`run` inside a package with `src/main.sag`
+   or `src/lib.sag`.
+5. Dependencies: packages by path, a lockfile, dependency names as path roots, no cycles between
+   packages.
+6. Libraries: `kind = "lib"` builds `.a`/`.so`/`.dll` with the `@export`ed functions and a
+   generated C header; linking C libraries from the manifest.
+7. Cross-compilation: `--target`, Android (NDK) and iOS, with `c_long`/`c_char` per target.
+8. A decision record re-evaluating MSVC `cl.exe` and `zig cc`, and the acceptance program.
+
+**Acceptance:** a command-line tool (a small `grep` or `wc`) built as a package reads files and
+stdin, depends on a local library package and passes with sanitizers; the same library builds
+as `.a`/`.so`/`.dll` and is called from a C program; and the tool compiles (without running)
+for Android and iOS.
+
+## Later phases (post-MVP)
+
 - **F4 Concurrency:** `Send`/`Sync`, `spawn`, `Mutex`, `Atomic`, atomic ARC, then
   `async`/`await`.
 - **F5 Self-hosting:** rewrite the compiler in Sagitario until it compiles itself.

@@ -4,8 +4,9 @@
 
 use std::collections::HashSet;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Suite {
@@ -33,6 +34,12 @@ struct Expectations {
   panic: Option<String>,
   /// Extra `sag` options, e.g. `--release`.
   flags: Vec<String>,
+  /// The program's command-line arguments.
+  args: Vec<String>,
+  /// Lines written to the program's stdin, each followed by a newline.
+  stdin: Vec<String>,
+  /// Environment variables set for the program.
+  env: Vec<(String, String)>,
   /// `//~ ERROR Ennnn` and `//~ WARN Wnnnn` annotations.
   diagnostics: Vec<ExpectedDiagnostic>,
 }
@@ -71,6 +78,13 @@ fn parse_expectations(source: &str) -> Result<Expectations, String> {
       expectations.panic = Some(rest.trim().to_string());
     } else if let Some(rest) = trimmed.strip_prefix("// sag-flags:") {
       expectations.flags.extend(rest.split_whitespace().map(str::to_string));
+    } else if let Some(rest) = trimmed.strip_prefix("// args:") {
+      expectations.args.extend(rest.split_whitespace().map(str::to_string));
+    } else if let Some(rest) = trimmed.strip_prefix("// stdin:") {
+      expectations.stdin.push(rest.strip_prefix(' ').unwrap_or(rest).to_string());
+    } else if let Some(rest) = trimmed.strip_prefix("// env:") {
+      let (name, value) = rest.trim().split_once('=').ok_or_else(|| format!("line {line_number}: `env` needs `NAME=value`"))?;
+      expectations.env.push((name.to_string(), value.to_string()));
     }
 
     if let Some((_, annotation)) = line.split_once("//~") {
@@ -201,34 +215,49 @@ fn case_expectations(case: &Case) -> Result<Expectations, String> {
       expectations.exit = parsed.exit;
       expectations.panic = parsed.panic;
       expectations.flags = parsed.flags;
+      expectations.args = parsed.args;
+      expectations.stdin = parsed.stdin;
+      expectations.env = parsed.env;
     }
   }
 
   Ok(expectations)
 }
 
-/// `sag run <flags> <file>`, with sanitizers unless `SAG_TEST_SANITIZE=0`
-/// (docs/testing.md#memory-checks).
-fn run(flags: &[String], file: &Path) -> Result<Output, String> {
-  let mut args = vec!["run"];
+/// `sag run <flags> <file> -- <args>` with the case's stdin and environment, and with
+/// sanitizers unless `SAG_TEST_SANITIZE=0` (docs/testing.md#memory-checks).
+fn run(expectations: &Expectations, file: &Path) -> Result<Output, String> {
+  let mut command = sag_command(&["run"]);
 
   if std::env::var("SAG_TEST_SANITIZE").map_or(true, |value| value != "0") {
-    args.push("--sanitize");
+    command.arg("--sanitize");
   }
 
-  args.extend(flags.iter().map(String::as_str));
+  command.args(&expectations.flags).arg(file).arg("--").args(&expectations.args);
+  command.envs(expectations.env.iter().map(|(name, value)| (name, value)));
+  command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
 
-  sag(&args, file)
+  let mut child = command.spawn().map_err(|error| format!("cannot run `sag`: {error}"))?;
+  let input: String = expectations.stdin.iter().map(|line| format!("{line}\n")).collect();
+
+  // Dropping stdin closes it, so the program sees the end of its input.
+  if let Some(mut stdin) = child.stdin.take() {
+    stdin.write_all(input.as_bytes()).map_err(|error| format!("cannot write the program's stdin: {error}"))?;
+  }
+
+  child.wait_with_output().map_err(|error| format!("cannot run `sag`: {error}"))
 }
 
 fn sag(args: &[&str], file: &Path) -> Result<Output, String> {
+  sag_command(args).arg(file).output().map_err(|error| format!("cannot run `sag`: {error}"))
+}
+
+fn sag_command(args: &[&str]) -> Command {
+  let mut command = Command::new(env!("CARGO_BIN_EXE_sag"));
+
   // Programs fail with exit code 102 if ARC objects leak (docs/testing.md#memory-checks).
-  Command::new(env!("CARGO_BIN_EXE_sag"))
-    .args(args)
-    .arg(file)
-    .env("SAG_LEAK_CHECK", "1")
-    .output()
-    .map_err(|error| format!("cannot run `sag`: {error}"))
+  command.args(args).env("SAG_LEAK_CHECK", "1");
+  command
 }
 
 fn exit_code(output: &Output) -> Result<i32, String> {
@@ -254,7 +283,7 @@ fn run_case(suite: Suite, case: &Case) -> Result<(), String> {
       if !expectations.diagnostics.is_empty() || expectations.panic.is_some() {
         return Err("run-pass tests cannot use `//~` annotations or `expect-panic`".to_string());
       }
-      let output = run(&expectations.flags, file)?;
+      let output = run(&expectations, file)?;
       expect_exit(&output, expectations.exit.unwrap_or(0))?;
 
       if !expectations.stdout.is_empty() {
@@ -272,7 +301,7 @@ fn run_case(suite: Suite, case: &Case) -> Result<(), String> {
       let Some(message) = &expectations.panic else {
         return Err("run-panic tests need an `expect-panic` annotation".to_string());
       };
-      let output = run(&expectations.flags, file)?;
+      let output = run(&expectations, file)?;
 
       expect_exit(&output, 101)?;
 
@@ -359,6 +388,10 @@ fn parses_all_annotation_kinds() {
 // expect-stdout:  indented
 // expect-exit: 3
 // expect-panic: index out of bounds
+// args: a b
+// stdin: first line
+// stdin:
+// env: NAME=a=b
 const x: i32 = \"hello\";   //~ ERROR E0042
 var y; //~ ERROR E0311, WARN W0001 WARN W0002
 ";
@@ -366,9 +399,12 @@ var y; //~ ERROR E0311, WARN W0001 WARN W0002
   assert_eq!(expectations.stdout, vec!["total = 6".to_string(), " indented".to_string()]);
   assert_eq!(expectations.exit, Some(3));
   assert_eq!(expectations.panic.as_deref(), Some("index out of bounds"));
+  assert_eq!(expectations.args, vec!["a".to_string(), "b".to_string()]);
+  assert_eq!(expectations.stdin, vec!["first line".to_string(), String::new()]);
+  assert_eq!(expectations.env, vec![("NAME".to_string(), "a=b".to_string())]);
 
   let codes: Vec<(usize, &str)> = expectations.diagnostics.iter().map(|diagnostic| (diagnostic.line, diagnostic.code.as_str())).collect();
-  assert_eq!(codes, vec![(5, "E0042"), (6, "E0311"), (6, "W0001"), (6, "W0002")]);
+  assert_eq!(codes, vec![(9, "E0042"), (10, "E0311"), (10, "W0001"), (10, "W0002")]);
 }
 
 #[test]
@@ -378,6 +414,7 @@ fn rejects_malformed_annotations() {
   assert!(parse_expectations("x; //~ ERROR W0001").is_err());
   assert!(parse_expectations("x; //~ ERROR").is_err());
   assert!(parse_expectations("// expect-exit: zero").is_err());
+  assert!(parse_expectations("// env: NAME").is_err());
 }
 
 #[test]

@@ -114,20 +114,39 @@ fn front_end(options: &CompileOptions, generate: bool) -> Result<FrontEnd, u8> {
   }
   let mut sources = SourceMap::new();
   let mut diagnostics = Diagnostics::new();
-  let mut loader = Loader { root: input.parent().map(Path::to_path_buf).unwrap_or_default(), entry: input.clone(), next_id: 0, modules: Vec::new() };
+  let mut loader = Loader {
+    root: input.parent().map(Path::to_path_buf).unwrap_or_default(),
+    entry: input.clone(),
+    next_id: 0,
+    modules: Vec::new(),
+    std: Vec::new(),
+  };
 
   loader.load(input, Vec::new(), &mut sources, &mut diagnostics)?;
 
-  // Each loaded module may refer to more modules; the ones that exist as files are loaded too.
+  // Each loaded module may refer to more modules; the ones that exist as files are loaded too,
+  // and so are the standard library modules it names.
   let mut attempted = HashSet::new();
+  let mut attempted_std = HashSet::new();
   let mut index = 0;
 
   while let Some(module) = loader.modules.get(index) {
-    for path in sagitario_resolve::module_references(module) {
+    let paths = if loader.std.contains(&index) { Vec::new() } else { sagitario_resolve::module_references(module) };
+    let std_names = sagitario_resolve::std_references(module);
+
+    for path in paths {
       if attempted.insert(path.clone())
         && let Some(file) = loader.module_file(&path)
       {
         loader.load(&file, path, &mut sources, &mut diagnostics)?;
+      }
+    }
+
+    for name in std_names {
+      if attempted_std.insert(name.clone())
+        && let Some((_, text)) = STD_SOURCES.iter().find(|(module, _)| *module == name)
+      {
+        loader.load_std(&name, text, &mut sources, &mut diagnostics)?;
       }
     }
 
@@ -142,7 +161,7 @@ fn front_end(options: &CompileOptions, generate: bool) -> Result<FrontEnd, u8> {
 
   report(&mut diagnostics, &sources, options)?;
 
-  let package = Package { modules: loader.modules, prelude: Some(prelude) };
+  let package = Package { modules: loader.modules, prelude: Some(prelude), std: loader.std };
   let resolution = sagitario_resolve::resolve(&package, &mut diagnostics);
   let typed = sagitario_types::check(&package, &resolution, &mut diagnostics);
 
@@ -164,6 +183,11 @@ fn front_end(options: &CompileOptions, generate: bool) -> Result<FrontEnd, u8> {
 
 /// The part of the prelude written in Sagitario.
 const PRELUDE: &str = include_str!("prelude.sag");
+
+/// The modules of the standard library written in Sagitario (docs/spec/11-standard-library.md),
+/// loaded when a program names them.
+const STD_SOURCES: [(&str, &str); 3] =
+  [("env", include_str!("std/env.sag")), ("io", include_str!("std/io.sag")), ("process", include_str!("std/process.sag"))];
 
 /// The integer types, each with a function `range_<type>` in the prelude.
 const INT_TYPES: [&str; 10] = ["i8", "i16", "i32", "i64", "isize", "u8", "u16", "u32", "u64", "usize"];
@@ -240,6 +264,8 @@ struct Loader {
   /// Keeps node ids unique across modules.
   next_id: u32,
   modules: Vec<Module>,
+  /// Indices in `modules` of the standard library modules.
+  std: Vec<usize>,
 }
 
 impl Loader {
@@ -277,15 +303,29 @@ impl Loader {
 
   /// Adds the prelude module, which every program sees, and returns its index.
   fn load_prelude(&mut self, sources: &mut SourceMap, diagnostics: &mut Diagnostics) -> Result<usize, u8> {
-    let id = sources.add(PathBuf::from("<prelude>"), prelude_source());
+    self.load_embedded("<prelude>", prelude_source(), "prelude", sources, diagnostics)
+  }
+
+  /// Adds the standard library module `std::name`.
+  fn load_std(&mut self, name: &str, text: &str, sources: &mut SourceMap, diagnostics: &mut Diagnostics) -> Result<(), u8> {
+    let index = self.load_embedded(&format!("<std::{name}>"), text.to_string(), name, sources, diagnostics)?;
+
+    self.std.push(index);
+
+    Ok(())
+  }
+
+  /// Adds a module whose source the compiler embeds, with the path `std::name`.
+  fn load_embedded(&mut self, file: &str, text: String, name: &str, sources: &mut SourceMap, diagnostics: &mut Diagnostics) -> Result<usize, u8> {
+    let id = sources.add(PathBuf::from(file), text);
     let Some(source) = sources.get(id) else {
-      eprintln!("internal compiler error: the prelude was not registered");
+      eprintln!("internal compiler error: `{file}` was not registered");
       return Err(EXIT_ICE);
     };
     let tokens = sagitario_lexer::lex(id, source.text(), diagnostics);
     let mut module = sagitario_parser::parse_module_from(id, tokens, &mut self.next_id, diagnostics);
 
-    module.path = vec!["std".to_string(), "prelude".to_string()];
+    module.path = vec!["std".to_string(), name.to_string()];
     self.modules.push(module);
 
     Ok(self.modules.len() - 1)

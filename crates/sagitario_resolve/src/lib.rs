@@ -17,7 +17,7 @@ use sagitario_ast::{
 use sagitario_diagnostics::{Diagnostic, Diagnostics, codes};
 use sagitario_span::Span;
 
-pub use modules::module_references;
+pub use modules::{module_references, std_references};
 
 /// Prelude functions implemented by the runtime (docs/spec/09-modules.md#prelude).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -34,6 +34,8 @@ pub enum Builtin {
   ErrorNew,
   /// `List::from(array)`: a new list holding copies of the elements of an array.
   ListFrom,
+  /// `std::process::exit(code)`, which ends the program and never returns.
+  Exit,
 }
 
 impl Builtin {
@@ -49,6 +51,7 @@ impl Builtin {
       Builtin::StringFromC => "string_from_c",
       Builtin::ErrorNew => "Error",
       Builtin::ListFrom => "List::from",
+      Builtin::Exit => "exit",
     }
   }
 
@@ -138,8 +141,9 @@ impl CType {
   }
 }
 
-/// A module or item of the standard library. In F1 it only has `std::ffi`, provided by the
-/// compiler.
+/// A module or item of the standard library provided by the compiler: `std` itself, `std::ffi`
+/// and `std::process::exit`. The other modules of `std` are written in Sagitario
+/// (docs/spec/11-standard-library.md).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StdItem {
   /// `std`
@@ -149,6 +153,8 @@ pub enum StdItem {
   CType(CType),
   CString,
   StringFromC,
+  /// `std::process::exit`
+  Exit,
 }
 
 /// Index of a module in `Resolution::modules`; the root module is `ModId(0)`.
@@ -306,8 +312,10 @@ pub struct Imported {
 /// A module of the package: a source file, or a directory without its own file.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ModuleInfo {
-  /// The logical path from the package root (`pkg`).
+  /// The logical path from the package root (`pkg`), or from `std` for the standard library.
   pub path: Vec<String>,
+  /// Whether the module belongs to the standard library (`std` and its modules).
+  pub in_std: bool,
   /// Index in `Package::modules`; `None` for a directory without a file.
   pub source: Option<usize>,
   pub parent: Option<ModId>,
@@ -319,6 +327,10 @@ pub struct ModuleInfo {
 impl ModuleInfo {
   /// The path as written in source: `pkg`, `pkg::net::http`.
   pub fn display_path(&self) -> String {
+    if self.in_std {
+      return self.path.join("::");
+    }
+
     std::iter::once("pkg").chain(self.path.iter().map(String::as_str)).collect::<Vec<_>>().join("::")
   }
 }
@@ -369,6 +381,8 @@ pub struct Resolution {
   pub interfaces: Vec<TypeInfo>,
   /// The prelude module, whose public items every module sees.
   pub prelude: Option<ModId>,
+  /// `std`, the parent of the standard library modules written in Sagitario.
+  pub std_root: Option<ModId>,
   /// The prelude's `Error` interface.
   pub error_interface: Option<InterfaceId>,
   /// Indexed by `ExternId`.
@@ -561,6 +575,25 @@ impl Resolution {
     source.is_some() && self.functions.get(id.0 as usize).map(|info| info.module) == source
   }
 
+  /// Whether a function (or the type declaring it) belongs to the prelude or the standard
+  /// library, which programs only contain the parts of that they use.
+  pub fn in_library(&self, id: FnId) -> bool {
+    self.in_prelude(id) || self.functions.get(id.0 as usize).is_some_and(|info| self.is_std_source(info.module))
+  }
+
+  /// Whether the module at this index of `Package::modules` belongs to the standard library.
+  pub fn is_std_source(&self, source: usize) -> bool {
+    self.modules.iter().any(|module| module.in_std && module.source == Some(source))
+  }
+
+  /// Whether a C function is a function of the runtime, which only the standard library may
+  /// declare: its name starts with `sag_`, and it may take and return `String`s.
+  pub fn is_runtime_extern(&self, package: &Package, id: ExternId) -> bool {
+    let in_std = self.externs.get(id.0 as usize).is_some_and(|info| self.is_std_source(info.module));
+
+    in_std && self.extern_decl(package, id).is_some_and(|decl| decl.name.name.starts_with("sag_"))
+  }
+
   /// Whether `inner` is `outer` or one of its submodules, which see `outer`'s private items.
   fn is_within(&self, inner: ModId, outer: ModId) -> bool {
     let mut current = Some(inner);
@@ -587,6 +620,10 @@ fn is_initializer_decl(decl: &FnDecl) -> bool {
 const RESERVED_NAMES: &[&str] = &["Send", "Sync", "spawn"];
 
 /// Integer and float type names, which take precedence over program types.
+/// The modules of the standard library (docs/spec/11-standard-library.md). The driver provides
+/// the source of each one but `ffi`, which the compiler implements.
+pub const STD_MODULES: [&str; 4] = ["env", "ffi", "io", "process"];
+
 const NUMERIC_TYPES: &[&str] = &["i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize", "f32", "f64"];
 
 /// Prelude and primitive type names that program types can shadow.
@@ -1498,6 +1535,7 @@ impl<'a> Resolver<'a> {
       (Named::Item(ItemRef::Fn(id)), []) => Some(Res::Fn(id)),
       (Named::Item(ItemRef::Extern(id)), []) => Some(Res::Extern(id)),
       (Named::Item(ItemRef::Std(StdItem::StringFromC)), []) => Some(Res::Builtin(Builtin::StringFromC)),
+      (Named::Item(ItemRef::Std(StdItem::Exit)), []) => Some(Res::Builtin(Builtin::Exit)),
       (Named::Item(ItemRef::Std(StdItem::CString)), [member]) => {
         if member.name == "new" {
           return Some(Res::Builtin(Builtin::CStringNew));
@@ -1613,6 +1651,7 @@ impl<'a> Resolver<'a> {
       Some(ItemRef::Fn(id)) => return Some(Res::Fn(id)),
       Some(ItemRef::Extern(id)) => return Some(Res::Extern(id)),
       Some(ItemRef::Std(StdItem::StringFromC)) => return Some(Res::Builtin(Builtin::StringFromC)),
+      Some(ItemRef::Std(StdItem::Exit)) => return Some(Res::Builtin(Builtin::Exit)),
       Some(ItemRef::Std(StdItem::CType(_) | StdItem::CString)) => {
         self.error(span, format!("`{name}` is a type, not a value"));
 
@@ -1715,7 +1754,7 @@ impl<'a> Resolver<'a> {
 
           Named::Item(self.module_member(module, segment)?)
         }
-        (_, name) => Named::Item(ItemRef::Std(self.std_member(named, name, segment.span)?)),
+        (_, name) => Named::Item(self.std_member(named, name, segment.span)?),
       };
       last = segment;
       rest = tail;
@@ -1724,17 +1763,34 @@ impl<'a> Resolver<'a> {
     Some((named, last, rest))
   }
 
-  /// A member of `std` or `std::ffi`, the only part of the standard library in F1.
-  fn std_member(&mut self, module: Named, name: &str, span: Span) -> Option<StdItem> {
+  /// A member of `std` (`std::ffi`, or a module written in Sagitario) or of `std::ffi`.
+  fn std_member(&mut self, module: Named, name: &str, span: Span) -> Option<ItemRef> {
     if let Named::Item(ItemRef::Std(StdItem::Root)) = module {
       if name == "ffi" {
-        return Some(StdItem::Ffi);
+        return Some(ItemRef::Std(StdItem::Ffi));
       }
 
-      self.diagnostics.push(
-        Diagnostic::error(codes::NOT_IMPLEMENTED, span, format!("`std::{name}` is not available yet"))
-          .with_note("in F1 the standard library only has `std::ffi`"),
-      );
+      if let Some(child) = self.resolution.std_root.and_then(|root| self.resolution.module(root)).and_then(|root| root.children.get(name)) {
+        return Some(ItemRef::Module(*child));
+      }
+
+      // The standard library itself names the prelude to implement its interfaces.
+      if name == "prelude" && self.resolution.module(self.module).is_some_and(|module| module.in_std) {
+        return self.resolution.prelude.map(ItemRef::Module);
+      }
+
+      let mut diagnostic = Diagnostic::error(codes::UNRESOLVED_NAME, span, format!("cannot find `{name}` in `std`"));
+
+      if let Some(similar) = sagitario_diagnostics::closest_match(name, STD_MODULES.iter().copied()) {
+        diagnostic = diagnostic.with_help(format!("a module with a similar spelling exists: `std::{similar}`"));
+      } else {
+        diagnostic = diagnostic.with_note(format!(
+          "the standard library has the modules {}",
+          STD_MODULES.iter().map(|name| format!("`{name}`")).collect::<Vec<_>>().join(", ")
+        ));
+      }
+
+      self.diagnostics.push(diagnostic);
 
       return None;
     }
@@ -1756,7 +1812,7 @@ impl<'a> Resolver<'a> {
       self.diagnostics.push(diagnostic);
     }
 
-    item
+    item.map(ItemRef::Std)
   }
 
   fn parent(&mut self, module: ModId, span: Span) -> Option<ModId> {
@@ -1773,6 +1829,11 @@ impl<'a> Resolver<'a> {
   fn module_member(&mut self, module: ModId, segment: &Ident) -> Option<ItemRef> {
     let info = self.resolution.module(module)?;
     let name = segment.name.as_str();
+
+    // `exit` never returns, which no function written in Sagitario can declare.
+    if info.in_std && info.path == ["std", "process"] && name == "exit" {
+      return Some(ItemRef::Std(StdItem::Exit));
+    }
 
     if let Some(declared) = info.items.get(name) {
       if declared.visibility == Visibility::Module && !self.resolution.is_within(self.module, module) {
@@ -1993,7 +2054,7 @@ impl<'a> Resolver<'a> {
 
   fn not_a_type(&mut self, name: &str, span: Span, item: ItemRef) {
     let what = match item {
-      ItemRef::Fn(_) | ItemRef::Extern(_) | ItemRef::Std(StdItem::StringFromC) => "a function",
+      ItemRef::Fn(_) | ItemRef::Extern(_) | ItemRef::Std(StdItem::StringFromC | StdItem::Exit) => "a function",
       ItemRef::Module(_) | ItemRef::Std(StdItem::Root | StdItem::Ffi) => "a module",
       ItemRef::Type(_) | ItemRef::Std(StdItem::CType(_) | StdItem::CString) => "a type",
     };

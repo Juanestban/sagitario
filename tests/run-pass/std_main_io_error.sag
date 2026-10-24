@@ -1,0 +1,10 @@
+// `main` returning an `io::Error`: it is printed with `message()` and the exit code is 1.
+// expect-stdout: working
+// expect-exit: 1
+
+use std::io;
+
+fn main() -> Result<(), io::Error> {
+  io::println("working")?;
+  Err(new io::Error(io::ErrorKind::PermissionDenied, "access denied"))
+}

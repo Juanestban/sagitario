@@ -29,6 +29,35 @@ pub(crate) fn build_tree(resolution: &mut Resolution, package: &Package) -> Vec<
       continue;
     }
 
+    // The standard library modules are children of `std`, outside the tree of `pkg` too.
+    if package.std.contains(&source) {
+      let root = *resolution.std_root.get_or_insert_with(|| {
+        let root = ModId(resolution.modules.len() as u32);
+
+        resolution.modules.push(ModuleInfo { path: vec!["std".to_string()], in_std: true, ..ModuleInfo::default() });
+
+        root
+      });
+      let node = ModId(resolution.modules.len() as u32);
+      let name = module.path.last().cloned().unwrap_or_default();
+
+      resolution.modules.push(ModuleInfo {
+        path: module.path.clone(),
+        in_std: true,
+        source: Some(source),
+        parent: Some(root),
+        ..ModuleInfo::default()
+      });
+
+      if let Some(info) = resolution.modules.get_mut(root.0 as usize) {
+        info.children.insert(name, node);
+      }
+
+      ids.push(node);
+
+      continue;
+    }
+
     let mut node = ModId(0);
 
     for segment in &module.path {
@@ -346,6 +375,52 @@ pub fn module_references(module: &Module) -> Vec<Vec<String>> {
     }
   }
 
+  for path in item_paths(module) {
+    let names: Vec<&str> = path.segments.iter().map(|segment| segment.name.as_str()).collect();
+    let Some((first, rest)) = names.split_first() else { continue };
+
+    if rest.is_empty() {
+      continue;
+    }
+
+    let absolute = match aliases.iter().find(|(alias, _)| alias == first) {
+      Some((_, target)) => Some(target.iter().cloned().chain(rest.iter().map(|name| name.to_string())).collect()),
+      None => absolute(&names, &module.path),
+    };
+
+    if let Some(absolute) = absolute {
+      add_prefixes(&absolute, &mut found);
+    }
+  }
+
+  found.remove(&module.path);
+  found.into_iter().collect()
+}
+
+/// The standard library modules a file may refer to: the second segment of its `use` paths and
+/// other paths that start with `std`. The driver loads the ones the standard library has.
+pub fn std_references(module: &Module) -> Vec<String> {
+  let mut flat = Vec::new();
+
+  for decl in &module.uses {
+    flatten(&decl.tree, &[], &mut flat);
+  }
+
+  let used = flat.iter().map(|import| import.segments.iter().map(|segment| segment.name.as_str()).collect::<Vec<_>>());
+  let written = item_paths(module).into_iter().map(|path| path.segments.iter().map(|segment| segment.name.as_str()).collect::<Vec<_>>());
+  let mut found = BTreeSet::new();
+
+  for names in used.chain(written) {
+    if let ["std", name, ..] = names.as_slice() {
+      found.insert(name.to_string());
+    }
+  }
+
+  found.into_iter().collect()
+}
+
+/// The paths written in the items of a file, outside its `use` declarations.
+fn item_paths(module: &Module) -> Vec<&Path> {
   let mut paths = Vec::new();
 
   for item in &module.items {
@@ -397,26 +472,7 @@ pub fn module_references(module: &Module) -> Vec<Vec<String>> {
     }
   }
 
-  for path in paths {
-    let names: Vec<&str> = path.segments.iter().map(|segment| segment.name.as_str()).collect();
-    let Some((first, rest)) = names.split_first() else { continue };
-
-    if rest.is_empty() {
-      continue;
-    }
-
-    let absolute = match aliases.iter().find(|(alias, _)| alias == first) {
-      Some((_, target)) => Some(target.iter().cloned().chain(rest.iter().map(|name| name.to_string())).collect()),
-      None => absolute(&names, &module.path),
-    };
-
-    if let Some(absolute) = absolute {
-      add_prefixes(&absolute, &mut found);
-    }
-  }
-
-  found.remove(&module.path);
-  found.into_iter().collect()
+  paths
 }
 
 /// The path from the package root named by a path starting with `pkg`, `self` or `super`.

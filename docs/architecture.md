@@ -37,7 +37,7 @@ crates/
   sagitario_codegen_c/    SIR → C11 text
   sagitario_driver/       orchestrates the pipeline, embeds the runtime, invokes the C compiler
   sagitario_cli/          the `sag` binary
-runtime/            minimal C runtime (ARC, panic, String, allocation, basic I/O)
+runtime/            minimal C runtime (ARC, panic, String, allocation, I/O and the OS calls of std)
 std/                standard library written in Sagitario
 tests/              end-to-end suites (see testing.md)
 ```
@@ -157,6 +157,15 @@ could be added.
   private functions behind methods such as `List::sort` or `String::split`
   (`BuiltinMethod::Prelude`, called with the receiver first). Prelude functions are templates,
   lowered only when used.
+- The standard library modules written in Sagitario (`crates/sagitario_driver/src/std/*.sag`)
+  are embedded by the driver too. It loads one when a loaded module names it
+  (`sagitario_resolve::std_references`) and lists them in `Package::std`; the resolver makes
+  them children of a `std` module outside the package tree (`Resolution::std_root`), next to
+  `std::ffi`, which the compiler implements. Their functions are templates like the prelude's
+  (`Resolution::in_library`). Their `extern` blocks declare runtime functions
+  (`Resolution::is_runtime_extern`: names starting with `sag_`, which may take and return
+  `String`); the C backend calls those directly, without an FFI wrapper. `std::process::exit`
+  is `Builtin::Exit`, typed `Never` like `panic`.
 - A `List<T>` is a `sag_object *` to a `sag_list`: the elements in a buffer with one spare slot,
   and a function releasing one element (`sag_elem_release_N`) when they are managed. An element
   is a place behind the list (`Projection::ListElem`, bounds-checked by `sag_list_at`); like a

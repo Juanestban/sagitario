@@ -3,6 +3,7 @@
 
 #include "sagitario_runtime.h"
 
+#include <errno.h>
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -983,6 +984,8 @@ const sag_c_char *sag_cstring_ptr(sag_cstring c) {
   return (const sag_c_char *)c->bytes;
 }
 
+static sag_string sag_string_from_bytes_lossy(const uint8_t *bytes, size_t len);
+
 /* The length of the UTF-8 sequence at the start of `b`: the whole character when `*valid`, or
  * the maximal ill-formed prefix that one U+FFFD replaces (as Rust's `from_utf8_lossy`). */
 static size_t sag_utf8_sequence(const uint8_t *b, size_t len, bool *valid) {
@@ -1030,8 +1033,11 @@ sag_string sag_string_from_c_at(const sag_c_char *p, const char *file, int line)
   if (p == NULL) {
     sag_panic_at("null pointer passed to string_from_c", file, line);
   }
-  const uint8_t *bytes = (const uint8_t *)p;
-  size_t len = strlen((const char *)p);
+  return sag_string_from_bytes_lossy((const uint8_t *)p, strlen((const char *)p));
+}
+
+/* A string with the UTF-8 in `bytes`, each ill-formed sequence replaced by U+FFFD. */
+static sag_string sag_string_from_bytes_lossy(const uint8_t *bytes, size_t len) {
   sag_sb sb;
   sag_sb_init(&sb);
   size_t index = 0;
@@ -1048,11 +1054,335 @@ sag_string sag_string_from_c_at(const sag_c_char *p, const char *file, int line)
   return sag_sb_finish(&sb);
 }
 
+static bool sag_utf8_valid(const uint8_t *bytes, size_t len) {
+  size_t index = 0;
+  while (index < len) {
+    bool valid;
+    index += sag_utf8_sequence(bytes + index, len - index, &valid);
+    if (!valid) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/* ---- Standard library: std::env, std::io, std::process --------------------------------- */
+
+#ifdef _WIN32
+#include <wchar.h>
+
+/* Windows passes arguments and the environment as UTF-16, which the CRT's `argv` and `getenv`
+ * convert to the ANSI code page. These kernel32 functions are declared here because
+ * <windows.h> is not strict C11. */
+#if defined(_M_IX86) || defined(__i386__)
+#define SAG_WINAPI __stdcall
+#else
+#define SAG_WINAPI
+#endif
+extern wchar_t *SAG_WINAPI GetCommandLineW(void);
+extern unsigned long SAG_WINAPI GetEnvironmentVariableW(const wchar_t *name, wchar_t *buffer, unsigned long size);
+
+/* Appends UTF-16 code units as UTF-8; unpaired surrogates become U+FFFD. */
+static void sag_sb_push_utf16(sag_sb *sb, const wchar_t *units, size_t len) {
+  size_t index = 0;
+  while (index < len) {
+    uint32_t c = (uint32_t)units[index++];
+    if (c >= 0xD800 && c <= 0xDBFF && index < len && (uint32_t)units[index] >= 0xDC00 && (uint32_t)units[index] <= 0xDFFF) {
+      c = 0x10000 + ((c - 0xD800) << 10) + ((uint32_t)units[index++] - 0xDC00);
+    } else if (c >= 0xD800 && c <= 0xDFFF) {
+      c = 0xFFFD;
+    }
+    sag_sb_push_char(sb, c);
+  }
+}
+
+/* The arguments as UTF-8, split from the command line with the rules of the C runtime. They
+ * are plain bytes, not strings, so they are not counted as live objects. */
+static sag_sb *sag_win_args = NULL;
+static size_t sag_win_arg_count = 0;
+
+static void sag_win_add_arg(const wchar_t *units, size_t len) {
+  sag_sb *grown = realloc(sag_win_args, (sag_win_arg_count + 1) * sizeof(sag_sb));
+  if (grown == NULL) {
+    sag_panic("out of memory");
+  }
+  sag_win_args = grown;
+  sag_sb_init(&sag_win_args[sag_win_arg_count]);
+  sag_sb_push_utf16(&sag_win_args[sag_win_arg_count], units, len);
+  sag_win_arg_count++;
+}
+
+static void sag_win_parse_args(void) {
+  const wchar_t *p = GetCommandLineW();
+  wchar_t *arg = sag_alloc((wcslen(p) + 1) * sizeof(wchar_t));
+  size_t len = 0;
+  /* The program name ends at the first space, or at the closing quote; backslashes are kept. */
+  if (*p == L'"') {
+    p++;
+    while (*p != 0 && *p != L'"') {
+      arg[len++] = *p++;
+    }
+    if (*p == L'"') {
+      p++;
+    }
+  } else {
+    while (*p != 0 && *p != L' ' && *p != L'\t') {
+      arg[len++] = *p++;
+    }
+  }
+  sag_win_add_arg(arg, len);
+  for (;;) {
+    while (*p == L' ' || *p == L'\t') {
+      p++;
+    }
+    if (*p == 0) {
+      break;
+    }
+    bool quoted = false;
+    len = 0;
+    while (*p != 0 && (quoted || (*p != L' ' && *p != L'\t'))) {
+      if (*p == L'\\') {
+        size_t slashes = 0;
+        while (*p == L'\\') {
+          slashes++;
+          p++;
+        }
+        /* 2n backslashes and a quote: n backslashes, and the quote delimits. 2n + 1: n
+         * backslashes and a literal quote. Backslashes elsewhere are literal. */
+        size_t kept = *p == L'"' ? slashes / 2 : slashes;
+        for (size_t i = 0; i < kept; i++) {
+          arg[len++] = L'\\';
+        }
+        if (*p == L'"' && slashes % 2 == 1) {
+          arg[len++] = *p++;
+        }
+      } else if (*p == L'"') {
+        if (quoted && p[1] == L'"') {
+          arg[len++] = L'"';
+          p += 2;
+        } else {
+          quoted = !quoted;
+          p++;
+        }
+      } else {
+        arg[len++] = *p++;
+      }
+    }
+    sag_win_add_arg(arg, len);
+  }
+  free(arg);
+}
+#else
+static int sag_argc = 0;
+static char **sag_argv = NULL;
+#endif
+
+size_t sag_env_arg_count(void) {
+#ifdef _WIN32
+  if (sag_win_args == NULL) {
+    sag_win_parse_args();
+  }
+  return sag_win_arg_count;
+#else
+  return sag_argc > 0 ? (size_t)sag_argc : 0;
+#endif
+}
+
+sag_string sag_env_arg(size_t index) {
+  if (index >= sag_env_arg_count()) {
+    return sag_string_empty();
+  }
+#ifdef _WIN32
+  return sag_string_from_bytes_lossy(sag_win_args[index].data, sag_win_args[index].len);
+#else
+  return sag_string_from_bytes_lossy((const uint8_t *)sag_argv[index], strlen(sag_argv[index]));
+#endif
+}
+
+sag_string sag_env_var(sag_string name, bool *found) {
+  *found = false;
+  if (name.len == 0 || memchr(name.ptr, '=', name.len) != NULL || memchr(name.ptr, 0, name.len) != NULL) {
+    return sag_string_empty();
+  }
+#ifdef _WIN32
+  wchar_t *wide = sag_alloc((name.len + 1) * sizeof(wchar_t));
+  size_t len = 0;
+  size_t index = 0;
+  while (index < name.len) {
+    uint32_t c = sag_utf8_next(name, &index);
+    if (c >= 0x10000) {
+      wide[len++] = (wchar_t)(0xD800 + ((c - 0x10000) >> 10));
+      wide[len++] = (wchar_t)(0xDC00 + ((c - 0x10000) & 0x3FF));
+    } else {
+      wide[len++] = (wchar_t)c;
+    }
+  }
+  wide[len] = 0;
+  /* Without a buffer, the size needed including the terminator; 0 when the variable is unset. */
+  unsigned long size = GetEnvironmentVariableW(wide, NULL, 0);
+  sag_string result = sag_string_empty();
+  if (size > 0) {
+    wchar_t *value = sag_alloc((size_t)size * sizeof(wchar_t));
+    unsigned long written = GetEnvironmentVariableW(wide, value, size);
+    if (written < size) {
+      sag_sb sb;
+      sag_sb_init(&sb);
+      sag_sb_push_utf16(&sb, value, written);
+      result = sag_sb_finish(&sb);
+      *found = true;
+    }
+    free(value);
+  }
+  free(wide);
+  return result;
+#else
+  char *copy = sag_alloc(name.len + 1);
+  memcpy(copy, name.ptr, name.len);
+  copy[name.len] = 0;
+  const char *value = getenv(copy);
+  free(copy);
+  if (value == NULL) {
+    return sag_string_empty();
+  }
+  *found = true;
+  return sag_string_from_bytes_lossy((const uint8_t *)value, strlen(value));
+#endif
+}
+
+/* The code of the last failed C library call: its `errno`, or an unknown I/O error. */
+static int32_t sag_io_errno(void) {
+  return errno > 0 ? (int32_t)errno : SAG_IO_UNKNOWN;
+}
+
+int32_t sag_io_write(int32_t stream, sag_string text, bool newline) {
+  FILE *file = stream == 2 ? stderr : stdout;
+  errno = 0;
+  if ((text.len > 0 && fwrite(text.ptr, 1, text.len, file) != text.len) || (newline && fputc('\n', file) == EOF)) {
+    return sag_io_errno();
+  }
+  return 0;
+}
+
+int32_t sag_io_flush(void) {
+  errno = 0;
+  return fflush(stdout) == 0 ? 0 : sag_io_errno();
+}
+
+/* Makes the bytes read from stdin a string, or reports that they are not UTF-8. */
+static sag_string sag_io_finish_read(sag_sb *sb, int32_t *status) {
+  if (!sag_utf8_valid(sb->data, sb->len)) {
+    free(sb->data);
+    sag_sb_init(sb);
+    *status = SAG_IO_INVALID_DATA;
+    return sag_string_empty();
+  }
+  *status = 0;
+  return sag_sb_finish(sb);
+}
+
+sag_string sag_io_read_line(int32_t *status) {
+  sag_sb sb;
+  sag_sb_init(&sb);
+  bool any = false;
+  int c;
+  errno = 0;
+  while ((c = getc(stdin)) != EOF) {
+    any = true;
+    if (c == '\n') {
+      break;
+    }
+    char byte = (char)c;
+    sag_sb_push_bytes(&sb, &byte, 1);
+  }
+  if (c == EOF && ferror(stdin)) {
+    *status = sag_io_errno();
+    clearerr(stdin);
+    free(sb.data);
+    return sag_string_empty();
+  }
+  if (!any) {
+    *status = SAG_IO_END;
+    return sag_string_empty();
+  }
+  if (sb.len > 0 && sb.data[sb.len - 1] == '\r') {
+    sb.len--;
+  }
+  return sag_io_finish_read(&sb, status);
+}
+
+sag_string sag_io_read_all(int32_t *status) {
+  sag_sb sb;
+  sag_sb_init(&sb);
+  char chunk[4096];
+  size_t count;
+  errno = 0;
+  while ((count = fread(chunk, 1, sizeof chunk, stdin)) > 0) {
+    sag_sb_push_bytes(&sb, chunk, count);
+  }
+  if (ferror(stdin)) {
+    *status = sag_io_errno();
+    clearerr(stdin);
+    free(sb.data);
+    return sag_string_empty();
+  }
+  return sag_io_finish_read(&sb, status);
+}
+
+int32_t sag_io_error_kind(int32_t code) {
+  if (code == SAG_IO_INVALID_DATA) {
+    return SAG_IO_KIND_INVALID_DATA;
+  }
+  /* Only EDOM, EILSEQ and ERANGE are standard C; the others exist on every supported system. */
+#ifdef ENOENT
+  if (code == ENOENT) {
+    return SAG_IO_KIND_NOT_FOUND;
+  }
+#endif
+#if defined(EACCES) && defined(EPERM)
+  if (code == EACCES || code == EPERM) {
+    return SAG_IO_KIND_PERMISSION_DENIED;
+  }
+#endif
+#ifdef EEXIST
+  if (code == EEXIST) {
+    return SAG_IO_KIND_ALREADY_EXISTS;
+  }
+#endif
+#ifdef EINVAL
+  if (code == EINVAL) {
+    return SAG_IO_KIND_INVALID_INPUT;
+  }
+#endif
+  return SAG_IO_KIND_OTHER;
+}
+
+sag_string sag_io_error_message(int32_t code) {
+  const char *message = "input/output error";
+  if (code == SAG_IO_INVALID_DATA) {
+    message = "stream did not contain valid UTF-8";
+  } else if (code > 0) {
+    message = strerror((int)code);
+  }
+  return sag_string_from_bytes_lossy((const uint8_t *)message, strlen(message));
+}
+
+_Noreturn void sag_process_exit(int32_t code) {
+  /* `_Exit` skips the `atexit` handlers, so leak checkers do not report the objects still
+   * alive. */
+  fflush(NULL);
+  _Exit((int)code);
+}
+
 /* ---- Program lifecycle ----------------------------------------------------------------- */
 
 void sag_rt_init(int argc, char **argv) {
+#ifdef _WIN32
   (void)argc;
   (void)argv;
+#else
+  sag_argc = argc;
+  sag_argv = argv;
+#endif
 }
 
 int sag_rt_finish(void) {

@@ -379,6 +379,7 @@ pub fn builtin_sig(builtin: Builtin) -> FnSig {
   match builtin {
     Builtin::Print | Builtin::Println | Builtin::Eprintln => FnSig { receiver: None, params: vec![Type::String], ret: Type::Unit },
     Builtin::Panic => FnSig { receiver: None, params: vec![Type::String], ret: Type::Never },
+    Builtin::Exit => FnSig { receiver: None, params: vec![Type::Int(IntTy::I32)], ret: Type::Never },
     Builtin::CStringNew => FnSig { receiver: None, params: vec![Type::String], ret: Type::Result(Box::new(Type::CString), Box::new(Type::String)) },
     Builtin::StringFromC => FnSig { receiver: None, params: vec![ffi::c_string_ptr()], ret: Type::String },
     // The result is the prelude's `Error`, which the type checker knows.

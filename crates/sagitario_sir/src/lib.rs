@@ -85,6 +85,8 @@ pub struct ExternDecl {
   pub symbol: String,
   pub params: Vec<Type>,
   pub ret: Type,
+  /// A function of the runtime, declared by its header and called directly.
+  pub runtime: bool,
 }
 
 /// The fields of the program's structs and enums, with type parameters in generic ones.
@@ -563,7 +565,9 @@ pub fn lower(
   for (id, decl) in resolution.extern_decls(package) {
     let sig = typed.extern_sig(id).ok_or_else(|| LowerError(format!("no signature for the C function `{}`", decl.name.name)))?;
 
-    externs.push(ExternDecl { symbol: decl.name.name.clone(), params: sig.params.clone(), ret: sig.ret.clone() });
+    let runtime = resolution.is_runtime_extern(package, id);
+
+    externs.push(ExternDecl { symbol: decl.name.name.clone(), params: sig.params.clone(), ret: sig.ret.clone(), runtime });
   }
 
   Ok(Program {

@@ -164,17 +164,21 @@ impl Checker<'_> {
       .push(Diagnostic::error(codes::NOT_FFI_SAFE, span, format!("{context} has type `{ty}`, which C cannot represent")).with_help(help));
   }
 
-  /// The parameters and result of a function C calls or is called through.
-  fn check_ffi_signature(&mut self, sig: &FnSig, params: &[&TypeExpr], ret: Option<&TypeExpr>) {
+  /// The parameters and result of a function C calls or is called through. Functions of the
+  /// runtime, which the standard library declares, also take and return `String`s: they borrow
+  /// their arguments and return new references.
+  fn check_ffi_signature(&mut self, sig: &FnSig, params: &[&TypeExpr], ret: Option<&TypeExpr>, runtime: bool) {
+    let safe = |checker: &Self, ty: &Type| checker.ffi_safe(ty) || (runtime && *ty == Type::String);
+
     for (ty, expr) in sig.params.iter().zip(params) {
-      if !self.ffi_safe(ty) {
+      if !safe(self, ty) {
         self.not_ffi_safe(expr.span, ty, "this parameter");
       }
     }
 
     if let Some(expr) = ret
       && sig.ret != Type::Unit
-      && !self.ffi_safe(&sig.ret)
+      && !safe(self, &sig.ret)
     {
       self.not_ffi_safe(expr.span, &sig.ret, "the result");
     }
@@ -182,13 +186,14 @@ impl Checker<'_> {
 
   /// The signatures of the C functions in `extern` blocks.
   pub(crate) fn extern_sigs(&mut self) {
-    for (_, decl) in self.resolution.extern_decls(self.package) {
+    for (id, decl) in self.resolution.extern_decls(self.package) {
       let params: Vec<Type> = decl.params.iter().map(|param| self.type_expr(&param.ty)).collect();
       let ret = decl.return_type.as_ref().map_or(Type::Unit, |ty| self.type_expr(ty));
       let sig = FnSig { receiver: None, params, ret };
       let param_exprs: Vec<&TypeExpr> = decl.params.iter().map(|param| &param.ty).collect();
+      let runtime = self.resolution.is_runtime_extern(self.package, id);
 
-      self.check_ffi_signature(&sig, &param_exprs, decl.return_type.as_ref());
+      self.check_ffi_signature(&sig, &param_exprs, decl.return_type.as_ref(), runtime);
       self.typed.extern_sigs.push(sig);
     }
   }
@@ -197,7 +202,7 @@ impl Checker<'_> {
   pub(crate) fn check_exported(&mut self, decl: &FnDecl, sig: &FnSig) {
     let params: Vec<&TypeExpr> = decl.params.iter().map(|param| &param.ty).collect();
 
-    self.check_ffi_signature(sig, &params, decl.return_type.as_ref());
+    self.check_ffi_signature(sig, &params, decl.return_type.as_ref(), false);
   }
 
   /// The fields of `@repr(C)` structs, which C reads with its own layout.
@@ -222,6 +227,11 @@ impl Checker<'_> {
     let mut found: Vec<(String, Span, Option<FnSig>)> = Vec::new();
 
     for (id, decl) in self.resolution.extern_decls(self.package) {
+      // The runtime's functions are declared by its header, not by the program.
+      if self.resolution.is_runtime_extern(self.package, id) {
+        continue;
+      }
+
       let sig = self.typed.extern_sig(id).cloned();
 
       found.push((decl.name.name.clone(), decl.name.span, sig));
