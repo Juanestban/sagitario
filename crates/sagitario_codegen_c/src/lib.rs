@@ -22,12 +22,17 @@
 //! of a struct or enum) and an itable `sag_it_K` with the interface's entries for that type:
 //! thunks `sag_th_K_J` calling the type's methods, default methods, and field getters and setters.
 //! `sag_todyn_K` turns a value into an interface value.
+//!
+//! A function value is a `sag_fnval`: a function pointer and an environment (`sag_envN`, an ARC
+//! object holding the captures, or NULL). Lambdas receive the environment as their first
+//! parameter, and named functions used as values are called through a wrapper `sag_wrap_N` that
+//! takes it.
 
 use sagitario_ast::{BinaryOp, UnaryOp};
-use sagitario_resolve::{Builtin, ClassId, EnumId, FnId, StructId};
+use sagitario_resolve::{Builtin, EnumId, FnId, StructId};
 use sagitario_sir::{
-  Callee, Const, ExternDecl, FieldAt, Function, ItableEntry, Layouts, Local, Operand, PanicMessage, Place, Program, Projection, Rvalue, Stmt,
-  TemplatePiece,
+  Callee, ClassInstance, Const, ExternDecl, FieldAt, Function, ItableEntry, Layouts, Local, Operand, PanicMessage, Place, Program, Projection,
+  Rvalue, Stmt, TemplatePiece,
 };
 use sagitario_types::{ClassRef, EnumRef, FloatTy, IntTy, StructRef, Type};
 
@@ -54,8 +59,10 @@ pub fn generate(program: &Program) -> GeneratedC {
     self_by_ref: false,
     source_line: None,
     pointees: Vec::new(),
-    classes: Vec::new(),
+    class_queue: Vec::new(),
+    classes: &program.classes,
     functions: &program.functions,
+    envs: &program.envs,
   };
   let order = generator.aggregate_order(program);
 
@@ -69,7 +76,7 @@ pub fn generate(program: &Program) -> GeneratedC {
     generator.out.push_str(&format!("{prototype};\n"));
   }
 
-  for (index, function) in program.functions.iter().enumerate() {
+  for (index, function) in program.functions.iter().enumerate().filter(|(_, function)| !function.template) {
     let signature = generator.signature(FnId(index as u32), function);
 
     generator.out.push_str(&format!("{}{signature};\n", linkage(function)));
@@ -78,8 +85,9 @@ pub fn generate(program: &Program) -> GeneratedC {
   generator.out.push('\n');
   generator.class_support(&order);
   generator.interface_support(program);
+  generator.closure_support(program);
 
-  for (index, function) in program.functions.iter().enumerate() {
+  for (index, function) in program.functions.iter().enumerate().filter(|(_, function)| !function.template) {
     generator.function(FnId(index as u32), function);
   }
 
@@ -95,8 +103,8 @@ fn linkage(function: &Function) -> &'static str {
   if function.export.is_some() { "" } else { "static " }
 }
 
-/// A C struct to define: a struct, an enum, a class's objects, or an array, `Option` or
-/// `Result` type (index in `Generator::instances`).
+/// A C struct to define: a struct, an enum, the objects of a class instance, or an array,
+/// `Option`, `Result` or generic struct or enum type (index in `Generator::instances`).
 #[derive(Clone, Copy)]
 enum Aggregate {
   Struct(usize),
@@ -107,8 +115,8 @@ enum Aggregate {
 
 struct Generator<'a> {
   layouts: &'a Layouts,
-  /// Every array, `Option` and `Result` type used by the program; `sag_tN` is the one at index
-  /// `N`.
+  /// Every array, `Option`, `Result` and generic struct or enum type used by the program;
+  /// `sag_tN` is the one at index `N`.
   instances: Vec<Type>,
   out: String,
   indent: usize,
@@ -122,17 +130,22 @@ struct Generator<'a> {
   source_line: Option<(u32, u32)>,
   /// Types behind pointers, given a C type after the aggregate being visited.
   pointees: Vec<Type>,
-  /// Classes whose objects are referenced, defined after the aggregate being visited.
-  classes: Vec<usize>,
+  /// Class instances whose objects are referenced, defined after the aggregate being visited.
+  class_queue: Vec<usize>,
+  /// The class types the program uses; `sag_cN` is the struct of the objects of the one at
+  /// index `N`.
+  classes: &'a [ClassInstance],
   /// The program's functions, for the signatures of calls through vtables.
   functions: &'a [Function],
+  /// The types captured by each closure environment.
+  envs: &'a [Vec<Type>],
 }
 
 impl<'a> Generator<'a> {
   /// Every aggregate type, each after the ones it contains, as C requires.
   fn aggregate_order(&mut self, program: &Program) -> Vec<Aggregate> {
     let mut order = Vec::new();
-    let mut done = vec![false; self.layouts.structs.len() + self.layouts.enums.len() + self.layouts.classes.len()];
+    let mut done = vec![false; self.layouts.structs.len() + self.layouts.enums.len() + self.classes.len()];
 
     for index in 0..self.layouts.structs.len() {
       self.visit_type(&struct_type(index), &mut done, &mut order);
@@ -142,12 +155,19 @@ impl<'a> Generator<'a> {
       self.visit_type(&enum_type(index), &mut done, &mut order);
     }
 
-    for index in 0..self.layouts.classes.len() {
-      self.classes.push(index);
+    for index in 0..self.classes.len() {
+      self.class_queue.push(index);
     }
 
     for function in &program.functions {
       for ty in function.locals.iter().chain([&function.ret]) {
+        self.visit_type(ty, &mut done, &mut order);
+      }
+    }
+
+    // Captures, which may be no function's local.
+    for env in &program.envs {
+      for ty in env {
         self.visit_type(ty, &mut done, &mut order);
       }
     }
@@ -172,7 +192,7 @@ impl<'a> Generator<'a> {
     loop {
       if let Some(pointee) = self.pointees.pop() {
         self.visit_type(&pointee, &mut done, &mut order);
-      } else if let Some(class) = self.classes.pop() {
+      } else if let Some(class) = self.class_queue.pop() {
         self.visit_class(class, &mut done, &mut order);
       } else {
         break;
@@ -195,28 +215,28 @@ impl<'a> Generator<'a> {
     }
 
     // An object contains its parent's part by value.
-    if let Some(parent) = self.layouts.class(ClassId(index as u32)).and_then(|layout| layout.parent) {
-      self.visit_class(parent.0 as usize, done, order);
+    if let Some(parent) = self.classes.get(index).and_then(|class| class.parent) {
+      self.visit_class(parent, done, order);
     }
 
-    for field in self.layouts.class_fields(ClassId(index as u32)) {
+    for field in self.classes.get(index).map(|class| class.fields.clone()).unwrap_or_default() {
       self.visit_type(&field, done, order);
     }
 
     order.push(Aggregate::Class(index));
   }
 
-  /// `done` flags structs first, then enums, then classes.
+  /// `done` flags structs first, then enums, then class instances.
   fn visit_type(&mut self, ty: &Type, done: &mut [bool], order: &mut Vec<Aggregate>) {
     let (flag, aggregate) = match ty {
-      Type::Struct(inner) => (inner.id.0 as usize, Aggregate::Struct(inner.id.0 as usize)),
-      Type::Enum(inner) => (self.layouts.structs.len() + inner.id.0 as usize, Aggregate::Enum(inner.id.0 as usize)),
+      Type::Struct(inner) if inner.args.is_empty() => (inner.id.0 as usize, Aggregate::Struct(inner.id.0 as usize)),
+      Type::Enum(inner) if inner.args.is_empty() => (self.layouts.structs.len() + inner.id.0 as usize, Aggregate::Enum(inner.id.0 as usize)),
       Type::Class(inner) => {
-        self.classes.push(inner.id.0 as usize);
+        self.class_queue.push(self.class_index(inner));
 
         return;
       }
-      Type::Array(..) | Type::Option(_) | Type::Result(..) => {
+      Type::Array(..) | Type::Option(_) | Type::Result(..) | Type::Struct(_) | Type::Enum(_) => {
         if self.instances.contains(ty) {
           return;
         }
@@ -256,8 +276,8 @@ impl<'a> Generator<'a> {
   /// The types a value of `ty` contains: per variant for enum-like types, else one group.
   fn parts(&self, ty: &Type) -> Vec<Vec<Type>> {
     match ty {
-      Type::Struct(inner) => vec![self.layouts.struct_fields(inner.id)],
-      Type::Class(inner) => vec![self.layouts.class_fields(inner.id)],
+      Type::Struct(inner) => vec![self.layouts.struct_fields(inner)],
+      Type::Class(inner) => vec![self.classes.get(self.class_index(inner)).map(|class| class.fields.clone()).unwrap_or_default()],
       Type::Array(elem, _) => vec![vec![elem.as_ref().clone()]],
       _ => self.layouts.variants(ty).unwrap_or_default(),
     }
@@ -267,7 +287,7 @@ impl<'a> Generator<'a> {
     match aggregate {
       Aggregate::Struct(index) => struct_type(index),
       Aggregate::Enum(index) => enum_type(index),
-      Aggregate::Class(index) => class_type(index),
+      Aggregate::Class(index) => self.classes.get(index).map_or(Type::Error, |class| Type::Class(class.class.clone())),
       Aggregate::Instance(index) => self.instances.get(index).cloned().unwrap_or(Type::Error),
     }
   }
@@ -275,9 +295,14 @@ impl<'a> Generator<'a> {
   /// The C struct of an aggregate: for a class, the struct of its objects.
   fn struct_name(&self, ty: &Type) -> String {
     match ty {
-      Type::Class(inner) => format!("sag_c{}", inner.id.0),
+      Type::Class(inner) => format!("sag_c{}", self.class_index(inner)),
       _ => self.c_type(ty),
     }
+  }
+
+  /// The class instance of a class type.
+  fn class_index(&self, class: &ClassRef) -> usize {
+    self.classes.iter().position(|instance| instance.class == *class).unwrap_or(0)
   }
 
   fn type_definitions(&mut self, order: &[Aggregate]) {
@@ -308,9 +333,9 @@ impl<'a> Generator<'a> {
     for aggregate in order {
       if let Aggregate::Class(index) = aggregate {
         let methods: Vec<String> = self
-          .layouts
-          .class(ClassId(*index as u32))
-          .map(|layout| layout.vtable.iter().map(|function| format!("(sag_method){}", fn_name(*function))).collect())
+          .classes
+          .get(*index)
+          .map(|class| class.vtable.iter().map(|function| format!("(sag_method){}", fn_name(*function))).collect())
           .unwrap_or_default();
 
         if !methods.is_empty() {
@@ -355,13 +380,8 @@ impl<'a> Generator<'a> {
       let mut methods = Vec::new();
 
       for (slot, entry) in itable.entries.iter().enumerate() {
-        match entry {
-          ItableEntry::Default(function) => methods.push(format!("(sag_method){}", fn_name(*function))),
-          _ => {
-            self.thunk(program, index, slot, entry, boxed);
-            methods.push(format!("(sag_method)sag_th_{index}_{slot}"));
-          }
-        }
+        self.thunk(program, index, slot, entry, boxed);
+        methods.push(format!("(sag_method)sag_th_{index}_{slot}"));
       }
 
       let parents: Vec<String> = itable.parents.iter().map(|parent| format!("&sag_it_{parent}")).collect();
@@ -415,10 +435,8 @@ impl<'a> Generator<'a> {
     };
 
     match entry {
-      ItableEntry::Method { signature, function, slot: vtable_slot } => {
-        let Some(signature) = program.functions.get(signature.0 as usize) else { return };
+      ItableEntry::Method { function, slot: vtable_slot, params, ret } => {
         let target = program.functions.get(function.0 as usize);
-        let params: Vec<Type> = signature.locals.iter().take(signature.param_count).skip(1).cloned().collect();
         let declared: Vec<String> = std::iter::once("sag_dyn self".to_string())
           .chain(params.iter().enumerate().map(|(arg, ty)| format!("{} a{arg}", self.c_type(ty))))
           .collect();
@@ -429,14 +447,14 @@ impl<'a> Generator<'a> {
           None => fn_name(*function),
         };
         let call = format!("{callee}({})", args.join(", "));
-        let ret = self.return_type(&signature.ret);
+        let ret = self.return_type(ret);
         let body = if ret == "void" { format!("{call};") } else { format!("return {call};") };
 
         self.out.push_str(&format!("static {ret} {name}({}) {{ {body} }}\n", declared.join(", ")));
       }
       ItableEntry::Field { field, ty, set } => {
         let place = match field {
-          FieldAt::Class { class, index } => format!("((sag_c{} *)self.object)->f{index}", class.0),
+          FieldAt::Class { class, index } => format!("((sag_c{class} *)self.object)->f{index}"),
           FieldAt::Struct(index) => format!("{object}.f{index}"),
         };
         let c_type = self.c_type(ty);
@@ -458,14 +476,54 @@ impl<'a> Generator<'a> {
           self.out.push_str(&format!("static {c_type} {name}(sag_dyn self) {{ {c_type} value = {place};{retain} return value; }}\n"));
         }
       }
-      ItableEntry::Default(_) => {}
     }
   }
 
-  /// The vtable of a class as a C expression: `sag_vtable_cN`, or `NULL` when it is empty.
-  fn vtable(&self, class: ClassId) -> String {
-    match self.layouts.class(class) {
-      Some(layout) if !layout.vtable.is_empty() => format!("sag_vtable_c{}", class.0),
+  /// The closure environments, then the wrappers of named functions used as values.
+  fn closure_support(&mut self, program: &Program) {
+    for (index, types) in program.envs.iter().enumerate() {
+      let fields: Vec<String> = types.iter().enumerate().map(|(field, ty)| format!(" {} c{field};", self.c_type(ty))).collect();
+      let releases: Vec<String> = types
+        .iter()
+        .enumerate()
+        .filter(|(_, ty)| self.layouts.is_managed(ty))
+        .map(|(field, ty)| format!("  {};\n", self.arc_call("release", ty, &format!("env->c{field}"))))
+        .collect();
+
+      self.out.push_str(&format!("typedef struct sag_env{index} {{ sag_object header;{} }} sag_env{index};\n", fields.concat()));
+      self.out.push_str(&format!("static void sag_drop_env{index}(sag_object *object) {{\n"));
+
+      if releases.is_empty() {
+        self.out.push_str("  (void)object;\n");
+      } else {
+        self.out.push_str(&format!("  sag_env{index} *env = (sag_env{index} *)object;\n{}", releases.concat()));
+      }
+
+      self.out.push_str("}\n");
+    }
+
+    for function_id in &program.wrapped {
+      let Some(function) = program.functions.get(function_id.0 as usize) else { continue };
+      let params: Vec<Type> = function.locals.iter().take(function.param_count).cloned().collect();
+      let declared: Vec<String> = std::iter::once("sag_object *env".to_string())
+        .chain(params.iter().enumerate().map(|(arg, ty)| format!("{} a{arg}", self.c_type(ty))))
+        .collect();
+      let args: Vec<String> = (0..params.len()).map(|arg| format!("a{arg}")).collect();
+      let ret = self.return_type(&function.ret);
+      let call = format!("{}({})", fn_name(*function_id), args.join(", "));
+      let body = if ret == "void" { format!("{call};") } else { format!("return {call};") };
+
+      self.out.push_str(&format!("static {ret} sag_wrap_{}({}) {{ (void)env; {body} }}\n", function_id.0, declared.join(", ")));
+    }
+
+    self.out.push('\n');
+  }
+
+  /// The vtable of a class instance as a C expression: `sag_vtable_cN`, or `NULL` when it is
+  /// empty.
+  fn vtable(&self, class: usize) -> String {
+    match self.classes.get(class) {
+      Some(instance) if !instance.vtable.is_empty() => format!("sag_vtable_c{class}"),
       _ => "NULL".to_string(),
     }
   }
@@ -474,11 +532,13 @@ impl<'a> Generator<'a> {
   /// `sag_new_cN`.
   fn class_functions(&mut self, index: usize) {
     let name = format!("sag_c{index}");
-    let parent = self.layouts.class(ClassId(index as u32)).and_then(|layout| layout.parent);
-    let weak = self.layouts.class(ClassId(index as u32)).map(|layout| layout.weak.clone()).unwrap_or_default();
+    let parent = self.classes.get(index).and_then(|class| class.parent);
+    let weak = self.classes.get(index).map(|class| class.weak.clone()).unwrap_or_default();
     let releases: Vec<String> = self
-      .layouts
-      .class_fields(ClassId(index as u32))
+      .classes
+      .get(index)
+      .map(|class| class.fields.clone())
+      .unwrap_or_default()
       .iter()
       .enumerate()
       .filter_map(|(field, ty)| match weak.get(field) {
@@ -497,10 +557,10 @@ impl<'a> Generator<'a> {
     }
 
     if let Some(parent) = parent {
-      self.out.push_str(&format!("  sag_drop_c{}(object);\n", parent.0));
+      self.out.push_str(&format!("  sag_drop_c{parent}(object);\n"));
     }
 
-    let vtable = self.vtable(ClassId(index as u32));
+    let vtable = self.vtable(index);
 
     self.out.push_str("}\n");
     self.out.push_str(&format!("static sag_object *sag_new_c{index}(void) {{\n"));
@@ -516,7 +576,8 @@ impl<'a> Generator<'a> {
     let members = match ty {
       Type::Class(inner) => {
         let fields = self.parts(ty).concat();
-        let weak = self.layouts.class(inner.id).map(|layout| layout.weak.clone()).unwrap_or_default();
+        let instance = self.classes.get(self.class_index(inner));
+        let weak = instance.map(|class| class.weak.clone()).unwrap_or_default();
         let members: Vec<String> = fields
           .iter()
           .enumerate()
@@ -526,8 +587,8 @@ impl<'a> Generator<'a> {
             format!(" {c_type} f{index};")
           })
           .collect();
-        let base = match self.layouts.class(inner.id).and_then(|layout| layout.parent) {
-          Some(parent) => format!("sag_c{} base;", parent.0),
+        let base = match instance.and_then(|class| class.parent) {
+          Some(parent) => format!("sag_c{parent} base;"),
           None => "sag_object header;".to_string(),
         };
 
@@ -629,6 +690,7 @@ impl<'a> Generator<'a> {
       Type::CString => format!("sag_cstring_{action}({value})"),
       Type::Class(_) => format!("sag_object_{action}({value})"),
       Type::Interface(_) => format!("sag_dyn_{action}({value})"),
+      Type::Function { .. } => format!("sag_fnval_{action}({value})"),
       _ => format!("sag_{action}_{}(&{value})", self.c_type(ty).trim_start_matches("sag_")),
     }
   }
@@ -650,10 +712,12 @@ impl<'a> Generator<'a> {
       Type::String => "sag_string".to_string(),
       Type::StringBuilder => "sag_builder".to_string(),
       Type::Interface(_) => "sag_dyn".to_string(),
-      // Only in interface signatures, which are never generated with it.
-      Type::SelfType => "uint8_t".to_string(),
-      Type::Struct(inner) => format!("sag_s{}", inner.id.0),
-      Type::Enum(inner) => format!("sag_e{}", inner.id.0),
+      Type::Function { .. } => "sag_fnval".to_string(),
+      // Templates are not generated, so parameters never reach C.
+      Type::Param(_) => "uint8_t".to_string(),
+      Type::Struct(inner) if inner.args.is_empty() => format!("sag_s{}", inner.id.0),
+      Type::Enum(inner) if inner.args.is_empty() => format!("sag_e{}", inner.id.0),
+      Type::Struct(_) | Type::Enum(_) => format!("sag_t{}", self.instance_index(ty)),
       Type::Class(_) => "sag_object *".to_string(),
       Type::Array(..) | Type::Option(_) | Type::Result(..) => format!("sag_t{}", self.instance_index(ty)),
       Type::CString => "sag_cstring".to_string(),
@@ -838,7 +902,14 @@ impl<'a> Generator<'a> {
   /// The C type of a pointer to a method, to call one taken from a vtable.
   fn method_pointer(&self, id: FnId) -> String {
     let Some(function) = self.functions.get(id.0 as usize) else { return "void (*)(void)".to_string() };
-    let params: Vec<String> = function.locals.iter().take(function.param_count).map(|ty| self.c_type(ty)).collect();
+    let mut params: Vec<String> = function.locals.iter().take(function.param_count).map(|ty| self.c_type(ty)).collect();
+
+    // A lambda's first parameter is its environment.
+    if function.closure
+      && let Some(first) = params.first_mut()
+    {
+      *first = "sag_object *".to_string();
+    }
 
     format!("{} (*)({})", self.return_type(&function.ret), params.join(", "))
   }
@@ -850,6 +921,11 @@ impl<'a> Generator<'a> {
       .take(function.param_count)
       .enumerate()
       .map(|(index, ty)| {
+        // A lambda's first parameter is its environment.
+        if index == 0 && function.closure {
+          return format!("sag_object *{}", local_name(Local(0)));
+        }
+
         let pointer = if index == 0 && function.self_by_ref { " *" } else { " " };
 
         format!("{}{pointer}{}", self.c_type(ty), local_name(Local(index as u32)))
@@ -870,12 +946,21 @@ impl<'a> Generator<'a> {
     self.indent = 1;
 
     for (index, ty) in function.locals.iter().enumerate().skip(function.param_count) {
-      let init =
-        if matches!(ty, Type::String | Type::Interface(_) | Type::Struct(_) | Type::Enum(_) | Type::Array(..) | Type::Option(_) | Type::Result(..)) {
-          "{0}"
-        } else {
-          "0"
-        };
+      let init = if matches!(
+        ty,
+        Type::String
+          | Type::Interface(_)
+          | Type::Function { .. }
+          | Type::Struct(_)
+          | Type::Enum(_)
+          | Type::Array(..)
+          | Type::Option(_)
+          | Type::Result(..)
+      ) {
+        "{0}"
+      } else {
+        "0"
+      };
 
       self.line(&format!("{} {} = {init};", self.c_type(ty), local_name(Local(index as u32))));
     }
@@ -900,7 +985,8 @@ impl<'a> Generator<'a> {
     for projection in &place.projections {
       match projection {
         Projection::Field(index) => out.push_str(&format!(".f{index}")),
-        Projection::ClassField { class, index } => out = format!("((sag_c{} *){out})->f{index}", class.0),
+        Projection::ClassField { class, index } => out = format!("((sag_c{class} *){out})->f{index}"),
+        Projection::EnvField { env, index } => out = format!("((sag_env{env} *){out})->c{index}"),
         Projection::Index { index, len } => {
           out.push_str(&format!(".data[sag_index_at({}, {len}, __FILE__, __LINE__)]", self.operand(index)));
         }
@@ -1086,6 +1172,28 @@ impl<'a> Generator<'a> {
   fn assign(&mut self, dest: &str, ty: &Type, value: &Rvalue) {
     match value {
       Rvalue::Template(pieces) => self.template(dest, pieces),
+      Rvalue::Closure { function, env: Some(env), captures } => {
+        let types = self.envs.get(*env).cloned().unwrap_or_default();
+
+        self.line("{");
+        self.indent += 1;
+        self.line(&format!("sag_env{env} *sag_closure = sag_object_alloc(sizeof(sag_env{env}));"));
+
+        for (index, (capture, ty)) in captures.iter().zip(&types).enumerate() {
+          self.line(&format!("sag_closure->c{index} = {};", self.operand(capture)));
+
+          if self.layouts.is_managed(ty) {
+            let retain = self.arc_call("retain", ty, &format!("sag_closure->c{index}"));
+
+            self.line(&format!("{retain};"));
+          }
+        }
+
+        self.line(&format!("sag_object_init((sag_object *)sag_closure, sag_drop_env{env}, NULL);"));
+        self.line(&format!("{dest} = (sag_fnval){{(sag_method){}, (sag_object *)sag_closure}};", fn_name(*function)));
+        self.indent -= 1;
+        self.line("}");
+      }
       Rvalue::DynUpcast { value, path } => {
         let value = self.operand(value);
         let itable = itable_path(&format!("{value}.itable"), path);
@@ -1153,6 +1261,16 @@ impl<'a> Generator<'a> {
 
         format!("(({} (*)({}))({itable}->methods[{slot}]))({})", self.return_type(ret), params.join(", "), args.join(", "))
       }
+      Rvalue::Call { callee: Callee::Closure { params, ret }, args } => {
+        let args: Vec<String> = args.iter().map(|arg| self.operand(arg)).collect();
+        let value = args.first().cloned().unwrap_or_default();
+        let types: Vec<String> = std::iter::once("sag_object *".to_string()).chain(params.iter().map(|param| self.c_type(param))).collect();
+        let rest: Vec<String> = std::iter::once(format!("{value}.env")).chain(args.iter().skip(1).cloned()).collect();
+
+        format!("(({} (*)({}))({value}.fn))({})", self.return_type(ret), types.join(", "), rest.join(", "))
+      }
+      Rvalue::Closure { function, env: None, .. } => format!("(sag_fnval){{(sag_method){}, NULL}}", fn_name(*function)),
+      Rvalue::FnValue(function) => format!("(sag_fnval){{(sag_method)sag_wrap_{}, NULL}}", function.0),
       Rvalue::Call { callee: Callee::Virtual { slot, function }, args } => {
         let args: Vec<String> = args.iter().map(|arg| self.operand(arg)).collect();
         let receiver = args.first().cloned().unwrap_or_default();
@@ -1188,11 +1306,13 @@ impl<'a> Generator<'a> {
           format!("({}){{.tag = {index}u, .u.v{index} = {{{}}}}}", self.c_type(ty), fields.join(", "))
         }
       }
-      Rvalue::Alloc(class) => format!("sag_new_c{}()", class.0),
+      Rvalue::Alloc(class) => format!("sag_new_c{class}()"),
       Rvalue::ToDyn { value, itable } => format!("sag_todyn_{itable}({})", self.operand(value)),
       // Templates, repeats, weak loads and conversions between interfaces are emitted as
       // statements by `Generator::assign`.
-      Rvalue::Template(_) | Rvalue::Repeat(_) | Rvalue::WeakLoad(_) | Rvalue::DynUpcast { .. } => "0".to_string(),
+      Rvalue::Template(_) | Rvalue::Repeat(_) | Rvalue::WeakLoad(_) | Rvalue::DynUpcast { .. } | Rvalue::Closure { env: Some(_), .. } => {
+        "0".to_string()
+      }
     }
   }
 
@@ -1225,7 +1345,8 @@ impl<'a> Generator<'a> {
             | Type::Enum(_)
             | Type::Class(_)
             | Type::Interface(_)
-            | Type::SelfType
+            | Type::Function { .. }
+            | Type::Param(_)
             | Type::Array(..)
             | Type::Option(_)
             | Type::Result(..)
@@ -1250,15 +1371,11 @@ impl<'a> Generator<'a> {
 }
 
 fn struct_type(index: usize) -> Type {
-  Type::Struct(StructRef { id: StructId(index as u32), name: String::new() })
+  Type::Struct(StructRef { id: StructId(index as u32), name: String::new(), args: Vec::new() })
 }
 
 fn enum_type(index: usize) -> Type {
-  Type::Enum(EnumRef { id: EnumId(index as u32), name: String::new() })
-}
-
-fn class_type(index: usize) -> Type {
-  Type::Class(ClassRef { id: ClassId(index as u32), name: String::new() })
+  Type::Enum(EnumRef { id: EnumId(index as u32), name: String::new(), args: Vec::new() })
 }
 
 /// Functions are named by id, so any Sagitario identifier (including Unicode) is safe in C.
@@ -1333,8 +1450,8 @@ fn itable_path(itable: &str, path: &[usize]) -> String {
 fn callee_name(callee: &Callee) -> String {
   match *callee {
     Callee::Fn(id) | Callee::Virtual { function: id, .. } => fn_name(id),
-    // Calls through itables are generated by `Generator::rvalue`.
-    Callee::Dyn { .. } => String::new(),
+    // Calls through itables and of function values are generated by `Generator::rvalue`.
+    Callee::Dyn { .. } | Callee::Closure { .. } => String::new(),
     Callee::Extern(id) => ffi_name(id.0 as usize),
     Callee::Builtin(Builtin::Print) => "sag_print".to_string(),
     Callee::Builtin(Builtin::Println) => "sag_println".to_string(),

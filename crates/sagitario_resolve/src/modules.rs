@@ -190,7 +190,6 @@ pub(crate) fn report_private_interfaces(resolution: &Resolution, package: &Packa
   for module in &package.modules {
     for item in &module.items {
       let mut checks: Vec<(&str, Vec<&TypeExpr>)> = Vec::new();
-      let mut parents: Vec<(&str, &Path)> = Vec::new();
 
       match item {
         Item::Fn(decl) if public(decl.visibility) => checks.push((&decl.name.name, signature_types(decl))),
@@ -208,9 +207,7 @@ pub(crate) fn report_private_interfaces(resolution: &Resolution, package: &Packa
 
           checks.push((&decl.name.name, fields));
 
-          for supertype in decl.parent.iter().chain(&decl.impls) {
-            parents.push((&decl.name.name, supertype));
-          }
+          checks.push((&decl.name.name, decl.parent.iter().chain(&decl.impls).collect()));
 
           for function in decl.functions.iter().filter(|function| function.visibility != Visibility::Private) {
             checks.push((&function.name.name, signature_types(function)));
@@ -232,9 +229,7 @@ pub(crate) fn report_private_interfaces(resolution: &Resolution, package: &Packa
         Item::Interface(decl) if public(decl.visibility) => {
           checks.push((&decl.name.name, decl.fields.iter().map(|field| &field.ty).collect()));
 
-          for parent in &decl.parents {
-            parents.push((&decl.name.name, parent));
-          }
+          checks.push((&decl.name.name, decl.parents.iter().collect()));
 
           for function in &decl.functions {
             checks.push((&function.name.name, signature_types(function)));
@@ -250,7 +245,7 @@ pub(crate) fn report_private_interfaces(resolution: &Resolution, package: &Packa
         _ => {}
       }
 
-      let mut entries: Vec<(&str, Vec<&Path>)> = parents.into_iter().map(|(owner, parent)| (owner, vec![parent])).collect();
+      let mut entries: Vec<(&str, Vec<&Path>)> = Vec::new();
 
       for (owner, types) in checks {
         let mut paths = Vec::new();
@@ -318,6 +313,11 @@ fn type_paths<'a>(ty: &'a TypeExpr, out: &mut Vec<&'a Path>) {
       }
     }
     TypeExprKind::Array { elem, .. } | TypeExprKind::Ptr { pointee: elem, .. } => type_paths(elem, out),
+    TypeExprKind::Fn { params, ret } => {
+      for ty in params.iter().chain(ret.as_deref()) {
+        type_paths(ty, out);
+      }
+    }
   }
 }
 
@@ -355,10 +355,12 @@ pub fn module_references(module: &Module) -> Vec<Vec<String>> {
       | Item::Class(ClassDecl { fields, functions, impls, .. })
       | Item::Interface(InterfaceDecl { fields, functions, parents: impls, .. }) => {
         if let Item::Class(ClassDecl { parent: Some(parent), .. }) = item {
-          paths.push(parent);
+          type_paths(parent, &mut paths);
         }
 
-        paths.extend(impls);
+        for ty in impls {
+          type_paths(ty, &mut paths);
+        }
 
         for field in fields {
           type_paths(&field.ty, &mut paths);
@@ -369,7 +371,9 @@ pub fn module_references(module: &Module) -> Vec<Vec<String>> {
         }
       }
       Item::Enum(decl) => {
-        paths.extend(&decl.impls);
+        for ty in &decl.impls {
+          type_paths(ty, &mut paths);
+        }
 
         for variant in &decl.variants {
           match &variant.fields {
@@ -448,8 +452,17 @@ fn add_prefixes(path: &[String], found: &mut BTreeSet<Vec<String>>) {
   }
 }
 
+/// A path in an expression and the paths in its type arguments.
+fn expr_path<'a>(path: &'a Path, out: &mut Vec<&'a Path>) {
+  out.push(path);
+
+  for arg in path.type_args.iter().flat_map(|args| &args.args) {
+    type_paths(arg, out);
+  }
+}
+
 fn fn_paths<'a>(decl: &'a FnDecl, out: &mut Vec<&'a Path>) {
-  for ty in signature_types(decl) {
+  for ty in signature_types(decl).into_iter().chain(decl.generics.iter().flat_map(|param| &param.bounds)) {
     type_paths(ty, out);
   }
 
@@ -485,8 +498,15 @@ fn expr_paths<'a>(expr: &'a Expr, out: &mut Vec<&'a Path>) {
   let exprs = |items: &'a [Expr], out: &mut Vec<&'a Path>| items.iter().for_each(|item| expr_paths(item, out));
 
   match &expr.kind {
-    ExprKind::Path(path) => out.push(path),
+    ExprKind::Path(path) => expr_path(path, out),
     ExprKind::Zod => {}
+    ExprKind::Lambda { params, body } => {
+      for ty in params.iter().filter_map(|param| param.ty.as_ref()) {
+        type_paths(ty, out);
+      }
+
+      expr_paths(body, out);
+    }
     ExprKind::Call { callee, args } => {
       expr_paths(callee, out);
       exprs(args, out);
@@ -501,7 +521,7 @@ fn expr_paths<'a>(expr: &'a Expr, out: &mut Vec<&'a Path>) {
       expr_paths(index, out);
     }
     ExprKind::StructLit { path, fields } => {
-      out.push(path);
+      expr_path(path, out);
 
       for field in fields {
         expr_paths(&field.value, out);
@@ -510,7 +530,7 @@ fn expr_paths<'a>(expr: &'a Expr, out: &mut Vec<&'a Path>) {
     ExprKind::ArrayLit(elems) => exprs(elems, out),
     ExprKind::ArrayRepeat { value, .. } | ExprKind::Try(value) | ExprKind::Unary { operand: value, .. } => expr_paths(value, out),
     ExprKind::New { path, args } => {
-      out.push(path);
+      expr_path(path, out);
       exprs(args, out);
     }
     ExprKind::Match { scrutinee, arms } => {

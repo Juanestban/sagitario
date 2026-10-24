@@ -1,6 +1,6 @@
 # 0012. Closures capture by value, read-only
 
-- Status: Accepted
+- Status: Accepted; refined by [ADR-0033](0033-closures-details.md)
 - Date: 2026-10-21
 
 ## Context

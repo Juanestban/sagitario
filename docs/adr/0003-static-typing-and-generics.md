@@ -1,6 +1,6 @@
 # 0003. Static typing, local inference, monomorphized generics
 
-- Status: Accepted
+- Status: Accepted; refined by [ADR-0032](0032-generics.md)
 - Date: 2026-10-21
 
 ## Context

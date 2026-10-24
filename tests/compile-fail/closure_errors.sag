@@ -1,0 +1,52 @@
+struct Point {
+  pub x: i32;
+
+  pub fn shift(self) {
+    self.x += 1;
+  }
+}
+
+class Widget {
+  pub var on_tick: fn();
+  pub var count: i32;
+
+  pub fn new() {
+    self.count = 0;
+    self.on_tick = () => {};
+  }
+
+  pub fn arm(self) {
+    self.on_tick = () => { //~ WARN W0008
+      self.count += 1;
+    };
+  }
+}
+
+fn run(f: fn(i32) -> i32) -> i32 {
+  f(1)
+}
+
+pub fn main() {
+  var total = 0;
+  const point = Point { x: 1 };
+  const _sum = run((n) => {
+    total += n; //~ ERROR E0331
+    n
+  });
+  const _move = () => {
+    point.x = 2; //~ ERROR E0331
+    point.shift(); //~ ERROR E0331
+  };
+  const _unknown = (_a, _b) => 0; //~ ERROR E0311, ERROR E0311
+  const _arity = run((_a, _b) => 0); //~ ERROR E0300
+  const _print = println; //~ ERROR E0314
+  const _not_fn = total(1); //~ ERROR E0314
+  const _wrong: fn(i32) -> String = (n) => n; //~ ERROR E0300
+  const widget = new Widget();
+  widget.on_tick = () => widget.count; //~ WARN W0008, ERROR E0300
+  widget.arm();
+  const _bound = widget.arm; //~ ERROR E0316
+  const _cmp = run == run; //~ ERROR E0310
+  total = 2;
+  println(`${total}`);
+}

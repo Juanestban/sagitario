@@ -25,8 +25,8 @@ fn parse_age(s: String) -> Result<i32, String> {
   into `Box<dyn Error>`: an error whose type implements an interface `E` becomes an `E`, and a
   `String` error becomes an `Error` when `E` is `Error`
   (`fn parse(s: String) -> Result<i32, Error> { const n = s.parse_i32()?; Ok(n) }`).
-- Any other conversion is explicit, and the diagnostic must suggest it (in F1, with a `match`;
-  from F2, with `map_err`):
+- Any other conversion is explicit, and the diagnostic must suggest it, with a `match` or with
+  `map_err` ([08-closures.md](08-closures.md)):
 
 ```sag
 const text = fs::read(path).map_err((e) => AppError::Io(e))?;

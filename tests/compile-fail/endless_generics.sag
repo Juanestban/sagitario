@@ -1,0 +1,12 @@
+// Each instance of `grow` needs an instance with a larger type, so instantiation never ends.
+fn grow<T>(value: T, depth: i32) -> i32 {
+  if depth == 0 {
+    return 0;
+  }
+
+  grow(Some(value), depth - 1) //~ ERROR E0330
+}
+
+pub fn main() {
+  const _ = grow(1, 3);
+}

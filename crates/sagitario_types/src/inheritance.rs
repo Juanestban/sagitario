@@ -4,23 +4,21 @@
 
 use std::collections::HashSet;
 
-use sagitario_ast::{Expr, Ident, Path, Visibility};
+use sagitario_ast::{Expr, Ident, TypeExpr, Visibility};
 use sagitario_diagnostics::{Diagnostic, codes};
-use sagitario_resolve::{ClassId, FnId, TypeItem, TypeRes};
+use sagitario_resolve::{ClassId, FnId, TypeItem};
 
-use crate::{Checker, Type};
+use crate::{Checker, ClassRef, Type};
 
 impl Checker<'_> {
-  /// The class named after `extends`.
-  pub(crate) fn parent_class(&mut self, path: &Path) -> Option<ClassId> {
-    match self.resolution.type_paths.get(&path.id) {
-      Some(TypeRes::Item(TypeItem::Class(id))) => Some(*id),
-      Some(TypeRes::Error) | None => None,
-      Some(_) => {
-        let name = path.segments.last().map_or("", |segment| segment.name.as_str());
-
+  /// The class named after `extends`, with its type arguments.
+  pub(crate) fn parent_class(&mut self, ty: &TypeExpr) -> Option<ClassRef> {
+    match self.type_expr(ty) {
+      Type::Class(class) => Some(class),
+      Type::Error => None,
+      other => {
         self.diagnostics.push(
-          Diagnostic::error(codes::INVALID_INHERITANCE, path.span, format!("only classes can be extended, and `{name}` is not a class"))
+          Diagnostic::error(codes::INVALID_INHERITANCE, ty.span, format!("only classes can be extended, and `{other}` is not a class"))
             .with_note("structs and enums have no inheritance"),
         );
 
@@ -32,7 +30,7 @@ impl Checker<'_> {
   /// Reports classes that inherit from themselves and removes their parent.
   pub(crate) fn check_inheritance_cycles(&mut self) {
     let count = self.typed.classes.len();
-    let parent = |checker: &Self, id: ClassId| checker.typed.class_def(id).and_then(|def| def.parent);
+    let parent = |checker: &Self, id: ClassId| checker.typed.class_def(id).and_then(|def| def.parent.as_ref().map(|parent| parent.id));
     let mut cyclic = Vec::new();
 
     for index in 0..count {
@@ -94,7 +92,9 @@ impl Checker<'_> {
   pub(crate) fn check_members(&mut self) {
     for index in 0..self.resolution.classes.len() {
       let id = ClassId(index as u32);
-      let (Some(decl), Some(parent)) = (self.resolution.class_decl(self.package, id), self.typed.class_def(id).and_then(|def| def.parent)) else {
+      let (Some(decl), Some(parent)) =
+        (self.resolution.class_decl(self.package, id), self.typed.class_def(id).and_then(|def| def.parent.as_ref().map(|parent| parent.id)))
+      else {
         continue;
       };
 
@@ -123,6 +123,13 @@ impl Checker<'_> {
           continue;
         };
         let Some(inherited_decl) = self.resolution.fn_decl(self.package, inherited) else { continue };
+
+        // Overrides are called through the vtable, which holds one function per slot.
+        if fn_decl.is_override && (!fn_decl.generics.is_empty() || !inherited_decl.generics.is_empty()) {
+          self.error(codes::INVALID_OVERRIDE, name.span, format!("`{}` has type parameters, so it cannot be overridden", name.name));
+
+          continue;
+        }
         let owner = self.resolution.owner(inherited).map(|owner| self.resolution.type_name(self.package, owner)).unwrap_or_default();
         let private = inherited_decl.visibility == Visibility::Private;
 
@@ -150,7 +157,7 @@ impl Checker<'_> {
             Diagnostic::error(codes::INVALID_OVERRIDE, name.span, "an `override` must be `pub`, like the method it overrides")
               .with_help("write `pub override fn`"),
           );
-        } else if self.typed.sig(function) != self.typed.sig(inherited) {
+        } else if !self.same_override_sig(id, function, inherited) {
           let expected = self.signature_text(inherited);
 
           self.diagnostics.push(
@@ -160,6 +167,18 @@ impl Checker<'_> {
           );
         }
       }
+    }
+  }
+
+  /// Whether `function` of class `id` has the signature of the inherited method it overrides,
+  /// with the type arguments the class gives its ancestor.
+  fn same_override_sig(&self, id: ClassId, function: FnId, inherited: FnId) -> bool {
+    let class_ty = self.type_ref(TypeItem::Class(id));
+    let expected = self.typed.sig(inherited).map(|sig| sig.substitute(&self.inherited_subst(&class_ty, inherited)));
+
+    match (self.typed.sig(function), expected) {
+      (Some(actual), Some(expected)) => actual.params == expected.params && actual.ret == expected.ret,
+      _ => true,
     }
   }
 
@@ -204,6 +223,8 @@ impl Checker<'_> {
           Some((codes::INVALID_OVERRIDE, format!("the abstract method `{name}` cannot be `prv`: subclasses must be able to override it")))
         } else if function.is_override {
           Some((codes::INVALID_OVERRIDE, format!("the method `{name}` cannot be both `abstract` and `override`")))
+        } else if !function.generics.is_empty() {
+          Some((codes::INVALID_OVERRIDE, format!("the abstract method `{name}` cannot have type parameters: it must be overridden")))
         } else if !decl.is_abstract {
           Some((codes::INVALID_INHERITANCE, format!("the class `{}` is not abstract, so its method `{name}` needs a body", decl.name.name)))
         } else {
@@ -277,7 +298,7 @@ impl Checker<'_> {
     for _ in 0..=self.typed.classes.len() {
       let Some(decl) = self.resolution.fn_decl(self.package, current).filter(|decl| decl.is_override) else { break };
       let parent = match self.resolution.owner(current) {
-        Some(TypeItem::Class(owner)) => self.typed.class_def(owner).and_then(|def| def.parent),
+        Some(TypeItem::Class(owner)) => self.typed.class_def(owner).and_then(|def| def.parent.as_ref().map(|parent| parent.id)),
         _ => None,
       };
 
@@ -322,7 +343,7 @@ impl Checker<'_> {
       let mut vtable = self
         .typed
         .class_def(id)
-        .and_then(|def| def.parent)
+        .and_then(|def| def.parent.as_ref().map(|parent| parent.id))
         .and_then(|parent| self.typed.class_def(parent))
         .map(|def| def.vtable.clone())
         .unwrap_or_default();
@@ -369,7 +390,7 @@ impl Checker<'_> {
         return Type::Error;
       }
     };
-    let Some(parent) = self.typed.class_def(class).and_then(|def| def.parent) else {
+    let Some(parent_ref) = self.typed.class_def(class).and_then(|def| def.parent.clone()) else {
       self.diagnostics.push(
         Diagnostic::error(
           codes::INVALID_INHERITANCE,
@@ -382,7 +403,8 @@ impl Checker<'_> {
 
       return Type::Error;
     };
-    let parent_ty = self.type_ref(TypeItem::Class(parent));
+    let parent = parent_ref.id;
+    let parent_ty = Type::Class(parent_ref);
 
     self.typed.expr_types.insert(receiver.id, parent_ty.clone());
 
@@ -417,11 +439,13 @@ impl Checker<'_> {
       }
     }
 
-    let Some(sig) = self.typed.sig(function).cloned() else { return Type::Error };
+    let subst = self.inherited_subst(&parent_ty, function);
+    let Some(sig) = self.typed.sig(function).map(|sig| sig.substitute(&subst)) else { return Type::Error };
 
     self.args(expr.span, "method", &sig.params, args);
     self.typed.method_calls.insert(expr.id, function);
     self.typed.zod_calls.insert(expr.id);
+    self.record_owner_args(expr.id, &subst, function);
 
     sig.ret
   }
@@ -445,11 +469,13 @@ impl Checker<'_> {
       );
     }
 
-    let params = self.typed.sig(initializer).map(|sig| sig.params.clone()).unwrap_or_default();
+    let subst = self.inherited_subst(&parent_ty, initializer);
+    let params = self.typed.sig(initializer).map(|sig| sig.substitute(&subst).params).unwrap_or_default();
 
     self.args(expr.span, "initializer", &params, args);
     self.typed.method_calls.insert(expr.id, initializer);
     self.typed.zod_calls.insert(expr.id);
+    self.record_owner_args(expr.id, &subst, initializer);
 
     Type::Unit
   }

@@ -85,13 +85,14 @@ pub enum Item {
   Extern(ExternBlock),
 }
 
-/// `interface Name extends A, B { fields and methods }` (docs/spec/05-interfaces-generics.md).
+/// `interface Name<T> extends A, B { fields and methods }` (docs/spec/05-interfaces-generics.md).
 /// Members are public; a method without body is required, one with a body is a default.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InterfaceDecl {
   pub visibility: Visibility,
   pub name: Ident,
-  pub parents: Vec<Path>,
+  pub generics: Vec<GenericParam>,
+  pub parents: Vec<TypeExpr>,
   pub fields: Vec<FieldDecl>,
   pub functions: Vec<FnDecl>,
   pub span: Span,
@@ -104,10 +105,11 @@ pub struct ClassDecl {
   pub is_abstract: bool,
   pub visibility: Visibility,
   pub name: Ident,
+  pub generics: Vec<GenericParam>,
   /// The class after `extends`.
-  pub parent: Option<Path>,
+  pub parent: Option<TypeExpr>,
   /// The interfaces after `impl`.
-  pub impls: Vec<Path>,
+  pub impls: Vec<TypeExpr>,
   pub fields: Vec<FieldDecl>,
   pub functions: Vec<FnDecl>,
   pub span: Span,
@@ -143,8 +145,9 @@ pub struct Export {
 pub struct EnumDecl {
   pub visibility: Visibility,
   pub name: Ident,
+  pub generics: Vec<GenericParam>,
   /// The interfaces after `impl`.
-  pub impls: Vec<Path>,
+  pub impls: Vec<TypeExpr>,
   pub variants: Vec<VariantDecl>,
   pub functions: Vec<FnDecl>,
   pub span: Span,
@@ -181,8 +184,9 @@ pub struct StructDecl {
   pub repr_c: bool,
   pub visibility: Visibility,
   pub name: Ident,
+  pub generics: Vec<GenericParam>,
   /// The interfaces after `impl`.
-  pub impls: Vec<Path>,
+  pub impls: Vec<TypeExpr>,
   pub fields: Vec<FieldDecl>,
   pub functions: Vec<FnDecl>,
   pub span: Span,
@@ -213,12 +217,21 @@ pub struct FnDecl {
   /// `override fn`: replaces a method of the parent class.
   pub is_override: bool,
   pub name: Ident,
+  pub generics: Vec<GenericParam>,
   /// `self`, only in methods of structs, enums and classes.
   pub self_param: Option<SelfParam>,
   pub params: Vec<Param>,
   pub return_type: Option<TypeExpr>,
   pub body: Block,
   pub span: Span,
+}
+
+/// A type parameter `T: Bound1 + Bound2`, with the bounds of its `where` clause too
+/// (docs/spec/05-interfaces-generics.md#generics).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenericParam {
+  pub name: Ident,
+  pub bounds: Vec<TypeExpr>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -251,6 +264,8 @@ pub enum TypeExprKind {
   Array { elem: Box<TypeExpr>, len: ArrayLen },
   /// `*const T` or `*mut T`
   Ptr { mutable: bool, pointee: Box<TypeExpr> },
+  /// `fn(A, B) -> R`; without `-> R` the result is `()`.
+  Fn { params: Vec<TypeExpr>, ret: Option<Box<TypeExpr>> },
 }
 
 /// The length of an array type or repeat expression: an integer literal.
@@ -267,6 +282,17 @@ pub struct Path {
   /// Identifies the path so later phases can find what a type path names.
   pub id: NodeId,
   pub segments: Vec<Ident>,
+  /// Type arguments written after one of the segments in an expression: `max<i32>`,
+  /// `Pair<i32>::new`, `new Box<i32>(...)`.
+  pub type_args: Option<TypeArgs>,
+  pub span: Span,
+}
+
+/// `<T, U>` after the segment at `segment` of an expression path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeArgs {
+  pub segment: usize,
+  pub args: Vec<TypeExpr>,
   pub span: Span,
 }
 
@@ -448,6 +474,11 @@ pub enum ExprKind {
   /// `zod`, the parent class's view of `self`: only as the receiver of `zod.method(...)` and
   /// `zod.new(...)`.
   Zod,
+  /// `(a, b: T) => body` or `x => body` (docs/spec/08-closures.md).
+  Lambda {
+    params: Vec<LambdaParam>,
+    body: Box<Expr>,
+  },
   /// `new Type(args)`: a class instance, or a `StringBuilder`.
   New {
     path: Path,
@@ -486,6 +517,14 @@ pub enum ExprKind {
   Return {
     value: Option<Box<Expr>>,
   },
+}
+
+/// A parameter of a lambda, with an optional type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LambdaParam {
+  pub name: Ident,
+  pub ty: Option<TypeExpr>,
+  pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

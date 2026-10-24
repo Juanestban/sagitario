@@ -11,16 +11,16 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 |---|---|---|
 | [0001](0001-compile-to-c-via-sir.md) | Compile to C11 through an own IR (SIR) | Accepted |
 | [0002](0002-arc-memory-model.md) | ARC memory model with value and reference types | Accepted (refined by 0027) |
-| [0003](0003-static-typing-and-generics.md) | Static typing, local inference, monomorphized generics | Accepted |
+| [0003](0003-static-typing-and-generics.md) | Static typing, local inference, monomorphized generics | Accepted (refined by 0032) |
 | [0004](0004-class-model.md) | Class model: single inheritance, interfaces, no open/final | Accepted (refined by 0027, 0029, 0031) |
-| [0005](0005-result-error-handling.md) | Errors as values with `Result` and `?` | Accepted (refined by 0031) |
+| [0005](0005-result-error-handling.md) | Errors as values with `Result` and `?` | Accepted (refined by 0031, 0033) |
 | [0006](0006-no-null-option.md) | No null; `Option<T>` only | Accepted |
 | [0007](0007-mutability-const-var.md) | Mutability with `const` / `var` | Accepted (amended by 0028) |
 | [0008](0008-concurrency-deferred.md) | Single-threaded MVP; Rust-style concurrency later | Accepted |
 | [0009](0009-ffi-and-unsafe.md) | Rust-style FFI and `unsafe` | Accepted (refined by 0026) |
 | [0010](0010-modules-and-packages.md) | File-as-module, logical imports, packages | Accepted (amended by 0024, 0025) |
 | [0011](0011-surface-syntax.md) | Surface syntax | Accepted |
-| [0012](0012-closures.md) | Closures capture by value, read-only | Accepted |
+| [0012](0012-closures.md) | Closures capture by value, read-only | Accepted (refined by 0033) |
 | [0013](0013-primitive-semantics.md) | Semantics of primitives and `String` | Accepted |
 | [0014](0014-mvp-scope.md) | MVP scope: F0 + F1 + F2, desktop only | Accepted |
 | [0015](0015-compiler-architecture-and-toolchain.md) | Compiler architecture and C toolchain | Accepted |
@@ -39,7 +39,9 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0028](0028-inferred-self-mutation.md) | `self` without `var`: methods that modify `self` are inferred | Accepted |
 | [0029](0029-inheritance.md) | Inheritance: construction, overriding, subtyping and dispatch | Accepted |
 | [0030](0030-weak-references.md) | Weak references: initialization, scope and runtime | Accepted |
-| [0031](0031-interfaces.md) | Interfaces: fields, implementation, interface values and `Error` | Accepted |
+| [0031](0031-interfaces.md) | Interfaces: fields, implementation, interface values and `Error` | Accepted (completed by 0032) |
+| [0032](0032-generics.md) | Generics: type arguments, inference, bounds and monomorphization | Accepted |
+| [0033](0033-closures-details.md) | Closures: arrow functions, function values and their representation | Accepted |
 
 ## Template
 

@@ -125,14 +125,18 @@ fn front_end(options: &CompileOptions, generate: bool) -> Result<FrontEnd, u8> {
   let typed = sagitario_types::check(&package, &resolution, &mut diagnostics);
 
   report(&mut diagnostics, &sources, options)?;
-  if !generate {
-    return Ok(FrontEnd { c_source: None });
-  }
 
-  let program = sagitario_sir::lower(&package, &resolution, &typed, &sources).map_err(|error| {
+  let program = sagitario_sir::lower(&package, &resolution, &typed, &sources, &mut diagnostics).map_err(|error| {
     eprintln!("internal compiler error: {}", error.0);
     EXIT_ICE
   })?;
+
+  // Generic code may instantiate itself endlessly, found while lowering.
+  report(&mut diagnostics, &sources, options)?;
+
+  if !generate {
+    return Ok(FrontEnd { c_source: None });
+  }
   Ok(FrontEnd { c_source: Some(sagitario_codegen_c::generate(&program)) })
 }
 

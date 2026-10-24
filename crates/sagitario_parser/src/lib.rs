@@ -3,9 +3,10 @@
 //! diagnostics and the parser recovers at item and statement boundaries.
 
 use sagitario_ast::{
-  ArrayLen, BinaryOp, Block, ClassDecl, EnumDecl, Export, Expr, ExprKind, ExternBlock, ExternFn, FieldDecl, FieldInit, FieldPattern, FnDecl, Ident,
-  InterfaceDecl, Item, LetStmt, MatchArm, Module, NodeId, Param, Path, Pattern, PatternKind, SelfParam, Stmt, StructDecl, TemplatePart, TypeExpr,
-  TypeExprKind, UnaryOp, UseDecl, UseTree, UseTreeKind, VariantDecl, VariantFieldDecl, VariantFields, Visibility,
+  ArrayLen, BinaryOp, Block, ClassDecl, EnumDecl, Export, Expr, ExprKind, ExternBlock, ExternFn, FieldDecl, FieldInit, FieldPattern, FnDecl,
+  GenericParam, Ident, InterfaceDecl, Item, LambdaParam, LetStmt, MatchArm, Module, NodeId, Param, Path, Pattern, PatternKind, SelfParam, Stmt,
+  StructDecl, TemplatePart, TypeArgs, TypeExpr, TypeExprKind, UnaryOp, UseDecl, UseTree, UseTreeKind, VariantDecl, VariantFieldDecl, VariantFields,
+  Visibility,
 };
 use sagitario_diagnostics::{Diagnostic, Diagnostics, codes};
 use sagitario_lexer::{self as lexer, Keyword, Token, TokenKind};
@@ -124,6 +125,9 @@ struct Parser<'a> {
   /// Set in the condition of `if`/`while` and the iterable of `for`, where `{` starts the body:
   /// `if x == Point { ... }` is not a struct literal there (as in Rust).
   no_struct_literal: bool,
+  /// Set in the guard of a `match` arm, where `name =>` ends the guard instead of starting a
+  /// lambda.
+  in_guard: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -132,7 +136,7 @@ impl<'a> Parser<'a> {
     let tokens: Vec<Token> = tokens.into_iter().filter(|token| !matches!(token.kind, TokenKind::DocComment { .. })).collect();
     let eof_span = tokens.last().map_or(Span::new(file, 0, 0), |token| token.span);
 
-    Parser { tokens, pos: 0, eof: Token { kind: TokenKind::Eof, span: eof_span }, next_id, diagnostics, no_struct_literal: false }
+    Parser { tokens, pos: 0, eof: Token { kind: TokenKind::Eof, span: eof_span }, next_id, diagnostics, no_struct_literal: false, in_guard: false }
   }
 
   fn current(&self) -> &Token {
@@ -632,14 +636,10 @@ impl<'a> Parser<'a> {
     self.expect(&TokenKind::Keyword(Keyword::Struct))?;
 
     let name = self.ident("a struct name")?;
-
-    if self.at(&TokenKind::Lt) {
-      let span = self.span();
-
-      return Err(self.not_implemented(span, "generic structs"));
-    }
-
+    let mut generics = self.generic_params()?;
     let impls = self.impls()?;
+
+    self.where_clause(&mut generics)?;
 
     self.expect(&TokenKind::LBrace)?;
 
@@ -674,16 +674,16 @@ impl<'a> Parser<'a> {
 
     let end = self.expect(&TokenKind::RBrace)?.span;
 
-    Ok(StructDecl { repr_c: false, visibility, name, impls, fields, functions, span: start.to(end) })
+    Ok(StructDecl { repr_c: false, visibility, name, generics, impls, fields, functions, span: start.to(end) })
   }
 
-  /// `impl A, B` after a type's name (and its `extends`).
-  fn impls(&mut self) -> PResult<Vec<Path>> {
+  /// `impl A, B<T>` after a type's name (and its `extends`).
+  fn impls(&mut self) -> PResult<Vec<TypeExpr>> {
     let mut impls = Vec::new();
 
     if self.eat(&TokenKind::Keyword(Keyword::Impl)) {
       loop {
-        impls.push(self.path()?);
+        impls.push(self.type_expr()?);
 
         if !self.eat(&TokenKind::Comma) {
           break;
@@ -699,24 +699,20 @@ impl<'a> Parser<'a> {
     self.expect(&TokenKind::Keyword(Keyword::Interface))?;
 
     let name = self.ident("an interface name")?;
-
-    if self.at(&TokenKind::Lt) {
-      let span = self.span();
-
-      return Err(self.not_implemented(span, "generic interfaces"));
-    }
-
+    let mut generics = self.generic_params()?;
     let mut parents = Vec::new();
 
     if self.eat(&TokenKind::Keyword(Keyword::Extends)) {
       loop {
-        parents.push(self.path()?);
+        parents.push(self.type_expr()?);
 
         if !self.eat(&TokenKind::Comma) {
           break;
         }
       }
     }
+
+    self.where_clause(&mut generics)?;
 
     self.expect(&TokenKind::LBrace)?;
 
@@ -752,7 +748,7 @@ impl<'a> Parser<'a> {
 
     let end = self.expect(&TokenKind::RBrace)?.span;
 
-    Ok(InterfaceDecl { visibility, name, parents, fields, functions, span: start.to(end) })
+    Ok(InterfaceDecl { visibility, name, generics, parents, fields, functions, span: start.to(end) })
   }
 
   /// A member of an interface: always public, so without `pub`/`prv`. A method without body is
@@ -799,16 +795,11 @@ impl<'a> Parser<'a> {
     self.expect(&TokenKind::Keyword(Keyword::Class))?;
 
     let name = self.ident("a class name")?;
-
-    if self.at(&TokenKind::Lt) {
-      let span = self.span();
-
-      return Err(self.not_implemented(span, "generic classes"));
-    }
-
-    let parent = if self.eat(&TokenKind::Keyword(Keyword::Extends)) { Some(self.path()?) } else { None };
-
+    let mut generics = self.generic_params()?;
+    let parent = if self.eat(&TokenKind::Keyword(Keyword::Extends)) { Some(self.type_expr()?) } else { None };
     let impls = self.impls()?;
+
+    self.where_clause(&mut generics)?;
 
     self.expect(&TokenKind::LBrace)?;
 
@@ -844,21 +835,17 @@ impl<'a> Parser<'a> {
 
     let end = self.expect(&TokenKind::RBrace)?.span;
 
-    Ok(ClassDecl { is_abstract, visibility, name, parent, impls, fields, functions, span: start.to(end) })
+    Ok(ClassDecl { is_abstract, visibility, name, generics, parent, impls, fields, functions, span: start.to(end) })
   }
 
   fn enum_decl(&mut self, visibility: Visibility, start: Span) -> PResult<EnumDecl> {
     self.expect(&TokenKind::Keyword(Keyword::Enum))?;
 
     let name = self.ident("an enum name")?;
-
-    if self.at(&TokenKind::Lt) {
-      let span = self.span();
-
-      return Err(self.not_implemented(span, "generic enums"));
-    }
-
+    let mut generics = self.generic_params()?;
     let impls = self.impls()?;
+
+    self.where_clause(&mut generics)?;
 
     self.expect(&TokenKind::LBrace)?;
 
@@ -909,7 +896,7 @@ impl<'a> Parser<'a> {
 
     let end = self.expect(&TokenKind::RBrace)?.span;
 
-    Ok(EnumDecl { visibility, name, impls, variants, functions, span: start.to(end) })
+    Ok(EnumDecl { visibility, name, generics, impls, variants, functions, span: start.to(end) })
   }
 
   /// `Name`, `Name(T1, T2)` or `Name { a: T1, b: T2 }`.
@@ -1154,6 +1141,7 @@ impl<'a> Parser<'a> {
     self.expect(&TokenKind::Keyword(Keyword::Fn))?;
 
     let name = if in_type { self.member_name("a function name")? } else { self.ident("a function name")? };
+    let mut generics = self.generic_params()?;
 
     self.expect(&TokenKind::LParen)?;
 
@@ -1193,6 +1181,9 @@ impl<'a> Parser<'a> {
     self.expect(&TokenKind::RParen)?;
 
     let return_type = if self.eat(&TokenKind::Arrow) { Some(self.type_expr()?) } else { None };
+
+    self.where_clause(&mut generics)?;
+
     let body = body(self)?;
 
     Ok(FnDecl {
@@ -1203,6 +1194,7 @@ impl<'a> Parser<'a> {
       is_abstract: false,
       is_override: false,
       name,
+      generics,
       self_param,
       params,
       return_type,
@@ -1284,6 +1276,33 @@ impl<'a> Parser<'a> {
 
         Ok(TypeExpr { span: path.span, kind: TypeExprKind::Path(path) })
       }
+      TokenKind::Keyword(Keyword::Fn) => {
+        self.advance();
+        self.expect(&TokenKind::LParen)?;
+
+        let mut params = Vec::new();
+
+        while !self.at(&TokenKind::RParen) {
+          params.push(self.type_expr()?);
+
+          if !self.eat(&TokenKind::Comma) {
+            break;
+          }
+        }
+
+        let mut end = self.expect(&TokenKind::RParen)?.span;
+        let ret = if self.eat(&TokenKind::Arrow) {
+          let ret = self.type_expr()?;
+
+          end = ret.span;
+
+          Some(Box::new(ret))
+        } else {
+          None
+        };
+
+        Ok(TypeExpr { kind: TypeExprKind::Fn { params, ret }, span: start.to(end) })
+      }
       TokenKind::Star => {
         self.advance();
 
@@ -1332,7 +1351,144 @@ impl<'a> Parser<'a> {
       segments.push(segment);
     }
 
-    Ok(Path { id: self.next_id(), segments, span })
+    Ok(Path { id: self.next_id(), segments, type_args: None, span })
+  }
+
+  /// A path in an expression, whose segments may be followed by type arguments:
+  /// `max<i32>(...)`, `Pair<i32>::new(...)`, `Box<i32> { ... }`. Since chained comparisons are an
+  /// error, `a < b > (c)` is never a valid comparison, so `<` starts type arguments whenever they
+  /// parse and are followed by `(`, `::` or (where struct literals are allowed) `{`.
+  fn expr_path(&mut self) -> PResult<Path> {
+    let first = self.path_segment()?;
+    let mut span = first.span;
+    let mut segments = vec![first];
+    let mut type_args = None;
+
+    loop {
+      if type_args.is_none()
+        && self.at(&TokenKind::Lt)
+        && let Some(args) = self.try_type_args(segments.len() - 1)
+      {
+        span = span.to(args.span);
+        type_args = Some(args);
+      }
+
+      if !(self.at(&TokenKind::ColonColon) && matches!(self.nth_kind(1), TokenKind::Ident(_) | TokenKind::Keyword(Keyword::New | Keyword::Super))) {
+        break;
+      }
+
+      self.advance();
+
+      let segment = if self.at(&TokenKind::Keyword(Keyword::Super)) { self.path_segment()? } else { self.member_name("a name")? };
+
+      span = span.to(segment.span);
+      segments.push(segment);
+    }
+
+    Ok(Path { id: self.next_id(), segments, type_args, span })
+  }
+
+  /// `<T, U>` if it parses and is followed by `(`, `::` or `{`; otherwise nothing is consumed and
+  /// no diagnostic remains.
+  fn try_type_args(&mut self, segment: usize) -> Option<TypeArgs> {
+    let (pos, reported) = (self.pos, self.diagnostics.len());
+    let parsed = self.type_args(segment);
+    let follows = matches!(self.kind(), TokenKind::LParen | TokenKind::ColonColon) || (self.at(&TokenKind::LBrace) && !self.no_struct_literal);
+
+    match parsed {
+      Ok(args) if follows => Some(args),
+      _ => {
+        self.pos = pos;
+        self.diagnostics.truncate(reported);
+
+        None
+      }
+    }
+  }
+
+  /// `<T, U>` for the segment at `segment`.
+  fn type_args(&mut self, segment: usize) -> PResult<TypeArgs> {
+    let start = self.expect(&TokenKind::Lt)?.span;
+    let mut args = Vec::new();
+
+    loop {
+      args.push(self.type_expr()?);
+
+      if !self.eat(&TokenKind::Comma) {
+        break;
+      }
+    }
+
+    let end = self.expect(&TokenKind::Gt)?.span;
+
+    Ok(TypeArgs { segment, args, span: start.to(end) })
+  }
+
+  /// `<T, U: Bound + Other>` after the name of an item, if present.
+  fn generic_params(&mut self) -> PResult<Vec<GenericParam>> {
+    let mut params = Vec::new();
+
+    if !self.eat(&TokenKind::Lt) {
+      return Ok(params);
+    }
+
+    loop {
+      let name = self.ident("a type parameter name")?;
+      let bounds = if self.eat(&TokenKind::Colon) { self.bounds()? } else { Vec::new() };
+
+      params.push(GenericParam { name, bounds });
+
+      if !self.eat(&TokenKind::Comma) || self.at(&TokenKind::Gt) {
+        break;
+      }
+    }
+
+    self.expect(&TokenKind::Gt)?;
+
+    Ok(params)
+  }
+
+  /// `A + B<T> + C`
+  fn bounds(&mut self) -> PResult<Vec<TypeExpr>> {
+    let mut bounds = vec![self.type_expr()?];
+
+    while self.eat(&TokenKind::Plus) {
+      bounds.push(self.type_expr()?);
+    }
+
+    Ok(bounds)
+  }
+
+  /// `where T: A + B, U: C`, whose bounds join those of the parameters it names.
+  fn where_clause(&mut self, params: &mut [GenericParam]) -> PResult<()> {
+    if !self.eat(&TokenKind::Keyword(Keyword::Where)) {
+      return Ok(());
+    }
+
+    loop {
+      let name = self.ident("a type parameter name")?;
+
+      self.expect(&TokenKind::Colon)?;
+
+      let bounds = self.bounds()?;
+
+      match params.iter_mut().find(|param| param.name.name == name.name) {
+        Some(param) => param.bounds.extend(bounds),
+        None => {
+          self.diagnostics.push(Diagnostic::error(
+            codes::UNRESOLVED_NAME,
+            name.span,
+            format!("`where` names `{}`, which is not a type parameter of this declaration", name.name),
+          ));
+        }
+      }
+
+      if !self.eat(&TokenKind::Comma) || self.at(&TokenKind::LBrace) {
+        break;
+      }
+    }
+
+    Ok(())
   }
 
   fn block(&mut self) -> PResult<Block> {
@@ -1362,7 +1518,7 @@ impl<'a> Parser<'a> {
       }
 
       match self.stmt() {
-        Ok(Some(StmtOrTail::Stmt(stmt))) => stmts.push(stmt),
+        Ok(Some(StmtOrTail::Stmt(stmt))) => stmts.push(*stmt),
         Ok(Some(StmtOrTail::Tail(expr))) => tail = Some(expr),
         Ok(None) => {}
         Err(ParseError) => self.skip_stmt(),
@@ -1376,7 +1532,7 @@ impl<'a> Parser<'a> {
 
   fn stmt(&mut self) -> PResult<Option<StmtOrTail>> {
     match self.kind() {
-      TokenKind::Keyword(Keyword::Const | Keyword::Var) => return self.let_stmt().map(|stmt| Some(StmtOrTail::Stmt(stmt))),
+      TokenKind::Keyword(Keyword::Const | Keyword::Var) => return self.let_stmt().map(|stmt| Some(StmtOrTail::Stmt(Box::new(stmt)))),
       TokenKind::Semi => {
         // An empty statement is harmless but almost always a typo.
         return Err(self.unexpected("a statement"));
@@ -1392,11 +1548,11 @@ impl<'a> Parser<'a> {
       let value = self.expr()?;
       let end = self.expect(&TokenKind::Semi)?.span;
 
-      return Ok(Some(StmtOrTail::Stmt(Stmt::Assign { span: expr.span.to(end), target: expr, op, value })));
+      return Ok(Some(StmtOrTail::Stmt(Box::new(Stmt::Assign { span: expr.span.to(end), target: expr, op, value }))));
     }
 
     if self.eat(&TokenKind::Semi) {
-      return Ok(Some(StmtOrTail::Stmt(Stmt::Expr(expr))));
+      return Ok(Some(StmtOrTail::Stmt(Box::new(Stmt::Expr(expr)))));
     }
 
     if self.at(&TokenKind::RBrace) || expr.is_block_like() {
@@ -1628,8 +1784,37 @@ impl<'a> Parser<'a> {
 
         ExprKind::Bool(keyword == Keyword::True)
       }
+      // `x => body`
+      TokenKind::Ident(name) if *self.nth_kind(1) == TokenKind::FatArrow && !self.in_guard => {
+        let name = Ident { name, span: self.advance().span };
+        let param = LambdaParam { span: name.span, name, ty: None };
+
+        return self.lambda_body(span, vec![param]);
+      }
+      // `(a, b: T) => body`
+      TokenKind::LParen if !self.in_guard && self.lambda_ahead() => {
+        self.advance();
+
+        let mut params = Vec::new();
+
+        while !self.at(&TokenKind::RParen) {
+          let name = self.ident("a parameter name")?;
+          let ty = if self.eat(&TokenKind::Colon) { Some(self.type_expr()?) } else { None };
+          let param_span = ty.as_ref().map_or(name.span, |ty| name.span.to(ty.span));
+
+          params.push(LambdaParam { name, ty, span: param_span });
+
+          if !self.eat(&TokenKind::Comma) {
+            break;
+          }
+        }
+
+        self.expect(&TokenKind::RParen)?;
+
+        return self.lambda_body(span, params);
+      }
       TokenKind::Ident(_) | TokenKind::Keyword(Keyword::SelfValue | Keyword::SelfType | Keyword::Pkg | Keyword::Super) => {
-        let path = self.path()?;
+        let path = self.expr_path()?;
 
         if self.at(&TokenKind::LBrace) && !self.no_struct_literal {
           return self.struct_literal(path);
@@ -1726,12 +1911,13 @@ impl<'a> Parser<'a> {
       TokenKind::Keyword(Keyword::New) => {
         self.advance();
 
-        let path = self.path()?;
+        let mut path = self.path()?;
 
         if self.at(&TokenKind::Lt) {
-          let span = self.span();
+          let type_args = self.type_args(path.segments.len() - 1)?;
 
-          return Err(self.not_implemented(span, "generic types"));
+          path.span = path.span.to(type_args.span);
+          path.type_args = Some(type_args);
         }
 
         let (args, end) = self.call_args()?;
@@ -1748,6 +1934,56 @@ impl<'a> Parser<'a> {
     };
 
     Ok(self.expr_node(kind, span))
+  }
+
+  /// Whether the `(` here starts the parameters of a lambda: its matching `)` is followed by `=>`.
+  fn lambda_ahead(&self) -> bool {
+    let mut depth = 0usize;
+    let mut offset = 0;
+
+    loop {
+      match self.nth_kind(offset) {
+        TokenKind::LParen => depth += 1,
+        TokenKind::RParen => {
+          depth = depth.saturating_sub(1);
+
+          if depth == 0 {
+            return *self.nth_kind(offset + 1) == TokenKind::FatArrow;
+          }
+        }
+        TokenKind::Eof => return false,
+        _ => {}
+      }
+
+      offset += 1;
+    }
+  }
+
+  /// `=> body` after the parameters of a lambda; the body is a block or an expression.
+  fn lambda_body(&mut self, start: Span, params: Vec<LambdaParam>) -> PResult<Expr> {
+    self.expect(&TokenKind::FatArrow)?;
+
+    // A lambda's body is a new context, even inside a guard.
+    let saved = std::mem::replace(&mut self.in_guard, false);
+    let body = self.lambda_expr();
+
+    self.in_guard = saved;
+
+    let body = body?;
+    let span = start.to(body.span);
+
+    Ok(self.expr_node(ExprKind::Lambda { params, body: Box::new(body) }, span))
+  }
+
+  fn lambda_expr(&mut self) -> PResult<Expr> {
+    if self.at(&TokenKind::LBrace) {
+      let block = self.block()?;
+      let span = block.span;
+
+      return Ok(self.expr_node(ExprKind::Block(block), span));
+    }
+
+    self.expr_with_struct_literals(true)
   }
 
   fn optional_value(&mut self) -> PResult<Option<Expr>> {
@@ -1796,7 +2032,7 @@ impl<'a> Parser<'a> {
       } else {
         let span = name.span;
 
-        let path = Path { id: self.next_id(), segments: vec![name.clone()], span };
+        let path = Path { id: self.next_id(), segments: vec![name.clone()], type_args: None, span };
 
         self.expr_node(ExprKind::Path(path), span)
       };
@@ -1857,7 +2093,16 @@ impl<'a> Parser<'a> {
   fn match_arms(&mut self, arms: &mut Vec<MatchArm>) -> PResult<()> {
     while !self.at(&TokenKind::RBrace) {
       let pattern = self.pattern()?;
-      let guard = if self.eat(&TokenKind::Keyword(Keyword::If)) { Some(self.expr()?) } else { None };
+      let guard = if self.eat(&TokenKind::Keyword(Keyword::If)) {
+        let saved = std::mem::replace(&mut self.in_guard, true);
+        let guard = self.expr();
+
+        self.in_guard = saved;
+
+        Some(guard?)
+      } else {
+        None
+      };
 
       self.expect(&TokenKind::FatArrow)?;
 
@@ -2046,7 +2291,7 @@ impl<'a> Parser<'a> {
 }
 
 enum StmtOrTail {
-  Stmt(Stmt),
+  Stmt(Box<Stmt>),
   /// An expression without `;`: the block's value if `}` follows, otherwise a block-like
   /// expression statement.
   Tail(Expr),
@@ -2239,8 +2484,6 @@ mod tests {
   fn reports_reserved_keywords_and_later_features() {
     assert_eq!(parse("fn await() {}").1, vec!["E0101"]);
     assert_eq!(parse("fn f() { async; }").1, vec!["E0101"]);
-    assert_eq!(parse("enum E<T> { A }").1, vec!["E0900"]);
-    assert_eq!(parse("struct P<T> {}").1, vec!["E0900"]);
   }
 
   #[test]
@@ -2267,6 +2510,41 @@ mod tests {
     assert_eq!(decl.functions[0].self_param, None);
     assert!(decl.functions[1].self_param.is_some());
     assert!(decl.functions[2].self_param.is_some());
+  }
+
+  #[test]
+  fn parses_lambdas_and_function_types() {
+    let (module, errors) = parse(
+      "fn f(g: fn(i32, bool) -> i32, h: fn()) {
+        const a = x => x + 1;
+        const b = (x: i32, y) => { x + y };
+        const c = () => 0;
+        const d = (1 + 2);
+        g(1, true);
+      }",
+    );
+
+    assert!(errors.is_empty(), "{errors:?}");
+
+    let function = only_fn(&module);
+
+    assert!(matches!(&function.params[0].ty.kind, TypeExprKind::Fn { params, ret: Some(_) } if params.len() == 2));
+    assert!(matches!(&function.params[1].ty.kind, TypeExprKind::Fn { params, ret: None } if params.is_empty()));
+
+    let inits: Vec<&ExprKind> = function
+      .body
+      .stmts
+      .iter()
+      .filter_map(|stmt| match stmt {
+        Stmt::Let(LetStmt { init: Some(init), .. }) => Some(&init.kind),
+        _ => None,
+      })
+      .collect();
+
+    assert!(matches!(inits[0], ExprKind::Lambda { params, .. } if params.len() == 1 && params[0].ty.is_none()));
+    assert!(matches!(inits[1], ExprKind::Lambda { params, body } if params.len() == 2 && matches!(body.kind, ExprKind::Block(_))));
+    assert!(matches!(inits[2], ExprKind::Lambda { params, .. } if params.is_empty()));
+    assert!(!matches!(inits[3], ExprKind::Lambda { .. }));
   }
 
   #[test]
@@ -2311,7 +2589,7 @@ mod tests {
     let [Item::Class(animal), Item::Class(dog)] = module.items.as_slice() else { panic!("expected two classes") };
 
     assert!(animal.is_abstract && animal.functions[0].is_abstract && animal.functions[0].body.stmts.is_empty());
-    assert_eq!(dog.parent.as_ref().map(|path| path.segments.len()), Some(2));
+    assert!(matches!(&dog.parent, Some(TypeExpr { kind: TypeExprKind::Path(path), .. }) if path.segments.len() == 2));
     assert!(dog.functions[1].is_override);
     assert!(
       matches!(&dog.functions[0].body.stmts[0], Stmt::Expr(Expr { kind: ExprKind::MethodCall { receiver, .. }, .. }) if receiver.kind == ExprKind::Zod)

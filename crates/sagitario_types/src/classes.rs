@@ -7,9 +7,10 @@
 
 use sagitario_ast::{Expr, ExprKind, Ident, Path, Stmt, Visibility};
 use sagitario_diagnostics::{Diagnostic, codes};
-use sagitario_resolve::{ClassId, FnId, LocalId, LocalKind, TypeItem};
+use sagitario_resolve::{ClassId, FnId, LocalId, LocalKind, ParamOwner, TypeItem};
 
-use crate::{Checker, ClassDef, FieldDef, PlaceUse, Receiver, Type};
+use crate::generic::Unknowns;
+use crate::{Checker, ClassDef, FieldDef, PlaceUse, Receiver, Subst, Type};
 
 /// What a place expression belongs to.
 enum PlaceBase<'e> {
@@ -173,38 +174,56 @@ impl Checker<'_> {
   }
 
   /// `new C(args)`: runs the initializer of `C`, if it has one, or else the one it inherits.
-  pub(crate) fn new_instance(&mut self, path: &Path, id: ClassId, args: &[Expr]) -> Type {
-    let ty = self.type_ref(TypeItem::Class(id));
+  pub(crate) fn new_instance(&mut self, expr: &Expr, path: &Path, id: ClassId, args: &[Expr], expected: Option<&Type>) -> Type {
+    let name = self.resolution.type_name(self.package, TypeItem::Class(id));
 
     if self.typed.class_def(id).is_some_and(|def| def.is_abstract) {
       self.diagnostics.push(
-        Diagnostic::error(codes::INVALID_INHERITANCE, path.span, format!("cannot create an instance of the abstract class `{ty}`"))
-          .with_help(format!("create an instance of a concrete subclass of `{ty}`")),
+        Diagnostic::error(codes::INVALID_INHERITANCE, path.span, format!("cannot create an instance of the abstract class `{name}`"))
+          .with_help(format!("create an instance of a concrete subclass of `{name}`")),
       );
     }
 
-    let Some(initializer) = self.typed.class_def(id).and_then(|def| def.initializer) else {
-      self.args(path.span, "initializer", &[], args);
+    // The type arguments of a generic class come from `new C<...>`, the expected type and the
+    // initializer's arguments.
+    let owner = ParamOwner::Item(TypeItem::Class(id));
+    let count = self.generic_count(owner);
+    let explicit =
+      self.explicit_args(path).map(|(_, args)| args).filter(|args| self.check_arg_count(path.span, &format!("`{name}`"), count, args.len()));
+    let mut unknowns = Unknowns::new();
 
-      return ty;
-    };
+    unknowns.add(owner, count, explicit);
 
-    if let Some(decl) = self.resolution.fn_decl(self.package, initializer)
+    if let Some(expected) = expected {
+      unknowns.unify(&self.type_ref(TypeItem::Class(id)), expected);
+    }
+
+    let initializer = self.typed.class_def(id).and_then(|def| def.initializer);
+
+    if let Some(initializer) = initializer
+      && let Some(decl) = self.resolution.fn_decl(self.package, initializer)
       && decl.visibility == Visibility::Private
       && self.owner != Some(TypeItem::Class(id))
     {
       self.diagnostics.push(
-        Diagnostic::error(codes::PRIVATE_MEMBER, path.span, format!("the initializer of `{ty}` is private"))
+        Diagnostic::error(codes::PRIVATE_MEMBER, path.span, format!("the initializer of `{name}` is private"))
           .with_label(decl.name.span, "declared `prv` here")
-          .with_help(format!("create instances with a static function of `{ty}`")),
+          .with_help(format!("create instances with a static function of `{name}`")),
       );
     }
 
-    let params = self.typed.sig(initializer).map(|sig| sig.params.clone()).unwrap_or_default();
+    let params = initializer.and_then(|initializer| self.typed.sig(initializer)).map(|sig| sig.params.clone()).unwrap_or_default();
 
-    self.args(path.span, "initializer", &params, args);
+    self.generic_args(path.span, "initializer", &params, args, &Subst::default(), &mut unknowns);
 
-    ty
+    let subst = if count == 0 { Subst::default() } else { self.finish_inference(path.span, &format!("`{name}`"), unknowns) };
+    let class_args = subst.params.first().map(|(_, args)| args.clone()).unwrap_or_default();
+
+    if let Some(initializer) = initializer {
+      self.record_owner_args(expr.id, &subst, initializer);
+    }
+
+    self.named_type(TypeItem::Class(id), class_args)
   }
 
   /// `instance.name`, a field of a class instance or one it inherits.
@@ -221,7 +240,8 @@ impl Checker<'_> {
         .collect();
 
       if self.class_method(id, field_name).is_some() {
-        diagnostic = diagnostic.with_help(format!("`{field_name}` is a function; call it with `{field_name}(...)`"));
+        diagnostic =
+          diagnostic.with_help(format!("`{field_name}` is a method; call it with `{field_name}(...)`, or wrap it in a lambda to use it as a value"));
       } else if let Some(similar) = sagitario_diagnostics::closest_match(field_name, fields.iter().map(String::as_str)) {
         diagnostic = diagnostic.with_help(format!("a field with a similar name exists: `{similar}`"));
       }
@@ -241,7 +261,11 @@ impl Checker<'_> {
       );
     }
 
-    field.ty.clone()
+    // The field's type with the type arguments of the class declaring it.
+    match base_ty {
+      Type::Class(class) => self.typed.class_field_type(class, field_name).map_or(field.ty.clone(), |(_, _, ty)| ty),
+      _ => field.ty.clone(),
+    }
   }
 
   /// Records that the method being checked modifies `self`.
@@ -321,6 +345,11 @@ impl Checker<'_> {
             .with_label(field.span, "declared `const` here")
             .with_help(format!("declare it `var {}` to modify it after `new`", name.name)),
         )
+      }
+      PlaceBase::Local(root) if self.is_captured(root) => {
+        let name = self.resolution.locals(self.function).get(root.0 as usize).map(|info| info.name.clone()).unwrap_or_default();
+
+        PlaceAccess::Immutable(self.captured_error(place.span, &name))
       }
       PlaceBase::Local(root) => {
         let Some(info) = self.resolution.locals(self.function).get(root.0 as usize) else { return PlaceAccess::Mutable };

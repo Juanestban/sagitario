@@ -50,7 +50,7 @@ impl FnLowering<'_> {
   }
 
   /// Whether the enum value at `place` is the variant `index`.
-  fn tag_is(&mut self, place: &Place, index: u32) -> LResult<Operand> {
+  pub(crate) fn tag_is(&mut self, place: &Place, index: u32) -> LResult<Operand> {
     let tag = self.tag(Operand::Place(place.clone()), &place.ty)?;
     let index = Operand::Const(Const::Int { value: u128::from(index), negative: false, ty: IntTy::U32 });
 
@@ -58,7 +58,7 @@ impl FnLowering<'_> {
   }
 
   /// Reads a place: managed values are borrowed, others copied.
-  fn read(&mut self, place: Place) -> Operand {
+  pub(crate) fn read(&mut self, place: Place) -> Operand {
     if self.managed(&place.ty) {
       return Operand::Place(place);
     }
@@ -68,7 +68,7 @@ impl FnLowering<'_> {
     self.new_value(ty, Rvalue::Use(Operand::Place(place)))
   }
 
-  fn value_place(&mut self, expr: &Expr) -> LResult<Place> {
+  pub(crate) fn value_place(&mut self, expr: &Expr) -> LResult<Place> {
     let ty = self.type_of(expr)?;
     let value = self.expr(expr)?;
 
@@ -374,7 +374,7 @@ impl FnLowering<'_> {
         if self.pattern_variant(pattern).is_none()
           && let Some(local) = self.resolution.bindings.get(&pattern.id)
         {
-          self.store(Local(local.0), Operand::Place(place.clone()));
+          self.store(self.local_id(*local), Operand::Place(place.clone()));
         }
 
         Ok(())
@@ -423,7 +423,7 @@ impl FnLowering<'_> {
     match &pattern.kind {
       PatternKind::Ident(_) => {
         if let Some(local) = self.resolution.bindings.get(&pattern.id) {
-          out.push(Local(local.0));
+          out.push(self.local_id(*local));
         }
       }
       PatternKind::Tuple { elems: patterns, .. } | PatternKind::Or(patterns) => {

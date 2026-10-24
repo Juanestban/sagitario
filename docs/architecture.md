@@ -133,6 +133,22 @@ could be added.
   interface, `Callee::Dyn` calls an entry). An itable lists thunks calling the type's methods
   (through the vtable when they vary), the interface's default methods, a getter and a setter per
   field, and the itables of the parent interfaces.
+- Generics are monomorphized while lowering: generic functions, methods of generic types and
+  interface methods are templates, instantiated on demand from a worklist with the type
+  arguments the checker recorded (`TypedModule::call_args`), and every type of an instance is
+  substituted. Each class type with its arguments is a class instance (`sag_cN`) with its own
+  struct, constructor, destructor and vtable; generic structs and enums become one `sag_tN` per
+  instantiation. Interface methods called on a known type go straight to its method or to the
+  default instantiated for it.
+- A function value is a `sag_fnval`: a function pointer and an environment, an ARC object
+  `sag_envN` holding copies of the captures, or NULL when nothing is captured. The resolver
+  records each lambda's own bindings and captures (`Resolution::lambdas`). SIR lowers each lambda
+  into a function of its own while lowering the enclosing one, with a remapped local numbering:
+  local 0 is the environment, then the parameters, the captures (copied out of the environment
+  with `EnvField` projections) and its bindings. `Rvalue::Closure` allocates the environment, and
+  `Callee::Closure` calls a value, casting the pointer to the exact signature and passing the
+  environment first. Named functions used as values (`Rvalue::FnValue`) are called through
+  wrappers `sag_wrap_N` that ignore the environment.
 - The prelude part written in Sagitario (`crates/sagitario_driver/src/prelude.sag`) is embedded
   by the driver as a module outside the package tree; the resolver looks names up there after a
   module's own items and imports.

@@ -88,6 +88,16 @@ impl Diagnostics {
     self.items.push(diagnostic);
   }
 
+  /// The number of diagnostics, errors and warnings.
+  pub fn len(&self) -> usize {
+    self.items.len()
+  }
+
+  /// Drops the diagnostics after the first `len`: those of an attempt the parser abandons.
+  pub fn truncate(&mut self, len: usize) {
+    self.items.truncate(len);
+  }
+
   pub fn has_errors(&self) -> bool {
     self.items.iter().any(|diagnostic| diagnostic.severity == Severity::Error)
   }
