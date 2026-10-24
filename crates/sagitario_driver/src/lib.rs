@@ -32,7 +32,13 @@ pub struct CompileOptions {
   pub program_args: Vec<String>,
   /// Release mode: integer overflow wraps and C is optimized (docs/spec/02-types.md#build-modes).
   pub release: bool,
+  /// Compile with AddressSanitizer and UndefinedBehaviorSanitizer where the C compiler supports
+  /// them (docs/testing.md#memory-checks).
+  pub sanitize: bool,
 }
+
+/// The C compiler flags of `--sanitize`: any undefined behavior aborts the program.
+const SANITIZE_FLAGS: [&str; 2] = ["-fsanitize=address,undefined", "-fno-sanitize-recover=undefined"];
 
 /// `sag check`: runs the front end only.
 pub fn check(options: &CompileOptions) -> u8 {
@@ -46,7 +52,12 @@ pub fn check(options: &CompileOptions) -> u8 {
 pub fn build(options: &CompileOptions) -> u8 {
   let executable = options.input.with_extension(env::consts::EXE_EXTENSION);
   match compile_to(options, &executable) {
-    Ok(()) => 0,
+    Ok(compiler) => {
+      if let Some(dir) = compiler.sanitizer_runtime_dir() {
+        eprintln!("note: the program needs the sanitizer runtime: add `{}` to PATH to run it", dir.display());
+      }
+      0
+    }
     Err(code) => code,
   }
 }
@@ -62,10 +73,21 @@ pub fn run(options: &CompileOptions) -> u8 {
   };
   let stem = options.input.file_stem().unwrap_or_default();
   let executable = dir.path.join(stem).with_extension(env::consts::EXE_EXTENSION);
-  if let Err(code) = compile_to(options, &executable) {
-    return code;
+  let compiler = match compile_to(options, &executable) {
+    Ok(compiler) => compiler,
+    Err(code) => return code,
+  };
+  let mut command = Command::new(&executable);
+  command.args(&options.program_args);
+  // On Windows the sanitizer runtime is a DLL next to the compiler (docs/adr/0018-windows-c-toolchain.md).
+  if let Some(dir) = compiler.sanitizer_runtime_dir() {
+    let mut paths = vec![dir];
+    paths.extend(env::var_os("PATH").map(|path| env::split_paths(&path).collect::<Vec<_>>()).unwrap_or_default());
+    if let Ok(path) = env::join_paths(paths) {
+      command.env("PATH", path);
+    }
   }
-  match Command::new(&executable).args(&options.program_args).status() {
+  match command.status() {
     // Exit codes that do not fit in a byte (e.g. Windows exception codes) and signals become 1.
     Ok(status) => status.code().and_then(|code| u8::try_from(code).ok()).unwrap_or(EXIT_FAILURE),
     Err(error) => {
@@ -357,7 +379,8 @@ fn use_color(format: DiagnosticFormat) -> bool {
   ansi_terminal && std::io::stderr().is_terminal()
 }
 
-fn compile_to(options: &CompileOptions, executable: &Path) -> Result<(), u8> {
+/// Compiles the program into `executable` and returns the C compiler used.
+fn compile_to(options: &CompileOptions, executable: &Path) -> Result<CCompiler, u8> {
   let Some(generated) = front_end(options, true)?.c_source else {
     eprintln!("internal compiler error: no C was generated");
     return Err(EXIT_ICE);
@@ -374,7 +397,8 @@ fn compile_to(options: &CompileOptions, executable: &Path) -> Result<(), u8> {
       return Err(EXIT_FAILURE);
     }
   }
-  let compiler = find_c_compiler(options.cc.as_deref())?;
+  let mut compiler = find_c_compiler(options.cc.as_deref())?;
+  compiler.sanitized = options.sanitize && compiler.supports_sanitizers();
   let dir = TempDir::create().map_err(|error| {
     eprintln!("error: cannot create a temporary directory: {error}");
     EXIT_FAILURE
@@ -397,20 +421,31 @@ fn compile_to(options: &CompileOptions, executable: &Path) -> Result<(), u8> {
   let mode: &[&str] = if options.release { &["-O2", "-DSAG_RELEASE"] } else { &["-O0", "-g"] };
   // `fmod` and friends live in libm outside Windows.
   let libm: &[&str] = if compiler.target.contains("windows") { &[] } else { &["-lm"] };
-  let output = Command::new(&compiler.command)
-    .args(["-std=c11", "-pedantic-errors"])
-    .args(mode)
-    .arg("-I")
-    .arg(&dir.path)
-    .arg(&program_c)
-    .arg(&runtime_c)
-    .args(generated.ffi.as_ref().map(|_| &ffi_c))
-    .arg("-o")
-    .arg(executable)
-    .args(libm)
-    .output();
+  let compile = |sanitize: &[&str]| {
+    Command::new(&compiler.command)
+      .args(["-std=c11", "-pedantic-errors"])
+      .args(mode)
+      .args(sanitize)
+      .arg("-I")
+      .arg(&dir.path)
+      .arg(&program_c)
+      .arg(&runtime_c)
+      .args(generated.ffi.as_ref().map(|_| &ffi_c))
+      .arg("-o")
+      .arg(executable)
+      .args(libm)
+      .output()
+  };
+  let output = compile(if compiler.sanitized { &SANITIZE_FLAGS } else { &[] });
   match output {
-    Ok(output) if output.status.success() => Ok(()),
+    Ok(output) if output.status.success() => Ok(compiler),
+    // The C compiles without sanitizers: the toolchain lacks their libraries.
+    Ok(output) if compiler.sanitized && compile(&[]).is_ok_and(|plain| plain.status.success()) => {
+      eprintln!("error: the C compiler `{}` cannot build with sanitizers (`{}`)", compiler.command, SANITIZE_FLAGS.join(" "));
+      eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+      eprintln!("note: install its sanitizer libraries, or build without `--sanitize`");
+      Err(EXIT_FAILURE)
+    }
     Ok(output) => {
       eprintln!("internal compiler error: the generated C failed to compile with `{}`", compiler.command);
       eprintln!("{}", String::from_utf8_lossy(&output.stderr));
@@ -427,6 +462,26 @@ struct CCompiler {
   command: String,
   /// Target triple reported by `-dumpmachine`.
   target: String,
+  /// Whether the program was compiled with sanitizers.
+  sanitized: bool,
+}
+
+impl CCompiler {
+  /// MinGW toolchains ship no sanitizer runtime (docs/adr/0018-windows-c-toolchain.md).
+  fn supports_sanitizers(&self) -> bool {
+    !self.target.contains("windows-gnu") && !self.target.contains("mingw")
+  }
+
+  /// The directory of the sanitizer runtime DLLs, which a sanitized program needs on `PATH` on
+  /// Windows; `None` elsewhere or when the program is not sanitized.
+  fn sanitizer_runtime_dir(&self) -> Option<PathBuf> {
+    if !self.sanitized || !self.target.contains("windows") {
+      return None;
+    }
+    let output = Command::new(&self.command).arg("-print-resource-dir").stdin(Stdio::null()).output().ok()?;
+    let resource_dir = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (output.status.success() && !resource_dir.is_empty()).then(|| Path::new(&resource_dir).join("lib").join("windows"))
+  }
 }
 
 /// Finds the C compiler: `--cc`, then `SAG_CC`, then `clang`, then `gcc` (docs/architecture.md).
@@ -450,7 +505,7 @@ fn find_c_compiler(explicit: Option<&str>) -> Result<CCompiler, u8> {
          set SAG_CC to an LLVM clang targeting `x86_64-pc-windows-msvc` (docs/adr/0018-windows-c-toolchain.md)"
       );
     }
-    return Ok(CCompiler { command, target });
+    return Ok(CCompiler { command, target, sanitized: false });
   }
   match configured {
     Some(command) => eprintln!("error: cannot run the C compiler `{command}` (from --cc or SAG_CC)"),

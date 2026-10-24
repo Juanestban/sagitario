@@ -20,6 +20,8 @@ sag run main.sag -- a b         # compile and run, forwarding arguments
 sag check main.sag              # front end only
 sag build main.sag --emit-c     # also write the generated C
 sag run --release main.sag      # optimized; integer overflow wraps
+sag run --sanitize main.sag     # with ASan and UBSan (the test harness always uses it)
+SAG_TEST_SANITIZE=0 cargo test --workspace   # faster local runs without sanitizers
 SAG_CC=gcc sag build main.sag   # choose the C compiler (or --cc)
 ```
 

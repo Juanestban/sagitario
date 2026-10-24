@@ -235,6 +235,8 @@ impl FnLowering<'_> {
 
   /// The receiver of an `Iter` method called on a list or array, as an iterator.
   pub(crate) fn iter_of(&mut self, receiver: &Expr, to_iter: FnId, args: Vec<Type>) -> LResult<Operand> {
+    // In generic code, the element type is in terms of the instance's parameters.
+    let args = args.iter().map(|arg| arg.substitute(&self.subst)).collect();
     let subst = Subst::of(ParamOwner::Fn(to_iter), args);
     let params = self.typed.sig(to_iter).map(|sig| sig.substitute(&subst).params).unwrap_or_default();
     let ret = self.typed.sig(to_iter).map(|sig| sig.ret.substitute(&subst)).unwrap_or(Type::Error);

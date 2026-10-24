@@ -24,9 +24,9 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0013](0013-primitive-semantics.md) | Semantics of primitives and `String` | Accepted (refined by 0034) |
 | [0014](0014-mvp-scope.md) | MVP scope: F0 + F1 + F2, desktop only | Accepted |
 | [0015](0015-compiler-architecture-and-toolchain.md) | Compiler architecture and C toolchain | Accepted |
-| [0016](0016-engineering-process.md) | Testing, quality gates, conventions and license | Accepted |
+| [0016](0016-engineering-process.md) | Testing, quality gates, conventions and license | Accepted (refined by 0036) |
 | [0017](0017-resolution-of-open-questions-q1-q11.md) | Resolution of open questions Q1–Q11 | Accepted (refined by 0034) |
-| [0018](0018-windows-c-toolchain.md) | Windows C toolchain: official LLVM (MSVC target), MinGW clang tolerated | Accepted |
+| [0018](0018-windows-c-toolchain.md) | Windows C toolchain: official LLVM (MSVC target), MinGW clang tolerated | Accepted (refined by 0036) |
 | [0019](0019-prelude-and-printing.md) | Prelude and printing | Accepted |
 | [0020](0020-expressions-bindings-and-build-modes.md) | Operators, bindings, control flow, interpolation and build modes | Accepted |
 | [0021](0021-structs-and-fixed-arrays.md) | Structs, methods and fixed arrays | Accepted (amended by 0028) |
@@ -44,6 +44,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0033](0033-closures-details.md) | Closures: arrow functions, function values and their representation | Accepted |
 | [0034](0034-collections-and-iterators.md) | Collections, iterators, and equality, order and hashing | Accepted |
 | [0035](0035-explicit-self-in-initializers.md) | Initializers declare `self` | Accepted |
+| [0036](0036-sanitizers-and-the-reference-zoo.md) | Sanitizers and the reference "zoo" program | Accepted |
 
 ## Template
 

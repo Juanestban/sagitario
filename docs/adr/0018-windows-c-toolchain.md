@@ -1,6 +1,6 @@
 # 0018. Windows C toolchain: official LLVM (MSVC target), MinGW clang tolerated
 
-- Status: Accepted
+- Status: Accepted; refined by [ADR-0036](0036-sanitizers-and-the-reference-zoo.md)
 - Date: 2026-10-22
 - Refines: [ADR-0015](0015-compiler-architecture-and-toolchain.md)
 

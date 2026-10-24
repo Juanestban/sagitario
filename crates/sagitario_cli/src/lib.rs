@@ -16,6 +16,8 @@ Commands:
 
 Options:
   --release                   Optimize; integer overflow wraps instead of panicking (build, run)
+  --sanitize                  Detect memory errors and undefined behavior with ASan and UBSan,
+                              where the C compiler supports them (build, run)
   --emit-c                    Also write the generated C (build, run)
   --cc <compiler>             C compiler to use; overrides SAG_CC (build, run)
   --diagnostic-format <fmt>   `human` (default) or `short`: one line per diagnostic";
@@ -92,6 +94,10 @@ fn parse_compile_options<I: Iterator<Item = String>>(mut args: I, mode: Mode) ->
       "--release" => {
         require_codegen(mode, &flag)?;
         options.release = true;
+      }
+      "--sanitize" => {
+        require_codegen(mode, &flag)?;
+        options.sanitize = true;
       }
       "--cc" => {
         require_codegen(mode, &flag)?;
@@ -199,6 +205,14 @@ mod tests {
     let expected = CompileOptions { program_args: vec!["--verbose".to_string(), "x".to_string()], ..options("main.sag") };
     assert_eq!(parse(&["run", "main.sag", "--", "--verbose", "x"]), Ok(Command::Run(expected)));
     assert!(parse(&["build", "main.sag", "--", "x"]).is_err());
+  }
+
+  #[test]
+  fn parses_sanitize() {
+    let expected = CompileOptions { sanitize: true, ..options("main.sag") };
+
+    assert_eq!(parse(&["run", "--sanitize", "main.sag"]), Ok(Command::Run(expected)));
+    assert!(parse(&["check", "--sanitize", "main.sag"]).is_err());
   }
 
   #[test]

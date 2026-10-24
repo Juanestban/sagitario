@@ -60,7 +60,10 @@ Increments ([ADR-0027](adr/0027-classes-and-arc.md)):
    ([ADR-0033](adr/0033-closures-details.md)).
 7. `List<T>`, `Map<K, V>`, iterators, and `Eq`/`Ord`/`Hash`
    ([ADR-0034](adr/0034-collections-and-iterators.md)).
-8. The reference "zoo" program below.
+8. The reference "zoo" program below, run with ASan and UBSan
+   ([ADR-0036](adr/0036-sanitizers-and-the-reference-zoo.md)).
+
+**Status:** done. The zoo is `tests/run-pass/reference_zoo/`.
 
 **Acceptance:** a reference "zoo" program using abstract classes, inheritance, `zod`,
 interfaces as types, bounded generics, `List`/`Map`, lambdas and `map`/`filter` passes with

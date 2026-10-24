@@ -22,6 +22,11 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # The official LLVM clang, which builds with sanitizers (docs/adr/0018-windows-c-toolchain.md).
+      - name: Use LLVM clang on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: echo "SAG_CC=C:\Program Files\LLVM\bin\clang.exe" >> $env:GITHUB_ENV
       - run: clang --version
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
