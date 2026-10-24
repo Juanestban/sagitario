@@ -53,6 +53,7 @@ Nova uses the nearest `Nova.toml` above.
 | `--sanitize` | build, run | AddressSanitizer and UndefinedBehaviorSanitizer, where the C compiler has them |
 | `--emit-c` | build, run | Also writes the generated C next to the executable or the library |
 | `--cc <compiler>` | build, run | The C compiler; overrides `SAG_CC` |
+| `--target <target>` | build, check | Compiles for another machine ([targets](#targets)) |
 | `--diagnostic-format <fmt>` | build, run, check | `human` (default) or `short` |
 
 Exit codes: 0 on success, 1 when the package has errors or a command fails, 2 for invalid
@@ -188,6 +189,41 @@ sources = ["c/helpers.c"]         # compiled as C11 and linked
 - The C functions are then declared in `extern "C"` blocks ([FFI](spec/10-ffi.md)).
 - A source that does not compile, or a library the linker cannot find, is an error of the
   package, shown with the C compiler's or the linker's message.
+
+## Targets
+
+Rationale: [ADR-0043](adr/0043-cross-compilation.md).
+
+`--target` compiles for another machine; `sag targets` lists the targets:
+
+| Target | Machine | Builds |
+|---|---|---|
+| `aarch64-linux-android` | Android on 64-bit ARM | programs and libraries |
+| `armv7-linux-androideabi` | Android on 32-bit ARM | programs and libraries |
+| `x86_64-linux-android` | Android on x86-64 (the emulator) | programs and libraries |
+| `aarch64-apple-ios` | iOS devices | libraries |
+| `aarch64-apple-ios-sim` | the iOS simulator on Apple silicon | libraries |
+| `x86_64-apple-ios` | the iOS simulator on Intel Macs | libraries |
+
+```sh
+nova build --target aarch64-linux-android   # target/aarch64-linux-android/debug/
+nova check --target armv7-linux-androideabi
+```
+
+- Builds for a target go to `target/<target>/debug/` (or `release/`). `sag build --target`
+  works too, and `nova check --target` checks the program as the target sees it.
+- **Android** uses the NDK: `ANDROID_NDK_HOME`, else `ANDROID_NDK_ROOT`, else the newest NDK in
+  the `ndk` directory of `ANDROID_HOME` or `ANDROID_SDK_ROOT`. The minimum API level is 24
+  (Android 7.0). A library's `.so` is what an app loads with JNI; programs run with `adb shell`.
+- **iOS** needs macOS with Xcode, found through `xcrun`; the minimum version is iOS 13.0. iOS runs
+  no standalone programs, so only libraries build, and only the static one unless
+  `[library] outputs` asks for the dynamic one too.
+- The sizes of `isize`, `usize`, `c_long` and the sign of `c_char` follow the target
+  ([FFI](spec/10-ffi.md#stdffi)): a literal that fits on one target may not fit on another.
+- Programs built for a target cannot run on this machine (`nova run --target` is an error), and
+  `--sanitize` only works for this machine. Running on a device or an emulator is not
+  automated yet.
+- Other targets, such as Linux from Windows, are not supported yet.
 
 ## Errors
 

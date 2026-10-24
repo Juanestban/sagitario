@@ -34,7 +34,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0023](0023-string-api-and-panic.md) | The `String` API, `StringBuilder` and `panic` | Accepted |
 | [0024](0024-modules-imports-and-visibility.md) | Modules, imports, visibility and the entry point | Accepted (amended by 0025; refined by 0037) |
 | [0025](0025-single-pub-visibility.md) | A single `pub` visibility, without `pub(pkg)` | Accepted |
-| [0026](0026-ffi-details.md) | FFI details: pointers, `unsafe`, `std::ffi` and exports | Accepted |
+| [0026](0026-ffi-details.md) | FFI details: pointers, `unsafe`, `std::ffi` and exports | Accepted (refined by 0043) |
 | [0027](0027-classes-and-arc.md) | Classes, construction, ARC objects and `weak` references | Accepted (refined by 0030, 0035) |
 | [0028](0028-inferred-self-mutation.md) | `self` without `var`: methods that modify `self` are inferred | Accepted |
 | [0029](0029-inheritance.md) | Inheritance: construction, overriding, subtyping and dispatch | Accepted |
@@ -51,6 +51,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0040](0040-nova-package-manager.md) | Nova, the package manager | Accepted |
 | [0041](0041-dependencies-by-path.md) | Dependencies by path | Accepted |
 | [0042](0042-library-outputs-and-linking-c.md) | Library outputs and linking C | Accepted |
+| [0043](0043-cross-compilation.md) | Cross-compilation to Android and iOS | Accepted |
 
 ## Template
 

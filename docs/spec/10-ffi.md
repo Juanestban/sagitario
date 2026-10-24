@@ -83,13 +83,16 @@ characters as `u32`.
 
 ## `std::ffi`
 
+The sizes of these types, and of `isize` and `usize`, are those of the target the program is
+compiled for ([targets](../nova.md#targets)), not of the machine running the compiler.
+
 The first module of the [standard library](11-standard-library.md), provided by the compiler:
 
 | Name | Meaning |
 |---|---|
-| `c_char`, `c_schar`, `c_uchar` | C `char` (`i8`, or `u8` where C's `char` is unsigned), `signed char`, `unsigned char` |
+| `c_char`, `c_schar`, `c_uchar` | C `char` (`i8`, or `u8` where C's `char` is unsigned: Linux and Android on ARM), `signed char`, `unsigned char` |
 | `c_short`, `c_ushort`, `c_int`, `c_uint` | `i16`, `u16`, `i32`, `u32` |
-| `c_long`, `c_ulong` | 32 bits on Windows, 64 bits elsewhere |
+| `c_long`, `c_ulong` | 32 bits on Windows and on 32-bit targets, 64 bits elsewhere |
 | `c_longlong`, `c_ulonglong`, `c_float`, `c_double` | `i64`, `u64`, `f32`, `f64` |
 | `c_void` | C's `void`, only behind a pointer |
 | `CString` | A NUL-terminated copy of a string (ARC) |

@@ -2,6 +2,9 @@
 //! writes the generated C with the embedded runtime, and invokes the C compiler.
 
 mod header;
+mod targets;
+
+pub use targets::{Platform, TARGETS, Target};
 
 use std::collections::HashSet;
 use std::env;
@@ -12,7 +15,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use sagitario_ast::{Module, Package, PackageInfo};
+use sagitario_ast::{Module, Package, PackageInfo, TargetInfo};
 use sagitario_diagnostics::{DiagnosticFormat, Diagnostics, render};
 use sagitario_span::SourceMap;
 
@@ -50,6 +53,9 @@ pub struct CompileOptions {
   pub name: String,
   /// C libraries and sources to link (docs/nova.md#linking-c).
   pub link: Link,
+  /// The name of the target to compile for (docs/nova.md#targets); the machine running the
+  /// compiler when `None`.
+  pub target: Option<String>,
 }
 
 /// What `[link]` adds to a build: C libraries, where to find them, and C sources to compile.
@@ -103,7 +109,7 @@ pub fn check(options: &CompileOptions) -> u8 {
 
 /// `sag build`: writes an executable next to the source file.
 pub fn build(options: &CompileOptions) -> u8 {
-  let executable = options.output.clone().unwrap_or_else(|| options.input.with_extension(env::consts::EXE_EXTENSION));
+  let executable = options.output.clone().unwrap_or_else(|| options.input.with_extension(executable_extension(options.target.as_deref())));
   match compile_to(options, &executable) {
     Ok(compiler) => {
       if let Some(dir) = compiler.sanitizer_runtime_dir() {
@@ -118,6 +124,12 @@ pub fn build(options: &CompileOptions) -> u8 {
 /// `sag run`: builds into a temporary directory (or `options.output`), runs the program and
 /// returns its exit code.
 pub fn run(options: &CompileOptions) -> u8 {
+  if let Some(target) = &options.target {
+    eprintln!("error: a program built for `{target}` cannot run on this machine");
+    eprintln!("note: build it with `build`, then copy it to the device (for Android: `adb push` and `adb shell`)");
+    return EXIT_FAILURE;
+  }
+
   let dir = match TempDir::create() {
     Ok(dir) => dir,
     Err(error) => {
@@ -231,7 +243,11 @@ fn front_end(options: &CompileOptions, generate: bool) -> Result<FrontEnd, u8> {
   report(&mut diagnostics, &sources, options)?;
 
   let infos = loader.packages.iter().map(|loaded| PackageInfo { name: loaded.name.clone(), dependencies: loaded.dependencies.clone() }).collect();
-  let package = Package { modules: loader.modules, prelude: Some(prelude), std: loader.std, library: options.library, packages: infos };
+  let target = match &options.target {
+    Some(name) => targets::find(name)?.info,
+    None => TargetInfo::host(),
+  };
+  let package = Package { modules: loader.modules, prelude: Some(prelude), std: loader.std, library: options.library, packages: infos, target };
   let resolution = sagitario_resolve::resolve(&package, &mut diagnostics);
   let typed = sagitario_types::check(&package, &resolution, &mut diagnostics);
 
@@ -588,7 +604,7 @@ impl Toolchain<'_> {
 
   /// Compiles one C file to an object; the generated C must be strict C11.
   fn compile(&self, source: &Path, object: &Path, generated: bool) -> Result<(), Failure> {
-    let mut command = Command::new(&self.compiler.command);
+    let mut command = self.compiler.command();
 
     command.arg("-std=c11");
 
@@ -655,7 +671,7 @@ impl Toolchain<'_> {
   }
 
   fn executable(&self, objects: &[PathBuf], link: &Link, executable: &Path) -> Result<(), Failure> {
-    let mut command = Command::new(&self.compiler.command);
+    let mut command = self.compiler.command();
 
     command.args(self.mode).args(self.sanitize).args(objects).arg("-o").arg(executable).args(self.link_args(link));
     self.link(&mut command)
@@ -753,7 +769,20 @@ fn compile_to(options: &CompileOptions, executable: &Path) -> Result<CCompiler, 
     emit_c(&generated, options.output.as_ref().unwrap_or(&options.input))?;
   }
 
-  let mut compiler = find_c_compiler(options.cc.as_deref())?;
+  let mut compiler = compiler_for(options)?;
+
+  if options.target.is_some() && options.sanitize {
+    eprintln!("error: `--sanitize` only works when compiling for this machine");
+    return Err(EXIT_FAILURE);
+  }
+
+  if let Some(target) = options.target.as_deref().map(targets::find).transpose()?
+    && target.platform == Platform::Ios
+  {
+    eprintln!("error: iOS runs no standalone programs; build a library for `{}` with Nova and add it to an Xcode project", target.name);
+    return Err(EXIT_FAILURE);
+  }
+
   compiler.sanitized = options.sanitize && compiler.supports_sanitizers();
   let dir = TempDir::create().map_err(|error| {
     eprintln!("error: cannot create a temporary directory: {error}");
@@ -846,7 +875,7 @@ pub fn build_library(options: &CompileOptions, outputs: &LibraryOutputs) -> Resu
     eprintln!("warning: the library `{name}` exports no functions; C can call only the functions declared `extern \"C\" fn`");
   }
 
-  let compiler = find_c_compiler(options.cc.as_deref())?;
+  let compiler = compiler_for(options)?;
   let (static_lib, dynamic_lib) = library_files(&compiler, outputs, name);
   let header_path = outputs.dir.join(format!("{name}.h"));
   let mut written = Vec::new();
@@ -886,7 +915,7 @@ pub fn build_library(options: &CompileOptions, outputs: &LibraryOutputs) -> Resu
   if let Some((path, import)) = dynamic_lib {
     let toolchain = Toolchain { compiler: &compiler, dir: &dir.path, mode, sanitize: &[], pic: !windows };
     let objects = toolchain.objects(&files, &options.link.sources).map_err(report)?;
-    let mut command = Command::new(&compiler.command);
+    let mut command = compiler.command();
 
     command.args(mode).args(&objects).arg("-o").arg(&path);
     export_list(&mut command, &compiler, &dir.path, &path, import.as_deref(), &front.exports)?;
@@ -957,8 +986,23 @@ fn export_list(command: &mut Command, compiler: &CCompiler, dir: &Path, library:
   Ok(())
 }
 
+/// The extension of executables for `target`: none on Android, `exe` on Windows.
+pub fn executable_extension(target: Option<&str>) -> &'static str {
+  if target.is_some() { "" } else { env::consts::EXE_EXTENSION }
+}
+
+/// The C compiler of the target of `options`, or of this machine.
+fn compiler_for(options: &CompileOptions) -> Result<CCompiler, u8> {
+  match &options.target {
+    Some(name) => targets::find(name)?.compiler(),
+    None => find_c_compiler(options.cc.as_deref()),
+  }
+}
+
 struct CCompiler {
   command: String,
+  /// Arguments every invocation needs, such as `--target=` when cross-compiling.
+  args: Vec<String>,
   /// Target triple reported by `-dumpmachine`.
   target: String,
   /// Whether the program was compiled with sanitizers.
@@ -966,6 +1010,14 @@ struct CCompiler {
 }
 
 impl CCompiler {
+  /// A command running the compiler, with the arguments that select the target.
+  fn command(&self) -> Command {
+    let mut command = Command::new(&self.command);
+
+    command.args(&self.args);
+    command
+  }
+
   /// Windows, with the MSVC or the MinGW toolchain (`x86_64-w64-mingw32`).
   fn windows(&self) -> bool {
     self.target.contains("windows") || self.mingw()
@@ -1017,7 +1069,7 @@ fn find_c_compiler(explicit: Option<&str>) -> Result<CCompiler, u8> {
          set SAG_CC to an LLVM clang targeting `x86_64-pc-windows-msvc` (docs/adr/0018-windows-c-toolchain.md)"
       );
     }
-    return Ok(CCompiler { command, target, sanitized: false });
+    return Ok(CCompiler { command, args: Vec::new(), target, sanitized: false });
   }
   match configured {
     Some(command) => eprintln!("error: cannot run the C compiler `{command}` (from --cc or SAG_CC)"),

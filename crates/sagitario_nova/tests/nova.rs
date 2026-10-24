@@ -628,3 +628,145 @@ fn links_c_sources_and_libraries_into_programs() -> io::Result<()> {
 
   Ok(())
 }
+
+/// Whether the Android NDK can be found, as Nova looks for it. Without it the Android tests are
+/// skipped, unless `SAG_REQUIRE_NDK=1` (set in CI) makes that a failure.
+fn ndk_available() -> bool {
+  let is_ndk = |dir: PathBuf| dir.join("toolchains").join("llvm").join("prebuilt").is_dir();
+  let from_env = |name: &str| std::env::var_os(name).map(PathBuf::from).filter(|dir| !dir.as_os_str().is_empty());
+  let direct = ["ANDROID_NDK_HOME", "ANDROID_NDK_ROOT"].iter().filter_map(|name| from_env(name)).any(is_ndk);
+  let in_sdk = ["ANDROID_HOME", "ANDROID_SDK_ROOT"]
+    .iter()
+    .filter_map(|name| from_env(name))
+    .filter_map(|sdk| fs::read_dir(sdk.join("ndk")).ok())
+    .any(|entries| entries.flatten().any(|entry| is_ndk(entry.path())));
+  let found = direct || in_sdk;
+
+  assert!(found || std::env::var("SAG_REQUIRE_NDK").map_or(true, |value| value != "1"), "SAG_REQUIRE_NDK=1 but the Android NDK was not found");
+
+  if !found {
+    eprintln!("skipped: the Android NDK was not found (set ANDROID_NDK_HOME)");
+  }
+
+  found
+}
+
+/// The ELF class (1 for 32 bits, 2 for 64) and machine of a file, or `None` if it is not ELF.
+fn elf_kind(path: &Path) -> io::Result<Option<(u8, u16)>> {
+  let bytes = fs::read(path)?;
+
+  if !bytes.starts_with(b"\x7fELF") {
+    return Ok(None);
+  }
+
+  // `e_machine` is little-endian on these targets.
+  let class = bytes.get(4).copied();
+  let machine = bytes.get(18..20).map(|pair| pair.iter().rev().fold(0u16, |value, byte| (value << 8) | u16::from(*byte)));
+
+  Ok(class.zip(machine))
+}
+
+#[test]
+fn cross_compiles_libraries_and_programs_for_android() -> io::Result<()> {
+  if !ndk_available() {
+    return Ok(());
+  }
+
+  let temp = TempDir::new()?;
+  let geo = temp.path.join("geo");
+
+  package(&geo, &format!("{}\n[link]\nsources = [\"c/helper.c\"]\n", manifest("geo", &[])), &[("lib.sag", LIBRARY_SOURCE)])?;
+  fs::create_dir_all(geo.join("c"))?;
+  fs::write(geo.join("c").join("helper.c"), "int helper_twice(int x) {\n  return 2 * x;\n}\n")?;
+
+  // ELF machines: AArch64, ARM and x86-64.
+  for (target, class, machine) in [("aarch64-linux-android", 2, 0xB7), ("armv7-linux-androideabi", 1, 0x28), ("x86_64-linux-android", 2, 0x3E)] {
+    assert_success(&nova(&geo, &["build", "--target", target])?);
+
+    let dir = geo.join("target").join(target).join("debug");
+
+    assert_eq!(elf_kind(&dir.join("libgeo.so"))?, Some((class, machine)), "{target}");
+    assert!(dir.join("libgeo.a").is_file() && dir.join("geo.h").is_file(), "{target}");
+  }
+
+  let app = temp.path.join("app");
+
+  package(&app, &manifest("app", &[]), &[("main.sag", "fn main() {\n  println(\"hola\");\n}\n")])?;
+  assert_success(&nova(&app, &["build", "--target", "aarch64-linux-android"])?);
+  assert_eq!(elf_kind(&app.join("target").join("aarch64-linux-android").join("debug").join("app"))?, Some((2, 0xB7)));
+
+  // It cannot run here, nor be sanitized.
+  assert_eq!(nova(&app, &["run", "--target", "aarch64-linux-android"])?.status.code(), Some(1));
+  assert_eq!(nova(&app, &["build", "--target", "aarch64-linux-android", "--sanitize"])?.status.code(), Some(1));
+
+  Ok(())
+}
+
+#[test]
+fn checks_integer_sizes_for_the_target() -> io::Result<()> {
+  let temp = TempDir::new()?;
+  let app = temp.path.join("app");
+
+  // `usize` has 32 bits on `armv7`, and `c_long` 64 on 64-bit Android.
+  package(
+    &app,
+    &manifest("app", &[]),
+    &[(
+      "main.sag",
+      "use std::ffi::c_long;\n\nfn main() {\n  const big: usize = 5_000_000_000;\n  const long: c_long = 5_000_000_000;\n  println(`${big} ${long}`);\n}\n",
+    )],
+  )?;
+
+  let armv7 = nova(&app, &["check", "--target", "armv7-linux-androideabi", "--diagnostic-format", "short"])?;
+
+  assert!(stderr(&armv7).contains("main.sag:4:22: error[E0302]"), "{}", stderr(&armv7));
+  assert!(stderr(&armv7).contains("main.sag:5:24: error[E0302]"), "{}", stderr(&armv7));
+  assert_success(&nova(&app, &["check", "--target", "aarch64-linux-android"])?);
+
+  // Unknown targets are reported with the supported ones.
+  let unknown = nova(&app, &["check", "--target", "riscv64-linux-android"])?;
+
+  assert_eq!(unknown.status.code(), Some(1));
+  assert!(stderr(&unknown).contains("aarch64-linux-android"), "{}", stderr(&unknown));
+
+  Ok(())
+}
+
+#[test]
+fn builds_libraries_for_ios_on_macos_only() -> io::Result<()> {
+  let temp = TempDir::new()?;
+  let geo = temp.path.join("geo");
+
+  package(&geo, &manifest("geo", &[]), &[("lib.sag", "pub extern \"C\" fn geo_one() -> i32 {\n  1\n}\n")])?;
+
+  let app = temp.path.join("app");
+
+  package(&app, &manifest("app", &[]), &[("main.sag", "fn main() {}\n")])?;
+
+  // iOS has no standalone programs.
+  assert_eq!(nova(&app, &["build", "--target", "aarch64-apple-ios"])?.status.code(), Some(1));
+
+  let build = nova(&geo, &["build", "--target", "aarch64-apple-ios"])?;
+
+  if !cfg!(target_os = "macos") {
+    assert_eq!(build.status.code(), Some(1));
+    assert!(stderr(&build).contains("only be built on macOS"), "{}", stderr(&build));
+
+    return Ok(());
+  }
+
+  assert_success(&build);
+
+  let device = geo.join("target").join("aarch64-apple-ios").join("debug");
+
+  // Only the static library by default, which Xcode links.
+  assert!(device.join("libgeo.a").is_file() && device.join("geo.h").is_file());
+  assert!(!device.join("libgeo.dylib").exists());
+
+  // The simulator, with the dynamic library too.
+  fs::write(geo.join("Nova.toml"), format!("{}\n[library]\noutputs = [\"static\", \"dynamic\"]\n", manifest("geo", &[])))?;
+  assert_success(&nova(&geo, &["build", "--target", "aarch64-apple-ios-sim"])?);
+  assert!(geo.join("target").join("aarch64-apple-ios-sim").join("debug").join("libgeo.dylib").is_file());
+
+  Ok(())
+}

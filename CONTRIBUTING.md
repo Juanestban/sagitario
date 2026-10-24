@@ -22,6 +22,7 @@ sag build main.sag --emit-c     # also write the generated C
 sag run --release main.sag      # optimized; integer overflow wraps
 sag run --sanitize main.sag     # with ASan and UBSan (the test harness always uses it)
 SAG_TEST_SANITIZE=0 cargo test --workspace   # faster local runs without sanitizers
+ANDROID_NDK_HOME=/path/to/ndk cargo test --workspace   # also the Android cross-compilation tests
 SAG_CC=gcc sag build main.sag   # choose the C compiler (or --cc)
 
 nova new demo                   # a package (docs/nova.md); then, inside it:

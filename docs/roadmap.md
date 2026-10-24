@@ -91,7 +91,8 @@ Increments:
 6. Library outputs: a library builds `.a`/`.so`/`.dylib`/`.dll` with the exported functions and
    a generated C header; `[link]` for C libraries and sources
    ([ADR-0042](adr/0042-library-outputs-and-linking-c.md)).
-7. Cross-compilation: `--target`, Android (NDK) and iOS, with `c_long`/`c_char` per target.
+7. Cross-compilation: `--target`, Android (NDK) and iOS, with `c_long`/`c_char` per target
+   ([ADR-0043](adr/0043-cross-compilation.md)).
 8. A decision record re-evaluating MSVC `cl.exe` and `zig cc`, and the acceptance program.
 
 **Acceptance:** a command-line tool (a small `grep` or `wc`) built as a package reads files and

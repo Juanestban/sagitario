@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use sagitario_diagnostics::{Diagnostic, DiagnosticFormat, render};
-use sagitario_driver::{CompileOptions, Dependency, EXIT_FAILURE, LibraryOutputs, Link};
+use sagitario_driver::{CompileOptions, Dependency, EXIT_FAILURE, LibraryOutputs, Link, Platform, TARGETS};
 use sagitario_span::SourceMap;
 
 use manifest::Manifest;
@@ -38,6 +38,8 @@ Options:
                               where the C compiler supports them (build, run)
   --emit-c                    Also write the generated C next to the executable (build, run)
   --cc <compiler>             C compiler to use; overrides SAG_CC (build, run)
+  --target <target>           Compile for another machine, such as `aarch64-linux-android`
+                              (build, check); `sag targets` lists them
   --diagnostic-format <fmt>   `human` (default) or `short`: one line per diagnostic";
 
 /// Exit code for invalid command-line usage.
@@ -65,6 +67,8 @@ pub struct Options {
   pub diagnostic_format: DiagnosticFormat,
   /// Arguments forwarded to the program by `nova run -- args`.
   pub program_args: Vec<String>,
+  /// The target to compile for (docs/nova.md#targets).
+  pub target: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,6 +152,7 @@ fn parse_options<I: Iterator<Item = String>>(mut args: I, command: &str) -> Resu
       "--sanitize" => options.sanitize = true,
       "--emit-c" => options.emit_c = true,
       "--cc" => options.cc = Some(inline_value.or_else(|| args.next()).ok_or_else(|| usage_error("`--cc` requires a value"))?),
+      "--target" => options.target = Some(inline_value.or_else(|| args.next()).ok_or_else(|| usage_error("`--target` requires a value"))?),
       "--diagnostic-format" => {
         options.diagnostic_format = match inline_value.or_else(|| args.next()).as_deref() {
           Some("human") => DiagnosticFormat::Human,
@@ -512,8 +517,31 @@ fn compile(options: &Options, mode: Mode) -> u8 {
     })
     .collect();
   let profile = if options.release { "release" } else { "debug" };
-  let target = package.dir.join("target").join(profile);
-  let executable = target.join(&package.manifest.name).with_extension(env::consts::EXE_EXTENSION);
+  // Builds for another machine go to `target/<target>/`, apart from this machine's.
+  let cross = match options.target.as_deref() {
+    Some(name) => match TARGETS.iter().find(|target| target.name == name) {
+      Some(target) => Some(target),
+      None => {
+        let names: Vec<&str> = TARGETS.iter().map(|target| target.name).collect();
+
+        return fail(format!("unknown target `{name}`\nnote: the supported targets are {}", names.join(", ")));
+      }
+    },
+    None => None,
+  };
+  let target = match cross {
+    Some(cross) => package.dir.join("target").join(cross.name).join(profile),
+    None => package.dir.join("target").join(profile),
+  };
+  let ios = cross.is_some_and(|cross| cross.platform == Platform::Ios);
+
+  if ios && !package.lib {
+    return fail(format!(
+      "iOS runs no standalone programs: make `{}` a library, with `src/lib.sag`, and add it to an Xcode project",
+      package.manifest.name
+    ));
+  }
+  let executable = target.join(&package.manifest.name).with_extension(sagitario_driver::executable_extension(options.target.as_deref()));
   // `[link]` of every package of the graph applies to the whole program.
   let mut link = Link::default();
 
@@ -541,6 +569,7 @@ fn compile(options: &Options, mode: Mode) -> u8 {
     direct_dependencies: package.dependencies.iter().map(|index| index - 1).collect(),
     name: package.manifest.name.clone(),
     link,
+    target: options.target.clone(),
   };
 
   for dependency in packages.iter().skip(1) {
@@ -566,10 +595,11 @@ fn compile(options: &Options, mode: Mode) -> u8 {
 
   if package.lib {
     let library = package.manifest.library.as_ref();
+    // Xcode links static libraries; dynamic ones for iOS must be asked for.
     let outputs = LibraryOutputs {
       dir: target.clone(),
       static_lib: library.is_none_or(|library| library.static_lib),
-      dynamic_lib: library.is_none_or(|library| library.dynamic_lib),
+      dynamic_lib: library.map_or(!ios, |library| library.dynamic_lib),
     };
 
     return match sagitario_driver::build_library(&compile_options, &outputs) {

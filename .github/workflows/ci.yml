@@ -16,6 +16,10 @@ jobs:
       matrix:
         os: [windows-latest, ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    env:
+      # The Ubuntu runners have the Android NDK: its cross-compilation tests must not be skipped
+      # there. The macOS runners have Xcode, which the iOS tests use (docs/nova.md#targets).
+      SAG_REQUIRE_NDK: ${{ matrix.os == 'ubuntu-latest' && '1' || '0' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

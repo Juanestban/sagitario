@@ -11,6 +11,7 @@ Commands:
   build    Compile a program to an executable
   run      Compile and run a program (arguments after `--` go to the program)
   check    Check a program without generating code
+  targets  List the targets `--target` accepts
   help     Show this message
   version  Show the compiler version
 
@@ -20,6 +21,8 @@ Options:
                               where the C compiler supports them (build, run)
   --emit-c                    Also write the generated C (build, run)
   --cc <compiler>             C compiler to use; overrides SAG_CC (build, run)
+  --target <target>           Compile for another machine, such as `aarch64-linux-android`
+                              (build, check)
   --diagnostic-format <fmt>   `human` (default) or `short`: one line per diagnostic";
 
 /// Exit code for invalid command-line usage.
@@ -33,6 +36,7 @@ pub enum Command {
   Build(CompileOptions),
   Run(CompileOptions),
   Check(CompileOptions),
+  Targets,
   Help,
   Version,
 }
@@ -70,6 +74,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Command, Us
     "build" => parse_compile_options(args, Mode::Build).map(Command::Build),
     "run" => parse_compile_options(args, Mode::Run).map(Command::Run),
     "check" => parse_compile_options(args, Mode::Check).map(Command::Check),
+    "targets" => Ok(Command::Targets),
     "help" | "--help" | "-h" => Ok(Command::Help),
     "version" | "--version" | "-v" => Ok(Command::Version),
     other => Err(usage_error(format!("unknown command `{other}`"))),
@@ -103,6 +108,7 @@ fn parse_compile_options<I: Iterator<Item = String>>(mut args: I, mode: Mode) ->
         require_codegen(mode, &flag)?;
         options.cc = Some(flag_value(&flag, inline_value, &mut args)?);
       }
+      "--target" => options.target = Some(flag_value(&flag, inline_value, &mut args)?),
       "--diagnostic-format" => {
         options.diagnostic_format = match flag_value(&flag, inline_value, &mut args)?.as_str() {
           "human" => DiagnosticFormat::Human,
@@ -149,6 +155,15 @@ pub fn execute(command: &Command) -> ExitCode {
     }
     Command::Version => {
       println!("sag {}", env!("CARGO_PKG_VERSION"));
+      ExitCode::SUCCESS
+    }
+    Command::Targets => {
+      println!("Targets for `--target`, besides this machine:");
+
+      for target in sagitario_driver::TARGETS {
+        println!("  {:<26}{}", target.name, target.description);
+      }
+
       ExitCode::SUCCESS
     }
     Command::Build(options) => ExitCode::from(sagitario_driver::build(options)),
@@ -213,6 +228,14 @@ mod tests {
 
     assert_eq!(parse(&["run", "--sanitize", "main.sag"]), Ok(Command::Run(expected)));
     assert!(parse(&["check", "--sanitize", "main.sag"]).is_err());
+  }
+
+  #[test]
+  fn parses_target() {
+    let expected = CompileOptions { target: Some("aarch64-linux-android".to_string()), ..options("main.sag") };
+
+    assert_eq!(parse(&["check", "--target", "aarch64-linux-android", "main.sag"]), Ok(Command::Check(expected)));
+    assert_eq!(parse(&["targets"]), Ok(Command::Targets));
   }
 
   #[test]

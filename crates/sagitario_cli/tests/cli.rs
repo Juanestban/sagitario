@@ -48,3 +48,16 @@ fn non_sag_input_exits_with_1() {
   assert_eq!(output.status.code(), Some(1));
   assert!(String::from_utf8_lossy(&output.stderr).contains("is not a `.sag` file"));
 }
+
+#[test]
+fn targets_lists_the_cross_compilation_targets() {
+  let output = sag(&["targets"]).unwrap();
+
+  assert!(output.status.success());
+
+  let text = String::from_utf8_lossy(&output.stdout);
+
+  for target in ["aarch64-linux-android", "armv7-linux-androideabi", "x86_64-linux-android", "aarch64-apple-ios", "aarch64-apple-ios-sim"] {
+    assert!(text.contains(target), "{text}");
+  }
+}

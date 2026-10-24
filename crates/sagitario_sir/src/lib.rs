@@ -1311,7 +1311,7 @@ impl FnLowering<'_> {
         let params = match &callee {
           Callee::Fn(id) | Callee::Virtual { function: id, .. } => self.typed.sig(*id).map(|sig| sig.params.clone()),
           Callee::Extern(id) => self.typed.extern_sig(*id).map(|sig| sig.params.clone()),
-          Callee::Builtin(builtin) => Some(sagitario_types::builtin_sig(*builtin).params),
+          Callee::Builtin(builtin) => Some(sagitario_types::builtin_sig(*builtin, &self.package.target).params),
           Callee::Dyn { params, .. } | Callee::Closure { params, .. } => Some(params.clone()),
           Callee::Runtime { .. } => None,
         }

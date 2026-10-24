@@ -40,6 +40,38 @@ pub struct Package {
   /// The package being compiled first, then its dependencies (docs/nova.md#dependencies), which
   /// `Module::package` indexes. Empty for a program without dependencies.
   pub packages: Vec<PackageInfo>,
+  /// The machine the program is compiled for.
+  pub target: TargetInfo,
+}
+
+/// What the compiler needs to know about the machine a program runs on (docs/nova.md#targets).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TargetInfo {
+  /// The width of pointers, `isize` and `usize`: 32 or 64.
+  pub pointer_width: u32,
+  /// Whether C's `long` has 32 bits: on Windows and on 32-bit targets.
+  pub long_is_32: bool,
+  /// Whether C's `char` is unsigned: on Linux and Android for ARM.
+  pub char_is_unsigned: bool,
+}
+
+impl TargetInfo {
+  /// The machine running the compiler.
+  pub fn host() -> TargetInfo {
+    let pointer_width = if cfg!(target_pointer_width = "32") { 32 } else { 64 };
+
+    TargetInfo {
+      pointer_width,
+      long_is_32: cfg!(windows) || pointer_width == 32,
+      char_is_unsigned: cfg!(all(any(target_os = "linux", target_os = "android"), any(target_arch = "aarch64", target_arch = "arm"))),
+    }
+  }
+}
+
+impl Default for TargetInfo {
+  fn default() -> TargetInfo {
+    TargetInfo::host()
+  }
 }
 
 /// A package of a program: the one being compiled, or a dependency.
@@ -54,7 +86,7 @@ pub struct PackageInfo {
 impl Package {
   /// A program made of one file.
   pub fn single(module: Module) -> Package {
-    Package { modules: vec![module], prelude: None, std: Vec::new(), library: false, packages: Vec::new() }
+    Package { modules: vec![module], prelude: None, std: Vec::new(), library: false, packages: Vec::new(), target: TargetInfo::host() }
   }
 }
 

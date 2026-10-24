@@ -2230,7 +2230,14 @@ static void *sag_win_inherited(unsigned long which) {
   return DuplicateHandle(GetCurrentProcess(), handle, GetCurrentProcess(), &copy, 0, 1, 2ul) ? copy : NULL;
 }
 #else
+/* Shared libraries on Apple systems cannot refer to `environ` directly. */
+#ifdef __APPLE__
+#include <crt_externs.h>
+#define sag_environ (*_NSGetEnviron())
+#else
 extern char **environ;
+#define sag_environ environ
+#endif
 
 /* Whether the `NAME=value` entry has the name `name`. */
 static bool sag_same_name(const char *entry, const char *name, size_t name_len) {
@@ -2242,7 +2249,7 @@ static bool sag_same_name(const char *entry, const char *name, size_t name_len) 
 static char **sag_environment(char **vars) {
   size_t count = 0;
   size_t extra = 0;
-  while (environ != NULL && environ[count] != NULL) {
+  while (sag_environ != NULL && sag_environ[count] != NULL) {
     count++;
   }
   while (vars[extra] != NULL) {
@@ -2253,10 +2260,10 @@ static char **sag_environment(char **vars) {
   for (size_t i = 0; i < count; i++) {
     bool replaced = false;
     for (size_t j = 0; j < extra && !replaced; j++) {
-      replaced = sag_same_name(environ[i], vars[j], (size_t)(strchr(vars[j], '=') - vars[j]));
+      replaced = sag_same_name(sag_environ[i], vars[j], (size_t)(strchr(vars[j], '=') - vars[j]));
     }
     if (!replaced) {
-      merged[len++] = environ[i];
+      merged[len++] = sag_environ[i];
     }
   }
   for (size_t j = 0; j < extra; j++) {
@@ -2476,7 +2483,7 @@ sag_string sag_process_run(sag_string argv, size_t argc, sag_string env, size_t 
   }
   pid_t pid = -1;
   if (code == 0) {
-    char **envp = env_count > 0 ? sag_environment(vars) : environ;
+    char **envp = env_count > 0 ? sag_environment(vars) : sag_environ;
     pid = fork();
     if (pid == 0) {
       /* The child: only async-signal-safe calls until `execve`. */
@@ -2496,7 +2503,7 @@ sag_string sag_process_run(sag_string argv, size_t argc, sag_string env, size_t 
     if (pid < 0) {
       code = sag_io_errno();
     }
-    if (envp != environ) {
+    if (envp != sag_environ) {
       free(envp);
     }
   }

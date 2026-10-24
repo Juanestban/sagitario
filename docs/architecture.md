@@ -248,6 +248,10 @@ Anything expressible in Sagitario belongs in `std/` instead.
   an error of the package. A dynamic library exports only the `extern "C" fn` functions,
   through a module-definition file (Windows), a version script (Linux) or an exported symbols
   list (macOS). `header.rs` writes a library's C header from the typed program.
+- Cross-compilation (`targets.rs`): a target gives the C compiler with the arguments every call
+  needs (`CCompiler::args`: `--target=<triple>`, and `-isysroot` for iOS) and the facts the type
+  checker needs (`TargetInfo` in `Package::target`: pointer width, size of C's `long`, sign of
+  C's `char`). Without `--target` they are those of the machine running the compiler.
 
 ## CLI
 
