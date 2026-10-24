@@ -241,6 +241,13 @@ Anything expressible in Sagitario belongs in `std/` instead.
   LLVM clang targeting `x86_64-pc-windows-msvc`. MinGW clang (`*-windows-gnu`, detected with
   `-dumpmachine`) is tolerated with a warning and without sanitizers. When running sanitized
   programs, the driver adds the sanitizer runtime directory to the child `PATH`.
+- Builds go through objects: the generated C (strict C11, `-pedantic-errors`) and the
+  package's C sources (C11) are compiled separately, then linked into an executable, archived
+  into a static library or linked into a dynamic one (`-fPIC` outside Windows). A failure in the
+  generated C alone is an internal compiler error; one in the package's sources or libraries is
+  an error of the package. A dynamic library exports only the `extern "C" fn` functions,
+  through a module-definition file (Windows), a version script (Linux) or an exported symbols
+  list (macOS). `header.rs` writes a library's C header from the typed program.
 
 ## CLI
 

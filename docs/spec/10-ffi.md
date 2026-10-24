@@ -24,8 +24,9 @@ fn main() {
   Their names are their C symbols; each one may be `pub`, like any function.
 - A C function may be declared in several blocks, always with the same signature.
 - Parameters and results must be FFI-safe (below); a function returning `()` returns `void`.
-- The C standard library is always linked. Linking other libraries arrives with the build
-  modes of F3. Variadic functions (`printf`) are not supported in the MVP.
+- The C standard library is always linked. A package links other C libraries and C sources
+  with `[link]` in its `Nova.toml` (F3, [Nova](../nova.md#linking-c)). Variadic functions
+  (`printf`) are not supported in the MVP.
 
 ## Exporting functions
 
@@ -37,8 +38,8 @@ extern "C" fn add(a: i32, b: i32) -> i32 { a + b }
 - `extern "C" fn` gives a function the C ABI and exports it under its own name, or under the
   symbol given by `@export("symbol")`. Its parameters and result must be FFI-safe. Sagitario
   code calls it like any other function.
-- Exported functions allow building Sagitario as a static or dynamic library (build modes
-  beyond executables are F3).
+- A library package builds into a static and a dynamic library that export these functions,
+  with a C header declaring them (F3, [Nova](../nova.md#library-outputs)).
 
 ## C symbols
 

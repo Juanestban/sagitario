@@ -120,7 +120,7 @@ fn finds_the_package_from_a_subdirectory() -> io::Result<()> {
 }
 
 #[test]
-fn checks_a_library_without_building_or_running_it() -> io::Result<()> {
+fn builds_but_does_not_run_a_library() -> io::Result<()> {
   let temp = TempDir::new()?;
 
   assert_success(&nova(&temp.path, &["new", "--lib", "geometry"])?);
@@ -132,11 +132,12 @@ fn checks_a_library_without_building_or_running_it() -> io::Result<()> {
   // A library needs no `main`, and a function called `main` is an ordinary one.
   fs::write(package.join("src").join("lib.sag"), "pub fn main(x: i32) -> i32 {\n  x\n}\n")?;
 
+  // Without exported functions it still builds, with a warning.
   let build = nova(&package, &["build"])?;
 
   assert_success(&build);
-  assert!(stderr(&build).contains("is a library"), "{}", stderr(&build));
-  assert!(!package.join("target").exists());
+  assert!(stderr(&build).contains("exports no functions"), "{}", stderr(&build));
+  assert!(package.join("target").join("debug").join("geometry.h").is_file());
 
   let run = nova(&package, &["run"])?;
 
@@ -247,7 +248,7 @@ fn reports_usage_errors() -> io::Result<()> {
 }
 
 /// Each manifest and the error it causes, as `line:column: error[code]`.
-const MANIFEST_ERRORS: [(&str, &str); 10] = [
+const MANIFEST_ERRORS: [(&str, &str); 13] = [
   ("[package]\nname = \"app\"\nversion = 0.1\n", "3:11: error[N0001]"),
   ("[package]\nname = \"app\"\nname = \"other\"\nversion = \"0.1.0\"\n", "3:1: error[N0002]"),
   ("[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2024\"\n", "4:1: error[N0003]"),
@@ -256,6 +257,9 @@ const MANIFEST_ERRORS: [(&str, &str); 10] = [
   ("[package]\nname = \"My-App\"\nversion = \"0.1.0\"\n", "2:8: error[N0006]"),
   ("[package]\nname = \"app\"\nversion = \"1.0\"\n", "3:11: error[N0007]"),
   ("[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nutil = { git = \"https://example.com/util\" }\n", "6:10: error[N0008]"),
+  ("[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[library]\noutputs = [\"shared\"]\n", "6:12: error[N0014]"),
+  ("[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[library]\n", "5:1: error[N0015]"),
+  ("[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[link]\nsources = [\"c/missing.c\"]\n", "6:12: error[N0016]"),
   // The layout errors point at `[package]`: no source file, then both.
   ("[package]\nname = \"app\"\nversion = \"0.1.0\"\n", "1:1: error[N0009]"),
   ("[package]\nname = \"app\"\nversion = \"0.1.0\"\n", "1:1: error[N0009]"),
@@ -271,11 +275,11 @@ fn reports_manifest_errors_with_their_location() -> io::Result<()> {
     fs::write(temp.path.join("Nova.toml"), manifest)?;
 
     // The first layout case has no source file; every other one has `src/main.sag`.
-    if index != 8 {
+    if index != MANIFEST_ERRORS.len() - 2 {
       fs::write(src.join("main.sag"), "fn main() {}\n")?;
     }
 
-    if index == 9 {
+    if index == MANIFEST_ERRORS.len() - 1 {
       fs::write(src.join("lib.sag"), "pub fn f() {}\n")?;
     }
 
@@ -427,6 +431,200 @@ fn reports_dependency_errors() -> io::Result<()> {
       assert!(reported.contains("app -> dep -> app"), "{reported}");
     }
   }
+
+  Ok(())
+}
+
+/// The C compiler the tests build C programs with: `SAG_CC`, else `clang`, else `gcc`, as `sag`
+/// chooses it.
+fn c_compiler() -> String {
+  if let Ok(compiler) = std::env::var("SAG_CC")
+    && !compiler.trim().is_empty()
+  {
+    return compiler;
+  }
+
+  let works = |command: &str| Command::new(command).arg("--version").output().is_ok_and(|output| output.status.success());
+
+  if works("clang") { "clang".to_string() } else { "gcc".to_string() }
+}
+
+/// The target triple of the C compiler.
+fn c_target(compiler: &str) -> io::Result<String> {
+  let output = Command::new(compiler).arg("-dumpmachine").output()?;
+
+  Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+const LIBRARY_SOURCE: &str = "use std::ffi::c_int;
+
+extern \"C\" {
+  fn helper_twice(x: c_int) -> c_int;
+}
+
+/// A point in the plane.
+@repr(C)
+pub struct Point {
+  pub x: f64;
+  pub y: f64;
+}
+
+/// The squared distance between
+/// two points.
+@export(\"geo_distance2\")
+pub extern \"C\" fn distance2(a: Point, b: Point) -> f64 {
+  const dx = a.x - b.x;
+  const dy = a.y - b.y;
+  dx * dx + dy * dy
+}
+
+/// Doubles `x` in C, after using a list.
+pub extern \"C\" fn geo_twice(x: i32) -> i32 {
+  const items = List::from([1, 2, 3]);
+  unsafe { helper_twice(x) } + items.len() as i32 - 3
+}
+
+pub extern \"C\" fn geo_fill(out: *mut Point) {
+  unsafe { *out = Point { x: 1.5, y: 2.5 }; }
+}
+";
+
+const HOST_SOURCE: &str = "#include <stdio.h>
+#include \"geo.h\"
+
+int main(void) {
+  Point a = {0.0, 0.0};
+  Point b = {3.0, 4.0};
+  Point c;
+  geo_fill(&c);
+  printf(\"%.1f %d %.1f %.1f\\n\", geo_distance2(a, b), geo_twice(21), c.x, c.y);
+  return 0;
+}
+";
+
+#[test]
+fn builds_a_library_that_c_programs_use() -> io::Result<()> {
+  let temp = TempDir::new()?;
+  let geo = temp.path.join("geo");
+
+  package(&geo, &format!("{}\n[link]\nsources = [\"c/helper.c\"]\n", manifest("geo", &[])), &[("lib.sag", LIBRARY_SOURCE)])?;
+  fs::create_dir_all(geo.join("c"))?;
+  fs::write(geo.join("c").join("helper.c"), "int helper_twice(int x) {\n  return 2 * x;\n}\n")?;
+
+  let build = nova(&geo, &["build"])?;
+
+  assert_success(&build);
+
+  let target = geo.join("target").join("debug");
+  let header = fs::read_to_string(target.join("geo.h"))?;
+
+  for expected in [
+    "#ifndef GEO_H",
+    "struct Point {\n  double x;\n  double y;\n};",
+    "/* The squared distance between\n * two points. */\ndouble geo_distance2(Point a, Point b);",
+    "int32_t geo_twice(int32_t x);",
+    "void geo_fill(Point *out);",
+    "extern \"C\" {",
+  ] {
+    assert!(header.contains(expected), "`{expected}` is not in the header:\n{header}");
+  }
+
+  let compiler = c_compiler();
+  let target_triple = c_target(&compiler)?;
+  let windows = target_triple.contains("windows") || target_triple.contains("mingw");
+  let msvc = windows && !target_triple.contains("windows-gnu") && !target_triple.contains("mingw");
+  let (static_lib, import_lib) = match (windows, msvc) {
+    (true, true) => ("geo.lib", "geo.dll.lib"),
+    (true, false) => ("libgeo.a", "libgeo.dll.a"),
+    _ => ("libgeo.a", ""),
+  };
+
+  fs::write(target.join("host.c"), HOST_SOURCE)?;
+
+  // The runtime uses libm outside Windows; the dynamic library finds its own.
+  let libm: &[&str] = if windows { &[] } else { &["-lm"] };
+  let dynamic: Vec<String> =
+    if windows { vec![import_lib.to_string()] } else { vec!["-L.".to_string(), "-lgeo".to_string(), format!("-Wl,-rpath,{}", target.display())] };
+
+  for (exe, libraries) in [("host_static", vec![static_lib.to_string()]), ("host_dynamic", dynamic)] {
+    let executable = exe_name(exe);
+    let compile =
+      Command::new(&compiler).args(["-std=c11", "host.c"]).args(&libraries).args(libm).arg("-o").arg(&executable).current_dir(&target).output()?;
+
+    assert!(compile.status.success(), "{exe}: {}", String::from_utf8_lossy(&compile.stderr));
+
+    let run = Command::new(target.join(&executable)).current_dir(&target).output()?;
+
+    assert_eq!(stdout(&run), "25.0 42 1.5 2.5\n", "{exe}: {}", String::from_utf8_lossy(&run.stderr));
+  }
+
+  Ok(())
+}
+
+fn exe_name(stem: &str) -> String {
+  format!("{stem}{}", std::env::consts::EXE_SUFFIX)
+}
+
+#[test]
+fn builds_only_the_chosen_library_outputs() -> io::Result<()> {
+  let temp = TempDir::new()?;
+  let lib = temp.path.join("solo");
+
+  package(
+    &lib,
+    &format!("{}\n[library]\noutputs = [\"static\"]\n", manifest("solo", &[])),
+    &[("lib.sag", "pub extern \"C\" fn solo_one() -> i32 {\n  1\n}\n")],
+  )?;
+  assert_success(&nova(&lib, &["build", "--release"])?);
+
+  let files: Vec<String> =
+    fs::read_dir(lib.join("target").join("release"))?.flatten().map(|entry| entry.file_name().to_string_lossy().to_string()).collect();
+
+  assert!(files.iter().any(|file| file == "solo.h"), "{files:?}");
+  assert!(files.iter().any(|file| file == "solo.lib" || file == "libsolo.a"), "{files:?}");
+  assert!(!files.iter().any(|file| file.ends_with(".dll") || file.ends_with(".so") || file.ends_with(".dylib")), "{files:?}");
+
+  // Libraries cannot be sanitized, and one without exports is reported.
+  assert_eq!(nova(&lib, &["build", "--sanitize"])?.status.code(), Some(1));
+
+  fs::write(lib.join("src").join("lib.sag"), "pub fn inner() -> i32 {\n  1\n}\n")?;
+
+  let empty = nova(&lib, &["build"])?;
+
+  assert_success(&empty);
+  assert!(stderr(&empty).contains("exports no functions"), "{}", stderr(&empty));
+
+  Ok(())
+}
+
+#[test]
+fn links_c_sources_and_libraries_into_programs() -> io::Result<()> {
+  let temp = TempDir::new()?;
+  let app = temp.path.join("app");
+  let libraries = if cfg!(windows) { "" } else { "libraries = [\"m\"]\n" };
+
+  package(
+    &app,
+    &format!("{}\n[link]\n{libraries}sources = [\"c/add.c\"]\n", manifest("app", &[])),
+    &[(
+      "main.sag",
+      "use std::ffi::c_int;\n\nextern \"C\" {\n  fn c_add(a: c_int, b: c_int) -> c_int;\n}\n\nfn main() {\n  const sum = unsafe { c_add(40, 2) };\n  println(`${sum}`);\n}\n",
+    )],
+  )?;
+  fs::create_dir_all(app.join("c"))?;
+  fs::write(app.join("c").join("add.c"), "int c_add(int a, int b) {\n  return a + b;\n}\n")?;
+
+  let run = nova(&app, &["run"])?;
+
+  assert_eq!(stdout(&run), "42\n", "{}", stderr(&run));
+
+  // A C source that does not compile is an error of the package, not of the compiler.
+  fs::write(app.join("c").join("add.c"), "int c_add(int a, int b) {\n  return a +;\n}\n")?;
+
+  let broken = nova(&app, &["build"])?;
+
+  assert_eq!(broken.status.code(), Some(1));
+  assert!(stderr(&broken).contains("cannot compile the C source"), "{}", stderr(&broken));
 
   Ok(())
 }

@@ -1,6 +1,8 @@
 //! Compilation driver: runs the pipeline (docs/architecture.md#pipeline), prints diagnostics,
 //! writes the generated C with the embedded runtime, and invokes the C compiler.
 
+mod header;
+
 use std::collections::HashSet;
 use std::env;
 use std::fs;
@@ -44,6 +46,37 @@ pub struct CompileOptions {
   pub dependencies: Vec<Dependency>,
   /// Indices in `dependencies` of the input's own dependencies.
   pub direct_dependencies: Vec<usize>,
+  /// The package's name, which names a library's files and its header.
+  pub name: String,
+  /// C libraries and sources to link (docs/nova.md#linking-c).
+  pub link: Link,
+}
+
+/// What `[link]` adds to a build: C libraries, where to find them, and C sources to compile.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Link {
+  /// Names passed as `-lname`.
+  pub libraries: Vec<String>,
+  /// Directories passed as `-Ldir`.
+  pub search_paths: Vec<PathBuf>,
+  /// C files compiled as C11 and linked with the program or library.
+  pub sources: Vec<PathBuf>,
+}
+
+impl Link {
+  fn is_empty(&self) -> bool {
+    self.libraries.is_empty() && self.search_paths.is_empty() && self.sources.is_empty()
+  }
+}
+
+/// The files `build_library` writes, besides the header.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LibraryOutputs {
+  pub dir: PathBuf,
+  /// `libname.a`, or `name.lib` with MSVC.
+  pub static_lib: bool,
+  /// `libname.so`, `libname.dylib`, or `name.dll` with its import library.
+  pub dynamic_lib: bool,
 }
 
 /// A library package the program depends on, compiled together with it.
@@ -120,6 +153,10 @@ pub fn run(options: &CompileOptions) -> u8 {
 
 struct FrontEnd {
   c_source: Option<sagitario_codegen_c::GeneratedC>,
+  /// A library's C header.
+  header: Option<String>,
+  /// The symbols of a library's exported functions.
+  exports: Vec<String>,
 }
 
 /// Lexes, parses, resolves and type checks; with `generate`, also lowers to SIR and emits C.
@@ -200,10 +237,13 @@ fn front_end(options: &CompileOptions, generate: bool) -> Result<FrontEnd, u8> {
 
   report(&mut diagnostics, &sources, options)?;
 
-  // A library has no entry point to lower from until library outputs exist.
-  if options.library {
-    return Ok(FrontEnd { c_source: None });
-  }
+  let (header, exports) = if options.library && generate {
+    let exports = header::exports(&package, &resolution, &typed).into_iter().map(|export| export.symbol).collect();
+
+    (Some(header::generate(&options.name, &package, &resolution, &typed, &sources)), exports)
+  } else {
+    (None, Vec::new())
+  };
 
   let program = sagitario_sir::lower(&package, &resolution, &typed, &sources, &mut diagnostics).map_err(|error| {
     eprintln!("internal compiler error: {}", error.0);
@@ -214,9 +254,9 @@ fn front_end(options: &CompileOptions, generate: bool) -> Result<FrontEnd, u8> {
   report(&mut diagnostics, &sources, options)?;
 
   if !generate {
-    return Ok(FrontEnd { c_source: None });
+    return Ok(FrontEnd { c_source: None, header, exports });
   }
-  Ok(FrontEnd { c_source: Some(sagitario_codegen_c::generate(&program)) })
+  Ok(FrontEnd { c_source: Some(sagitario_codegen_c::generate(&program)), header, exports })
 }
 
 /// The part of the prelude written in Sagitario.
@@ -518,6 +558,185 @@ pub fn use_color(format: DiagnosticFormat) -> bool {
   ansi_terminal && std::io::stderr().is_terminal()
 }
 
+/// What failed while building with the C toolchain.
+enum Failure {
+  /// The generated C, which is a compiler bug.
+  Generated(String),
+  /// A C source file of the package.
+  Source(PathBuf, String),
+  /// Linking, or archiving a static library.
+  Link(String),
+  /// A tool that could not run.
+  Spawn(String, io::Error),
+}
+
+/// Runs the C compiler and the archiver on the files of a build.
+struct Toolchain<'a> {
+  compiler: &'a CCompiler,
+  /// The temporary directory holding the generated C and the objects.
+  dir: &'a Path,
+  mode: &'a [&'a str],
+  sanitize: &'a [&'a str],
+  /// Position-independent code, for dynamic libraries outside Windows.
+  pic: bool,
+}
+
+impl Toolchain<'_> {
+  fn output(&self, command: &mut Command, tool: &str) -> Result<std::process::Output, Failure> {
+    command.output().map_err(|error| Failure::Spawn(tool.to_string(), error))
+  }
+
+  /// Compiles one C file to an object; the generated C must be strict C11.
+  fn compile(&self, source: &Path, object: &Path, generated: bool) -> Result<(), Failure> {
+    let mut command = Command::new(&self.compiler.command);
+
+    command.arg("-std=c11");
+
+    if generated {
+      command.arg("-pedantic-errors");
+    }
+
+    command.args(self.mode).args(self.sanitize);
+
+    if self.pic {
+      command.arg("-fPIC");
+    }
+
+    command.arg("-I").arg(self.dir).arg("-c").arg(source).arg("-o").arg(object);
+
+    let output = self.output(&mut command, &self.compiler.command)?;
+
+    if output.status.success() {
+      return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    Err(if generated { Failure::Generated(stderr) } else { Failure::Source(source.to_path_buf(), stderr) })
+  }
+
+  /// The objects of the generated C files and of the package's own C sources.
+  fn objects(&self, generated: &[PathBuf], sources: &[PathBuf]) -> Result<Vec<PathBuf>, Failure> {
+    let mut objects = Vec::new();
+
+    for (index, source) in generated.iter().chain(sources).enumerate() {
+      let object = self.dir.join(format!("object{index}.o"));
+
+      self.compile(source, &object, index < generated.len())?;
+      objects.push(object);
+    }
+
+    Ok(objects)
+  }
+
+  /// The libraries to link: the package's, then libm outside Windows (`fmod` and friends).
+  fn link_args(&self, link: &Link) -> Vec<String> {
+    let mut args = Vec::new();
+
+    for path in &link.search_paths {
+      args.push(format!("-L{}", path.display()));
+    }
+
+    for library in &link.libraries {
+      args.push(format!("-l{library}"));
+    }
+
+    if !self.compiler.windows() {
+      args.push("-lm".to_string());
+    }
+
+    args
+  }
+
+  fn link(&self, command: &mut Command) -> Result<(), Failure> {
+    let output = self.output(command, &self.compiler.command)?;
+
+    if output.status.success() { Ok(()) } else { Err(Failure::Link(String::from_utf8_lossy(&output.stderr).to_string())) }
+  }
+
+  fn executable(&self, objects: &[PathBuf], link: &Link, executable: &Path) -> Result<(), Failure> {
+    let mut command = Command::new(&self.compiler.command);
+
+    command.args(self.mode).args(self.sanitize).args(objects).arg("-o").arg(executable).args(self.link_args(link));
+    self.link(&mut command)
+  }
+}
+
+/// Writes the generated C, with the runtime, into `dir`, and returns the files to compile.
+fn write_generated(generated: &sagitario_codegen_c::GeneratedC, dir: &Path) -> Result<Vec<PathBuf>, u8> {
+  let program_c = dir.join("program.c");
+  let runtime_c = dir.join("sagitario_runtime.c");
+  let ffi_c = dir.join("sag_ffi.c");
+  let written = fs::write(&program_c, &generated.program)
+    .and_then(|()| fs::write(dir.join(sagitario_codegen_c::RUNTIME_HEADER), RUNTIME_HEADER))
+    .and_then(|()| fs::write(&runtime_c, RUNTIME_SOURCE))
+    .and_then(|()| match &generated.ffi {
+      Some(ffi) => fs::write(&ffi_c, ffi),
+      None => Ok(()),
+    });
+
+  if let Err(error) = written {
+    eprintln!("error: cannot write generated C to `{}`: {error}", dir.display());
+    return Err(EXIT_FAILURE);
+  }
+
+  let mut files = vec![program_c, runtime_c];
+
+  if generated.ffi.is_some() {
+    files.push(ffi_c);
+  }
+
+  Ok(files)
+}
+
+/// Writes the generated C next to `base` for `--emit-c`.
+fn emit_c(generated: &sagitario_codegen_c::GeneratedC, base: &Path) -> Result<(), u8> {
+  let c_path = base.with_extension("c");
+  let ffi_path = c_path.with_file_name(format!("{}_ffi.c", base.file_stem().unwrap_or_default().to_string_lossy()));
+  let written = fs::write(&c_path, &generated.program).and_then(|()| match &generated.ffi {
+    Some(ffi) => fs::write(&ffi_path, ffi),
+    None => Ok(()),
+  });
+
+  if let Err(error) = written {
+    eprintln!("error: cannot write the generated C next to `{}`: {error}", base.display());
+    return Err(EXIT_FAILURE);
+  }
+
+  Ok(())
+}
+
+/// Reports a failed build. Failures with the package's own C sources or libraries are errors in
+/// the package; failures with the generated C alone are internal compiler errors.
+fn report_failure(failure: Failure, compiler: &CCompiler, link: &Link) -> u8 {
+  match failure {
+    Failure::Generated(stderr) => {
+      eprintln!("internal compiler error: the generated C failed to compile with `{}`", compiler.command);
+      eprintln!("{stderr}");
+      EXIT_ICE
+    }
+    Failure::Source(path, stderr) => {
+      eprintln!("error: cannot compile the C source `{}`", path.display());
+      eprintln!("{stderr}");
+      EXIT_FAILURE
+    }
+    Failure::Link(stderr) if link.is_empty() => {
+      eprintln!("internal compiler error: the generated C failed to link with `{}`", compiler.command);
+      eprintln!("{stderr}");
+      EXIT_ICE
+    }
+    Failure::Link(stderr) => {
+      eprintln!("error: linking failed; check the C libraries and sources of `[link]`");
+      eprintln!("{stderr}");
+      EXIT_FAILURE
+    }
+    Failure::Spawn(tool, error) => {
+      eprintln!("error: cannot run `{tool}`: {error}");
+      EXIT_FAILURE
+    }
+  }
+}
+
 /// Compiles the program into `executable` and returns the C compiler used.
 fn compile_to(options: &CompileOptions, executable: &Path) -> Result<CCompiler, u8> {
   if options.library {
@@ -529,78 +748,213 @@ fn compile_to(options: &CompileOptions, executable: &Path) -> Result<CCompiler, 
     eprintln!("internal compiler error: no C was generated");
     return Err(EXIT_ICE);
   };
+
   if options.emit_c {
-    let base = options.output.as_ref().unwrap_or(&options.input);
-    let c_path = base.with_extension("c");
-    let ffi_path = c_path.with_file_name(format!("{}_ffi.c", base.file_stem().unwrap_or_default().to_string_lossy()));
-    let written = fs::write(&c_path, &generated.program).and_then(|()| match &generated.ffi {
-      Some(ffi) => fs::write(&ffi_path, ffi),
-      None => Ok(()),
-    });
-    if let Err(error) = written {
-      eprintln!("error: cannot write the generated C next to `{}`: {error}", options.input.display());
-      return Err(EXIT_FAILURE);
-    }
+    emit_c(&generated, options.output.as_ref().unwrap_or(&options.input))?;
   }
+
   let mut compiler = find_c_compiler(options.cc.as_deref())?;
   compiler.sanitized = options.sanitize && compiler.supports_sanitizers();
   let dir = TempDir::create().map_err(|error| {
     eprintln!("error: cannot create a temporary directory: {error}");
     EXIT_FAILURE
   })?;
-  let program_c = dir.path.join("program.c");
-  let runtime_c = dir.path.join("sagitario_runtime.c");
-  let ffi_c = dir.path.join("sag_ffi.c");
-  let written = fs::write(&program_c, &generated.program)
-    .and_then(|()| fs::write(dir.path.join(sagitario_codegen_c::RUNTIME_HEADER), RUNTIME_HEADER))
-    .and_then(|()| fs::write(&runtime_c, RUNTIME_SOURCE))
-    .and_then(|()| match &generated.ffi {
-      Some(ffi) => fs::write(&ffi_c, ffi),
-      None => Ok(()),
-    });
-  if let Err(error) = written {
-    eprintln!("error: cannot write generated C to `{}`: {error}", dir.path.display());
-    return Err(EXIT_FAILURE);
-  }
-
+  let files = write_generated(&generated, &dir.path)?;
   let mode: &[&str] = if options.release { &["-O2", "-DSAG_RELEASE"] } else { &["-O0", "-g"] };
-  // `fmod` and friends live in libm outside Windows.
-  let libm: &[&str] = if compiler.target.contains("windows") { &[] } else { &["-lm"] };
-  let compile = |sanitize: &[&str]| {
-    Command::new(&compiler.command)
-      .args(["-std=c11", "-pedantic-errors"])
-      .args(mode)
-      .args(sanitize)
-      .arg("-I")
-      .arg(&dir.path)
-      .arg(&program_c)
-      .arg(&runtime_c)
-      .args(generated.ffi.as_ref().map(|_| &ffi_c))
-      .arg("-o")
-      .arg(executable)
-      .args(libm)
-      .output()
+  let build = |sanitize: &[&str]| {
+    let toolchain = Toolchain { compiler: &compiler, dir: &dir.path, mode, sanitize, pic: false };
+    let objects = toolchain.objects(&files, &options.link.sources)?;
+
+    toolchain.executable(&objects, &options.link, executable)
   };
-  let output = compile(if compiler.sanitized { &SANITIZE_FLAGS } else { &[] });
-  match output {
-    Ok(output) if output.status.success() => Ok(compiler),
-    // The C compiles without sanitizers: the toolchain lacks their libraries.
-    Ok(output) if compiler.sanitized && compile(&[]).is_ok_and(|plain| plain.status.success()) => {
+
+  match build(if compiler.sanitized { &SANITIZE_FLAGS } else { &[] }) {
+    Ok(()) => Ok(compiler),
+    // It builds without sanitizers: the toolchain lacks their libraries.
+    Err(Failure::Generated(stderr) | Failure::Link(stderr)) if compiler.sanitized && build(&[]).is_ok() => {
       eprintln!("error: the C compiler `{}` cannot build with sanitizers (`{}`)", compiler.command, SANITIZE_FLAGS.join(" "));
-      eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+      eprintln!("{stderr}");
       eprintln!("note: install its sanitizer libraries, or build without `--sanitize`");
       Err(EXIT_FAILURE)
     }
-    Ok(output) => {
-      eprintln!("internal compiler error: the generated C failed to compile with `{}`", compiler.command);
-      eprintln!("{}", String::from_utf8_lossy(&output.stderr));
-      Err(EXIT_ICE)
-    }
-    Err(error) => {
-      eprintln!("error: cannot run the C compiler `{}`: {error}", compiler.command);
-      Err(EXIT_FAILURE)
+    Err(failure) => Err(report_failure(failure, &compiler, &options.link)),
+  }
+}
+
+/// The files `build_library` writes.
+fn library_files(compiler: &CCompiler, outputs: &LibraryOutputs, name: &str) -> (Option<PathBuf>, Option<(PathBuf, Option<PathBuf>)>) {
+  let (windows, mingw, apple) = (compiler.windows(), compiler.mingw(), compiler.apple());
+  let static_name = if windows && !mingw { format!("{name}.lib") } else { format!("lib{name}.a") };
+  let dynamic = if windows {
+    let import = if mingw { format!("lib{name}.dll.a") } else { format!("{name}.dll.lib") };
+
+    (outputs.dir.join(format!("{name}.dll")), Some(outputs.dir.join(import)))
+  } else if apple {
+    (outputs.dir.join(format!("lib{name}.dylib")), None)
+  } else {
+    (outputs.dir.join(format!("lib{name}.so")), None)
+  };
+
+  (outputs.static_lib.then(|| outputs.dir.join(static_name)), outputs.dynamic_lib.then_some(dynamic))
+}
+
+/// The archiver for static libraries: `SAG_AR`, then `llvm-ar` next to the C compiler, then
+/// `llvm-ar` and `ar` on `PATH`.
+fn find_archiver(compiler: &CCompiler) -> Result<String, u8> {
+  if let Ok(archiver) = env::var("SAG_AR")
+    && !archiver.trim().is_empty()
+  {
+    return Ok(archiver);
+  }
+
+  let mut candidates = Vec::new();
+
+  if let Some(dir) = Path::new(&compiler.command).parent().filter(|dir| !dir.as_os_str().is_empty()) {
+    candidates.push(dir.join("llvm-ar").with_extension(env::consts::EXE_EXTENSION).display().to_string());
+  }
+
+  candidates.push("llvm-ar".to_string());
+  candidates.push("ar".to_string());
+
+  for candidate in candidates {
+    if Command::new(&candidate).arg("--version").stdin(Stdio::null()).output().is_ok_and(|output| output.status.success()) {
+      return Ok(candidate);
     }
   }
+
+  eprintln!("error: no archiver found to build a static library; Sagitario needs `llvm-ar` or `ar`");
+  eprintln!("note: install one next to the C compiler or on PATH, or set SAG_AR");
+  Err(EXIT_FAILURE)
+}
+
+/// `nova build` of a library: its static and dynamic libraries and its header in
+/// `outputs.dir`. Returns the files written.
+pub fn build_library(options: &CompileOptions, outputs: &LibraryOutputs) -> Result<Vec<PathBuf>, u8> {
+  if options.sanitize {
+    eprintln!("error: libraries cannot be built with `--sanitize`: the programs using them would need the sanitizer runtime");
+    return Err(EXIT_FAILURE);
+  }
+
+  let front = front_end(options, true)?;
+  let (Some(generated), Some(header)) = (front.c_source, front.header) else {
+    eprintln!("internal compiler error: no C was generated for the library");
+    return Err(EXIT_ICE);
+  };
+  let name = &options.name;
+
+  if front.exports.is_empty() {
+    eprintln!("warning: the library `{name}` exports no functions; C can call only the functions declared `extern \"C\" fn`");
+  }
+
+  let compiler = find_c_compiler(options.cc.as_deref())?;
+  let (static_lib, dynamic_lib) = library_files(&compiler, outputs, name);
+  let header_path = outputs.dir.join(format!("{name}.h"));
+  let mut written = Vec::new();
+
+  if options.emit_c {
+    emit_c(&generated, &outputs.dir.join(name))?;
+  }
+
+  let dir = TempDir::create().map_err(|error| {
+    eprintln!("error: cannot create a temporary directory: {error}");
+    EXIT_FAILURE
+  })?;
+  let files = write_generated(&generated, &dir.path)?;
+  let mode: &[&str] = if options.release { &["-O2", "-DSAG_RELEASE"] } else { &["-O0", "-g"] };
+  let windows = compiler.windows();
+  let report = |failure| report_failure(failure, &compiler, &options.link);
+
+  if let Some(path) = static_lib {
+    let archiver = find_archiver(&compiler)?;
+    let toolchain = Toolchain { compiler: &compiler, dir: &dir.path, mode, sanitize: &[], pic: false };
+    let objects = toolchain.objects(&files, &options.link.sources).map_err(report)?;
+    // `ar` adds to an existing archive, which could keep stale objects.
+    let _ = fs::remove_file(&path);
+    let mut command = Command::new(&archiver);
+
+    command.arg("rcs").arg(&path).args(&objects);
+
+    let output = toolchain.output(&mut command, &archiver).map_err(report)?;
+
+    if !output.status.success() {
+      return Err(report(Failure::Link(String::from_utf8_lossy(&output.stderr).to_string())));
+    }
+
+    written.push(path);
+  }
+
+  if let Some((path, import)) = dynamic_lib {
+    let toolchain = Toolchain { compiler: &compiler, dir: &dir.path, mode, sanitize: &[], pic: !windows };
+    let objects = toolchain.objects(&files, &options.link.sources).map_err(report)?;
+    let mut command = Command::new(&compiler.command);
+
+    command.args(mode).args(&objects).arg("-o").arg(&path);
+    export_list(&mut command, &compiler, &dir.path, &path, import.as_deref(), &front.exports)?;
+    command.args(toolchain.link_args(&options.link));
+    toolchain.link(&mut command).map_err(report)?;
+    written.push(path);
+    written.extend(import);
+  }
+
+  if let Err(error) = fs::write(&header_path, header) {
+    eprintln!("error: cannot write `{}`: {error}", header_path.display());
+    return Err(EXIT_FAILURE);
+  }
+
+  written.push(header_path);
+
+  Ok(written)
+}
+
+/// Makes a dynamic library export only `exports`, with the linker's own means so that the C
+/// stays strict C11: a module-definition file on Windows, a version script on Linux and an
+/// exported symbols list on macOS.
+fn export_list(command: &mut Command, compiler: &CCompiler, dir: &Path, library: &Path, import: Option<&Path>, exports: &[String]) -> Result<(), u8> {
+  let (windows, mingw, apple) = (compiler.windows(), compiler.mingw(), compiler.apple());
+  let (file, text) = if windows {
+    let name = library.file_stem().unwrap_or_default().to_string_lossy();
+    let symbols: String = exports.iter().map(|symbol| format!("  {symbol}\n")).collect();
+
+    (dir.join("exports.def"), format!("LIBRARY {name}\nEXPORTS\n{symbols}"))
+  } else if apple {
+    (dir.join("exports.txt"), exports.iter().map(|symbol| format!("_{symbol}\n")).collect())
+  } else {
+    let symbols: String = exports.iter().map(|symbol| format!(" {symbol};")).collect();
+    let global = if symbols.is_empty() { String::new() } else { format!("global:{symbols} ") };
+
+    (dir.join("exports.map"), format!("{{ {global}local: *; }};\n"))
+  };
+
+  if let Err(error) = fs::write(&file, text) {
+    eprintln!("error: cannot write `{}`: {error}", file.display());
+    return Err(EXIT_FAILURE);
+  }
+
+  command.arg("-shared");
+
+  if mingw {
+    command.arg(&file);
+
+    if let Some(import) = import {
+      command.arg(format!("-Wl,--out-implib,{}", import.display()));
+    }
+  } else if windows {
+    command.arg(format!("-Wl,/DEF:{}", file.display()));
+
+    if let Some(import) = import {
+      command.arg(format!("-Wl,/IMPLIB:{}", import.display()));
+    }
+  } else if apple {
+    let name = library.file_name().unwrap_or_default().to_string_lossy();
+
+    command.arg("-dynamiclib").arg(format!("-Wl,-exported_symbols_list,{}", file.display())).arg(format!("-Wl,-install_name,@rpath/{name}"));
+  } else {
+    let name = library.file_name().unwrap_or_default().to_string_lossy();
+
+    command.arg("-fPIC").arg(format!("-Wl,--version-script={}", file.display())).arg(format!("-Wl,-soname,{name}"));
+  }
+
+  Ok(())
 }
 
 struct CCompiler {
@@ -612,15 +966,28 @@ struct CCompiler {
 }
 
 impl CCompiler {
+  /// Windows, with the MSVC or the MinGW toolchain (`x86_64-w64-mingw32`).
+  fn windows(&self) -> bool {
+    self.target.contains("windows") || self.mingw()
+  }
+
+  fn mingw(&self) -> bool {
+    self.target.contains("windows-gnu") || self.target.contains("mingw")
+  }
+
+  fn apple(&self) -> bool {
+    self.target.contains("apple") || self.target.contains("darwin")
+  }
+
   /// MinGW toolchains ship no sanitizer runtime (docs/adr/0018-windows-c-toolchain.md).
   fn supports_sanitizers(&self) -> bool {
-    !self.target.contains("windows-gnu") && !self.target.contains("mingw")
+    !self.mingw()
   }
 
   /// The directory of the sanitizer runtime DLLs, which a sanitized program needs on `PATH` on
   /// Windows; `None` elsewhere or when the program is not sanitized.
   fn sanitizer_runtime_dir(&self) -> Option<PathBuf> {
-    if !self.sanitized || !self.target.contains("windows") {
+    if !self.sanitized || !self.windows() {
       return None;
     }
     let output = Command::new(&self.command).arg("-print-resource-dir").stdin(Stdio::null()).output().ok()?;

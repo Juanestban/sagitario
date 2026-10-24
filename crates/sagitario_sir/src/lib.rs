@@ -57,7 +57,8 @@ pub struct Program {
   pub envs: Vec<Vec<Type>>,
   /// The named functions used as values, which get a wrapper taking an environment.
   pub wrapped: Vec<FnId>,
-  pub entry: FnId,
+  /// `main`; a library has none, and C calls its exported functions instead.
+  pub entry: Option<FnId>,
   /// Path of each source file, by `FileId` index, for `#line` directives.
   pub source_paths: Vec<String>,
   /// The C functions of the `extern` blocks, indexed by `ExternId`.
@@ -481,7 +482,12 @@ pub fn lower(
   sources: &SourceMap,
   diagnostics: &mut Diagnostics,
 ) -> LResult<Program> {
-  let entry = resolution.main.ok_or_else(|| LowerError("program without `main`".to_string()))?;
+  let entry = resolution.main;
+
+  if entry.is_none() && !package.library {
+    return error("program without `main`");
+  }
+
   let structs = typed
     .structs
     .iter()
@@ -518,7 +524,7 @@ pub fn lower(
     functions.push(lower_function(id, decl, Subst::default(), &mut cx)?);
   }
 
-  let main_error = main_error(entry, package, resolution, typed, &layouts, sources, &mut registry);
+  let main_error = entry.and_then(|entry| main_error(entry, package, resolution, typed, &layouts, sources, &mut registry));
   let mut instances: Vec<Option<Function>> = Vec::new();
 
   // Lowering an instance may need more instances.

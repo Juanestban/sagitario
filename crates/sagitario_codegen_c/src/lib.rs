@@ -798,14 +798,16 @@ impl<'a> Generator<'a> {
   }
 
   /// The C `main`: runs the entry function and turns an `Err` from `main` into exit code 1.
+  /// The C `main`, which calls the program's `main`; a library has none.
   fn entry_point(&mut self, program: &Program) {
-    let entry = fn_name(program.entry);
-    let returns_result = program.functions.get(program.entry.0 as usize).is_some_and(|function| matches!(function.ret, Type::Result(..)));
+    let Some(entry_id) = program.entry else { return };
+    let entry = fn_name(entry_id);
+    let returns_result = program.functions.get(entry_id.0 as usize).is_some_and(|function| matches!(function.ret, Type::Result(..)));
 
     self.out.push_str("int main(int argc, char **argv) {\n");
     self.out.push_str("  sag_rt_init(argc, argv);\n");
 
-    if let Some(function) = program.functions.get(program.entry.0 as usize).filter(|_| returns_result) {
+    if let Some(function) = program.functions.get(entry_id.0 as usize).filter(|_| returns_result) {
       let ty = self.c_type(&function.ret);
 
       self.out.push_str(&format!("  {ty} result = {entry}();\n"));

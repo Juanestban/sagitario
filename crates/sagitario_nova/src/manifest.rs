@@ -18,8 +18,29 @@ pub struct Manifest {
   pub authors: Vec<String>,
   pub license: Option<String>,
   pub dependencies: Vec<DependencySpec>,
+  /// `[library]`, which only libraries may have.
+  pub library: Option<LibrarySpec>,
+  pub link: LinkSpec,
   /// The `[package]` header, which errors about the package as a whole point to.
   pub span: Span,
+}
+
+/// `[library] outputs = ["static", "dynamic"]`: the files a library builds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LibrarySpec {
+  pub static_lib: bool,
+  pub dynamic_lib: bool,
+  /// The `[library]` header.
+  pub span: Span,
+}
+
+/// `[link]`: C libraries and sources (docs/nova.md#linking-c).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LinkSpec {
+  pub libraries: Vec<String>,
+  /// Relative to the directory of the manifest, or absolute, with their spans.
+  pub search_paths: Vec<(String, Span)>,
+  pub sources: Vec<(String, Span)>,
 }
 
 /// `name = { path = "..." }` in `[dependencies]`.
@@ -38,6 +59,9 @@ const FUTURE_DEPENDENCY_KEYS: [&str; 5] = ["version", "git", "branch", "tag", "r
 
 const PACKAGE_KEYS: [&str; 5] = ["name", "version", "description", "authors", "license"];
 
+/// The tables of `Nova.toml`.
+const TABLES: [&str; 4] = ["package", "dependencies", "library", "link"];
+
 /// Path roots that cannot name a package, since packages become path roots too.
 const RESERVED_NAMES: [&str; 5] = ["pkg", "self", "super", "std", "prelude"];
 
@@ -45,6 +69,8 @@ const RESERVED_NAMES: [&str; 5] = ["pkg", "self", "super", "std", "prelude"];
 pub fn read(document: &Document) -> Result<Manifest, Box<Diagnostic>> {
   let mut package = None;
   let mut dependencies = Vec::new();
+  let mut library = None;
+  let mut link = LinkSpec::default();
 
   for table in &document.tables {
     match table.name.as_str() {
@@ -62,10 +88,12 @@ pub fn read(document: &Document) -> Result<Manifest, Box<Diagnostic>> {
           dependencies.push(dependency(entry)?);
         }
       }
+      "library" => library = Some(library_spec(table)?),
+      "link" => link = link_spec(table)?,
       name => {
         let mut diagnostic = Diagnostic::error(codes::UNKNOWN_KEY, table.span, format!("`Nova.toml` has no table `[{name}]`"));
 
-        if let Some(similar) = sagitario_diagnostics::closest_match(name, ["package", "dependencies"]) {
+        if let Some(similar) = sagitario_diagnostics::closest_match(name, TABLES) {
           diagnostic = diagnostic.with_help(format!("a table with a similar name exists: `[{similar}]`"));
         }
 
@@ -126,6 +154,8 @@ pub fn read(document: &Document) -> Result<Manifest, Box<Diagnostic>> {
     authors,
     license: optional_string(package, "license")?,
     dependencies,
+    library,
+    link,
     span: package.span,
   })
 }
@@ -175,6 +205,111 @@ fn dependency(entry: &Entry) -> Result<DependencySpec, Box<Diagnostic>> {
   };
 
   Ok(DependencySpec { name: entry.key.clone(), path, span: entry.span, path_span })
+}
+
+/// The strings of an array, with their spans.
+fn strings(entry: &Entry, what: &str) -> Result<Vec<(String, Span)>, Box<Diagnostic>> {
+  let ValueKind::Array(values) = &entry.value.kind else {
+    return Err(Box::new(wrong_type(entry.value.span, &format!("`{}`", entry.key), "an array of strings", &entry.value.kind)));
+  };
+  let mut texts = Vec::new();
+
+  for value in values {
+    match &value.kind {
+      ValueKind::String(text) => texts.push((text.clone(), value.span)),
+      other => return Err(Box::new(wrong_type(value.span, what, "a string", other))),
+    }
+  }
+
+  Ok(texts)
+}
+
+fn unknown_key(table: &str, entry: &Entry, keys: &[&str]) -> Box<Diagnostic> {
+  let diagnostic = Diagnostic::error(codes::UNKNOWN_KEY, entry.span, format!("`[{table}]` has no key `{}`", entry.key));
+
+  Box::new(match sagitario_diagnostics::closest_match(&entry.key, keys.iter().copied()) {
+    Some(similar) => diagnostic.with_help(format!("a key with a similar name exists: `{similar}`")),
+    None => diagnostic.with_note(format!("its keys are {}", keys.iter().map(|key| format!("`{key}`")).collect::<Vec<_>>().join(", "))),
+  })
+}
+
+/// `[library]`
+fn library_spec(table: &Table) -> Result<LibrarySpec, Box<Diagnostic>> {
+  let mut spec = LibrarySpec { static_lib: true, dynamic_lib: true, span: table.span };
+
+  for entry in &table.entries {
+    if entry.key != "outputs" {
+      return Err(unknown_key("library", entry, &["outputs"]));
+    }
+
+    let outputs = strings(entry, "each output")?;
+
+    spec.static_lib = false;
+    spec.dynamic_lib = false;
+
+    for (output, span) in &outputs {
+      let seen = match output.as_str() {
+        "static" => std::mem::replace(&mut spec.static_lib, true),
+        "dynamic" => std::mem::replace(&mut spec.dynamic_lib, true),
+        _ => {
+          return Err(Box::new(
+            Diagnostic::error(codes::INVALID_VALUE, *span, format!("`{output}` is not a library output"))
+              .with_note("the outputs are `static` and `dynamic`"),
+          ));
+        }
+      };
+
+      if seen {
+        return Err(Box::new(Diagnostic::error(codes::DUPLICATE, *span, format!("the output `{output}` is listed twice"))));
+      }
+    }
+
+    if outputs.is_empty() {
+      return Err(Box::new(
+        Diagnostic::error(codes::INVALID_VALUE, entry.value.span, "a library needs at least one output").with_help("write `outputs = [\"static\"]`"),
+      ));
+    }
+  }
+
+  Ok(spec)
+}
+
+/// `[link]`
+fn link_spec(table: &Table) -> Result<LinkSpec, Box<Diagnostic>> {
+  let mut spec = LinkSpec::default();
+
+  for entry in &table.entries {
+    match entry.key.as_str() {
+      "libraries" => {
+        for (library, span) in strings(entry, "each library")? {
+          let valid = library.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
+            && library.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '+'));
+
+          if !valid {
+            return Err(Box::new(
+              Diagnostic::error(codes::INVALID_VALUE, span, format!("`{library}` is not a library name"))
+                .with_note("write the name the linker's `-l` takes, such as `\"sqlite3\"` for `libsqlite3`"),
+            ));
+          }
+
+          spec.libraries.push(library);
+        }
+      }
+      "search_paths" => spec.search_paths = strings(entry, "each search path")?,
+      "sources" => {
+        spec.sources = strings(entry, "each source")?;
+
+        if let Some((source, span)) = spec.sources.iter().find(|(source, _)| !source.ends_with(".c")) {
+          return Err(Box::new(
+            Diagnostic::error(codes::INVALID_VALUE, *span, format!("`{source}` is not a C source")).with_note("sources are C files ending in `.c`"),
+          ));
+        }
+      }
+      _ => return Err(unknown_key("link", entry, &["libraries", "search_paths", "sources"])),
+    }
+  }
+
+  Ok(spec)
 }
 
 fn find<'t>(table: &'t Table, key: &str) -> Option<&'t Entry> {
@@ -327,11 +462,33 @@ mod tests {
       ("[package]\nname = \"x\"\nversion = \"1.0.0\"\n[dependencies]\nutil = { path = 1 }", codes::WRONG_TYPE),
       ("[package]\nname = \"x\"\nversion = \"1.0.0\"\n[dependencies]\nutil = { path = \"a\", feature = 1 }", codes::UNKNOWN_KEY),
       ("[package]\nname = \"x\"\nversion = \"1.0.0\"\n[dependencies]\nMy-Util = { path = \"a\" }", codes::INVALID_NAME),
+      ("[package]\nname = \"x\"\nversion = \"1.0.0\"\n[library]\noutputs = [\"shared\"]", codes::INVALID_VALUE),
+      ("[package]\nname = \"x\"\nversion = \"1.0.0\"\n[library]\noutputs = []", codes::INVALID_VALUE),
+      ("[package]\nname = \"x\"\nversion = \"1.0.0\"\n[library]\noutputs = [\"static\", \"static\"]", codes::DUPLICATE),
+      ("[package]\nname = \"x\"\nversion = \"1.0.0\"\n[library]\nkind = \"x\"", codes::UNKNOWN_KEY),
+      ("[package]\nname = \"x\"\nversion = \"1.0.0\"\n[link]\nlibraries = [\"-lm\"]", codes::INVALID_VALUE),
+      ("[package]\nname = \"x\"\nversion = \"1.0.0\"\n[link]\nsources = [\"a.h\"]", codes::INVALID_VALUE),
+      ("[package]\nname = \"x\"\nversion = \"1.0.0\"\n[link]\nlibraries = \"m\"", codes::WRONG_TYPE),
+      ("[package]\nname = \"x\"\nversion = \"1.0.0\"\n[link]\nlibrary = [\"m\"]", codes::UNKNOWN_KEY),
     ];
 
     for (text, code) in cases {
       assert_eq!(read_text(text).unwrap_err().code, code, "{text}");
     }
+  }
+
+  #[test]
+  fn reads_library_and_link_tables() {
+    let manifest = read_text(
+      "[package]\nname = \"x\"\nversion = \"1.0.0\"\n[library]\noutputs = [\"dynamic\"]\n[link]\nlibraries = [\"m\", \"sqlite3\"]\nsearch_paths = [\"lib\"]\nsources = [\"c/a.c\"]\n",
+    )
+    .unwrap();
+    let library = manifest.library.unwrap();
+
+    assert!(!library.static_lib && library.dynamic_lib);
+    assert_eq!(manifest.link.libraries, vec!["m".to_string(), "sqlite3".to_string()]);
+    assert_eq!(manifest.link.search_paths.len(), 1);
+    assert_eq!(manifest.link.sources.first().map(|(source, _)| source.as_str()), Some("c/a.c"));
   }
 
   #[test]

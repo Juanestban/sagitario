@@ -29,8 +29,8 @@ A package is a **program** if it has `src/main.sag`, or a **library** if it has 
 it must have exactly one of them. Modules are the files under `src/`, as described in
 [modules](spec/09-modules.md).
 
-Programs use libraries through [dependencies](#dependencies). Libraries are checked but not
-built into files yet: building `.a`, `.so` and `.dll` files comes with library outputs.
+Programs use libraries through [dependencies](#dependencies), and C uses them through the
+[library outputs](#library-outputs) that `nova build` writes.
 
 ## Commands
 
@@ -51,7 +51,7 @@ Nova uses the nearest `Nova.toml` above.
 |---|---|---|
 | `--release` | build, run | Optimizes, and integer overflow wraps; output in `target/release/` |
 | `--sanitize` | build, run | AddressSanitizer and UndefinedBehaviorSanitizer, where the C compiler has them |
-| `--emit-c` | build, run | Also writes the generated C next to the executable |
+| `--emit-c` | build, run | Also writes the generated C next to the executable or the library |
 | `--cc <compiler>` | build, run | The C compiler; overrides `SAG_CC` |
 | `--diagnostic-format <fmt>` | build, run, check | `human` (default) or `short` |
 
@@ -76,8 +76,9 @@ license = "MIT OR Apache-2.0"        # optional
 | `description`, `license` | Optional strings |
 | `authors` | An optional array of strings |
 
-`[dependencies]` lists the package's [dependencies](#dependencies). Any other key or table is
-an error.
+`[dependencies]` lists the package's [dependencies](#dependencies), `[library]` chooses a
+library's [outputs](#library-outputs), and `[link]` adds [C libraries and sources](#linking-c).
+Any other key or table is an error.
 
 ### Syntax
 
@@ -128,6 +129,66 @@ fn main() {
 - Not yet: dependencies from git or a registry (and with them `Nova.lock`), renaming a
   dependency, development dependencies, features and optional dependencies.
 
+## Library outputs
+
+Rationale: [ADR-0042](adr/0042-library-outputs-and-linking-c.md).
+
+`nova build` in a library builds files that C (or any language calling C) links against, with a
+header declaring what they export:
+
+| | Static library | Dynamic library |
+|---|---|---|
+| Linux | `libgeo.a` | `libgeo.so` |
+| macOS | `libgeo.a` | `libgeo.dylib` |
+| Windows (MSVC) | `geo.lib` | `geo.dll`, with the import library `geo.dll.lib` |
+| Windows (MinGW) | `libgeo.a` | `geo.dll`, with the import library `libgeo.dll.a` |
+
+All of them, and the header `geo.h`, go to `target/debug/` (or `target/release/`).
+`[library] outputs = ["static"]` (or `["dynamic"]`) builds only one kind.
+
+```sag
+/// The squared distance between two points.
+@export("geo_distance2")
+pub extern "C" fn distance2(a: Point, b: Point) -> f64 { ... }
+```
+
+```c
+#include "geo.h"
+double d = geo_distance2(a, b);   /* cc main.c libgeo.a -lm */
+```
+
+- A library exports the `extern "C" fn` functions of its package and of its dependencies
+  ([FFI](spec/10-ffi.md#exporting-functions)); a dynamic library exports nothing else, not even
+  the runtime's functions. A library without exported functions builds with a warning.
+- The header declares the exported functions with fixed-width C types (`int32_t` for `i32` and
+  `c_int`, `double` for `f64`), defines the `@repr(C)` structs they use, and copies the `///`
+  comments. It works from C and C++.
+- The library contains the runtime. Programs linking the static library on Linux also need
+  `-lm`.
+- A panic in an exported function prints its message and ends the whole process with exit code
+  101: it never unwinds into C.
+- Two static libraries built by Sagitario cannot be linked into one program, since both contain
+  the runtime; dynamic libraries can.
+- Building a static library needs an archiver: `SAG_AR`, else `llvm-ar` next to the C
+  compiler, else `llvm-ar` or `ar` on `PATH`.
+- Libraries are never built with `--sanitize`, since the programs using them would need the
+  sanitizer runtime.
+
+## Linking C
+
+```toml
+[link]
+libraries = ["sqlite3"]          # -lsqlite3
+search_paths = ["vendor/lib"]     # -Lvendor/lib
+sources = ["c/helpers.c"]         # compiled as C11 and linked
+```
+
+- `[link]` applies to programs and libraries, and the `[link]` of every dependency applies to
+  the program using it. Paths are relative to the directory of the `Nova.toml` naming them.
+- The C functions are then declared in `extern "C"` blocks ([FFI](spec/10-ffi.md)).
+- A source that does not compile, or a library the linker cannot find, is an error of the
+  package, shown with the C compiler's or the linker's message.
+
 ## Errors
 
 Errors in `Nova.toml` and in the package's layout have codes with the prefix `N`, and are shown
@@ -158,3 +219,6 @@ error[N0006]: `Hello App` is not a valid package name: it must start with a lowe
 | N0011 | A dependency whose package has another name |
 | N0012 | A dependency that is a program, not a library |
 | N0013 | Packages that depend on each other in a cycle |
+| N0014 | A value that the key does not accept (a library output, a library name, a source not ending in `.c`) |
+| N0015 | A table that does not apply to this kind of package (`[library]` in a program) |
+| N0016 | A path in `[link]` that does not exist |

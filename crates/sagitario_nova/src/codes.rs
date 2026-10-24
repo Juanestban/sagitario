@@ -29,9 +29,15 @@ pub const DEPENDENCY_NAME: Code = Code("N0011");
 pub const NOT_A_LIBRARY: Code = Code("N0012");
 /// Packages that depend on each other in a cycle.
 pub const DEPENDENCY_CYCLE: Code = Code("N0013");
+/// A value that the key does not accept.
+pub const INVALID_VALUE: Code = Code("N0014");
+/// A table that does not apply to this kind of package.
+pub const NOT_APPLICABLE: Code = Code("N0015");
+/// A file or directory named in `Nova.toml` that does not exist.
+pub const FILE_NOT_FOUND: Code = Code("N0016");
 
 /// Every code, in order.
-pub const ALL: [Code; 13] = [
+pub const ALL: [Code; 16] = [
   SYNTAX,
   DUPLICATE,
   UNKNOWN_KEY,
@@ -45,4 +51,7 @@ pub const ALL: [Code; 13] = [
   DEPENDENCY_NAME,
   NOT_A_LIBRARY,
   DEPENDENCY_CYCLE,
+  INVALID_VALUE,
+  NOT_APPLICABLE,
+  FILE_NOT_FOUND,
 ];

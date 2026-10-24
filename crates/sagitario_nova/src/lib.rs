@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use sagitario_diagnostics::{Diagnostic, DiagnosticFormat, render};
-use sagitario_driver::{CompileOptions, Dependency, EXIT_FAILURE};
+use sagitario_driver::{CompileOptions, Dependency, EXIT_FAILURE, LibraryOutputs, Link};
 use sagitario_span::SourceMap;
 
 use manifest::Manifest;
@@ -366,6 +366,22 @@ impl Loader {
       }
     };
 
+    if let Some(library) = manifest.library.as_ref().filter(|_| !is_lib) {
+      let diagnostic = Diagnostic::error(codes::NOT_APPLICABLE, library.span, format!("`{}` is a program, which has no `[library]`", manifest.name))
+        .with_note("`[library]` chooses the files a library builds");
+
+      return Err(self.report(&diagnostic));
+    }
+
+    for (file, span) in manifest.link.search_paths.iter().chain(&manifest.link.sources) {
+      if !dir.join(file).exists() {
+        let diagnostic = Diagnostic::error(codes::FILE_NOT_FOUND, *span, format!("`{}` does not exist", tidy(&dir.join(file)).display()))
+          .with_note("paths in `[link]` are relative to the directory of `Nova.toml`");
+
+        return Err(self.report(&diagnostic));
+      }
+    }
+
     Ok(Package { dir, canonical, manifest, root, lib: is_lib, dependencies: Vec::new() })
   }
 
@@ -496,7 +512,21 @@ fn compile(options: &Options, mode: Mode) -> u8 {
     })
     .collect();
   let profile = if options.release { "release" } else { "debug" };
-  let executable = package.dir.join("target").join(profile).join(&package.manifest.name).with_extension(env::consts::EXE_EXTENSION);
+  let target = package.dir.join("target").join(profile);
+  let executable = target.join(&package.manifest.name).with_extension(env::consts::EXE_EXTENSION);
+  // `[link]` of every package of the graph applies to the whole program.
+  let mut link = Link::default();
+
+  for member in &packages {
+    for library in &member.manifest.link.libraries {
+      if !link.libraries.contains(library) {
+        link.libraries.push(library.clone());
+      }
+    }
+
+    link.search_paths.extend(member.manifest.link.search_paths.iter().map(|(path, _)| tidy(&member.dir.join(path))));
+    link.sources.extend(member.manifest.link.sources.iter().map(|(path, _)| tidy(&member.dir.join(path))));
+  }
   let compile_options = CompileOptions {
     input: package.root.clone(),
     emit_c: options.emit_c,
@@ -509,6 +539,8 @@ fn compile(options: &Options, mode: Mode) -> u8 {
     library: package.lib,
     dependencies,
     direct_dependencies: package.dependencies.iter().map(|index| index - 1).collect(),
+    name: package.manifest.name.clone(),
+    link,
   };
 
   for dependency in packages.iter().skip(1) {
@@ -516,20 +548,8 @@ fn compile(options: &Options, mode: Mode) -> u8 {
   }
   let Manifest { name, version, .. } = &package.manifest;
 
-  if package.lib {
-    if mode == Mode::Run {
-      return fail(format!("`{name}` is a library, which cannot run; `nova run` runs packages with `src/main.sag`"));
-    }
-
-    eprintln!("Checking {name} v{version}");
-
-    let code = sagitario_driver::check(&compile_options);
-
-    if code == 0 && mode == Mode::Build {
-      eprintln!("note: `{name}` is a library: it was checked, and building library files (`.a`, `.so`, `.dll`) is not available yet");
-    }
-
-    return code;
+  if package.lib && mode == Mode::Run {
+    return fail(format!("`{name}` is a library, which cannot run; `nova run` runs packages with `src/main.sag`"));
   }
 
   if mode == Mode::Check {
@@ -538,13 +558,30 @@ fn compile(options: &Options, mode: Mode) -> u8 {
     return sagitario_driver::check(&compile_options);
   }
 
-  if let Some(parent) = executable.parent()
-    && let Err(error) = fs::create_dir_all(parent)
-  {
-    return fail(format!("cannot create `{}`: {error}", parent.display()));
+  if let Err(error) = fs::create_dir_all(&target) {
+    return fail(format!("cannot create `{}`: {error}", target.display()));
   }
 
   eprintln!("Compiling {name} v{version}");
+
+  if package.lib {
+    let library = package.manifest.library.as_ref();
+    let outputs = LibraryOutputs {
+      dir: target.clone(),
+      static_lib: library.is_none_or(|library| library.static_lib),
+      dynamic_lib: library.is_none_or(|library| library.dynamic_lib),
+    };
+
+    return match sagitario_driver::build_library(&compile_options, &outputs) {
+      Ok(files) => {
+        let files: Vec<String> = files.iter().map(|file| file.display().to_string()).collect();
+
+        eprintln!("Finished {profile} library: {}", files.join(", "));
+        0
+      }
+      Err(code) => code,
+    };
+  }
 
   if mode == Mode::Run {
     return sagitario_driver::run(&compile_options);
