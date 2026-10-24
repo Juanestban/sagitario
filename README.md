@@ -9,7 +9,11 @@ Sagitario is a compiled systems programming language that combines Rust-like saf
 functional programming. It uses automatic reference counting, compiles to portable C11, and
 aims to run on every desktop and mobile platform and eventually compile itself.
 
-> **Status:** design complete, implementation starting (phase F0). Nothing is usable yet.
+> **Status:** the desktop MVP (phases F0–F2) works: modules, structs, enums and `match`,
+> classes with inheritance, interfaces, generics, closures, lists, maps and iterators, compiled
+> to C11 with ARC. The [reference zoo program](tests/run-pass/reference_zoo/main.sag) shows them
+> together. Concurrency, mobile targets and self-hosting come later (see the
+> [roadmap](docs/roadmap.md)).
 
 ```sag
 abstract class Animal {

@@ -1,0 +1,72 @@
+// The zoo and its keepers: a keeper refers back to its zoo weakly, so the zoo and its keepers
+// do not keep each other alive.
+
+use pkg::animals::Animal;
+
+pub class Keeper {
+  pub const name: String;
+  pub weak var zoo: Option<Zoo>;
+
+  pub fn new(self, name: String) {
+    self.name = name;
+    self.zoo = None;
+  }
+
+  pub fn report(self) -> String {
+    match self.zoo {
+      Some(zoo) => `${self.name} works at ${zoo.name}`,
+      None => `${self.name} has no zoo`,
+    }
+  }
+}
+
+pub class Zoo {
+  pub const name: String;
+  pub const keepers: List<Keeper>;
+  /// Called with each animal the zoo admits.
+  pub var on_arrival: fn(Animal);
+  prv const residents: List<Animal>;
+  prv const by_species: Map<String, List<Animal>>;
+
+  pub fn new(self, name: String) {
+    self.name = name;
+    self.keepers = new List<Keeper>();
+    self.on_arrival = (_animal) => {};
+    self.residents = new List<Animal>();
+    self.by_species = new Map<String, List<Animal>>();
+  }
+
+  pub fn admit(self, animal: Animal) {
+    self.residents.push(animal);
+
+    match self.by_species.get(animal.species) {
+      Some(group) => group.push(animal),
+      None => {
+        self.by_species.insert(animal.species, List::from([animal]));
+      }
+    }
+
+    self.on_arrival(animal);
+  }
+
+  pub fn hire(self, keeper: Keeper) {
+    keeper.zoo = Some(self);
+    self.keepers.push(keeper);
+  }
+
+  pub fn animals(self) -> List<Animal> {
+    self.residents
+  }
+
+  /// The species in the order they arrived.
+  pub fn species(self) -> List<String> {
+    self.by_species.keys().collect()
+  }
+
+  pub fn count_of(self, species: String) -> usize {
+    match self.by_species.get(species) {
+      Some(group) => group.len(),
+      None => 0,
+    }
+  }
+}

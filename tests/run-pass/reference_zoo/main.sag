@@ -1,0 +1,99 @@
+// The reference "zoo" program of the F2 acceptance criteria (docs/roadmap.md): abstract
+// classes, inheritance, `zod`, interfaces as types, bounded generics, `List`/`Map`, lambdas,
+// `map`/`filter`, `weak` references, a closure in a field, errors with `?` and modules. The
+// harness runs it with sanitizers and fails it on any leak.
+// expect-stdout: arrived: Rex, Tom, Polly, Max
+// expect-stdout: Rex the dog
+// expect-stdout: Tom the cat
+// expect-stdout: Polly the parrot, who says Hello
+// expect-stdout: Max the dog
+// expect-stdout: species: dog x2, cat x1, parrot x1
+// expect-stdout: loud: Rex, Polly, Max
+// expect-stdout: loudest: Polly
+// expect-stdout: chorus: Woof! Meow! Hello! Woof!
+// expect-stdout: speakers: Woof! Now playing Jazz FM! | loudest says Now playing Jazz FM
+// expect-stdout: fed 2 with meat
+// expect-stdout: error: Tom does not eat meat
+// expect-stdout: meals: Rex 1, Tom 0, Polly 0, Max 1 (total 2)
+// expect-stdout: by name: Max, Polly, Rex, Tom
+// expect-stdout: Ada works at City Zoo
+// expect-stdout: Ada has no zoo
+
+use pkg::animals::{Cat, Dog, Parrot, Speaker};
+use pkg::reports::{Radio, chorus, loudest};
+use pkg::zoo::{Keeper, Zoo};
+
+/// Feeds every animal that eats `food`, and returns how many ate.
+fn feed_all(zoo: Zoo, food: String) -> Result<i32, Error> {
+  var fed = 0;
+
+  for animal in zoo.animals().filter(animal => animal.diet() == food).collect() {
+    animal.eat(food)?;
+    fed += 1;
+  }
+
+  Ok(fed)
+}
+
+fn build_zoo(arrivals: List<String>) -> Zoo {
+  const zoo = new Zoo("City Zoo");
+
+  zoo.on_arrival = (animal) => arrivals.push(animal.name);
+  zoo.admit(new Dog("Rex"));
+  zoo.admit(new Cat("Tom"));
+  zoo.admit(new Parrot("Polly", "Hello"));
+  zoo.admit(new Dog("Max"));
+  zoo
+}
+
+fn main() -> Result<(), Error> {
+  const arrivals = new List<String>();
+  const keeper = new Keeper("Ada");
+
+  {
+    const zoo = build_zoo(arrivals);
+
+    zoo.hire(keeper);
+    println(`arrived: ${arrivals.join(", ")}`);
+
+    for animal in zoo.animals() {
+      println(animal.describe());
+    }
+
+    const counts = zoo.species().map(species => `${species} x${zoo.count_of(species)}`).collect();
+    println(`species: ${counts.join(", ")}`);
+
+    const loud = zoo.animals().filter(animal => animal.loudness() > 2).map(animal => animal.name).collect();
+    println(`loud: ${loud.join(", ")}`);
+    println(`loudest: ${loudest(zoo.animals()).map(animal => animal.name).unwrap_or("nobody")}`);
+    println(`chorus: ${chorus(zoo.animals())}`);
+
+    const speakers = new List<Speaker>();
+    speakers.push(zoo.animals()[0]);
+    speakers.push(Radio { station: "Jazz FM" });
+    const top = loudest(speakers).map(speaker => speaker.sound()).unwrap_or("silence");
+    println(`speakers: ${chorus(speakers)} | loudest says ${top}`);
+
+    const fed = feed_all(zoo, "meat")?;
+    println(`fed ${fed} with meat`);
+
+    match zoo.animals()[1].eat("meat") {
+      Ok(_) => println("Tom ate meat"),
+      Err(error) => println(`error: ${error.message()}`),
+    }
+
+    const meals = zoo.animals().map(animal => `${animal.name} ${animal.meals}`).collect();
+    const total = zoo.animals().fold(0, (sum, animal) => sum + animal.meals);
+    println(`meals: ${meals.join(", ")} (total ${total})`);
+
+    const names = zoo.animals().map(animal => animal.name).collect();
+    names.sort();
+    println(`by name: ${names.join(", ")}`);
+    println(keeper.report());
+  }
+
+  // The zoo is gone: the keeper's weak reference to it is empty.
+  println(keeper.report());
+
+  Ok(())
+}

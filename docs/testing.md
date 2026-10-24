@@ -59,7 +59,11 @@ fn main() { ... }
 - The runtime counts live ARC objects. When the environment variable `SAG_LEAK_CHECK` is set
   (the harness always sets it), a program that exits normally with objects still alive prints
   `leak check: N ARC object(s) still alive at exit` and exits with code 102, failing the test.
-- Where supported, test programs are compiled with ASan and UBSan (planned for F2).
+- The harness runs every `run-pass` and `run-panic` case with `sag run --sanitize`: ASan and
+  UBSan, with any undefined behavior aborting the program, so a report fails the test. Toolchains
+  without sanitizers (MinGW) build without them. `SAG_TEST_SANITIZE=0` turns them off for faster
+  local runs ([ADR-0036](adr/0036-sanitizers-and-the-reference-zoo.md)).
+- `tests/run-pass/reference_zoo/` is the reference program of the F2 acceptance criteria.
 
 ## Rules
 

@@ -207,9 +207,14 @@ fn case_expectations(case: &Case) -> Result<Expectations, String> {
   Ok(expectations)
 }
 
-/// `sag run <flags> <file>`.
+/// `sag run <flags> <file>`, with sanitizers unless `SAG_TEST_SANITIZE=0`
+/// (docs/testing.md#memory-checks).
 fn run(flags: &[String], file: &Path) -> Result<Output, String> {
   let mut args = vec!["run"];
+
+  if std::env::var("SAG_TEST_SANITIZE").map_or(true, |value| value != "0") {
+    args.push("--sanitize");
+  }
 
   args.extend(flags.iter().map(String::as_str));
 

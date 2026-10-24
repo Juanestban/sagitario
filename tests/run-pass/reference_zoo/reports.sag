@@ -1,0 +1,34 @@
+// Generic code over anything that speaks, and a speaker that is not an animal.
+
+use pkg::animals::Speaker;
+
+/// A struct boxed into an interface value when used as a `Speaker`.
+pub struct Radio impl Speaker {
+  pub station: String;
+
+  pub fn sound(self) -> String {
+    `Now playing ${self.station}`
+  }
+
+  pub fn loudness(self) -> i32 {
+    4
+  }
+}
+
+/// The loudest of `items`, the first one among equals.
+pub fn loudest<T: Speaker>(items: List<T>) -> Option<T> {
+  var best: Option<T> = None;
+
+  for item in items {
+    best = match best {
+      Some(current) => if item.loudness() > current.loudness() { Some(item) } else { Some(current) },
+      None => Some(item),
+    };
+  }
+
+  best
+}
+
+pub fn chorus<T: Speaker>(items: List<T>) -> String {
+  items.map(item => item.speak()).collect().join(" ")
+}

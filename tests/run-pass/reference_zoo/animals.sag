@@ -1,0 +1,108 @@
+// The animals: an abstract class implementing two interfaces, and three subclasses.
+
+/// Something that makes a sound; `speak` is a default method.
+pub interface Speaker {
+  fn sound(self) -> String;
+  fn loudness(self) -> i32;
+
+  fn speak(self) -> String {
+    `${self.sound()}!`
+  }
+}
+
+/// Something with a name that eats one kind of food.
+pub interface Feedable {
+  const name: String;
+
+  fn diet(self) -> String;
+}
+
+pub abstract class Animal impl Speaker, Feedable {
+  pub const name: String;
+  pub const species: String;
+  pub var meals: i32;
+
+  pub fn new(self, name: String, species: String) {
+    self.name = name;
+    self.species = species;
+    self.meals = 0;
+  }
+
+  pub abstract fn sound(self) -> String;
+  pub abstract fn diet(self) -> String;
+
+  pub fn loudness(self) -> i32 {
+    1
+  }
+
+  pub fn describe(self) -> String {
+    `${self.name} the ${self.species}`
+  }
+
+  /// Feeds the animal, if `food` is what it eats.
+  pub fn eat(self, food: String) -> Result<(), Error> {
+    if food != self.diet() {
+      return Err(Error(`${self.name} does not eat ${food}`));
+    }
+
+    self.meals += 1;
+    Ok(())
+  }
+}
+
+pub class Dog extends Animal {
+  pub fn new(self, name: String) {
+    zod.new(name, "dog");
+  }
+
+  pub override fn sound(self) -> String {
+    "Woof"
+  }
+
+  pub override fn diet(self) -> String {
+    "meat"
+  }
+
+  pub override fn loudness(self) -> i32 {
+    3
+  }
+}
+
+pub class Cat extends Animal {
+  pub fn new(self, name: String) {
+    zod.new(name, "cat");
+  }
+
+  pub override fn sound(self) -> String {
+    "Meow"
+  }
+
+  pub override fn diet(self) -> String {
+    "fish"
+  }
+}
+
+pub class Parrot extends Animal {
+  prv const phrase: String;
+
+  pub fn new(self, name: String, phrase: String) {
+    zod.new(name, "parrot");
+    self.phrase = phrase;
+  }
+
+  pub override fn sound(self) -> String {
+    self.phrase
+  }
+
+  pub override fn diet(self) -> String {
+    "seeds"
+  }
+
+  pub override fn loudness(self) -> i32 {
+    5
+  }
+
+  pub override fn describe(self) -> String {
+    `${zod.describe()}, who says ${self.phrase}`
+  }
+}

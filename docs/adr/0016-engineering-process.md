@@ -1,6 +1,6 @@
 # 0016. Testing, quality gates, conventions and license
 
-- Status: Accepted
+- Status: Accepted; refined by [ADR-0036](0036-sanitizers-and-the-reference-zoo.md)
 - Date: 2026-10-21
 
 ## Context

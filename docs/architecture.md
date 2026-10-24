@@ -206,7 +206,9 @@ Anything expressible in Sagitario belongs in `std/` instead.
   also tested on Linux.
 - Detection order: `SAG_CC` environment variable or `--cc` flag, then `clang` on `PATH`, then
   `gcc`. If none is found, `sag` fails with installation instructions per OS.
-- Debug builds of tests use `-fsanitize=address,undefined` where supported.
+- `--sanitize` (always used by the test harness) adds `-fsanitize=address,undefined
+  -fno-sanitize-recover=undefined` where the toolchain supports it (not MinGW). A toolchain that
+  compiles the C only without them is reported as missing its sanitizer libraries.
 - Windows ([ADR-0018](adr/0018-windows-c-toolchain.md)): the supported compiler is official
   LLVM clang targeting `x86_64-pc-windows-msvc`. MinGW clang (`*-windows-gnu`, detected with
   `-dumpmachine`) is tolerated with a warning and without sanitizers. When running sanitized
