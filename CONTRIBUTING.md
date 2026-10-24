@@ -7,6 +7,10 @@
   Visual Studio Build Tools, which the Rust MSVC toolchain already needs. If `clang` on your
   `PATH` is an MSYS2/MinGW clang, set `SAG_CC` to the LLVM one; MinGW works best-effort,
   without sanitizers. gcc is optional on Linux.
+- On macOS, do not export `DYLD_LIBRARY_PATH` pointing to Homebrew's LLVM
+  (`/opt/homebrew/opt/llvm/lib`), in your shell or through `launchctl setenv`. It makes
+  `rustc`, `rustdoc` and `clippy-driver` load that `libLLVM.dylib` instead of their own, and
+  they crash with SIGSEGV in `initialize_available_targets` before compiling anything.
 
 ## Commands
 
