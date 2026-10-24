@@ -186,12 +186,16 @@ const PRELUDE: &str = include_str!("prelude.sag");
 
 /// The modules of the standard library written in Sagitario (docs/spec/11-standard-library.md),
 /// loaded when a program names them.
-const STD_SOURCES: [(&str, &str); 5] = [
+/// The file of `std` itself: helpers shared by its modules, which programs cannot name.
+const STD_ROOT: &str = include_str!("std/std.sag");
+
+const STD_SOURCES: [(&str, &str); 6] = [
   ("env", include_str!("std/env.sag")),
   ("fs", include_str!("std/fs.sag")),
   ("io", include_str!("std/io.sag")),
   ("path", include_str!("std/path.sag")),
   ("process", include_str!("std/process.sag")),
+  ("time", include_str!("std/time.sag")),
 ];
 
 /// The integer types, each with a function `range_<type>` in the prelude.
@@ -308,20 +312,35 @@ impl Loader {
 
   /// Adds the prelude module, which every program sees, and returns its index.
   fn load_prelude(&mut self, sources: &mut SourceMap, diagnostics: &mut Diagnostics) -> Result<usize, u8> {
-    self.load_embedded("<prelude>", prelude_source(), "prelude", sources, diagnostics)
+    self.load_embedded("<prelude>", prelude_source(), vec!["std".to_string(), "prelude".to_string()], sources, diagnostics)
   }
 
   /// Adds the standard library module `std::name`.
+  /// The first one comes with the file of `std` itself.
   fn load_std(&mut self, name: &str, text: &str, sources: &mut SourceMap, diagnostics: &mut Diagnostics) -> Result<(), u8> {
-    let index = self.load_embedded(&format!("<std::{name}>"), text.to_string(), name, sources, diagnostics)?;
+    if self.std.is_empty() {
+      let index = self.load_embedded("<std>", STD_ROOT.to_string(), vec!["std".to_string()], sources, diagnostics)?;
+
+      self.std.push(index);
+    }
+
+    let path = vec!["std".to_string(), name.to_string()];
+    let index = self.load_embedded(&format!("<std::{name}>"), text.to_string(), path, sources, diagnostics)?;
 
     self.std.push(index);
 
     Ok(())
   }
 
-  /// Adds a module whose source the compiler embeds, with the path `std::name`.
-  fn load_embedded(&mut self, file: &str, text: String, name: &str, sources: &mut SourceMap, diagnostics: &mut Diagnostics) -> Result<usize, u8> {
+  /// Adds a module whose source the compiler embeds.
+  fn load_embedded(
+    &mut self,
+    file: &str,
+    text: String,
+    path: Vec<String>,
+    sources: &mut SourceMap,
+    diagnostics: &mut Diagnostics,
+  ) -> Result<usize, u8> {
     let id = sources.add(PathBuf::from(file), text);
     let Some(source) = sources.get(id) else {
       eprintln!("internal compiler error: `{file}` was not registered");
@@ -330,7 +349,7 @@ impl Loader {
     let tokens = sagitario_lexer::lex(id, source.text(), diagnostics);
     let mut module = sagitario_parser::parse_module_from(id, tokens, &mut self.next_id, diagnostics);
 
-    module.path = vec!["std".to_string(), name.to_string()];
+    module.path = path;
     self.modules.push(module);
 
     Ok(self.modules.len() - 1)

@@ -537,6 +537,20 @@ int32_t sag_fs_copy(sag_string from, sag_string to);
 /* The names in a directory, without `.` and `..`, separated by NUL characters. */
 sag_string sag_fs_read_dir(sag_string path, int32_t *status);
 sag_string sag_fs_current_dir(int32_t *status);
+/* Nanoseconds of a monotonic clock, and since the Unix epoch (0 before it). */
+uint64_t sag_time_monotonic(void);
+uint64_t sag_time_system(void);
+/* Sleeps at least `nanos` nanoseconds. */
+void sag_time_sleep(uint64_t nanos);
+
+/* Runs the program `argv` (`argc` parts separated by NUL, the program first) with the
+ * `NAME=value` entries of `env` added to the environment, in `cwd` unless it is empty, with
+ * `input` as stdin if `has_input`, capturing stdout and stderr if `capture`. Sets results[0] to
+ * an error code or 0, results[1] to the exit code and results[2] to whether there is one, and
+ * returns stdout followed by stderr, `*split` being the length of stdout. */
+sag_string sag_process_run(sag_string argv, size_t argc, sag_string env, size_t env_count, sag_string cwd, sag_string input, bool has_input,
+                           bool capture, int32_t *results, size_t *split);
+
 /* Whether paths follow Windows rules (`\` separators and drive letters). */
 bool sag_path_windows(void);
 

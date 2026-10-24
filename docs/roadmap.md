@@ -82,7 +82,7 @@ Increments:
 2. `std::fs`: reading, writing and appending files, existence checks, removal, directories
    and the current directory; `std::path` ([ADR-0038](adr/0038-file-system-and-paths.md)).
 3. `std::time` (`Instant`, `Duration`, system time) and `std::process::Command` (run a program,
-   capture its output and exit status).
+   capture its output and exit status) ([ADR-0039](adr/0039-time-and-commands.md)).
 4. Packages: `sagitario.toml`, `sag new`, `sag build`/`run` inside a package with `src/main.sag`
    or `src/lib.sag`.
 5. Dependencies: packages by path, a lockfile, dependency names as path roots, no cycles between

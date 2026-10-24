@@ -1,0 +1,114 @@
+// `std::process::Command`: the program runs itself as the child, with a role in its first
+// argument, so the test works the same on every system.
+// expect-stdout: echo: code 0, success true
+// expect-stdout: args: [a b] [c"d] [] [e\] [ñ]
+// expect-stdout: variable: hijo ñ
+// expect-stdout: stderr: to stderr
+// expect-stdout: input: HOLA|MUNDO|
+// expect-stdout: big: 300 lines, 300 lines
+// expect-stdout: fail: Some(3), success false
+// expect-stdout: cannot run "no-such-program-sag": No such file or directory
+// expect-stdout: missing: NotFound
+// expect-stdout: bad name: InvalidInput
+// expect-stdout: nul: InvalidInput
+// expect-stdout: directory: sub
+// expect-stdout: inherited
+// expect-stdout: status: true
+
+use std::env;
+use std::fs;
+use std::io;
+use std::io::ErrorKind;
+use std::path;
+use std::process;
+use std::process::{Command, Output};
+
+/// The child: does what `role` says, then exits.
+fn child(role: String) -> Result<(), io::Error> {
+  if role == "echo" {
+    const args = env::args().iter().skip(2).map((arg) => `[${arg}]`).collect();
+    io::println(`args: ${args.join(" ")}`)?;
+    io::println(`variable: ${env::variable("SAG_TEST_CHILD").unwrap_or("none")}`)?;
+    io::eprintln("to stderr")?;
+  } else if role == "upper" {
+    io::print(io::read_to_string()?.to_ascii_uppercase())?;
+  } else if role == "big" {
+    // More than a pipe holds, on both streams at once.
+    const line = "x".repeat(1000);
+
+    for _i in 0..300 {
+      io::println(line)?;
+      io::eprintln(line)?;
+    }
+  } else if role == "dir" {
+    io::println(path::file_name(fs::current_dir()?).unwrap_or("?"))?;
+  } else if role == "inherited" {
+    io::println("inherited")?;
+  }
+
+  process::exit(if role == "fail" { 3 } else { 0 });
+}
+
+fn kind_name(result: Result<Output, io::Error>) -> String {
+  match result {
+    Ok(_) => "no error",
+    Err(error) => match error.kind() {
+      ErrorKind::NotFound => "NotFound",
+      ErrorKind::InvalidInput => "InvalidInput",
+      _ => "another kind",
+    },
+  }
+}
+
+/// Lines written with `\n`, or with `\r\n` by the C runtime of Windows.
+fn lines(text: String) -> String {
+  text.replace("\r", "").replace("\n", "|")
+}
+
+fn main() -> Result<(), io::Error> {
+  const args = env::args();
+
+  if args.len() > 1 {
+    child(args[1])?;
+  }
+
+  const me = args[0];
+
+  const echo = new Command(me).arg("echo").args(List::from(["a b", "c\"d", "", "e\\", "ñ"])).env("SAG_TEST_CHILD", "hijo ñ").output()?;
+  println(`echo: code ${echo.status.code.unwrap_or(-1)}, success ${echo.status.success()}`);
+  print(echo.stdout.replace("\r", ""));
+  println(`stderr: ${echo.stderr.trim()}`);
+
+  const upper = new Command(me).arg("upper").input("hola\nmundo\n").output()?;
+  println(`input: ${lines(upper.stdout)}`);
+
+  const big = new Command(me).arg("big").output()?;
+  println(`big: ${big.stdout.lines().len()} lines, ${big.stderr.lines().len()} lines`);
+
+  const fail = new Command(me).arg("fail").output()?;
+  const code = match fail.status.code {
+    Some(code) => `Some(${code})`,
+    None => "None",
+  };
+  println(`fail: ${code}, success ${fail.status.success()}`);
+
+  match new Command("no-such-program-sag").output() {
+    Ok(_) => println("ran a missing program"),
+    Err(error) => println(error.message()),
+  }
+
+  println(`missing: ${kind_name(new Command("no-such-program-sag").arg("x").output())}`);
+  println(`bad name: ${kind_name(new Command(me).env("A=B", "c").output())}`);
+  println(`nul: ${kind_name(new Command(me).arg("a\0b").output())}`);
+
+  fs::create_dir("sub")?;
+  const dir = new Command(me).arg("dir").current_dir("sub").output()?;
+  print(dir.stdout.replace("\r", "").replace("sub\n", "directory: sub\n"));
+  fs::remove_dir("sub")?;
+
+  // Without capturing, the child prints to this program's stdout.
+  const status = new Command(me).arg("inherited").status()?;
+  println(`status: ${status.success()}`);
+
+  Ok(())
+}

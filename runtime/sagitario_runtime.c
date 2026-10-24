@@ -1,6 +1,6 @@
 /* `getenv` is standard C11; MSVC's CRT only deprecates it in favor of non-portable variants. */
 #define _CRT_SECURE_NO_WARNINGS
-/* The file system functions of std::fs are POSIX, not C11. */
+/* The file system, clock and process functions of std are POSIX, not C11. */
 #if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
 #define _POSIX_C_SOURCE 200809L
 #endif
@@ -15,8 +15,13 @@
 
 #ifndef _WIN32
 #include <dirent.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 #endif
 
@@ -1913,6 +1918,689 @@ bool sag_path_windows(void) {
 #else
   return false;
 #endif
+}
+
+/* ---- Standard library: std::time ------------------------------------------------------- */
+
+#ifdef _WIN32
+extern int SAG_WINAPI QueryPerformanceCounter(int64_t *count);
+extern int SAG_WINAPI QueryPerformanceFrequency(int64_t *frequency);
+extern void SAG_WINAPI GetSystemTimePreciseAsFileTime(sag_win_filetime *time);
+extern void SAG_WINAPI Sleep(unsigned long milliseconds);
+#endif
+
+uint64_t sag_time_monotonic(void) {
+#ifdef _WIN32
+  int64_t count = 0;
+  int64_t frequency = 1;
+  QueryPerformanceCounter(&count);
+  QueryPerformanceFrequency(&frequency);
+  if (frequency <= 0 || count < 0) {
+    return 0;
+  }
+  uint64_t ticks = (uint64_t)count;
+  uint64_t rate = (uint64_t)frequency;
+  /* Split so that `ticks * 10^9` cannot overflow. */
+  return ticks / rate * UINT64_C(1000000000) + ticks % rate * UINT64_C(1000000000) / rate;
+#else
+  struct timespec now;
+  if (clock_gettime(CLOCK_MONOTONIC, &now) != 0 || now.tv_sec < 0) {
+    return 0;
+  }
+  return (uint64_t)now.tv_sec * UINT64_C(1000000000) + (uint64_t)now.tv_nsec;
+#endif
+}
+
+uint64_t sag_time_system(void) {
+#ifdef _WIN32
+  /* 100-nanosecond intervals since 1601-01-01; the Unix epoch is 11644473600 seconds later. */
+  sag_win_filetime now;
+  GetSystemTimePreciseAsFileTime(&now);
+  uint64_t intervals = ((uint64_t)now.high << 32) | (uint64_t)now.low;
+  uint64_t epoch = UINT64_C(116444736000000000);
+  return intervals < epoch ? 0 : (intervals - epoch) * 100;
+#else
+  struct timespec now;
+  if (clock_gettime(CLOCK_REALTIME, &now) != 0 || now.tv_sec < 0) {
+    return 0;
+  }
+  return (uint64_t)now.tv_sec * UINT64_C(1000000000) + (uint64_t)now.tv_nsec;
+#endif
+}
+
+void sag_time_sleep(uint64_t nanos) {
+#ifdef _WIN32
+  /* Whole milliseconds, rounded up so that the program never sleeps less than asked. */
+  uint64_t millis = nanos / 1000000 + (nanos % 1000000 != 0);
+  while (millis > 0) {
+    unsigned long part = millis > 0x7FFFFFFFu ? 0x7FFFFFFFul : (unsigned long)millis;
+    Sleep(part);
+    millis -= part;
+  }
+#else
+  struct timespec left;
+  left.tv_sec = (time_t)(nanos / 1000000000);
+  left.tv_nsec = (long)(nanos % 1000000000);
+  while (nanosleep(&left, &left) != 0 && errno == EINTR) {
+  }
+#endif
+}
+
+/* ---- Standard library: std::process::Command ------------------------------------------- */
+
+/* The parts of `text` separated by NUL characters, as NUL-terminated copies; `count` parts. */
+static char **sag_split_nul(sag_string text, size_t count) {
+  char **parts = sag_alloc((count + 1) * sizeof(char *));
+  size_t start = 0;
+  for (size_t index = 0; index < count; index++) {
+    size_t end = start;
+    while (end < text.len && text.ptr[end] != 0) {
+      end++;
+    }
+    parts[index] = sag_alloc(end - start + 1);
+    memcpy(parts[index], text.ptr + start, end - start);
+    parts[index][end - start] = 0;
+    start = end + 1;
+  }
+  parts[count] = NULL;
+  return parts;
+}
+
+static void sag_free_parts(char **parts) {
+  if (parts == NULL) {
+    return;
+  }
+  for (size_t index = 0; parts[index] != NULL; index++) {
+    free(parts[index]);
+  }
+  free(parts);
+}
+
+/* The result of running a child: stdout then stderr in one string, with the length of the
+ * stdout part. Both halves are converted separately, so the split is a character boundary. */
+static sag_string sag_process_result(sag_sb *out, sag_sb *err, size_t *split) {
+  sag_string out_text = sag_string_from_bytes_lossy(out->data, out->len);
+  sag_string err_text = sag_string_from_bytes_lossy(err->data, err->len);
+  free(out->data);
+  free(err->data);
+  sag_sb sb;
+  sag_sb_init(&sb);
+  sag_sb_push_str(&sb, out_text);
+  sag_sb_push_str(&sb, err_text);
+  *split = out_text.len;
+  sag_string_release(out_text);
+  sag_string_release(err_text);
+  return sag_sb_finish(&sb);
+}
+
+#ifdef _WIN32
+typedef struct sag_win_security_attributes {
+  unsigned long length;
+  void *descriptor;
+  int inherit;
+} sag_win_security_attributes;
+
+typedef struct sag_win_startup_info {
+  unsigned long cb;
+  wchar_t *reserved;
+  wchar_t *desktop;
+  wchar_t *title;
+  unsigned long x;
+  unsigned long y;
+  unsigned long x_size;
+  unsigned long y_size;
+  unsigned long x_count_chars;
+  unsigned long y_count_chars;
+  unsigned long fill_attribute;
+  unsigned long flags;
+  unsigned short show_window;
+  unsigned short reserved2_size;
+  unsigned char *reserved2;
+  void *std_input;
+  void *std_output;
+  void *std_error;
+} sag_win_startup_info;
+
+typedef struct sag_win_process_information {
+  void *process;
+  void *thread;
+  unsigned long process_id;
+  unsigned long thread_id;
+} sag_win_process_information;
+
+extern int SAG_WINAPI CreatePipe(void **read, void **write, sag_win_security_attributes *attributes, unsigned long size);
+extern int SAG_WINAPI SetHandleInformation(void *handle, unsigned long mask, unsigned long flags);
+extern void *SAG_WINAPI GetStdHandle(unsigned long which);
+extern void *SAG_WINAPI GetCurrentProcess(void);
+extern int SAG_WINAPI DuplicateHandle(void *source_process, void *source, void *target_process, void **target, unsigned long access, int inherit,
+                                      unsigned long options);
+extern int SAG_WINAPI CreateProcessW(const wchar_t *application, wchar_t *command_line, sag_win_security_attributes *process_attributes,
+                                     sag_win_security_attributes *thread_attributes, int inherit_handles, unsigned long flags, void *environment,
+                                     const wchar_t *directory, sag_win_startup_info *startup, sag_win_process_information *information);
+extern void *SAG_WINAPI CreateThread(sag_win_security_attributes *attributes, size_t stack_size, unsigned long(SAG_WINAPI *start)(void *), void *parameter,
+                                     unsigned long flags, unsigned long *thread_id);
+extern unsigned long SAG_WINAPI WaitForSingleObject(void *handle, unsigned long milliseconds);
+extern int SAG_WINAPI GetExitCodeProcess(void *process, unsigned long *code);
+extern wchar_t *SAG_WINAPI GetEnvironmentStringsW(void);
+extern int SAG_WINAPI FreeEnvironmentStringsW(wchar_t *block);
+
+#define SAG_WIN_INFINITE 0xFFFFFFFFul
+
+/* Appends `units` to a growing UTF-16 buffer. */
+typedef struct sag_wbuf {
+  wchar_t *data;
+  size_t len;
+  size_t cap;
+} sag_wbuf;
+
+static void sag_wbuf_push(sag_wbuf *buf, const wchar_t *units, size_t len) {
+  if (buf->len + len + 1 > buf->cap) {
+    size_t cap = buf->cap == 0 ? 256 : buf->cap;
+    while (buf->len + len + 1 > cap) {
+      cap *= 2;
+    }
+    wchar_t *grown = realloc(buf->data, cap * sizeof(wchar_t));
+    if (grown == NULL) {
+      sag_panic("out of memory");
+    }
+    buf->data = grown;
+    buf->cap = cap;
+  }
+  memcpy(buf->data + buf->len, units, len * sizeof(wchar_t));
+  buf->len += len;
+  buf->data[buf->len] = 0;
+}
+
+static void sag_wbuf_push_unit(sag_wbuf *buf, wchar_t unit) {
+  sag_wbuf_push(buf, &unit, 1);
+}
+
+/* Appends an argument quoted so that the C runtime's rules (sag_win_parse_args) read it back. */
+static void sag_win_quote_arg(sag_wbuf *line, const wchar_t *arg) {
+  size_t len = wcslen(arg);
+  bool plain = len > 0;
+  for (size_t i = 0; i < len; i++) {
+    if (arg[i] == L' ' || arg[i] == L'\t' || arg[i] == L'"') {
+      plain = false;
+    }
+  }
+  if (plain) {
+    sag_wbuf_push(line, arg, len);
+    return;
+  }
+  sag_wbuf_push_unit(line, L'"');
+  size_t slashes = 0;
+  for (size_t i = 0; i < len; i++) {
+    if (arg[i] == L'\\') {
+      slashes++;
+      continue;
+    }
+    /* Backslashes before a quote are doubled, and the quote escaped. */
+    size_t count = arg[i] == L'"' ? slashes * 2 + 1 : slashes;
+    for (size_t j = 0; j < count; j++) {
+      sag_wbuf_push_unit(line, L'\\');
+    }
+    sag_wbuf_push_unit(line, arg[i]);
+    slashes = 0;
+  }
+  /* Backslashes before the closing quote are doubled. */
+  for (size_t j = 0; j < slashes * 2; j++) {
+    sag_wbuf_push_unit(line, L'\\');
+  }
+  sag_wbuf_push_unit(line, L'"');
+}
+
+/* The UTF-16 copy of a NUL-terminated UTF-8 string. */
+static wchar_t *sag_wide_c(const char *text) {
+  return sag_wide(sag_string_from_static(text, strlen(text)));
+}
+
+/* Whether the `NAME=value` entry of an environment block has the name `name` (Windows names
+ * ignore ASCII case). Entries starting with `=` are hidden variables of the shell. */
+static bool sag_win_same_name(const wchar_t *entry, const wchar_t *name, size_t name_len) {
+  for (size_t i = 0; i < name_len; i++) {
+    wchar_t a = entry[i];
+    wchar_t b = name[i];
+    if (a >= L'a' && a <= L'z') {
+      a = (wchar_t)(a - 32);
+    }
+    if (b >= L'a' && b <= L'z') {
+      b = (wchar_t)(b - 32);
+    }
+    if (a != b || a == 0) {
+      return false;
+    }
+  }
+  return entry[name_len] == L'=';
+}
+
+/* The environment block of the child: the parent's, with the `NAME=value` entries in `vars`
+ * replacing or adding variables. */
+static wchar_t *sag_win_environment(char **vars) {
+  sag_wbuf block = {NULL, 0, 0};
+  wchar_t *parent = GetEnvironmentStringsW();
+  for (const wchar_t *entry = parent; entry != NULL && *entry != 0; entry += wcslen(entry) + 1) {
+    bool replaced = false;
+    for (size_t i = 0; vars[i] != NULL && !replaced; i++) {
+      wchar_t *var = sag_wide_c(vars[i]);
+      size_t name_len = (size_t)(wcschr(var, L'=') - var);
+      replaced = entry[0] != L'=' && sag_win_same_name(entry, var, name_len);
+      free(var);
+    }
+    if (!replaced) {
+      sag_wbuf_push(&block, entry, wcslen(entry) + 1);
+    }
+  }
+  if (parent != NULL) {
+    FreeEnvironmentStringsW(parent);
+  }
+  for (size_t i = 0; vars[i] != NULL; i++) {
+    wchar_t *var = sag_wide_c(vars[i]);
+    sag_wbuf_push(&block, var, wcslen(var) + 1);
+    free(var);
+  }
+  /* The block ends with an empty entry. */
+  sag_wbuf_push_unit(&block, 0);
+  return block.data;
+}
+
+typedef struct sag_win_reader {
+  void *pipe;
+  sag_sb bytes;
+} sag_win_reader;
+
+static unsigned long SAG_WINAPI sag_win_read_pipe(void *parameter) {
+  sag_win_reader *reader = parameter;
+  char chunk[4096];
+  unsigned long count;
+  while (ReadFile(reader->pipe, chunk, sizeof chunk, &count, NULL) && count > 0) {
+    sag_sb_push_bytes(&reader->bytes, chunk, count);
+  }
+  return 0;
+}
+
+/* An inheritable copy of one of the parent's standard handles. */
+static void *sag_win_inherited(unsigned long which) {
+  void *handle = GetStdHandle(which);
+  void *copy = NULL;
+  if (handle == NULL || handle == SAG_WIN_INVALID_HANDLE) {
+    return NULL;
+  }
+  /* DUPLICATE_SAME_ACCESS */
+  return DuplicateHandle(GetCurrentProcess(), handle, GetCurrentProcess(), &copy, 0, 1, 2ul) ? copy : NULL;
+}
+#else
+extern char **environ;
+
+/* Whether the `NAME=value` entry has the name `name`. */
+static bool sag_same_name(const char *entry, const char *name, size_t name_len) {
+  return strncmp(entry, name, name_len) == 0 && entry[name_len] == '=';
+}
+
+/* The environment of the child: the parent's, with the entries of `vars` replacing or adding
+ * variables. Only the array is new; the strings are borrowed. */
+static char **sag_environment(char **vars) {
+  size_t count = 0;
+  size_t extra = 0;
+  while (environ != NULL && environ[count] != NULL) {
+    count++;
+  }
+  while (vars[extra] != NULL) {
+    extra++;
+  }
+  char **merged = sag_alloc((count + extra + 1) * sizeof(char *));
+  size_t len = 0;
+  for (size_t i = 0; i < count; i++) {
+    bool replaced = false;
+    for (size_t j = 0; j < extra && !replaced; j++) {
+      replaced = sag_same_name(environ[i], vars[j], (size_t)(strchr(vars[j], '=') - vars[j]));
+    }
+    if (!replaced) {
+      merged[len++] = environ[i];
+    }
+  }
+  for (size_t j = 0; j < extra; j++) {
+    merged[len++] = vars[j];
+  }
+  merged[len] = NULL;
+  return merged;
+}
+
+/* The file `program` names: itself if it contains `/`, else the first executable file of that
+ * name in the directories of PATH. NULL if there is none. */
+static char *sag_find_program(const char *program) {
+  if (strchr(program, '/') != NULL) {
+    char *copy = sag_alloc(strlen(program) + 1);
+    strcpy(copy, program);
+    return copy;
+  }
+  const char *path = getenv("PATH");
+  if (path == NULL) {
+    path = "/usr/local/bin:/usr/bin:/bin";
+  }
+  size_t program_len = strlen(program);
+  for (;;) {
+    const char *end = strchr(path, ':');
+    size_t dir_len = end == NULL ? strlen(path) : (size_t)(end - path);
+    /* An empty directory means the current one. */
+    char *candidate = sag_alloc(dir_len + program_len + 3);
+    if (dir_len == 0) {
+      memcpy(candidate, ".", 1);
+      dir_len = 1;
+    } else {
+      memcpy(candidate, path, dir_len);
+    }
+    candidate[dir_len] = '/';
+    memcpy(candidate + dir_len + 1, program, program_len + 1);
+    struct stat info;
+    if (stat(candidate, &info) == 0 && S_ISREG(info.st_mode) && access(candidate, X_OK) == 0) {
+      return candidate;
+    }
+    free(candidate);
+    if (end == NULL) {
+      return NULL;
+    }
+    path = end + 1;
+  }
+}
+
+static bool sag_cloexec_pipe(int fds[2]) {
+  if (pipe(fds) != 0) {
+    return false;
+  }
+  fcntl(fds[0], F_SETFD, FD_CLOEXEC);
+  fcntl(fds[1], F_SETFD, FD_CLOEXEC);
+  return true;
+}
+
+static void sag_close_fd(int *fd) {
+  if (*fd >= 0) {
+    close(*fd);
+    *fd = -1;
+  }
+}
+
+/* Reads what is available from `*fd` into `bytes`, closing it at the end of the stream. */
+static void sag_drain_fd(int *fd, sag_sb *bytes) {
+  char chunk[4096];
+  ssize_t count = read(*fd, chunk, sizeof chunk);
+  if (count > 0) {
+    sag_sb_push_bytes(bytes, chunk, (size_t)count);
+  } else if (count == 0 || errno != EINTR) {
+    sag_close_fd(fd);
+  }
+}
+#endif
+
+sag_string sag_process_run(sag_string argv, size_t argc, sag_string env, size_t env_count, sag_string cwd, sag_string input, bool has_input,
+                           bool capture, int32_t *results, size_t *split) {
+  /* results: [0] an error code or 0, [1] the exit code, [2] whether there is one. */
+  results[0] = 0;
+  results[1] = 0;
+  results[2] = 0;
+  *split = 0;
+  sag_sb out;
+  sag_sb err;
+  sag_sb_init(&out);
+  sag_sb_init(&err);
+  char **args = sag_split_nul(argv, argc);
+  char **vars = sag_split_nul(env, env_count);
+  /* The child shares stdout and stderr: what the program printed must come first. */
+  fflush(NULL);
+#ifdef _WIN32
+  sag_wbuf line = {NULL, 0, 0};
+  wchar_t *program = sag_wide_c(args[0]);
+  /* The program name is only quoted, never escaped, when it holds spaces. */
+  bool spaced = wcschr(program, L' ') != NULL || wcschr(program, L'\t') != NULL || *program == 0;
+  if (spaced) {
+    sag_wbuf_push_unit(&line, L'"');
+  }
+  sag_wbuf_push(&line, program, wcslen(program));
+  if (spaced) {
+    sag_wbuf_push_unit(&line, L'"');
+  }
+  free(program);
+  for (size_t i = 1; i < argc; i++) {
+    wchar_t *arg = sag_wide_c(args[i]);
+    sag_wbuf_push_unit(&line, L' ');
+    sag_win_quote_arg(&line, arg);
+    free(arg);
+  }
+  wchar_t *environment = env_count > 0 ? sag_win_environment(vars) : NULL;
+  wchar_t *directory = cwd.len > 0 ? sag_wide(cwd) : NULL;
+
+  sag_win_security_attributes inheritable = {sizeof(sag_win_security_attributes), NULL, 1};
+  void *in_read = NULL;
+  void *in_write = NULL;
+  sag_win_reader readers[2] = {{NULL, {NULL, 0, 0}}, {NULL, {NULL, 0, 0}}};
+  void *child_out[2] = {NULL, NULL};
+  sag_win_startup_info startup;
+  memset(&startup, 0, sizeof startup);
+  startup.cb = sizeof startup;
+  startup.flags = 0x100ul; /* STARTF_USESTDHANDLES */
+  /* HANDLE_FLAG_INHERIT is cleared on the parent's ends of the pipes. */
+  if (has_input && CreatePipe(&in_read, &in_write, &inheritable, 0)) {
+    SetHandleInformation(in_write, 1ul, 0ul);
+    startup.std_input = in_read;
+  } else {
+    startup.std_input = sag_win_inherited((unsigned long)-10); /* STD_INPUT_HANDLE */
+  }
+  for (int i = 0; i < 2; i++) {
+    if (capture && CreatePipe(&readers[i].pipe, &child_out[i], &inheritable, 0)) {
+      SetHandleInformation(readers[i].pipe, 1ul, 0ul);
+    } else {
+      child_out[i] = sag_win_inherited(i == 0 ? (unsigned long)-11 : (unsigned long)-12); /* STD_OUTPUT_HANDLE, STD_ERROR_HANDLE */
+    }
+  }
+  startup.std_output = child_out[0];
+  startup.std_error = child_out[1];
+
+  sag_win_process_information info;
+  memset(&info, 0, sizeof info);
+  /* CREATE_UNICODE_ENVIRONMENT */
+  int created = CreateProcessW(NULL, line.data, NULL, NULL, 1, 0x400ul, environment, directory, &startup, &info);
+  int32_t code = created ? 0 : sag_win_last_errno();
+  /* The child holds its own copies of its ends. */
+  if (startup.std_input != NULL) {
+    CloseHandle(startup.std_input);
+  }
+  for (int i = 0; i < 2; i++) {
+    if (child_out[i] != NULL) {
+      CloseHandle(child_out[i]);
+    }
+  }
+  if (created) {
+    void *threads[2] = {NULL, NULL};
+    for (int i = 0; i < 2; i++) {
+      if (readers[i].pipe != NULL) {
+        threads[i] = CreateThread(NULL, 0, sag_win_read_pipe, &readers[i], 0, NULL);
+        if (threads[i] == NULL) {
+          sag_win_read_pipe(&readers[i]);
+        }
+      }
+    }
+    if (in_write != NULL) {
+      size_t done = 0;
+      while (done < input.len) {
+        size_t left = input.len - done;
+        unsigned long written;
+        /* A child that stops reading closes the pipe: the rest of the input is dropped. */
+        if (!WriteFile(in_write, input.ptr + done, left > 65536 ? 65536ul : (unsigned long)left, &written, NULL)) {
+          break;
+        }
+        done += written;
+      }
+      CloseHandle(in_write);
+      in_write = NULL;
+    }
+    for (int i = 0; i < 2; i++) {
+      if (threads[i] != NULL) {
+        WaitForSingleObject(threads[i], SAG_WIN_INFINITE);
+        CloseHandle(threads[i]);
+      }
+    }
+    WaitForSingleObject(info.process, SAG_WIN_INFINITE);
+    unsigned long exit_code = 0;
+    GetExitCodeProcess(info.process, &exit_code);
+    results[1] = (int32_t)exit_code;
+    results[2] = 1;
+    CloseHandle(info.process);
+    CloseHandle(info.thread);
+  }
+  if (in_write != NULL) {
+    CloseHandle(in_write);
+  }
+  for (int i = 0; i < 2; i++) {
+    if (readers[i].pipe != NULL) {
+      CloseHandle(readers[i].pipe);
+    }
+  }
+  free(line.data);
+  free(environment);
+  free(directory);
+  out = readers[0].bytes;
+  err = readers[1].bytes;
+#else
+  int32_t code = 0;
+  char *program = sag_find_program(args[0]);
+  char *directory = cwd.len > 0 ? sag_cpath(cwd) : NULL;
+  int in_fds[2] = {-1, -1};
+  int out_fds[2] = {-1, -1};
+  int err_fds[2] = {-1, -1};
+  int exec_fds[2] = {-1, -1};
+  if (program == NULL) {
+    code = ENOENT;
+  } else if ((has_input && !sag_cloexec_pipe(in_fds)) || (capture && (!sag_cloexec_pipe(out_fds) || !sag_cloexec_pipe(err_fds))) ||
+             !sag_cloexec_pipe(exec_fds)) {
+    code = sag_io_errno();
+  }
+  pid_t pid = -1;
+  if (code == 0) {
+    char **envp = env_count > 0 ? sag_environment(vars) : environ;
+    pid = fork();
+    if (pid == 0) {
+      /* The child: only async-signal-safe calls until `execve`. */
+      if ((in_fds[0] >= 0 && dup2(in_fds[0], 0) < 0) || (out_fds[1] >= 0 && dup2(out_fds[1], 1) < 0) ||
+          (err_fds[1] >= 0 && dup2(err_fds[1], 2) < 0) || (directory != NULL && chdir(directory) != 0)) {
+        int error = errno;
+        ssize_t ignored = write(exec_fds[1], &error, sizeof error);
+        (void)ignored;
+        _exit(127);
+      }
+      execve(program, args, envp);
+      int error = errno;
+      ssize_t ignored = write(exec_fds[1], &error, sizeof error);
+      (void)ignored;
+      _exit(127);
+    }
+    if (pid < 0) {
+      code = sag_io_errno();
+    }
+    if (envp != environ) {
+      free(envp);
+    }
+  }
+  sag_close_fd(&in_fds[0]);
+  sag_close_fd(&out_fds[1]);
+  sag_close_fd(&err_fds[1]);
+  sag_close_fd(&exec_fds[1]);
+  if (pid > 0) {
+    /* The exec pipe closes when `execve` succeeds, or delivers the child's `errno`. */
+    int error = 0;
+    ssize_t count;
+    do {
+      count = read(exec_fds[0], &error, sizeof error);
+    } while (count < 0 && errno == EINTR);
+    if (count == (ssize_t)sizeof error) {
+      code = error;
+      sag_close_fd(&in_fds[1]);
+    } else {
+      /* A child that stops reading would raise SIGPIPE on the parent. */
+      struct sigaction ignore;
+      struct sigaction previous;
+      memset(&ignore, 0, sizeof ignore);
+      ignore.sa_handler = SIG_IGN;
+      sigemptyset(&ignore.sa_mask);
+      sigaction(SIGPIPE, &ignore, &previous);
+      if (in_fds[1] >= 0) {
+        fcntl(in_fds[1], F_SETFL, fcntl(in_fds[1], F_GETFL) | O_NONBLOCK);
+      }
+      size_t done = 0;
+      if (in_fds[1] >= 0 && input.len == 0) {
+        sag_close_fd(&in_fds[1]);
+      }
+      while (in_fds[1] >= 0 || out_fds[0] >= 0 || err_fds[0] >= 0) {
+        struct pollfd fds[3];
+        nfds_t count_fds = 0;
+        int in_slot = -1;
+        int out_slot = -1;
+        int err_slot = -1;
+        if (in_fds[1] >= 0) {
+          in_slot = (int)count_fds;
+          fds[count_fds].fd = in_fds[1];
+          fds[count_fds++].events = POLLOUT;
+        }
+        if (out_fds[0] >= 0) {
+          out_slot = (int)count_fds;
+          fds[count_fds].fd = out_fds[0];
+          fds[count_fds++].events = POLLIN;
+        }
+        if (err_fds[0] >= 0) {
+          err_slot = (int)count_fds;
+          fds[count_fds].fd = err_fds[0];
+          fds[count_fds++].events = POLLIN;
+        }
+        for (nfds_t i = 0; i < count_fds; i++) {
+          fds[i].revents = 0;
+        }
+        if (poll(fds, count_fds, -1) < 0) {
+          if (errno == EINTR) {
+            continue;
+          }
+          break;
+        }
+        if (in_slot >= 0 && fds[in_slot].revents != 0) {
+          ssize_t written = write(in_fds[1], input.ptr + done, input.len - done);
+          if (written > 0) {
+            done += (size_t)written;
+          }
+          if (done == input.len || (written < 0 && errno != EAGAIN && errno != EINTR)) {
+            sag_close_fd(&in_fds[1]);
+          }
+        }
+        if (out_slot >= 0 && fds[out_slot].revents != 0) {
+          sag_drain_fd(&out_fds[0], &out);
+        }
+        if (err_slot >= 0 && fds[err_slot].revents != 0) {
+          sag_drain_fd(&err_fds[0], &err);
+        }
+      }
+      sigaction(SIGPIPE, &previous, NULL);
+    }
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+    }
+    if (code == 0 && WIFEXITED(status)) {
+      results[1] = WEXITSTATUS(status);
+      results[2] = 1;
+    }
+  }
+  sag_close_fd(&in_fds[1]);
+  sag_close_fd(&out_fds[0]);
+  sag_close_fd(&err_fds[0]);
+  sag_close_fd(&exec_fds[0]);
+  free(program);
+  free(directory);
+#endif
+  sag_free_parts(args);
+  sag_free_parts(vars);
+  results[0] = code;
+  if (code != 0) {
+    free(out.data);
+    free(err.data);
+    return sag_string_empty();
+  }
+  return sag_process_result(&out, &err, split);
 }
 
 /* ---- Program lifecycle ----------------------------------------------------------------- */

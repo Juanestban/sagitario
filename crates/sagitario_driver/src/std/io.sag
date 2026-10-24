@@ -6,8 +6,6 @@ extern "C" {
   fn sag_io_flush() -> i32;
   fn sag_io_read_line(status: *mut i32) -> String;
   fn sag_io_read_all(status: *mut i32) -> String;
-  fn sag_io_error_kind(code: i32) -> i32;
-  fn sag_io_error_message(code: i32) -> String;
 }
 
 /// What kind of failure an I/O error is.
@@ -41,19 +39,9 @@ pub class Error impl std::prelude::Error {
   }
 }
 
-/// The error with this runtime code: an `errno` value, or one of the runtime's own codes.
+/// The error with this runtime code.
 fn error_from(code: i32) -> Error {
-  const kind = match unsafe { sag_io_error_kind(code) } {
-    0 => ErrorKind::NotFound,
-    1 => ErrorKind::PermissionDenied,
-    2 => ErrorKind::AlreadyExists,
-    3 => ErrorKind::InvalidInput,
-    4 => ErrorKind::InvalidData,
-    5 => ErrorKind::UnexpectedEof,
-    _ => ErrorKind::Other,
-  };
-
-  new Error(kind, unsafe { sag_io_error_message(code) })
+  super::os_error(code, "")
 }
 
 /// The result of an operation that returned this runtime code, 0 on success.

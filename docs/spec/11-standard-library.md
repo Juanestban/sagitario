@@ -1,7 +1,7 @@
 # 11. Standard library (F3)
 
 Rationale: [ADR-0037](../adr/0037-standard-library-env-io-process.md),
-[ADR-0038](../adr/0038-file-system-and-paths.md).
+[ADR-0038](../adr/0038-file-system-and-paths.md), [ADR-0039](../adr/0039-time-and-commands.md).
 
 The standard library is the set of modules under the path root `std`. A program imports them
 with `use` like its own modules (`use std::io;`, `use std::env::args;`) or names them in full
@@ -15,7 +15,8 @@ functions it uses.
 | `std::io` | Standard input and output with errors as values; `io::Error` | F3 |
 | `std::fs` | Files and directories | F3 |
 | `std::path` | Joining paths and taking them apart | F3 |
-| `std::process` | `exit` | F3 |
+| `std::process` | `exit`, running programs | F3 |
+| `std::time` | Durations, clocks and `sleep` | F3 |
 
 Naming a module that does not exist (`std::net`) is an error.
 
@@ -153,6 +154,83 @@ it can stand where any value is expected (`const n = if ok { 1 } else { process:
   the leak check of the test harness does not report the objects still alive.
 - Exit codes outside 0–255 depend on the operating system; POSIX systems keep the low 8 bits.
 
+### Running programs
+
+```sag
+use std::process::Command;
+
+const output = new Command("git").arg("status").arg("--short").current_dir("repo").output()?;
+if output.status.success() {
+  print(output.stdout);
+}
+```
+
+`Command` is a class; each of these methods changes the command and returns it, so calls chain:
+
+| Method | Effect |
+|---|---|
+| `new Command(program)` | The program to run, looked up in the directories of `PATH` unless it contains a separator (on Windows, also with `.exe`) |
+| `arg(text)`, `args(list)` | Adds arguments, passed exactly as given |
+| `env(name, value)` | Sets an environment variable for the program; the others are inherited |
+| `current_dir(path)` | The program's working directory |
+| `input(text)` | Text written to the program's stdin, which is then closed; without it the program reads this program's stdin |
+
+| Method | Result |
+|---|---|
+| `output() -> Result<Output, io::Error>` | Runs the program to its end, capturing its stdout and stderr |
+| `status() -> Result<ExitStatus, io::Error>` | Runs the program to its end, printing to this program's stdout and stderr |
+
+```sag
+pub struct ExitStatus {
+  pub code: Option<i32>;   // None if a signal ended the program (POSIX systems)
+  pub fn success(self) -> bool;   // whether the code is 0
+}
+
+pub struct Output {
+  pub status: ExitStatus;
+  pub stdout: String;
+  pub stderr: String;
+}
+```
+
+- A program that ends with a code other than 0 is not an error: `success()` is `false`.
+- A program that cannot be started is an error, such as
+  `cannot run "tool": No such file or directory` of kind `NotFound`. An argument, variable or
+  directory containing a NUL character, or a variable name that is empty or contains `=`, is an
+  error of kind `InvalidInput`.
+- Captured output that is not valid UTF-8 has each ill-formed sequence replaced by U+FFFD.
+- This program's buffered output is written out before the child starts, so what both print
+  appears in order.
+- Not yet: running a program in the background (`spawn`, `wait`, `kill`), redirecting to
+  files, removing or clearing inherited variables, and connecting programs with pipes.
+
+## `std::time`
+
+Rationale: [ADR-0039](../adr/0039-time-and-commands.md).
+
+| Item | Meaning |
+|---|---|
+| `Duration` | A span of time with nanosecond precision, up to about 584 years |
+| `Instant` | A point of a monotonic clock, which never goes back; for measuring |
+| `SystemTime` | A point of the system clock, which the user or the network may change |
+| `sleep(duration: Duration)` | Pauses the program for at least `duration` |
+
+| Function | Result |
+|---|---|
+| `Duration::from_secs(n)`, `from_millis(n)`, `from_micros(n)`, `from_nanos(n)` | A `Duration` from a `u64` |
+| `d.as_secs()`, `as_millis()`, `as_micros()`, `as_nanos()` | The whole units, as `u64` |
+| `d.as_secs_f64()` | The seconds with their fraction |
+| `d.plus(e)`, `d.minus(e)`, `d.times(n: u64)` | Arithmetic; `minus` panics if `e` is longer, also in release builds |
+| `Instant::now()`, `i.elapsed()` | The current instant, and the time since `i` |
+| `i.duration_since(earlier)` | The time from `earlier` to `i`; zero if `earlier` is later |
+| `SystemTime::now()`, `t.since_unix_epoch()` | The current time, and the time since 1970-01-01 00:00:00 UTC (zero before it) |
+
+- The three types implement `Ord` (and so `Eq`): `a.compare(b)`, and lists of them can be
+  sorted. Without operator overloading, arithmetic and comparisons are methods.
+- Creating or adding durations beyond the range of `u64` nanoseconds follows integer overflow
+  rules: a panic in debug builds.
+- Calendar dates, time zones and formatting are not part of `std::time`.
+
 ## Implementation rules
 
 The modules of `std`, except `std::ffi`, are written in Sagitario and embedded in the compiler.
@@ -162,6 +240,9 @@ They follow the rules of every module, with two exceptions that only the standar
   which may also take and return `String` (borrowed arguments, new references as results).
 - It may name the prelude module as `std::prelude`, to implement the prelude's interfaces with
   types of the same name (`io::Error` implements `Error`).
+
+`std` itself has a file of private helpers, which its modules call as `super::name`: like any
+module's private items, only its submodules see them.
 
 `std::process::exit` is provided by the compiler, since no function written in Sagitario can
 declare that it never returns.

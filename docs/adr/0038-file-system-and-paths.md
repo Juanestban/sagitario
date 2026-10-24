@@ -44,4 +44,5 @@ conventions differ too. Increment 2 settles Q91–Q101.
 - The POSIX code was compiled locally with the Android NDK's clang (bionic). glibc and macOS are
   first exercised in CI.
 - `std::fs` builds its `io::Error`s itself, since the error helpers of `std::io` are private and
-  the language has no package-private visibility.
+  the language has no package-private visibility. ADR-0039 replaces this with a helper shared
+  through `std`'s own file.

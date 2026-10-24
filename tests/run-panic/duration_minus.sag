@@ -1,0 +1,10 @@
+// Durations are never negative: subtracting a longer one panics, also in release builds.
+// expect-panic: cannot subtract a longer duration from a shorter one
+// sag-flags: --release
+
+use std::time::Duration;
+
+fn main() {
+  const short = Duration::from_millis(1);
+  println(`${short.minus(Duration::from_secs(1)).as_nanos()}`);
+}

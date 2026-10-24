@@ -29,7 +29,8 @@ pub(crate) fn build_tree(resolution: &mut Resolution, package: &Package) -> Vec<
       continue;
     }
 
-    // The standard library modules are children of `std`, outside the tree of `pkg` too.
+    // The standard library modules are children of `std`, outside the tree of `pkg` too. `std`
+    // itself has a file whose private items only its modules see.
     if package.std.contains(&source) {
       let root = *resolution.std_root.get_or_insert_with(|| {
         let root = ModId(resolution.modules.len() as u32);
@@ -38,6 +39,17 @@ pub(crate) fn build_tree(resolution: &mut Resolution, package: &Package) -> Vec<
 
         root
       });
+
+      if module.path.len() == 1 {
+        if let Some(info) = resolution.modules.get_mut(root.0 as usize) {
+          info.source = Some(source);
+        }
+
+        ids.push(root);
+
+        continue;
+      }
+
       let node = ModId(resolution.modules.len() as u32);
       let name = module.path.last().cloned().unwrap_or_default();
 
