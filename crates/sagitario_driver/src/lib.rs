@@ -845,8 +845,9 @@ fn find_archiver(compiler: &CCompiler) -> Result<String, u8> {
   candidates.push("llvm-ar".to_string());
   candidates.push("ar".to_string());
 
+  // Only whether it starts: the `ar` of macOS has no `--version` and exits with an error.
   for candidate in candidates {
-    if Command::new(&candidate).arg("--version").stdin(Stdio::null()).output().is_ok_and(|output| output.status.success()) {
+    if Command::new(&candidate).arg("--version").stdin(Stdio::null()).output().is_ok() {
       return Ok(candidate);
     }
   }
