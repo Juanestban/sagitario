@@ -21,27 +21,36 @@
 //! Enums, `Option` and `Result` values carry a tag (the variant's index) and the fields of their
 //! variant; `match` and `?` (in `matching`) test the tag before reading those fields.
 //!
+//! Generic code is lowered per instance (`mono`): the types of a template's expressions are
+//! substituted with the instance's type arguments, so every SIR type is concrete.
+//!
 //! Lowering only runs on programs without errors, so an inconsistency it finds is an internal
 //! compiler error, reported as `LowerError`.
 
 mod interfaces;
 mod matching;
+mod mono;
 mod text;
 
 pub use interfaces::{FieldAt, Itable, ItableEntry};
+pub use mono::ClassInstance;
 
 use sagitario_ast::{BinaryOp, Block, Expr, ExprKind, FnDecl, Package, Stmt as AstStmt, TemplatePart, UnaryOp};
-use sagitario_resolve::{Builtin, ClassId, ExternId, FnId, Res, Resolution, TypeItem};
+use sagitario_diagnostics::Diagnostics;
+use sagitario_resolve::{Builtin, ClassId, ExternId, FnId, ParamOwner, Res, Resolution, TypeItem};
 
 use crate::interfaces::Registry;
 use sagitario_span::{SourceMap, Span};
-use sagitario_types::{BuiltinMethod, FloatTy, IntTy, Receiver, Type, TypedModule};
+use sagitario_types::{BuiltinMethod, ClassRef, EnumRef, FloatTy, IntTy, Receiver, StructRef, Subst, Type, TypedModule};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
-  /// Indexed by `FnId`.
+  /// Indexed by `FnId`: the program's functions (templates are placeholders), then the instances
+  /// of templates.
   pub functions: Vec<Function>,
   pub layouts: Layouts,
+  /// The class types the program uses, with their type arguments.
+  pub classes: Vec<ClassInstance>,
   pub entry: FnId,
   /// Path of each source file, by `FileId` index, for `#line` directives.
   pub source_paths: Vec<String>,
@@ -72,15 +81,13 @@ pub struct ExternDecl {
   pub ret: Type,
 }
 
-/// The fields of the program's structs, enums and classes.
+/// The fields of the program's structs and enums, with type parameters in generic ones.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Layouts {
   /// Indexed by `StructId`.
   pub structs: Vec<StructLayout>,
   /// Indexed by `EnumId`.
   pub enums: Vec<EnumLayout>,
-  /// Indexed by `ClassId`.
-  pub classes: Vec<ClassLayout>,
 }
 
 impl Layouts {
@@ -89,7 +96,7 @@ impl Layouts {
     match ty {
       Type::String | Type::StringBuilder | Type::CString | Type::Class(_) | Type::Interface(_) => true,
       Type::Array(elem, _) => self.is_managed(elem),
-      Type::Struct(inner) => self.structs.get(inner.id.0 as usize).is_some_and(|layout| layout.fields.iter().any(|field| self.is_managed(field))),
+      Type::Struct(inner) => self.struct_fields(inner).iter().any(|field| self.is_managed(field)),
       Type::Enum(_) | Type::Option(_) | Type::Result(..) => self.variants(ty).iter().flatten().flatten().any(|field| self.is_managed(field)),
       _ => false,
     }
@@ -98,38 +105,30 @@ impl Layouts {
   /// The field types of each variant of an enum, `Option` or `Result` type.
   pub fn variants(&self, ty: &Type) -> Option<Vec<Vec<Type>>> {
     match ty {
-      Type::Enum(inner) => self.enums.get(inner.id.0 as usize).map(|layout| layout.variants.clone()),
+      Type::Enum(inner) => {
+        let subst = enum_subst(inner);
+
+        self
+          .enums
+          .get(inner.id.0 as usize)
+          .map(|layout| layout.variants.iter().map(|fields| fields.iter().map(|field| field.substitute(&subst)).collect()).collect())
+      }
       Type::Option(value) => Some(vec![Vec::new(), vec![value.as_ref().clone()]]),
       Type::Result(value, error) => Some(vec![vec![value.as_ref().clone()], vec![error.as_ref().clone()]]),
       _ => None,
     }
   }
 
-  pub fn struct_fields(&self, id: sagitario_resolve::StructId) -> Vec<Type> {
-    self.structs.get(id.0 as usize).map(|layout| layout.fields.clone()).unwrap_or_default()
-  }
+  /// The field types of a struct type, with its type arguments.
+  pub fn struct_fields(&self, ty: &StructRef) -> Vec<Type> {
+    let subst = Subst::of(ParamOwner::Item(TypeItem::Struct(ty.id)), ty.args.clone());
 
-  /// The fields a class declares itself, after those of its ancestors.
-  pub fn class_fields(&self, id: ClassId) -> Vec<Type> {
-    self.classes.get(id.0 as usize).map(|layout| layout.fields.clone()).unwrap_or_default()
-  }
-
-  pub fn class(&self, id: ClassId) -> Option<&ClassLayout> {
-    self.classes.get(id.0 as usize)
+    self.structs.get(ty.id.0 as usize).map(|layout| layout.fields.iter().map(|field| field.substitute(&subst)).collect()).unwrap_or_default()
   }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct ClassLayout {
-  pub name: String,
-  /// Objects of the class start with the parent's part.
-  pub parent: Option<ClassId>,
-  /// The types of the class's own fields, in declaration order.
-  pub fields: Vec<Type>,
-  /// Which of those fields are `weak`: stored as a bare reference instead of an `Option`.
-  pub weak: Vec<bool>,
-  /// The methods called through the vtable, by slot.
-  pub vtable: Vec<FnId>,
+fn enum_subst(ty: &EnumRef) -> Subst {
+  Subst::of(ParamOwner::Item(TypeItem::Enum(ty.id)), ty.args.clone())
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -149,6 +148,8 @@ pub struct StructLayout {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Function {
   pub name: String,
+  /// A generic template, only used through its instances: it has no code.
+  pub template: bool,
   /// The first locals are the parameters, starting with `self` in methods.
   pub param_count: usize,
   /// A method that modifies a struct's or enum's `self`: local 0 refers to the caller's value
@@ -179,9 +180,9 @@ pub struct Place {
 pub enum Projection {
   /// The field at this position of a struct.
   Field(usize),
-  /// The field at position `index` among those `class` declares, in the instance a reference
-  /// points to (an instance of `class` or of a subclass).
-  ClassField { class: ClassId, index: usize },
+  /// The field at position `index` among those of class instance `class` (the class declaring
+  /// it), in the object a reference points to (of that class or a subclass).
+  ClassField { class: usize, index: usize },
   /// A bounds-checked element of an array of length `len`.
   Index { index: Operand, len: u64 },
   /// The tag of an enum value: the index of its variant, as `u32`.
@@ -257,10 +258,10 @@ pub enum Stmt {
     bytes: bool,
     body: Vec<Stmt>,
   },
-  /// Makes the instance in `object` dispatch through the vtable of `class`.
+  /// Makes the instance in `object` dispatch through the vtable of class instance `class`.
   SetVtable {
     object: Local,
-    class: ClassId,
+    class: usize,
   },
   Break,
   Continue,
@@ -315,9 +316,9 @@ pub enum Rvalue {
     index: u32,
     fields: Vec<Operand>,
   },
-  /// A new instance of a class with one reference and every field zeroed, which its
+  /// A new object of class instance `N` with one reference and every field zeroed, which its
   /// initializer then assigns.
-  Alloc(ClassId),
+  Alloc(usize),
   /// The `Option` in a `weak` field: `Some` with a new reference while the instance is alive.
   WeakLoad(Place),
   /// A value of a class, struct or enum as an interface value with the given itable: a new
@@ -406,7 +407,15 @@ fn error<T>(message: impl Into<String>) -> LResult<T> {
   Err(LowerError(message.into()))
 }
 
-pub fn lower(package: &Package, resolution: &Resolution, typed: &TypedModule, sources: &SourceMap) -> LResult<Program> {
+/// Lowers the program; errors found while instantiating generic code (an endless series of
+/// instances) are added to `diagnostics`.
+pub fn lower(
+  package: &Package,
+  resolution: &Resolution,
+  typed: &TypedModule,
+  sources: &SourceMap,
+  diagnostics: &mut Diagnostics,
+) -> LResult<Program> {
   let entry = resolution.main.ok_or_else(|| LowerError("program without `main`".to_string()))?;
   let structs = typed
     .structs
@@ -418,29 +427,57 @@ pub fn lower(package: &Package, resolution: &Resolution, typed: &TypedModule, so
     .iter()
     .map(|def| EnumLayout { name: def.name.clone(), variants: def.variants.iter().map(|variant| variant.field_types()).collect() })
     .collect();
-  let classes = typed
-    .classes
-    .iter()
-    .map(|def| ClassLayout {
-      name: def.name.clone(),
-      parent: def.parent,
-      fields: def.fields.iter().map(|field| field.ty.clone()).collect(),
-      weak: def.fields.iter().map(|field| field.weak).collect(),
-      vtable: def.vtable.clone(),
-    })
-    .collect();
-  let layouts = Layouts { structs, enums, classes };
+  let layouts = Layouts { structs, enums };
   let mut functions = Vec::new();
-
-  let mut registry = Registry::default();
+  let mut registry = Registry { first_instance: resolution.functions.len() as u32, ..Registry::default() };
 
   for (id, decl) in resolution.fn_decls(package) {
+    if mono::is_template(resolution, typed, id) {
+      functions.push(Function {
+        name: decl.name.name.clone(),
+        template: true,
+        param_count: 0,
+        self_by_ref: false,
+        export: None,
+        ret: Type::Unit,
+        locals: Vec::new(),
+        body: Vec::new(),
+      });
+
+      continue;
+    }
+
     let mut cx = Context { package, resolution, typed, layouts: &layouts, sources, registry: &mut registry };
 
-    functions.push(lower_function(id, decl, &mut cx)?);
+    functions.push(lower_function(id, decl, Subst::default(), &mut cx)?);
   }
 
   let main_error = main_error(entry, package, resolution, typed, &layouts, sources, &mut registry);
+  let mut instances: Vec<Option<Function>> = Vec::new();
+
+  // Lowering an instance may need more instances.
+  while let Some(index) = registry.pending.pop() {
+    let Some(instance) = registry.instances.get(index).cloned() else { continue };
+    let Some(decl) = resolution.fn_decl(package, instance.template) else { continue };
+    let mut cx = Context { package, resolution, typed, layouts: &layouts, sources, registry: &mut registry };
+    let function = lower_function(instance.template, decl, instance.subst, &mut cx)?;
+
+    if instances.len() <= index {
+      instances.resize(index + 1, None);
+    }
+
+    if let Some(slot) = instances.get_mut(index) {
+      *slot = Some(function);
+    }
+  }
+
+  for function in instances {
+    functions.push(function.ok_or_else(|| LowerError("an instance was not lowered".to_string()))?);
+  }
+
+  for diagnostic in std::mem::take(&mut registry.diagnostics) {
+    diagnostics.push(diagnostic);
+  }
 
   let source_paths = sources.files().iter().map(|source| source.path().display().to_string()).collect();
   let mut externs = Vec::new();
@@ -451,7 +488,17 @@ pub fn lower(package: &Package, resolution: &Resolution, typed: &TypedModule, so
     externs.push(ExternDecl { symbol: decl.name.name.clone(), params: sig.params.clone(), ret: sig.ret.clone() });
   }
 
-  Ok(Program { functions, layouts, entry, source_paths, externs, itables: registry.itables, boxes: registry.boxes, main_error })
+  Ok(Program {
+    functions,
+    layouts,
+    classes: registry.classes,
+    entry,
+    source_paths,
+    externs,
+    itables: registry.itables,
+    boxes: registry.boxes,
+    main_error,
+  })
 }
 
 /// What lowering a function needs from the whole program.
@@ -483,9 +530,11 @@ fn main_error(
     Type::Interface(interface) => Some(MainError { itable: None, path: typed.interface_path(interface.id, error)?, slot }),
     concrete => {
       let mut cx = Context { package, resolution, typed, layouts, sources, registry };
-      let mut lowering = FnLowering::new(&mut cx, Type::Unit, Vec::new());
+      let span = resolution.fn_decl(package, entry)?.name.span;
+      let mut lowering = FnLowering::new(&mut cx, Type::Unit, Vec::new(), Subst::default(), span);
+      let interface = typed.implemented_ref(concrete, error)?;
 
-      Some(MainError { itable: Some(lowering.itable(error, concrete)), path: Vec::new(), slot })
+      Some(MainError { itable: Some(lowering.itable(&interface, concrete)), path: Vec::new(), slot })
     }
   }
 }
@@ -509,11 +558,17 @@ fn first_zod_new(decl: &FnDecl, typed: &TypedModule) -> Option<sagitario_ast::No
     .then_some(first.id)
 }
 
-fn lower_function(id: FnId, decl: &FnDecl, cx: &mut Context) -> LResult<Function> {
+/// Lowers a function, or the instance of a template with the type arguments in `subst`.
+fn lower_function(id: FnId, decl: &FnDecl, subst: Subst, cx: &mut Context) -> LResult<Function> {
   let (resolution, typed) = (cx.resolution, cx.typed);
-  let sig = typed.sig(id).ok_or_else(|| LowerError(format!("no signature for `{}`", decl.name.name)))?;
-  let locals = typed.local_types.get(id.0 as usize).cloned().ok_or_else(|| LowerError("missing local types".to_string()))?;
-  let mut lowering = FnLowering::new(cx, sig.ret.clone(), locals);
+  let sig = typed.sig(id).ok_or_else(|| LowerError(format!("no signature for `{}`", decl.name.name)))?.substitute(&subst);
+  let locals = typed.local_types.get(id.0 as usize).ok_or_else(|| LowerError("missing local types".to_string()))?;
+  let locals: Vec<Type> = locals.iter().map(|ty| ty.substitute(&subst)).collect();
+  let mut lowering = FnLowering::new(cx, sig.ret.clone(), locals.clone(), subst, decl.name.span);
+
+  for ty in &locals {
+    lowering.register_types(ty);
+  }
 
   if decl.is_abstract {
     // Only reachable while the class's own initializer runs (ADR-0029).
@@ -522,6 +577,8 @@ fn lower_function(id: FnId, decl: &FnDecl, cx: &mut Context) -> LResult<Function
     lowering.emit(Stmt::Panic(PanicMessage::Static(format!("called the abstract method `{}` of `{owner}` while initializing it", decl.name.name))));
   } else if let (Some(Receiver::Init), Some(TypeItem::Class(class))) = (sig.receiver, resolution.owner(id)) {
     // The instance dispatches as this class once its parent part is initialized.
+    let class = lowering.own_class(class);
+
     match first_zod_new(decl, typed) {
       Some(call) => lowering.vtable_after = Some((call, class)),
       None => lowering.emit(Stmt::SetVtable { object: Local(0), class }),
@@ -544,6 +601,7 @@ fn lower_function(id: FnId, decl: &FnDecl, cx: &mut Context) -> LResult<Function
 
   Ok(Function {
     name: decl.name.name.clone(),
+    template: false,
     param_count: decl.params.len() + usize::from(sig.receiver.is_some()),
     self_by_ref: sig.receiver == Some(Receiver::Var),
     export: decl.extern_c.then(|| decl.export.as_ref().map_or_else(|| decl.name.name.clone(), |export| export.symbol.clone())),
@@ -579,13 +637,30 @@ struct FnLowering<'a> {
   /// Managed temporaries created on the current path and not yet released.
   pending: Vec<Local>,
   loops: Vec<LoopCx>,
-  /// In an initializer, the `zod.new(...)` after which the instance takes this class's vtable.
-  vtable_after: Option<(sagitario_ast::NodeId, ClassId)>,
+  /// In an initializer, the `zod.new(...)` after which the instance takes this class's vtable
+  /// (a class instance).
+  vtable_after: Option<(sagitario_ast::NodeId, usize)>,
+  /// The type arguments of the instance being lowered; empty outside generic code.
+  subst: Subst,
+  /// Where the code being lowered is, for errors found while instantiating.
+  span: Span,
 }
 
 impl<'a> FnLowering<'a> {
-  fn new(cx: &'a mut Context, ret: Type, locals: Vec<Type>) -> FnLowering<'a> {
+  /// The class instance of a class used inside its own declaration, with the instance's type
+  /// arguments.
+  fn own_class(&mut self, id: ClassId) -> usize {
+    let name = self.typed.class_def(id).map(|def| def.name.clone()).unwrap_or_default();
+    let args =
+      self.subst.params.iter().find(|(owner, _)| *owner == ParamOwner::Item(TypeItem::Class(id))).map(|(_, args)| args.clone()).unwrap_or_default();
+
+    self.class_instance(&ClassRef { id, name, args })
+  }
+
+  fn new(cx: &'a mut Context, ret: Type, locals: Vec<Type>, subst: Subst, span: Span) -> FnLowering<'a> {
     FnLowering {
+      subst,
+      span,
       package: cx.package,
       registry: cx.registry,
       resolution: cx.resolution,
@@ -620,6 +695,7 @@ impl FnLowering<'_> {
   }
 
   fn temp(&mut self, ty: Type) -> Local {
+    self.register_types(&ty);
     self.locals.push(ty);
 
     Local(self.locals.len() as u32 - 1)
@@ -630,7 +706,9 @@ impl FnLowering<'_> {
   }
 
   fn type_of(&self, expr: &Expr) -> LResult<Type> {
-    self.typed.expr_type(expr).cloned().ok_or_else(|| LowerError(format!("expression without a type at byte {}", expr.span.start)))
+    let ty = self.typed.expr_type(expr).ok_or_else(|| LowerError(format!("expression without a type at byte {}", expr.span.start)))?;
+
+    Ok(ty.substitute(&self.subst))
   }
 
   fn binding(&self, id: sagitario_ast::NodeId) -> LResult<Local> {
@@ -727,6 +805,7 @@ impl FnLowering<'_> {
       let line = self.line(tail.span);
 
       self.emit(line);
+      self.span = tail.span;
 
       let mark = self.pending.len();
       let value = self.expr(tail)?;
@@ -762,6 +841,7 @@ impl FnLowering<'_> {
     let line = self.line(span);
 
     self.emit(line);
+    self.span = span;
 
     let mark = self.pending.len();
 
@@ -797,13 +877,13 @@ impl FnLowering<'_> {
         let mut new_value = self.operand_as(value, &ty)?;
 
         if let Some(op) = op {
-          let getter = self.dyn_field(interface.id, &name.name, false)?;
+          let getter = self.dyn_field(&interface, &name.name, false)?;
           let current = self.call(getter, vec![receiver.clone()], ty.clone());
 
           new_value = self.binary(*op, ty, current, new_value);
         }
 
-        self.set_dyn_field(receiver, interface.id, &name.name, new_value)?;
+        self.set_dyn_field(receiver, &interface, &name.name, new_value)?;
       }
       AstStmt::Assign { target, value, .. } if self.is_weak_field(target) => {
         let value = self.expr(value)?;
@@ -899,7 +979,7 @@ impl FnLowering<'_> {
       ExprKind::Field { base, name } if self.is_interface_field(expr) => {
         let Type::Interface(interface) = self.type_of(base)? else { return error("interface field of another type") };
         let receiver = self.expr(base)?;
-        let getter = self.dyn_field(interface.id, &name.name, false)?;
+        let getter = self.dyn_field(&interface, &name.name, false)?;
         // The getter returns a new reference.
         let value = self.call(getter, vec![receiver], ty.clone());
 
@@ -973,7 +1053,10 @@ impl FnLowering<'_> {
 
     let projection = match self.type_of(base)? {
       Type::Struct(owner) => self.typed.field_index(owner.id, &name.name).map(Projection::Field),
-      Type::Class(owner) => self.typed.class_field(owner.id, &name.name).map(|(class, index, _)| Projection::ClassField { class, index }),
+      Type::Class(owner) => self
+        .typed
+        .class_field_type(&owner, &name.name)
+        .map(|(declaring, index, _)| Projection::ClassField { class: self.class_instance(&declaring), index }),
       _ => return error("field of a value that is not a struct or a class instance"),
     };
     let projection = projection.ok_or_else(|| LowerError(format!("unknown field `{}`", name.name)))?;
@@ -1080,9 +1163,20 @@ impl FnLowering<'_> {
         Ok(self.new_value(ty, Rvalue::Template(pieces)))
       }
       ExprKind::Call { callee, args } => {
-        let callee = match self.resolution.paths.get(&callee.id) {
-          Some(Res::Fn(id)) => Callee::Fn(*id),
-          Some(Res::Extern(id)) => Callee::Extern(*id),
+        let callee = match self.resolution.paths.get(&callee.id).copied() {
+          Some(Res::Fn(id)) => {
+            let subst = self.call_subst(expr.id, id, None);
+            let params = self.typed.sig(id).map(|sig| sig.substitute(&subst).params).unwrap_or_default();
+            let function = self.instance(id, subst);
+            let mut operands = Vec::new();
+
+            for (arg, param) in args.iter().zip(&params) {
+              operands.push(self.operand_as(arg, param)?);
+            }
+
+            return Ok(self.call(Callee::Fn(function), operands, ty));
+          }
+          Some(Res::Extern(id)) => Callee::Extern(id),
           Some(Res::Builtin(Builtin::ErrorNew)) => {
             let [text] = args.as_slice() else { return error("`Error` without one argument") };
             let text = self.operand_as(text, &Type::String)?;
@@ -1095,7 +1189,7 @@ impl FnLowering<'_> {
 
             return Ok(self.cstring_new(&ty, text));
           }
-          Some(Res::Builtin(builtin)) => Callee::Builtin(*builtin),
+          Some(Res::Builtin(builtin)) => Callee::Builtin(builtin),
           Some(Res::Variant(variant)) => {
             let fields = self.variant_fields(&ty, variant.index);
             let mut operands = Vec::new();
@@ -1145,19 +1239,26 @@ impl FnLowering<'_> {
 
           return Ok(Operand::Const(Const::Int { value: u128::from(len), negative: false, ty: IntTy::Usize }));
         };
-        let sig = self.typed.sig(function).cloned().ok_or_else(|| LowerError("method without a signature".to_string()))?;
-        let by_ref = sig.receiver == Some(Receiver::Var);
         let receiver_ty = self.type_of(receiver)?;
-        // `zod` calls name their implementation; methods of interface values go through the
-        // itable; others go through the vtable when it varies.
-        let callee = match (&receiver_ty, self.typed.slots.get(&function)) {
-          (Type::Interface(interface), _) => self.dyn_method(interface.id, function)?,
-          (_, Some(slot)) if !self.typed.zod_calls.contains(&expr.id) => Callee::Virtual { slot: *slot, function },
-          _ => Callee::Fn(function),
+        let subst = self.call_subst(expr.id, function, Some(&receiver_ty));
+        let sig = self.typed.sig(function).ok_or_else(|| LowerError("method without a signature".to_string()))?.substitute(&subst);
+        // Methods of interface values go through the itable; interface methods on values of a
+        // known type call that type's method or the default instantiated for it; `zod` calls
+        // name their implementation; others go through the vtable when it varies.
+        let (callee, by_ref) = match (&receiver_ty, self.resolution.owner(function)) {
+          (Type::Interface(interface), _) => (self.dyn_method(interface, function)?, false),
+          (_, Some(TypeItem::Interface(_))) => self.concrete_interface_call(expr.id, function, &receiver_ty),
+          _ => {
+            let by_ref = sig.receiver == Some(Receiver::Var);
+            let target = self.instance(function, subst);
+
+            match self.typed.slots.get(&function) {
+              Some(slot) if !self.typed.zod_calls.contains(&expr.id) => (Callee::Virtual { slot: *slot, function: target }, false),
+              _ => (Callee::Fn(target), by_ref),
+            }
+          }
         };
         let receiver_value = if by_ref { Operand::Ref(self.base_place(receiver)?) } else { self.expr(receiver)? };
-        // A default method receives the value as its interface.
-        let receiver_value = self.default_receiver(function, receiver_value, &receiver_ty);
         let mut operands = vec![receiver_value];
 
         for (arg, param) in args.iter().zip(&sig.params) {
@@ -1197,7 +1298,7 @@ impl FnLowering<'_> {
         let Type::Struct(owner) = &ty else {
           return error("struct literal without a struct type");
         };
-        let field_types = self.layouts.struct_fields(owner.id);
+        let field_types = self.layouts.struct_fields(owner);
         let mut operands: Vec<Option<Operand>> = vec![None; field_types.len()];
 
         // Field values run in source order and are stored in declaration order.
@@ -1486,12 +1587,23 @@ impl FnLowering<'_> {
     let Type::Class(class) = ty else {
       return error("`new` of a type other than a class or `StringBuilder`");
     };
-    let instance = self.new_value(ty.clone(), Rvalue::Alloc(class.id));
+    let class_instance = self.class_instance(class);
+    let instance = self.new_value(ty.clone(), Rvalue::Alloc(class_instance));
 
     if self.typed.class_def(class.id).is_some_and(|def| def.initializer.is_none()) {
       if let (Some(initializer), Operand::Local(object)) = (self.typed.inherited_initializer(class.id), &instance) {
+        let subst = match self.resolution.owner(initializer) {
+          Some(TypeItem::Class(owner)) => {
+            let args = self.typed.class_ancestor(class, owner).map(|ancestor| ancestor.args).unwrap_or_default();
+
+            Subst::of(ParamOwner::Item(TypeItem::Class(owner)), args)
+          }
+          _ => Subst::default(),
+        };
+        let initializer = self.instance(initializer, subst);
+
         self.call(Callee::Fn(initializer), vec![instance.clone()], Type::Unit);
-        self.emit(Stmt::SetVtable { object: *object, class: class.id });
+        self.emit(Stmt::SetVtable { object: *object, class: class_instance });
       }
 
       return Ok(instance);
@@ -1500,7 +1612,9 @@ impl FnLowering<'_> {
     let Some(initializer) = self.typed.class_def(class.id).and_then(|def| def.initializer) else {
       return Ok(instance);
     };
-    let params = self.typed.sig(initializer).map(|sig| sig.params.clone()).unwrap_or_default();
+    let subst = Subst::of(ParamOwner::Item(TypeItem::Class(class.id)), class.args.clone());
+    let params = self.typed.sig(initializer).map(|sig| sig.substitute(&subst).params).unwrap_or_default();
+    let initializer = self.instance(initializer, subst);
     let mut operands = vec![instance.clone()];
 
     for (arg, param) in args.iter().zip(&params) {

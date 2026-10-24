@@ -1,0 +1,75 @@
+interface Named {
+  const name: String;
+}
+
+interface Mapper {
+  fn map<U>(self, value: U) -> U;
+}
+
+struct Plain {
+  pub x: i32;
+}
+
+class Pet impl Named {
+  pub const name: String;
+
+  pub fn new(name: String) {
+    self.name = name;
+  }
+}
+
+class Box<T> {
+  pub var value: T;
+
+  pub fn new(value: T) {
+    self.value = value;
+  }
+
+  pub fn wrap<U>(self, other: U) -> U {
+    other
+  }
+}
+
+class Wrong extends Box<i32> {
+  pub fn new() {
+    zod.new(1);
+  }
+
+  pub override fn wrap<U>(self, other: U) -> U { //~ ERROR E0327
+    other
+  }
+}
+
+struct Holder<T: Named> {
+  pub item: T;
+}
+
+fn bad_bound<T: Plain>(value: T) -> T { //~ ERROR E0330
+  value
+}
+
+fn named<T: Named>(value: T) -> String {
+  value.name
+}
+
+fn empty<T>() -> Option<T> {
+  None
+}
+
+fn plain<T>(value: T) -> T {
+  value.x //~ ERROR E0316
+}
+
+fn use_mapper(_mapper: Mapper) {} //~ ERROR E0329
+
+pub fn main() {
+  const _ok = named(new Pet("Rex"));
+  const _wrong = named(Plain { x: 1 }); //~ ERROR E0330
+  const _unknown = empty(); //~ ERROR E0311
+  const _fixed = empty<i32>();
+  const _count = empty<i32, i32>(); //~ ERROR E0318
+  const _holder: Holder<Plain> = Holder { item: Plain { x: 1 } }; //~ ERROR E0330, ERROR E0330
+  const _bare: Box = new Box(1); //~ ERROR E0318
+  const _mismatch: Box<i32> = new Box("text"); //~ ERROR E0300
+  const _plain = plain(1);
+}

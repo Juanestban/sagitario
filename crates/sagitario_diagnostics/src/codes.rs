@@ -114,6 +114,9 @@ pub const INVALID_WEAK: Code = Code("E0328");
 /// An `impl` or interface that breaks the rules of interfaces: not an interface, a missing or
 /// mismatched member, a cycle of `extends`, or an interface mentioning `Self` used as a type.
 pub const INVALID_IMPL: Code = Code("E0329");
+/// A type argument that does not implement a bound of its parameter, a bound that is not an
+/// interface, or generic instances that never end.
+pub const UNSATISFIED_BOUND: Code = Code("E0330");
 
 /// A language feature that is specified but not implemented yet.
 pub const NOT_IMPLEMENTED: Code = Code("E0900");
@@ -185,6 +188,7 @@ pub const ALL: &[Code] = &[
   INVALID_OVERRIDE,
   INVALID_WEAK,
   INVALID_IMPL,
+  UNSATISFIED_BOUND,
   NOT_IMPLEMENTED,
   UNUSED_BINDING,
   UNNEEDED_VAR,

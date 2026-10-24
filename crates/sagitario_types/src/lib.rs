@@ -8,6 +8,7 @@ mod classes;
 mod exhaustive;
 mod ffi;
 mod flow;
+mod generic;
 mod inheritance;
 mod interfaces;
 mod patterns;
@@ -22,9 +23,11 @@ use sagitario_ast::{
 };
 use sagitario_diagnostics::{Code, Diagnostic, Diagnostics, codes};
 use sagitario_resolve::{
-  Builtin, CType, ClassId, EnumId, EnumKind, ExternId, FnId, InterfaceId, LocalId, LocalKind, Res, Resolution, StructId, TypeItem, TypeRes,
-  VariantRef,
+  Builtin, CType, ClassId, EnumId, EnumKind, ExternId, FnId, InterfaceId, LocalId, LocalKind, ParamOwner, Res, Resolution, StructId, TypeItem,
+  TypeRes, VariantRef,
 };
+
+pub use generic::Subst;
 use sagitario_span::Span;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -119,8 +122,9 @@ pub enum Type {
   /// A value of any type implementing an interface: a reference with its methods
   /// (docs/spec/05-interfaces-generics.md#interfaces-as-types).
   Interface(InterfaceRef),
-  /// `Self` in the signature of an interface method: the implementing type.
-  SelfType,
+  /// A type parameter of a generic declaration, or the `Self` of an interface: replaced by a
+  /// concrete type in each instance (docs/spec/05-interfaces-generics.md#generics).
+  Param(ParamRef),
   /// `[T; N]`
   Array(Box<Type>, u64),
   /// The prelude's `Option<T>`.
@@ -144,32 +148,140 @@ pub enum Type {
   Error,
 }
 
-/// A struct type; the name is kept for messages.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// A struct type. The name is kept for messages and is not part of the type's identity.
+#[derive(Debug, Clone)]
 pub struct StructRef {
   pub id: StructId,
   pub name: String,
+  /// The type arguments of a generic type, in the order of its parameters.
+  pub args: Vec<Type>,
 }
 
-/// A class type; the name is kept for messages.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+impl PartialEq for StructRef {
+  fn eq(&self, other: &Self) -> bool {
+    self.id == other.id && self.args == other.args
+  }
+}
+
+impl Eq for StructRef {}
+
+impl std::hash::Hash for StructRef {
+  fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+    self.id.hash(state);
+    self.args.hash(state);
+  }
+}
+
+/// A class type. The name is kept for messages and is not part of the type's identity.
+#[derive(Debug, Clone)]
 pub struct ClassRef {
   pub id: ClassId,
   pub name: String,
+  /// The type arguments of a generic type, in the order of its parameters.
+  pub args: Vec<Type>,
 }
 
-/// An interface type; the name is kept for messages.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+impl PartialEq for ClassRef {
+  fn eq(&self, other: &Self) -> bool {
+    self.id == other.id && self.args == other.args
+  }
+}
+
+impl Eq for ClassRef {}
+
+impl std::hash::Hash for ClassRef {
+  fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+    self.id.hash(state);
+    self.args.hash(state);
+  }
+}
+
+/// An interface type. The name is kept for messages and is not part of the type's identity.
+#[derive(Debug, Clone)]
 pub struct InterfaceRef {
   pub id: InterfaceId,
   pub name: String,
+  /// The type arguments of a generic type, in the order of its parameters.
+  pub args: Vec<Type>,
 }
 
-/// An enum type of the program; the name is kept for messages.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+impl PartialEq for InterfaceRef {
+  fn eq(&self, other: &Self) -> bool {
+    self.id == other.id && self.args == other.args
+  }
+}
+
+impl Eq for InterfaceRef {}
+
+impl std::hash::Hash for InterfaceRef {
+  fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+    self.id.hash(state);
+    self.args.hash(state);
+  }
+}
+
+/// An enum type of the program. The name is kept for messages and is not part of the type's identity.
+#[derive(Debug, Clone)]
 pub struct EnumRef {
   pub id: EnumId,
   pub name: String,
+  /// The type arguments of a generic type, in the order of its parameters.
+  pub args: Vec<Type>,
+}
+
+impl PartialEq for EnumRef {
+  fn eq(&self, other: &Self) -> bool {
+    self.id == other.id && self.args == other.args
+  }
+}
+
+impl Eq for EnumRef {}
+
+impl std::hash::Hash for EnumRef {
+  fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+    self.id.hash(state);
+    self.args.hash(state);
+  }
+}
+
+/// The position of `Self` among the parameters of an interface.
+pub const SELF_PARAM: u32 = u32::MAX;
+
+/// A type parameter: the declaration it belongs to and its position there (`SELF_PARAM` for the
+/// `Self` of an interface). The name is kept for messages.
+#[derive(Debug, Clone)]
+pub struct ParamRef {
+  pub owner: ParamOwner,
+  pub index: u32,
+  pub name: String,
+}
+
+impl PartialEq for ParamRef {
+  fn eq(&self, other: &Self) -> bool {
+    self.owner == other.owner && self.index == other.index
+  }
+}
+
+impl Eq for ParamRef {}
+
+impl std::hash::Hash for ParamRef {
+  fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+    self.owner.hash(state);
+    self.index.hash(state);
+  }
+}
+
+/// Writes `Name` or `Name<A, B>`.
+fn write_generic(f: &mut fmt::Formatter<'_>, name: &str, args: &[Type]) -> fmt::Result {
+  f.write_str(name)?;
+
+  if args.is_empty() {
+    return Ok(());
+  }
+
+  let args: Vec<String> = args.iter().map(Type::to_string).collect();
+
+  write!(f, "<{}>", args.join(", "))
 }
 
 impl Type {
@@ -206,11 +318,11 @@ impl fmt::Display for Type {
       Type::Int(ty) => f.write_str(ty.name()),
       Type::Float(ty) => f.write_str(ty.name()),
       Type::String => f.write_str("String"),
-      Type::Struct(ty) => f.write_str(&ty.name),
-      Type::Enum(ty) => f.write_str(&ty.name),
-      Type::Class(ty) => f.write_str(&ty.name),
-      Type::Interface(ty) => f.write_str(&ty.name),
-      Type::SelfType => f.write_str("Self"),
+      Type::Struct(ty) => write_generic(f, &ty.name, &ty.args),
+      Type::Enum(ty) => write_generic(f, &ty.name, &ty.args),
+      Type::Class(ty) => write_generic(f, &ty.name, &ty.args),
+      Type::Interface(ty) => write_generic(f, &ty.name, &ty.args),
+      Type::Param(param) => f.write_str(&param.name),
       Type::Array(elem, len) => write!(f, "[{elem}; {len}]"),
       Type::Option(value) => write!(f, "Option<{value}>"),
       Type::Result(value, error) => write!(f, "Result<{value}, {error}>"),
@@ -277,8 +389,8 @@ pub struct StructDef {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClassDef {
   pub name: String,
-  /// The class after `extends`.
-  pub parent: Option<ClassId>,
+  /// The class after `extends`, with type arguments in terms of this class's parameters.
+  pub parent: Option<ClassRef>,
   pub is_abstract: bool,
   /// The class's own fields in declaration order; inherited ones belong to its ancestors.
   pub fields: Vec<FieldDef>,
@@ -291,14 +403,23 @@ pub struct ClassDef {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InterfaceDef {
   pub name: String,
-  /// The interfaces after `extends`.
-  pub parents: Vec<InterfaceId>,
+  /// The interfaces after `extends`, with type arguments in terms of this interface's
+  /// parameters.
+  pub parents: Vec<InterfaceRef>,
   /// The fields an implementing type must have.
   pub fields: Vec<FieldDef>,
   /// The interface's own methods, required and default, in declaration order.
   pub methods: Vec<FnId>,
   /// Whether the interface or an ancestor mentions `Self`, so it cannot be a type.
   pub uses_self: bool,
+}
+
+/// A type parameter of a generic declaration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenericDef {
+  pub name: String,
+  /// The interfaces after `:` and in the `where` clause.
+  pub bounds: Vec<InterfaceRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -374,8 +495,14 @@ pub struct TypedModule {
   pub classes: Vec<ClassDef>,
   /// Indexed by `InterfaceId`.
   pub interfaces: Vec<InterfaceDef>,
-  /// The interfaces each struct, enum and class declares with `impl`.
-  pub impls: HashMap<TypeItem, Vec<InterfaceId>>,
+  /// The interfaces each struct, enum and class declares with `impl`, with type arguments in
+  /// terms of the type's parameters.
+  pub impls: HashMap<TypeItem, Vec<InterfaceRef>>,
+  /// The type parameters of each generic declaration.
+  pub generics: HashMap<ParamOwner, Vec<GenericDef>>,
+  /// The type arguments of each use of a generic function, method or initializer, by the node
+  /// id of the call or `new`: those of the function's type, then the function's own.
+  pub call_args: HashMap<NodeId, Vec<Type>>,
   /// The prelude's `Error` interface and the class `Error(message)` creates.
   pub error_types: Option<(InterfaceId, ClassId)>,
   /// Calls to methods of `Option` and `Result`, by node id.
@@ -420,7 +547,7 @@ impl TypedModule {
     let mut chain = vec![id];
 
     // Cycles are reported and removed when the classes are defined; the bound is a safeguard.
-    while let Some(parent) = chain.last().and_then(|last| self.class_def(*last)).and_then(|def| def.parent) {
+    while let Some(parent) = chain.last().and_then(|last| self.class_def(*last)).and_then(|def| def.parent.as_ref().map(|parent| parent.id)) {
       if chain.len() > self.classes.len() {
         break;
       }
@@ -460,8 +587,8 @@ impl TypedModule {
       next += 1;
 
       for parent in self.interface_def(current).map(|def| def.parents.clone()).unwrap_or_default() {
-        if !found.contains(&parent) {
-          found.push(parent);
+        if !found.contains(&parent.id) {
+          found.push(parent.id);
         }
       }
     }
@@ -489,7 +616,7 @@ impl TypedModule {
         let mut path = path.clone();
 
         path.push(index);
-        queue.push((parent, path));
+        queue.push((parent.id, path));
       }
     }
 
@@ -508,7 +635,7 @@ impl TypedModule {
 
     for owner in owners {
       for interface in self.impls.get(&owner).cloned().unwrap_or_default() {
-        for ancestor in self.interface_ancestors(interface) {
+        for ancestor in self.interface_ancestors(interface.id) {
           if !found.contains(&ancestor) {
             found.push(ancestor);
           }
@@ -554,12 +681,13 @@ impl TypedModule {
   }
 
   /// Whether a value of type `actual` can be used where `expected` is required, converting it if
-  /// needed: an instance as one of its ancestors, a value as an interface its type implements.
+  /// needed: an instance as one of its ancestors, a value as an interface its type implements
+  /// (type parameters implement their bounds).
   pub fn fits(&self, actual: &Type, expected: &Type) -> bool {
     match (actual, expected) {
-      (Type::Class(actual), Type::Class(expected)) => self.is_subclass(actual.id, expected.id),
-      (actual, Type::Interface(expected)) if TypedModule::type_item(actual).is_some() => {
-        TypedModule::type_item(actual).is_some_and(|item| self.implemented(item).contains(&expected.id))
+      (Type::Class(actual), Type::Class(expected)) => self.class_ancestors(actual).contains(expected),
+      (Type::Struct(_) | Type::Enum(_) | Type::Class(_) | Type::Interface(_) | Type::Param(_), Type::Interface(expected)) => {
+        self.implements(actual, expected)
       }
       _ => actual.fits(expected),
     }
@@ -573,7 +701,20 @@ impl TypedModule {
   /// The variants of an enum, `Option` or `Result` type, with their field types.
   pub fn variants(&self, ty: &Type) -> Option<Vec<VariantDef>> {
     match ty {
-      Type::Enum(ty) => self.enums.get(ty.id.0 as usize).map(|def| def.variants.clone()),
+      Type::Enum(ty) => {
+        let subst = Subst::of(ParamOwner::Item(TypeItem::Enum(ty.id)), ty.args.clone());
+
+        self.enums.get(ty.id.0 as usize).map(|def| {
+          def
+            .variants
+            .iter()
+            .map(|variant| VariantDef {
+              fields: variant.fields.iter().map(|(name, field)| (name.clone(), field.substitute(&subst))).collect(),
+              ..variant.clone()
+            })
+            .collect()
+        })
+      }
       Type::Option(value) => Some(vec![VariantDef::new("None", Vec::new()), VariantDef::new("Some", vec![value.as_ref().clone()])]),
       Type::Result(value, error) => {
         Some(vec![VariantDef::new("Ok", vec![value.as_ref().clone()]), VariantDef::new("Err", vec![error.as_ref().clone()])])
@@ -607,6 +748,7 @@ pub fn check(package: &Package, resolution: &Resolution, diagnostics: &mut Diagn
     pointees: Vec::new(),
     mutates_self: vec![false; resolution.functions.len()],
     interface_types: Vec::new(),
+    type_bounds: Vec::new(),
     self_calls: Vec::new(),
     receiver_checks: Vec::new(),
     zod_new_calls: Vec::new(),
@@ -616,6 +758,7 @@ pub fn check(package: &Package, resolution: &Resolution, diagnostics: &mut Diagn
   checker.enum_defs();
   checker.class_defs();
   checker.interface_defs();
+  checker.generic_defs();
   checker.check_recursive_types();
   checker.check_repr_c_structs();
   checker.extern_sigs();
@@ -648,6 +791,8 @@ pub fn check(package: &Package, resolution: &Resolution, diagnostics: &mut Diagn
 
   checker.check_pointees();
   checker.infer_mutating_methods();
+  // The bounds of the types written inside function bodies.
+  checker.check_type_bounds();
 
   let typed = checker.typed;
 
@@ -713,6 +858,8 @@ struct Checker<'a> {
   pointees: Vec<(Span, Type)>,
   /// Interfaces used as types, checked once it is known whether they mention `Self`.
   interface_types: Vec<(Span, InterfaceId)>,
+  /// Generic types written with arguments, whose bounds are checked once every bound is known.
+  type_bounds: Vec<(Span, Type)>,
   /// Whether each struct or enum method modifies `self` directly, by `FnId`.
   mutates_self: Vec<bool>,
   /// Methods called on `self` (or a part of it) inside a method, as (caller, callee): the
@@ -737,18 +884,37 @@ impl Checker<'_> {
   }
 
   fn struct_ref(&self, id: StructId) -> Type {
-    let name = self.resolution.struct_decl(self.package, id).map_or_else(String::new, |decl| decl.name.name.clone());
-
-    Type::Struct(StructRef { id, name })
+    self.type_ref(TypeItem::Struct(id))
   }
 
+  /// A program type used inside its own declaration: generic types take their own parameters
+  /// as arguments.
   fn type_ref(&self, item: TypeItem) -> Type {
+    self.named_type(item, self.identity_args(ParamOwner::Item(item)))
+  }
+
+  /// The parameters of a declaration as types.
+  fn identity_args(&self, owner: ParamOwner) -> Vec<Type> {
+    let generics = self.resolution.generics(self.package, owner);
+
+    generics.iter().enumerate().map(|(index, param)| Type::Param(ParamRef { owner, index: index as u32, name: param.name.name.clone() })).collect()
+  }
+
+  /// A program type with type arguments.
+  fn named_type(&self, item: TypeItem, args: Vec<Type>) -> Type {
+    let name = self.resolution.type_name(self.package, item);
+
     match item {
-      TypeItem::Struct(id) => self.struct_ref(id),
-      TypeItem::Enum(id) => Type::Enum(EnumRef { id, name: self.resolution.type_name(self.package, item) }),
-      TypeItem::Class(id) => Type::Class(ClassRef { id, name: self.resolution.type_name(self.package, item) }),
-      TypeItem::Interface(id) => Type::Interface(InterfaceRef { id, name: self.resolution.type_name(self.package, item) }),
+      TypeItem::Struct(id) => Type::Struct(StructRef { id, name, args }),
+      TypeItem::Enum(id) => Type::Enum(EnumRef { id, name, args }),
+      TypeItem::Class(id) => Type::Class(ClassRef { id, name, args }),
+      TypeItem::Interface(id) => Type::Interface(InterfaceRef { id, name, args }),
     }
+  }
+
+  /// The number of type parameters of a declaration.
+  fn generic_count(&self, owner: ParamOwner) -> usize {
+    self.resolution.generics(self.package, owner).len()
   }
 
   /// Resolves the field types of every enum variant.
@@ -929,7 +1095,13 @@ impl Checker<'_> {
     self.locals = vec![None; local_count];
 
     // `self` is the first local of a method, followed by the parameters.
-    let self_ty = self.owner.filter(|_| sig.receiver.is_some()).map(|owner| self.type_ref(owner));
+    // In a default method, `self` is the type implementing the interface: its `Self`.
+    let self_ty = self.owner.filter(|_| sig.receiver.is_some()).map(|owner| match owner {
+      TypeItem::Interface(id) => {
+        Type::Param(ParamRef { owner: ParamOwner::Item(TypeItem::Interface(id)), index: SELF_PARAM, name: "Self".to_string() })
+      }
+      owner => self.type_ref(owner),
+    });
     let param_types = self_ty.into_iter().chain(sig.params.iter().cloned());
 
     for (index, ty) in param_types.enumerate() {
@@ -993,6 +1165,26 @@ impl Checker<'_> {
           None => Type::Error,
         }
       }
+      TypeExprKind::Generic { path, args } if matches!(self.resolution.type_paths.get(&path.id), Some(TypeRes::Item(_))) => {
+        let Some(TypeRes::Item(item)) = self.resolution.type_paths.get(&path.id).copied() else { return Type::Error };
+        let name = path.segments.last().map_or("", |segment| segment.name.as_str());
+        let types: Vec<Type> = args.iter().map(|arg| self.type_expr(arg)).collect();
+        let expected = self.generic_count(ParamOwner::Item(item));
+
+        if !self.check_arg_count(ty.span, &format!("`{name}`"), expected, types.len()) {
+          return Type::Error;
+        }
+
+        let result = self.named_type(item, types);
+
+        if let TypeItem::Interface(id) = item {
+          self.interface_types.push((path.span, id));
+        }
+
+        self.type_bounds.push((ty.span, result.clone()));
+
+        result
+      }
       TypeExprKind::Generic { path, args } => {
         let name = path.segments.last().map_or("", |segment| segment.name.as_str());
         let arity = match name {
@@ -1029,12 +1221,26 @@ impl Checker<'_> {
       TypeExprKind::Path(path) => {
         // The resolver reports unknown types and resolves program types and module paths.
         match self.resolution.type_paths.get(&path.id) {
+          Some(TypeRes::Item(item)) if self.generic_count(ParamOwner::Item(*item)) > 0 => {
+            let name = self.resolution.type_name(self.package, *item);
+            let params: Vec<String> =
+              self.resolution.generics(self.package, ParamOwner::Item(*item)).iter().map(|param| param.name.name.clone()).collect();
+
+            self.error(codes::WRONG_TYPE_ARGUMENTS, path.span, format!("`{name}` needs type arguments: `{name}<{}>`", params.join(", ")));
+
+            return Type::Error;
+          }
           Some(TypeRes::Item(TypeItem::Interface(id))) => {
             self.interface_types.push((path.span, *id));
 
             return self.type_ref(TypeItem::Interface(*id));
           }
           Some(TypeRes::Item(item)) => return self.type_ref(*item),
+          Some(TypeRes::Param(owner, index)) => {
+            let name = self.resolution.generics(self.package, *owner).get(*index as usize).map(|param| param.name.name.clone()).unwrap_or_default();
+
+            return Type::Param(ParamRef { owner: *owner, index: *index, name });
+          }
           Some(TypeRes::CType(CType::Void)) if !behind_pointer => return self.bare_c_void(path.span),
           Some(TypeRes::CType(c)) => return ffi::c_type(*c),
           Some(TypeRes::CString) => return Type::CString,
@@ -1060,7 +1266,9 @@ impl Checker<'_> {
         if name == "Self" {
           return match self.owner {
             // Inside an interface, `Self` is the type implementing it.
-            Some(TypeItem::Interface(_)) => Type::SelfType,
+            Some(TypeItem::Interface(id)) => {
+              Type::Param(ParamRef { owner: ParamOwner::Item(TypeItem::Interface(id)), index: SELF_PARAM, name: "Self".to_string() })
+            }
             Some(owner) => self.type_ref(owner),
             None => {
               self.error(codes::UNRESOLVED_NAME, segment.span, "`Self` is only available inside a struct, enum or class");
@@ -1340,26 +1548,37 @@ impl Checker<'_> {
 
           Type::Error
         }
-        Some(Res::Variant(variant)) => self.variant_value(expr.span, *variant, None, expected),
+        Some(Res::Variant(variant)) => {
+          let path = match &expr.kind {
+            ExprKind::Path(path) => Some(path),
+            _ => None,
+          };
+
+          self.variant_value(expr.span, *variant, None, expected, path)
+        }
         Some(Res::Struct(_)) | None => Type::Error,
       },
       ExprKind::Call { callee, args } => match self.resolution.paths.get(&callee.id).copied() {
         Some(Res::Variant(variant)) if matches!(callee.kind, ExprKind::Path(_)) => {
-          let ty = self.variant_value(expr.span, variant, Some(args), expected);
+          let path = match &callee.kind {
+            ExprKind::Path(path) => Some(path),
+            _ => None,
+          };
+          let ty = self.variant_value(expr.span, variant, Some(args), expected, path);
 
           self.typed.expr_types.insert(callee.id, ty.clone());
 
           ty
         }
-        _ => self.call(expr, callee, args),
+        _ => self.call(expr, callee, args, expected),
       },
       ExprKind::Try(inner) => self.try_expr(inner),
-      ExprKind::New { path, args } => self.new_expr(path, args),
+      ExprKind::New { path, args } => self.new_expr(expr, path, args, expected),
       ExprKind::Match { scrutinee, arms } => self.match_expr(scrutinee, arms, expected),
       ExprKind::MethodCall { receiver, method, args } => self.method_call(expr, receiver, method, args),
       ExprKind::Field { base, name } => self.field(base, name),
       ExprKind::Index { base, index } => self.index(base, index),
-      ExprKind::StructLit { path, fields } => self.struct_literal(expr, path, fields),
+      ExprKind::StructLit { path, fields } => self.struct_literal(expr, path, fields, expected),
       ExprKind::ArrayLit(elems) => self.array_literal(expr.span, elems, expected),
       ExprKind::ArrayRepeat { value, len } => {
         let elem = match expected {
@@ -1758,9 +1977,9 @@ impl Checker<'_> {
     }
   }
 
-  fn call(&mut self, expr: &Expr, callee: &Expr, args: &[Expr]) -> Type {
+  fn call(&mut self, expr: &Expr, callee: &Expr, args: &[Expr], expected: Option<&Type>) -> Type {
     let sig = match (&callee.kind, self.resolution.paths.get(&callee.id).copied()) {
-      (ExprKind::Path(_), Some(Res::Fn(id))) => self.typed.sig(id).cloned(),
+      (ExprKind::Path(path), Some(Res::Fn(id))) => return self.fn_call(expr, path, id, args, expected),
       (ExprKind::Path(_), Some(Res::Extern(id))) => self.extern_call_sig(callee, id),
       (ExprKind::Path(_), Some(Res::Builtin(Builtin::ErrorNew))) => {
         let ret = self.typed.error_types.map_or(Type::Error, |(error, _)| self.type_ref(TypeItem::Interface(error)));
@@ -1827,6 +2046,20 @@ impl Checker<'_> {
 
     if let Some(ty) = self.ffi_method(expr, receiver, &receiver_ty, method, args) {
       return ty;
+    }
+
+    // A type parameter has the methods of its bounds.
+    if let Type::Param(_) = &receiver_ty {
+      let Some(function) = self.interface_method_of(&receiver_ty, name) else {
+        self.error(codes::UNKNOWN_MEMBER, method.span, format!("no method `{name}` on type `{receiver_ty}`"));
+        self.unchecked_args(args);
+
+        return Type::Error;
+      };
+
+      self.typed.method_calls.insert(expr.id, function);
+
+      return self.generic_method_call(expr, &receiver_ty, function, args);
     }
 
     let owner = match &receiver_ty {
@@ -1916,9 +2149,7 @@ impl Checker<'_> {
       }
     }
 
-    self.args(expr.span, "method", &sig.params, args);
-
-    sig.ret
+    self.generic_method_call(expr, &receiver_ty, function, args)
   }
 
   fn field(&mut self, base: &Expr, name: &Ident) -> Type {
@@ -1929,8 +2160,8 @@ impl Checker<'_> {
       return self.class_field(class.id, &base_ty, name);
     }
 
-    if let Type::Interface(interface) = &base_ty {
-      return self.interface_field_type(interface.id, &base_ty, name);
+    if let Type::Interface(_) | Type::Param(_) = &base_ty {
+      return self.interface_field_type(&base_ty, name);
     }
 
     let Type::Struct(owner) = &base_ty else {
@@ -1962,7 +2193,7 @@ impl Checker<'_> {
       );
     }
 
-    field.ty.clone()
+    field.ty.substitute(&Subst::of(ParamOwner::Item(TypeItem::Struct(owner.id)), owner.args.clone()))
   }
 
   fn index(&mut self, base: &Expr, index: &Expr) -> Type {
@@ -1989,10 +2220,10 @@ impl Checker<'_> {
     }
   }
 
-  fn struct_literal(&mut self, expr: &Expr, path: &Path, fields: &[FieldInit]) -> Type {
+  fn struct_literal(&mut self, expr: &Expr, path: &Path, fields: &[FieldInit], expected: Option<&Type>) -> Type {
     let id = match self.resolution.paths.get(&expr.id).copied() {
       Some(Res::Struct(id)) => id,
-      Some(Res::Variant(variant)) => return self.named_variant_literal(path, variant, fields),
+      Some(Res::Variant(variant)) => return self.named_variant_literal(path, variant, fields, expected),
       _ => {
         for field in fields {
           self.expr(&field.value, None);
@@ -2001,9 +2232,24 @@ impl Checker<'_> {
         return Type::Error;
       }
     };
-    let ty = self.struct_ref(id);
     let def = self.typed.struct_def(id).cloned().unwrap_or(StructDef { name: String::new(), fields: Vec::new() });
     let mut seen: Vec<(&str, Span)> = Vec::new();
+    // The type arguments of a generic struct come from the path, the expected type and the
+    // field values.
+    let owner = ParamOwner::Item(TypeItem::Struct(id));
+    let mut unknowns = generic::Unknowns::new();
+    let count = self.generic_count(owner);
+
+    if count > 0 {
+      let explicit = self.explicit_args(path).map(|(_, args)| args).filter(|args| self.check_arg_count(path.span, "this struct", count, args.len()));
+      let identity = self.type_ref(TypeItem::Struct(id));
+
+      unknowns.add(owner, count, explicit);
+
+      if let Some(expected) = expected {
+        unknowns.unify(&identity, expected);
+      }
+    }
 
     for init in fields {
       let name = init.name.name.as_str();
@@ -2021,9 +2267,9 @@ impl Checker<'_> {
       seen.push((name, init.name.span));
 
       match def.fields.iter().find(|field| field.name == name) {
-        Some(field) => self.expect(&init.value, &field.ty),
+        Some(field) => self.generic_arg(&init.value, &field.ty, &Subst::default(), &mut unknowns),
         None => {
-          let mut diagnostic = Diagnostic::error(codes::UNKNOWN_MEMBER, init.name.span, format!("the struct `{ty}` has no field `{name}`"));
+          let mut diagnostic = Diagnostic::error(codes::UNKNOWN_MEMBER, init.name.span, format!("the struct `{}` has no field `{name}`", def.name));
 
           if let Some(similar) = sagitario_diagnostics::closest_match(name, def.fields.iter().map(|field| field.name.as_str())) {
             diagnostic = diagnostic.with_help(format!("a field with a similar name exists: `{similar}`"));
@@ -2035,6 +2281,13 @@ impl Checker<'_> {
       }
     }
 
+    let ty = if unknowns.is_empty() {
+      self.struct_ref(id)
+    } else {
+      let subst = self.finish_inference(path.span, &format!("`{}`", def.name), unknowns);
+
+      self.named_type(TypeItem::Struct(id), subst.params.into_iter().next().map(|(_, args)| args).unwrap_or_default())
+    };
     let missing: Vec<String> =
       def.fields.iter().filter(|field| !seen.iter().any(|(name, _)| *name == field.name)).map(|field| format!("`{}`", field.name)).collect();
 
@@ -2107,8 +2360,15 @@ impl Checker<'_> {
 
   /// A variant used as a value: `Shape::Empty`, `None` (no `args`) or `Shape::Circle(r)`,
   /// `Some(x)` (with `args`).
-  fn variant_value(&mut self, span: Span, variant: VariantRef, args: Option<&[Expr]>, expected: Option<&Type>) -> Type {
+  fn variant_value(&mut self, span: Span, variant: VariantRef, args: Option<&[Expr]>, expected: Option<&Type>, written: Option<&Path>) -> Type {
     let path = self.variant_path(variant);
+
+    // A variant of a generic enum infers the enum's type arguments.
+    let generic = match variant.owner {
+      EnumKind::User(id) if self.generic_count(ParamOwner::Item(TypeItem::Enum(id))) > 0 => Some(id),
+      _ => None,
+    };
+    let mut unknowns = generic.map(|id| self.enum_unknowns(id, expected, written));
 
     // `Some(x)` without an expected `Option`: the type comes from `x`.
     if variant.owner == EnumKind::Option && variant.index == 1 && !matches!(expected, Some(Type::Option(_))) {
@@ -2137,6 +2397,24 @@ impl Checker<'_> {
 
       return Type::Error;
     };
+
+    if let (Some(id), Some(unknowns)) = (generic, unknowns.as_mut()) {
+      let form_error = match (args, def.fields.is_empty(), def.named) {
+        (Some(_), true, _) => Some(format!("`{path}` carries no data; write `{path}` without parentheses")),
+        (None, false, false) => Some(format!("`{path}` carries data; write `{path}(...)`")),
+        (_, false, true) => Some(format!("`{path}` has named fields; write `{path} {{ ... }}`")),
+        _ => None,
+      };
+
+      if let Some(message) = form_error {
+        self.error(codes::WRONG_CALL_FORM, span, message);
+        self.unchecked_args(args.unwrap_or_default());
+      } else if let Some(args) = args {
+        self.generic_args(span, "variant", &def.field_types(), args, &Subst::default(), unknowns);
+      }
+
+      return self.finish_enum(span, id, unknowns);
+    }
     let form_error = match (args, def.fields.is_empty(), def.named) {
       (Some(_), true, _) => Some(format!("`{path}` carries no data; write `{path}` without parentheses")),
       (None, false, false) => Some(format!("`{path}` carries data; write `{path}(...)`")),
@@ -2159,11 +2437,15 @@ impl Checker<'_> {
   }
 
   /// `Shape::Rect { w: 1.0, h: 2.0 }`
-  fn named_variant_literal(&mut self, path: &Path, variant: VariantRef, fields: &[FieldInit]) -> Type {
+  fn named_variant_literal(&mut self, path: &Path, variant: VariantRef, fields: &[FieldInit], expected: Option<&Type>) -> Type {
     let name = self.variant_path(variant);
     let ty = match variant.owner {
       EnumKind::User(id) => self.type_ref(TypeItem::Enum(id)),
       EnumKind::Option | EnumKind::Result => Type::Error,
+    };
+    let mut unknowns = match variant.owner {
+      EnumKind::User(id) if self.generic_count(ParamOwner::Item(TypeItem::Enum(id))) > 0 => Some(self.enum_unknowns(id, expected, Some(path))),
+      _ => None,
     };
     let def = self.typed.variants(&ty).and_then(|variants| variants.get(variant.index as usize).cloned());
     let Some(def) = def.filter(|def| def.named) else {
@@ -2193,7 +2475,10 @@ impl Checker<'_> {
       seen.push((field_name, init.name.span));
 
       match def.field_index(field_name).and_then(|index| def.fields.get(index)) {
-        Some((_, field_ty)) => self.expect(&init.value, &field_ty.clone()),
+        Some((_, field_ty)) => match unknowns.as_mut() {
+          Some(unknowns) => self.generic_arg(&init.value, &field_ty.clone(), &Subst::default(), unknowns),
+          None => self.expect(&init.value, &field_ty.clone()),
+        },
         None => {
           self.error(codes::UNKNOWN_MEMBER, init.name.span, format!("the variant `{name}` has no field `{field_name}`"));
           self.expr(&init.value, None);
@@ -2217,7 +2502,10 @@ impl Checker<'_> {
       );
     }
 
-    ty
+    match (variant.owner, unknowns) {
+      (EnumKind::User(id), Some(mut unknowns)) => self.finish_enum(path.span, id, &mut unknowns),
+      _ => ty,
+    }
   }
 
   /// A method of `Option` or `Result` (docs/spec/07-errors.md).

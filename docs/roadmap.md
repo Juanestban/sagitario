@@ -55,7 +55,7 @@ Increments ([ADR-0027](adr/0027-classes-and-arc.md)):
 3. `weak` references ([ADR-0030](adr/0030-weak-references.md)).
 4. Interfaces: fields, default methods, `impl` on classes, structs and enums, interfaces as
    types, the `Error` interface ([ADR-0031](adr/0031-interfaces.md)).
-5. Monomorphized generics with bounds.
+5. Monomorphized generics with bounds ([ADR-0032](adr/0032-generics.md)).
 6. Closures: arrow functions, function types, captures.
 7. `List<T>`, `Map<K, V>` and iterators with `map`/`filter`.
 8. The reference "zoo" program below.

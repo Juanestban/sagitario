@@ -2,11 +2,11 @@
 //! the types that implement them, interfaces used as types, and the default methods that the
 //! implementing types receive.
 
-use sagitario_ast::{Ident, Path, Visibility};
+use sagitario_ast::{Ident, TypeExpr, Visibility};
 use sagitario_diagnostics::{Diagnostic, codes};
-use sagitario_resolve::{ClassId, EnumId, FnId, InterfaceId, StructId, TypeItem, TypeRes};
+use sagitario_resolve::{ClassId, EnumId, FnId, InterfaceId, ParamOwner, StructId, TypeItem};
 
-use crate::{Checker, FieldDef, FnSig, InterfaceDef, Receiver, Type, TypedModule};
+use crate::{Checker, FieldDef, FnSig, InterfaceDef, InterfaceRef, Subst, Type};
 
 impl Checker<'_> {
   /// Resolves the parents, fields and methods of every interface.
@@ -17,7 +17,7 @@ impl Checker<'_> {
 
       self.owner = Some(TypeItem::Interface(id));
 
-      let parents = decl.parents.iter().filter_map(|path| self.interface_path(path)).collect();
+      let parents = decl.parents.iter().filter_map(|ty| self.supertype_interface(ty)).collect();
       let fields = decl
         .fields
         .iter()
@@ -62,16 +62,21 @@ impl Checker<'_> {
     })
   }
 
-  /// The interface named after `extends` in an interface, or after `impl`.
-  fn interface_path(&mut self, path: &Path) -> Option<InterfaceId> {
-    match self.resolution.type_paths.get(&path.id) {
-      Some(TypeRes::Item(TypeItem::Interface(id))) => Some(*id),
-      Some(TypeRes::Error) | None => None,
-      Some(_) => {
-        let name = path.segments.last().map_or("", |segment| segment.name.as_str());
+  /// The interface named after `extends` in an interface, or after `impl`, with its type
+  /// arguments.
+  fn supertype_interface(&mut self, ty: &TypeExpr) -> Option<InterfaceRef> {
+    // Implementing an interface does not use it as a type, even if it mentions `Self`.
+    let mark = self.interface_types.len();
+    let named = self.type_expr(ty);
 
+    self.interface_types.truncate(mark);
+
+    match named {
+      Type::Interface(interface) => Some(interface),
+      Type::Error => None,
+      other => {
         self.diagnostics.push(
-          Diagnostic::error(codes::INVALID_IMPL, path.span, format!("`{name}` is not an interface"))
+          Diagnostic::error(codes::INVALID_IMPL, ty.span, format!("`{other}` is not an interface"))
             .with_note("`impl` and the `extends` of an interface name interfaces; a class extends its parent class with `extends`"),
         );
 
@@ -87,7 +92,7 @@ impl Checker<'_> {
         let id = InterfaceId(*index as u32);
         let parents = self.typed.interface_def(id).map(|def| def.parents.clone()).unwrap_or_default();
 
-        parents.iter().any(|parent| self.typed.interface_ancestors(*parent).contains(&id))
+        parents.iter().any(|parent| self.typed.interface_ancestors(parent.id).contains(&id))
       })
       .collect();
 
@@ -109,9 +114,12 @@ impl Checker<'_> {
   pub(crate) fn check_interfaces(&mut self) {
     for index in 0..self.typed.interfaces.len() {
       let id = InterfaceId(index as u32);
+      // Methods with type parameters cannot be called through a value either: their instances
+      // are not known.
       let mentions_self = self.typed.interface_def(id).is_some_and(|def| {
-        def.fields.iter().any(|field| mentions_self(&field.ty))
-          || def.methods.iter().filter_map(|method| self.typed.sig(*method)).any(|sig| sig.params.iter().chain([&sig.ret]).any(mentions_self))
+        def.fields.iter().any(|field| field.ty.has_self())
+          || def.methods.iter().filter_map(|method| self.typed.sig(*method)).any(|sig| sig.params.iter().chain([&sig.ret]).any(Type::has_self))
+          || def.methods.iter().any(|method| self.typed.generics.contains_key(&ParamOwner::Fn(*method)))
       });
 
       if let Some(def) = self.typed.interfaces.get_mut(index) {
@@ -134,8 +142,9 @@ impl Checker<'_> {
         let name = self.typed.interface_def(id).map_or_else(String::new, |def| def.name.clone());
 
         self.diagnostics.push(
-          Diagnostic::error(codes::INVALID_IMPL, span, format!("the interface `{name}` mentions `Self`, so it cannot be used as a type"))
-            .with_note("a value of the interface would not know which type `Self` is; use it as a bound of a generic type (F2) instead"),
+          Diagnostic::error(codes::INVALID_IMPL, span, format!("the interface `{name}` cannot be used as a type"))
+            .with_note("it mentions `Self` or has methods with type parameters, which a value of the interface could not resolve")
+            .with_help("use it as the bound of a type parameter instead"),
         );
       }
     }
@@ -143,29 +152,26 @@ impl Checker<'_> {
     self.check_interface_members();
     self.collect_impls();
     self.check_implementations();
+    self.check_type_bounds();
   }
 
-  /// The methods of interfaces take `self`, have unique names among their ancestors, and only
-  /// interfaces that can be types have default methods in the MVP.
+  /// The methods of interfaces take `self` and have unique names among their ancestors.
   fn check_interface_members(&mut self) {
     for index in 0..self.typed.interfaces.len() {
       let id = InterfaceId(index as u32);
       let Some(decl) = self.resolution.interface_decl(self.package, id) else { continue };
-      let uses_self = self.typed.interface_def(id).is_some_and(|def| def.uses_self);
       let methods = self.typed.interface_def(id).map(|def| def.methods.clone()).unwrap_or_default();
 
       for (method, function) in methods.iter().zip(&decl.functions) {
         if function.self_param.is_none() {
           self.error(codes::INVALID_IMPL, function.name.span, format!("the interface method `{}` must take `self`", function.name.name));
-        } else if !function.is_abstract && uses_self {
-          self.error(codes::NOT_IMPLEMENTED, function.name.span, "default methods in interfaces that mention `Self` are not implemented yet");
         }
 
         // A method reached through two parents is the same method; two with one name are not.
         let parents = self.typed.interface_def(id).map(|def| def.parents.clone()).unwrap_or_default();
 
         for parent in parents {
-          if let Some((owner, inherited)) = self.typed.interface_method(parent, &function.name.name, self.resolution, self.package)
+          if let Some((owner, inherited)) = self.typed.interface_method(parent.id, &function.name.name, self.resolution, self.package)
             && inherited != *method
           {
             let owner = self.typed.interface_def(owner).map_or_else(String::new, |def| def.name.clone());
@@ -178,7 +184,7 @@ impl Checker<'_> {
       for field in &decl.fields {
         let parents = self.typed.interface_def(id).map(|def| def.parents.clone()).unwrap_or_default();
 
-        if parents.into_iter().any(|parent| self.typed.interface_field(parent, &field.name.name).is_some()) {
+        if parents.into_iter().any(|parent| self.typed.interface_field(parent.id, &field.name.name).is_some()) {
           self.error(codes::INVALID_IMPL, field.name.span, format!("`{}` is already a field of a parent interface", field.name.name));
         }
       }
@@ -187,7 +193,7 @@ impl Checker<'_> {
 
   /// The interfaces each struct, enum and class names after `impl`.
   fn collect_impls(&mut self) {
-    let mut found: Vec<(TypeItem, Vec<Path>)> = Vec::new();
+    let mut found: Vec<(TypeItem, Vec<TypeExpr>)> = Vec::new();
 
     for index in 0..self.resolution.structs.len() as u32 {
       if let Some(decl) = self.resolution.struct_decl(self.package, StructId(index)) {
@@ -207,13 +213,17 @@ impl Checker<'_> {
       }
     }
 
-    for (item, paths) in found {
-      let interfaces: Vec<InterfaceId> = paths.iter().filter_map(|path| self.interface_path(path)).collect();
+    for (item, types) in found {
+      self.owner = Some(item);
+
+      let interfaces: Vec<InterfaceRef> = types.iter().filter_map(|ty| self.supertype_interface(ty)).collect();
 
       if !interfaces.is_empty() {
         self.typed.impls.insert(item, interfaces);
       }
     }
+
+    self.owner = None;
   }
 
   /// Every type implements the fields and methods of its interfaces (Q43, Q44).
@@ -225,7 +235,8 @@ impl Checker<'_> {
     items.extend((0..self.resolution.classes.len() as u32).map(|index| TypeItem::Class(ClassId(index))));
 
     for item in items {
-      let interfaces = self.typed.implemented(item);
+      let item_ty = self.type_ref(item);
+      let interfaces = self.typed.implemented_refs(&item_ty);
 
       if interfaces.is_empty() {
         continue;
@@ -233,17 +244,27 @@ impl Checker<'_> {
 
       // A class checks what it declares itself; what it inherits was checked in its ancestors,
       // except that a concrete class must end up with every required method.
-      let own: Vec<InterfaceId> =
-        self.typed.impls.get(&item).map(|own| own.iter().flat_map(|id| self.typed.interface_ancestors(*id)).collect()).unwrap_or_default();
+      let own: Vec<InterfaceRef> = self
+        .typed
+        .impls
+        .get(&item)
+        .map(|own| own.iter().flat_map(|interface| self.typed.interface_ancestor_refs(interface)).collect())
+        .unwrap_or_default();
 
       for interface in interfaces {
         if own.contains(&interface) {
-          self.check_fields(item, interface);
+          self.check_fields(item, &interface);
         }
 
-        self.check_methods(item, interface, own.contains(&interface));
+        self.check_methods(item, &interface, own.contains(&interface));
       }
     }
+  }
+
+  /// Replaces the parameters of an interface (and `Self`) in its members for a type implementing
+  /// it.
+  fn interface_subst(interface: &InterfaceRef, self_ty: &Type) -> Subst {
+    Subst::of(ParamOwner::Item(TypeItem::Interface(interface.id)), interface.args.clone()).with_self(self_ty.clone())
   }
 
   fn type_span(&self, item: TypeItem) -> Option<(String, sagitario_span::Span)> {
@@ -259,19 +280,24 @@ impl Checker<'_> {
 
   /// The type has a public field for each field of the interface, of the same type, and `var`
   /// when the interface's is.
-  fn check_fields(&mut self, item: TypeItem, interface: InterfaceId) {
+  fn check_fields(&mut self, item: TypeItem, interface: &InterfaceRef) {
     let Some((type_name, span)) = self.type_span(item) else { return };
-    let fields = self.typed.interface_def(interface).map(|def| def.fields.clone()).unwrap_or_default();
-    let interface_name = self.typed.interface_def(interface).map_or_else(String::new, |def| def.name.clone());
+    let fields = self.typed.interface_def(interface.id).map(|def| def.fields.clone()).unwrap_or_default();
+    let interface_name = Type::Interface(interface.clone()).to_string();
     let self_ty = self.type_ref(item);
+    let subst = Self::interface_subst(interface, &self_ty);
 
     for field in fields {
-      let found: Option<FieldDef> = match item {
-        TypeItem::Struct(id) => self.typed.struct_def(id).and_then(|def| def.fields.iter().find(|own| own.name == field.name).cloned()),
-        TypeItem::Class(id) => self.typed.class_field(id, &field.name).map(|(_, _, own)| own.clone()),
-        TypeItem::Enum(_) | TypeItem::Interface(_) => None,
+      let found: Option<FieldDef> = match (item, &self_ty) {
+        (TypeItem::Struct(id), _) => self.typed.struct_def(id).and_then(|def| def.fields.iter().find(|own| own.name == field.name).cloned()),
+        (TypeItem::Class(id), Type::Class(class)) => self.typed.class_field(id, &field.name).map(|(_, _, own)| own.clone()).map(|own| {
+          let ty = self.typed.class_field_type(class, &field.name).map_or(own.ty.clone(), |(_, _, ty)| ty);
+
+          FieldDef { ty, ..own }
+        }),
+        _ => None,
       };
-      let expected = substitute_self(&field.ty, &self_ty);
+      let expected = field.ty.substitute(&subst);
       let problem = match &found {
         None => Some(format!("`{type_name}` has no field `{}`, which the interface `{interface_name}` requires", field.name)),
         Some(own) if !own.public => Some(format!("the field `{}` of `{type_name}` must be `pub` to implement `{interface_name}`", field.name)),
@@ -295,11 +321,12 @@ impl Checker<'_> {
 
   /// The type's implementation of each method of the interface: public, with the same signature,
   /// or the interface's default. `own` is set when the type names the interface itself.
-  fn check_methods(&mut self, item: TypeItem, interface: InterfaceId, own: bool) {
+  fn check_methods(&mut self, item: TypeItem, interface: &InterfaceRef, own: bool) {
     let Some((type_name, span)) = self.type_span(item) else { return };
-    let methods = self.typed.interface_def(interface).map(|def| def.methods.clone()).unwrap_or_default();
-    let interface_name = self.typed.interface_def(interface).map_or_else(String::new, |def| def.name.clone());
+    let methods = self.typed.interface_def(interface.id).map(|def| def.methods.clone()).unwrap_or_default();
+    let interface_name = Type::Interface(interface.clone()).to_string();
     let self_ty = self.type_ref(item);
+    let subst = Self::interface_subst(interface, &self_ty);
     let is_abstract = matches!(item, TypeItem::Class(id) if self.typed.class_def(id).is_some_and(|def| def.is_abstract));
 
     for method in methods {
@@ -328,12 +355,16 @@ impl Checker<'_> {
       }
 
       let Some(implementation) = self.resolution.fn_decl(self.package, function) else { continue };
-      let expected = self.typed.sig(method).map(|sig| substitute_sig(sig, &self_ty));
+      // The method's own type parameters correspond to the implementation's.
+      let own_args = self.identity_args(ParamOwner::Fn(function));
+      let expected = self.typed.sig(method).map(|sig| sig.substitute(&subst.clone().with(ParamOwner::Fn(method), own_args.clone())));
+      let actual = self.typed.sig(function).map(|sig| sig.substitute(&self.inherited_subst(&self_ty, function)));
+      let same_generics = self.generic_count(ParamOwner::Fn(method)) == own_args.len();
 
       if implementation.visibility == Visibility::Private {
         self.error(codes::INVALID_IMPL, implementation.name.span, format!("`{name}` must be `pub` to implement `{interface_name}`"));
-      } else if let Some(expected) = expected
-        && self.typed.sig(function).is_some_and(|sig| sig.params != expected.params || sig.ret != expected.ret)
+      } else if let (Some(expected), Some(actual)) = (expected, actual)
+        && (!same_generics || actual.params != expected.params || actual.ret != expected.ret)
       {
         self.diagnostics.push(
           Diagnostic::error(
@@ -363,58 +394,65 @@ impl Checker<'_> {
     })
   }
 
-  /// `value.name` where `value` has an interface type.
-  pub(crate) fn interface_field_type(&mut self, id: InterfaceId, base_ty: &Type, name: &Ident) -> Type {
-    match self.typed.interface_field(id, &name.name) {
-      Some((_, _, field)) => field.ty.clone(),
-      None => {
-        let mut diagnostic = Diagnostic::error(codes::UNKNOWN_MEMBER, name.span, format!("no field `{}` on type `{base_ty}`", name.name));
+  /// The substitution giving the type parameters of the type declaring `function` (one of the
+  /// ancestors of `self_ty`, or an interface it implements) their arguments in `self_ty`.
+  pub(crate) fn inherited_subst(&self, self_ty: &Type, function: FnId) -> Subst {
+    match (self.resolution.owner(function), self_ty) {
+      (Some(TypeItem::Class(owner)), Type::Class(class)) => {
+        let args = self.typed.class_ancestor(class, owner).map(|ancestor| ancestor.args).unwrap_or_default();
 
-        if self.typed.interface_method(id, &name.name, self.resolution, self.package).is_some() {
-          diagnostic = diagnostic.with_help(format!("`{0}` is a method; call it with `{0}(...)`", name.name));
-        }
+        Subst::of(ParamOwner::Item(TypeItem::Class(owner)), args)
+      }
+      (Some(TypeItem::Interface(owner)), _) => {
+        let args = self.typed.implemented_ref(self_ty, owner).map(|interface| interface.args).unwrap_or_default();
 
-        self.diagnostics.push(diagnostic);
+        Subst::of(ParamOwner::Item(TypeItem::Interface(owner)), args).with_self(self_ty.clone())
+      }
+      (
+        Some(owner @ (TypeItem::Struct(_) | TypeItem::Enum(_))),
+        Type::Struct(crate::StructRef { args, .. }) | Type::Enum(crate::EnumRef { args, .. }),
+      ) => Subst::of(ParamOwner::Item(owner), args.clone()),
+      _ => Subst::default(),
+    }
+  }
 
-        Type::Error
+  /// `value.name` where `value` has an interface type or is a type parameter: a field of one of
+  /// its interfaces.
+  pub(crate) fn interface_field_type(&mut self, base_ty: &Type, name: &Ident) -> Type {
+    for interface in self.typed.implemented_refs(base_ty) {
+      let field = self.typed.interface_def(interface.id).and_then(|def| def.fields.iter().find(|field| field.name == name.name).cloned());
+
+      if let Some(field) = field {
+        return field.ty.substitute(&Self::interface_subst(&interface, base_ty));
       }
     }
+
+    let mut diagnostic = Diagnostic::error(codes::UNKNOWN_MEMBER, name.span, format!("no field `{}` on type `{base_ty}`", name.name));
+
+    if self.interface_method_of(base_ty, &name.name).is_some() {
+      diagnostic = diagnostic.with_help(format!("`{0}` is a method; call it with `{0}(...)`", name.name));
+    }
+
+    self.diagnostics.push(diagnostic);
+
+    Type::Error
+  }
+
+  /// A method of the interfaces of an interface type or a type parameter.
+  pub(crate) fn interface_method_of(&self, ty: &Type, name: &str) -> Option<FnId> {
+    self.typed.implemented_refs(ty).into_iter().find_map(|interface| {
+      let methods = self.typed.interface_def(interface.id)?.methods.clone();
+
+      methods.into_iter().find(|method| self.resolution.fn_decl(self.package, *method).is_some_and(|decl| decl.name.name == name))
+    })
   }
 
   /// Whether `ty` is the prelude's `Error` or implements it.
   pub(crate) fn implements_error(&self, ty: &Type) -> bool {
     let Some((error, _)) = self.typed.error_types else { return false };
+    let name = self.typed.interface_def(error).map(|def| def.name.clone()).unwrap_or_default();
 
-    TypedModule::type_item(ty).is_some_and(|item| self.typed.implemented(item).contains(&error))
-  }
-}
-
-fn mentions_self(ty: &Type) -> bool {
-  match ty {
-    Type::SelfType => true,
-    Type::Array(elem, _) | Type::Option(elem) | Type::Ptr { pointee: elem, .. } => mentions_self(elem),
-    Type::Result(value, error) => mentions_self(value) || mentions_self(error),
-    _ => false,
-  }
-}
-
-/// `ty` with `Self` replaced by the implementing type.
-fn substitute_self(ty: &Type, self_ty: &Type) -> Type {
-  match ty {
-    Type::SelfType => self_ty.clone(),
-    Type::Array(elem, len) => Type::Array(Box::new(substitute_self(elem, self_ty)), *len),
-    Type::Option(value) => Type::Option(Box::new(substitute_self(value, self_ty))),
-    Type::Result(value, error) => Type::Result(Box::new(substitute_self(value, self_ty)), Box::new(substitute_self(error, self_ty))),
-    Type::Ptr { mutable, pointee } => Type::Ptr { mutable: *mutable, pointee: Box::new(substitute_self(pointee, self_ty)) },
-    other => other.clone(),
-  }
-}
-
-fn substitute_sig(sig: &FnSig, self_ty: &Type) -> FnSig {
-  FnSig {
-    receiver: sig.receiver.map(|_| Receiver::Value),
-    params: sig.params.iter().map(|param| substitute_self(param, self_ty)).collect(),
-    ret: substitute_self(&sig.ret, self_ty),
+    self.typed.implements(ty, &InterfaceRef { id: error, name, args: Vec::new() })
   }
 }
 

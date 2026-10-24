@@ -1,0 +1,190 @@
+// Generics: functions with inferred and explicit type arguments, generic structs, enums and
+// classes (also inherited and extended with arguments), bounds and `where` clauses, interfaces
+// with `Self` and default methods specialized per type, and generic interfaces used as types.
+// The harness fails the test on any leak.
+// expect-stdout: first: 10, explicit: b
+// expect-stdout: pair: 1 and one, swapped: one and 1
+// expect-stdout: leaves: 3, depth: 2
+// expect-stdout: boxed: hello, labeled: answer = 42, int: 8
+// expect-stdout: names: Rex, Tom
+// expect-stdout: biggest: 9, smallest: 2
+// expect-stdout: counted: 0 1 2
+// expect-stdout: maybe: 5 and nothing
+
+fn first<T>(items: [T; 3]) -> T {
+  items[0]
+}
+
+struct Pair<A, B> {
+  pub left: A;
+  pub right: B;
+
+  pub fn new(left: A, right: B) -> Self {
+    Self { left, right }
+  }
+
+  pub fn swap(self) -> Pair<B, A> {
+    Pair { left: self.right, right: self.left }
+  }
+}
+
+enum Tree<T> {
+  Leaf(T),
+  Node(Pair<T, T>),
+
+  pub fn leaves(self) -> i32 {
+    match self {
+      Tree::Leaf(_) => 1,
+      Tree::Node(_) => 2,
+    }
+  }
+}
+
+enum Maybe<T> {
+  Some(T),
+  Nothing,
+}
+
+class Box<T> {
+  pub var value: T;
+
+  pub fn new(value: T) {
+    self.value = value;
+  }
+
+  pub fn get(self) -> T {
+    self.value
+  }
+}
+
+class Labeled<T> extends Box<T> {
+  pub const label: String;
+
+  pub fn new(label: String, value: T) {
+    zod.new(value);
+    self.label = label;
+  }
+}
+
+class IntBox extends Box<i32> {
+  pub fn new(value: i32) {
+    zod.new(value);
+  }
+
+  pub override fn get(self) -> i32 {
+    self.value * 2
+  }
+}
+
+interface Named {
+  const name: String;
+}
+
+class Pet impl Named {
+  pub const name: String;
+
+  pub fn new(name: String) {
+    self.name = name;
+  }
+}
+
+fn names<T: Named>(items: [T; 2]) -> String {
+  `${items[0].name}, ${items[1].name}`
+}
+
+interface Comparable {
+  fn compare(self, other: Self) -> i32;
+
+  fn max(self, other: Self) -> Self {
+    if self.compare(other) >= 0 { self } else { other }
+  }
+}
+
+struct Score impl Comparable {
+  pub points: i32;
+
+  pub fn compare(self, other: Score) -> i32 {
+    self.points - other.points
+  }
+}
+
+fn biggest<T>(a: T, b: T) -> T
+where
+  T: Comparable,
+{
+  a.max(b)
+}
+
+interface Source<T> {
+  fn next(self) -> Option<T>;
+}
+
+class Counter impl Source<i32> {
+  prv var current: i32;
+  prv const limit: i32;
+
+  pub fn new(limit: i32) {
+    self.current = 0;
+    self.limit = limit;
+  }
+
+  pub fn next(self) -> Option<i32> {
+    if self.current >= self.limit {
+      return None;
+    }
+
+    self.current += 1;
+    Some(self.current - 1)
+  }
+}
+
+fn drain(source: Source<i32>) -> String {
+  const text = new StringBuilder();
+
+  loop {
+    match source.next() {
+      Some(value) => text.append(` ${value}`),
+      None => break,
+    }
+  }
+
+  text.to_string()
+}
+
+fn describe<T>(value: Maybe<T>, show: bool) -> String {
+  match value {
+    Maybe::Some(_) => if show { "5" } else { "something" },
+    Maybe::Nothing => "nothing",
+  }
+}
+
+fn main() {
+  const numbers = [10, 20, 30];
+  println(`first: ${first(numbers)}, explicit: ${first<String>(["b", "c", "d"])}`);
+
+  const pair = Pair::new(1, "one");
+  const swapped = pair.swap();
+  println(`pair: ${pair.left} and ${pair.right}, swapped: ${swapped.left} and ${swapped.right}`);
+
+  const leaf: Tree<i32> = Tree::Leaf(1);
+  const node = Tree::Node(Pair<i32, i32>::new(2, 3));
+  println(`leaves: ${leaf.leaves() + node.leaves()}, depth: ${node.leaves()}`);
+
+  const boxed = new Box("hello");
+  const labeled = new Labeled("answer", 42);
+  const doubled = new IntBox(4);
+  const as_box: Box<i32> = doubled;
+  println(`boxed: ${boxed.get()}, labeled: ${labeled.label} = ${labeled.get()}, int: ${as_box.get()}`);
+
+  const pets = [new Pet("Rex"), new Pet("Tom")];
+  println(`names: ${names(pets)}`);
+
+  const high = biggest(Score { points: 9 }, Score { points: 2 });
+  const low = Score { points: 2 }.max(Score { points: 1 });
+  println(`biggest: ${high.points}, smallest: ${low.points}`);
+
+  println(`counted:${drain(new Counter(3))}`);
+
+  const some: Maybe<i32> = Maybe::Some(5);
+  println(`maybe: ${describe(some, true)} and ${describe(Maybe<String>::Nothing, true)}`);
+}

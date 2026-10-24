@@ -170,13 +170,13 @@ impl Checker<'_> {
   }
 
   /// `new Type(args)`: a class instance or a `StringBuilder`.
-  pub(crate) fn new_expr(&mut self, path: &Path, args: &[Expr]) -> Type {
+  pub(crate) fn new_expr(&mut self, expr: &Expr, path: &Path, args: &[Expr], expected: Option<&Type>) -> Type {
     let name = path.segments.last().map_or("", |segment| segment.name.as_str());
     let resolved = self.resolution.type_paths.get(&path.id).copied();
     let user_type = matches!(resolved, Some(TypeRes::Item(_)));
 
     if let Some(TypeRes::Item(TypeItem::Class(id))) = resolved {
-      return self.new_instance(path, id, args);
+      return self.new_instance(expr, path, id, args, expected);
     }
 
     if path.segments.len() == 1 && name == "StringBuilder" && !user_type {

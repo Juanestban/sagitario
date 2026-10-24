@@ -133,6 +133,13 @@ could be added.
   interface, `Callee::Dyn` calls an entry). An itable lists thunks calling the type's methods
   (through the vtable when they vary), the interface's default methods, a getter and a setter per
   field, and the itables of the parent interfaces.
+- Generics are monomorphized while lowering: generic functions, methods of generic types and
+  interface methods are templates, instantiated on demand from a worklist with the type
+  arguments the checker recorded (`TypedModule::call_args`), and every type of an instance is
+  substituted. Each class type with its arguments is a class instance (`sag_cN`) with its own
+  struct, constructor, destructor and vtable; generic structs and enums become one `sag_tN` per
+  instantiation. Interface methods called on a known type go straight to its method or to the
+  default instantiated for it.
 - The prelude part written in Sagitario (`crates/sagitario_driver/src/prelude.sag`) is embedded
   by the driver as a module outside the package tree; the resolver looks names up there after a
   module's own items and imports.

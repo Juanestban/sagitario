@@ -1,6 +1,6 @@
 # 0031. Interfaces: fields, implementation, interface values and `Error`
 
-- Status: Accepted
+- Status: Accepted; completed by [ADR-0032](0032-generics.md) (Q47: defaults are now instantiated per type)
 - Date: 2026-10-23
 - Refines: [ADR-0004](0004-class-model.md) (interfaces) and [ADR-0005](0005-result-error-handling.md)
   (the `Error` interface)

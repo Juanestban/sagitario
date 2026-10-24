@@ -11,8 +11,8 @@ mod modules;
 use std::collections::{HashMap, HashSet};
 
 use sagitario_ast::{
-  Block, ClassDecl, EnumDecl, Expr, ExprKind, ExternFn, FnDecl, Ident, InterfaceDecl, Item, Module, NodeId, Package, Path, Pattern, PatternKind,
-  Stmt, StructDecl, TemplatePart, TypeExpr, TypeExprKind, VariantFields, Visibility,
+  Block, ClassDecl, EnumDecl, Expr, ExprKind, ExternFn, FnDecl, GenericParam, Ident, InterfaceDecl, Item, Module, NodeId, Package, Path, Pattern,
+  PatternKind, Stmt, StructDecl, TemplatePart, TypeExpr, TypeExprKind, VariantFields, Visibility,
 };
 use sagitario_diagnostics::{Diagnostic, Diagnostics, codes};
 use sagitario_span::Span;
@@ -233,10 +233,19 @@ pub enum Res {
   Variant(VariantRef),
 }
 
+/// The declaration a type parameter belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ParamOwner {
+  Item(TypeItem),
+  Fn(FnId),
+}
+
 /// What a type path refers to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TypeRes {
   Item(TypeItem),
+  /// The type parameter at this position of its declaration.
+  Param(ParamOwner, u32),
   /// A primitive or prelude type, or `Self`, which the type checker resolves by name.
   Builtin,
   /// A C type of `std::ffi`.
@@ -430,6 +439,18 @@ impl Resolution {
     }
   }
 
+  /// The type parameters of a generic declaration.
+  pub fn generics<'p>(&self, package: &'p Package, owner: ParamOwner) -> &'p [GenericParam] {
+    match owner {
+      ParamOwner::Fn(id) => self.fn_decl(package, id).map(|decl| decl.generics.as_slice()),
+      ParamOwner::Item(TypeItem::Struct(id)) => self.struct_decl(package, id).map(|decl| decl.generics.as_slice()),
+      ParamOwner::Item(TypeItem::Enum(id)) => self.enum_decl(package, id).map(|decl| decl.generics.as_slice()),
+      ParamOwner::Item(TypeItem::Class(id)) => self.class_decl(package, id).map(|decl| decl.generics.as_slice()),
+      ParamOwner::Item(TypeItem::Interface(id)) => self.interface_decl(package, id).map(|decl| decl.generics.as_slice()),
+    }
+    .unwrap_or_default()
+  }
+
   /// The name of a struct, enum, class or interface.
   pub fn type_name(&self, package: &Package, item: TypeItem) -> String {
     match item {
@@ -551,7 +572,7 @@ pub fn resolve(package: &Package, diagnostics: &mut Diagnostics) -> Resolution {
     let id = StructId(index as u32);
 
     if let (Some(decl), Some(info)) = (resolution.struct_decl(package, id), resolution.structs.get(index)) {
-      declarations.push((TypeItem::Struct(id), info.module, decl.fields.iter().map(|field| &field.ty).collect()));
+      declarations.push((TypeItem::Struct(id), info.module, decl.fields.iter().map(|field| &field.ty).chain(bounds(&decl.generics)).collect()));
     }
   }
 
@@ -565,7 +586,7 @@ pub fn resolve(package: &Package, diagnostics: &mut Diagnostics) -> Resolution {
         VariantFields::Named(fields) => fields.iter().map(|field| &field.ty).collect(),
       });
 
-      declarations.push((TypeItem::Enum(id), info.module, types.collect()));
+      declarations.push((TypeItem::Enum(id), info.module, types.chain(bounds(&decl.generics)).collect()));
     }
   }
 
@@ -573,7 +594,7 @@ pub fn resolve(package: &Package, diagnostics: &mut Diagnostics) -> Resolution {
     let id = ClassId(index as u32);
 
     if let (Some(decl), Some(info)) = (resolution.class_decl(package, id), resolution.classes.get(index)) {
-      declarations.push((TypeItem::Class(id), info.module, decl.fields.iter().map(|field| &field.ty).collect()));
+      declarations.push((TypeItem::Class(id), info.module, decl.fields.iter().map(|field| &field.ty).chain(bounds(&decl.generics)).collect()));
     }
   }
 
@@ -581,13 +602,13 @@ pub fn resolve(package: &Package, diagnostics: &mut Diagnostics) -> Resolution {
     let id = InterfaceId(index as u32);
 
     if let (Some(decl), Some(info)) = (resolution.interface_decl(package, id), resolution.interfaces.get(index)) {
-      declarations.push((TypeItem::Interface(id), info.module, decl.fields.iter().map(|field| &field.ty).collect()));
+      declarations.push((TypeItem::Interface(id), info.module, decl.fields.iter().map(|field| &field.ty).chain(bounds(&decl.generics)).collect()));
     }
   }
 
   // The parent class of each class (`extends`), the interfaces each type implements (`impl`)
   // and the parents of each interface.
-  let mut supertypes: Vec<(TypeItem, usize, Vec<&Path>)> = Vec::new();
+  let mut supertypes: Vec<(TypeItem, usize, Vec<&TypeExpr>)> = Vec::new();
 
   for (index, info) in resolution.classes.iter().enumerate() {
     if let Some(decl) = resolution.class_decl(package, ClassId(index as u32)) {
@@ -616,8 +637,8 @@ pub fn resolve(package: &Package, diagnostics: &mut Diagnostics) -> Resolution {
   for (owner, source, paths) in supertypes {
     let mut resolver = Resolver::new(package, &resolution, module_of(&module_ids, source), Some(owner), diagnostics);
 
-    for path in paths {
-      resolver.type_path(path);
+    for ty in paths {
+      resolver.type_expr(ty);
     }
 
     let output = resolver.finish();
@@ -656,6 +677,12 @@ pub fn resolve(package: &Package, diagnostics: &mut Diagnostics) -> Resolution {
   for (id, decl) in resolution.fn_decls(package) {
     let Some(info) = resolution.functions.get(id.0 as usize).copied() else { continue };
     let mut resolver = Resolver::new(package, &resolution, module_of(&module_ids, info.module), info.owner, diagnostics);
+
+    resolver.enter_generics(ParamOwner::Fn(id), &decl.generics);
+
+    for bound in bounds(&decl.generics) {
+      resolver.type_expr(bound);
+    }
 
     if let Some(self_param) = &decl.self_param {
       resolver.declare("self", self_param.span, LocalKind::SelfParam);
@@ -697,6 +724,11 @@ pub fn resolve(package: &Package, diagnostics: &mut Diagnostics) -> Resolution {
   modules::report_private_interfaces(&resolution, package, diagnostics);
 
   resolution
+}
+
+/// The bounds of every type parameter.
+fn bounds(generics: &[GenericParam]) -> impl Iterator<Item = &TypeExpr> {
+  generics.iter().flat_map(|param| &param.bounds)
 }
 
 /// The module of the file at `source` in `Package::modules`.
@@ -889,12 +921,14 @@ struct Resolver<'a> {
   type_paths: HashMap<NodeId, TypeRes>,
   /// Imports that were used, by module and name.
   used: HashSet<(ModId, String)>,
+  /// The type parameters in scope: the owner type's, then the function's.
+  generics: Vec<(String, ParamOwner, u32)>,
   diagnostics: &'a mut Diagnostics,
 }
 
 impl<'a> Resolver<'a> {
   fn new(package: &'a Package, resolution: &'a Resolution, module: ModId, owner: Option<TypeItem>, diagnostics: &'a mut Diagnostics) -> Resolver<'a> {
-    Resolver {
+    let mut resolver = Resolver {
       package,
       resolution,
       module,
@@ -905,7 +939,46 @@ impl<'a> Resolver<'a> {
       bindings: HashMap::new(),
       type_paths: HashMap::new(),
       used: HashSet::new(),
+      generics: Vec::new(),
       diagnostics,
+    };
+
+    if let Some(owner) = owner {
+      let generics = resolution.generics(package, ParamOwner::Item(owner));
+
+      resolver.enter_generics(ParamOwner::Item(owner), generics);
+    }
+
+    resolver
+  }
+
+  /// Brings the type parameters of a declaration into scope.
+  fn enter_generics(&mut self, owner: ParamOwner, params: &[GenericParam]) {
+    for (index, param) in params.iter().enumerate() {
+      let name = &param.name.name;
+
+      if params.iter().take(index).any(|previous| previous.name.name == *name) {
+        self.diagnostics.push(Diagnostic::error(
+          codes::DUPLICATE_DEFINITION,
+          param.name.span,
+          format!("the type parameter `{name}` is declared more than once"),
+        ));
+      }
+
+      self.generics.push((name.clone(), owner, index as u32));
+    }
+  }
+
+  fn lookup_generic(&self, name: &str) -> Option<(ParamOwner, u32)> {
+    self.generics.iter().rev().find(|(param, _, _)| param == name).map(|(_, owner, index)| (*owner, *index))
+  }
+
+  /// The type arguments written in an expression path.
+  fn type_args(&mut self, path: &Path) {
+    if let Some(args) = &path.type_args {
+      for arg in &args.args {
+        self.type_expr(arg);
+      }
     }
   }
 
@@ -1002,6 +1075,8 @@ impl<'a> Resolver<'a> {
   fn expr(&mut self, expr: &Expr) {
     match &expr.kind {
       ExprKind::Path(path) => {
+        self.type_args(path);
+
         if let Some(res) = self.path(path) {
           self.paths.insert(expr.id, res);
         }
@@ -1020,6 +1095,8 @@ impl<'a> Resolver<'a> {
         self.expr(index);
       }
       ExprKind::StructLit { path, fields } => {
+        self.type_args(path);
+
         if let Some(res) = self.struct_literal_path(path) {
           self.paths.insert(expr.id, res);
         }
@@ -1033,6 +1110,8 @@ impl<'a> Resolver<'a> {
       ExprKind::Try(inner) => self.expr(inner),
       // In F1 only `new StringBuilder()` exists; the type checker reports any other type.
       ExprKind::New { path, args } => {
+        self.type_args(path);
+
         self.new_path(path);
         self.exprs(args);
       }
@@ -1365,6 +1444,12 @@ impl<'a> Resolver<'a> {
   fn value_name(&mut self, name: &str, span: Span) -> Option<Res> {
     if let Some(id) = self.lookup_local(name) {
       return Some(Res::Local(id));
+    }
+
+    if self.lookup_generic(name).is_some() {
+      self.error(span, format!("`{name}` is a type parameter, not a value"));
+
+      return None;
     }
 
     match name {
@@ -1711,7 +1796,9 @@ impl<'a> Resolver<'a> {
       [segment] => {
         let name = segment.name.as_str();
 
-        if NUMERIC_TYPES.contains(&name) || name == "Self" {
+        if let Some((owner, index)) = self.lookup_generic(name) {
+          TypeRes::Param(owner, index)
+        } else if NUMERIC_TYPES.contains(&name) || name == "Self" {
           TypeRes::Builtin
         } else {
           match self.lookup_item(name) {
