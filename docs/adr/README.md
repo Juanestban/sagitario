@@ -49,6 +49,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0038](0038-file-system-and-paths.md) | `std::fs` and `std::path` | Accepted |
 | [0039](0039-time-and-commands.md) | `std::time` and `std::process::Command` | Accepted |
 | [0040](0040-nova-package-manager.md) | Nova, the package manager | Accepted |
+| [0041](0041-dependencies-by-path.md) | Dependencies by path | Accepted |
 
 ## Template
 

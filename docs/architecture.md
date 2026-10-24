@@ -151,6 +151,13 @@ could be added.
   `Callee::Closure` calls a value, casting the pointer to the exact signature and passing the
   environment first. Named functions used as values (`Rvalue::FnValue`) are called through
   wrappers `sag_wrap_N` that ignore the environment.
+- A program can span several packages (`Package::packages`): the one being compiled, then its
+  dependencies, each with its own module tree (`Module::package`, `Resolution::package_roots`).
+  The driver loads each dependency's root module and the modules its paths reach
+  (`sagitario_resolve::module_references` tells which package each one belongs to). `pkg` names
+  the root of the current module's package, and a dependency's name is a further path root.
+  Everything is then checked and lowered as one program. Nova, not the compiler, reads the
+  manifests and checks the graph (names, libraries, no cycles).
 - The prelude part written in Sagitario (`crates/sagitario_driver/src/prelude.sag`, followed by
   one range function per integer type that the driver generates) is embedded by the driver as a
   module outside the package tree; the resolver looks names up there after a module's own items

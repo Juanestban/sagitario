@@ -37,12 +37,24 @@ pub struct Package {
   pub std: Vec<usize>,
   /// A library: it needs no `main`, and a function called `main` is an ordinary one.
   pub library: bool,
+  /// The package being compiled first, then its dependencies (docs/nova.md#dependencies), which
+  /// `Module::package` indexes. Empty for a program without dependencies.
+  pub packages: Vec<PackageInfo>,
+}
+
+/// A package of a program: the one being compiled, or a dependency.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageInfo {
+  /// The name its dependents use as a path root; unused for the package being compiled.
+  pub name: String,
+  /// Indices in `Package::packages` of the packages it depends on directly.
+  pub dependencies: Vec<usize>,
 }
 
 impl Package {
   /// A program made of one file.
   pub fn single(module: Module) -> Package {
-    Package { modules: vec![module], prelude: None, std: Vec::new(), library: false }
+    Package { modules: vec![module], prelude: None, std: Vec::new(), library: false, packages: Vec::new() }
   }
 }
 
@@ -53,6 +65,9 @@ pub struct Module {
   /// The logical path from the package root: empty for the root, `["net", "http"]` for
   /// `net/http.sag`.
   pub path: Vec<String>,
+  /// Index in `Package::packages` of the package the file belongs to: 0 for the one being
+  /// compiled (and for the prelude and the standard library).
+  pub package: usize,
   pub uses: Vec<UseDecl>,
   pub items: Vec<Item>,
 }

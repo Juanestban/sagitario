@@ -85,8 +85,9 @@ Increments:
    capture its output and exit status) ([ADR-0039](adr/0039-time-and-commands.md)).
 4. Packages with Nova, the package manager: `Nova.toml`, `nova new`, `nova build`/`run`/`check`
    with `src/main.sag` or `src/lib.sag` ([ADR-0040](adr/0040-nova-package-manager.md)).
-5. Dependencies: packages by path, a lockfile, dependency names as path roots, no cycles between
-   packages.
+5. Dependencies: packages by path, dependency names as path roots, no cycles between packages
+   ([ADR-0041](adr/0041-dependencies-by-path.md)). `Nova.lock` waits for dependencies from git or
+   a registry.
 6. Libraries: `kind = "lib"` builds `.a`/`.so`/`.dll` with the `@export`ed functions and a
    generated C header; linking C libraries from the manifest.
 7. Cross-compilation: `--target`, Android (NDK) and iOS, with `c_long`/`c_char` per target.

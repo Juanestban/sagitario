@@ -41,6 +41,8 @@ pub enum ValueKind {
   Integer(i64),
   Boolean(bool),
   Array(Vec<Value>),
+  /// `{ key = value, ... }`, on one line.
+  Table(Vec<Entry>),
 }
 
 impl ValueKind {
@@ -51,6 +53,7 @@ impl ValueKind {
       ValueKind::Integer(_) => "an integer",
       ValueKind::Boolean(_) => "a boolean",
       ValueKind::Array(_) => "an array",
+      ValueKind::Table(_) => "an inline table",
     }
   }
 }
@@ -255,7 +258,7 @@ impl Parser<'_> {
       Some('"') => ValueKind::String(self.basic_string()?),
       Some('\'') => ValueKind::String(self.literal_string()?),
       Some('[') => ValueKind::Array(self.array()?),
-      Some('{') => return Err(Box::new(self.unsupported(self.here(), "inline tables (`{ ... }`)"))),
+      Some('{') => ValueKind::Table(self.inline_table()?),
       Some(c) if c.is_ascii_alphanumeric() || c == '+' || c == '-' => self.word()?,
       _ => return Err(Box::new(self.error(self.here(), "expected a value: a string, an integer, `true`, `false` or an array"))),
     };
@@ -389,6 +392,67 @@ impl Parser<'_> {
     Ok(values)
   }
 
+  /// `{ key = value, ... }` on one line, without a trailing comma.
+  fn inline_table(&mut self) -> Result<Vec<Entry>, Box<Diagnostic>> {
+    let start = self.pos;
+    let mut entries: Vec<Entry> = Vec::new();
+
+    self.bump();
+    self.skip_blank(false);
+
+    if self.peek() == Some('}') {
+      self.bump();
+
+      return Ok(entries);
+    }
+
+    loop {
+      self.skip_blank(false);
+
+      let key_start = self.pos;
+      let key = self.key()?;
+      let span = self.span(key_start);
+
+      self.skip_blank(false);
+
+      if self.peek() != Some('=') {
+        return Err(Box::new(self.error(self.here(), format!("expected `=` after the key `{key}`"))));
+      }
+
+      self.bump();
+      self.skip_blank(false);
+
+      let value = self.value()?;
+
+      if let Some(previous) = entries.iter().find(|previous| previous.key == key) {
+        return Err(Box::new(
+          Diagnostic::error(codes::DUPLICATE, span, format!("the key `{key}` is defined twice")).with_label(previous.span, "first defined here"),
+        ));
+      }
+
+      entries.push(Entry { key, span, value });
+      self.skip_blank(false);
+
+      match self.peek() {
+        Some(',') => {
+          self.bump();
+          self.skip_blank(false);
+
+          if self.peek() == Some('}') {
+            return Err(Box::new(self.error(self.here(), "an inline table cannot end with a comma")));
+          }
+        }
+        Some('}') => {
+          self.bump();
+
+          return Ok(entries);
+        }
+        None | Some('\n' | '\r') => return Err(Box::new(self.error(self.span(start), "an inline table must close on the line it starts"))),
+        Some(_) => return Err(Box::new(self.error(self.here(), "expected `,` or `}` in the inline table"))),
+      }
+    }
+  }
+
   /// `true`, `false` or a decimal integer such as `-1_000`.
   fn word(&mut self) -> Result<ValueKind, Box<Diagnostic>> {
     let start = self.pos;
@@ -461,6 +525,9 @@ mod tests {
       ValueKind::Integer(value) => value.to_string(),
       ValueKind::Boolean(value) => value.to_string(),
       ValueKind::Array(values) => format!("[{}]", values.iter().map(|value| shape(&value.kind)).collect::<Vec<_>>().join(",")),
+      ValueKind::Table(entries) => {
+        format!("{{{}}}", entries.iter().map(|entry| format!("{}={}", entry.key, shape(&entry.value.kind))).collect::<Vec<_>>().join(","))
+      }
     }
   }
 
@@ -501,7 +568,9 @@ mod tests {
       "[a.b]",
       "a.b = 1",
       "\"a\" = 1",
-      "a = { b = 1 }",
+      "a = { b = 1, }",
+      "a = { b = 1",
+      "a = { b 1 }",
       "a = 1.5",
       "a = 1979-05-27",
       "a = 012",
@@ -516,6 +585,12 @@ mod tests {
 
       assert_eq!(error.code, codes::SYNTAX, "{text}");
     }
+  }
+
+  #[test]
+  fn parses_inline_tables() {
+    assert_eq!(entries("a = { path = \"../x\", n = [1] }\nb = {}"), vec![".a={path=\"../x\",n=[1]}", ".b={}"]);
+    assert_eq!(parse_text("a = { b = 1, b = 2 }").unwrap_err().code, codes::DUPLICATE);
   }
 
   #[test]

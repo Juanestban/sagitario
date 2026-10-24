@@ -150,7 +150,7 @@ fn resolve_package(files: &[(&str, &str)]) -> Vec<&'static str> {
 
   assert!(!diagnostics.has_errors(), "parse failed: {:?}", diagnostics.take());
 
-  resolve(&Package { modules, prelude: None, std: Vec::new(), library: false }, &mut diagnostics);
+  resolve(&Package { modules, prelude: None, std: Vec::new(), library: false, packages: Vec::new() }, &mut diagnostics);
 
   diagnostics.take().iter().map(|diagnostic| diagnostic.code.0).collect()
 }
@@ -194,7 +194,7 @@ fn finds_the_modules_a_file_refers_to() {
 
   module.path = vec!["app".to_string()];
 
-  let found: Vec<String> = module_references(&module).iter().map(|path| path.join("::")).collect();
+  let found: Vec<String> = module_references(&module, &[]).iter().map(|target| target.path.join("::")).collect();
 
   assert_eq!(
     found,
@@ -225,4 +225,20 @@ fn finds_the_standard_library_modules_a_file_names() {
   let module = sagitario_parser::parse_module(file, tokens, &mut diagnostics);
 
   assert_eq!(std_references(&module), vec!["env", "ffi", "io", "process", "time"]);
+}
+
+#[test]
+fn finds_the_modules_of_dependencies_a_file_refers_to() {
+  let text = "use geo::shapes::{self, Circle}; use pkg::util; fn main() { shapes::area(); geo::plane::origin(); util::x(); }";
+  let mut sources = SourceMap::new();
+  let mut diagnostics = Diagnostics::new();
+  let file = sources.add(PathBuf::from("main.sag"), text.to_string());
+  let tokens = sagitario_lexer::lex(file, text, &mut diagnostics);
+  let module = sagitario_parser::parse_module(file, tokens, &mut diagnostics);
+  let found: Vec<String> = module_references(&module, &["geo".to_string()])
+    .iter()
+    .map(|target| format!("{}:{}", target.dependency.as_deref().unwrap_or("pkg"), target.path.join("::")))
+    .collect();
+
+  assert_eq!(found, vec!["pkg:util", "pkg:util::x", "geo:plane", "geo:plane::origin", "geo:shapes", "geo:shapes::Circle", "geo:shapes::area"]);
 }

@@ -10,7 +10,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use sagitario_ast::{Module, Package};
+use sagitario_ast::{Module, Package, PackageInfo};
 use sagitario_diagnostics::{DiagnosticFormat, Diagnostics, render};
 use sagitario_span::SourceMap;
 
@@ -40,6 +40,21 @@ pub struct CompileOptions {
   pub output: Option<PathBuf>,
   /// The input is the root of a library: it needs no `main` and is only checked.
   pub library: bool,
+  /// Every package the input depends on, directly or not (docs/nova.md#dependencies).
+  pub dependencies: Vec<Dependency>,
+  /// Indices in `dependencies` of the input's own dependencies.
+  pub direct_dependencies: Vec<usize>,
+}
+
+/// A library package the program depends on, compiled together with it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Dependency {
+  /// The name its dependents use as a path root.
+  pub name: String,
+  /// Its root module, `src/lib.sag`.
+  pub entry: PathBuf,
+  /// Indices in `CompileOptions::dependencies` of its own dependencies.
+  pub dependencies: Vec<usize>,
 }
 
 /// The C compiler flags of `--sanitize`: any undefined behavior aborts the program.
@@ -120,15 +135,18 @@ fn front_end(options: &CompileOptions, generate: bool) -> Result<FrontEnd, u8> {
   }
   let mut sources = SourceMap::new();
   let mut diagnostics = Diagnostics::new();
-  let mut loader = Loader {
-    root: input.parent().map(Path::to_path_buf).unwrap_or_default(),
-    entry: input.clone(),
-    next_id: 0,
-    modules: Vec::new(),
-    std: Vec::new(),
-  };
+  // The input's package comes first; dependency `i` is package `i + 1`.
+  let mut packages = vec![LoadedPackage::new(input, "", &options.direct_dependencies)];
 
-  loader.load(input, Vec::new(), &mut sources, &mut diagnostics)?;
+  packages.extend(options.dependencies.iter().map(|dependency| LoadedPackage::new(&dependency.entry, &dependency.name, &dependency.dependencies)));
+
+  let mut loader = Loader { packages, next_id: 0, modules: Vec::new(), std: Vec::new() };
+
+  for package in 0..loader.packages.len() {
+    let entry = loader.packages.get(package).map(|loaded| loaded.entry.clone()).unwrap_or_default();
+
+    loader.load(&entry, Vec::new(), package, &mut sources, &mut diagnostics)?;
+  }
 
   // Each loaded module may refer to more modules; the ones that exist as files are loaded too,
   // and so are the standard library modules it names.
@@ -137,14 +155,22 @@ fn front_end(options: &CompileOptions, generate: bool) -> Result<FrontEnd, u8> {
   let mut index = 0;
 
   while let Some(module) = loader.modules.get(index) {
-    let paths = if loader.std.contains(&index) { Vec::new() } else { sagitario_resolve::module_references(module) };
+    let package = module.package;
+    let names = loader.dependency_names(package);
+    let targets = if loader.std.contains(&index) { Vec::new() } else { sagitario_resolve::module_references(module, &names) };
     let std_names = sagitario_resolve::std_references(module);
 
-    for path in paths {
-      if attempted.insert(path.clone())
-        && let Some(file) = loader.module_file(&path)
+    for target in targets {
+      let target_package = match &target.dependency {
+        None => Some(package),
+        Some(name) => loader.dependency(package, name),
+      };
+
+      if let Some(target_package) = target_package
+        && attempted.insert((target_package, target.path.clone()))
+        && let Some(file) = loader.module_file(target_package, &target.path)
       {
-        loader.load(&file, path, &mut sources, &mut diagnostics)?;
+        loader.load(&file, target.path, target_package, &mut sources, &mut diagnostics)?;
       }
     }
 
@@ -167,7 +193,8 @@ fn front_end(options: &CompileOptions, generate: bool) -> Result<FrontEnd, u8> {
 
   report(&mut diagnostics, &sources, options)?;
 
-  let package = Package { modules: loader.modules, prelude: Some(prelude), std: loader.std, library: options.library };
+  let infos = loader.packages.iter().map(|loaded| PackageInfo { name: loaded.name.clone(), dependencies: loaded.dependencies.clone() }).collect();
+  let package = Package { modules: loader.modules, prelude: Some(prelude), std: loader.std, library: options.library, packages: infos };
   let resolution = sagitario_resolve::resolve(&package, &mut diagnostics);
   let typed = sagitario_types::check(&package, &resolution, &mut diagnostics);
 
@@ -278,9 +305,30 @@ fn prelude_source() -> String {
 
 /// Reads, lexes and parses the modules of a program (docs/spec/09-modules.md): the entry file is
 /// the root module `pkg`, and `pkg::net::http` is the file `net/http.sag` next to it.
-struct Loader {
+/// A package whose modules are loaded: the input's, or a dependency.
+struct LoadedPackage {
+  name: String,
+  /// The directory of its root module, which holds its other modules.
   root: PathBuf,
   entry: PathBuf,
+  /// Indices in `Loader::packages` of its dependencies.
+  dependencies: Vec<usize>,
+}
+
+impl LoadedPackage {
+  /// Dependency `i` of `CompileOptions::dependencies` is package `i + 1`.
+  fn new(entry: &Path, name: &str, dependencies: &[usize]) -> LoadedPackage {
+    LoadedPackage {
+      name: name.to_string(),
+      root: entry.parent().map(Path::to_path_buf).unwrap_or_default(),
+      entry: entry.to_path_buf(),
+      dependencies: dependencies.iter().map(|index| index + 1).collect(),
+    }
+  }
+}
+
+struct Loader {
+  packages: Vec<LoadedPackage>,
   /// Keeps node ids unique across modules.
   next_id: u32,
   modules: Vec<Module>,
@@ -290,7 +338,7 @@ struct Loader {
 
 impl Loader {
   /// Adds a module unless it has lexical errors, which are reported later with the others.
-  fn load(&mut self, file: &Path, path: Vec<String>, sources: &mut SourceMap, diagnostics: &mut Diagnostics) -> Result<(), u8> {
+  fn load(&mut self, file: &Path, path: Vec<String>, package: usize, sources: &mut SourceMap, diagnostics: &mut Diagnostics) -> Result<(), u8> {
     let text = match fs::read_to_string(file) {
       Ok(text) => text,
       Err(error) => {
@@ -315,10 +363,25 @@ impl Loader {
       let mut module = sagitario_parser::parse_module_from(id, tokens, &mut self.next_id, diagnostics);
 
       module.path = path;
+      module.package = package;
       self.modules.push(module);
     }
 
     Ok(())
+  }
+
+  /// The names of the dependencies of `package`.
+  fn dependency_names(&self, package: usize) -> Vec<String> {
+    let dependencies = self.packages.get(package).map(|loaded| loaded.dependencies.as_slice()).unwrap_or_default();
+
+    dependencies.iter().filter_map(|index| self.packages.get(*index)).map(|loaded| loaded.name.clone()).collect()
+  }
+
+  /// The package that `package` depends on under `name`.
+  fn dependency(&self, package: usize, name: &str) -> Option<usize> {
+    let dependencies = self.packages.get(package)?.dependencies.as_slice();
+
+    dependencies.iter().copied().find(|index| self.packages.get(*index).is_some_and(|loaded| loaded.name == name))
   }
 
   /// Adds the prelude module, which every program sees, and returns its index.
@@ -366,11 +429,12 @@ impl Loader {
     Ok(self.modules.len() - 1)
   }
 
-  /// The file of the module at `path`, if it exists with exactly these names (also on
-  /// case-insensitive file systems) and is not the entry file.
-  fn module_file(&self, path: &[String]) -> Option<PathBuf> {
+  /// The file of the module at `path` in `package`, if it exists with exactly these names (also
+  /// on case-insensitive file systems) and is not the package's entry file.
+  fn module_file(&self, package: usize, path: &[String]) -> Option<PathBuf> {
+    let package = self.packages.get(package)?;
     let (last, dirs) = path.split_last()?;
-    let mut dir = self.root.clone();
+    let mut dir = package.root.clone();
 
     for name in dirs {
       if !has_entry(&dir, name, true) {
@@ -389,7 +453,7 @@ impl Loader {
     let file = dir.join(name);
     let same = |a: &Path, b: &Path| matches!((fs::canonicalize(a), fs::canonicalize(b)), (Ok(a), Ok(b)) if a == b);
 
-    if same(&file, &self.entry) { None } else { Some(file) }
+    if same(&file, &package.entry) { None } else { Some(file) }
   }
 }
 

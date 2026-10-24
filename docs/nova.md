@@ -29,8 +29,8 @@ A package is a **program** if it has `src/main.sag`, or a **library** if it has 
 it must have exactly one of them. Modules are the files under `src/`, as described in
 [modules](spec/09-modules.md).
 
-Libraries are checked but not built yet: building `.a`, `.so` and `.dll` files comes with
-library outputs, and using one package from another with dependencies.
+Programs use libraries through [dependencies](#dependencies). Libraries are checked but not
+built into files yet: building `.a`, `.so` and `.dll` files comes with library outputs.
 
 ## Commands
 
@@ -76,7 +76,8 @@ license = "MIT OR Apache-2.0"        # optional
 | `description`, `license` | Optional strings |
 | `authors` | An optional array of strings |
 
-Any other key or table is an error, except `[dependencies]`, reserved for dependencies.
+`[dependencies]` lists the package's [dependencies](#dependencies). Any other key or table is
+an error.
 
 ### Syntax
 
@@ -90,9 +91,42 @@ lines with bare keys, comments (`#`) and these values:
 | Decimal integers, with `_` between digits | `1_000`, `-5` |
 | Booleans | `true`, `false` |
 | Arrays, over several lines if needed, with an optional trailing comma | `["a", "b"]` |
+| Inline tables, on one line and without a trailing comma | `{ path = "../util" }` |
 
-Other TOML features (dotted and quoted keys, inline tables, arrays of tables, multi-line
-strings, floats and dates) are reported as unsupported.
+Other TOML features (dotted and quoted keys, arrays of tables, multi-line strings, floats and
+dates) are reported as unsupported.
+
+## Dependencies
+
+Rationale: [ADR-0041](adr/0041-dependencies-by-path.md).
+
+```toml
+[dependencies]
+geometry = { path = "../geometry" }
+```
+
+```sag
+use geometry::shapes::Circle;
+
+fn main() {
+  println(`${geometry::area(Circle { radius: 2.0 })}`);
+}
+```
+
+- A dependency is a library package found by its `path`, relative to the directory of the
+  `Nova.toml` that names it (or absolute). Its key must be the dependency's own `name`.
+- Its name is a path root in the dependent package, like `std`: `use geometry::shapes::Circle;`
+  or `geometry::area(c)`. A module-level item or import with the same name hides it.
+- Only its `pub` items can be used, through the path of the module declaring them: the
+  dependency's modules are all reachable, and `pub` marks its API.
+- Each package sees only its own dependencies by name. A package reached through several
+  dependencies (the same directory) is compiled once.
+- Packages cannot depend on each other in a cycle.
+- The whole graph is compiled together into one program, so a generic function of a dependency
+  is instantiated with the types its users pass.
+- Errors in a dependency's code are reported with the paths of its files.
+- Not yet: dependencies from git or a registry (and with them `Nova.lock`), renaming a
+  dependency, development dependencies, features and optional dependencies.
 
 ## Errors
 
@@ -118,5 +152,9 @@ error[N0006]: `Hello App` is not a valid package name: it must start with a lowe
 | N0005 | A value of the wrong type |
 | N0006 | An invalid package name |
 | N0007 | An invalid version |
-| N0008 | A part of `Nova.toml` that is not available yet (`[dependencies]`) |
+| N0008 | A part of `Nova.toml` that is not available yet (dependencies by `version` or `git`) |
 | N0009 | A package without exactly one of `src/main.sag` and `src/lib.sag` |
+| N0010 | A dependency whose `path` holds no package |
+| N0011 | A dependency whose package has another name |
+| N0012 | A dependency that is a program, not a library |
+| N0013 | Packages that depend on each other in a cycle |

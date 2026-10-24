@@ -11,8 +11,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use sagitario_diagnostics::{DiagnosticFormat, render};
-use sagitario_driver::{CompileOptions, EXIT_FAILURE};
+use sagitario_diagnostics::{Diagnostic, DiagnosticFormat, render};
+use sagitario_driver::{CompileOptions, Dependency, EXIT_FAILURE};
 use sagitario_span::SourceMap;
 
 use manifest::Manifest;
@@ -283,14 +283,18 @@ enum Mode {
   Check,
 }
 
-/// A package found from the current directory.
+/// A package of the graph being built: the one of the current directory, or a dependency.
 struct Package {
   /// The directory of `Nova.toml`, as written in messages: relative when it is the current one.
   dir: PathBuf,
+  /// The same directory, to recognize a package reached by several paths.
+  canonical: PathBuf,
   manifest: Manifest,
   /// `src/main.sag` or `src/lib.sag`.
   root: PathBuf,
   lib: bool,
+  /// Indices in the graph of its dependencies.
+  dependencies: Vec<usize>,
 }
 
 /// The directory holding `Nova.toml`: the current one or the nearest above it.
@@ -311,54 +315,186 @@ fn find_package_dir() -> Result<PathBuf, u8> {
   )))
 }
 
-/// Reads and checks the manifest and the layout of the package of the current directory.
-fn load_package(format: DiagnosticFormat) -> Result<Package, u8> {
+/// Reads the manifests of a package and its dependencies, reporting errors with their location.
+struct Loader {
+  sources: SourceMap,
+  format: DiagnosticFormat,
+  /// The package of the current directory first.
+  packages: Vec<Package>,
+}
+
+impl Loader {
+  fn report(&self, diagnostic: &Diagnostic) -> u8 {
+    eprintln!("{}", render(diagnostic, &self.sources, self.format, sagitario_driver::use_color(self.format)));
+    EXIT_FAILURE
+  }
+
+  /// Reads and checks the manifest and the layout of the package in `dir`.
+  fn read(&mut self, dir: PathBuf) -> Result<Package, u8> {
+    let path = dir.join(manifest::FILE_NAME);
+    let text = fs::read_to_string(&path).map_err(|error| fail(format!("cannot read `{}`: {error}", path.display())))?;
+    let here = if dir.as_os_str().is_empty() { Path::new(".") } else { dir.as_path() };
+    let canonical = fs::canonicalize(here).map_err(|error| fail(format!("cannot read `{}`: {error}", here.display())))?;
+    let file = self.sources.add(path, text.clone());
+    let manifest = match toml::parse(file, &text).and_then(|document| manifest::read(&document)) {
+      Ok(manifest) => manifest,
+      Err(diagnostic) => return Err(self.report(&diagnostic)),
+    };
+    let src = dir.join("src");
+    let main = src.join("main.sag");
+    let lib = src.join("lib.sag");
+    let layout_error = |message: String, help: &str| Diagnostic::error(codes::INVALID_LAYOUT, manifest.span, message).with_help(help.to_string());
+
+    let (root, is_lib) = match (main.is_file(), lib.is_file()) {
+      (true, false) => (main, false),
+      (false, true) => (lib, true),
+      (false, false) => {
+        let diagnostic = layout_error(
+          format!("the package `{}` has neither `src/main.sag` nor `src/lib.sag`", manifest.name),
+          "create `src/main.sag` for a program, or `src/lib.sag` for a library",
+        );
+
+        return Err(self.report(&diagnostic));
+      }
+      (true, true) => {
+        let diagnostic = layout_error(
+          format!("the package `{}` has both `src/main.sag` and `src/lib.sag`", manifest.name),
+          "a package is a program or a library for now: remove one of them",
+        );
+
+        return Err(self.report(&diagnostic));
+      }
+    };
+
+    Ok(Package { dir, canonical, manifest, root, lib: is_lib, dependencies: Vec::new() })
+  }
+
+  /// Loads the dependencies of the package at `index`, then theirs. `chain` holds the packages
+  /// being loaded, from the first one: reaching one of them again is a cycle.
+  fn load_dependencies(&mut self, index: usize, chain: &mut Vec<usize>) -> Result<(), u8> {
+    let Some(package) = self.packages.get(index) else { return Ok(()) };
+    let specs = package.manifest.dependencies.clone();
+    let base = package.dir.clone();
+
+    for spec in specs {
+      let dir = tidy(&base.join(&spec.path));
+      let canonical = fs::canonicalize(&dir).ok().filter(|canonical| canonical.join(manifest::FILE_NAME).is_file());
+      let Some(canonical) = canonical else {
+        let diagnostic = Diagnostic::error(codes::DEPENDENCY_NOT_FOUND, spec.path_span, format!("there is no package at `{}`", dir.display()))
+          .with_note(format!("the dependency `{}` must be a directory with a `{}`", spec.name, manifest::FILE_NAME));
+
+        return Err(self.report(&diagnostic));
+      };
+
+      let dependency = match self.packages.iter().position(|package| package.canonical == canonical) {
+        Some(existing) if chain.contains(&existing) => {
+          let start = chain.iter().position(|item| *item == existing).unwrap_or(0);
+          let names: Vec<&str> = chain
+            .iter()
+            .skip(start)
+            .chain([&existing])
+            .filter_map(|item| self.packages.get(*item))
+            .map(|package| package.manifest.name.as_str())
+            .collect();
+          let diagnostic =
+            Diagnostic::error(codes::DEPENDENCY_CYCLE, spec.span, format!("the packages depend on each other: {}", names.join(" -> ")))
+              .with_note("packages cannot depend on each other in a cycle; move what they share into another package");
+
+          return Err(self.report(&diagnostic));
+        }
+        Some(existing) => existing,
+        None => {
+          let package = self.read(dir.clone())?;
+
+          self.packages.push(package);
+
+          let added = self.packages.len() - 1;
+
+          chain.push(added);
+          self.load_dependencies(added, chain)?;
+          chain.pop();
+
+          added
+        }
+      };
+      let Some(found) = self.packages.get(dependency) else { return Err(EXIT_FAILURE) };
+
+      if found.manifest.name != spec.name {
+        let diagnostic = Diagnostic::error(
+          codes::DEPENDENCY_NAME,
+          spec.span,
+          format!("the package at `{}` is called `{}`, not `{}`", dir.display(), found.manifest.name, spec.name),
+        )
+        .with_help(format!("write `{} = {{ path = \"{}\" }}`", found.manifest.name, spec.path));
+
+        return Err(self.report(&diagnostic));
+      }
+
+      if !found.lib {
+        let diagnostic = Diagnostic::error(codes::NOT_A_LIBRARY, spec.span, format!("`{}` is a program, not a library", spec.name))
+          .with_note("only libraries (with `src/lib.sag`) can be dependencies");
+
+        return Err(self.report(&diagnostic));
+      }
+
+      if let Some(package) = self.packages.get_mut(index) {
+        package.dependencies.push(dependency);
+      }
+    }
+
+    Ok(())
+  }
+}
+
+/// `path` without `.` and with each `..` removing the directory before it, for messages:
+/// `../geo/../math` becomes `../math`. It never looks at the file system.
+fn tidy(path: &Path) -> PathBuf {
+  use std::path::Component;
+
+  let mut tidied = PathBuf::new();
+
+  for component in path.components() {
+    match component {
+      Component::CurDir => {}
+      Component::ParentDir if matches!(tidied.components().next_back(), Some(Component::Normal(_))) => {
+        tidied.pop();
+      }
+      other => tidied.push(other),
+    }
+  }
+
+  if tidied.as_os_str().is_empty() { PathBuf::from(".") } else { tidied }
+}
+
+/// Reads the package of the current directory and its dependencies.
+fn load_packages(format: DiagnosticFormat) -> Result<Vec<Package>, u8> {
   let dir = find_package_dir()?;
-  let path = dir.join(manifest::FILE_NAME);
-  let text = fs::read_to_string(&path).map_err(|error| fail(format!("cannot read `{}`: {error}", path.display())))?;
-  let mut sources = SourceMap::new();
-  let file = sources.add(path.clone(), text.clone());
-  let report = |diagnostic: Box<sagitario_diagnostics::Diagnostic>| {
-    eprintln!("{}", render(&diagnostic, &sources, format, sagitario_driver::use_color(format)));
-    EXIT_FAILURE
-  };
-  let manifest = toml::parse(file, &text).and_then(|document| manifest::read(&document)).map_err(report)?;
-  let src = dir.join("src");
-  let main = src.join("main.sag");
-  let lib = src.join("lib.sag");
-  let layout_error = |message: &str, help: &str| {
-    let diagnostic = sagitario_diagnostics::Diagnostic::error(codes::INVALID_LAYOUT, manifest.span, message.to_string()).with_help(help.to_string());
+  let mut loader = Loader { sources: SourceMap::new(), format, packages: Vec::new() };
+  let package = loader.read(dir)?;
 
-    eprintln!("{}", render(&diagnostic, &sources, format, sagitario_driver::use_color(format)));
-    EXIT_FAILURE
-  };
+  loader.packages.push(package);
+  loader.load_dependencies(0, &mut vec![0])?;
 
-  let (root, is_lib) = match (main.is_file(), lib.is_file()) {
-    (true, false) => (main, false),
-    (false, true) => (lib, true),
-    (false, false) => {
-      return Err(layout_error(
-        &format!("the package `{}` has neither `src/main.sag` nor `src/lib.sag`", manifest.name),
-        "create `src/main.sag` for a program, or `src/lib.sag` for a library",
-      ));
-    }
-    (true, true) => {
-      return Err(layout_error(
-        &format!("the package `{}` has both `src/main.sag` and `src/lib.sag`", manifest.name),
-        "a package is a program or a library for now: remove one of them",
-      ));
-    }
-  };
-
-  Ok(Package { dir, manifest, root, lib: is_lib })
+  Ok(loader.packages)
 }
 
 /// `nova build`, `nova run` and `nova check`.
 fn compile(options: &Options, mode: Mode) -> u8 {
-  let package = match load_package(options.diagnostic_format) {
-    Ok(package) => package,
+  let packages = match load_packages(options.diagnostic_format) {
+    Ok(packages) => packages,
     Err(code) => return code,
   };
+  let Some(package) = packages.first() else { return EXIT_FAILURE };
+  // The compiler numbers dependencies from 0: package `i` of the graph is dependency `i - 1`.
+  let dependencies = packages
+    .iter()
+    .skip(1)
+    .map(|dependency| Dependency {
+      name: dependency.manifest.name.clone(),
+      entry: dependency.root.clone(),
+      dependencies: dependency.dependencies.iter().map(|index| index - 1).collect(),
+    })
+    .collect();
   let profile = if options.release { "release" } else { "debug" };
   let executable = package.dir.join("target").join(profile).join(&package.manifest.name).with_extension(env::consts::EXE_EXTENSION);
   let compile_options = CompileOptions {
@@ -371,7 +507,13 @@ fn compile(options: &Options, mode: Mode) -> u8 {
     sanitize: options.sanitize,
     output: Some(executable.clone()),
     library: package.lib,
+    dependencies,
+    direct_dependencies: package.dependencies.iter().map(|index| index - 1).collect(),
   };
+
+  for dependency in packages.iter().skip(1) {
+    eprintln!("Using {} v{} ({})", dependency.manifest.name, dependency.manifest.version, dependency.dir.display());
+  }
   let Manifest { name, version, .. } = &package.manifest;
 
   if package.lib {

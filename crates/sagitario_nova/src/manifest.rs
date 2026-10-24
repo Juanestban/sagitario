@@ -17,9 +17,24 @@ pub struct Manifest {
   pub description: Option<String>,
   pub authors: Vec<String>,
   pub license: Option<String>,
+  pub dependencies: Vec<DependencySpec>,
   /// The `[package]` header, which errors about the package as a whole point to.
   pub span: Span,
 }
+
+/// `name = { path = "..." }` in `[dependencies]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DependencySpec {
+  pub name: String,
+  /// Relative to the directory of the manifest, or absolute.
+  pub path: String,
+  /// The key, which errors about the dependency point to.
+  pub span: Span,
+  pub path_span: Span,
+}
+
+/// Keys of other kinds of dependencies, which a later version of Nova provides.
+const FUTURE_DEPENDENCY_KEYS: [&str; 5] = ["version", "git", "branch", "tag", "rev"];
 
 const PACKAGE_KEYS: [&str; 5] = ["name", "version", "description", "authors", "license"];
 
@@ -29,6 +44,7 @@ const RESERVED_NAMES: [&str; 5] = ["pkg", "self", "super", "std", "prelude"];
 /// The manifest a parsed `Nova.toml` describes.
 pub fn read(document: &Document) -> Result<Manifest, Box<Diagnostic>> {
   let mut package = None;
+  let mut dependencies = Vec::new();
 
   for table in &document.tables {
     match table.name.as_str() {
@@ -42,10 +58,9 @@ pub fn read(document: &Document) -> Result<Manifest, Box<Diagnostic>> {
       }
       "package" => package = Some(table),
       "dependencies" => {
-        return Err(Box::new(
-          Diagnostic::error(codes::NOT_AVAILABLE, table.span, "dependencies are not available yet")
-            .with_note("Nova builds packages without dependencies for now"),
-        ));
+        for entry in &table.entries {
+          dependencies.push(dependency(entry)?);
+        }
       }
       name => {
         let mut diagnostic = Diagnostic::error(codes::UNKNOWN_KEY, table.span, format!("`Nova.toml` has no table `[{name}]`"));
@@ -110,8 +125,56 @@ pub fn read(document: &Document) -> Result<Manifest, Box<Diagnostic>> {
     description: optional_string(package, "description")?,
     authors,
     license: optional_string(package, "license")?,
+    dependencies,
     span: package.span,
   })
+}
+
+/// A dependency in `[dependencies]`: only packages by path for now.
+fn dependency(entry: &Entry) -> Result<DependencySpec, Box<Diagnostic>> {
+  if let Some(problem) = name_problem(&entry.key) {
+    return Err(Box::new(Diagnostic::error(codes::INVALID_NAME, entry.span, problem)));
+  }
+
+  let example = format!("{} = {{ path = \"../{}\" }}", entry.key, entry.key);
+  let ValueKind::Table(fields) = &entry.value.kind else {
+    return Err(Box::new(
+      Diagnostic::error(
+        codes::WRONG_TYPE,
+        entry.value.span,
+        format!("the dependency `{}` must be an inline table, not {}", entry.key, entry.value.kind.describe()),
+      )
+      .with_help(format!("write `{example}`")),
+    ));
+  };
+  let mut path = None;
+
+  for field in fields {
+    match (field.key.as_str(), &field.value.kind) {
+      ("path", ValueKind::String(text)) => path = Some((text.clone(), field.value.span)),
+      ("path", other) => return Err(Box::new(wrong_type(field.value.span, "`path`", "a string", other))),
+      (key, _) if FUTURE_DEPENDENCY_KEYS.contains(&key) => {
+        return Err(Box::new(
+          Diagnostic::error(codes::NOT_AVAILABLE, field.span, format!("dependencies by `{key}` are not available yet"))
+            .with_note("Nova finds dependencies by `path` for now"),
+        ));
+      }
+      (key, _) => {
+        return Err(Box::new(
+          Diagnostic::error(codes::UNKNOWN_KEY, field.span, format!("a dependency has no key `{key}`")).with_note("its only key is `path`"),
+        ));
+      }
+    }
+  }
+
+  let Some((path, path_span)) = path else {
+    return Err(Box::new(
+      Diagnostic::error(codes::MISSING_KEY, entry.value.span, format!("the dependency `{}` has no `path`", entry.key))
+        .with_help(format!("write `{example}`")),
+    ));
+  };
+
+  Ok(DependencySpec { name: entry.key.clone(), path, span: entry.span, path_span })
 }
 
 fn find<'t>(table: &'t Table, key: &str) -> Option<&'t Entry> {
@@ -258,7 +321,12 @@ mod tests {
       ("[package]\nname = \"class\"\nversion = \"1.0.0\"", codes::INVALID_NAME),
       ("[package]\nname = \"std\"\nversion = \"1.0.0\"", codes::INVALID_NAME),
       ("[package]\nname = \"x\"\nversion = \"1.0\"", codes::INVALID_VERSION),
-      ("[package]\nname = \"x\"\nversion = \"1.0.0\"\n[dependencies]", codes::NOT_AVAILABLE),
+      ("[package]\nname = \"x\"\nversion = \"1.0.0\"\n[dependencies]\nutil = { version = \"1.0\" }", codes::NOT_AVAILABLE),
+      ("[package]\nname = \"x\"\nversion = \"1.0.0\"\n[dependencies]\nutil = \"../util\"", codes::WRONG_TYPE),
+      ("[package]\nname = \"x\"\nversion = \"1.0.0\"\n[dependencies]\nutil = {}", codes::MISSING_KEY),
+      ("[package]\nname = \"x\"\nversion = \"1.0.0\"\n[dependencies]\nutil = { path = 1 }", codes::WRONG_TYPE),
+      ("[package]\nname = \"x\"\nversion = \"1.0.0\"\n[dependencies]\nutil = { path = \"a\", feature = 1 }", codes::UNKNOWN_KEY),
+      ("[package]\nname = \"x\"\nversion = \"1.0.0\"\n[dependencies]\nMy-Util = { path = \"a\" }", codes::INVALID_NAME),
     ];
 
     for (text, code) in cases {

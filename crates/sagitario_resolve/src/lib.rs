@@ -17,7 +17,7 @@ use sagitario_ast::{
 use sagitario_diagnostics::{Diagnostic, Diagnostics, codes};
 use sagitario_span::Span;
 
-pub use modules::{module_references, std_references};
+pub use modules::{ModuleRef, module_references, std_references};
 
 /// Prelude functions implemented by the runtime (docs/spec/09-modules.md#prelude).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -316,6 +316,10 @@ pub struct ModuleInfo {
   pub path: Vec<String>,
   /// Whether the module belongs to the standard library (`std` and its modules).
   pub in_std: bool,
+  /// Index in `Package::packages` of its package.
+  pub package: usize,
+  /// How paths to it start: the dependency's name, or empty for `pkg`.
+  pub root: String,
   /// Index in `Package::modules`; `None` for a directory without a file.
   pub source: Option<usize>,
   pub parent: Option<ModId>,
@@ -331,7 +335,9 @@ impl ModuleInfo {
       return self.path.join("::");
     }
 
-    std::iter::once("pkg").chain(self.path.iter().map(String::as_str)).collect::<Vec<_>>().join("::")
+    let root = if self.root.is_empty() { "pkg" } else { self.root.as_str() };
+
+    std::iter::once(root).chain(self.path.iter().map(String::as_str)).collect::<Vec<_>>().join("::")
   }
 }
 
@@ -383,6 +389,8 @@ pub struct Resolution {
   pub prelude: Option<ModId>,
   /// `std`, the parent of the standard library modules written in Sagitario.
   pub std_root: Option<ModId>,
+  /// The root module of each package in `Package::packages`; the first is `ModId(0)`.
+  pub package_roots: Vec<ModId>,
   /// The prelude's `Error` interface.
   pub error_interface: Option<InterfaceId>,
   /// Indexed by `ExternId`.
@@ -592,6 +600,20 @@ impl Resolution {
     let in_std = self.externs.get(id.0 as usize).is_some_and(|info| self.is_std_source(info.module));
 
     in_std && self.extern_decl(package, id).is_some_and(|decl| decl.name.name.starts_with("sag_"))
+  }
+
+  /// The root module of the package of `module`: what `pkg` names there.
+  fn package_root(&self, module: ModId) -> ModId {
+    self.module(module).and_then(|info| self.package_roots.get(info.package)).copied().unwrap_or(ModId(0))
+  }
+
+  /// The root module of the dependency called `name` of the package of `module`.
+  pub fn dependency_root(&self, package: &Package, module: ModId, name: &str) -> Option<ModId> {
+    let current = self.module(module)?.package;
+    let info = package.packages.get(current)?;
+    let dependency = info.dependencies.iter().find(|index| package.packages.get(**index).is_some_and(|dependency| dependency.name == name))?;
+
+    self.package_roots.get(*dependency).copied()
   }
 
   /// Whether `inner` is `outer` or one of its submodules, which see `outer`'s private items.
@@ -1704,7 +1726,7 @@ impl<'a> Resolver<'a> {
   fn qualified<'p>(&mut self, segments: &'p [Ident]) -> Option<(Named, &'p Ident, &'p [Ident])> {
     let (first, mut rest) = segments.split_first()?;
     let mut named = match first.name.as_str() {
-      "pkg" => Named::Item(ItemRef::Module(ModId(0))),
+      "pkg" => Named::Item(ItemRef::Module(self.resolution.package_root(self.module))),
       "self" => Named::Item(ItemRef::Module(self.module)),
       "super" => Named::Item(ItemRef::Module(self.parent(self.module, first.span)?)),
       "Self" => {
@@ -1720,6 +1742,10 @@ impl<'a> Resolver<'a> {
         None if name == "Result" => Named::Prelude(EnumKind::Result),
         None if name == "List" => Named::List,
         None if name == "std" => Named::Item(ItemRef::Std(StdItem::Root)),
+        // A dependency of the package, unless a name of the module hides it.
+        None if self.resolution.dependency_root(self.package, self.module, name).is_some() => {
+          Named::Item(ItemRef::Module(self.resolution.dependency_root(self.package, self.module, name)?))
+        }
         None => {
           let mut diagnostic = Diagnostic::error(codes::UNRESOLVED_NAME, first.span, format!("cannot find `{name}` in this scope"));
           let items = self.item_names();

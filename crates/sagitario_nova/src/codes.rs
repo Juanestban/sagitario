@@ -21,6 +21,28 @@ pub const INVALID_VERSION: Code = Code("N0007");
 pub const NOT_AVAILABLE: Code = Code("N0008");
 /// A package without exactly one of `src/main.sag` and `src/lib.sag`.
 pub const INVALID_LAYOUT: Code = Code("N0009");
+/// A dependency whose path holds no package.
+pub const DEPENDENCY_NOT_FOUND: Code = Code("N0010");
+/// A dependency whose package has another name.
+pub const DEPENDENCY_NAME: Code = Code("N0011");
+/// A dependency that is a program, not a library.
+pub const NOT_A_LIBRARY: Code = Code("N0012");
+/// Packages that depend on each other in a cycle.
+pub const DEPENDENCY_CYCLE: Code = Code("N0013");
 
 /// Every code, in order.
-pub const ALL: [Code; 9] = [SYNTAX, DUPLICATE, UNKNOWN_KEY, MISSING_KEY, WRONG_TYPE, INVALID_NAME, INVALID_VERSION, NOT_AVAILABLE, INVALID_LAYOUT];
+pub const ALL: [Code; 13] = [
+  SYNTAX,
+  DUPLICATE,
+  UNKNOWN_KEY,
+  MISSING_KEY,
+  WRONG_TYPE,
+  INVALID_NAME,
+  INVALID_VERSION,
+  NOT_AVAILABLE,
+  INVALID_LAYOUT,
+  DEPENDENCY_NOT_FOUND,
+  DEPENDENCY_NAME,
+  NOT_A_LIBRARY,
+  DEPENDENCY_CYCLE,
+];

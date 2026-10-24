@@ -255,7 +255,7 @@ const MANIFEST_ERRORS: [(&str, &str); 10] = [
   ("[package]\nname = \"app\"\nversion = 1\n", "3:11: error[N0005]"),
   ("[package]\nname = \"My-App\"\nversion = \"0.1.0\"\n", "2:8: error[N0006]"),
   ("[package]\nname = \"app\"\nversion = \"1.0\"\n", "3:11: error[N0007]"),
-  ("[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\n", "5:1: error[N0008]"),
+  ("[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nutil = { git = \"https://example.com/util\" }\n", "6:10: error[N0008]"),
   // The layout errors point at `[package]`: no source file, then both.
   ("[package]\nname = \"app\"\nversion = \"0.1.0\"\n", "1:1: error[N0009]"),
   ("[package]\nname = \"app\"\nversion = \"0.1.0\"\n", "1:1: error[N0009]"),
@@ -291,10 +291,141 @@ fn reports_manifest_errors_with_their_location() -> io::Result<()> {
 
 #[test]
 fn every_nova_code_has_a_test() -> io::Result<()> {
-  let tests: String = MANIFEST_ERRORS.iter().map(|(_, expected)| *expected).collect();
+  let tests: String = MANIFEST_ERRORS.iter().chain(DEPENDENCY_ERRORS.iter()).map(|(_, expected)| *expected).collect();
 
   for code in sagitario_nova::codes::ALL {
     assert!(tests.contains(code.0), "no test reports {}", code.0);
+  }
+
+  Ok(())
+}
+
+/// Writes a package with `Nova.toml` and the given source files in `dir`.
+fn package(dir: &Path, manifest: &str, files: &[(&str, &str)]) -> io::Result<()> {
+  fs::create_dir_all(dir.join("src"))?;
+  fs::write(dir.join("Nova.toml"), manifest)?;
+
+  for (name, text) in files {
+    let file = dir.join("src").join(name);
+
+    if let Some(parent) = file.parent() {
+      fs::create_dir_all(parent)?;
+    }
+
+    fs::write(file, text)?;
+  }
+
+  Ok(())
+}
+
+fn manifest(name: &str, dependencies: &[(&str, &str)]) -> String {
+  let mut text = format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n");
+
+  if !dependencies.is_empty() {
+    text.push_str("\n[dependencies]\n");
+
+    for (dependency, path) in dependencies {
+      text.push_str(&format!("{dependency} = {{ path = \"{path}\" }}\n"));
+    }
+  }
+
+  text
+}
+
+#[test]
+fn builds_a_program_with_dependencies() -> io::Result<()> {
+  let temp = TempDir::new()?;
+
+  // `app` uses `geo` and `numbers`; `geo` uses `numbers` too, which is compiled once.
+  package(
+    &temp.path.join("numbers"),
+    &manifest("numbers", &[]),
+    &[("lib.sag", "pub fn square(x: i32) -> i32 {\n  x * x\n}\n\n/// An ordinary function in a library.\npub fn main() -> i32 {\n  7\n}\n")],
+  )?;
+  package(
+    &temp.path.join("geo"),
+    &manifest("geo", &[("numbers", "../numbers")]),
+    &[
+      ("lib.sag", "use pkg::shapes::square::Square;\n\npub fn unit() -> Square {\n  Square { side: 1 }\n}\n"),
+      ("shapes/square.sag", "pub struct Square {\n  pub side: i32;\n\n  pub fn area(self) -> i32 {\n    numbers::square(self.side)\n  }\n}\n"),
+    ],
+  )?;
+  package(
+    &temp.path.join("app"),
+    &manifest("app", &[("geo", "../geo"), ("numbers", "../numbers")]),
+    &[(
+      "main.sag",
+      "use geo::shapes::square::Square;\n\nfn main() {\n  const big = Square { side: 4 };\n  println(`${big.area()} ${geo::unit().area()} ${numbers::main()}`);\n}\n",
+    )],
+  )?;
+
+  let run = nova(&temp.path.join("app"), &["run"])?;
+
+  assert_success(&run);
+  assert_eq!(stdout(&run), "16 1 7\n");
+  assert!(stderr(&run).contains("Using geo v0.1.0"), "{}", stderr(&run));
+
+  // A library with dependencies is checked with them.
+  assert_success(&nova(&temp.path.join("geo"), &["check"])?);
+
+  Ok(())
+}
+
+#[test]
+fn keeps_items_private_across_packages_and_lets_local_names_win() -> io::Result<()> {
+  let temp = TempDir::new()?;
+
+  package(&temp.path.join("util"), &manifest("util", &[]), &[("lib.sag", "pub fn open() -> i32 {\n  1\n}\n\nfn hidden() -> i32 {\n  2\n}\n")])?;
+  package(&temp.path.join("app"), &manifest("app", &[("util", "../util")]), &[("main.sag", "fn main() {\n  util::open();\n  util::hidden();\n}\n")])?;
+
+  let check = nova(&temp.path.join("app"), &["check", "--diagnostic-format", "short"])?;
+
+  assert_eq!(check.status.code(), Some(1));
+  assert!(stderr(&check).contains("main.sag:3:9: error[E0207]"), "{}", stderr(&check));
+
+  // An import called like a dependency hides it.
+  fs::write(temp.path.join("app").join("src").join("helpers.sag"), "pub fn open() -> i32 {\n  3\n}\n")?;
+  fs::write(temp.path.join("app").join("src").join("main.sag"), "use pkg::helpers as util;\n\nfn main() {\n  println(`${util::open()}`);\n}\n")?;
+
+  let run = nova(&temp.path.join("app"), &["run"])?;
+
+  assert_eq!(stdout(&run), "3\n", "{}", stderr(&run));
+
+  Ok(())
+}
+
+/// The dependencies of `app`, and the error each case causes in a `Nova.toml`.
+const DEPENDENCY_ERRORS: [(&str, &str); 4] =
+  [("missing", "6:16: error[N0010]"), ("renamed", "6:1: error[N0011]"), ("program", "6:1: error[N0012]"), ("cycle", "6:1: error[N0013]")];
+
+#[test]
+fn reports_dependency_errors() -> io::Result<()> {
+  for (case, expected) in DEPENDENCY_ERRORS {
+    let temp = TempDir::new()?;
+    let app = temp.path.join("app");
+    let main = [("main.sag", "fn main() {}\n")];
+    let lib = [("lib.sag", "pub fn f() {}\n")];
+
+    // Each case's `app` depends on `dep` at `../dep`; its line 6 is the dependency.
+    package(&app, &manifest("app", &[("dep", "../dep")]), &main)?;
+
+    match case {
+      "renamed" => package(&temp.path.join("dep"), &manifest("other", &[]), &lib)?,
+      "program" => package(&temp.path.join("dep"), &manifest("dep", &[]), &main)?,
+      "cycle" => package(&temp.path.join("dep"), &manifest("dep", &[("app", "../app")]), &lib)?,
+      _ => {}
+    }
+
+    let output = nova(&app, &["check", "--diagnostic-format", "short"])?;
+    let reported = stderr(&output);
+
+    assert_eq!(output.status.code(), Some(1), "{case}");
+    assert!(reported.contains(&format!("Nova.toml:{expected}")), "expected `{expected}` for {case}, reported:\n{reported}");
+
+    // The cycle closes in `dep`'s manifest, which points back at `app`.
+    if case == "cycle" {
+      assert!(reported.contains("app -> dep -> app"), "{reported}");
+    }
   }
 
   Ok(())
