@@ -80,7 +80,7 @@ Increments:
 1. The standard library's foundation, `std::env`, `std::process::exit` and `std::io`
    ([ADR-0037](adr/0037-standard-library-env-io-process.md)).
 2. `std::fs`: reading, writing and appending files, existence checks, removal, directories
-   and the current directory.
+   and the current directory; `std::path` ([ADR-0038](adr/0038-file-system-and-paths.md)).
 3. `std::time` (`Instant`, `Duration`, system time) and `std::process::Command` (run a program,
    capture its output and exit status).
 4. Packages: `sagitario.toml`, `sag new`, `sag build`/`run` inside a package with `src/main.sag`

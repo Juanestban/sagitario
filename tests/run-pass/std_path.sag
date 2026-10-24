@@ -1,0 +1,30 @@
+// `std::path`: joining paths and taking them apart, with `/` (valid on every system).
+// expect-stdout: join: a/b a/b /b b a/
+// expect-stdout: file_name: "c.tar.gz" "c" None None None ".bashrc"
+// expect-stdout: parent: "a/b" "" "/" None None "a"
+// expect-stdout: extension: "gz" None None ""
+// expect-stdout: stem: "c.tar" ".bashrc" "c"
+
+use std::path;
+
+fn shown(value: Option<String>) -> String {
+  match value {
+    Some(text) => `"${text}"`,
+    None => "None",
+  }
+}
+
+fn main() {
+  println(`join: ${path::join("a", "b")} ${path::join("a/", "b")} ${path::join("a", "/b")} ${path::join("", "b")} ${path::join("a", "")}`);
+
+  const names = [path::file_name("a/b/c.tar.gz"), path::file_name("a/c//"), path::file_name("/"), path::file_name("a/.."), path::file_name(""), path::file_name(".bashrc")];
+  println(`file_name: ${shown(names[0])} ${shown(names[1])} ${shown(names[2])} ${shown(names[3])} ${shown(names[4])} ${shown(names[5])}`);
+
+  const parents = [path::parent("a/b/c.tar.gz"), path::parent("a"), path::parent("/a//"), path::parent("/"), path::parent(""), path::parent("a//b/")];
+  println(`parent: ${shown(parents[0])} ${shown(parents[1])} ${shown(parents[2])} ${shown(parents[3])} ${shown(parents[4])} ${shown(parents[5])}`);
+
+  const extensions = [path::extension("a/b/c.tar.gz"), path::extension(".bashrc"), path::extension("a.d/c"), path::extension("c.")];
+  println(`extension: ${shown(extensions[0])} ${shown(extensions[1])} ${shown(extensions[2])} ${shown(extensions[3])}`);
+
+  println(`stem: ${shown(path::stem("a/b/c.tar.gz"))} ${shown(path::stem(".bashrc"))} ${shown(path::stem("c"))}`);
+}

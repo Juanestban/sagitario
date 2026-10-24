@@ -1,0 +1,139 @@
+//! `std::path`: functions on paths written as `String`s (docs/spec/11-standard-library.md#stdpath).
+//! `/` separates components everywhere, and `\` too on Windows, where a path may also start
+//! with a drive (`C:`).
+
+extern "C" {
+  fn sag_path_windows() -> bool;
+}
+
+fn windows() -> bool {
+  unsafe { sag_path_windows() }
+}
+
+fn is_separator(byte: u8) -> bool {
+  byte == 47 || (byte == 92 && windows())
+}
+
+/// The length of the root at the start of `bytes`: its separators, after a drive on Windows.
+fn root_len(bytes: List<u8>) -> usize {
+  var end = 0usize;
+  const letter = bytes.len() >= 2 && ((bytes[0] >= 65 && bytes[0] <= 90) || (bytes[0] >= 97 && bytes[0] <= 122));
+
+  if letter && bytes[1] == 58 && windows() {
+    end = 2;
+  }
+
+  while end < bytes.len() && is_separator(bytes[end]) {
+    end += 1;
+  }
+
+  end
+}
+
+/// `path` without separators at its end, except those of its root.
+fn trimmed(path: String) -> String {
+  const bytes = path.bytes().collect();
+  const root = root_len(bytes);
+  var end = bytes.len();
+
+  while end > root && is_separator(bytes[end - 1]) {
+    end -= 1;
+  }
+
+  path.substring(0, end)
+}
+
+/// Where the last component of `path` (without trailing separators) starts.
+fn name_start(path: String) -> usize {
+  const bytes = path.bytes().collect();
+  const root = root_len(bytes);
+  var start = bytes.len();
+
+  while start > root && !is_separator(bytes[start - 1]) {
+    start -= 1;
+  }
+
+  start
+}
+
+/// `part` after `base`, with a separator between them. A `part` with a root replaces `base`.
+/// The separator is `/`, or `\` on Windows when `base` uses only `\`.
+pub fn join(base: String, part: String) -> String {
+  if base.is_empty() || root_len(part.bytes().collect()) > 0 {
+    return part;
+  }
+
+  const last = base.bytes().collect().last().unwrap_or(0);
+
+  if is_separator(last) {
+    return base + part;
+  }
+
+  const separator = if windows() && base.contains("\\") && !base.contains("/") { "\\" } else { "/" };
+
+  `${base}${separator}${part}`
+}
+
+/// The last component of `path`, or `None` if it has none (`""`, `/`) or it is `.` or `..`.
+pub fn file_name(path: String) -> Option<String> {
+  const path = trimmed(path);
+  const name = path.substring(name_start(path), path.len());
+
+  if name.is_empty() || name == "." || name == ".." { None } else { Some(name) }
+}
+
+/// `path` without its last component: `Some("")` for a single relative component, `None` for a
+/// root or an empty path.
+pub fn parent(path: String) -> Option<String> {
+  const path = trimmed(path);
+  const bytes = path.bytes().collect();
+  const root = root_len(bytes);
+
+  if path.len() == root {
+    return None;
+  }
+
+  var end = name_start(path);
+
+  while end > root && is_separator(bytes[end - 1]) {
+    end -= 1;
+  }
+
+  Some(path.substring(0, end))
+}
+
+/// Where the extension of a file name starts: after its last `.`, unless the name starts with
+/// it (`.bashrc` has no extension).
+fn dot(name: String) -> Option<usize> {
+  const bytes = name.bytes().collect();
+  var index = bytes.len();
+
+  while index > 1 {
+    index -= 1;
+
+    if bytes[index] == 46 {
+      return Some(index);
+    }
+  }
+
+  None
+}
+
+/// The text after the last `.` of the file name: `Some("gz")` for `a.tar.gz`, `None` without a
+/// `.` or for `.bashrc`.
+pub fn extension(path: String) -> Option<String> {
+  const name = file_name(path)?;
+  const index = dot(name)?;
+
+  Some(name.substring(index + 1, name.len()))
+}
+
+/// The file name without its extension: `Some("a.tar")` for `a.tar.gz`.
+pub fn stem(path: String) -> Option<String> {
+  const name = file_name(path)?;
+
+  match dot(name) {
+    Some(index) => Some(name.substring(0, index)),
+    None => Some(name),
+  }
+}

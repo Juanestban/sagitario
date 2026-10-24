@@ -1,5 +1,9 @@
 /* `getenv` is standard C11; MSVC's CRT only deprecates it in favor of non-portable variants. */
 #define _CRT_SECURE_NO_WARNINGS
+/* The file system functions of std::fs are POSIX, not C11. */
+#if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200809L
+#endif
 
 #include "sagitario_runtime.h"
 
@@ -8,6 +12,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifndef _WIN32
+#include <dirent.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
+#endif
 
 /* ---- Panics ---------------------------------------------------------------------------- */
 
@@ -1371,6 +1382,537 @@ _Noreturn void sag_process_exit(int32_t code) {
    * alive. */
   fflush(NULL);
   _Exit((int)code);
+}
+
+/* ---- Standard library: std::fs and std::path ------------------------------------------- */
+
+#ifdef _WIN32
+/* kernel32 declarations, with the Windows types spelled out: DWORD is `unsigned long`, BOOL
+ * `int` and HANDLE `void *`. */
+typedef struct sag_win_filetime {
+  unsigned long low;
+  unsigned long high;
+} sag_win_filetime;
+
+typedef struct sag_win_find_data {
+  unsigned long attributes;
+  sag_win_filetime created;
+  sag_win_filetime accessed;
+  sag_win_filetime written;
+  unsigned long size_high;
+  unsigned long size_low;
+  unsigned long reserved0;
+  unsigned long reserved1;
+  wchar_t name[260];
+  wchar_t alternate_name[14];
+} sag_win_find_data;
+
+extern void *SAG_WINAPI CreateFileW(const wchar_t *name, unsigned long access, unsigned long share, void *security, unsigned long disposition,
+                                    unsigned long flags, void *template_file);
+extern int SAG_WINAPI ReadFile(void *file, void *buffer, unsigned long size, unsigned long *read, void *overlapped);
+extern int SAG_WINAPI WriteFile(void *file, const void *buffer, unsigned long size, unsigned long *written, void *overlapped);
+extern int SAG_WINAPI CloseHandle(void *handle);
+extern unsigned long SAG_WINAPI GetFileAttributesW(const wchar_t *name);
+extern int SAG_WINAPI CreateDirectoryW(const wchar_t *name, void *security);
+extern int SAG_WINAPI RemoveDirectoryW(const wchar_t *name);
+extern int SAG_WINAPI DeleteFileW(const wchar_t *name);
+extern int SAG_WINAPI MoveFileExW(const wchar_t *from, const wchar_t *to, unsigned long flags);
+extern int SAG_WINAPI CopyFileW(const wchar_t *from, const wchar_t *to, int fail_if_exists);
+extern void *SAG_WINAPI FindFirstFileW(const wchar_t *pattern, sag_win_find_data *data);
+extern int SAG_WINAPI FindNextFileW(void *find, sag_win_find_data *data);
+extern int SAG_WINAPI FindClose(void *find);
+extern unsigned long SAG_WINAPI GetCurrentDirectoryW(unsigned long size, wchar_t *buffer);
+extern unsigned long SAG_WINAPI GetLastError(void);
+
+#define SAG_WIN_INVALID_HANDLE ((void *)(intptr_t)-1)
+#define SAG_WIN_INVALID_ATTRIBUTES 0xFFFFFFFFul
+#define SAG_WIN_ATTRIBUTE_DIRECTORY 0x10ul
+
+/* The `errno` value of a Windows error code, so that kinds and messages match other systems. */
+static int32_t sag_win_errno(unsigned long error) {
+  switch (error) {
+  case 2:   /* ERROR_FILE_NOT_FOUND */
+  case 3:   /* ERROR_PATH_NOT_FOUND */
+  case 15:  /* ERROR_INVALID_DRIVE */
+  case 161: /* ERROR_BAD_PATHNAME */
+    return ENOENT;
+  case 5:  /* ERROR_ACCESS_DENIED */
+  case 32: /* ERROR_SHARING_VIOLATION */
+  case 33: /* ERROR_LOCK_VIOLATION */
+    return EACCES;
+  case 80:  /* ERROR_FILE_EXISTS */
+  case 183: /* ERROR_ALREADY_EXISTS */
+    return EEXIST;
+  case 87:  /* ERROR_INVALID_PARAMETER */
+  case 123: /* ERROR_INVALID_NAME */
+    return EINVAL;
+  case 145: /* ERROR_DIR_NOT_EMPTY */
+    return ENOTEMPTY;
+  case 267: /* ERROR_DIRECTORY */
+    return ENOTDIR;
+  case 8:  /* ERROR_NOT_ENOUGH_MEMORY */
+  case 14: /* ERROR_OUTOFMEMORY */
+    return ENOMEM;
+  case 39:  /* ERROR_HANDLE_DISK_FULL */
+  case 112: /* ERROR_DISK_FULL */
+    return ENOSPC;
+  default:
+    return SAG_IO_UNKNOWN;
+  }
+}
+
+static int32_t sag_win_last_errno(void) {
+  return sag_win_errno(GetLastError());
+}
+
+/* `s` as a NUL-terminated UTF-16 string, or NULL if it contains a NUL character. */
+static wchar_t *sag_wide(sag_string s) {
+  if (memchr(s.ptr, 0, s.len) != NULL) {
+    return NULL;
+  }
+  wchar_t *wide = sag_alloc((s.len + 1) * sizeof(wchar_t));
+  size_t len = 0;
+  size_t index = 0;
+  while (index < s.len) {
+    uint32_t c = sag_utf8_next(s, &index);
+    if (c >= 0x10000) {
+      wide[len++] = (wchar_t)(0xD800 + ((c - 0x10000) >> 10));
+      wide[len++] = (wchar_t)(0xDC00 + ((c - 0x10000) & 0x3FF));
+    } else {
+      wide[len++] = (wchar_t)c;
+    }
+  }
+  wide[len] = 0;
+  return wide;
+}
+#else
+/* `s` as a NUL-terminated C string, or NULL if it contains a NUL character. */
+static char *sag_cpath(sag_string s) {
+  if (memchr(s.ptr, 0, s.len) != NULL) {
+    return NULL;
+  }
+  char *path = sag_alloc(s.len + 1);
+  memcpy(path, s.ptr, s.len);
+  path[s.len] = 0;
+  return path;
+}
+#endif
+
+int32_t sag_fs_kind(sag_string path) {
+#ifdef _WIN32
+  wchar_t *wide = sag_wide(path);
+  if (wide == NULL) {
+    return SAG_FS_MISSING;
+  }
+  unsigned long attributes = GetFileAttributesW(wide);
+  free(wide);
+  if (attributes == SAG_WIN_INVALID_ATTRIBUTES) {
+    return SAG_FS_MISSING;
+  }
+  return (attributes & SAG_WIN_ATTRIBUTE_DIRECTORY) != 0 ? SAG_FS_DIR : SAG_FS_FILE;
+#else
+  char *cpath = sag_cpath(path);
+  if (cpath == NULL) {
+    return SAG_FS_MISSING;
+  }
+  struct stat info;
+  int result = stat(cpath, &info);
+  free(cpath);
+  if (result != 0) {
+    return SAG_FS_MISSING;
+  }
+  if (S_ISDIR(info.st_mode)) {
+    return SAG_FS_DIR;
+  }
+  return S_ISREG(info.st_mode) ? SAG_FS_FILE : SAG_FS_OTHER;
+#endif
+}
+
+/* Systems report a directory used as a file differently; they all become EISDIR. */
+static int32_t sag_fs_file_error(sag_string path, int32_t code) {
+  return code != 0 && sag_fs_kind(path) == SAG_FS_DIR ? EISDIR : code;
+}
+
+sag_string sag_fs_read(sag_string path, int32_t *status) {
+  sag_sb sb;
+  sag_sb_init(&sb);
+#ifdef _WIN32
+  wchar_t *wide = sag_wide(path);
+  if (wide == NULL) {
+    *status = EINVAL;
+    return sag_string_empty();
+  }
+  /* GENERIC_READ, sharing everything, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL. */
+  void *file = CreateFileW(wide, 0x80000000ul, 7ul, NULL, 3ul, 0x80ul, NULL);
+  free(wide);
+  if (file == SAG_WIN_INVALID_HANDLE) {
+    *status = sag_fs_file_error(path, sag_win_last_errno());
+    return sag_string_empty();
+  }
+  char chunk[4096];
+  unsigned long count;
+  int32_t code = 0;
+  for (;;) {
+    if (!ReadFile(file, chunk, sizeof chunk, &count, NULL)) {
+      code = sag_win_last_errno();
+      break;
+    }
+    if (count == 0) {
+      break;
+    }
+    sag_sb_push_bytes(&sb, chunk, count);
+  }
+  CloseHandle(file);
+#else
+  char *cpath = sag_cpath(path);
+  if (cpath == NULL) {
+    *status = EINVAL;
+    return sag_string_empty();
+  }
+  errno = 0;
+  FILE *file = fopen(cpath, "rb");
+  free(cpath);
+  if (file == NULL) {
+    *status = sag_fs_file_error(path, sag_io_errno());
+    return sag_string_empty();
+  }
+  char chunk[4096];
+  size_t count;
+  int32_t code = 0;
+  while ((count = fread(chunk, 1, sizeof chunk, file)) > 0) {
+    sag_sb_push_bytes(&sb, chunk, count);
+  }
+  if (ferror(file)) {
+    code = sag_fs_file_error(path, sag_io_errno());
+  }
+  fclose(file);
+#endif
+  if (code != 0) {
+    free(sb.data);
+    *status = code;
+    return sag_string_empty();
+  }
+  return sag_io_finish_read(&sb, status);
+}
+
+int32_t sag_fs_write(sag_string path, sag_string text, bool append) {
+#ifdef _WIN32
+  wchar_t *wide = sag_wide(path);
+  if (wide == NULL) {
+    return EINVAL;
+  }
+  /* FILE_APPEND_DATA with OPEN_ALWAYS, or GENERIC_WRITE with CREATE_ALWAYS. */
+  void *file = CreateFileW(wide, append ? 0x4ul : 0x40000000ul, 7ul, NULL, append ? 4ul : 2ul, 0x80ul, NULL);
+  free(wide);
+  if (file == SAG_WIN_INVALID_HANDLE) {
+    return sag_fs_file_error(path, sag_win_last_errno());
+  }
+  int32_t code = 0;
+  size_t done = 0;
+  while (done < text.len) {
+    size_t left = text.len - done;
+    unsigned long size = left > 0x40000000u ? 0x40000000ul : (unsigned long)left;
+    unsigned long written;
+    if (!WriteFile(file, text.ptr + done, size, &written, NULL)) {
+      code = sag_win_last_errno();
+      break;
+    }
+    done += written;
+  }
+  if (!CloseHandle(file) && code == 0) {
+    code = sag_win_last_errno();
+  }
+  return code;
+#else
+  char *cpath = sag_cpath(path);
+  if (cpath == NULL) {
+    return EINVAL;
+  }
+  errno = 0;
+  FILE *file = fopen(cpath, append ? "ab" : "wb");
+  free(cpath);
+  if (file == NULL) {
+    return sag_fs_file_error(path, sag_io_errno());
+  }
+  int32_t code = 0;
+  if (text.len > 0 && fwrite(text.ptr, 1, text.len, file) != text.len) {
+    code = sag_io_errno();
+  }
+  if (fclose(file) != 0 && code == 0) {
+    code = sag_io_errno();
+  }
+  return code;
+#endif
+}
+
+int32_t sag_fs_create_dir(sag_string path) {
+#ifdef _WIN32
+  wchar_t *wide = sag_wide(path);
+  if (wide == NULL) {
+    return EINVAL;
+  }
+  int32_t code = CreateDirectoryW(wide, NULL) ? 0 : sag_win_last_errno();
+  free(wide);
+  return code;
+#else
+  char *cpath = sag_cpath(path);
+  if (cpath == NULL) {
+    return EINVAL;
+  }
+  errno = 0;
+  int32_t code = mkdir(cpath, 0777) == 0 ? 0 : sag_io_errno();
+  free(cpath);
+  return code;
+#endif
+}
+
+int32_t sag_fs_remove_dir(sag_string path) {
+#ifdef _WIN32
+  wchar_t *wide = sag_wide(path);
+  if (wide == NULL) {
+    return EINVAL;
+  }
+  int32_t code = RemoveDirectoryW(wide) ? 0 : sag_win_last_errno();
+  free(wide);
+  return code;
+#else
+  char *cpath = sag_cpath(path);
+  if (cpath == NULL) {
+    return EINVAL;
+  }
+  errno = 0;
+  int32_t code = rmdir(cpath) == 0 ? 0 : sag_io_errno();
+  free(cpath);
+  /* Some systems report a directory that is not empty as EEXIST. */
+  return code == EEXIST ? ENOTEMPTY : code;
+#endif
+}
+
+int32_t sag_fs_remove_file(sag_string path) {
+#ifdef _WIN32
+  wchar_t *wide = sag_wide(path);
+  if (wide == NULL) {
+    return EINVAL;
+  }
+  int32_t code = DeleteFileW(wide) ? 0 : sag_win_last_errno();
+  free(wide);
+#else
+  char *cpath = sag_cpath(path);
+  if (cpath == NULL) {
+    return EINVAL;
+  }
+  errno = 0;
+  int32_t code = unlink(cpath) == 0 ? 0 : sag_io_errno();
+  free(cpath);
+#endif
+  return sag_fs_file_error(path, code);
+}
+
+int32_t sag_fs_rename(sag_string from, sag_string to) {
+#ifdef _WIN32
+  wchar_t *wide_from = sag_wide(from);
+  wchar_t *wide_to = sag_wide(to);
+  int32_t code = EINVAL;
+  /* MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED: replace the target, as POSIX does. */
+  if (wide_from != NULL && wide_to != NULL) {
+    code = MoveFileExW(wide_from, wide_to, 3ul) ? 0 : sag_win_last_errno();
+  }
+  free(wide_from);
+  free(wide_to);
+  return code;
+#else
+  char *cfrom = sag_cpath(from);
+  char *cto = sag_cpath(to);
+  int32_t code = EINVAL;
+  if (cfrom != NULL && cto != NULL) {
+    errno = 0;
+    code = rename(cfrom, cto) == 0 ? 0 : sag_io_errno();
+  }
+  free(cfrom);
+  free(cto);
+  return code;
+#endif
+}
+
+int32_t sag_fs_copy(sag_string from, sag_string to) {
+  if (sag_fs_kind(from) == SAG_FS_DIR) {
+    return EISDIR;
+  }
+#ifdef _WIN32
+  wchar_t *wide_from = sag_wide(from);
+  wchar_t *wide_to = sag_wide(to);
+  int32_t code = EINVAL;
+  if (wide_from != NULL && wide_to != NULL) {
+    code = CopyFileW(wide_from, wide_to, 0) ? 0 : sag_win_last_errno();
+  }
+  free(wide_from);
+  free(wide_to);
+  return code;
+#else
+  char *cfrom = sag_cpath(from);
+  char *cto = sag_cpath(to);
+  if (cfrom == NULL || cto == NULL) {
+    free(cfrom);
+    free(cto);
+    return EINVAL;
+  }
+  errno = 0;
+  FILE *source = fopen(cfrom, "rb");
+  free(cfrom);
+  if (source == NULL) {
+    free(cto);
+    return sag_io_errno();
+  }
+  FILE *target = fopen(cto, "wb");
+  free(cto);
+  if (target == NULL) {
+    int32_t code = sag_io_errno();
+    fclose(source);
+    return code;
+  }
+  int32_t code = 0;
+  char chunk[4096];
+  size_t count;
+  while (code == 0 && (count = fread(chunk, 1, sizeof chunk, source)) > 0) {
+    if (fwrite(chunk, 1, count, target) != count) {
+      code = sag_io_errno();
+    }
+  }
+  if (code == 0 && ferror(source)) {
+    code = sag_io_errno();
+  }
+  fclose(source);
+  if (fclose(target) != 0 && code == 0) {
+    code = sag_io_errno();
+  }
+  return code;
+#endif
+}
+
+sag_string sag_fs_read_dir(sag_string path, int32_t *status) {
+  if (sag_fs_kind(path) == SAG_FS_FILE) {
+    *status = ENOTDIR;
+    return sag_string_empty();
+  }
+  sag_sb sb;
+  sag_sb_init(&sb);
+  bool first = true;
+#ifdef _WIN32
+  /* `path\*`, without doubling a trailing separator. */
+  sag_sb pattern;
+  sag_sb_init(&pattern);
+  sag_sb_push_str(&pattern, path);
+  if (path.len > 0 && path.ptr[path.len - 1] != '\\' && path.ptr[path.len - 1] != '/') {
+    sag_sb_push_bytes(&pattern, "\\", 1);
+  }
+  sag_sb_push_bytes(&pattern, "*", 1);
+  sag_string text = sag_sb_finish(&pattern);
+  wchar_t *wide = path.len == 0 ? NULL : sag_wide(text);
+  sag_string_release(text);
+  if (wide == NULL) {
+    *status = path.len == 0 ? ENOENT : EINVAL;
+    return sag_string_empty();
+  }
+  sag_win_find_data data;
+  void *find = FindFirstFileW(wide, &data);
+  free(wide);
+  if (find == SAG_WIN_INVALID_HANDLE) {
+    *status = sag_win_last_errno();
+    return sag_string_empty();
+  }
+  do {
+    size_t len = wcslen(data.name);
+    if ((len == 1 && data.name[0] == L'.') || (len == 2 && data.name[0] == L'.' && data.name[1] == L'.')) {
+      continue;
+    }
+    if (!first) {
+      sag_sb_push_bytes(&sb, "", 1); /* the NUL that separates names */
+    }
+    first = false;
+    sag_sb_push_utf16(&sb, data.name, len);
+  } while (FindNextFileW(find, &data));
+  FindClose(find);
+#else
+  char *cpath = sag_cpath(path);
+  if (cpath == NULL) {
+    *status = EINVAL;
+    return sag_string_empty();
+  }
+  errno = 0;
+  DIR *dir = opendir(cpath);
+  free(cpath);
+  if (dir == NULL) {
+    *status = sag_io_errno();
+    return sag_string_empty();
+  }
+  struct dirent *entry;
+  while ((entry = readdir(dir)) != NULL) {
+    const char *name = entry->d_name;
+    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
+      continue;
+    }
+    if (!first) {
+      sag_sb_push_bytes(&sb, "", 1); /* the NUL that separates names */
+    }
+    first = false;
+    sag_string text = sag_string_from_bytes_lossy((const uint8_t *)name, strlen(name));
+    sag_sb_push_str(&sb, text);
+    sag_string_release(text);
+  }
+  closedir(dir);
+#endif
+  *status = 0;
+  return sag_sb_finish(&sb);
+}
+
+sag_string sag_fs_current_dir(int32_t *status) {
+#ifdef _WIN32
+  /* Without a buffer, the size needed including the terminator. */
+  unsigned long size = GetCurrentDirectoryW(0, NULL);
+  if (size == 0) {
+    *status = sag_win_last_errno();
+    return sag_string_empty();
+  }
+  wchar_t *buffer = sag_alloc((size_t)size * sizeof(wchar_t));
+  unsigned long len = GetCurrentDirectoryW(size, buffer);
+  if (len == 0 || len >= size) {
+    free(buffer);
+    *status = len == 0 ? sag_win_last_errno() : SAG_IO_UNKNOWN;
+    return sag_string_empty();
+  }
+  sag_sb sb;
+  sag_sb_init(&sb);
+  sag_sb_push_utf16(&sb, buffer, len);
+  free(buffer);
+  *status = 0;
+  return sag_sb_finish(&sb);
+#else
+  size_t size = 256;
+  for (;;) {
+    char *buffer = sag_alloc(size);
+    errno = 0;
+    if (getcwd(buffer, size) != NULL) {
+      sag_string text = sag_string_from_bytes_lossy((const uint8_t *)buffer, strlen(buffer));
+      free(buffer);
+      *status = 0;
+      return text;
+    }
+    free(buffer);
+    if (errno != ERANGE || size > SIZE_MAX / 2) {
+      *status = sag_io_errno();
+      return sag_string_empty();
+    }
+    size *= 2;
+  }
+#endif
+}
+
+bool sag_path_windows(void) {
+#ifdef _WIN32
+  return true;
+#else
+  return false;
+#endif
 }
 
 /* ---- Program lifecycle ----------------------------------------------------------------- */

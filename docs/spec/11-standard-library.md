@@ -1,6 +1,7 @@
 # 11. Standard library (F3)
 
-Rationale: [ADR-0037](../adr/0037-standard-library-env-io-process.md).
+Rationale: [ADR-0037](../adr/0037-standard-library-env-io-process.md),
+[ADR-0038](../adr/0038-file-system-and-paths.md).
 
 The standard library is the set of modules under the path root `std`. A program imports them
 with `use` like its own modules (`use std::io;`, `use std::env::args;`) or names them in full
@@ -12,6 +13,8 @@ functions it uses.
 | `std::ffi` | C types, `CString`, `string_from_c` ([FFI](10-ffi.md)) | F1 |
 | `std::env` | Command-line arguments and environment variables | F3 |
 | `std::io` | Standard input and output with errors as values; `io::Error` | F3 |
+| `std::fs` | Files and directories | F3 |
+| `std::path` | Joining paths and taking them apart | F3 |
 | `std::process` | `exit` | F3 |
 
 Naming a module that does not exist (`std::net`) is an error.
@@ -78,6 +81,68 @@ pub enum ErrorKind {
   ([errors](07-errors.md#the--operator)), and `main` may return `Result<(), io::Error>`.
 - The kinds are the same on every operating system. Failures without a more precise kind are
   `Other`.
+
+## `std::fs`
+
+Rationale: [ADR-0038](../adr/0038-file-system-and-paths.md). Paths are `String`s, relative to the
+current directory unless they have a root. The functions with a `Result` fail with an
+`io::Error` whose message names the operation and the path:
+`cannot read "notes.txt": No such file or directory`.
+
+| Function | Result |
+|---|---|
+| `read_to_string(path) -> Result<String, io::Error>` | The whole file |
+| `write(path, text)` | Creates the file, or replaces its contents |
+| `append(path, text)` | Adds `text` at the end of the file, creating it if needed |
+| `exists(path) -> bool` | Whether `path` names a file, a directory or anything else |
+| `is_file(path) -> bool`, `is_dir(path) -> bool` | Whether it names a regular file, or a directory |
+| `create_dir(path)` | Creates a directory; its parent must exist |
+| `create_dir_all(path)` | Creates a directory and the missing ones above it; one that exists is not an error |
+| `remove_dir(path)` | Removes an empty directory |
+| `remove_file(path)` | Removes a file |
+| `rename(from, to)` | Moves a file or directory, replacing `to` if it is a file that exists |
+| `copy(from, to)` | Copies a file, replacing `to` if it exists |
+| `read_dir(path) -> Result<List<String>, io::Error>` | The names of a directory's entries, without `.` and `..`, sorted by their bytes |
+| `current_dir() -> Result<String, io::Error>` | The current working directory, as an absolute path |
+
+- The functions without a stated result return `Result<(), io::Error>`.
+- Contents are read and written byte for byte: `\r\n` is never translated. A file that is not
+  valid UTF-8 is an error of kind `InvalidData`.
+- `exists`, `is_file` and `is_dir` return `false` when the path cannot be examined.
+- Using a directory as a file, or a file as a directory, fails the same way on every system:
+  messages such as "Is a directory" and "Not a directory", of kind `Other`.
+- Names that are not valid UTF-8 are listed by `read_dir` with each ill-formed sequence replaced
+  by U+FFFD. On Windows, paths are passed to the system as UTF-16, so any Unicode name works.
+- A path containing a NUL character is an error of kind `InvalidInput`.
+- Not yet: reading and writing bytes, file metadata (size, times, permissions), removing a
+  directory tree, and changing the current directory (F4, since it is process-wide state).
+
+## `std::path`
+
+Functions on paths as text; they never touch the file system. `/` separates components on
+every system, and `\` too on Windows, where a path may also start with a drive (`C:`). The
+root of a path is its leading separators, after the drive on Windows.
+
+| Function | Result |
+|---|---|
+| `join(base, part) -> String` | `part` after `base` with a separator between them; `part` itself if it has a root or `base` is empty |
+| `file_name(path) -> Option<String>` | The last component; `None` for `""`, a root, `.` or `..` |
+| `parent(path) -> Option<String>` | The path without its last component; `Some("")` for a single relative component, `None` for `""` or a root |
+| `extension(path) -> Option<String>` | The text after the last `.` of the file name; `None` without a `.` or when the name only starts with one (`.bashrc`) |
+| `stem(path) -> Option<String>` | The file name without its extension |
+
+- Trailing separators are ignored: `file_name("a/b/")` is `Some("b")`.
+- `join` separates with `/`, or with `\` on Windows when `base` uses only `\`.
+
+```sag
+use std::path;
+
+path::join("logs", "app.txt")         // "logs/app.txt"
+path::file_name("logs/app.tar.gz")    // Some("app.tar.gz")
+path::extension("logs/app.tar.gz")    // Some("gz")
+path::stem("logs/app.tar.gz")         // Some("app.tar")
+path::parent("logs/app.tar.gz")       // Some("logs")
+```
 
 ## `std::process`
 

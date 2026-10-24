@@ -1,6 +1,7 @@
 // The standard library: private items, the compiler-provided `exit`, the prelude module, the
 // runtime's functions and the C types of `std::ffi` keep their rules.
 
+use std::fs;
 use std::io;
 use std::process;
 use std::prelude::Error as Base; //~ ERROR E0200
@@ -12,6 +13,7 @@ extern "C" {
 
 fn main() {
   io::error_from(1); //~ ERROR E0207
+  fs::kind_of("a.txt"); //~ ERROR E0207
   io::missing(); //~ ERROR E0200
   std::nett::get(); //~ ERROR E0200
   const _x: i32 = process::exit; //~ ERROR E0314

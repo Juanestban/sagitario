@@ -166,6 +166,10 @@ could be added.
   (`Resolution::is_runtime_extern`: names starting with `sag_`, which may take and return
   `String`); the C backend calls those directly, without an FFI wrapper. `std::process::exit`
   is `Builtin::Exit`, typed `Never` like `panic`.
+- The runtime's operating system calls are standard C where possible. `std::fs` needs POSIX on
+  Linux and macOS (`_POSIX_C_SOURCE`) and the UTF-16 functions of kernel32 on Windows, which
+  the runtime declares itself instead of including `<windows.h>`; Windows error codes are
+  translated to `errno` values so that error kinds and messages match on every system.
 - A `List<T>` is a `sag_object *` to a `sag_list`: the elements in a buffer with one spare slot,
   and a function releasing one element (`sag_elem_release_N`) when they are managed. An element
   is a place behind the list (`Projection::ListElem`, bounds-checked by `sag_list_at`); like a

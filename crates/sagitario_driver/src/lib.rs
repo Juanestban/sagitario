@@ -186,8 +186,13 @@ const PRELUDE: &str = include_str!("prelude.sag");
 
 /// The modules of the standard library written in Sagitario (docs/spec/11-standard-library.md),
 /// loaded when a program names them.
-const STD_SOURCES: [(&str, &str); 3] =
-  [("env", include_str!("std/env.sag")), ("io", include_str!("std/io.sag")), ("process", include_str!("std/process.sag"))];
+const STD_SOURCES: [(&str, &str); 5] = [
+  ("env", include_str!("std/env.sag")),
+  ("fs", include_str!("std/fs.sag")),
+  ("io", include_str!("std/io.sag")),
+  ("path", include_str!("std/path.sag")),
+  ("process", include_str!("std/process.sag")),
+];
 
 /// The integer types, each with a function `range_<type>` in the prelude.
 const INT_TYPES: [&str; 10] = ["i8", "i16", "i32", "i64", "isize", "u8", "u16", "u32", "u64", "usize"];

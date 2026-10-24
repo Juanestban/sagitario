@@ -46,6 +46,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0035](0035-explicit-self-in-initializers.md) | Initializers declare `self` | Accepted |
 | [0036](0036-sanitizers-and-the-reference-zoo.md) | Sanitizers and the reference "zoo" program | Accepted |
 | [0037](0037-standard-library-env-io-process.md) | The standard library: `std::env`, `std::io` and `std::process` | Accepted |
+| [0038](0038-file-system-and-paths.md) | `std::fs` and `std::path` | Accepted |
 
 ## Template
 

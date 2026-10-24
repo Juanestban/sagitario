@@ -49,6 +49,8 @@ fn main() { ... }
   `// stdin: text` writes a line (`text` and `\n`) to its stdin and may repeat; stdin is closed
   after the last line, or at once without any. `// env: NAME=value` sets an environment
   variable for the program and may repeat.
+- `run-pass` and `run-panic` programs run in a new empty working directory, removed afterwards,
+  so they can create files with relative paths.
 - Panics print `panic at <file>:<line>: <message>`; `expect-panic` matches a substring.
 - `//~ ERROR Ennnn` and `//~ WARN Wnnnn` assert a diagnostic with that code on the same line.
   Several can share a line: `//~ ERROR E0311, WARN W0001 WARN W0002`.

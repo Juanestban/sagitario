@@ -7,6 +7,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Suite {
@@ -224,10 +225,39 @@ fn case_expectations(case: &Case) -> Result<Expectations, String> {
   Ok(expectations)
 }
 
-/// `sag run <flags> <file> -- <args>` with the case's stdin and environment, and with
-/// sanitizers unless `SAG_TEST_SANITIZE=0` (docs/testing.md#memory-checks).
+/// An empty directory that a program runs in, removed on drop.
+struct WorkDir {
+  path: PathBuf,
+}
+
+impl WorkDir {
+  fn create() -> Result<WorkDir, String> {
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    let count = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("sag-case-{}-{count}", std::process::id()));
+    let _ = fs::remove_dir_all(&path);
+
+    fs::create_dir_all(&path).map_err(|error| format!("cannot create `{}`: {error}", path.display()))?;
+
+    Ok(WorkDir { path })
+  }
+}
+
+impl Drop for WorkDir {
+  fn drop(&mut self) {
+    // Best effort: a leftover directory is harmless.
+    let _ = fs::remove_dir_all(&self.path);
+  }
+}
+
+/// `sag run <flags> <file> -- <args>` with the case's stdin and environment, in an empty
+/// working directory, and with sanitizers unless `SAG_TEST_SANITIZE=0`
+/// (docs/testing.md#memory-checks).
 fn run(expectations: &Expectations, file: &Path) -> Result<Output, String> {
+  let dir = WorkDir::create()?;
   let mut command = sag_command(&["run"]);
+
+  command.current_dir(&dir.path);
 
   if std::env::var("SAG_TEST_SANITIZE").map_or(true, |value| value != "0") {
     command.arg("--sanitize");

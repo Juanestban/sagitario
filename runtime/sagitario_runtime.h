@@ -518,6 +518,28 @@ sag_string sag_io_error_message(int32_t code);
 /* Flushes output and ends the program without running pending releases. */
 _Noreturn void sag_process_exit(int32_t code);
 
+/* What a path names, for std::fs; errors count as missing. */
+#define SAG_FS_MISSING 0
+#define SAG_FS_FILE 1
+#define SAG_FS_DIR 2
+#define SAG_FS_OTHER 3
+
+/* Each returns 0 or an error code, or sets `*status` to one. Paths with NUL are EINVAL. */
+int32_t sag_fs_kind(sag_string path);
+sag_string sag_fs_read(sag_string path, int32_t *status);
+int32_t sag_fs_write(sag_string path, sag_string text, bool append);
+int32_t sag_fs_create_dir(sag_string path);
+int32_t sag_fs_remove_dir(sag_string path);
+int32_t sag_fs_remove_file(sag_string path);
+/* Replaces the target if it exists, on every system. */
+int32_t sag_fs_rename(sag_string from, sag_string to);
+int32_t sag_fs_copy(sag_string from, sag_string to);
+/* The names in a directory, without `.` and `..`, separated by NUL characters. */
+sag_string sag_fs_read_dir(sag_string path, int32_t *status);
+sag_string sag_fs_current_dir(int32_t *status);
+/* Whether paths follow Windows rules (`\` separators and drive letters). */
+bool sag_path_windows(void);
+
 /* ---- Program lifecycle ----------------------------------------------------------------- */
 
 void sag_rt_init(int argc, char **argv);

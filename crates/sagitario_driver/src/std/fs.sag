@@ -1,0 +1,162 @@
+//! `std::fs`: files and directories (docs/spec/11-standard-library.md#stdfs). Paths are
+//! `String`s; error messages name the operation and the path.
+
+use std::io;
+use std::io::ErrorKind;
+use std::path;
+
+extern "C" {
+  fn sag_io_error_kind(code: i32) -> i32;
+  fn sag_io_error_message(code: i32) -> String;
+  fn sag_fs_kind(path: String) -> i32;
+  fn sag_fs_read(path: String, status: *mut i32) -> String;
+  fn sag_fs_write(path: String, text: String, append: bool) -> i32;
+  fn sag_fs_create_dir(path: String) -> i32;
+  fn sag_fs_remove_dir(path: String) -> i32;
+  fn sag_fs_remove_file(path: String) -> i32;
+  fn sag_fs_rename(from: String, to: String) -> i32;
+  fn sag_fs_copy(from: String, to: String) -> i32;
+  fn sag_fs_read_dir(path: String, status: *mut i32) -> String;
+  fn sag_fs_current_dir(status: *mut i32) -> String;
+}
+
+/// The error with this runtime code, described as `action: system message`.
+fn failure(code: i32, action: String) -> io::Error {
+  const kind = match unsafe { sag_io_error_kind(code) } {
+    0 => ErrorKind::NotFound,
+    1 => ErrorKind::PermissionDenied,
+    2 => ErrorKind::AlreadyExists,
+    3 => ErrorKind::InvalidInput,
+    4 => ErrorKind::InvalidData,
+    5 => ErrorKind::UnexpectedEof,
+    _ => ErrorKind::Other,
+  };
+
+  const message = unsafe { sag_io_error_message(code) };
+
+  new io::Error(kind, `${action}: ${message}`)
+}
+
+/// What `path` names: 0 nothing (or an error), 1 a file, 2 a directory, 3 something else.
+fn kind_of(path: String) -> i32 {
+  unsafe { sag_fs_kind(path) }
+}
+
+/// The whole file at `path`. A file that is not UTF-8 is an error of kind `InvalidData`.
+pub fn read_to_string(path: String) -> Result<String, io::Error> {
+  var status = [0i32; 1];
+  const text = unsafe { sag_fs_read(path, status.as_mut_ptr()) };
+
+  if status[0] == 0 { Ok(text) } else { Err(failure(status[0], `cannot read "${path}"`)) }
+}
+
+/// Writes `text` to the file at `path`, creating it or replacing its contents.
+pub fn write(path: String, text: String) -> Result<(), io::Error> {
+  const code = unsafe { sag_fs_write(path, text, false) };
+
+  if code == 0 { Ok(()) } else { Err(failure(code, `cannot write "${path}"`)) }
+}
+
+/// Writes `text` at the end of the file at `path`, creating it if needed.
+pub fn append(path: String, text: String) -> Result<(), io::Error> {
+  const code = unsafe { sag_fs_write(path, text, true) };
+
+  if code == 0 { Ok(()) } else { Err(failure(code, `cannot append to "${path}"`)) }
+}
+
+/// Whether `path` names a file, a directory or anything else that exists.
+pub fn exists(path: String) -> bool {
+  kind_of(path) != 0
+}
+
+pub fn is_file(path: String) -> bool {
+  kind_of(path) == 1
+}
+
+pub fn is_dir(path: String) -> bool {
+  kind_of(path) == 2
+}
+
+/// Creates the directory `path`; its parent must exist.
+pub fn create_dir(path: String) -> Result<(), io::Error> {
+  const code = unsafe { sag_fs_create_dir(path) };
+
+  if code == 0 { Ok(()) } else { Err(failure(code, `cannot create directory "${path}"`)) }
+}
+
+/// Creates the directory `path` and the missing ones above it. A directory that already exists
+/// is not an error.
+pub fn create_dir_all(path: String) -> Result<(), io::Error> {
+  if path.is_empty() || is_dir(path) {
+    return Ok(());
+  }
+
+  match path::parent(path) {
+    Some(parent) => create_dir_all(parent)?,
+    None => {}
+  }
+
+  match create_dir(path) {
+    Ok(_) => Ok(()),
+    // Created meanwhile by someone else.
+    Err(_) if is_dir(path) => Ok(()),
+    Err(error) => Err(error),
+  }
+}
+
+/// Removes the directory `path`, which must be empty.
+pub fn remove_dir(path: String) -> Result<(), io::Error> {
+  const code = unsafe { sag_fs_remove_dir(path) };
+
+  if code == 0 { Ok(()) } else { Err(failure(code, `cannot remove directory "${path}"`)) }
+}
+
+/// Removes the file at `path`.
+pub fn remove_file(path: String) -> Result<(), io::Error> {
+  const code = unsafe { sag_fs_remove_file(path) };
+
+  if code == 0 { Ok(()) } else { Err(failure(code, `cannot remove "${path}"`)) }
+}
+
+/// Moves `from` to `to`, replacing `to` if it is a file that exists.
+pub fn rename(from: String, to: String) -> Result<(), io::Error> {
+  const code = unsafe { sag_fs_rename(from, to) };
+
+  if code == 0 { Ok(()) } else { Err(failure(code, `cannot rename "${from}" to "${to}"`)) }
+}
+
+/// Copies the file `from` to `to`, replacing `to` if it exists.
+pub fn copy(from: String, to: String) -> Result<(), io::Error> {
+  const code = unsafe { sag_fs_copy(from, to) };
+
+  if code == 0 { Ok(()) } else { Err(failure(code, `cannot copy "${from}" to "${to}"`)) }
+}
+
+/// The names of the entries of the directory `path`, without `.` and `..`, sorted by their
+/// bytes.
+pub fn read_dir(path: String) -> Result<List<String>, io::Error> {
+  var status = [0i32; 1];
+  const text = unsafe { sag_fs_read_dir(path, status.as_mut_ptr()) };
+
+  if status[0] != 0 {
+    return Err(failure(status[0], `cannot read directory "${path}"`));
+  }
+
+  if text.is_empty() {
+    return Ok(new List<String>());
+  }
+
+  // The runtime separates the names with NUL, which no file name contains.
+  const names = text.split("\0");
+  names.sort();
+
+  Ok(names)
+}
+
+/// The current working directory, as an absolute path.
+pub fn current_dir() -> Result<String, io::Error> {
+  var status = [0i32; 1];
+  const dir = unsafe { sag_fs_current_dir(status.as_mut_ptr()) };
+
+  if status[0] == 0 { Ok(dir) } else { Err(failure(status[0], "cannot get the current directory")) }
+}
