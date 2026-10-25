@@ -7,6 +7,7 @@
 // expect-stdout: 1.5 2 0.30000000000000004 -0.5
 // expect-stdout: 0.1 100000000000000000000 0.0000001 inf
 // expect-stdout: true false
+// expect-stdout: 340282350000000000000000000000000000000 -340282350000000000000000000000000000000 inf -inf 340282350000000000000000000000000000000
 pub fn main() {
   const a = 5;
   const b = 2;
@@ -22,4 +23,9 @@ pub fn main() {
   println(`${x} ${2.0} ${0.1 + 0.2} ${-0.5}`);
   println(`${0.1f32} ${1e20} ${1e-7} ${1.0 / 0.0}`);
   println(`${a < b || b == 2 && !false} ${'a' > 'b'}`);
+
+  // `f64` to `f32` rounds to nearest: just beyond the largest `f32` still rounds down to it.
+  const near: f64 = 3.4028235e38;
+  const beyond: f64 = 3.4028236e38;
+  println(`${near as f32} ${-near as f32} ${beyond as f32} ${-beyond as f32} ${3.4028235e38 as f32}`);
 }

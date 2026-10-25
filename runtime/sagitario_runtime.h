@@ -426,13 +426,21 @@ SAG_F2I_UNSIGNED(u32, uint32_t, UINT32_MAX, 4294967296.0)
 SAG_F2I_UNSIGNED(u64, uint64_t, UINT64_MAX, 18446744073709551616.0)
 SAG_F2I_UNSIGNED(usize, size_t, SIZE_MAX, 18446744073709551616.0)
 
-/* Out-of-range values become infinity instead of being undefined behavior. */
+/* Rounds to nearest: values beyond FLT_MAX round down to it until halfway to 2^128
+ * (2^128 - 2^103), where they become infinity, instead of being undefined behavior. */
 static inline float sag_f64_to_f32(double x) {
-  if (x > FLT_MAX) {
+  const double overflow = 340282356779733661637539395458142568448.0;
+  if (x >= overflow) {
     return HUGE_VALF;
   }
-  if (x < -FLT_MAX) {
+  if (x <= -overflow) {
     return -HUGE_VALF;
+  }
+  if (x > FLT_MAX) {
+    return FLT_MAX;
+  }
+  if (x < -FLT_MAX) {
+    return -FLT_MAX;
   }
   return (float)x;
 }

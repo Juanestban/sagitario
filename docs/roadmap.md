@@ -144,7 +144,8 @@ Increments:
    ([ADR-0052](adr/0052-resolver-port-and-resolution-dumps.md)).
 5. `types`, in two halves with their dumps: 5a the declarations (`--dump=declarations`), 5b the
    bodies of functions (`--dump=types`) ([ADR-0053](adr/0053-type-checker-port-and-type-dumps.md)).
-6. `sir` and `codegen_c`.
+6. `sir` and `codegen_c`, compared through the generated C (`--dump=c`)
+   ([ADR-0054](adr/0054-lowering-and-c-generation-port.md)).
 7. The driver and the CLI: `sagc` passes every suite.
 8. The bootstrap to the fixed point, its CI job and the acceptance.
 

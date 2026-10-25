@@ -61,7 +61,8 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0050](0050-lexer-port-and-token-dumps.md) | The lexer port, token dumps and `char::from_u32` | Accepted (refined by 0051) |
 | [0051](0051-parser-port-and-ast-dumps.md) | The parser port and AST dumps | Accepted (refined by 0052) |
 | [0052](0052-resolver-port-and-resolution-dumps.md) | The resolver port and resolution dumps | Accepted (refined by 0053) |
-| [0053](0053-type-checker-port-and-type-dumps.md) | The type checker port and type dumps | Accepted |
+| [0053](0053-type-checker-port-and-type-dumps.md) | The type checker port and type dumps | Accepted (refined by 0054) |
+| [0054](0054-lowering-and-c-generation-port.md) | The lowering and C generation port | Accepted |
 
 ## Template
 

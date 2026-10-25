@@ -77,6 +77,8 @@ pub enum Dump {
   Declarations,
   /// The types of the program: its declarations and the bodies of its functions.
   Types,
+  /// The C that `build` generates for the program.
+  C,
 }
 
 /// What `[link]` adds to a build: C libraries, where to find them, and C sources to compile.
@@ -141,6 +143,10 @@ pub fn on_large_stack(work: fn() -> std::process::ExitCode) -> std::process::Exi
 pub fn check(options: &CompileOptions) -> u8 {
   if let Some(dump @ (Dump::Resolve | Dump::Declarations | Dump::Types)) = options.dump {
     return dump_program(options, dump);
+  }
+
+  if options.dump == Some(Dump::C) {
+    return dump_c(options);
   }
 
   if let Some(dump) = options.dump {
@@ -238,7 +244,7 @@ fn dump_file(options: &CompileOptions, dump: Dump) -> u8 {
 
       print!("{}", sagitario_ast::dump::dump(&module));
     }
-    Dump::Ast | Dump::Resolve | Dump::Declarations | Dump::Types => {}
+    Dump::Ast | Dump::Resolve | Dump::Declarations | Dump::Types | Dump::C => {}
   }
 
   match report(&mut diagnostics, &sources, options) {
@@ -272,6 +278,28 @@ fn dump_program(options: &CompileOptions, dump: Dump) -> u8 {
     Err(code) => code,
   }
 }
+
+/// `sag check --dump=c`: the C that `build` generates, without compiling it: `program.c`, then
+/// `sag_ffi.c` after a marker line when the program calls C or exports functions
+/// (docs/adr/0054-lowering-and-c-generation-port.md).
+fn dump_c(options: &CompileOptions) -> u8 {
+  match front_end(options, true) {
+    Ok(FrontEnd { c_source: Some(generated), .. }) => {
+      print!("{}", generated.program);
+
+      if let Some(ffi) = &generated.ffi {
+        print!("{C_DUMP_FFI_MARKER}{ffi}");
+      }
+
+      0
+    }
+    Ok(_) => 0,
+    Err(code) => code,
+  }
+}
+
+/// The line separating the two translation units in `--dump=c`.
+const C_DUMP_FFI_MARKER: &str = "/* ---- sag_ffi.c ---- */\n";
 
 struct FrontEnd {
   c_source: Option<sagitario_codegen_c::GeneratedC>,

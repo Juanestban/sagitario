@@ -1213,7 +1213,9 @@ impl FnLowering<'_> {
       (ConstValue::Char(value), _) => Const::Char(value),
       (ConstValue::Str(value), _) => Const::Str(value),
       (ConstValue::Int(value), Type::Int(int)) => Const::Int { value: value.unsigned_abs(), negative: value < 0, ty: *int },
-      (ConstValue::Float(value), Type::Float(float)) => Const::Float(format!("{value:?}"), *float),
+      // `Display` writes the shortest text that reads back as the same value, without an
+      // exponent: what the self-hosted compiler can write too (ADR-0054).
+      (ConstValue::Float(value), Type::Float(float)) => Const::Float(format!("{value}"), *float),
       (value, ty) => return error(format!("constant {value:?} typed as {ty}")),
     };
 

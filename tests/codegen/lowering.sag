@@ -1,0 +1,103 @@
+// Combinations the lowering handles in separate places: struct values boxed in interface values
+// with fields read and written through them, conversions to a parent interface, generic classes
+// instantiated with nested types, closures capturing closures, ranges counting down by steps at
+// the limits of their types, `parse` at the limits and `?`.
+
+interface Named {
+  var name: String;
+
+  fn greet(self) -> String {
+    `hi ${self.name}`
+  }
+}
+
+interface Tagged extends Named {
+  fn tag(self) -> i32;
+}
+
+struct Label impl Tagged {
+  pub name: String;
+  pub id: i32;
+
+  pub fn tag(self) -> i32 {
+    self.id
+  }
+}
+
+class Stack<T> {
+  pub var items: List<T>;
+
+  pub fn new(self) {
+    self.items = new List();
+  }
+
+  pub fn push(self, item: T) {
+    self.items.push(item);
+  }
+
+  pub fn top(self) -> Option<T> {
+    if self.items.is_empty() { None } else { Some(self.items[self.items.len() - 1]) }
+  }
+}
+
+fn rename(value: Named, name: String) -> String {
+  value.name = name;
+  value.greet()
+}
+
+fn adder(step: i64) -> fn(i64) -> i64 {
+  const twice = (x: i64) => x + step * 2;
+
+  (x: i64) => twice(x) - step
+}
+
+fn parse_all(texts: List<String>) -> Result<i64, String> {
+  var total = 0i64;
+
+  for text in texts {
+    total += text.parse_i8()? as i64;
+  }
+
+  Ok(total)
+}
+
+pub fn main() {
+  const tagged: Tagged = Label { name: "a", id: 7 };
+  const named: Named = tagged;
+
+  println(`${rename(named, "b")} ${tagged.name} ${tagged.tag()}`);
+
+  const stacks: Stack<Option<List<String>>> = new Stack();
+
+  stacks.push(Some(List::from(["x", "y"])));
+  stacks.push(None);
+
+  match stacks.top() {
+    Some(Some(items)) => println(`top ${items.len()}`),
+    Some(None) => println("top none"),
+    None => println("empty"),
+  }
+
+  println(`${adder(5)(1)} ${adder(-3)(10)}`);
+
+  var down = "";
+
+  for value in (250u8..=255u8).rev().step_by(2) {
+    down = down + ` ${value}`;
+  }
+
+  for value in (-128i8..-120i8).step_by(3) {
+    down = down + ` ${value}`;
+  }
+
+  println(down);
+  show(parse_all(List::from(["127", "-128", "1"])));
+  show(parse_all(List::from(["127", "128"])));
+}
+
+fn show(result: Result<i64, String>) {
+  match result {
+    Ok(total) => println(`total ${total}`),
+    Err(message) => println(`error ${message}`),
+  }
+}
