@@ -1,70 +1,57 @@
-//! `sagc`: the Sagitario compiler written in Sagitario (F5, docs/roadmap.md). While it is being
-//! ported it does what its passes allow: `sagc check
-//! --dump=tokens|ast|resolve|declarations|types|c <file.sag>`, which prints the tokens or the
-//! syntax tree of a file, or the resolution, the typed declarations, the types or the generated C
-//! of a program, like `sag check --dump=...`
-//! (docs/adr/0050-lexer-port-and-token-dumps.md, docs/adr/0051-parser-port-and-ast-dumps.md,
-//! docs/adr/0052-resolver-port-and-resolution-dumps.md,
-//! docs/adr/0053-type-checker-port-and-type-dumps.md,
-//! docs/adr/0054-lowering-and-c-generation-port.md).
+//! `sagc`: the Sagitario compiler written in Sagitario (F5, docs/roadmap.md), with the command
+//! line of `sag` (docs/adr/0055-driver-and-cli-port.md). The port of `sagitario_cli`.
 
-use pkg::ast::dump;
-use pkg::codegen_c;
-use pkg::diagnostics;
-use pkg::diagnostics::{DiagnosticFormat, Diagnostics};
-use pkg::lexer;
-use pkg::loader::Loader;
-use pkg::parser;
-use pkg::resolve;
-use pkg::sir;
-use pkg::span::SourceMap;
-use pkg::types;
-use pkg::types::Stage;
+use pkg::diagnostics::DiagnosticFormat;
+use pkg::driver;
+use pkg::driver::CompileOptions;
+use pkg::driver::targets;
 use std::env;
-use std::fs;
-use std::path;
 use std::process;
 
-const USAGE: String = "Usage: sagc check --dump=tokens|ast|resolve|declarations|types|c [--diagnostic-format human|short] <file.sag>";
+/// The help text, written line by line so it does not depend on the line endings of this file.
+fn usage() -> String {
+  List::from([
+    "Usage: sagc <command> [options] <file.sag>",
+    "",
+    "Commands:",
+    "  build    Compile a program to an executable",
+    "  run      Compile and run a program (arguments after `--` go to the program)",
+    "  check    Check a program without generating code",
+    "  targets  List the targets `--target` accepts",
+    "  help     Show this message",
+    "  version  Show the compiler version",
+    "",
+    "Options:",
+    "  --release                   Optimize; integer overflow wraps instead of panicking (build, run)",
+    "  --sanitize                  Detect memory errors and undefined behavior with ASan and UBSan,",
+    "                              where the C compiler supports them (build, run)",
+    "  --sanitize=thread           Detect data races with TSan instead, where the C compiler supports",
+    "                              it; elsewhere, ASan and UBSan (build, run)",
+    "  --emit-c                    Also write the generated C (build, run)",
+    "  --cc <compiler>             C compiler to use; overrides SAG_CC (build, run)",
+    "  --target <target>           Compile for another machine, such as `aarch64-linux-android`",
+    "                              (build, check)",
+    "  --diagnostic-format <fmt>   `human` (default) or `short`: one line per diagnostic",
+  ]).join("\n")
+}
 
-/// Exit code for an internal compiler error.
-const EXIT_ICE: i32 = 101;
-
-/// The line separating the two translation units in `--dump=c`.
-const C_DUMP_FFI_MARKER: String = "/* ---- sag_ffi.c ---- */\n";
+/// The version of the language and of `sag`, which `sagc` implements.
+const VERSION: String = "0.4.0";
 
 /// Exit code for invalid command-line usage.
 const EXIT_USAGE: i32 = 2;
 
-/// What the command line asks for.
-class Options {
-  pub var input: Option<String>;
-  pub var dump: Option<String>;
-  pub var format: DiagnosticFormat;
-
-  pub fn new(self) {
-    self.input = None;
-    self.dump = None;
-    self.format = DiagnosticFormat::Human;
-  }
+enum Mode {
+  Build,
+  Run,
+  Check,
 }
 
-fn usage_error(message: String) -> i32 {
-  eprintln(`error: ${message}`);
-  eprintln("");
-  eprintln(USAGE);
-  EXIT_USAGE
-}
-
-/// `--flag=value` or `--flag value`: the value, taken from the next argument if needed.
-fn flag_value(inline: Option<String>, args: List<String>, index: Position) -> Option<String> {
-  match inline {
-    Some(value) => Some(value),
-    None => {
-      index.value += 1;
-      args.get(index.value)
-    }
-  }
+enum Command {
+  Compile(Mode, CompileOptions),
+  Targets,
+  Help,
+  Version,
 }
 
 /// The position of the argument being read.
@@ -76,235 +63,202 @@ class Position {
   }
 }
 
-fn parse(args: List<String>) -> Result<Options, String> {
-  if args.len() < 2 {
-    return Err("missing command");
-  }
+/// Parses the arguments that follow the program name.
+fn parse_args(args: List<String>) -> Result<Command, String> {
+  const command = match args.first() {
+    Some(found) => found,
+    None => return Err("missing command"),
+  };
 
-  if args[1] != "check" {
-    return Err(`unknown command \`${args[1]}\``);
+  if command == "build" {
+    Ok(Command::Compile(Mode::Build, parse_compile_options(args, Mode::Build)?))
+  } else if command == "run" {
+    Ok(Command::Compile(Mode::Run, parse_compile_options(args, Mode::Run)?))
+  } else if command == "check" {
+    Ok(Command::Compile(Mode::Check, parse_compile_options(args, Mode::Check)?))
+  } else if command == "targets" {
+    Ok(Command::Targets)
+  } else if command == "help" || command == "--help" || command == "-h" {
+    Ok(Command::Help)
+  } else if command == "version" || command == "--version" || command == "-v" {
+    Ok(Command::Version)
+  } else {
+    Err(`unknown command \`${command}\``)
   }
+}
 
-  const options = new Options();
-  const index = new Position(2);
+/// The options after the command, `args[0]`.
+fn parse_compile_options(args: List<String>, mode: Mode) -> Result<CompileOptions, String> {
+  const options = new CompileOptions();
+  var input: Option<String> = None;
+  const index = new Position(1);
 
   while index.value < args.len() {
     const arg = args[index.value];
     var flag = arg;
     var inline: Option<String> = None;
 
-    if arg.starts_with("--") {
-      if let Some(equals) = arg.find("=") {
+    if let Some(equals) = arg.find("=") {
+      if arg.substring(0, equals).starts_with("--") {
         flag = arg.substring(0, equals);
         inline = Some(arg.substring(equals + 1, arg.len()));
       }
     }
 
-    if flag == "--dump" {
-      match flag_value(inline, args, index) {
-        Some(value) if value == "tokens" || value == "ast" || value == "resolve" || value == "declarations" || value == "types" || value == "c" => {
-          options.dump = Some(value);
-        }
-        Some(value) => return Err(`unknown dump \`${value}\`; expected \`tokens\`, \`ast\`, \`resolve\`, \`declarations\`, \`types\` or \`c\``),
-        None => return Err("`--dump` requires a value"),
+    if flag == "--emit-c" {
+      require_codegen(mode, flag)?;
+      options.emit_c = true;
+    } else if flag == "--release" {
+      require_codegen(mode, flag)?;
+      options.release = true;
+    } else if flag == "--sanitize" {
+      require_codegen(mode, flag)?;
+      options.sanitize = true;
+      options.thread_sanitizer = match inline {
+        None => false,
+        Some(value) if value == "thread" => true,
+        Some(other) => return Err(`unknown sanitizer \`${other}\`; \`--sanitize=thread\` is the only one to choose`),
+      };
+    } else if flag == "--cc" {
+      require_codegen(mode, flag)?;
+      options.cc = Some(flag_value(flag, inline, args, index)?);
+    } else if flag == "--target" {
+      options.target = Some(flag_value(flag, inline, args, index)?);
+    } else if flag == "--dump" {
+      // Hidden: for the differential tests of the self-hosted compiler.
+      if mode != Mode::Check {
+        return Err("`--dump` is only accepted by `sag check`");
+      }
+
+      const value = flag_value(flag, inline, args, index)?;
+
+      if value == "tokens" || value == "ast" || value == "resolve" || value == "declarations" || value == "types" || value == "c" {
+        options.dump = Some(value);
+      } else {
+        return Err(`unknown dump \`${value}\`; expected \`tokens\`, \`ast\`, \`resolve\`, \`declarations\`, \`types\` or \`c\``);
       }
     } else if flag == "--diagnostic-format" {
-      match flag_value(inline, args, index) {
-        Some(value) if value == "human" => {
-          options.format = DiagnosticFormat::Human;
-        }
-        Some(value) if value == "short" => {
-          options.format = DiagnosticFormat::Short;
-        }
-        Some(value) => return Err(`unknown diagnostic format \`${value}\`; expected \`human\` or \`short\``),
-        None => return Err("`--diagnostic-format` requires a value"),
+      const value = flag_value(flag, inline, args, index)?;
+
+      if value == "human" {
+        options.format = DiagnosticFormat::Human;
+      } else if value == "short" {
+        options.format = DiagnosticFormat::Short;
+      } else {
+        return Err(`unknown diagnostic format \`${value}\`; expected \`human\` or \`short\``);
       }
+    } else if flag == "--" {
+      if mode != Mode::Run {
+        return Err("program arguments after `--` are only accepted by `sag run`");
+      }
+
+      for rest in (index.value + 1)..args.len() {
+        options.program_args.push(args[rest]);
+      }
+
+      index.value = args.len();
     } else if flag.starts_with("-") {
       return Err(`unknown option \`${flag}\``);
-    } else if options.input.is_some() {
-      return Err(`unexpected argument \`${arg}\`; only one input file is accepted`);
     } else {
-      options.input = Some(arg);
+      if input.is_some() {
+        return Err(`unexpected argument \`${arg}\`; only one input file is accepted`);
+      }
+
+      input = Some(arg);
     }
 
     index.value += 1;
   }
 
-  if options.input.is_none() {
-    return Err("missing input file");
-  }
-
-  if options.dump.is_none() {
-    return Err("only `check --dump=tokens|ast|resolve|declarations|types|c` is ported yet");
-  }
+  options.input = match input {
+    Some(found) => found,
+    None => return Err("missing input file"),
+  };
 
   Ok(options)
 }
 
-fn plural(count: usize) -> String {
-  if count == 1 { "" } else { "s" }
+fn require_codegen(mode: Mode, flag: String) -> Result<(), String> {
+  if mode == Mode::Check {
+    return Err(`\`${flag}\` is not accepted by \`sag check\`, which generates no code`);
+  }
+
+  Ok(())
 }
 
-/// Colors only the human format, honoring `NO_COLOR`, when `CLICOLOR_FORCE` asks for them:
-/// Sagitario cannot tell yet whether stderr is a terminal.
-fn use_color(format: DiagnosticFormat) -> bool {
-  if format == DiagnosticFormat::Short {
-    return false;
+/// `--flag=value` or `--flag value`: the value, taken from the next argument if needed.
+fn flag_value(flag: String, inline: Option<String>, args: List<String>, index: Position) -> Result<String, String> {
+  if let Some(value) = inline {
+    return Ok(value);
   }
 
-  if let Some(value) = env::variable("NO_COLOR") {
-    if !value.is_empty() {
-      return false;
-    }
-  }
+  index.value += 1;
 
-  match env::variable("CLICOLOR_FORCE") {
-    Some(value) => value != "0",
-    None => false,
+  match args.get(index.value) {
+    Some(value) => Ok(value),
+    None => Err(`\`${flag}\` requires a value`),
   }
 }
 
-/// Prints the diagnostics in source order, and a summary in the human format. Returns whether
-/// any of them is an error.
-fn report(diagnostics: Diagnostics, sources: SourceMap, format: DiagnosticFormat, input: String) -> bool {
-  const errors = diagnostics.error_count();
-  const warnings = diagnostics.warning_count();
-  const color = use_color(format);
+/// Pads `text` with spaces to `width` characters.
+fn pad(text: String, width: usize) -> String {
+  const out = new StringBuilder();
 
-  for diagnostic in diagnostics.take() {
-    eprintln(diagnostics::render(diagnostic, sources, format, color));
+  out.append(text);
+
+  for _ in text.chars().count()..width {
+    out.append(" ");
   }
 
-  if format == DiagnosticFormat::Human {
-    const warnings_text = `${warnings} warning${plural(warnings)}`;
-
-    if errors > 0 {
-      const also = if warnings > 0 { `; ${warnings_text} emitted` } else { "" };
-
-      eprintln(`error: could not compile \`${input}\` due to ${errors} previous error${plural(errors)}${also}`);
-    } else if warnings > 0 {
-      eprintln(`warning: \`${input}\` generated ${warnings_text}`);
-    }
-  }
-
-  errors > 0
+  out.to_string()
 }
 
-/// `check --dump=...`: the tokens or the syntax tree of the input file alone, and its
-/// diagnostics. A file with lexical errors is not parsed, as in a build.
-fn dump_file(input: String, dump_kind: String, format: DiagnosticFormat) -> i32 {
-  const text = match fs::read_to_string(input) {
-    Ok(text) => text,
-    Err(error) => {
-      eprintln(`error: cannot read \`${input}\`: ${error.message()}`);
-      return 1;
+/// Runs a parsed command and returns the process exit code.
+fn execute(command: Command) -> i32 {
+  match command {
+    Command::Help => {
+      println(usage());
+      0
     }
-  };
-  const sources = new SourceMap();
-  const diagnostics = new Diagnostics();
-  const file = sources.add(input, text);
-  const tokens = lexer::lex(file, text, diagnostics);
-
-  if dump_kind == "tokens" {
-    print(lexer::dump(tokens));
-  } else if !diagnostics.has_errors() {
-    print(dump::dump(parser::parse_module(file, tokens, diagnostics)));
-  }
-
-  if report(diagnostics, sources, format, input) { 1 } else { 0 }
-}
-
-/// `check --dump=resolve|declarations|types|c`: loads the program as a build does, resolves it and
-/// prints the resolution, or type checks its declarations or all of it and prints the result, or
-/// lowers it and prints the generated C. Lexical and syntax errors stop before resolving; type
-/// errors stop before lowering.
-fn dump_program(input: String, dump_kind: String, format: DiagnosticFormat) -> i32 {
-  const is_sag = match path::extension(input) {
-    Some(extension) => extension == "sag",
-    None => false,
-  };
-
-  if !is_sag {
-    eprintln(`error: \`${input}\` is not a \`.sag\` file`);
-    return 1;
-  }
-
-  if !fs::is_file(input) {
-    eprintln(`error: cannot find \`${input}\``);
-    return 1;
-  }
-
-  const sources = new SourceMap();
-  const diagnostics = new Diagnostics();
-  const loader = new Loader(input);
-
-  if !loader.load(input, new List(), sources, diagnostics) || !loader.load_references(sources, diagnostics) {
-    return 1;
-  }
-
-  if report(diagnostics, sources, format, input) {
-    return 1;
-  }
-
-  const prelude = loader.load_prelude(sources, diagnostics);
-
-  if report(diagnostics, sources, format, input) {
-    return 1;
-  }
-
-  const package = loader.package(prelude);
-  const resolution = resolve::resolve(package, diagnostics);
-
-  if dump_kind == "resolve" {
-    print(resolve::dump::dump(resolution));
-  } else if dump_kind == "c" {
-    const typed = types::check_until(package, resolution, diagnostics, Stage::Bodies);
-
-    if report(diagnostics, sources, format, input) {
-      return 1;
+    Command::Version => {
+      println(`sagc ${VERSION}`);
+      0
     }
+    Command::Targets => {
+      println("Targets for `--target`, besides this machine:");
 
-    const program = match sir::lower(package, resolution, typed, sources, diagnostics) {
-      Ok(program) => program,
-      Err(message) => {
-        eprintln(`internal compiler error: ${message}`);
-        return EXIT_ICE;
+      for target in targets::targets() {
+        println("  " + pad(target.name, 26) + target.description);
       }
-    };
 
-    // Generic code may instantiate itself endlessly, found while lowering.
-    if report(diagnostics, sources, format, input) {
-      return 1;
+      0
     }
-
-    const generated = codegen_c::generate(program);
-
-    print(generated.program);
-
-    if let Some(ffi) = generated.ffi {
-      print(C_DUMP_FFI_MARKER + ffi);
-    }
-
-    return 0;
-  } else {
-    const stage = if dump_kind == "types" { Stage::Bodies } else { Stage::Declarations };
-
-    print(types::dump::dump(types::check_until(package, resolution, diagnostics, stage)));
+    Command::Compile(mode, options) => match mode {
+      Mode::Build => driver::build(options),
+      Mode::Run => driver::run(options),
+      Mode::Check => driver::check(options),
+    },
   }
-
-  if report(diagnostics, sources, format, input) { 1 } else { 0 }
 }
 
 pub fn main() {
-  const options = match parse(env::args()) {
-    Ok(options) => options,
-    Err(message) => process::exit(usage_error(message)),
-  };
-  const input = options.input.unwrap_or("");
-  const dump_kind = options.dump.unwrap_or("tokens");
-  const code = if dump_kind == "tokens" || dump_kind == "ast" { dump_file(input, dump_kind, options.format) } else { dump_program(input, dump_kind, options.format) };
+  const args = env::args();
+  const rest: List<String> = new List();
 
-  if code != 0 {
-    process::exit(code);
+  for index in 1..args.len() {
+    rest.push(args[index]);
   }
+
+  const code = match parse_args(rest) {
+    Ok(command) => execute(command),
+    Err(message) => {
+      eprintln(`error: ${message}\n\n${usage()}`);
+      EXIT_USAGE
+    }
+  };
+
+  // Always through `exit`, which skips the releases still pending: the leak check that a
+  // program compiled with `SAG_LEAK_CHECK` set runs at its end is for that program, which
+  // inherits the variable, and not for the compiler.
+  process::exit(code);
 }

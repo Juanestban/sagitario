@@ -90,7 +90,7 @@ fn parse(lw: Lowering, ty: Type, target: Type, operands: List<Operand>) -> Resul
 
   match target.kind {
     TypeKind::Int(int_ty) => {
-      const max = types::int_max(int_ty, 64);
+      const max = types::int_max(int_ty, lw.package.target.pointer_width);
 
       if types::is_signed(int_ty) {
         operands.push(int_operand(max + 1, true, IntTy::I64));

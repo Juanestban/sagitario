@@ -4,11 +4,10 @@
 //! modules of `types` the checks of one area each, as functions taking the checker
 //! (docs/adr/0053-type-checker-port-and-type-dumps.md).
 
-use pkg::ast::{ArrayLen, FieldDecl, FnDecl, Package, TypeExpr, TypeExprKind, VariantFields, Visibility};
+use pkg::ast::{ArrayLen, FieldDecl, FnDecl, Package, TargetInfo, TypeExpr, TypeExprKind, VariantFields, Visibility};
 use pkg::diagnostics;
 use pkg::diagnostics::{Diagnostic, Diagnostics};
 use pkg::diagnostics::codes;
-use pkg::loader;
 use pkg::resolve::{ParamOwner, Resolution, TypeItem, TypeRes};
 use pkg::resolve;
 use pkg::span::Span;
@@ -761,22 +760,6 @@ pub struct VariantDef {
   }
 }
 
-/// The machine the program is compiled for: what the sizes of C types depend on.
-pub struct TargetInfo {
-  /// The width of pointers, `isize` and `usize`: 32 or 64.
-  pub pointer_width: u32;
-  /// Whether C's `long` has 32 bits: on Windows and on 32-bit targets.
-  pub long_is_32: bool;
-  /// Whether C's `char` is unsigned: on Linux and Android for ARM.
-  pub char_is_unsigned: bool;
-
-  /// The machine running the compiler. `sagc` runs on 64-bit hosts, and only tells Windows from
-  /// the rest; a host with an unsigned `char` (Linux on ARM) is not detected yet.
-  pub fn host() -> TargetInfo {
-    TargetInfo { pointer_width: 64, long_is_32: loader::windows(), char_is_unsigned: false }
-  }
-}
-
 /// How far `check_until` goes.
 pub enum Stage {
   /// The definitions of types, the signatures, the constants, inheritance, interfaces and `main`.
@@ -975,7 +958,7 @@ pub class Checker {
     self.resolution = resolution;
     self.diagnostics = diagnostics;
     self.typed = new TypedModule();
-    self.target = TargetInfo::host();
+    self.target = package.target;
     self.owner = None;
     self.pointees = new List();
     self.interface_types = new List();

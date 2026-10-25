@@ -125,6 +125,11 @@ const SANITIZE_FLAGS: [&str; 2] = ["-fsanitize=address,undefined", "-fno-sanitiz
 /// The C compiler flags of `--sanitize=thread`: a program with a data race exits with an error.
 const THREAD_SANITIZE_FLAGS: [&str; 1] = ["-fsanitize=thread"];
 
+/// The stack every executable reserves on Windows, in bytes: the default of Linux and macOS, so
+/// programs, among them the self-hosted compiler, recurse as deeply on every system
+/// (docs/adr/0055-driver-and-cli-port.md).
+const STACK_RESERVE: &str = "8388608";
+
 /// The stack of the thread running the compiler. The passes recurse over the syntax tree, and
 /// deeply nested code needs more than the main thread's stack (1 MiB on Windows), above all in
 /// debug builds.
@@ -866,8 +871,15 @@ impl Toolchain<'_> {
 
     if self.compiler.cl {
       command.arg("/nologo").args(self.mode).args(objects).arg(format!("/Fe{}", executable.display())).arg("/link").args(self.link_args(link));
+      command.arg(format!("/STACK:{STACK_RESERVE}"));
     } else {
       command.args(self.mode).args(self.sanitize).args(objects).arg("-o").arg(executable).args(self.link_args(link));
+
+      if self.compiler.mingw() {
+        command.arg(format!("-Wl,--stack,{STACK_RESERVE}"));
+      } else if self.compiler.windows() {
+        command.arg(format!("-Wl,/STACK:{STACK_RESERVE}"));
+      }
     }
 
     self.link(&mut command)

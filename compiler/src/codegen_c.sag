@@ -706,7 +706,7 @@ class Generator {
 
     self.line("if (" + step_text + " == 0) sag_panic_at(\"the step of `step_by` must be greater than 0\", __FILE__, __LINE__);");
     self.line(
-      `for (uintmax_t sag_o${n} = 0, sag_d${n} = (` + empty + `); sag_d${n} == 0; sag_d${n} = (` + distance + ` - sag_o${n} < ` + step_text + `), sag_o${n} = sag_d${n} ? sag_o${n} : sag_o${n} + ` + step_text + ") {",
+      `for (uintmax_t sag_o${n} = 0, sag_d${n} = (${empty}); sag_d${n} == 0; sag_d${n} = (${distance} - sag_o${n} < ${step_text}), sag_o${n} = sag_d${n} ? sag_o${n} : sag_o${n} + ${step_text}) {`,
     );
     self.indent += 1;
     self.line(self.local(variable) + " = sag_from_uintmax_" + types::int_name(ty) + "(" + value + ");");
@@ -1454,6 +1454,18 @@ class Generator {
 
   prv fn stmt(self, statement: Stmt) {
     match statement {
+      Stmt::If { cond, then_body, else_body } => self.if_stmt(cond, then_body, else_body),
+      Stmt::Loop(body) => self.block("for (;;)", body),
+      Stmt::ForRange { variable, ty, start, end, inclusive, reverse, step, body } => self.for_range(variable, ty, start, end, inclusive, reverse, step, body),
+      Stmt::ForArray { variable, array, len, body } => self.for_array(variable, array, len, body),
+      Stmt::ForText { variable, text, bytes, body } => self.for_text(variable, text, bytes, body),
+      _ => self.simple_stmt(statement),
+    }
+  }
+
+  /// A statement that holds no statements.
+  prv fn simple_stmt(self, statement: Stmt) {
+    match statement {
       // `#line` must start at column 0 to stay readable; C ignores the indentation anyway.
       Stmt::Line { file, line } => {
         self.source_line = Some(SourceLine { file: file, line: line });
@@ -1471,14 +1483,6 @@ class Generator {
 
         self.line(self.local(target) + " = " + value + ";");
       }
-      Stmt::If { cond, then_body, else_body } => {
-        self.block("if (" + self.operand(cond) + ")", then_body);
-
-        if !else_body.is_empty() {
-          self.block("else", else_body);
-        }
-      }
-      Stmt::Loop(body) => self.block("for (;;)", body),
       Stmt::ListPush { list, value } => {
         self.line("*(" + self.list_elem(list) + " *)sag_list_push(" + self.operand(list) + ") = " + self.operand(value) + ";");
       }
@@ -1487,65 +1491,6 @@ class Generator {
       }
       Stmt::ListClear(list) => self.line("sag_list_clear(" + self.operand(list) + ");"),
       Stmt::ListReverse(list) => self.line("sag_list_reverse(" + self.operand(list) + ");"),
-      Stmt::ForRange { variable, ty, start, end, inclusive, reverse, step, body } => {
-        if reverse || step.is_some() {
-          return self.for_range_stepped(variable, ty, start, end, inclusive, reverse, step, body);
-        }
-
-        const c_ty = int_c_type(ty);
-        const counter = `sag_i${variable}`;
-        const start_text = self.operand(start);
-        const end_text = self.operand(end);
-        // A `continue` jumps to the increment, which must never step past `end`, so the closed
-        // form tracks completion in a separate flag.
-        var header = "";
-
-        if inclusive {
-          const done = `sag_done${variable}`;
-
-          header = "for (" + c_ty + " " + counter + " = " + start_text + ", " + done + " = (" + c_ty + ")(" + start_text + " > " + end_text + "); " + done + " == 0; " + done
-            + " = (" + c_ty + ")(" + counter + " == " + end_text + "), " + counter + " = " + done + " ? " + counter + " : (" + c_ty + ")(" + counter + " + 1))";
-        } else {
-          header = "for (" + c_ty + " " + counter + " = " + start_text + "; " + counter + " < " + end_text + "; " + counter + " = (" + c_ty + ")(" + counter + " + 1))";
-        }
-
-        self.line(header + " {");
-        self.indent += 1;
-        self.line(self.local(variable) + " = " + counter + ";");
-        self.stmts(body);
-        self.indent -= 1;
-        self.line("}");
-      }
-      Stmt::ForArray { variable, array, len, body } => {
-        const counter = `sag_i${variable}`;
-
-        self.line("for (size_t " + counter + " = 0; " + counter + ` < ${len}; ` + counter + "++) {");
-        self.indent += 1;
-        self.line(self.local(variable) + " = " + self.local(array) + ".data[" + counter + "];");
-        self.stmts(body);
-        self.indent -= 1;
-        self.line("}");
-      }
-      Stmt::ForText { variable, text, bytes, body } => {
-        const counter = `sag_i${variable}`;
-        const text_name = self.local(text);
-        const variable_name = self.local(variable);
-
-        // `sag_utf8_next` advances the index, so `continue` needs no increment step.
-        if bytes {
-          self.line("for (size_t " + counter + " = 0; " + counter + " < " + text_name + ".len; " + counter + "++) {");
-          self.indent += 1;
-          self.line(variable_name + " = " + text_name + ".ptr[" + counter + "];");
-        } else {
-          self.line("for (size_t " + counter + " = 0; " + counter + " < " + text_name + ".len;) {");
-          self.indent += 1;
-          self.line(variable_name + " = sag_utf8_next(" + text_name + ", &" + counter + ");");
-        }
-
-        self.stmts(body);
-        self.indent -= 1;
-        self.line("}");
-      }
       Stmt::WeakStore { dest, value } => {
         const dest_text = self.place(dest);
         const value_text = self.operand(value);
@@ -1561,7 +1506,77 @@ class Generator {
       },
       Stmt::Panic(PanicMessage::Static(message)) => self.line("sag_panic_at(" + c_string_literal(message) + ", __FILE__, __LINE__);"),
       Stmt::Panic(PanicMessage::Value(message)) => self.line("sag_panic_str_at(" + self.operand(message) + ", __FILE__, __LINE__);"),
+      _ => {}
     }
+  }
+
+  prv fn if_stmt(self, cond: Operand, then_body: List<Stmt>, else_body: List<Stmt>) {
+    self.block("if (" + self.operand(cond) + ")", then_body);
+
+    if !else_body.is_empty() {
+      self.block("else", else_body);
+    }
+  }
+
+  prv fn for_range(self, variable: u32, ty: IntTy, start: Operand, end: Operand, inclusive: bool, reverse: bool, step: Option<Operand>, body: List<Stmt>) {
+    if reverse || step.is_some() {
+      return self.for_range_stepped(variable, ty, start, end, inclusive, reverse, step, body);
+    }
+
+    const c_ty = int_c_type(ty);
+    const counter = `sag_i${variable}`;
+    const start_text = self.operand(start);
+    const end_text = self.operand(end);
+    // A `continue` jumps to the increment, which must never step past `end`, so the closed
+    // form tracks completion in a separate flag.
+    var header = "";
+
+    if inclusive {
+      const done = `sag_done${variable}`;
+
+      header = `for (${c_ty} ${counter} = ${start_text}, ${done} = (${c_ty})(${start_text} > ${end_text}); ${done} == 0; ${done} = (${c_ty})(${counter} == ${end_text}), ${counter} = ${done} ? ${counter} : (${c_ty})(${counter} + 1))`;
+    } else {
+      header = `for (${c_ty} ${counter} = ${start_text}; ${counter} < ${end_text}; ${counter} = (${c_ty})(${counter} + 1))`;
+    }
+
+    self.line(header + " {");
+    self.indent += 1;
+    self.line(self.local(variable) + " = " + counter + ";");
+    self.stmts(body);
+    self.indent -= 1;
+    self.line("}");
+  }
+
+  prv fn for_array(self, variable: u32, array: u32, len: u64, body: List<Stmt>) {
+    const counter = `sag_i${variable}`;
+
+    self.line("for (size_t " + counter + " = 0; " + counter + ` < ${len}; ` + counter + "++) {");
+    self.indent += 1;
+    self.line(self.local(variable) + " = " + self.local(array) + ".data[" + counter + "];");
+    self.stmts(body);
+    self.indent -= 1;
+    self.line("}");
+  }
+
+  prv fn for_text(self, variable: u32, text: u32, bytes: bool, body: List<Stmt>) {
+    const counter = `sag_i${variable}`;
+    const text_name = self.local(text);
+    const variable_name = self.local(variable);
+
+    // `sag_utf8_next` advances the index, so `continue` needs no increment step.
+    if bytes {
+      self.line("for (size_t " + counter + " = 0; " + counter + " < " + text_name + ".len; " + counter + "++) {");
+      self.indent += 1;
+      self.line(variable_name + " = " + text_name + ".ptr[" + counter + "];");
+    } else {
+      self.line("for (size_t " + counter + " = 0; " + counter + " < " + text_name + ".len;) {");
+      self.indent += 1;
+      self.line(variable_name + " = sag_utf8_next(" + text_name + ", &" + counter + ");");
+    }
+
+    self.stmts(body);
+    self.indent -= 1;
+    self.line("}");
   }
 
   /// `dest = value;` where `dest` is an lvalue of type `ty`.
@@ -1864,7 +1879,7 @@ fn binary(op: BinaryOp, ty: Type, lhs: String, rhs: String) -> String {
   }
 
   match ty.kind {
-    TypeKind::Int(int_ty) => "sag_" + helper + "_" + types::int_name(int_ty) + "_at(" + lhs + ", " + rhs + ", __FILE__, __LINE__)",
+    TypeKind::Int(int_ty) => `sag_${helper}_${types::int_name(int_ty)}_at(${lhs}, ${rhs}, __FILE__, __LINE__)`,
     TypeKind::Float(FloatTy::F32) => if op == BinaryOp::Rem { "fmodf(" + lhs + ", " + rhs + ")" } else { "(" + lhs + " " + ast::binary_symbol(op) + " " + rhs + ")" },
     TypeKind::Float(FloatTy::F64) => if op == BinaryOp::Rem { "fmod(" + lhs + ", " + rhs + ")" } else { "(" + lhs + " " + ast::binary_symbol(op) + " " + rhs + ")" },
     _ => "(" + lhs + " " + ast::binary_symbol(op) + " " + rhs + ")",

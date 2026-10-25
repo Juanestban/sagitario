@@ -2,6 +2,7 @@
 //! types are resolved by later phases, which refer to nodes by their ids. `Expr`, `Pattern` and
 //! `TypeExpr` are classes: they contain themselves, which a struct cannot do by value.
 
+use pkg::loader;
 use pkg::span::Span;
 
 pub struct Ident {
@@ -31,6 +32,24 @@ pub struct Package {
   pub library: bool;
   /// The package being compiled first, then its dependencies.
   pub packages: List<PackageInfo>;
+  /// The machine the program is compiled for.
+  pub target: TargetInfo;
+}
+
+/// The machine the program is compiled for: what the sizes of C types depend on.
+pub struct TargetInfo {
+  /// The width of pointers, `isize` and `usize`: 32 or 64.
+  pub pointer_width: u32;
+  /// Whether C's `long` has 32 bits: on Windows and on 32-bit targets.
+  pub long_is_32: bool;
+  /// Whether C's `char` is unsigned: on Linux and Android for ARM.
+  pub char_is_unsigned: bool;
+
+  /// The machine running the compiler. `sagc` runs on 64-bit hosts, and only tells Windows from
+  /// the rest; a host with an unsigned `char` (Linux on ARM) is not detected yet.
+  pub fn host() -> TargetInfo {
+    TargetInfo { pointer_width: 64, long_is_32: loader::windows(), char_is_unsigned: false }
+  }
 }
 
 /// A package of a program: the one being compiled, or a dependency.

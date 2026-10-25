@@ -146,7 +146,8 @@ Increments:
    bodies of functions (`--dump=types`) ([ADR-0053](adr/0053-type-checker-port-and-type-dumps.md)).
 6. `sir` and `codegen_c`, compared through the generated C (`--dump=c`)
    ([ADR-0054](adr/0054-lowering-and-c-generation-port.md)).
-7. The driver and the CLI: `sagc` passes every suite.
+7. The driver and the CLI: `sagc` passes every suite (`SAG_COMPILER`), and executables reserve
+   an 8 MiB stack on Windows ([ADR-0055](adr/0055-driver-and-cli-port.md)).
 8. The bootstrap to the fixed point, its CI job and the acceptance.
 
 **Acceptance:** `sagc` built by the Rust compiler (stage 1) passes every suite on Windows, Linux

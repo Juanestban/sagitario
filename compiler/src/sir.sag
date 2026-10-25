@@ -6,7 +6,7 @@
 //! Places are values: a place derived from another copies its projections, since lists are
 //! references in Sagitario and SIR already emitted must not change.
 
-use pkg::ast::{BinaryOp, Block, Expr, ExprKind, FnDecl, Package, Stmt as AstStmt, TemplatePart, UnaryOp};
+use pkg::ast::{BinaryOp, Block, Expr, ExprKind, FieldInit, FnDecl, Ident, Package, Stmt as AstStmt, TemplatePart, UnaryOp};
 use pkg::diagnostics::{Diagnostic, Diagnostics};
 use pkg::resolve::{ParamOwner, Res, Resolution, TypeItem};
 use pkg::span::{SourceMap, Span};
@@ -1503,52 +1503,10 @@ pub class Lowering {
         _ => Err("unsupported path operand"),
       },
       ExprKind::Try(inner) => matching::try_expr(self, inner),
-      ExprKind::New { args, .. } => {
-        match ty.kind {
-          TypeKind::StringBuilder => return Ok(strings::new_string_builder(self)),
-          TypeKind::List(_) => return Ok(self.new_value(ty, Rvalue::ListNew)),
-          _ => {}
-        }
-
-        self.new_instance(ty, args)
-      }
+      ExprKind::New { args, .. } => self.new_expr(ty, args),
       ExprKind::Match { scrutinee, arms } => matching::match_expr(self, ty, scrutinee, arms),
-      ExprKind::Field { .. } | ExprKind::Index { .. } => {
-        const place = self.place(value)?;
-
-        if self.managed(ty) {
-          // A field of an instance or an element of a list can change during the statement
-          // through another reference.
-          for projection in place.projections {
-            match projection {
-              Projection::ClassField { .. } | Projection::ListElem { .. } => return Ok(self.owned_copy(ty, Operand::Place(place))),
-              _ => {}
-            }
-          }
-
-          return Ok(Operand::Place(place));
-        }
-
-        // Copied when read, so a later change to the place in the same expression is not seen.
-        Ok(self.new_value(ty, Rvalue::Use(Operand::Place(place))))
-      }
-      ExprKind::Template(parts) => {
-        const pieces: List<TemplatePiece> = new List();
-
-        for part in parts {
-          match part {
-            TemplatePart::Text(text) => pieces.push(TemplatePiece::Text(text)),
-            TemplatePart::Expr(inner) => {
-              const part_ty = self.type_of(inner)?;
-              const part_value = self.expr(inner)?;
-
-              pieces.push(TemplatePiece::Value { ty: part_ty, value: part_value });
-            }
-          }
-        }
-
-        Ok(self.new_value(ty, Rvalue::Template(pieces)))
-      }
+      ExprKind::Field { .. } | ExprKind::Index { .. } => self.read_place(value, ty),
+      ExprKind::Template(parts) => self.template(ty, parts),
       ExprKind::Call { callee, args } => {
         if collections::is_list_from(self, callee) {
           return collections::list_from(self, ty, args);
@@ -1556,208 +1514,12 @@ pub class Lowering {
 
         self.call_expr(value, callee, args, ty)
       }
-      ExprKind::MethodCall { receiver, method, args } => {
-        if self.typed.field_calls.contains_key(value.id) {
-          return closures::field_call(self, receiver, method.name, args);
-        }
-
-        if let Some(builtin) = self.typed.builtin_methods.get(value.id) {
-          return match builtin {
-            BuiltinMethod::Map | BuiltinMethod::MapErr | BuiltinMethod::AndThen | BuiltinMethod::UnwrapOrElse | BuiltinMethod::Filter => {
-              closures::closure_method(self, builtin, ty, receiver, args)
-            }
-            BuiltinMethod::List(op) => collections::list_method(self, op, ty, receiver, args),
-            BuiltinMethod::Prelude(function) => collections::prelude_method(self, value, function, ty, receiver, args),
-            BuiltinMethod::TotalCompare => collections::total_compare(self, ty, receiver, args),
-            BuiltinMethod::RangeRev => collections::range_iter(self, receiver, true, ty),
-            BuiltinMethod::Runtime { .. } | BuiltinMethod::Find | BuiltinMethod::ToDigit | BuiltinMethod::Parse(_) => {
-              strings::text_method(self, builtin, ty, receiver, args)
-            }
-            _ => matching::builtin_method(self, builtin, ty, receiver, args),
-          };
-        }
-
-        self.method_call(value, receiver, args, ty)
-      }
-      ExprKind::StructLit { fields, .. } => {
-        if let TypeKind::Enum(_) = ty.kind {
-          const variant = match self.resolution.paths.get(value.id) {
-            Some(Res::Variant(found)) => found,
-            _ => return Err("variant literal without a variant"),
-          };
-          var def: Option<pkg::types::VariantDef> = None;
-
-          if let Some(variants) = self.typed.variants(ty) {
-            def = variants.get(variant.index as usize);
-          }
-
-          const found = match def {
-            Some(found) => found,
-            None => return Err("unknown variant"),
-          };
-          const operands: List<Option<Operand>> = new List();
-
-          for _ in found.fields {
-            operands.push(None);
-          }
-
-          // Field values run in source order and are stored in declaration order.
-          for init in fields {
-            var position: Option<usize> = None;
-
-            for index in 0..found.fields.len() {
-              if let Some(field_name) = found.fields[index].name {
-                if position.is_none() && field_name == init.name.name {
-                  position = Some(index);
-                }
-              }
-            }
-
-            const index = match position {
-              Some(index) => index,
-              None => return Err("unknown variant field"),
-            };
-            const stored = self.operand_as(init.value, found.fields[index].ty)?;
-
-            operands[index] = Some(stored);
-          }
-
-          const complete: List<Operand> = new List();
-
-          for operand in operands {
-            match operand {
-              Some(found_operand) => complete.push(found_operand),
-              None => return Err("variant literal with missing fields"),
-            }
-          }
-
-          return Ok(matching::variant(self, ty, variant.index, complete));
-        }
-
-        const owner = match ty.kind {
-          TypeKind::Struct(named) => named,
-          _ => return Err("struct literal without a struct type"),
-        };
-        const field_types = self.layouts.struct_fields(owner);
-        const operands: List<Option<Operand>> = new List();
-
-        for _ in field_types {
-          operands.push(None);
-        }
-
-        // Field values run in source order and are stored in declaration order.
-        for init in fields {
-          const index = match self.typed.field_index(owner.id, init.name.name) {
-            Some(index) => index,
-            None => return Err("unknown field in literal"),
-          };
-          const stored = self.operand_as(init.value, field_types.get(index).unwrap_or(types::error()))?;
-
-          operands[index] = Some(stored);
-        }
-
-        const complete: List<Operand> = new List();
-
-        for operand in operands {
-          match operand {
-            Some(found_operand) => complete.push(found_operand),
-            None => return Err("struct literal with missing fields"),
-          }
-        }
-
-        Ok(self.aggregate(ty, complete, field_types))
-      }
-      ExprKind::ArrayLit(elems) => {
-        const elem_ty = match ty.kind {
-          TypeKind::Array { elem, .. } => elem,
-          _ => return Err("array literal without an array type"),
-        };
-        const operands: List<Operand> = new List();
-        const part_types: List<Type> = new List();
-
-        for elem in elems {
-          operands.push(self.operand_as(elem, elem_ty)?);
-          part_types.push(elem_ty);
-        }
-
-        Ok(self.aggregate(ty, operands, part_types))
-      }
-      ExprKind::ArrayRepeat { value: repeated, .. } => {
-        const elem_ty = match ty.kind {
-          TypeKind::Array { elem, .. } => elem,
-          _ => return Err("array repeat without an array type"),
-        };
-        const element = self.operand_as(repeated, elem_ty)?;
-
-        Ok(self.new_value(ty, Rvalue::Repeat(element)))
-      }
-      ExprKind::Unary { op, operand } => {
-        if op == UnaryOp::Deref {
-          // The pointee is never managed: its value is copied now.
-          const place = self.place(value)?;
-
-          return Ok(self.new_value(ty, Rvalue::Use(Operand::Place(place))));
-        }
-
-        // A negated literal is a single constant, so `-128i8` never overflows.
-        if op == UnaryOp::Neg {
-          match operand.kind {
-            ExprKind::Int { value: digits, .. } => {
-              if let TypeKind::Int(int_ty) = ty.kind {
-                return match digits.parse_u64() {
-                  Ok(magnitude) => Ok(int_operand(magnitude, true, int_ty)),
-                  Err(_) => Err("integer literal out of range"),
-                };
-              }
-            }
-            ExprKind::Float { text, .. } => {
-              if let TypeKind::Float(float_ty) = ty.kind {
-                return Ok(Operand::Const(Const::Float { text: "-" + text, ty: float_ty }));
-              }
-            }
-            _ => {}
-          }
-        }
-
-        const operand_ty = self.type_of(operand)?;
-        const operand_value = self.expr(operand)?;
-
-        Ok(self.new_value(ty, Rvalue::Unary { op: op, ty: operand_ty, operand: operand_value }))
-      }
-      ExprKind::Binary { op, lhs, rhs } => {
-        if op == BinaryOp::And || op == BinaryOp::Or {
-          const result = self.temp(types::of(TypeKind::Bool));
-          const left = self.expr(lhs)?;
-          var then_body: List<Stmt> = new List();
-          var else_body: List<Stmt> = new List();
-
-          if op == BinaryOp::And {
-            then_body = self.evaluate_into(rhs, result)?;
-            else_body = self.constant_into(false, result);
-          } else {
-            then_body = self.constant_into(true, result);
-            else_body = self.evaluate_into(rhs, result)?;
-          }
-
-          self.emit(Stmt::If { cond: left, then_body: then_body, else_body: else_body });
-
-          return Ok(Operand::Local(result));
-        }
-
-        const operand_ty = self.type_of(lhs)?;
-        const left = self.expr(lhs)?;
-        const right = self.expr(rhs)?;
-
-        if let TypeKind::Enum(_) = operand_ty.kind {
-          // Enums without data are equal when their variants are.
-          const left_tag = matching::tag(self, left, operand_ty)?;
-          const right_tag = matching::tag(self, right, operand_ty)?;
-
-          return Ok(self.new_value(ty, Rvalue::Binary { op: op, ty: tag_type(), lhs: left_tag, rhs: right_tag }));
-        }
-
-        Ok(strings::binary(self, op, operand_ty, left, right))
-      }
+      ExprKind::MethodCall { receiver, method, args } => self.method_call_expr(value, ty, receiver, method, args),
+      ExprKind::StructLit { fields, .. } => self.struct_lit(value, ty, fields),
+      ExprKind::ArrayLit(elems) => self.array_lit(ty, elems),
+      ExprKind::ArrayRepeat { value: repeated, .. } => self.array_repeat(ty, repeated),
+      ExprKind::Unary { op, operand } => self.unary(value, ty, op, operand),
+      ExprKind::Binary { op, lhs, rhs } => self.binary(ty, op, lhs, rhs),
       ExprKind::Cast { expr: inner, .. } => {
         const from = self.type_of(inner)?;
         const operand_value = self.expr(inner)?;
@@ -1766,83 +1528,11 @@ pub class Lowering {
       }
       ExprKind::Block(body) => self.block_value(body, ty),
       ExprKind::Unsafe(body) => self.block_value(body, ty),
-      ExprKind::If { cond, then_block, else_branch } => {
-        const condition = self.expr(cond)?;
-        const dest: Option<u32> = if is_valueless(ty) { None } else { Some(self.temp(ty)) };
-        const then_mark = self.open_buffer();
-
-        self.block_into(then_block, dest)?;
-
-        const then_body = self.close_buffer(then_mark);
-        var else_body: List<Stmt> = new List();
-
-        if let Some(branch) = else_branch {
-          const else_mark = self.open_buffer();
-          const branch_value = self.expr(branch)?;
-
-          if let Some(target) = dest {
-            if !is_valueless(self.type_of(branch)?) {
-              self.store(target, branch_value);
-            }
-          }
-
-          else_body = self.close_buffer(else_mark);
-        }
-
-        self.emit(Stmt::If { cond: condition, then_body: then_body, else_body: else_body });
-
-        Ok(self.owned_result(dest))
-      }
-      ExprKind::While { cond, body } => {
-        const mark = self.open_loop(None);
-        const condition_mark = self.pending.len();
-        const condition = self.expr(cond)?;
-
-        self.release_pending_from(condition_mark);
-        self.emit(Stmt::If { cond: condition, then_body: new List(), else_body: List::from([Stmt::Break]) });
-        self.block_into(body, None)?;
-
-        const loop_body = self.close_loop(mark);
-
-        self.emit(Stmt::Loop(loop_body));
-
-        Ok(unit_operand())
-      }
-      ExprKind::Loop(body) => {
-        const dest: Option<u32> = if is_valueless(ty) { None } else { Some(self.temp(ty)) };
-        const mark = self.open_loop(dest);
-
-        self.block_into(body, None)?;
-
-        const loop_body = self.close_loop(mark);
-
-        self.emit(Stmt::Loop(loop_body));
-
-        Ok(self.owned_result(dest))
-      }
+      ExprKind::If { cond, then_block, else_branch } => self.if_expr(ty, cond, then_block, else_branch),
+      ExprKind::While { cond, body } => self.while_expr(cond, body),
+      ExprKind::Loop(body) => self.loop_expr(ty, body),
       ExprKind::For { iter, body, .. } => self.for_expr(value, iter, body),
-      ExprKind::Break(result) => {
-        const current = match self.loops.last() {
-          Some(found) => found,
-          None => return Err("`break` outside of a loop"),
-        };
-
-        if let Some(found) = result {
-          const value_ty = self.type_of(found)?;
-          const operand = self.expr(found)?;
-
-          if let Some(target) = current.result {
-            if !is_valueless(value_ty) {
-              self.store_from(target, operand, value_ty);
-            }
-          }
-        }
-
-        self.release_for_exit(current.scope_depth, current.pending_mark);
-        self.emit(Stmt::Break);
-
-        Ok(unit_operand())
-      }
+      ExprKind::Break(result) => self.break_expr(result),
       ExprKind::Continue => {
         const current = match self.loops.last() {
           Some(found) => found,
@@ -1854,31 +1544,369 @@ pub class Lowering {
 
         Ok(unit_operand())
       }
-      ExprKind::Return(result) => {
-        var operand: Option<Operand> = None;
+      ExprKind::Return(result) => self.return_expr(result),
+      ExprKind::Range { .. } => collections::range_iter(self, value, false, ty),
+    }
+  }
 
-        if let Some(found) = result {
-          if !is_valueless(self.type_of(found)?) {
-            const ret = self.ret;
-            const returned = self.operand_as(found, ret)?;
+  prv fn new_expr(self, ty: Type, args: List<Expr>) -> Result<Operand, String> {
+    match ty.kind {
+      TypeKind::StringBuilder => return Ok(strings::new_string_builder(self)),
+      TypeKind::List(_) => return Ok(self.new_value(ty, Rvalue::ListNew)),
+      _ => {}
+    }
 
-            if self.managed(ret) {
-              self.emit(Stmt::Retain(returned));
+    self.new_instance(ty, args)
+  }
+
+  prv fn read_place(self, value: Expr, ty: Type) -> Result<Operand, String> {
+    const place = self.place(value)?;
+
+    if self.managed(ty) {
+      // A field of an instance or an element of a list can change during the statement
+      // through another reference.
+      for projection in place.projections {
+        match projection {
+          Projection::ClassField { .. } | Projection::ListElem { .. } => return Ok(self.owned_copy(ty, Operand::Place(place))),
+          _ => {}
+        }
+      }
+
+      return Ok(Operand::Place(place));
+    }
+
+    // Copied when read, so a later change to the place in the same expression is not seen.
+    Ok(self.new_value(ty, Rvalue::Use(Operand::Place(place))))
+  }
+
+  prv fn template(self, ty: Type, parts: List<TemplatePart>) -> Result<Operand, String> {
+    const pieces: List<TemplatePiece> = new List();
+
+    for part in parts {
+      match part {
+        TemplatePart::Text(text) => pieces.push(TemplatePiece::Text(text)),
+        TemplatePart::Expr(inner) => {
+          const part_ty = self.type_of(inner)?;
+          const part_value = self.expr(inner)?;
+
+          pieces.push(TemplatePiece::Value { ty: part_ty, value: part_value });
+        }
+      }
+    }
+
+    Ok(self.new_value(ty, Rvalue::Template(pieces)))
+  }
+
+  prv fn method_call_expr(self, value: Expr, ty: Type, receiver: Expr, method: Ident, args: List<Expr>) -> Result<Operand, String> {
+    if self.typed.field_calls.contains_key(value.id) {
+      return closures::field_call(self, receiver, method.name, args);
+    }
+
+    if let Some(builtin) = self.typed.builtin_methods.get(value.id) {
+      return match builtin {
+        BuiltinMethod::Map | BuiltinMethod::MapErr | BuiltinMethod::AndThen | BuiltinMethod::UnwrapOrElse | BuiltinMethod::Filter => {
+          closures::closure_method(self, builtin, ty, receiver, args)
+        }
+        BuiltinMethod::List(op) => collections::list_method(self, op, ty, receiver, args),
+        BuiltinMethod::Prelude(function) => collections::prelude_method(self, value, function, ty, receiver, args),
+        BuiltinMethod::TotalCompare => collections::total_compare(self, ty, receiver, args),
+        BuiltinMethod::RangeRev => collections::range_iter(self, receiver, true, ty),
+        BuiltinMethod::Runtime { .. } | BuiltinMethod::Find | BuiltinMethod::ToDigit | BuiltinMethod::Parse(_) => {
+          strings::text_method(self, builtin, ty, receiver, args)
+        }
+        _ => matching::builtin_method(self, builtin, ty, receiver, args),
+      };
+    }
+
+    self.method_call(value, receiver, args, ty)
+  }
+
+  prv fn struct_lit(self, value: Expr, ty: Type, fields: List<FieldInit>) -> Result<Operand, String> {
+    if let TypeKind::Enum(_) = ty.kind {
+      const variant = match self.resolution.paths.get(value.id) {
+        Some(Res::Variant(found)) => found,
+        _ => return Err("variant literal without a variant"),
+      };
+      var def: Option<pkg::types::VariantDef> = None;
+
+      if let Some(variants) = self.typed.variants(ty) {
+        def = variants.get(variant.index as usize);
+      }
+
+      const found = match def {
+        Some(found) => found,
+        None => return Err("unknown variant"),
+      };
+      const operands: List<Option<Operand>> = new List();
+
+      for _ in found.fields {
+        operands.push(None);
+      }
+
+      // Field values run in source order and are stored in declaration order.
+      for init in fields {
+        var position: Option<usize> = None;
+
+        for index in 0..found.fields.len() {
+          if let Some(field_name) = found.fields[index].name {
+            if position.is_none() && field_name == init.name.name {
+              position = Some(index);
             }
-
-            operand = Some(returned);
-          } else {
-            self.expr(found)?;
           }
         }
 
-        self.release_for_exit(0, 0);
-        self.emit(Stmt::Return(operand));
+        const index = match position {
+          Some(index) => index,
+          None => return Err("unknown variant field"),
+        };
+        const stored = self.operand_as(init.value, found.fields[index].ty)?;
 
-        Ok(unit_operand())
+        operands[index] = Some(stored);
       }
-      ExprKind::Range { .. } => collections::range_iter(self, value, false, ty),
+
+      const complete: List<Operand> = new List();
+
+      for operand in operands {
+        match operand {
+          Some(found_operand) => complete.push(found_operand),
+          None => return Err("variant literal with missing fields"),
+        }
+      }
+
+      return Ok(matching::variant(self, ty, variant.index, complete));
     }
+
+    const owner = match ty.kind {
+      TypeKind::Struct(named) => named,
+      _ => return Err("struct literal without a struct type"),
+    };
+    const field_types = self.layouts.struct_fields(owner);
+    const operands: List<Option<Operand>> = new List();
+
+    for _ in field_types {
+      operands.push(None);
+    }
+
+    // Field values run in source order and are stored in declaration order.
+    for init in fields {
+      const index = match self.typed.field_index(owner.id, init.name.name) {
+        Some(index) => index,
+        None => return Err("unknown field in literal"),
+      };
+      const stored = self.operand_as(init.value, field_types.get(index).unwrap_or(types::error()))?;
+
+      operands[index] = Some(stored);
+    }
+
+    const complete: List<Operand> = new List();
+
+    for operand in operands {
+      match operand {
+        Some(found_operand) => complete.push(found_operand),
+        None => return Err("struct literal with missing fields"),
+      }
+    }
+
+    Ok(self.aggregate(ty, complete, field_types))
+  }
+
+  prv fn array_lit(self, ty: Type, elems: List<Expr>) -> Result<Operand, String> {
+    const elem_ty = match ty.kind {
+      TypeKind::Array { elem, .. } => elem,
+      _ => return Err("array literal without an array type"),
+    };
+    const operands: List<Operand> = new List();
+    const part_types: List<Type> = new List();
+
+    for elem in elems {
+      operands.push(self.operand_as(elem, elem_ty)?);
+      part_types.push(elem_ty);
+    }
+
+    Ok(self.aggregate(ty, operands, part_types))
+  }
+
+  prv fn array_repeat(self, ty: Type, repeated: Expr) -> Result<Operand, String> {
+    const elem_ty = match ty.kind {
+      TypeKind::Array { elem, .. } => elem,
+      _ => return Err("array repeat without an array type"),
+    };
+    const element = self.operand_as(repeated, elem_ty)?;
+
+    Ok(self.new_value(ty, Rvalue::Repeat(element)))
+  }
+
+  prv fn unary(self, value: Expr, ty: Type, op: UnaryOp, operand: Expr) -> Result<Operand, String> {
+    if op == UnaryOp::Deref {
+      // The pointee is never managed: its value is copied now.
+      const place = self.place(value)?;
+
+      return Ok(self.new_value(ty, Rvalue::Use(Operand::Place(place))));
+    }
+
+    // A negated literal is a single constant, so `-128i8` never overflows.
+    if op == UnaryOp::Neg {
+      match operand.kind {
+        ExprKind::Int { value: digits, .. } => {
+          if let TypeKind::Int(int_ty) = ty.kind {
+            return match digits.parse_u64() {
+              Ok(magnitude) => Ok(int_operand(magnitude, true, int_ty)),
+              Err(_) => Err("integer literal out of range"),
+            };
+          }
+        }
+        ExprKind::Float { text, .. } => {
+          if let TypeKind::Float(float_ty) = ty.kind {
+            return Ok(Operand::Const(Const::Float { text: "-" + text, ty: float_ty }));
+          }
+        }
+        _ => {}
+      }
+    }
+
+    const operand_ty = self.type_of(operand)?;
+    const operand_value = self.expr(operand)?;
+
+    Ok(self.new_value(ty, Rvalue::Unary { op: op, ty: operand_ty, operand: operand_value }))
+  }
+
+  prv fn binary(self, ty: Type, op: BinaryOp, lhs: Expr, rhs: Expr) -> Result<Operand, String> {
+    if op == BinaryOp::And || op == BinaryOp::Or {
+      const result = self.temp(types::of(TypeKind::Bool));
+      const left = self.expr(lhs)?;
+      var then_body: List<Stmt> = new List();
+      var else_body: List<Stmt> = new List();
+
+      if op == BinaryOp::And {
+        then_body = self.evaluate_into(rhs, result)?;
+        else_body = self.constant_into(false, result);
+      } else {
+        then_body = self.constant_into(true, result);
+        else_body = self.evaluate_into(rhs, result)?;
+      }
+
+      self.emit(Stmt::If { cond: left, then_body: then_body, else_body: else_body });
+
+      return Ok(Operand::Local(result));
+    }
+
+    const operand_ty = self.type_of(lhs)?;
+    const left = self.expr(lhs)?;
+    const right = self.expr(rhs)?;
+
+    if let TypeKind::Enum(_) = operand_ty.kind {
+      // Enums without data are equal when their variants are.
+      const left_tag = matching::tag(self, left, operand_ty)?;
+      const right_tag = matching::tag(self, right, operand_ty)?;
+
+      return Ok(self.new_value(ty, Rvalue::Binary { op: op, ty: tag_type(), lhs: left_tag, rhs: right_tag }));
+    }
+
+    Ok(strings::binary(self, op, operand_ty, left, right))
+  }
+
+  prv fn if_expr(self, ty: Type, cond: Expr, then_block: Block, else_branch: Option<Expr>) -> Result<Operand, String> {
+    const condition = self.expr(cond)?;
+    const dest: Option<u32> = if is_valueless(ty) { None } else { Some(self.temp(ty)) };
+    const then_mark = self.open_buffer();
+
+    self.block_into(then_block, dest)?;
+
+    const then_body = self.close_buffer(then_mark);
+    var else_body: List<Stmt> = new List();
+
+    if let Some(branch) = else_branch {
+      const else_mark = self.open_buffer();
+      const branch_value = self.expr(branch)?;
+
+      if let Some(target) = dest {
+        if !is_valueless(self.type_of(branch)?) {
+          self.store(target, branch_value);
+        }
+      }
+
+      else_body = self.close_buffer(else_mark);
+    }
+
+    self.emit(Stmt::If { cond: condition, then_body: then_body, else_body: else_body });
+
+    Ok(self.owned_result(dest))
+  }
+
+  prv fn while_expr(self, cond: Expr, body: Block) -> Result<Operand, String> {
+    const mark = self.open_loop(None);
+    const condition_mark = self.pending.len();
+    const condition = self.expr(cond)?;
+
+    self.release_pending_from(condition_mark);
+    self.emit(Stmt::If { cond: condition, then_body: new List(), else_body: List::from([Stmt::Break]) });
+    self.block_into(body, None)?;
+
+    const loop_body = self.close_loop(mark);
+
+    self.emit(Stmt::Loop(loop_body));
+
+    Ok(unit_operand())
+  }
+
+  prv fn loop_expr(self, ty: Type, body: Block) -> Result<Operand, String> {
+    const dest: Option<u32> = if is_valueless(ty) { None } else { Some(self.temp(ty)) };
+    const mark = self.open_loop(dest);
+
+    self.block_into(body, None)?;
+
+    const loop_body = self.close_loop(mark);
+
+    self.emit(Stmt::Loop(loop_body));
+
+    Ok(self.owned_result(dest))
+  }
+
+  prv fn break_expr(self, result: Option<Expr>) -> Result<Operand, String> {
+    const current = match self.loops.last() {
+      Some(found) => found,
+      None => return Err("`break` outside of a loop"),
+    };
+
+    if let Some(found) = result {
+      const value_ty = self.type_of(found)?;
+      const operand = self.expr(found)?;
+
+      if let Some(target) = current.result {
+        if !is_valueless(value_ty) {
+          self.store_from(target, operand, value_ty);
+        }
+      }
+    }
+
+    self.release_for_exit(current.scope_depth, current.pending_mark);
+    self.emit(Stmt::Break);
+
+    Ok(unit_operand())
+  }
+
+  prv fn return_expr(self, result: Option<Expr>) -> Result<Operand, String> {
+    var operand: Option<Operand> = None;
+
+    if let Some(found) = result {
+      if !is_valueless(self.type_of(found)?) {
+        const ret = self.ret;
+        const returned = self.operand_as(found, ret)?;
+
+        if self.managed(ret) {
+          self.emit(Stmt::Retain(returned));
+        }
+
+        operand = Some(returned);
+      } else {
+        self.expr(found)?;
+      }
+    }
+
+    self.release_for_exit(0, 0);
+    self.emit(Stmt::Return(operand));
+
+    Ok(unit_operand())
   }
 
   /// The right operand of `&&` or `||` stored in `result`, as a buffer.
@@ -2060,7 +2088,7 @@ pub class Lowering {
         Some(sig) => sig.params,
         None => new List(),
       },
-      Callee::Builtin(name) => pkg::types::exprs::builtin_sig(name, pkg::types::TargetInfo::host()).params,
+      Callee::Builtin(name) => pkg::types::exprs::builtin_sig(name, self.package.target).params,
       _ => new List(),
     };
     const operands: List<Operand> = new List();

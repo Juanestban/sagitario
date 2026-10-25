@@ -4,7 +4,7 @@
 //! prelude are embedded. Nova dependencies are not loaded yet
 //! (docs/adr/0052-resolver-port-and-resolution-dumps.md).
 
-use pkg::ast::{Module, Package, PackageInfo};
+use pkg::ast::{Module, Package, PackageInfo, TargetInfo};
 use pkg::diagnostics::Diagnostics;
 use pkg::lexer;
 use pkg::parser;
@@ -32,6 +32,7 @@ const STD_TIME: String = include_str("../../crates/sagitario_driver/src/std/time
 
 /// The source of the standard library module `std::name` written in Sagitario.
 fn std_source(name: String) -> Option<String> {
+  // Change this and use match for improve the design
   if name == "env" {
     Some(STD_ENV)
   } else if name == "fs" {
@@ -317,10 +318,11 @@ pub class Loader {
     if same { None } else { Some(push_path(dir, name)) }
   }
 
-  /// The package of the program: its modules, the prelude and the standard library modules.
-  pub fn package(self, prelude: usize) -> Package {
+  /// The package of the program, compiled for `target`: its modules, the prelude and the
+  /// standard library modules.
+  pub fn package(self, prelude: usize, target: TargetInfo) -> Package {
     const info = PackageInfo { name: "", dependencies: new List() };
 
-    Package { modules: self.modules, prelude: Some(prelude), std: self.std, library: false, packages: List::from([info]) }
+    Package { modules: self.modules, prelude: Some(prelude), std: self.std, library: false, packages: List::from([info]), target: target }
   }
 }

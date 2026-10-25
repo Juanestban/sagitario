@@ -100,7 +100,9 @@ passes as they are ported
 [ADR-0052](adr/0052-resolver-port-and-resolution-dumps.md),
 [ADR-0053](adr/0053-type-checker-port-and-type-dumps.md),
 [ADR-0054](adr/0054-lowering-and-c-generation-port.md)). `tests/lexer/`, `tests/parser/`,
-`tests/resolve/`, `tests/types/` and `tests/codegen/` hold edge cases of each pass. The test also checks the modules of `compiler/` generated from the Rust compiler;
+`tests/resolve/`, `tests/types/` and `tests/codegen/` hold edge cases of each pass. With
+`SAG_COMPILER=<path to sagc>`, the harness of the suites runs that compiler instead of `sag`
+([ADR-0055](adr/0055-driver-and-cli-port.md)). The test also checks the modules of `compiler/` generated from the Rust compiler;
 `SAG_BLESS=1 cargo test --test selfhost` rewrites them.
 
 ## CI

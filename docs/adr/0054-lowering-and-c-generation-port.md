@@ -41,5 +41,12 @@ and write strict C11. Increment 6 settles Q267–Q274.
   spec rounds to nearest (docs/spec/02-types.md#conversions), so values up to halfway to 2^128 now
   round to `FLT_MAX`, which also keeps the C conversion in range. `tests/run-pass/arithmetic_and_casts.sag`
   covers it.
+- `sagc` runs on the main thread, whose stack is 1 MiB on Windows, while the Rust compiler runs
+  on a 64 MiB thread (ADR-0050, Q235). Unoptimized C keeps every local of a function in its frame,
+  so a large `match` that recurses has a large frame: `Lowering::expr` took 40 KB and
+  `Generator::stmt` 25 KB, and with AddressSanitizer generating the C of `compiler/` overflowed
+  the stack. Their heavy arms are now methods of their own, and long chains of `+` that build C
+  text are template strings, which lower to a flat list of pieces instead of one nested level per
+  operand. A large stack for `sagc` itself belongs to the driver (increment 7).
 - `SourceMap` gains `len`, `Resolution` gains `in_prelude` and `in_library`, and the
   `TypedModule` of `sagc` gains `interface_path`, `class_parent` and `local_type`.
