@@ -70,6 +70,9 @@ fn main() { ... }
   without sanitizers (MinGW) build without them. `SAG_TEST_SANITIZE=0` turns them off for faster
   local runs ([ADR-0036](adr/0036-sanitizers-and-the-reference-zoo.md)).
 - `tests/run-pass/reference_zoo/` is the reference program of the F2 acceptance criteria.
+- `tests/acceptance/f3/` is the F3 acceptance program: the `wc` and `textcount` packages and a C
+  program using the library, run by the Nova test `f3_acceptance`
+  ([ADR-0044](adr/0044-c-toolchains.md)).
 
 ## Rules
 
@@ -84,4 +87,5 @@ fn main() { ... }
 
 GitHub Actions matrix on Windows, Linux and macOS running `cargo fmt --check`,
 `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` with
-clang, plus a Linux job with `SAG_CC=gcc`.
+clang, plus a Linux job with `SAG_CC=gcc` and a Windows job with `SAG_CC=cl` (without
+sanitizers). The Ubuntu job requires the Android NDK (`SAG_REQUIRE_NDK=1`).

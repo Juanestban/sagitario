@@ -1,0 +1,48 @@
+// Counts the lines, words and bytes of a text, for Sagitario programs and for C. Part of the
+// F3 acceptance program (docs/roadmap.md).
+use std::ffi::{c_char, string_from_c};
+
+/// The lines, words and bytes of a text, as `wc` counts them.
+pub struct Counts {
+  pub lines: u64;
+  pub words: u64;
+  pub bytes: u64;
+
+  /// The counts of two texts together.
+  pub fn plus(self, other: Counts) -> Counts {
+    Counts { lines: self.lines + other.lines, words: self.words + other.words, bytes: self.bytes + other.bytes }
+  }
+}
+
+/// Counts the line breaks of `text`, its words (runs of characters other than ASCII whitespace)
+/// and its bytes.
+pub fn count(text: String) -> Counts {
+  var lines: u64 = 0;
+  var words: u64 = 0;
+  var in_word = false;
+
+  for c in text.chars() {
+    if c == '\n' {
+      lines += 1;
+    }
+
+    if c.is_ascii_whitespace() {
+      in_word = false;
+    } else if !in_word {
+      in_word = true;
+      words += 1;
+    }
+  }
+
+  Counts { lines, words, bytes: text.len() as u64 }
+}
+
+/// The number of lines of the C string `text`.
+pub extern "C" fn textcount_lines(text: *const c_char) -> u64 {
+  count(unsafe { string_from_c(text) }).lines
+}
+
+/// The number of words of the C string `text`.
+pub extern "C" fn textcount_words(text: *const c_char) -> u64 {
+  count(unsafe { string_from_c(text) }).words
+}

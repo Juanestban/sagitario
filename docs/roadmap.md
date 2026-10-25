@@ -93,12 +93,17 @@ Increments:
    ([ADR-0042](adr/0042-library-outputs-and-linking-c.md)).
 7. Cross-compilation: `--target`, Android (NDK) and iOS, with `c_long`/`c_char` per target
    ([ADR-0043](adr/0043-cross-compilation.md)).
-8. A decision record re-evaluating MSVC `cl.exe` and `zig cc`, and the acceptance program.
+8. MSVC `cl` supported best-effort, `zig cc` not adopted, `c_char` spelled `char` in headers,
+   and the acceptance program ([ADR-0044](adr/0044-c-toolchains.md)).
+
+**Status:** done. The acceptance program is `tests/acceptance/f3/`, run by the Nova test
+`f3_acceptance`.
 
 **Acceptance:** a command-line tool (a small `grep` or `wc`) built as a package reads files and
 stdin, depends on a local library package and passes with sanitizers; the same library builds
 as `.a`/`.so`/`.dll` and is called from a C program; and the tool compiles (without running)
-for Android and iOS.
+for Android and iOS. iOS runs no standalone programs (ADR-0043), so there the library builds
+instead.
 
 ## Later phases (post-MVP)
 

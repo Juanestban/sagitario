@@ -126,7 +126,7 @@ impl Target {
       Ok(output) if output.status.success() => {
         let target = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
-        Ok(CCompiler { command, args, target, sanitized: false })
+        Ok(CCompiler { command, args, target, sanitized: false, cl: false })
       }
       _ => {
         eprintln!("error: cannot run the C compiler `{command}` for the target `{}`", self.name);

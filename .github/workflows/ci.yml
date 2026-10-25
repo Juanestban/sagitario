@@ -48,6 +48,28 @@ jobs:
       - run: gcc --version
       - run: cargo test --workspace
 
+  # MSVC's cl, supported best-effort and without sanitizers (docs/adr/0044-c-toolchains.md).
+  cl:
+    name: test (windows-latest, cl)
+    runs-on: windows-latest
+    env:
+      SAG_CC: cl
+      SAG_TEST_SANITIZE: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The environment of a Developer Command Prompt, for the following steps.
+      - name: Set up the MSVC environment
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul && set" | ForEach-Object {
+            if ($_ -match '^([^=]+)=(.*)$') { "$($Matches[1])=$($Matches[2])" >> $env:GITHUB_ENV }
+          }
+      - run: cl
+      - run: cargo test --workspace
+
   msrv:
     name: minimum supported Rust version
     runs-on: ubuntu-latest

@@ -23,10 +23,10 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0012](0012-closures.md) | Closures capture by value, read-only | Accepted (refined by 0033) |
 | [0013](0013-primitive-semantics.md) | Semantics of primitives and `String` | Accepted (refined by 0034) |
 | [0014](0014-mvp-scope.md) | MVP scope: F0 + F1 + F2, desktop only | Accepted |
-| [0015](0015-compiler-architecture-and-toolchain.md) | Compiler architecture and C toolchain | Accepted |
+| [0015](0015-compiler-architecture-and-toolchain.md) | Compiler architecture and C toolchain | Accepted (refined by 0044) |
 | [0016](0016-engineering-process.md) | Testing, quality gates, conventions and license | Accepted (refined by 0036) |
 | [0017](0017-resolution-of-open-questions-q1-q11.md) | Resolution of open questions Q1–Q11 | Accepted (refined by 0034) |
-| [0018](0018-windows-c-toolchain.md) | Windows C toolchain: official LLVM (MSVC target), MinGW clang tolerated | Accepted (refined by 0036) |
+| [0018](0018-windows-c-toolchain.md) | Windows C toolchain: official LLVM (MSVC target), MinGW clang tolerated | Accepted (refined by 0036, 0044) |
 | [0019](0019-prelude-and-printing.md) | Prelude and printing | Accepted (refined by 0037) |
 | [0020](0020-expressions-bindings-and-build-modes.md) | Operators, bindings, control flow, interpolation and build modes | Accepted |
 | [0021](0021-structs-and-fixed-arrays.md) | Structs, methods and fixed arrays | Accepted (amended by 0028) |
@@ -50,8 +50,9 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0039](0039-time-and-commands.md) | `std::time` and `std::process::Command` | Accepted |
 | [0040](0040-nova-package-manager.md) | Nova, the package manager | Accepted |
 | [0041](0041-dependencies-by-path.md) | Dependencies by path | Accepted |
-| [0042](0042-library-outputs-and-linking-c.md) | Library outputs and linking C | Accepted |
+| [0042](0042-library-outputs-and-linking-c.md) | Library outputs and linking C | Accepted (refined by 0044) |
 | [0043](0043-cross-compilation.md) | Cross-compilation to Android and iOS | Accepted |
+| [0044](0044-c-toolchains.md) | C toolchains: MSVC `cl` best-effort, no `zig cc`, and the F3 acceptance program | Accepted |
 
 ## Template
 

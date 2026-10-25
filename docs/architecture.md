@@ -241,13 +241,18 @@ Anything expressible in Sagitario belongs in `std/` instead.
   LLVM clang targeting `x86_64-pc-windows-msvc`. MinGW clang (`*-windows-gnu`, detected with
   `-dumpmachine`) is tolerated with a warning and without sanitizers. When running sanitized
   programs, the driver adds the sanitizer runtime directory to the child `PATH`.
+- MSVC `cl` ([ADR-0044](adr/0044-c-toolchains.md)) is tolerated too, without sanitizers. It is
+  recognized by its file name (`CCompiler::cl`), needs a Developer Command Prompt (`INCLUDE`),
+  and has its own options in `Toolchain` (`/std:c11`, `/Fo`, `/Fe`, `/link`, `/LD`), with
+  `lib.exe` for static libraries. `zig cc` is not supported.
 - Builds go through objects: the generated C (strict C11, `-pedantic-errors`) and the
   package's C sources (C11) are compiled separately, then linked into an executable, archived
   into a static library or linked into a dynamic one (`-fPIC` outside Windows). A failure in the
   generated C alone is an internal compiler error; one in the package's sources or libraries is
   an error of the package. A dynamic library exports only the `extern "C" fn` functions,
   through a module-definition file (Windows), a version script (Linux) or an exported symbols
-  list (macOS). `header.rs` writes a library's C header from the typed program.
+  list (macOS). `header.rs` writes a library's C header from the typed program, spelling
+  `c_char` as `char` from the type written in the source.
 - Cross-compilation (`targets.rs`): a target gives the C compiler with the arguments every call
   needs (`CCompiler::args`: `--target=<triple>`, and `-isysroot` for iOS) and the facts the type
   checker needs (`TargetInfo` in `Package::target`: pointer width, size of C's `long`, sign of

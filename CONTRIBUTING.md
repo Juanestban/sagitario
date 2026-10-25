@@ -6,7 +6,8 @@
 - clang (the official C compiler). On Windows: official LLVM (`x86_64-pc-windows-msvc`) plus
   Visual Studio Build Tools, which the Rust MSVC toolchain already needs. If `clang` on your
   `PATH` is an MSYS2/MinGW clang, set `SAG_CC` to the LLVM one; MinGW works best-effort,
-  without sanitizers. gcc is optional on Linux.
+  without sanitizers. MSVC `cl` also works best-effort, without sanitizers, from a Developer
+  Command Prompt. gcc is optional on Linux.
 - On macOS, do not export `DYLD_LIBRARY_PATH` pointing to Homebrew's LLVM
   (`/opt/homebrew/opt/llvm/lib`), in your shell or through `launchctl setenv`. It makes
   `rustc`, `rustdoc` and `clippy-driver` load that `libLLVM.dylib` instead of their own, and
@@ -28,6 +29,7 @@ sag run --sanitize main.sag     # with ASan and UBSan (the test harness always u
 SAG_TEST_SANITIZE=0 cargo test --workspace   # faster local runs without sanitizers
 ANDROID_NDK_HOME=/path/to/ndk cargo test --workspace   # also the Android cross-compilation tests
 SAG_CC=gcc sag build main.sag   # choose the C compiler (or --cc)
+SAG_CC=cl SAG_TEST_SANITIZE=0 cargo test --workspace   # with MSVC, in a Developer Command Prompt
 
 nova new demo                   # a package (docs/nova.md); then, inside it:
 nova run -- a b                 # build target/debug/demo and run it

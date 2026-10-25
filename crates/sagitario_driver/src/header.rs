@@ -1,8 +1,8 @@
 //! The C header of a library (docs/nova.md#library-outputs): the prototypes of its exported
 //! functions and the `@repr(C)` structs they use, with the `///` comments of the source.
 
-use sagitario_ast::{FnDecl, Package};
-use sagitario_resolve::{Resolution, StructId};
+use sagitario_ast::{FnDecl, Package, TypeExpr, TypeExprKind};
+use sagitario_resolve::{CType, Resolution, StructId, TypeRes};
 use sagitario_span::SourceMap;
 use sagitario_types::{FloatTy, IntTy, Type, TypedModule};
 
@@ -103,9 +103,15 @@ impl Header<'_> {
     }
   }
 
-  /// The C spelling of `ty`, followed by `name` (a declarator) when given.
-  fn declare(&mut self, ty: &Type, name: &str) -> String {
+  /// The C spelling of `ty`, written `written` in the source, followed by `name` (a declarator)
+  /// when given. `c_char` is spelled `char`, which C does not take as `int8_t` or `uint8_t`.
+  fn declare(&mut self, ty: &Type, written: Option<&TypeExpr>, name: &str) -> String {
+    let c_char = written.is_some_and(|written| match &written.kind {
+      TypeExprKind::Path(path) => self.resolution.type_paths.get(&path.id) == Some(&TypeRes::CType(CType::Char)),
+      _ => false,
+    });
     let base = match ty {
+      Type::Int(_) if c_char => "char".to_string(),
       Type::Int(int) => match int {
         IntTy::I8 => "int8_t",
         IntTy::I16 => "int16_t",
@@ -124,7 +130,11 @@ impl Header<'_> {
       Type::Bool => "bool".to_string(),
       Type::Struct(inner) => self.struct_name(inner.id),
       Type::Ptr { mutable, pointee } => {
-        let inner = if **pointee == Type::CVoid { "void".to_string() } else { self.declare(pointee, "") };
+        let written = written.and_then(|written| match &written.kind {
+          TypeExprKind::Ptr { pointee, .. } => Some(&**pointee),
+          _ => None,
+        });
+        let inner = if **pointee == Type::CVoid { "void".to_string() } else { self.declare(pointee, written, "") };
         let pointer = if *mutable { format!("{inner} *") } else { format!("const {inner} *") };
 
         return if name.is_empty() { pointer } else { format!("{pointer}{name}") };
@@ -196,10 +206,14 @@ pub fn generate(name: &str, package: &Package, resolution: &Resolution, typed: &
     let fields: Vec<(String, Type)> =
       typed.struct_def(id).map(|def| def.fields.iter().map(|field| (c_name(&field.name), field.ty.clone())).collect()).unwrap_or_default();
 
+    let written = resolution.struct_decl(package, id).map(|decl| &decl.fields);
+
     out.push_str(&format!("\nstruct {struct_name} {{\n"));
 
-    for (field, ty) in fields {
-      out.push_str(&format!("  {};\n", header.declare(&ty, &field)));
+    for (index, (field, ty)) in fields.into_iter().enumerate() {
+      let field_type = written.and_then(|fields| fields.get(index)).map(|decl| &decl.ty);
+
+      out.push_str(&format!("  {};\n", header.declare(&ty, field_type, &field)));
     }
 
     out.push_str("};\n");
@@ -209,9 +223,13 @@ pub fn generate(name: &str, package: &Package, resolution: &Resolution, typed: &
     let text = sources.get(export.decl.span.file).map(|source| source.text()).unwrap_or_default();
     let docs = doc_comment(text, export.decl.span.start as usize);
     let params: Vec<String> =
-      export.params.iter().zip(&export.decl.params).map(|(ty, param)| header.declare(ty, &c_name(&param.name.name))).collect();
+      export.params.iter().zip(&export.decl.params).map(|(ty, param)| header.declare(ty, Some(&param.ty), &c_name(&param.name.name))).collect();
     let params = if params.is_empty() { "void".to_string() } else { params.join(", ") };
-    let ret = if matches!(export.ret, Type::Unit | Type::Never) { "void".to_string() } else { header.declare(&export.ret, "") };
+    let ret = if matches!(export.ret, Type::Unit | Type::Never) {
+      "void".to_string()
+    } else {
+      header.declare(&export.ret, export.decl.return_type.as_ref(), "")
+    };
 
     out.push('\n');
 

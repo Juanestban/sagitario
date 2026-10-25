@@ -419,6 +419,15 @@ static inline float sag_f64_to_f32(double x) {
   return (float)x;
 }
 
+/* The division of two constants: MSVC rejects a constant division by zero, which IEEE 754
+ * defines as an infinity or NaN (docs/adr/0044-c-toolchains.md). */
+static inline float sag_div_f32(float a, float b) {
+  return a / b;
+}
+static inline double sag_div_f64(double a, double b) {
+  return a / b;
+}
+
 /* ---- Lists (docs/spec/02-types.md#arrays-and-lists) -------------------------------------- */
 
 /* A `List<T>`: an object holding `len` elements of `size` bytes in `data`, which has room for

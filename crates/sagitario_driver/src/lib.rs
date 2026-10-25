@@ -602,23 +602,36 @@ impl Toolchain<'_> {
     command.output().map_err(|error| Failure::Spawn(tool.to_string(), error))
   }
 
+  /// What a failed tool printed: `cl` and `lib` print their errors to stdout.
+  fn failure_text(&self, output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    if self.compiler.cl { format!("{}{stderr}", String::from_utf8_lossy(&output.stdout)) } else { stderr }
+  }
+
   /// Compiles one C file to an object; the generated C must be strict C11.
   fn compile(&self, source: &Path, object: &Path, generated: bool) -> Result<(), Failure> {
     let mut command = self.compiler.command();
 
-    command.arg("-std=c11");
+    if self.compiler.cl {
+      // MSVC has no option rejecting extensions in C; `/W3` keeps its warnings to likely bugs.
+      command.args(["/nologo", "/std:c11", "/W3", "/utf-8"]).args(self.mode);
+      command.arg("/I").arg(self.dir).arg("/c").arg(source).arg(format!("/Fo{}", object.display()));
+    } else {
+      command.arg("-std=c11");
 
-    if generated {
-      command.arg("-pedantic-errors");
+      if generated {
+        command.arg("-pedantic-errors");
+      }
+
+      command.args(self.mode).args(self.sanitize);
+
+      if self.pic {
+        command.arg("-fPIC");
+      }
+
+      command.arg("-I").arg(self.dir).arg("-c").arg(source).arg("-o").arg(object);
     }
-
-    command.args(self.mode).args(self.sanitize);
-
-    if self.pic {
-      command.arg("-fPIC");
-    }
-
-    command.arg("-I").arg(self.dir).arg("-c").arg(source).arg("-o").arg(object);
 
     let output = self.output(&mut command, &self.compiler.command)?;
 
@@ -626,7 +639,7 @@ impl Toolchain<'_> {
       return Ok(());
     }
 
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let stderr = self.failure_text(&output);
 
     Err(if generated { Failure::Generated(stderr) } else { Failure::Source(source.to_path_buf(), stderr) })
   }
@@ -636,7 +649,7 @@ impl Toolchain<'_> {
     let mut objects = Vec::new();
 
     for (index, source) in generated.iter().chain(sources).enumerate() {
-      let object = self.dir.join(format!("object{index}.o"));
+      let object = self.dir.join(format!("object{index}.{}", if self.compiler.cl { "obj" } else { "o" }));
 
       self.compile(source, &object, index < generated.len())?;
       objects.push(object);
@@ -645,9 +658,22 @@ impl Toolchain<'_> {
     Ok(objects)
   }
 
-  /// The libraries to link: the package's, then libm outside Windows (`fmod` and friends).
+  /// The libraries to link: the package's, then libm outside Windows (`fmod` and friends). For
+  /// `cl` they are options of the linker, after `/link`.
   fn link_args(&self, link: &Link) -> Vec<String> {
     let mut args = Vec::new();
+
+    if self.compiler.cl {
+      for path in &link.search_paths {
+        args.push(format!("/LIBPATH:{}", path.display()));
+      }
+
+      for library in &link.libraries {
+        args.push(format!("{library}.lib"));
+      }
+
+      return args;
+    }
 
     for path in &link.search_paths {
       args.push(format!("-L{}", path.display()));
@@ -667,13 +693,18 @@ impl Toolchain<'_> {
   fn link(&self, command: &mut Command) -> Result<(), Failure> {
     let output = self.output(command, &self.compiler.command)?;
 
-    if output.status.success() { Ok(()) } else { Err(Failure::Link(String::from_utf8_lossy(&output.stderr).to_string())) }
+    if output.status.success() { Ok(()) } else { Err(Failure::Link(self.failure_text(&output))) }
   }
 
   fn executable(&self, objects: &[PathBuf], link: &Link, executable: &Path) -> Result<(), Failure> {
     let mut command = self.compiler.command();
 
-    command.args(self.mode).args(self.sanitize).args(objects).arg("-o").arg(executable).args(self.link_args(link));
+    if self.compiler.cl {
+      command.arg("/nologo").args(self.mode).args(objects).arg(format!("/Fe{}", executable.display())).arg("/link").args(self.link_args(link));
+    } else {
+      command.args(self.mode).args(self.sanitize).args(objects).arg("-o").arg(executable).args(self.link_args(link));
+    }
+
     self.link(&mut command)
   }
 }
@@ -784,12 +815,17 @@ fn compile_to(options: &CompileOptions, executable: &Path) -> Result<CCompiler, 
   }
 
   compiler.sanitized = options.sanitize && compiler.supports_sanitizers();
+
+  if options.sanitize && compiler.cl {
+    eprintln!("warning: `cl` builds without sanitizers: MSVC has no UndefinedBehaviorSanitizer (docs/adr/0044-c-toolchains.md)");
+  }
+
   let dir = TempDir::create().map_err(|error| {
     eprintln!("error: cannot create a temporary directory: {error}");
     EXIT_FAILURE
   })?;
   let files = write_generated(&generated, &dir.path)?;
-  let mode: &[&str] = if options.release { &["-O2", "-DSAG_RELEASE"] } else { &["-O0", "-g"] };
+  let mode = compiler.mode(options.release);
   let build = |sanitize: &[&str]| {
     let toolchain = Toolchain { compiler: &compiler, dir: &dir.path, mode, sanitize, pic: false };
     let objects = toolchain.objects(&files, &options.link.sources)?;
@@ -830,6 +866,11 @@ fn library_files(compiler: &CCompiler, outputs: &LibraryOutputs, name: &str) -> 
 /// The archiver for static libraries: `SAG_AR`, then `llvm-ar` next to the C compiler, then
 /// `llvm-ar` and `ar` on `PATH`.
 fn find_archiver(compiler: &CCompiler) -> Result<String, u8> {
+  // MSVC's own librarian, next to `cl` (`lib.exe`).
+  if compiler.cl {
+    return Ok(Path::new(&compiler.command).with_file_name("lib").display().to_string());
+  }
+
   if let Ok(archiver) = env::var("SAG_AR")
     && !archiver.trim().is_empty()
   {
@@ -890,7 +931,7 @@ pub fn build_library(options: &CompileOptions, outputs: &LibraryOutputs) -> Resu
     EXIT_FAILURE
   })?;
   let files = write_generated(&generated, &dir.path)?;
-  let mode: &[&str] = if options.release { &["-O2", "-DSAG_RELEASE"] } else { &["-O0", "-g"] };
+  let mode = compiler.mode(options.release);
   let windows = compiler.windows();
   let report = |failure| report_failure(failure, &compiler, &options.link);
 
@@ -902,12 +943,16 @@ pub fn build_library(options: &CompileOptions, outputs: &LibraryOutputs) -> Resu
     let _ = fs::remove_file(&path);
     let mut command = Command::new(&archiver);
 
-    command.arg("rcs").arg(&path).args(&objects);
+    if compiler.cl {
+      command.arg("/NOLOGO").arg(format!("/OUT:{}", path.display())).args(&objects);
+    } else {
+      command.arg("rcs").arg(&path).args(&objects);
+    }
 
     let output = toolchain.output(&mut command, &archiver).map_err(report)?;
 
     if !output.status.success() {
-      return Err(report(Failure::Link(String::from_utf8_lossy(&output.stderr).to_string())));
+      return Err(report(Failure::Link(toolchain.failure_text(&output))));
     }
 
     written.push(path);
@@ -918,10 +963,21 @@ pub fn build_library(options: &CompileOptions, outputs: &LibraryOutputs) -> Resu
     let objects = toolchain.objects(&files, &options.link.sources).map_err(report)?;
     let mut command = compiler.command();
 
-    command.args(mode).args(&objects).arg("-o").arg(&path);
+    if compiler.cl {
+      command.arg("/nologo").args(mode).arg("/LD").args(&objects).arg(format!("/Fe{}", path.display())).arg("/link");
+    } else {
+      command.args(mode).args(&objects).arg("-o").arg(&path);
+    }
+
     export_list(&mut command, &compiler, &dir.path, &path, import.as_deref(), &front.exports)?;
     command.args(toolchain.link_args(&options.link));
     toolchain.link(&mut command).map_err(report)?;
+
+    // The MSVC linker also writes an exports file next to the import library.
+    if let Some(import) = import.as_deref().filter(|_| compiler.cl) {
+      let _ = fs::remove_file(import.with_extension("exp"));
+    }
+
     written.push(path);
     written.extend(import);
   }
@@ -958,6 +1014,16 @@ fn export_list(command: &mut Command, compiler: &CCompiler, dir: &Path, library:
   if let Err(error) = fs::write(&file, text) {
     eprintln!("error: cannot write `{}`: {error}", file.display());
     return Err(EXIT_FAILURE);
+  }
+
+  if compiler.cl {
+    command.arg(format!("/DEF:{}", file.display()));
+
+    if let Some(import) = import {
+      command.arg(format!("/IMPLIB:{}", import.display()));
+    }
+
+    return Ok(());
   }
 
   command.arg("-shared");
@@ -1008,6 +1074,8 @@ struct CCompiler {
   target: String,
   /// Whether the program was compiled with sanitizers.
   sanitized: bool,
+  /// MSVC's `cl`, whose options differ from clang's and gcc's (docs/adr/0044-c-toolchains.md).
+  cl: bool,
 }
 
 impl CCompiler {
@@ -1032,9 +1100,20 @@ impl CCompiler {
     self.target.contains("apple") || self.target.contains("darwin")
   }
 
-  /// MinGW toolchains ship no sanitizer runtime (docs/adr/0018-windows-c-toolchain.md).
+  /// MinGW toolchains ship no sanitizer runtime (docs/adr/0018-windows-c-toolchain.md), and MSVC
+  /// has no UndefinedBehaviorSanitizer.
   fn supports_sanitizers(&self) -> bool {
-    !self.mingw()
+    !self.mingw() && !self.cl
+  }
+
+  /// The options of a debug or release build.
+  fn mode(&self, release: bool) -> &'static [&'static str] {
+    match (self.cl, release) {
+      (true, true) => &["/O2", "/DSAG_RELEASE"],
+      (true, false) => &["/Od", "/Z7"],
+      (false, true) => &["-O2", "-DSAG_RELEASE"],
+      (false, false) => &["-O0", "-g"],
+    }
   }
 
   /// The directory of the sanitizer runtime DLLs, which a sanitized program needs on `PATH` on
@@ -1057,6 +1136,10 @@ fn find_c_compiler(explicit: Option<&str>) -> Result<CCompiler, u8> {
     None => vec!["clang".to_string(), "gcc".to_string()],
   };
   for command in candidates {
+    if is_cl(&command) {
+      return msvc_compiler(command);
+    }
+
     let Ok(output) = Command::new(&command).arg("-dumpmachine").stdin(Stdio::null()).output() else {
       continue;
     };
@@ -1070,13 +1153,35 @@ fn find_c_compiler(explicit: Option<&str>) -> Result<CCompiler, u8> {
          set SAG_CC to an LLVM clang targeting `x86_64-pc-windows-msvc` (docs/adr/0018-windows-c-toolchain.md)"
       );
     }
-    return Ok(CCompiler { command, args: Vec::new(), target, sanitized: false });
+    return Ok(CCompiler { command, args: Vec::new(), target, sanitized: false, cl: false });
   }
   match configured {
     Some(command) => eprintln!("error: cannot run the C compiler `{command}` (from --cc or SAG_CC)"),
     None => eprintln!("error: no C compiler found; Sagitario needs `clang` (or `gcc`) on PATH\n{}", install_hint()),
   }
   Err(EXIT_FAILURE)
+}
+
+/// Whether `command` is MSVC's `cl`, which has no `-dumpmachine` and is recognized by its name.
+fn is_cl(command: &str) -> bool {
+  Path::new(command).file_stem().is_some_and(|stem| stem.eq_ignore_ascii_case("cl"))
+}
+
+/// MSVC's `cl`, which finds its headers and libraries through the variables a Developer Command
+/// Prompt sets (`INCLUDE`, `LIB`).
+fn msvc_compiler(command: String) -> Result<CCompiler, u8> {
+  if env::var_os("INCLUDE").is_none_or(|include| include.is_empty()) {
+    eprintln!("error: `{command}` needs the environment of a Developer Command Prompt for Visual Studio (`INCLUDE` is not set)");
+    eprintln!("note: run `vcvars64.bat` from the Visual Studio installation first, or open a Developer Command Prompt");
+    return Err(EXIT_FAILURE);
+  }
+
+  if Command::new(&command).stdin(Stdio::null()).output().is_err() {
+    eprintln!("error: cannot run the C compiler `{command}` (from --cc or SAG_CC)");
+    return Err(EXIT_FAILURE);
+  }
+
+  Ok(CCompiler { command, args: Vec::new(), target: format!("{}-pc-windows-msvc", env::consts::ARCH), sanitized: false, cl: true })
 }
 
 fn install_hint() -> &'static str {

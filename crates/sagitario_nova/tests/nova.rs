@@ -449,11 +449,38 @@ fn c_compiler() -> String {
   if works("clang") { "clang".to_string() } else { "gcc".to_string() }
 }
 
+/// Whether the C compiler is MSVC's `cl`, which `sag` recognizes by its name.
+fn is_cl(compiler: &str) -> bool {
+  Path::new(compiler).file_stem().is_some_and(|stem| stem.eq_ignore_ascii_case("cl"))
+}
+
 /// The target triple of the C compiler.
 fn c_target(compiler: &str) -> io::Result<String> {
+  if is_cl(compiler) {
+    return Ok(format!("{}-pc-windows-msvc", std::env::consts::ARCH));
+  }
+
   let output = Command::new(compiler).arg("-dumpmachine").output()?;
 
   Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Compiles the C program `source` in `dir` into `executable`, linked with `libraries`.
+fn compile_c_program(compiler: &str, dir: &Path, source: &str, libraries: &[String], executable: &str) -> io::Result<Output> {
+  let mut command = Command::new(compiler);
+
+  if is_cl(compiler) {
+    command.args(["/nologo", "/std:c11", source]).args(libraries).arg(format!("/Fe{executable}"));
+  } else {
+    command.args(["-std=c11", source]).args(libraries).arg("-o").arg(executable);
+  }
+
+  // `cl` prints its errors to stdout.
+  let mut output = command.current_dir(dir).output()?;
+
+  output.stderr.splice(0..0, output.stdout.iter().copied());
+
+  Ok(output)
 }
 
 const LIBRARY_SOURCE: &str = "use std::ffi::c_int;
@@ -542,14 +569,16 @@ fn builds_a_library_that_c_programs_use() -> io::Result<()> {
   fs::write(target.join("host.c"), HOST_SOURCE)?;
 
   // The runtime uses libm outside Windows; the dynamic library finds its own.
-  let libm: &[&str] = if windows { &[] } else { &["-lm"] };
+  let libm = if windows { None } else { Some("-lm".to_string()) };
   let dynamic: Vec<String> =
     if windows { vec![import_lib.to_string()] } else { vec!["-L.".to_string(), "-lgeo".to_string(), format!("-Wl,-rpath,{}", target.display())] };
 
-  for (exe, libraries) in [("host_static", vec![static_lib.to_string()]), ("host_dynamic", dynamic)] {
+  for (exe, mut libraries) in [("host_static", vec![static_lib.to_string()]), ("host_dynamic", dynamic)] {
     let executable = exe_name(exe);
-    let compile =
-      Command::new(&compiler).args(["-std=c11", "host.c"]).args(&libraries).args(libm).arg("-o").arg(&executable).current_dir(&target).output()?;
+
+    libraries.extend(libm.clone());
+
+    let compile = compile_c_program(&compiler, &target, "host.c", &libraries, &executable)?;
 
     assert!(compile.status.success(), "{exe}: {}", String::from_utf8_lossy(&compile.stderr));
 
@@ -767,6 +796,131 @@ fn builds_libraries_for_ios_on_macos_only() -> io::Result<()> {
   fs::write(geo.join("Nova.toml"), format!("{}\n[library]\noutputs = [\"static\", \"dynamic\"]\n", manifest("geo", &[])))?;
   assert_success(&nova(&geo, &["build", "--target", "aarch64-apple-ios-sim"])?);
   assert!(geo.join("target").join("aarch64-apple-ios-sim").join("debug").join("libgeo.dylib").is_file());
+
+  Ok(())
+}
+
+/// Copies the directory `from` into `to`, recursively.
+fn copy_dir(from: &Path, to: &Path) -> io::Result<()> {
+  fs::create_dir_all(to)?;
+
+  for entry in fs::read_dir(from)? {
+    let entry = entry?;
+    let target = to.join(entry.file_name());
+
+    if entry.file_type()?.is_dir() { copy_dir(&entry.path(), &target)? } else { fs::copy(entry.path(), target).map(|_| ())? }
+  }
+
+  Ok(())
+}
+
+/// The F3 acceptance program (docs/roadmap.md): `tests/acceptance/f3/` holds `wc`, a small `wc`
+/// built as a package, which depends on the library package `textcount`, and a C program using
+/// that library.
+#[test]
+fn f3_acceptance() -> io::Result<()> {
+  let temp = TempDir::new()?;
+  let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join("tests").join("acceptance").join("f3");
+
+  copy_dir(&root, &temp.path)?;
+
+  let (wc, textcount) = (temp.path.join("wc"), temp.path.join("textcount"));
+
+  fs::write(wc.join("a.txt"), "uno dos\ntres\n")?;
+  fs::write(wc.join("b.txt"), "cuatro cinco seis\n")?;
+
+  // Files, with sanitizers like the other end-to-end tests.
+  let sanitize = std::env::var("SAG_TEST_SANITIZE").map_or(true, |value| value != "0");
+  let mut args = vec!["run"];
+
+  if sanitize {
+    args.push("--sanitize");
+  }
+
+  let files = nova(&wc, &[args.as_slice(), &["--", "a.txt", "b.txt"]].concat())?;
+
+  assert_success(&files);
+  assert_eq!(stdout(&files), "      2       3      13 a.txt\n      1       3      18 b.txt\n      3       6      31 total\n");
+
+  // Stdin.
+  let mut child = Command::new(env!("CARGO_BIN_EXE_nova"))
+    .args(&args)
+    .current_dir(&wc)
+    .stdin(std::process::Stdio::piped())
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::piped())
+    .spawn()?;
+
+  if let Some(mut input) = child.stdin.take() {
+    io::Write::write_all(&mut input, "hola mundo\nadiós\n".as_bytes())?;
+  }
+
+  let piped = child.wait_with_output()?;
+
+  assert_success(&piped);
+  assert_eq!(stdout(&piped), "      2       3      18\n");
+
+  // A missing file is reported, and the others are still counted.
+  let missing = nova(&wc, &[args.as_slice(), &["--", "a.txt", "missing.txt"]].concat())?;
+
+  assert_eq!(missing.status.code(), Some(1), "{}", stderr(&missing));
+  assert!(stderr(&missing).contains("wc: missing.txt:"), "{}", stderr(&missing));
+  assert!(stdout(&missing).contains(" a.txt\n"), "{}", stdout(&missing));
+
+  // The library, from C: linked statically and dynamically, compiled with warnings as errors.
+  assert_success(&nova(&textcount, &["build"])?);
+
+  let target = textcount.join("target").join("debug");
+  let header = fs::read_to_string(target.join("textcount.h"))?;
+
+  assert!(header.contains("uint64_t textcount_words(const char *text);"), "{header}");
+  fs::copy(textcount.join("..").join("c").join("main.c"), target.join("main.c"))?;
+
+  let compiler = c_compiler();
+  let target_triple = c_target(&compiler)?;
+  let windows = target_triple.contains("windows") || target_triple.contains("mingw");
+  let mingw = target_triple.contains("windows-gnu") || target_triple.contains("mingw");
+  let (static_lib, import_lib) = match (windows, mingw) {
+    (true, false) => ("textcount.lib", "textcount.dll.lib"),
+    (true, true) => ("libtextcount.a", "libtextcount.dll.a"),
+    _ => ("libtextcount.a", ""),
+  };
+  let werror = if is_cl(&compiler) { "/WX" } else { "-Werror" };
+  let libm: Vec<String> = if windows { Vec::new() } else { vec!["-lm".to_string()] };
+  let dynamic: Vec<String> = if windows {
+    vec![import_lib.to_string()]
+  } else {
+    vec!["-L.".to_string(), "-ltextcount".to_string(), format!("-Wl,-rpath,{}", target.display())]
+  };
+
+  for (name, libraries) in [("c_static", vec![static_lib.to_string()]), ("c_dynamic", dynamic)] {
+    let executable = exe_name(name);
+    let libraries: Vec<String> = [vec![werror.to_string()], libraries, libm.clone()].concat();
+    let compile = compile_c_program(&compiler, &target, "main.c", &libraries, &executable)?;
+
+    assert!(compile.status.success(), "{name}: {}", stderr(&compile));
+
+    let run = Command::new(target.join(&executable)).current_dir(&target).output()?;
+
+    assert_eq!(stdout(&run), "2 3\n", "{name}: {}", stderr(&run));
+  }
+
+  // Android: the tool and the library. iOS runs no standalone programs: the library is checked
+  // for it everywhere, and built on macOS.
+  if ndk_available() {
+    for (target, machine) in [("aarch64-linux-android", 0xB7), ("armv7-linux-androideabi", 0x28), ("x86_64-linux-android", 0x3E)] {
+      assert_success(&nova(&wc, &["build", "--target", target])?);
+      assert_success(&nova(&textcount, &["build", "--target", target])?);
+      assert_eq!(elf_kind(&wc.join("target").join(target).join("debug").join("wc"))?.map(|kind| kind.1), Some(machine), "{target}");
+    }
+  }
+
+  assert_success(&nova(&textcount, &["check", "--target", "aarch64-apple-ios"])?);
+
+  if cfg!(target_os = "macos") {
+    assert_success(&nova(&textcount, &["build", "--target", "aarch64-apple-ios"])?);
+    assert!(textcount.join("target").join("aarch64-apple-ios").join("debug").join("libtextcount.a").is_file());
+  }
 
   Ok(())
 }

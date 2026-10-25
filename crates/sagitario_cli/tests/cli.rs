@@ -61,3 +61,14 @@ fn targets_lists_the_cross_compilation_targets() {
     assert!(text.contains(target), "{text}");
   }
 }
+
+#[test]
+fn cl_needs_a_developer_command_prompt() -> io::Result<()> {
+  let output =
+    Command::new(env!("CARGO_BIN_EXE_sag")).args(["run", "--cc", "cl", "../../tests/run-pass/control_flow.sag"]).env_remove("INCLUDE").output()?;
+
+  assert_eq!(output.status.code(), Some(1));
+  assert!(String::from_utf8_lossy(&output.stderr).contains("Developer Command Prompt"), "{}", String::from_utf8_lossy(&output.stderr));
+
+  Ok(())
+}

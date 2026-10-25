@@ -1338,6 +1338,10 @@ impl<'a> Generator<'a> {
       Rvalue::Unary { op: UnaryOp::Neg, operand: value, .. } => format!("(-{})", self.operand(value)),
       // Dereferences are places (`Projection::Deref`); this form is not produced.
       Rvalue::Unary { op: UnaryOp::Deref, operand: value, .. } => format!("(*{})", self.operand(value)),
+      // MSVC rejects dividing constants by zero, which C11 with IEEE 754 defines.
+      Rvalue::Binary { op: BinaryOp::Div, ty: Type::Float(float), lhs: lhs @ Operand::Const(_), rhs: rhs @ Operand::Const(_) } => {
+        format!("sag_div_{}({}, {})", float.name(), self.operand(lhs), self.operand(rhs))
+      }
       Rvalue::Binary { op, ty, lhs, rhs } => binary(*op, ty, &self.operand(lhs), &self.operand(rhs)),
       Rvalue::Cast { from, to, operand: value } => match (from, to) {
         (Type::Ptr { .. }, Type::Ptr { .. }) => format!("(({}){})", self.c_type(to), self.operand(value)),

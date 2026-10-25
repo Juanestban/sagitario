@@ -1,0 +1,64 @@
+// A small `wc`: the lines, words and bytes of each file, then their total, or of stdin when no
+// file is given. The F3 acceptance program (docs/roadmap.md).
+use std::env;
+use std::fs;
+use std::io;
+use std::process;
+use textcount::Counts;
+
+/// `n` right-aligned in 7 columns, as `wc` prints it.
+fn column(n: u64) -> String {
+  const text = `${n}`;
+
+  if text.len() < 7 { " ".repeat(7 - text.len()) + text } else { text }
+}
+
+fn report(counts: Counts, name: String) {
+  const line = `${column(counts.lines)} ${column(counts.words)} ${column(counts.bytes)}`;
+
+  if name.is_empty() { println(line) } else { println(`${line} ${name}`) }
+}
+
+fn main() {
+  const args = env::args();
+
+  if args.len() == 1 {
+    match io::read_to_string() {
+      Ok(text) => report(textcount::count(text), ""),
+      Err(error) => {
+        eprintln(`wc: stdin: ${error.message()}`);
+        process::exit(1);
+      }
+    }
+
+    return;
+  }
+
+  var total = Counts { lines: 0, words: 0, bytes: 0 };
+  var failed = false;
+
+  for i in 1..args.len() {
+    const name = args[i];
+
+    match fs::read_to_string(name) {
+      Ok(text) => {
+        const counts = textcount::count(text);
+
+        report(counts, name);
+        total = total.plus(counts);
+      }
+      Err(error) => {
+        eprintln(`wc: ${name}: ${error.message()}`);
+        failed = true;
+      }
+    }
+  }
+
+  if args.len() > 2 {
+    report(total, "total");
+  }
+
+  if failed {
+    process::exit(1);
+  }
+}

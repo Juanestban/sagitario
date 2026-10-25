@@ -162,7 +162,7 @@ double d = geo_distance2(a, b);   /* cc main.c libgeo.a -lm */
   ([FFI](spec/10-ffi.md#exporting-functions)); a dynamic library exports nothing else, not even
   the runtime's functions. A library without exported functions builds with a warning.
 - The header declares the exported functions with fixed-width C types (`int32_t` for `i32` and
-  `c_int`, `double` for `f64`), defines the `@repr(C)` structs they use, and copies the `///`
+  `c_int`, `double` for `f64`; `c_char` is `char`), defines the `@repr(C)` structs they use, and copies the `///`
   comments. It works from C and C++.
 - The library contains the runtime. Programs linking the static library on Linux also need
   `-lm`.
