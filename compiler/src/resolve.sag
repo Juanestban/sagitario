@@ -489,8 +489,69 @@ pub class Resolution {
     }
   }
 
+  /// The initializer of a class: its function `new` (docs/spec/04-classes.md).
+  pub fn initializer(self, package: Package, id: u32) -> Option<u32> {
+    const function = self.type_function(package, TypeItem::Class(id), "new")?;
+
+    if self.is_initializer(package, function) { Some(function) } else { None }
+  }
+
+  /// Whether a function is a method: it takes `self` and is not an initializer.
+  pub fn is_method(self, package: Package, id: u32) -> bool {
+    const takes_self = match self.fn_decl(package, id) {
+      Some(decl) => decl.self_param.is_some(),
+      None => false,
+    };
+
+    takes_self && !self.is_initializer(package, id)
+  }
+
   pub fn module(self, id: u32) -> Option<ModuleInfo> {
     self.modules.get(id as usize)
+  }
+
+  /// An item of the prelude module by name, public or not.
+  pub fn prelude_item(self, name: String) -> Option<ItemRef> {
+    const declared = self.module(self.prelude?)?.items.get(name)?;
+
+    Some(declared.item)
+  }
+
+  /// A type of the prelude module by name.
+  pub fn prelude_type(self, name: String) -> Option<TypeItem> {
+    match self.prelude_item(name) {
+      Some(ItemRef::Type(item)) => Some(item),
+      _ => None,
+    }
+  }
+
+  /// Whether the module at this index of `Package::modules` belongs to the standard library.
+  pub fn is_std_source(self, source: usize) -> bool {
+    for module in self.modules {
+      if module.in_std {
+        if let Some(found) = module.source {
+          if found == source {
+            return true;
+          }
+        }
+      }
+    }
+
+    false
+  }
+
+  /// Whether a C function is a function of the runtime, which only the standard library may
+  /// declare: its name starts with `sag_`.
+  pub fn is_runtime_extern(self, package: Package, id: u32) -> bool {
+    const in_std = match self.externs.get(id as usize) {
+      Some(info) => self.is_std_source(info.module),
+      None => false,
+    };
+
+    in_std && match self.extern_decl(package, id) {
+      Some(decl) => decl.name.name.starts_with("sag_"),
+      None => false,
+    }
   }
 
   /// The root module of the package of `module`: what `pkg` names there.

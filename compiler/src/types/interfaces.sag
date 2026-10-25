@@ -1,0 +1,634 @@
+//! Interfaces (docs/spec/05-interfaces-generics.md, ADR-0031): their parents, fields and methods,
+//! the types that implement them and interfaces used as types. The port of the declarations part
+//! of `sagitario_types::interfaces`.
+
+use pkg::ast::{Ident, TypeExpr};
+use pkg::diagnostics::Diagnostic;
+use pkg::diagnostics::codes;
+use pkg::resolve::{ParamOwner, TypeItem};
+use pkg::types::{Checker, FieldDef, FnSig, InterfaceDef, NamedRef, SpanInterface, Subst, Type, TypeKind};
+use pkg::types;
+use pkg::types::generic;
+use pkg::types::inheritance;
+use pkg::types::send;
+use pkg::types::typed::{ErrorTypes, ImplEntry, item_key, owner_key};
+
+/// Resolves the parents, fields and methods of every interface.
+pub fn interface_defs(cx: Checker) {
+  for index in 0..cx.resolution.interfaces.len() {
+    const id = index as u32;
+    const decl = match cx.resolution.interface_decl(cx.package, id) {
+      Some(decl) => decl,
+      None => continue,
+    };
+
+    cx.owner = Some(TypeItem::Interface(id));
+
+    const parents: List<NamedRef> = new List();
+
+    for ty in decl.parents {
+      if let Some(parent) = supertype_interface(cx, ty) {
+        parents.push(parent);
+      }
+    }
+
+    const fields: List<FieldDef> = new List();
+
+    for field in decl.fields {
+      if field.is_weak {
+        cx.error(codes::INVALID_WEAK, field.name.span, "only class fields can be `weak`");
+      }
+
+      fields.push(FieldDef { name: field.name.name, ty: cx.type_expr(field.ty), public: true, mutable: types::is_var(field), is_weak: false, span: field.span });
+    }
+
+    const methods = cx.resolution.interfaces[index].functions;
+
+    cx.typed.interfaces.push(new InterfaceDef(decl.name.name, parents, fields, methods));
+  }
+
+  cx.owner = None;
+  check_interface_cycles(cx);
+
+  if let Some(error) = cx.resolution.error_interface {
+    if cx.resolution.prelude.is_some() {
+      if let Some(message_error) = prelude_class(cx, "MessageError") {
+        cx.typed.error_types = Some(ErrorTypes { interface_id: error, class_id: message_error });
+      }
+    }
+  }
+}
+
+/// A class of the prelude module, by name.
+fn prelude_class(cx: Checker, name: String) -> Option<u32> {
+  const prelude = cx.resolution.prelude?;
+  const source = cx.resolution.module(prelude)?.source;
+
+  for index in 0..cx.resolution.classes.len() {
+    const id = index as u32;
+    const in_prelude = match source {
+      Some(module) => cx.resolution.classes[index].module == module,
+      None => false,
+    };
+
+    if in_prelude {
+      if let Some(decl) = cx.resolution.class_decl(cx.package, id) {
+        if decl.name.name == name {
+          return Some(id);
+        }
+      }
+    }
+  }
+
+  None
+}
+
+/// The interface named after `extends` in an interface, or after `impl`, with its type
+/// arguments.
+fn supertype_interface(cx: Checker, ty: TypeExpr) -> Option<NamedRef> {
+  // Implementing an interface does not use it as a type, even if it mentions `Self`.
+  const mark = cx.interface_types.len();
+  const named = cx.type_expr(ty);
+
+  while cx.interface_types.len() > mark {
+    cx.interface_types.pop();
+  }
+
+  match named.kind {
+    TypeKind::Interface(interface_ref) => {
+      if send::is_send_interface(cx, interface_ref.id) {
+        cx.diagnostics.push(
+          Diagnostic::error(codes::INVALID_IMPL, ty.span, "`Send` cannot be implemented or extended")
+            .with_note("the compiler infers which types are `Send` from what they hold"),
+        );
+
+        return None;
+      }
+
+      Some(interface_ref)
+    }
+    TypeKind::Error => None,
+    _ => {
+      cx.diagnostics.push(
+        Diagnostic::error(codes::INVALID_IMPL, ty.span, "`" + types::text(named) + "` is not an interface")
+          .with_note("`impl` and the `extends` of an interface name interfaces; a class extends its parent class with `extends`"),
+      );
+
+      None
+    }
+  }
+}
+
+/// Reports interfaces that extend themselves and removes their parents.
+fn check_interface_cycles(cx: Checker) {
+  const cyclic: List<u32> = new List();
+
+  for index in 0..cx.typed.interfaces.len() {
+    const id = index as u32;
+
+    for parent in cx.typed.interfaces[index].parents {
+      if !cyclic.contains(id) && cx.typed.interface_ancestors(parent.id).contains(id) {
+        cyclic.push(id);
+      }
+    }
+  }
+
+  for id in cyclic {
+    if let Some(decl) = cx.resolution.interface_decl(cx.package, id) {
+      cx.error(codes::INVALID_IMPL, decl.name.span, "the interface `" + decl.name.name + "` extends itself");
+    }
+
+    if let Some(def) = cx.typed.interface_def(id) {
+      def.parents = new List();
+    }
+  }
+}
+
+fn sig_mentions_self(sig: FnSig) -> bool {
+  for param in sig.params {
+    if types::has_self(param) {
+      return true;
+    }
+  }
+
+  types::has_self(sig.ret)
+}
+
+/// Once every signature is known: which interfaces mention `Self`, where interfaces are used,
+/// and whether each type implements its interfaces.
+pub fn check_interfaces(cx: Checker) {
+  for def in cx.typed.interfaces {
+    var mentions_self = false;
+
+    for field in def.fields {
+      if types::has_self(field.ty) {
+        mentions_self = true;
+      }
+    }
+
+    // Methods with type parameters cannot be called through a value either: their instances are
+    // not known.
+    for method in def.methods {
+      if let Some(sig) = cx.typed.sig(method) {
+        if sig_mentions_self(sig) {
+          mentions_self = true;
+        }
+      }
+
+      if cx.typed.generics.contains_key(owner_key(ParamOwner::Fn(method))) {
+        mentions_self = true;
+      }
+    }
+
+    def.uses_self = mentions_self;
+  }
+
+  // An interface whose ancestor mentions `Self` mentions it too.
+  for index in 0..cx.typed.interfaces.len() {
+    var uses_self = false;
+
+    for ancestor in cx.typed.interface_ancestors(index as u32) {
+      if let Some(def) = cx.typed.interface_def(ancestor) {
+        if def.uses_self {
+          uses_self = true;
+        }
+      }
+    }
+
+    cx.typed.interfaces[index].uses_self = uses_self;
+  }
+
+  const used = cx.interface_types;
+
+  cx.interface_types = new List<SpanInterface>();
+
+  for entry in used {
+    if send::is_send_interface(cx, entry.id) {
+      send::send_used_as_type(cx, entry.span);
+    } else if let Some(def) = cx.typed.interface_def(entry.id) {
+      if def.uses_self {
+        cx.diagnostics.push(
+          Diagnostic::error(codes::INVALID_IMPL, entry.span, "the interface `" + def.name + "` cannot be used as a type")
+            .with_note("it mentions `Self` or has methods with type parameters, which a value of the interface could not resolve")
+            .with_help("use it as the bound of a type parameter instead"),
+        );
+      }
+    }
+  }
+
+  check_interface_members(cx);
+  collect_impls(cx);
+  check_implementations(cx);
+  generic::check_type_bounds(cx);
+}
+
+/// The methods of interfaces take `self` and have unique names among their ancestors.
+fn check_interface_members(cx: Checker) {
+  for index in 0..cx.typed.interfaces.len() {
+    const id = index as u32;
+    const decl = match cx.resolution.interface_decl(cx.package, id) {
+      Some(decl) => decl,
+      None => continue,
+    };
+    const methods = cx.typed.interfaces[index].methods;
+    var position = 0usize;
+
+    while position < methods.len() && position < decl.functions.len() {
+      const method = methods[position];
+      const function = decl.functions[position];
+
+      position += 1;
+
+      if function.self_param.is_none() {
+        cx.error(codes::INVALID_IMPL, function.name.span, "the interface method `" + function.name.name + "` must take `self`");
+      }
+
+      // A method reached through two parents is the same method; two with one name are not.
+      for parent in cx.typed.interfaces[index].parents {
+        if let Some(found) = cx.typed.interface_method(parent.id, function.name.name, cx.resolution, cx.package) {
+          if found.method != method {
+            const owner = match cx.typed.interface_def(found.interface_id) {
+              Some(def) => def.name,
+              None => "",
+            };
+
+            cx.error(codes::INVALID_IMPL, function.name.span, "`" + function.name.name + "` is already a method of the interface `" + owner + "`");
+          }
+        }
+      }
+    }
+
+    for field in decl.fields {
+      var inherited = false;
+
+      for parent in cx.typed.interfaces[index].parents {
+        if !inherited && cx.typed.interface_field(parent.id, field.name.name).is_some() {
+          inherited = true;
+        }
+      }
+
+      if inherited {
+        cx.error(codes::INVALID_IMPL, field.name.span, "`" + field.name.name + "` is already a field of a parent interface");
+      }
+    }
+  }
+}
+
+/// The types a struct, enum or class names after `impl`.
+struct Declared {
+  pub item: TypeItem;
+  pub types: List<TypeExpr>;
+}
+
+/// The interfaces each struct, enum and class names after `impl`.
+fn collect_impls(cx: Checker) {
+  const found: List<Declared> = new List();
+
+  for index in 0..cx.resolution.structs.len() {
+    if let Some(decl) = cx.resolution.struct_decl(cx.package, index as u32) {
+      found.push(Declared { item: TypeItem::Struct(index as u32), types: decl.impls });
+    }
+  }
+
+  for index in 0..cx.resolution.enums.len() {
+    if let Some(decl) = cx.resolution.enum_decl(cx.package, index as u32) {
+      found.push(Declared { item: TypeItem::Enum(index as u32), types: decl.impls });
+    }
+  }
+
+  for index in 0..cx.resolution.classes.len() {
+    if let Some(decl) = cx.resolution.class_decl(cx.package, index as u32) {
+      found.push(Declared { item: TypeItem::Class(index as u32), types: decl.impls });
+    }
+  }
+
+  for entry in found {
+    cx.owner = Some(entry.item);
+
+    const implemented: List<NamedRef> = new List();
+
+    for ty in entry.types {
+      if let Some(interface_ref) = supertype_interface(cx, ty) {
+        implemented.push(interface_ref);
+      }
+    }
+
+    if !implemented.is_empty() {
+      cx.typed.impls.insert(item_key(entry.item), ImplEntry { item: entry.item, interfaces: implemented });
+    }
+  }
+
+  cx.owner = None;
+}
+
+/// Every type implements the fields and methods of its interfaces.
+fn check_implementations(cx: Checker) {
+  const items: List<TypeItem> = new List();
+
+  for index in 0..cx.resolution.structs.len() {
+    items.push(TypeItem::Struct(index as u32));
+  }
+
+  for index in 0..cx.resolution.enums.len() {
+    items.push(TypeItem::Enum(index as u32));
+  }
+
+  for index in 0..cx.resolution.classes.len() {
+    items.push(TypeItem::Class(index as u32));
+  }
+
+  for item in items {
+    const item_ty = cx.type_ref(item);
+    const implemented = cx.typed.implemented_refs(item_ty);
+
+    if implemented.is_empty() {
+      continue;
+    }
+
+    // A class checks what it declares itself; what it inherits was checked in its ancestors,
+    // except that a concrete class must end up with every required method.
+    const own: List<NamedRef> = new List();
+
+    if let Some(entry) = cx.typed.impls.get(item_key(item)) {
+      for interface_ref in entry.interfaces {
+        for ancestor in cx.typed.interface_ancestor_refs(interface_ref) {
+          own.push(ancestor);
+        }
+      }
+    }
+
+    for interface_ref in implemented {
+      const is_own = types::contains_ref(own, interface_ref);
+
+      if is_own {
+        check_fields(cx, item, interface_ref);
+      }
+
+      check_methods(cx, item, interface_ref, is_own);
+    }
+  }
+}
+
+/// Replaces the parameters of an interface (and `Self`) in its members for a type implementing
+/// it.
+fn interface_subst(interface_ref: NamedRef, self_ty: Type) -> Subst {
+  Subst::of(ParamOwner::Item(TypeItem::Interface(interface_ref.id)), interface_ref.args).with_self(self_ty)
+}
+
+fn type_name_of(cx: Checker, item: TypeItem) -> Option<Ident> {
+  match item {
+    TypeItem::Struct(id) => match cx.resolution.struct_decl(cx.package, id) {
+      Some(decl) => Some(decl.name),
+      None => None,
+    },
+    TypeItem::Enum(id) => match cx.resolution.enum_decl(cx.package, id) {
+      Some(decl) => Some(decl.name),
+      None => None,
+    },
+    TypeItem::Class(id) => match cx.resolution.class_decl(cx.package, id) {
+      Some(decl) => Some(decl.name),
+      None => None,
+    },
+    TypeItem::Interface(id) => match cx.resolution.interface_decl(cx.package, id) {
+      Some(decl) => Some(decl.name),
+      None => None,
+    },
+  }
+}
+
+/// The type has a public field for each field of the interface, of the same type, and `var`
+/// when the interface's is.
+fn check_fields(cx: Checker, item: TypeItem, interface_ref: NamedRef) {
+  const type_ident = match type_name_of(cx, item) {
+    Some(name) => name,
+    None => return,
+  };
+  const type_name = type_ident.name;
+  const span = type_ident.span;
+  const fields = match cx.typed.interface_def(interface_ref.id) {
+    Some(def) => def.fields,
+    None => new List(),
+  };
+  const interface_name = types::text(types::interface_type(interface_ref));
+  const self_ty = cx.type_ref(item);
+  const subst = interface_subst(interface_ref, self_ty);
+
+  for field in fields {
+    var found: Option<FieldDef> = None;
+
+    match item {
+      TypeItem::Struct(id) => {
+        if let Some(def) = cx.typed.struct_def(id) {
+          for own in def.fields {
+            if found.is_none() && own.name == field.name {
+              found = Some(own);
+            }
+          }
+        }
+      }
+      TypeItem::Class(id) => {
+        if let TypeKind::Class(class_ref) = self_ty.kind {
+          if let Some(own) = cx.typed.class_field(id, field.name) {
+            const ty = match cx.typed.class_field_type(class_ref, field.name) {
+              Some(found_type) => found_type.ty,
+              None => own.field.ty,
+            };
+
+            found = Some(FieldDef { name: own.field.name, ty: ty, public: own.field.public, mutable: own.field.mutable, is_weak: own.field.is_weak, span: own.field.span });
+          }
+        }
+      }
+      _ => {}
+    }
+
+    const expected = types::substitute(field.ty, subst);
+    var problem: Option<String> = None;
+    var at = span;
+
+    match found {
+      None => {
+        problem = Some("`" + type_name + "` has no field `" + field.name + "`, which the interface `" + interface_name + "` requires");
+      }
+      Some(own) => {
+        at = own.span;
+
+        if !own.public {
+          problem = Some("the field `" + field.name + "` of `" + type_name + "` must be `pub` to implement `" + interface_name + "`");
+        } else if !types::same_type(own.ty, expected) {
+          problem = Some("the field `" + field.name + "` of `" + type_name + "` must have type `" + types::text(expected) + "`, as in `" + interface_name + "`");
+        } else if field.mutable && !own.mutable {
+          problem = Some("the field `" + field.name + "` of `" + type_name + "` must be `var`: the interface `" + interface_name + "` declares it `var`");
+        } else if own.is_weak {
+          problem = Some("the field `" + field.name + "` of `" + type_name + "` cannot be `weak` to implement `" + interface_name + "`");
+        }
+      }
+    }
+
+    if let Some(message) = problem {
+      cx.diagnostics.push(Diagnostic::error(codes::INVALID_IMPL, at, message).with_label(field.span, "required here"));
+    }
+  }
+}
+
+/// The type's implementation of each method of the interface: public, with the same signature,
+/// or the interface's default. `own` is set when the type names the interface itself.
+fn check_methods(cx: Checker, item: TypeItem, interface_ref: NamedRef, own: bool) {
+  const type_ident = match type_name_of(cx, item) {
+    Some(name) => name,
+    None => return,
+  };
+  const type_name = type_ident.name;
+  const span = type_ident.span;
+  const methods = match cx.typed.interface_def(interface_ref.id) {
+    Some(def) => def.methods,
+    None => new List(),
+  };
+  const interface_name = types::text(types::interface_type(interface_ref));
+  const self_ty = cx.type_ref(item);
+  const subst = interface_subst(interface_ref, self_ty);
+  const is_abstract = match item {
+    TypeItem::Class(id) => match cx.typed.class_def(id) {
+      Some(def) => def.is_abstract,
+      None => false,
+    },
+    _ => false,
+  };
+  const is_class = match item {
+    TypeItem::Class(_) => true,
+    _ => false,
+  };
+
+  for method in methods {
+    const decl = match cx.resolution.fn_decl(cx.package, method) {
+      Some(decl) => decl,
+      None => continue,
+    };
+    const name = decl.name.name;
+    const candidate = match item {
+      TypeItem::Class(id) => inheritance::class_method(cx, id, name),
+      _ => cx.resolution.type_function(cx.package, item, name),
+    };
+    var found: Option<u32> = None;
+
+    if let Some(function) = candidate {
+      if cx.resolution.is_method(cx.package, function) {
+        found = Some(function);
+      }
+    }
+
+    const function = match found {
+      Some(function) => function,
+      None => {
+        if decl.is_abstract && !is_abstract {
+          cx.diagnostics.push(
+            Diagnostic::error(codes::INVALID_IMPL, span, "`" + type_name + "` does not implement the method `" + name + "` of `" + interface_name + "`")
+              .with_label(decl.name.span, "required here")
+              .with_help("add `pub fn " + name + "(...)`"),
+          );
+        }
+
+        continue;
+      }
+    };
+
+    // Methods a class inherits were checked in the class declaring them.
+    if !own && !is_class {
+      continue;
+    }
+
+    const implementation = match cx.resolution.fn_decl(cx.package, function) {
+      Some(found_decl) => found_decl,
+      None => continue,
+    };
+    // The method's own type parameters correspond to the implementation's.
+    const own_args = cx.identity_args(ParamOwner::Fn(function));
+    const expected = match cx.typed.sig(method) {
+      Some(sig) => Some(types::substitute_sig(sig, subst.with(ParamOwner::Fn(method), own_args))),
+      None => None,
+    };
+    const actual = match cx.typed.sig(function) {
+      Some(sig) => Some(types::substitute_sig(sig, inherited_subst(cx, self_ty, function))),
+      None => None,
+    };
+    const same_generics = cx.generic_count(ParamOwner::Fn(method)) == own_args.len();
+
+    if types::is_private(implementation.visibility) {
+      cx.error(codes::INVALID_IMPL, implementation.name.span, "`" + name + "` must be `pub` to implement `" + interface_name + "`");
+    } else if let Some(expected_sig) = expected {
+      if let Some(actual_sig) = actual {
+        if !same_generics || !types::same_types(actual_sig.params, expected_sig.params) || !types::same_type(actual_sig.ret, expected_sig.ret) {
+          cx.diagnostics.push(
+            Diagnostic::error(codes::INVALID_IMPL, implementation.name.span, "`" + name + "` must have the signature declared in `" + interface_name + "`")
+              .with_label(decl.name.span, "declared here")
+              .with_note("expected `" + signature_text(name, expected_sig) + "`"),
+          );
+        }
+      }
+    }
+  }
+}
+
+/// The substitution giving the type parameters of the type declaring `function` (one of the
+/// ancestors of `self_ty`, or an interface it implements) their arguments in `self_ty`.
+pub fn inherited_subst(cx: Checker, self_ty: Type, function: u32) -> Subst {
+  match cx.resolution.owner(function) {
+    Some(TypeItem::Class(owner)) => {
+      if let TypeKind::Class(class_ref) = self_ty.kind {
+        const args = match cx.typed.class_ancestor(class_ref, owner) {
+          Some(ancestor) => ancestor.args,
+          None => new List(),
+        };
+
+        return Subst::of(ParamOwner::Item(TypeItem::Class(owner)), args);
+      }
+
+      Subst::empty()
+    }
+    Some(TypeItem::Interface(owner)) => {
+      const args = match cx.typed.implemented_ref(self_ty, owner) {
+        Some(interface_ref) => interface_ref.args,
+        None => new List(),
+      };
+
+      Subst::of(ParamOwner::Item(TypeItem::Interface(owner)), args).with_self(self_ty)
+    }
+    Some(TypeItem::Struct(owner)) => match self_ty.kind {
+      TypeKind::Struct(named) => Subst::of(ParamOwner::Item(TypeItem::Struct(owner)), named.args),
+      TypeKind::Enum(named) => Subst::of(ParamOwner::Item(TypeItem::Struct(owner)), named.args),
+      _ => Subst::empty(),
+    },
+    Some(TypeItem::Enum(owner)) => match self_ty.kind {
+      TypeKind::Struct(named) => Subst::of(ParamOwner::Item(TypeItem::Enum(owner)), named.args),
+      TypeKind::Enum(named) => Subst::of(ParamOwner::Item(TypeItem::Enum(owner)), named.args),
+      _ => Subst::empty(),
+    },
+    None => Subst::empty(),
+  }
+}
+
+/// Whether `ty` is the prelude's `Error` or implements it.
+pub fn implements_error(cx: Checker, ty: Type) -> bool {
+  const error_types = match cx.typed.error_types {
+    Some(found) => found,
+    None => return false,
+  };
+  const name = match cx.typed.interface_def(error_types.interface_id) {
+    Some(def) => def.name,
+    None => "",
+  };
+
+  cx.typed.implements(ty, NamedRef { id: error_types.interface_id, name: name, args: new List() })
+}
+
+/// `fn name(self, A) -> R`, for messages.
+fn signature_text(name: String, sig: FnSig) -> String {
+  const params = List::from(["self"]);
+
+  for param in types::texts(sig.params) {
+    params.push(param);
+  }
+
+  const ret = if types::is_unit(sig.ret) { "" } else { " -> " + types::text(sig.ret) };
+
+  "fn " + name + "(" + params.join(", ") + ")" + ret
+}

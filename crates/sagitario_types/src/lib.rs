@@ -8,6 +8,7 @@ mod classes;
 mod closures;
 mod collections;
 mod consts;
+pub mod dump;
 mod exhaustive;
 mod ffi;
 mod flow;
@@ -813,7 +814,21 @@ impl TypedModule {
   }
 }
 
+/// How far `check_until` goes (docs/adr/0053-type-checker-port-and-type-dumps.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
+  /// The definitions of types, the signatures, the constants, inheritance, interfaces and `main`.
+  Declarations,
+  /// Also the bodies of functions and the flow analysis: the whole check.
+  Bodies,
+}
+
 pub fn check(package: &Package, resolution: &Resolution, diagnostics: &mut Diagnostics) -> TypedModule {
+  check_until(package, resolution, diagnostics, Stage::Bodies)
+}
+
+/// Type checks up to and including `stage`.
+pub fn check_until(package: &Package, resolution: &Resolution, diagnostics: &mut Diagnostics, stage: Stage) -> TypedModule {
   let mut checker = Checker {
     package,
     resolution,
@@ -870,6 +885,10 @@ pub fn check(package: &Package, resolution: &Resolution, diagnostics: &mut Diagn
 
   if let Some((id, main)) = decls.iter().find(|(id, _)| Some(*id) == resolution.main) {
     checker.check_main(*id, main);
+  }
+
+  if stage == Stage::Declarations {
+    return checker.typed;
   }
 
   for (id, decl) in &decls {

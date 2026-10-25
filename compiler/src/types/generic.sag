@@ -1,0 +1,135 @@
+//! Generics (docs/spec/05-interfaces-generics.md#generics, ADR-0032): the type parameters of each
+//! generic declaration with their bounds, and the bounds of type arguments. The port of
+//! `sagitario_types::generic`; substitution itself is in `types`.
+
+use pkg::diagnostics::Diagnostic;
+use pkg::diagnostics::codes;
+use pkg::resolve::{ParamOwner, TypeItem};
+use pkg::span::Span;
+use pkg::types::{Checker, GenericDef, NamedRef, SpanType, Subst, TypeKind};
+use pkg::types;
+use pkg::types::typed::{GenericsEntry, owner_key};
+
+/// The type parameters of every generic declaration, with their bounds.
+pub fn generic_defs(cx: Checker) {
+  const owners: List<ParamOwner> = new List();
+
+  for index in 0..cx.resolution.structs.len() {
+    owners.push(ParamOwner::Item(TypeItem::Struct(index as u32)));
+  }
+
+  for index in 0..cx.resolution.enums.len() {
+    owners.push(ParamOwner::Item(TypeItem::Enum(index as u32)));
+  }
+
+  for index in 0..cx.resolution.classes.len() {
+    owners.push(ParamOwner::Item(TypeItem::Class(index as u32)));
+  }
+
+  for index in 0..cx.resolution.interfaces.len() {
+    owners.push(ParamOwner::Item(TypeItem::Interface(index as u32)));
+  }
+
+  for index in 0..cx.resolution.functions.len() {
+    owners.push(ParamOwner::Fn(index as u32));
+  }
+
+  for owner in owners {
+    const params = cx.resolution.generics(cx.package, owner);
+
+    if params.is_empty() {
+      continue;
+    }
+
+    cx.owner = match owner {
+      ParamOwner::Item(item) => Some(item),
+      ParamOwner::Fn(id) => cx.resolution.owner(id),
+    };
+
+    // Bounds are not values of the interface, so interfaces mentioning `Self` are fine here.
+    const interface_types = cx.interface_types.len();
+    const defs: List<GenericDef> = new List();
+
+    for param in params {
+      const bounds: List<NamedRef> = new List();
+
+      for bound in param.bounds {
+        const ty = cx.type_expr(bound);
+
+        match ty.kind {
+          TypeKind::Interface(interface_ref) => bounds.push(interface_ref),
+          TypeKind::Error => {}
+          _ => cx.error(codes::UNSATISFIED_BOUND, bound.span, "the bound of `" + param.name.name + "` must be an interface, not `" + types::text(ty) + "`"),
+        }
+      }
+
+      defs.push(GenericDef { name: param.name.name, bounds: bounds });
+    }
+
+    while cx.interface_types.len() > interface_types {
+      cx.interface_types.pop();
+    }
+
+    cx.typed.generics.insert(owner_key(owner), GenericsEntry { owner: owner, params: defs });
+  }
+
+  cx.owner = None;
+}
+
+/// The bounds of the type arguments written in types, once every type's interfaces are known.
+pub fn check_type_bounds(cx: Checker) {
+  const pending = cx.type_bounds;
+
+  cx.type_bounds = new List<SpanType>();
+
+  for entry in pending {
+    const subst = match entry.ty.kind {
+      TypeKind::Struct(named) => Subst::of(ParamOwner::Item(TypeItem::Struct(named.id)), named.args),
+      TypeKind::Enum(named) => Subst::of(ParamOwner::Item(TypeItem::Enum(named.id)), named.args),
+      TypeKind::Class(named) => Subst::of(ParamOwner::Item(TypeItem::Class(named.id)), named.args),
+      TypeKind::Interface(named) => Subst::of(ParamOwner::Item(TypeItem::Interface(named.id)), named.args),
+      _ => continue,
+    };
+
+    check_bounds(cx, entry.span, subst);
+  }
+}
+
+/// Reports type arguments that do not implement the bounds of their parameters.
+pub fn check_bounds(cx: Checker, span: Span, subst: Subst) {
+  for entry in subst.params {
+    const params = cx.typed.generic_params(entry.owner).unwrap_or(new List());
+    var index = 0usize;
+
+    while index < params.len() && index < entry.args.len() {
+      const param = params[index];
+      const arg = entry.args[index];
+
+      index += 1;
+
+      for bound in param.bounds {
+        const required = types::substitute_ref(bound, subst);
+        const bound_ty = types::interface_type(required);
+
+        if types::is_error(arg) || types::is_never(arg) || cx.typed.implements(arg, required) {
+          continue;
+        }
+
+        var diagnostic = Diagnostic::error(codes::UNSATISFIED_BOUND, span, "`" + types::text(arg) + "` does not implement `" + types::text(bound_ty) + "`")
+          .with_note("the type parameter `" + param.name + "` requires `" + types::text(bound_ty) + "`");
+        const is_send = match cx.typed.prelude.send {
+          Some(send) => send == required.id,
+          None => false,
+        };
+
+        if is_send {
+          if let Some(reason) = cx.typed.not_send_reason(arg) {
+            diagnostic = diagnostic.with_note(reason);
+          }
+        }
+
+        cx.diagnostics.push(diagnostic);
+      }
+    }
+  }
+}

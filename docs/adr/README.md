@@ -60,7 +60,8 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0049](0049-self-hosting-plan-and-language-prerequisites.md) | The self-hosting plan, module-level constants, `include_str`, `if let` and `while let` | Accepted (refined by 0050) |
 | [0050](0050-lexer-port-and-token-dumps.md) | The lexer port, token dumps and `char::from_u32` | Accepted (refined by 0051) |
 | [0051](0051-parser-port-and-ast-dumps.md) | The parser port and AST dumps | Accepted (refined by 0052) |
-| [0052](0052-resolver-port-and-resolution-dumps.md) | The resolver port and resolution dumps | Accepted |
+| [0052](0052-resolver-port-and-resolution-dumps.md) | The resolver port and resolution dumps | Accepted (refined by 0053) |
+| [0053](0053-type-checker-port-and-type-dumps.md) | The type checker port and type dumps | Accepted |
 
 ## Template
 

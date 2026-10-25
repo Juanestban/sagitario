@@ -1,0 +1,184 @@
+//! Classes (docs/spec/04-classes.md): their fields and the initializer `new`. The port of the
+//! declarations part of `sagitario_types::classes`; `types::inheritance` checks the hierarchy.
+
+use pkg::ast::{ExprKind, FieldDecl, Stmt};
+use pkg::diagnostics::Diagnostic;
+use pkg::diagnostics::codes;
+use pkg::resolve::TypeItem;
+use pkg::types::{Checker, ClassDef, FieldDef, Type, TypeKind};
+use pkg::types;
+use pkg::types::inheritance;
+
+/// Resolves the parent and the field types of every class.
+pub fn class_defs(cx: Checker) {
+  for index in 0..cx.resolution.classes.len() {
+    const id = index as u32;
+    const decl = match cx.resolution.class_decl(cx.package, id) {
+      Some(decl) => decl,
+      None => continue,
+    };
+
+    cx.owner = Some(TypeItem::Class(id));
+
+    const parent = match decl.parent {
+      Some(path) => inheritance::parent_class(cx, path),
+      None => None,
+    };
+    const fields: List<FieldDef> = new List();
+
+    for field in decl.fields {
+      const ty = cx.type_expr(field.ty);
+      const is_weak = field.is_weak && check_weak_field(cx, field, ty);
+
+      fields.push(FieldDef { name: field.name.name, ty: ty, public: !types::is_private(field.visibility), mutable: types::is_var(field), is_weak: is_weak, span: field.span });
+    }
+
+    const initializer = cx.resolution.initializer(cx.package, id);
+
+    cx.typed.classes.push(new ClassDef(decl.name.name, parent, decl.is_abstract, fields, initializer));
+  }
+
+  cx.owner = None;
+  inheritance::check_inheritance_cycles(cx);
+}
+
+/// A `weak` field is `var` and holds an `Option` of a class; returns whether it is valid.
+fn check_weak_field(cx: Checker, field: FieldDecl, ty: Type) -> bool {
+  var problem: Option<String> = None;
+
+  if types::is_const(field) {
+    problem = Some("a `weak` field must be `var`: it becomes `None` when its instance is destroyed");
+  } else {
+    match ty.kind {
+      TypeKind::Option(inner) => {
+        if let TypeKind::Class(_) = inner.kind {
+          return true;
+        }
+
+        problem = Some("a `weak` field holds an `Option` of a class, not `" + types::text(ty) + "`");
+      }
+      TypeKind::Error => return false,
+      _ => {
+        problem = Some("a `weak` field holds an `Option` of a class, not `" + types::text(ty) + "`");
+      }
+    }
+  }
+
+  if let Some(message) = problem {
+    cx.diagnostics.push(Diagnostic::error(codes::INVALID_WEAK, field.name.span, message).with_help("declare it as `weak var " + field.name.name + ": Option<ClassName>;`"));
+  }
+
+  false
+}
+
+/// The initializer of each class: present if the class has fields or its parent's initializer
+/// takes arguments, starting with `zod.new(...)` when an ancestor has one, without a return
+/// type, and never a method. Then the rules of inheritance.
+pub fn check_classes(cx: Checker) {
+  for index in 0..cx.resolution.classes.len() {
+    const id = index as u32;
+    const decl = match cx.resolution.class_decl(cx.package, id) {
+      Some(decl) => decl,
+      None => continue,
+    };
+    const name = decl.name.name;
+    const inherited = cx.typed.inherited_initializer(id);
+    const own = match cx.typed.class_def(id) {
+      Some(def) => def.initializer,
+      None => None,
+    };
+
+    for function in decl.functions {
+      if function.name.name != "new" {
+        continue;
+      }
+
+      if function.self_param.is_none() {
+        cx.diagnostics.push(
+          Diagnostic::error(codes::INVALID_INITIALIZER, function.name.span, "the initializer `new` must take `self` first")
+            .with_note("`self` is the instance being initialized")
+            .with_help("declare it as `pub fn new(self, ...)`"),
+        );
+      } else if let Some(ret) = function.return_type {
+        cx.diagnostics.push(
+          Diagnostic::error(codes::INVALID_INITIALIZER, ret.span, "the initializer `new` has no return type")
+            .with_help("remove the return type: `new " + name + "(...)` returns the new instance"),
+        );
+      }
+    }
+
+    match own {
+      None => {
+        if !decl.fields.is_empty() {
+          cx.diagnostics.push(
+            Diagnostic::error(codes::INVALID_INITIALIZER, decl.name.span, "the class `" + name + "` has fields but no initializer")
+              .with_help("declare `pub fn new(self, ...) { ... }` and assign every field in it"),
+          );
+        } else if let Some(parent_initializer) = inherited {
+          const takes_args = match cx.typed.sig(parent_initializer) {
+            Some(sig) => !sig.params.is_empty(),
+            None => false,
+          };
+
+          if takes_args {
+            const parent = match cx.resolution.owner(parent_initializer) {
+              Some(owner) => cx.resolution.type_name(cx.package, owner),
+              None => "",
+            };
+
+            cx.diagnostics.push(
+              Diagnostic::error(codes::INVALID_INITIALIZER, decl.name.span, "the class `" + name + "` must declare an initializer")
+                .with_note("the initializer of `" + parent + "` takes arguments, which `new " + name + "()` cannot pass")
+                .with_help("declare `pub fn new(self, ...) { zod.new(...); }`"),
+            );
+          }
+        }
+      }
+      Some(own_initializer) => {
+        if let Some(parent_initializer) = inherited {
+          require_zod_new(cx, own_initializer, parent_initializer);
+        }
+      }
+    }
+  }
+
+  inheritance::check_members(cx);
+  inheritance::check_abstract_methods(cx);
+  inheritance::build_vtables(cx);
+}
+
+/// The initializer of a class whose ancestor has one must start with `zod.new(...)`.
+fn require_zod_new(cx: Checker, own: u32, inherited: u32) {
+  const decl = match cx.resolution.fn_decl(cx.package, own) {
+    Some(decl) => decl,
+    None => return,
+  };
+  const first = match decl.body.stmts.first() {
+    Some(Stmt::Expr(expr)) => Some(expr),
+    Some(_) => None,
+    None => decl.body.tail,
+  };
+
+  if let Some(expr) = first {
+    if let ExprKind::MethodCall { receiver, method, .. } = expr.kind {
+      if let ExprKind::Zod = receiver.kind {
+        if method.name == "new" {
+          cx.zod_new_calls.push(expr.id);
+
+          return;
+        }
+      }
+    }
+  }
+
+  const parent = match cx.resolution.owner(inherited) {
+    Some(owner) => cx.resolution.type_name(cx.package, owner),
+    None => "",
+  };
+
+  cx.diagnostics.push(
+    Diagnostic::error(codes::INVALID_INITIALIZER, decl.name.span, "this initializer must start with `zod.new(...)`")
+      .with_note("`" + parent + "` has an initializer, which runs before the fields of the subclass are assigned")
+      .with_help("make `zod.new(...)` the first statement"),
+  );
+}

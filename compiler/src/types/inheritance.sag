@@ -1,0 +1,493 @@
+//! Inheritance between classes (docs/spec/04-classes.md#inheritance, ADR-0029): the parent of
+//! each class, members inherited through the ancestors, `override` and `abstract`, and the
+//! vtables of methods dispatched dynamically. The port of the declarations part of
+//! `sagitario_types::inheritance`.
+
+use pkg::ast::{Ident, TypeExpr};
+use pkg::diagnostics::Diagnostic;
+use pkg::diagnostics::codes;
+use pkg::resolve::TypeItem;
+use pkg::types::{Checker, NamedRef, TypeKind};
+use pkg::types;
+use pkg::types::interfaces;
+
+/// The class named after `extends`, with its type arguments.
+pub fn parent_class(cx: Checker, ty: TypeExpr) -> Option<NamedRef> {
+  const named = cx.type_expr(ty);
+
+  match named.kind {
+    TypeKind::Class(class_ref) => Some(class_ref),
+    TypeKind::Error => None,
+    _ => {
+      cx.diagnostics.push(
+        Diagnostic::error(codes::INVALID_INHERITANCE, ty.span, "only classes can be extended, and `" + types::text(named) + "` is not a class")
+          .with_note("structs and enums have no inheritance"),
+      );
+
+      None
+    }
+  }
+}
+
+/// Reports classes that inherit from themselves and removes their parent.
+pub fn check_inheritance_cycles(cx: Checker) {
+  const count = cx.typed.classes.len();
+  const cyclic: List<u32> = new List();
+
+  for index in 0..count {
+    const start = index as u32;
+    var current = cx.typed.class_parent_id(start);
+    var steps = 0usize;
+
+    while let Some(class_id) = current {
+      if class_id == start {
+        cyclic.push(start);
+        break;
+      }
+
+      steps += 1;
+
+      if steps > count {
+        break;
+      }
+
+      current = cx.typed.class_parent_id(class_id);
+    }
+  }
+
+  for id in cyclic {
+    if let Some(decl) = cx.resolution.class_decl(cx.package, id) {
+      cx.diagnostics.push(
+        Diagnostic::error(codes::INVALID_INHERITANCE, decl.name.span, "the class `" + decl.name.name + "` inherits from itself")
+          .with_note("the chain of `extends` must end in a class without a parent"),
+      );
+    }
+
+    if let Some(def) = cx.typed.class_def(id) {
+      def.parent = None;
+    }
+  }
+}
+
+/// A function of a class or, if it is a method, of one of its ancestors. Initializers and
+/// static functions are not inherited.
+pub fn class_method(cx: Checker, id: u32, name: String) -> Option<u32> {
+  const chain = cx.typed.class_chain(id);
+
+  for depth in 0..chain.len() {
+    if let Some(function) = cx.resolution.type_function(cx.package, TypeItem::Class(chain[depth]), name) {
+      const method = cx.resolution.is_method(cx.package, function);
+
+      return if depth == 0 || method { Some(function) } else { None };
+    }
+  }
+
+  None
+}
+
+fn class_name(cx: Checker, id: u32) -> String {
+  cx.resolution.type_name(cx.package, TypeItem::Class(id))
+}
+
+fn owner_name(cx: Checker, function: u32) -> String {
+  match cx.resolution.owner(function) {
+    Some(owner) => cx.resolution.type_name(cx.package, owner),
+    None => "",
+  }
+}
+
+/// The members a class declares against those it inherits: no field or function may reuse an
+/// inherited name, except an `override` of a public method with the same signature.
+pub fn check_members(cx: Checker) {
+  for index in 0..cx.resolution.classes.len() {
+    const id = index as u32;
+    const decl = match cx.resolution.class_decl(cx.package, id) {
+      Some(decl) => decl,
+      None => continue,
+    };
+    const parent = match cx.typed.class_parent_id(id) {
+      Some(parent) => parent,
+      None => continue,
+    };
+
+    for field in decl.fields {
+      inherited_name_clash(cx, parent, field.name);
+    }
+
+    const functions = cx.resolution.classes[index].functions;
+    var position = 0usize;
+
+    while position < functions.len() && position < decl.functions.len() {
+      const function = functions[position];
+      const fn_decl = decl.functions[position];
+
+      position += 1;
+
+      if cx.resolution.is_initializer(cx.package, function) || inherited_name_clash(cx, parent, fn_decl.name) {
+        continue;
+      }
+
+      const name = fn_decl.name;
+      const inherited = match class_method(cx, parent, name.name) {
+        Some(inherited) => inherited,
+        None => {
+          if fn_decl.is_override {
+            cx.diagnostics.push(
+              Diagnostic::error(codes::INVALID_OVERRIDE, name.span, "`" + name.name + "` overrides nothing")
+                .with_note("no ancestor of `" + decl.name.name + "` declares a method `" + name.name + "`")
+                .with_help("remove `override`"),
+            );
+          }
+
+          continue;
+        }
+      };
+      const inherited_decl = match cx.resolution.fn_decl(cx.package, inherited) {
+        Some(inherited_decl) => inherited_decl,
+        None => continue,
+      };
+
+      // Overrides are called through the vtable, which holds one function per slot.
+      if fn_decl.is_override && (!fn_decl.generics.is_empty() || !inherited_decl.generics.is_empty()) {
+        cx.error(codes::INVALID_OVERRIDE, name.span, "`" + name.name + "` has type parameters, so it cannot be overridden");
+        continue;
+      }
+
+      const owner = owner_name(cx, inherited);
+      const private = types::is_private(inherited_decl.visibility);
+
+      if !cx.resolution.is_method(cx.package, function) || (private && !fn_decl.is_override) {
+        const note = if private { "private methods cannot be overridden" } else { "static functions cannot reuse the name of an inherited method" };
+
+        cx.diagnostics.push(
+          Diagnostic::error(codes::DUPLICATE_DEFINITION, name.span, "`" + name.name + "` is already a method of `" + owner + "`")
+            .with_label(inherited_decl.name.span, "declared here")
+            .with_note(note),
+        );
+      } else if !fn_decl.is_override {
+        cx.diagnostics.push(
+          Diagnostic::error(codes::INVALID_OVERRIDE, name.span, "`" + name.name + "` replaces the method of `" + owner + "` without `override`")
+            .with_label(inherited_decl.name.span, "overridden method declared here")
+            .with_help("write `pub override fn " + name.name + "`"),
+        );
+      } else if private {
+        cx.diagnostics.push(
+          Diagnostic::error(codes::INVALID_OVERRIDE, name.span, "cannot override `" + name.name + "`: it is private to `" + owner + "`")
+            .with_label(inherited_decl.name.span, "declared `prv` here"),
+        );
+      } else if types::is_private(fn_decl.visibility) {
+        cx.diagnostics.push(
+          Diagnostic::error(codes::INVALID_OVERRIDE, name.span, "an `override` must be `pub`, like the method it overrides").with_help("write `pub override fn`"),
+        );
+      } else if !same_override_sig(cx, id, function, inherited) {
+        const expected = signature_text(cx, inherited);
+
+        cx.diagnostics.push(
+          Diagnostic::error(codes::INVALID_OVERRIDE, name.span, "`" + name.name + "` must have the same signature as the method it overrides")
+            .with_label(inherited_decl.name.span, "overridden method declared here in `" + owner + "`")
+            .with_note("expected `" + expected + "`"),
+        );
+      }
+    }
+  }
+}
+
+/// Whether `function` of class `id` has the signature of the inherited method it overrides,
+/// with the type arguments the class gives its ancestor.
+fn same_override_sig(cx: Checker, id: u32, function: u32, inherited: u32) -> bool {
+  const class_ty = cx.type_ref(TypeItem::Class(id));
+  const actual = match cx.typed.sig(function) {
+    Some(sig) => sig,
+    None => return true,
+  };
+  const expected = match cx.typed.sig(inherited) {
+    Some(sig) => types::substitute_sig(sig, interfaces::inherited_subst(cx, class_ty, inherited)),
+    None => return true,
+  };
+
+  types::same_types(actual.params, expected.params) && types::same_type(actual.ret, expected.ret)
+}
+
+/// Reports a member named like an inherited field, and returns whether it did.
+fn inherited_name_clash(cx: Checker, parent: u32, name: Ident) -> bool {
+  const found = match cx.typed.class_field(parent, name.name) {
+    Some(found) => found,
+    None => return false,
+  };
+  const owner = class_name(cx, found.class_id);
+
+  cx.diagnostics.push(
+    Diagnostic::error(codes::DUPLICATE_DEFINITION, name.span, "`" + name.name + "` is already a field of `" + owner + "`")
+      .with_label(found.field.span, "declared here")
+      .with_note("a class inherits every field of its ancestors; fields cannot be redeclared"),
+  );
+
+  true
+}
+
+/// `fn name(self, A, B) -> R`, for messages.
+fn signature_text(cx: Checker, function: u32) -> String {
+  const name = match cx.resolution.fn_decl(cx.package, function) {
+    Some(decl) => decl.name.name,
+    None => "",
+  };
+  const sig = match cx.typed.sig(function) {
+    Some(sig) => sig,
+    None => return "",
+  };
+  const params = List::from(["self"]);
+
+  for param in types::texts(sig.params) {
+    params.push(param);
+  }
+
+  const ret = if types::is_unit(sig.ret) { "" } else { " -> " + types::text(sig.ret) };
+
+  "fn " + name + "(" + params.join(", ") + ")" + ret
+}
+
+/// Abstract methods only in abstract classes, as public methods; concrete classes implement
+/// every abstract method they inherit.
+pub fn check_abstract_methods(cx: Checker) {
+  for index in 0..cx.resolution.classes.len() {
+    const id = index as u32;
+    const decl = match cx.resolution.class_decl(cx.package, id) {
+      Some(decl) => decl,
+      None => continue,
+    };
+
+    for function in decl.functions {
+      if !function.is_abstract {
+        continue;
+      }
+
+      const name = function.name.name;
+      var code = codes::INVALID_OVERRIDE;
+      var problem: Option<String> = None;
+
+      if function.self_param.is_none() {
+        problem = Some("the abstract function `" + name + "` must be a method that takes `self`");
+      } else if types::is_private(function.visibility) {
+        problem = Some("the abstract method `" + name + "` cannot be `prv`: subclasses must be able to override it");
+      } else if function.is_override {
+        problem = Some("the method `" + name + "` cannot be both `abstract` and `override`");
+      } else if !function.generics.is_empty() {
+        problem = Some("the abstract method `" + name + "` cannot have type parameters: it must be overridden");
+      } else if !decl.is_abstract {
+        code = codes::INVALID_INHERITANCE;
+        problem = Some("the class `" + decl.name.name + "` is not abstract, so its method `" + name + "` needs a body");
+      }
+
+      if let Some(message) = problem {
+        cx.diagnostics.push(Diagnostic::error(code, function.name.span, message));
+      }
+    }
+
+    if decl.is_abstract {
+      continue;
+    }
+
+    for function in implementations(cx, id) {
+      // Malformed abstract methods were reported where they are declared.
+      const abstract_decl = match cx.resolution.fn_decl(cx.package, function) {
+        Some(found) => found,
+        None => continue,
+      };
+
+      if !abstract_decl.is_abstract || abstract_decl.self_param.is_none() || abstract_decl.name.name == "new" || types::is_private(abstract_decl.visibility) {
+        continue;
+      }
+
+      // An abstract method of this class was reported above.
+      const own = match cx.resolution.owner(function) {
+        Some(TypeItem::Class(owner)) => owner == id,
+        _ => false,
+      };
+
+      if own {
+        continue;
+      }
+
+      const owner = owner_name(cx, function);
+      const name = abstract_decl.name.name;
+
+      cx.diagnostics.push(
+        Diagnostic::error(codes::INVALID_INHERITANCE, decl.name.span, "the class `" + decl.name.name + "` does not implement the abstract method `" + name + "` of `" + owner + "`")
+          .with_label(abstract_decl.name.span, "declared `abstract` here")
+          .with_help("add `pub override fn " + name + "(...)`, or declare `abstract class " + decl.name.name + "`"),
+      );
+    }
+  }
+}
+
+/// The method each name runs on instances of a class: its own, or the nearest ancestor's.
+fn implementations(cx: Checker, id: u32) -> List<u32> {
+  const names: List<String> = new List();
+  const methods: List<u32> = new List();
+  const chain = cx.typed.class_chain(id);
+  var index = chain.len();
+
+  while index > 0 {
+    index -= 1;
+
+    const class_id = chain[index];
+    const functions = match cx.resolution.classes.get(class_id as usize) {
+      Some(info) => info.functions,
+      None => new List(),
+    };
+
+    for function in functions {
+      if !cx.resolution.is_method(cx.package, function) {
+        continue;
+      }
+
+      const decl = match cx.resolution.fn_decl(cx.package, function) {
+        Some(decl) => decl,
+        None => continue,
+      };
+
+      match names.index_of(decl.name.name) {
+        Some(position) => {
+          methods[position] = function;
+        }
+        None => {
+          names.push(decl.name.name);
+          methods.push(function);
+        }
+      }
+    }
+  }
+
+  methods
+}
+
+/// The method an override ultimately overrides: the first declaration of its name.
+fn method_root(cx: Checker, function: u32) -> u32 {
+  var current = function;
+  var count = 0usize;
+
+  while count <= cx.typed.classes.len() {
+    count += 1;
+
+    const decl = match cx.resolution.fn_decl(cx.package, current) {
+      Some(decl) => decl,
+      None => break,
+    };
+
+    if !decl.is_override {
+      break;
+    }
+
+    const parent = match cx.resolution.owner(current) {
+      Some(TypeItem::Class(owner)) => cx.typed.class_parent_id(owner),
+      _ => None,
+    };
+    const overridden = match parent {
+      Some(parent) => class_method(cx, parent, decl.name.name),
+      None => None,
+    };
+
+    match overridden {
+      Some(next) => {
+        if next == current {
+          break;
+        }
+
+        current = next;
+      }
+      None => break,
+    }
+  }
+
+  current
+}
+
+/// A method of a class, with the class declaring it.
+struct ClassMethod {
+  pub class_id: u32;
+  pub function: u32;
+}
+
+/// Gives a vtable slot to every abstract or overridden method and to its overrides, and builds
+/// the vtable of each class from its parent's. Calls to other methods are direct.
+pub fn build_vtables(cx: Checker) {
+  const methods: List<ClassMethod> = new List();
+
+  for index in 0..cx.resolution.classes.len() {
+    for function in cx.resolution.classes[index].functions {
+      if cx.resolution.is_method(cx.package, function) {
+        methods.push(ClassMethod { class_id: index as u32, function: function });
+      }
+    }
+  }
+
+  const dynamic: List<u32> = new List();
+
+  for entry in methods {
+    const decl = match cx.resolution.fn_decl(cx.package, entry.function) {
+      Some(decl) => decl,
+      None => continue,
+    };
+
+    if decl.is_abstract {
+      dynamic.push(entry.function);
+    } else if decl.is_override {
+      dynamic.push(method_root(cx, entry.function));
+    }
+  }
+
+  // Parents come before their subclasses.
+  const order: List<u32> = new List();
+
+  for index in 0..cx.typed.classes.len() {
+    order.push(index as u32);
+  }
+
+  order.sort_by((a, b) => cx.typed.class_chain(a).len().compare(cx.typed.class_chain(b).len()));
+
+  for id in order {
+    const vtable: List<u32> = new List();
+
+    if let Some(parent) = cx.typed.class_parent_id(id) {
+      if let Some(parent_def) = cx.typed.class_def(parent) {
+        for function in parent_def.vtable {
+          vtable.push(function);
+        }
+      }
+    }
+
+    for entry in methods {
+      if entry.class_id != id {
+        continue;
+      }
+
+      const root = method_root(cx, entry.function);
+
+      if !dynamic.contains(root) {
+        continue;
+      }
+
+      var slot = 0usize;
+
+      if root == entry.function {
+        vtable.push(entry.function);
+        slot = vtable.len() - 1;
+      } else {
+        slot = match cx.typed.slots.get(root) {
+          Some(slot) => slot,
+          None => continue,
+        };
+
+        if slot < vtable.len() {
+          vtable[slot] = entry.function;
+        }
+      }
+
+      cx.typed.slots.insert(entry.function, slot);
+    }
+
+    if let Some(def) = cx.typed.class_def(id) {
+      def.vtable = vtable;
+    }
+  }
+}

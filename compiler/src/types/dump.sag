@@ -1,0 +1,281 @@
+//! The typed module as text, the port of `sagitario_types::dump` (`check --dump=declarations`,
+//! docs/adr/0053-type-checker-port-and-type-dumps.md). Sections in a fixed order, one entry per
+//! line; maps are sorted by key. Types carry the identity of program types and parameters:
+//! `Point#struct2<i32>`, `T#fn3.0`.
+
+use pkg::lexer;
+use pkg::resolve::{ParamOwner, TypeItem};
+use pkg::span::Span;
+use pkg::types::{FieldDef, FnSig, NamedRef, Receiver, SELF_PARAM, Type, TypeKind};
+use pkg::types;
+use pkg::types::consts::ConstValue;
+use pkg::types::typed::{GenericsEntry, ImplEntry, TypedModule};
+
+pub fn dump(typed: TypedModule) -> String {
+  const out = new StringBuilder();
+
+  for index in 0..typed.sigs.len() {
+    out.append(`sig ${index} ${signature(typed.sigs[index])}\n`);
+  }
+
+  for index in 0..typed.extern_sigs.len() {
+    out.append(`extern_sig ${index} ${signature(typed.extern_sigs[index])}\n`);
+  }
+
+  for index in 0..typed.structs.len() {
+    const def = typed.structs[index];
+
+    out.append(`struct ${index} ${def.name}\n`);
+    fields(out, def.fields);
+  }
+
+  for index in 0..typed.enums.len() {
+    const def = typed.enums[index];
+
+    out.append(`enum ${index} ${def.name}\n`);
+
+    for variant in def.variants {
+      const parts: List<String> = new List();
+
+      for field in variant.fields {
+        match field.name {
+          Some(name) => parts.push(name + ": " + ty(field.ty)),
+          None => parts.push(ty(field.ty)),
+        }
+      }
+
+      const kind = if variant.named { "named" } else { "tuple" };
+
+      out.append("  variant " + variant.name + " " + kind + " [" + parts.join(", ") + "]\n");
+    }
+  }
+
+  for index in 0..typed.classes.len() {
+    const def = typed.classes[index];
+    const parent = match def.parent {
+      Some(found) => ty(types::of(TypeKind::Class(found))),
+      None => "-",
+    };
+
+    out.append(`class ${index} ${def.name} parent=${parent} abstract=${def.is_abstract} initializer=${optional(def.initializer)} vtable=${list(def.vtable)}\n`);
+    fields(out, def.fields);
+  }
+
+  for index in 0..typed.interfaces.len() {
+    const def = typed.interfaces[index];
+
+    out.append(`interface ${index} ${def.name} parents=${interfaces(def.parents)} methods=${list(def.methods)} uses_self=${def.uses_self}\n`);
+    fields(out, def.fields);
+  }
+
+  const impls: List<ImplEntry> = typed.impls.values().collect();
+
+  impls.sort_by((a, b) => item_order(a.item).compare(item_order(b.item)));
+
+  for entry in impls {
+    out.append("impl " + type_item(entry.item) + " -> " + interfaces(entry.interfaces) + "\n");
+  }
+
+  const generics: List<GenericsEntry> = typed.generics.values().collect();
+
+  generics.sort_by((a, b) => owner_order(a.owner).compare(owner_order(b.owner)));
+
+  for entry in generics {
+    const params: List<String> = new List();
+
+    for param in entry.params {
+      params.push(param.name + ": " + interfaces(param.bounds));
+    }
+
+    out.append("generics " + param_owner(entry.owner) + " -> " + params.join("; ") + "\n");
+  }
+
+  const error_types = match typed.error_types {
+    Some(found) => `interface ${found.interface_id} class ${found.class_id}`,
+    None => "-",
+  };
+
+  out.append(`error_types ${error_types}\n`);
+
+  const prelude = typed.prelude;
+
+  out.append(
+    `prelude ordering=${optional(prelude.ordering)} eq=${optional(prelude.eq)} ord=${optional(prelude.ord)} hash=${optional(prelude.hash)} entry=${optional(prelude.entry)} iter=${optional(prelude.iter)} map=${optional(prelude.map)} send=${optional(prelude.send)}\n`,
+  );
+
+  const slots: List<u32> = typed.slots.keys().collect();
+
+  slots.sort();
+
+  for id in slots {
+    out.append(`slot fn ${id} -> ${typed.slots.get(id).unwrap_or(0)}\n`);
+  }
+
+  out.append(`sync_classes ${list(typed.sync_classes)}\n`);
+
+  for index in 0..typed.const_types.len() {
+    const value = match typed.const_values.get(index) {
+      Some(Some(found)) => const_value(found),
+      _ => "-",
+    };
+
+    out.append(`const ${index} ${ty(typed.const_types[index])} = ${value}\n`);
+  }
+
+  out.to_string()
+}
+
+fn const_value(value: ConstValue) -> String {
+  match value {
+    ConstValue::Bool(found) => `bool ${found}`,
+    ConstValue::Char(found) => "char " + lexer::quote(`${found}`),
+    ConstValue::Int(found) => "int " + found.text(),
+    ConstValue::Float(found) => `float ${found}`,
+    ConstValue::Str(found) => "str " + lexer::quote(found),
+  }
+}
+
+fn optional(value: Option<u32>) -> String {
+  match value {
+    Some(found) => `${found}`,
+    None => "-",
+  }
+}
+
+fn list(values: List<u32>) -> String {
+  if values.is_empty() {
+    return "-";
+  }
+
+  const parts: List<String> = new List();
+
+  for value in values {
+    parts.push(`${value}`);
+  }
+
+  parts.join(",")
+}
+
+fn span(span: Span) -> String {
+  `${span.file}:${span.start}..${span.end}`
+}
+
+fn fields(out: StringBuilder, fields: List<FieldDef>) {
+  for field in fields {
+    const visibility = if field.public { "pub" } else { "prv" };
+    const mutability = if field.mutable { "var" } else { "const" };
+    const is_weak = if field.is_weak { " weak" } else { "" };
+
+    out.append("  field " + field.name + ": " + ty(field.ty) + " " + visibility + " " + mutability + is_weak + " " + span(field.span) + "\n");
+  }
+}
+
+fn signature(sig: FnSig) -> String {
+  const receiver = match sig.receiver {
+    None => "-",
+    Some(Receiver::Value) => "value",
+    Some(Receiver::Var) => "var",
+    Some(Receiver::Init) => "init",
+  };
+
+  receiver + " " + types_text(sig.params) + " -> " + ty(sig.ret)
+}
+
+/// `[A, B]`
+fn types_text(list: List<Type>) -> String {
+  const parts: List<String> = new List();
+
+  for item in list {
+    parts.push(ty(item));
+  }
+
+  "[" + parts.join(", ") + "]"
+}
+
+fn interfaces(list: List<NamedRef>) -> String {
+  const parts: List<String> = new List();
+
+  for interface_ref in list {
+    parts.push(ty(types::interface_type(interface_ref)));
+  }
+
+  "[" + parts.join(", ") + "]"
+}
+
+/// The order of type items in the dump: by kind, then by id.
+fn item_order(item: TypeItem) -> u64 {
+  match item {
+    TypeItem::Struct(id) => id as u64,
+    TypeItem::Enum(id) => 4294967296 + id as u64,
+    TypeItem::Class(id) => 2 * 4294967296 + id as u64,
+    TypeItem::Interface(id) => 3 * 4294967296 + id as u64,
+  }
+}
+
+/// The order of generic declarations in the dump: types first, then functions.
+fn owner_order(owner: ParamOwner) -> u64 {
+  match owner {
+    ParamOwner::Item(item) => item_order(item),
+    ParamOwner::Fn(id) => 4 * 4294967296 + id as u64,
+  }
+}
+
+fn type_item(item: TypeItem) -> String {
+  match item {
+    TypeItem::Struct(id) => `struct${id}`,
+    TypeItem::Enum(id) => `enum${id}`,
+    TypeItem::Class(id) => `class${id}`,
+    TypeItem::Interface(id) => `interface${id}`,
+  }
+}
+
+fn param_owner(owner: ParamOwner) -> String {
+  match owner {
+    ParamOwner::Item(item) => type_item(item),
+    ParamOwner::Fn(id) => `fn${id}`,
+  }
+}
+
+/// `Name#kindN` or `Name#kindN<A, B>`.
+fn named(name: String, item: TypeItem, args: List<Type>) -> String {
+  const parts: List<String> = new List();
+
+  for arg in args {
+    parts.push(ty(arg));
+  }
+
+  const suffix = if parts.is_empty() { "" } else { "<" + parts.join(", ") + ">" };
+
+  name + "#" + type_item(item) + suffix
+}
+
+pub fn ty(value: Type) -> String {
+  match value.kind {
+    TypeKind::Struct(found) => named(found.name, TypeItem::Struct(found.id), found.args),
+    TypeKind::Enum(found) => named(found.name, TypeItem::Enum(found.id), found.args),
+    TypeKind::Class(found) => named(found.name, TypeItem::Class(found.id), found.args),
+    TypeKind::Interface(found) => named(found.name, TypeItem::Interface(found.id), found.args),
+    TypeKind::Param(param) => {
+      const index = if param.index == SELF_PARAM { "self" } else { `${param.index}` };
+
+      param.name + "#" + param_owner(param.owner) + "." + index
+    }
+    TypeKind::Function { params, ret } => {
+      const parts: List<String> = new List();
+
+      for param in params {
+        parts.push(ty(param));
+      }
+
+      const result = if types::is_unit(ret) { "" } else { " -> " + ty(ret) };
+
+      "fn(" + parts.join(", ") + ")" + result
+    }
+    TypeKind::Array { elem, len } => "[" + ty(elem) + `; ${len}]`,
+    TypeKind::List(elem) => "List<" + ty(elem) + ">",
+    TypeKind::Option(inner) => "Option<" + ty(inner) + ">",
+    TypeKind::Result { value: ok, error } => "Result<" + ty(ok) + ", " + ty(error) + ">",
+    TypeKind::Ptr { mutable, pointee } => (if mutable { "*mut " } else { "*const " }) + ty(pointee),
+    _ => types::text(value),
+  }
+}

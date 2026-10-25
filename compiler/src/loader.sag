@@ -132,13 +132,13 @@ fn prelude_source() -> String {
 
 /// Whether paths use `\` as their separator, as Rust's `PathBuf::push` does on Windows: only
 /// there does `std::path` treat `\` as a separator.
-fn windows() -> bool {
+pub fn windows() -> bool {
   path::join("x\\", "y") == "x\\y"
 }
 
 /// `name` after `dir`, as Rust's `PathBuf::push` writes it: the driver builds module paths that
 /// way, and the diagnostics of both compilers must name the same files.
-fn push_path(dir: String, name: String) -> String {
+pub fn push_path(dir: String, name: String) -> String {
   if dir.is_empty() {
     return name;
   }

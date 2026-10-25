@@ -1,0 +1,44 @@
+//! Collections and iteration (docs/spec/02-types.md#lists, docs/spec/08-closures.md#iterators,
+//! ADR-0034): the prelude items the compiler relies on. The port of
+//! `sagitario_types::collections`.
+
+use pkg::resolve::TypeItem;
+use pkg::types::Checker;
+use pkg::types::typed::PreludeItems;
+
+fn prelude_interface(cx: Checker, name: String) -> Option<u32> {
+  match cx.resolution.prelude_type(name) {
+    Some(TypeItem::Interface(id)) => Some(id),
+    _ => None,
+  }
+}
+
+fn prelude_class(cx: Checker, name: String) -> Option<u32> {
+  match cx.resolution.prelude_type(name) {
+    Some(TypeItem::Class(id)) => Some(id),
+    _ => None,
+  }
+}
+
+/// Finds the prelude items the compiler relies on.
+pub fn prelude_items(cx: Checker) {
+  const ordering = match cx.resolution.prelude_type("Ordering") {
+    Some(TypeItem::Enum(id)) => Some(id),
+    _ => None,
+  };
+  const entry = match cx.resolution.prelude_type("Entry") {
+    Some(TypeItem::Struct(id)) => Some(id),
+    _ => None,
+  };
+
+  cx.typed.prelude = PreludeItems {
+    ordering: ordering,
+    eq: prelude_interface(cx, "Eq"),
+    ord: prelude_interface(cx, "Ord"),
+    hash: prelude_interface(cx, "Hash"),
+    entry: entry,
+    iter: prelude_class(cx, "Iter"),
+    map: prelude_class(cx, "Map"),
+    send: prelude_interface(cx, "Send"),
+  };
+}

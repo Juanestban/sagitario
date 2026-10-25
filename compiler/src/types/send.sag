@@ -1,0 +1,43 @@
+//! `Send` (docs/spec/05-interfaces-generics.md#send, ADR-0045): the classes of `std::sync` and
+//! the prelude's `Send` interface. The port of `sagitario_types::send`; which types are `Send`
+//! is in `types::typed`.
+
+use pkg::diagnostics::Diagnostic;
+use pkg::diagnostics::codes;
+use pkg::resolve::{ItemRef, TypeItem};
+use pkg::span::Span;
+use pkg::types::Checker;
+
+/// Finds the classes of `std::sync`, if the program uses it, in declaration order.
+pub fn sync_classes(cx: Checker) {
+  for module in cx.resolution.modules {
+    if module.in_std && module.path.len() == 2 && module.path[0] == "std" && module.path[1] == "sync" {
+      const classes: List<u32> = new List();
+
+      for declared in module.items.values() {
+        if let ItemRef::Type(TypeItem::Class(id)) = declared.item {
+          classes.push(id);
+        }
+      }
+
+      classes.sort();
+      cx.typed.sync_classes = classes;
+
+      return;
+    }
+  }
+}
+
+/// The prelude's `Send` interface.
+pub fn is_send_interface(cx: Checker, id: u32) -> bool {
+  match cx.resolution.prelude_type("Send") {
+    Some(TypeItem::Interface(send)) => send == id,
+    _ => false,
+  }
+}
+
+pub fn send_used_as_type(cx: Checker, span: Span) {
+  cx.diagnostics.push(
+    Diagnostic::error(codes::INVALID_IMPL, span, "`Send` cannot be used as a type").with_help("use it as the bound of a type parameter: `T: Send`"),
+  );
+}

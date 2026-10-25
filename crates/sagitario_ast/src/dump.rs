@@ -50,7 +50,7 @@ fn visibility(visibility: Visibility) -> &'static str {
 }
 
 /// `text` between double quotes, as in the token dump.
-fn quote(text: &str) -> String {
+pub fn quote(text: &str) -> String {
   let mut out = String::from("\"");
 
   for c in text.chars() {

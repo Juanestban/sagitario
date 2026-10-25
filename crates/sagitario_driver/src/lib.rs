@@ -73,6 +73,8 @@ pub enum Dump {
   Ast,
   /// The names of the program, as the resolver binds them.
   Resolve,
+  /// The declarations of the program, as the type checker defines them.
+  Declarations,
 }
 
 /// What `[link]` adds to a build: C libraries, where to find them, and C sources to compile.
@@ -135,8 +137,8 @@ pub fn on_large_stack(work: fn() -> std::process::ExitCode) -> std::process::Exi
 
 /// `sag check`: runs the front end only.
 pub fn check(options: &CompileOptions) -> u8 {
-  if options.dump == Some(Dump::Resolve) {
-    return dump_resolution(options);
+  if let Some(dump @ (Dump::Resolve | Dump::Declarations)) = options.dump {
+    return dump_program(options, dump);
   }
 
   if let Some(dump) = options.dump {
@@ -234,7 +236,7 @@ fn dump_file(options: &CompileOptions, dump: Dump) -> u8 {
 
       print!("{}", sagitario_ast::dump::dump(&module));
     }
-    Dump::Ast | Dump::Resolve => {}
+    Dump::Ast | Dump::Resolve | Dump::Declarations => {}
   }
 
   match report(&mut diagnostics, &sources, options) {
@@ -243,16 +245,24 @@ fn dump_file(options: &CompileOptions, dump: Dump) -> u8 {
   }
 }
 
-/// `sag check --dump=resolve`: loads the program as `check` does, resolves it and prints the
-/// resolution (docs/adr/0052-resolver-port-and-resolution-dumps.md).
-fn dump_resolution(options: &CompileOptions) -> u8 {
+/// `sag check --dump=resolve|declarations`: loads the program as `check` does, resolves it and
+/// prints the resolution, or type checks its declarations and prints them
+/// (docs/adr/0052-resolver-port-and-resolution-dumps.md,
+/// docs/adr/0053-type-checker-port-and-type-dumps.md).
+fn dump_program(options: &CompileOptions, dump: Dump) -> u8 {
   let (package, sources, mut diagnostics) = match load_package(options) {
     Ok(loaded) => loaded,
     Err(code) => return code,
   };
   let resolution = sagitario_resolve::resolve(&package, &mut diagnostics);
 
-  print!("{}", sagitario_resolve::dump::dump(&resolution));
+  if dump == Dump::Resolve {
+    print!("{}", sagitario_resolve::dump::dump(&resolution));
+  } else {
+    let typed = sagitario_types::check_until(&package, &resolution, &mut diagnostics, sagitario_types::Stage::Declarations);
+
+    print!("{}", sagitario_types::dump::dump(&typed));
+  }
 
   match report(&mut diagnostics, &sources, options) {
     Ok(()) => 0,

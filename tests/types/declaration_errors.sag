@@ -1,0 +1,47 @@
+// Errors in declarations: recursive types, type arguments, unknown and misplaced types, and an
+// invalid `main`.
+
+struct Node {
+  pub value: i32;
+  pub next: Option<Node>;
+}
+
+enum List2 {
+  Empty,
+  Cons(i32, List2),
+}
+
+struct A {
+  pub b: [B; 2];
+}
+
+struct B {
+  pub a: Result<i32, A>;
+}
+
+struct Generic<T> {
+  pub value: T;
+}
+
+struct Uses {
+  pub missing: Generic;
+  pub extra: Generic<i32, i32>;
+  pub option: Option;
+  pub result: Result<i32>;
+  pub list: List<i32, i32>;
+  pub plain: i32<bool>;
+  pub array: [i32; 3u8];
+  pub huge: [i32; 99999999999999999999];
+  pub self_type: Self;
+  pub void: std::ffi::c_void;
+  pub function: fn(i32, String) -> Option<i32>;
+  pub pointer: *const Generic<String>;
+}
+
+fn outside() -> Self {
+  outside()
+}
+
+fn main(args: List<String>) -> i32 {
+  0
+}

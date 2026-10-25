@@ -351,8 +351,16 @@ impl Checker<'_> {
     match std::fs::read_to_string(&path) {
       Ok(text) => Some((Type::String, ConstValue::Str(text))),
       Err(error) => {
+        // The reason by kind, not the system's message, which depends on the platform.
+        let reason = match error.kind() {
+          std::io::ErrorKind::NotFound => "the file does not exist",
+          std::io::ErrorKind::PermissionDenied => "permission denied",
+          std::io::ErrorKind::InvalidData => "the file is not UTF-8",
+          _ => "the file cannot be read",
+        };
+
         self.diagnostics.push(
-          Diagnostic::error(codes::INVALID_INCLUDE, arg.span, format!("cannot read `{}`: {error}", path.display()))
+          Diagnostic::error(codes::INVALID_INCLUDE, arg.span, format!("cannot read `{}`: {reason}", path.display()))
             .with_note("the path is relative to the directory of this source file, and the file must be UTF-8"),
         );
 

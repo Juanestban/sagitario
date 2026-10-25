@@ -142,7 +142,8 @@ Increments:
 3. `parser`, with AST dumps (`--dump=ast`) ([ADR-0051](adr/0051-parser-port-and-ast-dumps.md)).
 4. `resolve` and the module loader, with resolution dumps (`--dump=resolve`)
    ([ADR-0052](adr/0052-resolver-port-and-resolution-dumps.md)).
-5. `types`.
+5. `types`, in two halves with their dumps: 5a the declarations (`--dump=declarations`), 5b the
+   bodies of functions (`--dump=types`) ([ADR-0053](adr/0053-type-checker-port-and-type-dumps.md)).
 6. `sir` and `codegen_c`.
 7. The driver and the CLI: `sagc` passes every suite.
 8. The bootstrap to the fixed point, its CI job and the acceptance.

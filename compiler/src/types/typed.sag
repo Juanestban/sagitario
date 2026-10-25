@@ -1,0 +1,756 @@
+//! What the type checker produces, and the questions later phases ask about it: the ancestors
+//! of classes and interfaces, the interfaces a type implements, which types are `Send`, the
+//! variants of an enum type. The port of `TypedModule` and its methods across `sagitario_types`.
+
+use pkg::resolve::{ParamOwner, Resolution, TypeItem};
+use pkg::ast::Package;
+use pkg::types::{
+  ClassDef, EnumDef, FieldDef, FnSig, GenericDef, InterfaceDef, NamedRef, ParamRef, SELF_PARAM, StructDef, Subst, Type, TypeKind, VariantDef,
+};
+use pkg::types;
+use pkg::types::consts::ConstValue;
+
+/// The prelude items the compiler relies on.
+pub struct PreludeItems {
+  pub ordering: Option<u32>;
+  pub eq: Option<u32>;
+  pub ord: Option<u32>;
+  pub hash: Option<u32>;
+  pub entry: Option<u32>;
+  pub iter: Option<u32>;
+  pub map: Option<u32>;
+  pub send: Option<u32>;
+}
+
+/// The interfaces a struct, enum or class declares with `impl`.
+pub struct ImplEntry {
+  pub item: TypeItem;
+  pub interfaces: List<NamedRef>;
+}
+
+/// The type parameters of a generic declaration.
+pub struct GenericsEntry {
+  pub owner: ParamOwner;
+  pub params: List<GenericDef>;
+}
+
+/// The prelude's `Error` interface and the class `Error(message)` creates.
+pub struct ErrorTypes {
+  pub interface_id: u32;
+  pub class_id: u32;
+}
+
+/// A field of a class or one of its ancestors: the declaring class and its position there.
+pub struct ClassField {
+  pub class_id: u32;
+  pub index: usize;
+  pub field: FieldDef;
+}
+
+/// The type of a field of a class type: the declaring ancestor with its arguments.
+pub struct ClassFieldType {
+  pub ancestor: NamedRef;
+  pub index: usize;
+  pub ty: Type;
+}
+
+/// A method of an interface or one of its ancestors, with the declaring interface.
+pub struct InterfaceMethod {
+  pub interface_id: u32;
+  pub method: u32;
+}
+
+/// A field of an interface or one of its ancestors, with the declaring interface.
+pub struct InterfaceField {
+  pub interface_id: u32;
+  pub index: usize;
+  pub field: FieldDef;
+}
+
+/// The key of a type item in maps.
+pub fn item_key(item: TypeItem) -> String {
+  match item {
+    TypeItem::Struct(id) => `s${id}`,
+    TypeItem::Enum(id) => `e${id}`,
+    TypeItem::Class(id) => `c${id}`,
+    TypeItem::Interface(id) => `i${id}`,
+  }
+}
+
+/// The key of a generic declaration in maps.
+pub fn owner_key(owner: ParamOwner) -> String {
+  match owner {
+    ParamOwner::Item(item) => item_key(item),
+    ParamOwner::Fn(id) => `f${id}`,
+  }
+}
+
+pub class TypedModule {
+  /// Signature of each function, indexed by function id.
+  pub var sigs: List<FnSig>;
+  /// Signature of each C function of the `extern` blocks.
+  pub var extern_sigs: List<FnSig>;
+  pub var structs: List<StructDef>;
+  pub var enums: List<EnumDef>;
+  pub var classes: List<ClassDef>;
+  pub var interfaces: List<InterfaceDef>;
+  /// By `item_key`.
+  pub var impls: Map<String, ImplEntry>;
+  /// By `owner_key`.
+  pub var generics: Map<String, GenericsEntry>;
+  pub var error_types: Option<ErrorTypes>;
+  /// The vtable slot of each method dispatched dynamically.
+  pub var slots: Map<u32, usize>;
+  pub var prelude: PreludeItems;
+  /// The classes of `std::sync`.
+  pub var sync_classes: List<u32>;
+  /// The type of each module-level constant.
+  pub var const_types: List<Type>;
+  /// The value of each module-level constant, or `None` if it has an error.
+  pub var const_values: List<Option<ConstValue>>;
+
+  pub fn new(self) {
+    self.sigs = new List();
+    self.extern_sigs = new List();
+    self.structs = new List();
+    self.enums = new List();
+    self.classes = new List();
+    self.interfaces = new List();
+    self.impls = new Map<String, ImplEntry>();
+    self.generics = new Map<String, GenericsEntry>();
+    self.error_types = None;
+    self.slots = new Map<u32, usize>();
+    self.prelude = PreludeItems { ordering: None, eq: None, ord: None, hash: None, entry: None, iter: None, map: None, send: None };
+    self.sync_classes = new List();
+    self.const_types = new List();
+    self.const_values = new List();
+  }
+
+  pub fn sig(self, id: u32) -> Option<FnSig> {
+    self.sigs.get(id as usize)
+  }
+
+  pub fn extern_sig(self, id: u32) -> Option<FnSig> {
+    self.extern_sigs.get(id as usize)
+  }
+
+  pub fn struct_def(self, id: u32) -> Option<StructDef> {
+    self.structs.get(id as usize)
+  }
+
+  pub fn class_def(self, id: u32) -> Option<ClassDef> {
+    self.classes.get(id as usize)
+  }
+
+  pub fn interface_def(self, id: u32) -> Option<InterfaceDef> {
+    self.interfaces.get(id as usize)
+  }
+
+  /// The parameters of a generic declaration.
+  pub fn generic_params(self, owner: ParamOwner) -> Option<List<GenericDef>> {
+    match self.generics.get(owner_key(owner)) {
+      Some(entry) => Some(entry.params),
+      None => None,
+    }
+  }
+
+  pub fn class_parent_id(self, id: u32) -> Option<u32> {
+    match self.class_def(id) {
+      Some(def) => match def.parent {
+        Some(parent) => Some(parent.id),
+        None => None,
+      },
+      None => None,
+    }
+  }
+
+  /// A class followed by its ancestors, nearest first.
+  pub fn class_chain(self, id: u32) -> List<u32> {
+    const chain = List::from([id]);
+
+    // Cycles are reported and removed when the classes are defined; the bound is a safeguard.
+    while let Some(parent) = self.class_parent_id(chain.last().unwrap_or(id)) {
+      if chain.len() > self.classes.len() {
+        break;
+      }
+
+      chain.push(parent);
+    }
+
+    chain
+  }
+
+  /// Whether `sub` is `sup` or one of its subclasses.
+  pub fn is_subclass(self, sub: u32, sup: u32) -> bool {
+    self.class_chain(sub).contains(sup)
+  }
+
+  /// A field of a class or one of its ancestors.
+  pub fn class_field(self, id: u32, name: String) -> Option<ClassField> {
+    for class_id in self.class_chain(id) {
+      if let Some(def) = self.class_def(class_id) {
+        for index in 0..def.fields.len() {
+          if def.fields[index].name == name {
+            return Some(ClassField { class_id: class_id, index: index, field: def.fields[index] });
+          }
+        }
+      }
+    }
+
+    None
+  }
+
+  /// An interface followed by its ancestors, breadth first, without repetitions.
+  pub fn interface_ancestors(self, id: u32) -> List<u32> {
+    const found = List::from([id]);
+    var next = 0usize;
+
+    while next < found.len() {
+      const current = found[next];
+
+      next += 1;
+
+      if let Some(def) = self.interface_def(current) {
+        for parent in def.parents {
+          if !found.contains(parent.id) {
+            found.push(parent.id);
+          }
+        }
+      }
+    }
+
+    found
+  }
+
+  /// The interfaces a struct, enum or class implements, with their ancestors (for a class, also
+  /// those of its ancestors).
+  pub fn implemented(self, item: TypeItem) -> List<u32> {
+    const owners: List<TypeItem> = new List();
+
+    match item {
+      TypeItem::Class(id) => {
+        for class_id in self.class_chain(id) {
+          owners.push(TypeItem::Class(class_id));
+        }
+      }
+      TypeItem::Interface(id) => return self.interface_ancestors(id),
+      other => owners.push(other),
+    }
+
+    const found: List<u32> = new List();
+
+    for owner in owners {
+      if let Some(entry) = self.impls.get(item_key(owner)) {
+        for interface_ref in entry.interfaces {
+          for ancestor in self.interface_ancestors(interface_ref.id) {
+            if !found.contains(ancestor) {
+              found.push(ancestor);
+            }
+          }
+        }
+      }
+    }
+
+    found
+  }
+
+  /// A method of an interface or one of its ancestors.
+  pub fn interface_method(self, id: u32, name: String, resolution: Resolution, package: Package) -> Option<InterfaceMethod> {
+    for interface_id in self.interface_ancestors(id) {
+      if let Some(def) = self.interface_def(interface_id) {
+        for method in def.methods {
+          if let Some(decl) = resolution.fn_decl(package, method) {
+            if decl.name.name == name {
+              return Some(InterfaceMethod { interface_id: interface_id, method: method });
+            }
+          }
+        }
+      }
+    }
+
+    None
+  }
+
+  /// A field of an interface or one of its ancestors.
+  pub fn interface_field(self, id: u32, name: String) -> Option<InterfaceField> {
+    for interface_id in self.interface_ancestors(id) {
+      if let Some(def) = self.interface_def(interface_id) {
+        for index in 0..def.fields.len() {
+          if def.fields[index].name == name {
+            return Some(InterfaceField { interface_id: interface_id, index: index, field: def.fields[index] });
+          }
+        }
+      }
+    }
+
+    None
+  }
+
+  /// Whether a value of type `actual` can be used where `expected` is required, converting it if
+  /// needed: an instance as one of its ancestors, a value as an interface its type implements.
+  pub fn fits(self, actual: Type, expected: Type) -> bool {
+    if let TypeKind::Class(actual_class) = actual.kind {
+      if let TypeKind::Class(expected_class) = expected.kind {
+        return types::contains_ref(self.class_ancestors(actual_class), expected_class);
+      }
+    }
+
+    if let TypeKind::Interface(expected_interface) = expected.kind {
+      const convertible = match actual.kind {
+        TypeKind::Struct(_) | TypeKind::Enum(_) | TypeKind::Class(_) | TypeKind::Interface(_) | TypeKind::Param(_) => true,
+        _ => false,
+      };
+
+      if convertible {
+        return self.implements(actual, expected_interface);
+      }
+    }
+
+    types::plain_fits(actual, expected)
+  }
+
+  /// The initializer `zod.new(...)` runs for a class: the nearest ancestor's.
+  pub fn inherited_initializer(self, id: u32) -> Option<u32> {
+    const chain = self.class_chain(id);
+
+    for index in 1..chain.len() {
+      if let Some(def) = self.class_def(chain[index]) {
+        if let Some(initializer) = def.initializer {
+          return Some(initializer);
+        }
+      }
+    }
+
+    None
+  }
+
+  /// The variants of an enum, `Option` or `Result` type, with their field types.
+  pub fn variants(self, ty: Type) -> Option<List<VariantDef>> {
+    match ty.kind {
+      TypeKind::Enum(named) => {
+        const subst = Subst::of(ParamOwner::Item(TypeItem::Enum(named.id)), named.args);
+        const def = self.enums.get(named.id as usize)?;
+        const variants: List<VariantDef> = new List();
+
+        for variant in def.variants {
+          const fields: List<types::VariantField> = new List();
+
+          for field in variant.fields {
+            fields.push(types::VariantField { name: field.name, ty: types::substitute(field.ty, subst) });
+          }
+
+          variants.push(VariantDef { name: variant.name, named: variant.named, fields: fields });
+        }
+
+        Some(variants)
+      }
+      TypeKind::Option(value) => Some(List::from([VariantDef::positional("None", new List()), VariantDef::positional("Some", List::from([value]))])),
+      TypeKind::Result { value, error } => Some(List::from([VariantDef::positional("Ok", List::from([value])), VariantDef::positional("Err", List::from([error]))])),
+      _ => None,
+    }
+  }
+
+  /// The parameters of a declaration as types.
+  pub fn identity_args(self, owner: ParamOwner) -> List<Type> {
+    const args: List<Type> = new List();
+
+    if let Some(params) = self.generic_params(owner) {
+      for index in 0..params.len() {
+        args.push(types::of(TypeKind::Param(ParamRef { owner: owner, index: index as u32, name: params[index].name })));
+      }
+    }
+
+    args
+  }
+
+  /// The interfaces a parameter is bounded by; `Self` is bounded by its interface.
+  pub fn param_bounds(self, param: ParamRef) -> List<NamedRef> {
+    if param.index == SELF_PARAM {
+      if let ParamOwner::Item(TypeItem::Interface(id)) = param.owner {
+        const name = match self.interface_def(id) {
+          Some(def) => def.name,
+          None => "",
+        };
+
+        return List::from([NamedRef { id: id, name: name, args: self.identity_args(param.owner) }]);
+      }
+
+      return new List();
+    }
+
+    match self.generic_params(param.owner) {
+      Some(params) => match params.get(param.index as usize) {
+        Some(def) => def.bounds,
+        None => new List(),
+      },
+      None => new List(),
+    }
+  }
+
+  /// An interface followed by its ancestors, with their type arguments.
+  pub fn interface_ancestor_refs(self, interface_ref: NamedRef) -> List<NamedRef> {
+    const found = List::from([interface_ref]);
+    var next = 0usize;
+
+    while next < found.len() {
+      const current = found[next];
+
+      next += 1;
+
+      const subst = Subst::of(ParamOwner::Item(TypeItem::Interface(current.id)), current.args);
+
+      if let Some(def) = self.interface_def(current.id) {
+        for parent in def.parents {
+          const substituted = types::substitute_ref(parent, subst);
+
+          if !types::contains_ref(found, substituted) && found.len() <= self.interfaces.len() * 4 {
+            found.push(substituted);
+          }
+        }
+      }
+    }
+
+    found
+  }
+
+  /// A class followed by its ancestors, with their type arguments.
+  pub fn class_ancestors(self, class_ref: NamedRef) -> List<NamedRef> {
+    const chain = List::from([class_ref]);
+
+    while true {
+      const last = chain.last().unwrap_or(class_ref);
+      const parent = match self.class_def(last.id) {
+        Some(def) => match def.parent {
+          Some(parent) => parent,
+          None => break,
+        },
+        None => break,
+      };
+
+      if chain.len() > self.classes.len() {
+        break;
+      }
+
+      const subst = Subst::of(ParamOwner::Item(TypeItem::Class(last.id)), last.args);
+
+      chain.push(types::substitute_ref(parent, subst));
+    }
+
+    chain
+  }
+
+  /// The interfaces a type implements, with their type arguments, each with its ancestors.
+  pub fn implemented_refs(self, ty: Type) -> List<NamedRef> {
+    var direct: List<NamedRef> = new List();
+
+    match ty.kind {
+      TypeKind::Struct(named) => {
+        direct = self.impls_of(TypeItem::Struct(named.id), named.args);
+      }
+      TypeKind::Enum(named) => {
+        direct = self.impls_of(TypeItem::Enum(named.id), named.args);
+      }
+      TypeKind::Class(named) => {
+        for class_ref in self.class_ancestors(named) {
+          for interface_ref in self.impls_of(TypeItem::Class(class_ref.id), class_ref.args) {
+            direct.push(interface_ref);
+          }
+        }
+      }
+      TypeKind::Interface(named) => {
+        direct = List::from([named]);
+      }
+      TypeKind::Param(param) => {
+        direct = self.param_bounds(param);
+      }
+      _ => {
+        direct = self.primitive_impls(ty);
+      }
+    }
+
+    const found: List<NamedRef> = new List();
+
+    for interface_ref in direct {
+      for ancestor in self.interface_ancestor_refs(interface_ref) {
+        if !types::contains_ref(found, ancestor) {
+          found.push(ancestor);
+        }
+      }
+    }
+
+    found
+  }
+
+  prv fn impls_of(self, item: TypeItem, args: List<Type>) -> List<NamedRef> {
+    const subst = Subst::of(ParamOwner::Item(item), args);
+    const result: List<NamedRef> = new List();
+
+    if let Some(entry) = self.impls.get(item_key(item)) {
+      for interface_ref in entry.interfaces {
+        result.push(types::substitute_ref(interface_ref, subst));
+      }
+    }
+
+    result
+  }
+
+  /// The interfaces integers, `bool`, `char` and `String` implement: `Ord` and `Hash`.
+  pub fn primitive_impls(self, ty: Type) -> List<NamedRef> {
+    const result: List<NamedRef> = new List();
+    const primitive = match ty.kind {
+      TypeKind::Int(_) | TypeKind::Bool | TypeKind::Char | TypeKind::String => true,
+      _ => false,
+    };
+
+    if !primitive {
+      return result;
+    }
+
+    if let Some(id) = self.prelude.ord {
+      result.push(NamedRef { id: id, name: "Ord", args: new List() });
+    }
+
+    if let Some(id) = self.prelude.hash {
+      result.push(NamedRef { id: id, name: "Hash", args: new List() });
+    }
+
+    result
+  }
+
+  /// Whether values of `ty` implement `interface` (with the same type arguments). The compiler
+  /// infers `Send`, which no type names after `impl`.
+  pub fn implements(self, ty: Type, interface_ref: NamedRef) -> bool {
+    if let Some(send) = self.prelude.send {
+      if send == interface_ref.id {
+        return self.not_send_reason(ty).is_none();
+      }
+    }
+
+    types::contains_ref(self.implemented_refs(ty), interface_ref)
+  }
+
+  /// The field types of a struct type, with its type arguments.
+  pub fn struct_field_types(self, named: NamedRef) -> List<Type> {
+    const subst = Subst::of(ParamOwner::Item(TypeItem::Struct(named.id)), named.args);
+    const result: List<Type> = new List();
+
+    if let Some(def) = self.struct_def(named.id) {
+      for field in def.fields {
+        result.push(types::substitute(field.ty, subst));
+      }
+    }
+
+    result
+  }
+
+  /// The type of a field of a class type or one of its ancestors.
+  pub fn class_field_type(self, class_ref: NamedRef, name: String) -> Option<ClassFieldType> {
+    for ancestor in self.class_ancestors(class_ref) {
+      if let Some(def) = self.class_def(ancestor.id) {
+        for index in 0..def.fields.len() {
+          if def.fields[index].name == name {
+            const subst = Subst::of(ParamOwner::Item(TypeItem::Class(ancestor.id)), ancestor.args);
+
+            return Some(ClassFieldType { ancestor: ancestor, index: index, ty: types::substitute(def.fields[index].ty, subst) });
+          }
+        }
+      }
+    }
+
+    None
+  }
+
+  /// The field types of a class type's own fields, with its type arguments.
+  pub fn class_field_types(self, class_ref: NamedRef) -> List<Type> {
+    const subst = Subst::of(ParamOwner::Item(TypeItem::Class(class_ref.id)), class_ref.args);
+    const result: List<Type> = new List();
+
+    if let Some(def) = self.class_def(class_ref.id) {
+      for field in def.fields {
+        result.push(types::substitute(field.ty, subst));
+      }
+    }
+
+    result
+  }
+
+  /// The ancestor of `ty` (itself included) declaring the class `id`, with its arguments.
+  pub fn class_ancestor(self, ty: NamedRef, id: u32) -> Option<NamedRef> {
+    for ancestor in self.class_ancestors(ty) {
+      if ancestor.id == id {
+        return Some(ancestor);
+      }
+    }
+
+    None
+  }
+
+  /// The ancestor interface `id` of an interface type, or one of the interfaces a type
+  /// implements, with its arguments.
+  pub fn implemented_ref(self, ty: Type, id: u32) -> Option<NamedRef> {
+    for interface_ref in self.implemented_refs(ty) {
+      if interface_ref.id == id {
+        return Some(interface_ref);
+      }
+    }
+
+    None
+  }
+
+  /// Why values of `ty` cannot be sent to another thread, or `None` if `ty` is `Send`.
+  pub fn not_send_reason(self, ty: Type) -> Option<String> {
+    self.not_send(ty, new List())
+  }
+
+  /// `visiting` holds the types being checked: a type reached again through itself adds no new
+  /// reason.
+  prv fn not_send(self, ty: Type, visiting: List<Type>) -> Option<String> {
+    if types::contains_type(visiting, ty) {
+      return None;
+    }
+
+    match ty.kind {
+      TypeKind::Unit | TypeKind::Bool | TypeKind::Char | TypeKind::Int(_) | TypeKind::Float(_) | TypeKind::String | TypeKind::CString | TypeKind::Never
+        | TypeKind::Error => None,
+      TypeKind::StringBuilder => Some("a `StringBuilder` can be changed through any reference to it"),
+      TypeKind::List(_) => Some("a `" + types::text(ty) + "` can be changed through any reference to it"),
+      TypeKind::Function { .. } => Some("a function value can capture values that are not `Send`"),
+      TypeKind::Ptr { .. } | TypeKind::CVoid => Some("raw pointers are not `Send`"),
+      TypeKind::Interface(interface_ref) => {
+        if let Some(send) = self.prelude.send {
+          if send == interface_ref.id {
+            return None;
+          }
+        }
+
+        Some("a value of the interface `" + interface_ref.name + "` can hold a type that is not `Send`")
+      }
+      TypeKind::Param(param) => {
+        var bounded = false;
+
+        for bound in self.param_bounds(param) {
+          if let Some(send) = self.prelude.send {
+            if send == bound.id {
+              bounded = true;
+            }
+          }
+        }
+
+        if bounded { None } else { Some("the type parameter `" + param.name + "` is not bounded by `Send`") }
+      }
+      TypeKind::Array { elem, .. } => self.not_send(elem, visiting),
+      TypeKind::Option(elem) => self.not_send(elem, visiting),
+      TypeKind::Result { value, error } => {
+        if let Some(reason) = self.not_send(value, visiting) {
+          return Some(reason);
+        }
+
+        self.not_send(error, visiting)
+      }
+      TypeKind::Struct(named) => {
+        visiting.push(ty);
+
+        var reason: Option<String> = None;
+
+        for field in self.struct_field_types(named) {
+          if reason.is_none() {
+            reason = self.not_send(field, visiting);
+          }
+        }
+
+        visiting.pop();
+        reason
+      }
+      TypeKind::Enum(named) => {
+        visiting.push(ty);
+
+        const subst = Subst::of(ParamOwner::Item(TypeItem::Enum(named.id)), named.args);
+        var reason: Option<String> = None;
+
+        if let Some(def) = self.enums.get(named.id as usize) {
+          for variant in def.variants {
+            for field in variant.field_types() {
+              if reason.is_none() {
+                reason = self.not_send(types::substitute(field, subst), visiting);
+              }
+            }
+          }
+        }
+
+        visiting.pop();
+        reason
+      }
+      TypeKind::Class(named) => {
+        if self.sync_classes.contains(named.id) {
+          for arg in named.args {
+            if let Some(reason) = self.not_send(arg, visiting) {
+              return Some(reason);
+            }
+          }
+
+          return None;
+        }
+
+        visiting.push(ty);
+
+        const reason = self.class_not_send(named, visiting);
+
+        visiting.pop();
+        reason
+      }
+    }
+  }
+
+  /// A class is `Send` when every field, its own and inherited, is `const` and `Send`, and so is
+  /// every subclass.
+  prv fn class_not_send(self, class_ref: NamedRef, visiting: List<Type>) -> Option<String> {
+    for ancestor in self.class_ancestors(class_ref) {
+      if let Some(reason) = self.own_fields_not_send(ancestor, visiting) {
+        return Some(reason);
+      }
+    }
+
+    for index in 0..self.classes.len() {
+      const id = index as u32;
+
+      if id != class_ref.id && self.is_subclass(id, class_ref.id) {
+        const name = match self.class_def(id) {
+          Some(def) => def.name,
+          None => "",
+        };
+        const subclass = NamedRef { id: id, name: name, args: self.identity_args(ParamOwner::Item(TypeItem::Class(id))) };
+
+        if let Some(reason) = self.own_fields_not_send(subclass, visiting) {
+          return Some("its subclass `" + name + "` is not `Send`: " + reason);
+        }
+      }
+    }
+
+    None
+  }
+
+  prv fn own_fields_not_send(self, class_ref: NamedRef, visiting: List<Type>) -> Option<String> {
+    const def = self.class_def(class_ref.id)?;
+    const field_types = self.class_field_types(class_ref);
+
+    for index in 0..def.fields.len() {
+      const field = def.fields[index];
+
+      if field.is_weak {
+        return Some("the field `" + field.name + "` of `" + def.name + "` is `weak`");
+      }
+
+      if field.mutable {
+        return Some("the field `" + field.name + "` of `" + def.name + "` is `var`");
+      }
+
+      if let Some(ty) = field_types.get(index) {
+        if let Some(reason) = self.not_send(ty, visiting) {
+          return Some(reason);
+        }
+      }
+    }
+
+    None
+  }
+}
