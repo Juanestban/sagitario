@@ -2773,6 +2773,154 @@ void sag_thread_join(void *pointer) {
   sag_threads_release();
   free(thread);
 }
+
+/* ---- Standard library: std::sync ------------------------------------------------------- */
+
+#ifdef _WIN32
+extern void SAG_WINAPI InitializeSRWLock(void **lock);
+extern void SAG_WINAPI AcquireSRWLockExclusive(void **lock);
+extern void SAG_WINAPI ReleaseSRWLockExclusive(void **lock);
+#endif
+
+/* Its address identifies the running thread. */
+static SAG_THREAD_LOCAL char sag_thread_marker;
+
+static void sag_sync_handle_called(sag_object *object) {
+  (void)object;
+  sag_panic("internal error: a runtime handle of std::sync was called");
+}
+
+static sag_fnval sag_sync_handle(sag_object *object) {
+  sag_fnval handle;
+  handle.fn = (sag_method)sag_sync_handle_called;
+  handle.env = object;
+  return handle;
+}
+
+typedef struct sag_mutex {
+  sag_object header;
+  /* The address of the marker of the thread holding the lock, or 0. */
+  atomic_uintptr_t owner;
+#ifdef _WIN32
+  void *lock;
+#else
+  pthread_mutex_t lock;
+#endif
+} sag_mutex;
+
+static void sag_mutex_drop(sag_object *object) {
+#ifdef _WIN32
+  (void)object;
+#else
+  pthread_mutex_destroy(&((sag_mutex *)object)->lock);
+#endif
+}
+
+sag_fnval sag_sync_mutex_new(void) {
+  sag_mutex *mutex = sag_object_alloc(sizeof(sag_mutex));
+  atomic_init(&mutex->owner, 0);
+#ifdef _WIN32
+  InitializeSRWLock(&mutex->lock);
+#else
+  if (pthread_mutex_init(&mutex->lock, NULL) != 0) {
+    sag_panic("failed to create a mutex");
+  }
+#endif
+  sag_object_init(&mutex->header, sag_mutex_drop, NULL);
+  return sag_sync_handle(&mutex->header);
+}
+
+void sag_sync_mutex_lock(sag_fnval handle) {
+  sag_mutex *mutex = (sag_mutex *)handle.env;
+  uintptr_t self = (uintptr_t)&sag_thread_marker;
+  if (atomic_load(&mutex->owner) == self) {
+    sag_panic("a thread locked a `Mutex` it already holds: the function given to `update` must not use the same mutex");
+  }
+#ifdef _WIN32
+  AcquireSRWLockExclusive(&mutex->lock);
+#else
+  pthread_mutex_lock(&mutex->lock);
+#endif
+  atomic_store(&mutex->owner, self);
+}
+
+void sag_sync_mutex_unlock(sag_fnval handle) {
+  sag_mutex *mutex = (sag_mutex *)handle.env;
+  atomic_store(&mutex->owner, 0);
+#ifdef _WIN32
+  ReleaseSRWLockExclusive(&mutex->lock);
+#else
+  pthread_mutex_unlock(&mutex->lock);
+#endif
+}
+
+typedef struct sag_atomic_cell {
+  sag_object header;
+  _Atomic uint64_t value;
+} sag_atomic_cell;
+
+static void sag_atomic_cell_drop(sag_object *object) {
+  (void)object;
+}
+
+static _Atomic uint64_t *sag_atomic_value(sag_fnval handle) {
+  return &((sag_atomic_cell *)handle.env)->value;
+}
+
+sag_fnval sag_sync_atomic_new(uint64_t value) {
+  sag_atomic_cell *cell = sag_object_alloc(sizeof(sag_atomic_cell));
+  atomic_init(&cell->value, value);
+  sag_object_init(&cell->header, sag_atomic_cell_drop, NULL);
+  return sag_sync_handle(&cell->header);
+}
+
+uint64_t sag_sync_atomic_load(sag_fnval cell) {
+  return atomic_load(sag_atomic_value(cell));
+}
+
+void sag_sync_atomic_store(sag_fnval cell, uint64_t value) {
+  atomic_store(sag_atomic_value(cell), value);
+}
+
+uint64_t sag_sync_atomic_swap(sag_fnval cell, uint64_t value) {
+  return atomic_exchange(sag_atomic_value(cell), value);
+}
+
+/* `value` reduced to `bits` bits, then sign-extended or zero-extended back to 64. */
+static uint64_t sag_atomic_canonical(uint64_t value, uint32_t bits, bool is_signed) {
+  if (bits == 0) {
+    bits = (uint32_t)(sizeof(size_t) * CHAR_BIT);
+  }
+  if (bits >= 64) {
+    return value;
+  }
+  uint64_t mask = (UINT64_C(1) << bits) - 1;
+  value &= mask;
+  if (is_signed && (value >> (bits - 1)) != 0) {
+    value |= ~mask;
+  }
+  return value;
+}
+
+uint64_t sag_sync_atomic_add(sag_fnval cell, uint64_t delta, bool subtract, uint32_t bits, bool is_signed) {
+  _Atomic uint64_t *value = sag_atomic_value(cell);
+  uint64_t previous = atomic_load(value);
+  for (;;) {
+    uint64_t next = sag_atomic_canonical(subtract ? previous - delta : previous + delta, bits, is_signed);
+    if (atomic_compare_exchange_weak(value, &previous, next)) {
+      return previous;
+    }
+  }
+}
+
+bool sag_sync_atomic_compare_exchange(sag_fnval cell, uint64_t expected, uint64_t desired, uint64_t *actual) {
+  uint64_t current = expected;
+  if (atomic_compare_exchange_strong(sag_atomic_value(cell), &current, desired)) {
+    return true;
+  }
+  *actual = current;
+  return false;
+}
 #endif
 
 /* ---- Program lifecycle ----------------------------------------------------------------- */

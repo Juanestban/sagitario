@@ -2,7 +2,7 @@
 
 Rationale: [ADR-0037](../adr/0037-standard-library-env-io-process.md),
 [ADR-0038](../adr/0038-file-system-and-paths.md), [ADR-0039](../adr/0039-time-and-commands.md),
-[ADR-0045](../adr/0045-threads-and-send.md).
+[ADR-0045](../adr/0045-threads-and-send.md), [ADR-0046](../adr/0046-mutex-and-atomics.md).
 
 The standard library is the set of modules under the path root `std`. A program imports them
 with `use` like its own modules (`use std::io;`, `use std::env::args;`) or names them in full
@@ -17,6 +17,7 @@ functions it uses.
 | `std::fs` | Files and directories | F3 |
 | `std::path` | Joining paths and taking them apart | F3 |
 | `std::process` | `exit`, running programs | F3 |
+| `std::sync` | `Mutex` and atomic values, shared between threads | F4 |
 | `std::thread` | Threads | F4 |
 | `std::time` | Durations, clocks and `sleep` | F3 |
 
@@ -205,6 +206,43 @@ pub struct Output {
   appears in order.
 - Not yet: running a program in the background (`spawn`, `wait`, `kill`), redirecting to
   files, removing or clearing inherited variables, and connecting programs with pipes.
+
+## `std::sync`
+
+Rationale: [ADR-0046](../adr/0046-mutex-and-atomics.md).
+
+```sag
+use std::sync::{AtomicI64, Mutex};
+use std::thread;
+
+const hits = new AtomicI64(0);
+const names = new Mutex("");
+const worker = thread::spawn(() => {
+  hits.fetch_add(1);
+  names.update((text) => `${text}a`);
+});
+
+worker.join();
+println(`${hits.load()} ${names.get()}`);
+```
+
+| Item | Meaning |
+|---|---|
+| `Mutex<T: Send>` | A value that threads share, changed by one thread at a time |
+| `new Mutex(value)`, `m.get() -> T`, `m.set(value)` | Creates it, copies the value out, replaces it |
+| `m.update(f: fn(T) -> T) -> T` | Replaces the value with `f(value)` while no other thread can use the mutex, and returns the new value |
+| `AtomicBool`, `AtomicI32`, `AtomicI64`, `AtomicU32`, `AtomicU64`, `AtomicUsize` | A value of that type that threads read and change at once |
+| `new AtomicI64(value)`, `a.load()`, `a.store(value)` | Creates it, reads it, writes it |
+| `a.swap(value)` | Writes `value` and returns the previous value |
+| `a.compare_exchange(expected, desired) -> Result<T, T>` | Writes `desired` if the value is `expected`: `Ok(expected)` if it did, `Err(actual)` if not |
+| `a.fetch_add(n)`, `a.fetch_sub(n)` | Integers only: adds or subtracts `n` and returns the previous value; the result wraps around at the type's limits, also in debug builds |
+
+- `Mutex<T>` and the atomics are `Send` (a `Mutex<T>` when `T` is), so threads can capture
+  them. Since `T` must be `Send`, a mutex cannot hold a `List` or a class with `var` fields.
+- There are no lock guards: every method takes and releases the lock itself. A thread using a
+  mutex inside the function it gave to `update` of the same mutex panics instead of waiting
+  forever.
+- Atomic operations are sequentially consistent: every thread sees them in one order.
 
 ## `std::thread`
 

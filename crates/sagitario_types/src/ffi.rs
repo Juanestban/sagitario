@@ -164,8 +164,8 @@ impl Checker<'_> {
   }
 
   /// The parameters and result of a function C calls or is called through. Functions of the
-  /// runtime, which the standard library declares, also take and return `String`s and take
-  /// `fn()` values: they borrow their arguments and return new references.
+  /// runtime, which the standard library declares, also take and return `String`s and `fn()`
+  /// values: they borrow their arguments and return new references.
   fn check_ffi_signature(&mut self, sig: &FnSig, params: &[&TypeExpr], ret: Option<&TypeExpr>, runtime: bool) {
     let body = Type::Function { params: Vec::new(), ret: Box::new(Type::Unit) };
     let safe = |checker: &Self, ty: &Type| checker.ffi_safe(ty) || (runtime && (*ty == Type::String || *ty == body));

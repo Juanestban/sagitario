@@ -289,12 +289,13 @@ const PRELUDE: &str = include_str!("prelude.sag");
 /// The file of `std` itself: helpers shared by its modules, which programs cannot name.
 const STD_ROOT: &str = include_str!("std/std.sag");
 
-const STD_SOURCES: [(&str, &str); 7] = [
+const STD_SOURCES: [(&str, &str); 8] = [
   ("env", include_str!("std/env.sag")),
   ("fs", include_str!("std/fs.sag")),
   ("io", include_str!("std/io.sag")),
   ("path", include_str!("std/path.sag")),
   ("process", include_str!("std/process.sag")),
+  ("sync", include_str!("std/sync.sag")),
   ("thread", include_str!("std/thread.sag")),
   ("time", include_str!("std/time.sag")),
 ];

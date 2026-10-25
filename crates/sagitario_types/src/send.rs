@@ -59,6 +59,7 @@ impl TypedModule {
         visiting.pop();
         reason
       }
+      Type::Class(inner) if self.sync_classes.contains(&inner.id) => inner.args.iter().find_map(|arg| self.not_send(arg, visiting)),
       Type::Class(inner) => {
         visiting.push(ty.clone());
 
@@ -117,6 +118,20 @@ impl TypedModule {
 }
 
 impl Checker<'_> {
+  /// Finds the classes of `std::sync`, if the program uses it.
+  pub(crate) fn sync_classes(&mut self) {
+    let Some(module) = self.resolution.modules.iter().find(|module| module.in_std && module.path == ["std", "sync"]) else { return };
+
+    self.typed.sync_classes = module
+      .items
+      .values()
+      .filter_map(|declared| match declared.item {
+        ItemRef::Type(TypeItem::Class(id)) => Some(id),
+        _ => None,
+      })
+      .collect();
+  }
+
   /// The prelude's `Send` interface.
   pub(crate) fn is_send_interface(&self, id: InterfaceId) -> bool {
     self.resolution.prelude_type("Send") == Some(TypeItem::Interface(id))

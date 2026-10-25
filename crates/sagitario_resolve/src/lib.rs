@@ -645,7 +645,7 @@ const RESERVED_NAMES: &[&str] = &["Send", "Sync"];
 /// Integer and float type names, which take precedence over program types.
 /// The modules of the standard library (docs/spec/11-standard-library.md). The driver provides
 /// the source of each one but `ffi`, which the compiler implements.
-pub const STD_MODULES: [&str; 8] = ["env", "ffi", "fs", "io", "path", "process", "thread", "time"];
+pub const STD_MODULES: [&str; 9] = ["env", "ffi", "fs", "io", "path", "process", "sync", "thread", "time"];
 
 const NUMERIC_TYPES: &[&str] = &["i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize", "f32", "f64"];
 

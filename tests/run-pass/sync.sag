@@ -1,0 +1,96 @@
+// `std::sync` (docs/spec/11-standard-library.md#stdsync): eight threads adding to atomics and
+// to mutexes at once, `Mutex<String>` and `Mutex` of an immutable class, `swap`,
+// `compare_exchange`, wrapping `fetch_add`/`fetch_sub`, and `AtomicBool` as a flag. The harness
+// runs it with ThreadSanitizer where the C compiler has it, and fails it on any leak.
+// sanitize: thread
+// expect-stdout: atomic 8000 mutex 8000 updates 8000
+// expect-stdout: log has 8 entries
+// expect-stdout: swap 5 -> 9, exchange Ok(9) then Err(10)
+// expect-stdout: wrap -2147483648 0 0
+// expect-stdout: flag true false, Ok(true) Err(false)
+// expect-stdout: config v2 3
+
+use std::sync::{AtomicBool, AtomicI32, AtomicI64, AtomicU32, AtomicUsize, Mutex};
+use std::thread;
+use std::thread::JoinHandle;
+
+class Config {
+  pub const name: String;
+  pub const version: i32;
+
+  pub fn new(self, name: String, version: i32) {
+    self.name = name;
+    self.version = version;
+  }
+}
+
+pub fn main() {
+  const counter = new AtomicI64(0);
+  const total = new Mutex(0i64);
+  const updates = new AtomicUsize(0);
+  const log = new Mutex("");
+  const workers: List<JoinHandle<()>> = new List();
+
+  for id in 0..8 {
+    workers.push(thread::spawn(() => {
+      for _ in 0..1000 {
+        counter.fetch_add(1);
+        total.update((value) => value + 1);
+        updates.fetch_add(1);
+      }
+
+      log.update((text) => `${text}[${id}]`);
+    }));
+  }
+
+  for worker in workers {
+    worker.join();
+  }
+
+  println(`atomic ${counter.load()} mutex ${total.get()} updates ${updates.load()}`);
+  println(`log has ${log.get().split("[").len() - 1} entries`);
+
+  const cell = new AtomicI32(5);
+  const before = cell.swap(9);
+  const first = cell.compare_exchange(9, 10);
+  const second = cell.compare_exchange(9, 11);
+
+  println(`swap ${before} -> 9, exchange ${show(first)} then ${show(second)}`);
+
+  const small = new AtomicI32(2147483647);
+  const unsigned = new AtomicU32(0);
+
+  small.fetch_add(1);
+  unsigned.fetch_sub(1);
+  unsigned.fetch_add(1);
+
+  const wrapped = new AtomicU32(4294967295);
+
+  wrapped.fetch_add(1);
+  println(`wrap ${small.load()} ${unsigned.swap(4294967295)} ${wrapped.load()}`);
+
+  const flag = new AtomicBool(false);
+  const was = flag.swap(true);
+
+  println(`flag ${flag.load()} ${was}, ${showb(flag.compare_exchange(true, false))} ${showb(flag.compare_exchange(true, false))}`);
+
+  const config = new Mutex(new Config("v1", 1));
+  const reader = thread::spawn(() => config.get().version);
+
+  config.set(new Config("v2", reader.join() + 2));
+  println(`config ${config.get().name} ${config.get().version}`);
+}
+
+fn show(result: Result<i32, i32>) -> String {
+  match result {
+    Ok(value) => `Ok(${value})`,
+    Err(value) => `Err(${value})`,
+  }
+}
+
+fn showb(result: Result<bool, bool>) -> String {
+  match result {
+    Ok(value) => `Ok(${value})`,
+    Err(value) => `Err(${value})`,
+  }
+}

@@ -1,0 +1,24 @@
+use std::sync::{AtomicI64, Mutex};
+use std::thread;
+
+class Counter {
+  pub var count: i32;
+
+  pub fn new(self) {
+    self.count = 0;
+  }
+}
+
+fn needs_send<T: Send>(value: T) -> T {
+  value
+}
+
+pub fn main() {
+  const _lists = new Mutex(List::from([1, 2])); //~ ERROR E0330
+  const _counters = new Mutex(new Counter()); //~ ERROR E0330
+  const shared = new Mutex(1);
+  const atomic = new AtomicI64(0);
+  const _a = thread::spawn(() => shared.get() + atomic.load() as i32);
+  const _b = needs_send(shared);
+  const _c = needs_send(atomic);
+}

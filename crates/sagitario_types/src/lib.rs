@@ -588,6 +588,9 @@ pub struct TypedModule {
   pub to_iter: HashMap<NodeId, (FnId, Vec<Type>)>,
   /// Ranges used as values, by node id: the prelude function making their iterator.
   pub ranges: HashMap<NodeId, FnId>,
+  /// The classes of `std::sync`, which are `Send` when their type arguments are: they guard
+  /// their state themselves (ADR-0046).
+  pub sync_classes: Vec<ClassId>,
 }
 
 impl TypedModule {
@@ -827,6 +830,7 @@ pub fn check(package: &Package, resolution: &Resolution, diagnostics: &mut Diagn
   };
 
   checker.prelude_items();
+  checker.sync_classes();
   checker.struct_defs();
   checker.enum_defs();
   checker.class_defs();

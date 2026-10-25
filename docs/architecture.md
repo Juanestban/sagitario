@@ -218,6 +218,8 @@ Minimal C, embedded in the `sag` binary and compiled with every program:
 - threads for `std::thread` (`sag_thread_start`, `sag_thread_join`: pthreads or Windows'
   `CreateThread`); the stack of objects being destroyed is per thread, and the first thread to
   panic ends the program,
+- locks and atomic cells for `std::sync` (`sag_sync_*`, [ADR-0046](adr/0046-mutex-and-atomics.md)):
+  runtime objects returned as the environment of a `fn()` value, so ARC frees them,
 - panic (message, file, line, exit code 101), including the array bounds check
   `sag_index_at`,
 - `String` storage and UTF-8 helpers, allocation,
@@ -258,7 +260,7 @@ Anything expressible in Sagitario belongs in `std/` instead.
   through a module-definition file (Windows), a version script (Linux) or an exported symbols
   list (macOS). `header.rs` writes a library's C header from the typed program, spelling
   `c_char` as `char` from the type written in the source.
-- Threads: the generated C of a program using `std::thread` (`GeneratedC::threads`) and its
+- Threads: the generated C of a program using `std::thread` or `std::sync` (`GeneratedC::threads`) and its
   runtime start with `#define SAG_THREADS 1`; they compile with `-pthread` outside Windows and
   with `/experimental:c11atomics` under `cl`. `--sanitize=thread` uses `-fsanitize=thread` where
   the target has it (not Windows), and otherwise the usual sanitizers.

@@ -113,8 +113,10 @@ Threads with data races prevented by `Send`, synchronization and message passing
 Increments:
 
 1. `Send` inferred by the compiler, `std::thread` (`spawn`, `JoinHandle::join`), atomic
-   reference counts in programs using threads, and `--sanitize=thread`.
-2. `Mutex<T>` and `Atomic<T>`.
+   reference counts in programs using threads, and `--sanitize=thread`
+   ([ADR-0045](adr/0045-threads-and-send.md)).
+2. `std::sync`: `Mutex<T>` and atomics per type (`AtomicI64`, ...)
+   ([ADR-0046](adr/0046-mutex-and-atomics.md)).
 3. `Channel<T>`, `thread::sleep` and `thread::available_parallelism`.
 4. A decision record for `async`/`await`, and the acceptance program.
 
