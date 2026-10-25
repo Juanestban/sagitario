@@ -17,6 +17,18 @@ _Noreturn void sag_panic(const char *message);
 /* Prints `panic at file:line: message` to stderr and exits with code 101. */
 _Noreturn void sag_panic_at(const char *message, const char *file, int line);
 
+/* ---- Reference counts ------------------------------------------------------------------ */
+
+/* A program using `std::thread` is compiled with SAG_THREADS: its reference counts are atomic,
+ * since objects reachable from `Send` values are shared between threads (ADR-0045). Other
+ * programs keep plain counts. */
+#ifdef SAG_THREADS
+#include <stdatomic.h>
+typedef atomic_size_t sag_count;
+#else
+typedef size_t sag_count;
+#endif
+
 /* ---- Strings (ARC) --------------------------------------------------------------------- */
 
 typedef struct sag_string_buf sag_string_buf;
@@ -149,12 +161,13 @@ sag_string sag_builder_to_string(sag_builder builder);
 typedef void (*sag_method)(void);
 
 /* The header every class instance starts with. `strong` counts the references to the object;
- * when it reaches zero, `drop` releases the object's fields. The memory is freed once no weak
- * reference remains either. `vtable` lists the methods called with dynamic dispatch, or is NULL
- * when the class has none. */
+ * when it reaches zero, `drop` releases the object's fields. `weak` counts the weak references,
+ * plus one held by all the strong ones together; the memory is freed when it reaches zero.
+ * `vtable` lists the methods called with dynamic dispatch, or is NULL when the class has
+ * none. */
 typedef struct sag_object {
-  size_t strong;
-  size_t weak;
+  sag_count strong;
+  sag_count weak;
   void (*drop)(struct sag_object *object);
   const sag_method *vtable;
 } sag_object;
@@ -562,6 +575,14 @@ sag_string sag_process_run(sag_string argv, size_t argc, sag_string env, size_t 
 
 /* Whether paths follow Windows rules (`\` separators and drive letters). */
 bool sag_path_windows(void);
+
+/* ---- Standard library: std::thread (compiled with SAG_THREADS) ------------------------- */
+
+/* Runs `body` in a new thread, which holds a reference to it, and returns the thread; panics if
+ * the system cannot start one. */
+void *sag_thread_start(sag_fnval body);
+/* Waits for a thread to finish and frees it. */
+void sag_thread_join(void *thread);
 
 /* ---- Program lifecycle ----------------------------------------------------------------- */
 

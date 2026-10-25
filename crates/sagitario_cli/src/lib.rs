@@ -19,6 +19,8 @@ Options:
   --release                   Optimize; integer overflow wraps instead of panicking (build, run)
   --sanitize                  Detect memory errors and undefined behavior with ASan and UBSan,
                               where the C compiler supports them (build, run)
+  --sanitize=thread           Detect data races with TSan instead, where the C compiler supports
+                              it; elsewhere, ASan and UBSan (build, run)
   --emit-c                    Also write the generated C (build, run)
   --cc <compiler>             C compiler to use; overrides SAG_CC (build, run)
   --target <target>           Compile for another machine, such as `aarch64-linux-android`
@@ -103,6 +105,11 @@ fn parse_compile_options<I: Iterator<Item = String>>(mut args: I, mode: Mode) ->
       "--sanitize" => {
         require_codegen(mode, &flag)?;
         options.sanitize = true;
+        options.thread_sanitizer = match inline_value.as_deref() {
+          None => false,
+          Some("thread") => true,
+          Some(other) => return Err(usage_error(format!("unknown sanitizer `{other}`; `--sanitize=thread` is the only one to choose"))),
+        };
       }
       "--cc" => {
         require_codegen(mode, &flag)?;
@@ -227,6 +234,11 @@ mod tests {
     let expected = CompileOptions { sanitize: true, ..options("main.sag") };
 
     assert_eq!(parse(&["run", "--sanitize", "main.sag"]), Ok(Command::Run(expected)));
+
+    let thread = CompileOptions { sanitize: true, thread_sanitizer: true, ..options("main.sag") };
+
+    assert_eq!(parse(&["run", "--sanitize=thread", "main.sag"]), Ok(Command::Run(thread)));
+    assert!(parse(&["run", "--sanitize=memory", "main.sag"]).is_err());
     assert!(parse(&["check", "--sanitize", "main.sag"]).is_err());
   }
 

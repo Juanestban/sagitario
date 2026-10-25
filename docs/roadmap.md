@@ -105,15 +105,31 @@ as `.a`/`.so`/`.dll` and is called from a C program; and the tool compiles (with
 for Android and iOS. iOS runs no standalone programs (ADR-0043), so there the library builds
 instead.
 
+## F4: Concurrency (post-MVP)
+
+Threads with data races prevented by `Send`, synchronization and message passing
+([ADR-0045](adr/0045-threads-and-send.md)).
+
+Increments:
+
+1. `Send` inferred by the compiler, `std::thread` (`spawn`, `JoinHandle::join`), atomic
+   reference counts in programs using threads, and `--sanitize=thread`.
+2. `Mutex<T>` and `Atomic<T>`.
+3. `Channel<T>`, `thread::sleep` and `thread::available_parallelism`.
+4. A decision record for `async`/`await`, and the acceptance program.
+
+**Acceptance:** a parallel word count: threads count files and return `Map`s through `join`, an
+`Atomic` tracks progress, and a producer feeds consumers through a `Channel`; it passes with
+ThreadSanitizer on Linux and macOS, and with the leak check.
+
 ## Later phases (post-MVP)
 
-- **F4 Concurrency:** `Send`/`Sync`, `spawn`, `Mutex`, `Atomic`, atomic ARC, then
-  `async`/`await`.
+- **`async`/`await`:** after F4, as its decision record settles.
 - **F5 Self-hosting:** rewrite the compiler in Sagitario until it compiles itself.
 
 ## Deferred decisions
 
-Revisit after the MVP: `protected` visibility, `weak` captures in closures, operator
+Revisit after the MVP: shared mutable collections between threads (ADR-0045), `protected` visibility, `weak` captures in closures, operator
 overloading and derived `Eq`, binding generation, internationalized diagnostics, automatic
 error conversion with `From<T>` (and implementing one generic interface several times),
 `Error::source()` and backtraces, a `Display` interface, slices, open ranges, general tuples,

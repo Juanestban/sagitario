@@ -40,6 +40,9 @@ pub struct CompileOptions {
   /// Compile with AddressSanitizer and UndefinedBehaviorSanitizer where the C compiler supports
   /// them (docs/testing.md#memory-checks).
   pub sanitize: bool,
+  /// With `sanitize`: ThreadSanitizer instead, where the C compiler supports it
+  /// (`--sanitize=thread`).
+  pub thread_sanitizer: bool,
   /// Where `build` and `run` write the executable (and `--emit-c` the C); by default next to
   /// the input for `build`, and in a temporary directory for `run`.
   pub output: Option<PathBuf>,
@@ -98,6 +101,9 @@ pub struct Dependency {
 
 /// The C compiler flags of `--sanitize`: any undefined behavior aborts the program.
 const SANITIZE_FLAGS: [&str; 2] = ["-fsanitize=address,undefined", "-fno-sanitize-recover=undefined"];
+
+/// The C compiler flags of `--sanitize=thread`: a program with a data race exits with an error.
+const THREAD_SANITIZE_FLAGS: [&str; 1] = ["-fsanitize=thread"];
 
 /// `sag check`: runs the front end only.
 pub fn check(options: &CompileOptions) -> u8 {
@@ -283,12 +289,13 @@ const PRELUDE: &str = include_str!("prelude.sag");
 /// The file of `std` itself: helpers shared by its modules, which programs cannot name.
 const STD_ROOT: &str = include_str!("std/std.sag");
 
-const STD_SOURCES: [(&str, &str); 6] = [
+const STD_SOURCES: [(&str, &str); 7] = [
   ("env", include_str!("std/env.sag")),
   ("fs", include_str!("std/fs.sag")),
   ("io", include_str!("std/io.sag")),
   ("path", include_str!("std/path.sag")),
   ("process", include_str!("std/process.sag")),
+  ("thread", include_str!("std/thread.sag")),
   ("time", include_str!("std/time.sag")),
 ];
 
@@ -595,6 +602,8 @@ struct Toolchain<'a> {
   sanitize: &'a [&'a str],
   /// Position-independent code, for dynamic libraries outside Windows.
   pic: bool,
+  /// Whether the program uses threads (`GeneratedC::threads`).
+  threads: bool,
 }
 
 impl Toolchain<'_> {
@@ -616,6 +625,12 @@ impl Toolchain<'_> {
     if self.compiler.cl {
       // MSVC has no option rejecting extensions in C; `/W3` keeps its warnings to likely bugs.
       command.args(["/nologo", "/std:c11", "/W3", "/utf-8"]).args(self.mode);
+
+      // MSVC provides `<stdatomic.h>` only behind this option (docs/adr/0045-threads-and-send.md).
+      if self.threads {
+        command.arg("/experimental:c11atomics");
+      }
+
       command.arg("/I").arg(self.dir).arg("/c").arg(source).arg(format!("/Fo{}", object.display()));
     } else {
       command.arg("-std=c11");
@@ -630,6 +645,7 @@ impl Toolchain<'_> {
         command.arg("-fPIC");
       }
 
+      command.args(self.pthread());
       command.arg("-I").arg(self.dir).arg("-c").arg(source).arg("-o").arg(object);
     }
 
@@ -687,7 +703,13 @@ impl Toolchain<'_> {
       args.push("-lm".to_string());
     }
 
+    args.extend(self.pthread().iter().map(|arg| arg.to_string()));
     args
+  }
+
+  /// POSIX threads, for programs using threads outside Windows (which uses its own API).
+  fn pthread(&self) -> &'static [&'static str] {
+    if self.threads && !self.compiler.windows() { &["-pthread"] } else { &[] }
   }
 
   fn link(&self, command: &mut Command) -> Result<(), Failure> {
@@ -714,9 +736,10 @@ fn write_generated(generated: &sagitario_codegen_c::GeneratedC, dir: &Path) -> R
   let program_c = dir.join("program.c");
   let runtime_c = dir.join("sagitario_runtime.c");
   let ffi_c = dir.join("sag_ffi.c");
+  let runtime = if generated.threads { format!("#define SAG_THREADS 1\n{RUNTIME_SOURCE}") } else { RUNTIME_SOURCE.to_string() };
   let written = fs::write(&program_c, &generated.program)
     .and_then(|()| fs::write(dir.join(sagitario_codegen_c::RUNTIME_HEADER), RUNTIME_HEADER))
-    .and_then(|()| fs::write(&runtime_c, RUNTIME_SOURCE))
+    .and_then(|()| fs::write(&runtime_c, runtime))
     .and_then(|()| match &generated.ffi {
       Some(ffi) => fs::write(&ffi_c, ffi),
       None => Ok(()),
@@ -820,6 +843,14 @@ fn compile_to(options: &CompileOptions, executable: &Path) -> Result<CCompiler, 
     eprintln!("warning: `cl` builds without sanitizers: MSVC has no UndefinedBehaviorSanitizer (docs/adr/0044-c-toolchains.md)");
   }
 
+  let thread_sanitizer = compiler.sanitized && options.thread_sanitizer && compiler.supports_thread_sanitizer();
+
+  if compiler.sanitized && options.thread_sanitizer && !thread_sanitizer {
+    eprintln!("warning: `{}` has no ThreadSanitizer for `{}`; building with ASan and UBSan instead", compiler.command, compiler.target);
+  }
+
+  let sanitize_flags: &[&str] = if thread_sanitizer { &THREAD_SANITIZE_FLAGS } else { &SANITIZE_FLAGS };
+
   let dir = TempDir::create().map_err(|error| {
     eprintln!("error: cannot create a temporary directory: {error}");
     EXIT_FAILURE
@@ -827,17 +858,17 @@ fn compile_to(options: &CompileOptions, executable: &Path) -> Result<CCompiler, 
   let files = write_generated(&generated, &dir.path)?;
   let mode = compiler.mode(options.release);
   let build = |sanitize: &[&str]| {
-    let toolchain = Toolchain { compiler: &compiler, dir: &dir.path, mode, sanitize, pic: false };
+    let toolchain = Toolchain { compiler: &compiler, dir: &dir.path, mode, sanitize, pic: false, threads: generated.threads };
     let objects = toolchain.objects(&files, &options.link.sources)?;
 
     toolchain.executable(&objects, &options.link, executable)
   };
 
-  match build(if compiler.sanitized { &SANITIZE_FLAGS } else { &[] }) {
+  match build(if compiler.sanitized { sanitize_flags } else { &[] }) {
     Ok(()) => Ok(compiler),
     // It builds without sanitizers: the toolchain lacks their libraries.
     Err(Failure::Generated(stderr) | Failure::Link(stderr)) if compiler.sanitized && build(&[]).is_ok() => {
-      eprintln!("error: the C compiler `{}` cannot build with sanitizers (`{}`)", compiler.command, SANITIZE_FLAGS.join(" "));
+      eprintln!("error: the C compiler `{}` cannot build with sanitizers (`{}`)", compiler.command, sanitize_flags.join(" "));
       eprintln!("{stderr}");
       eprintln!("note: install its sanitizer libraries, or build without `--sanitize`");
       Err(EXIT_FAILURE)
@@ -937,7 +968,7 @@ pub fn build_library(options: &CompileOptions, outputs: &LibraryOutputs) -> Resu
 
   if let Some(path) = static_lib {
     let archiver = find_archiver(&compiler)?;
-    let toolchain = Toolchain { compiler: &compiler, dir: &dir.path, mode, sanitize: &[], pic: false };
+    let toolchain = Toolchain { compiler: &compiler, dir: &dir.path, mode, sanitize: &[], pic: false, threads: generated.threads };
     let objects = toolchain.objects(&files, &options.link.sources).map_err(report)?;
     // `ar` adds to an existing archive, which could keep stale objects.
     let _ = fs::remove_file(&path);
@@ -959,7 +990,7 @@ pub fn build_library(options: &CompileOptions, outputs: &LibraryOutputs) -> Resu
   }
 
   if let Some((path, import)) = dynamic_lib {
-    let toolchain = Toolchain { compiler: &compiler, dir: &dir.path, mode, sanitize: &[], pic: !windows };
+    let toolchain = Toolchain { compiler: &compiler, dir: &dir.path, mode, sanitize: &[], pic: !windows, threads: generated.threads };
     let objects = toolchain.objects(&files, &options.link.sources).map_err(report)?;
     let mut command = compiler.command();
 
@@ -1104,6 +1135,11 @@ impl CCompiler {
   /// has no UndefinedBehaviorSanitizer.
   fn supports_sanitizers(&self) -> bool {
     !self.mingw() && !self.cl
+  }
+
+  /// ThreadSanitizer exists for Linux and macOS, not for Windows.
+  fn supports_thread_sanitizer(&self) -> bool {
+    self.supports_sanitizers() && !self.windows()
   }
 
   /// The options of a debug or release build.

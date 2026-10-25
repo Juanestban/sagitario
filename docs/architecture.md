@@ -32,7 +32,8 @@ crates/
   sagitario_ast/          AST definitions
   sagitario_parser/       recursive descent + Pratt parsing for expressions: tokens → AST
   sagitario_resolve/      module tree from files, `use`, name resolution, visibility
-  sagitario_types/        type checking, local inference, generics, inheritance, interfaces
+  sagitario_types/        type checking, local inference, generics, inheritance, interfaces,
+                          `Send` and the check of `thread::spawn` (send.rs)
   sagitario_sir/          SIR definition + lowering from typed AST + retain/release insertion
   sagitario_codegen_c/    SIR → C11 text
   sagitario_driver/       orchestrates the pipeline, embeds the runtime, invokes the C compiler
@@ -212,7 +213,11 @@ could be added.
 
 Minimal C, embedded in the `sag` binary and compiled with every program:
 
-- ARC object header and retain/release (non-atomic in the MVP),
+- ARC object header and retain/release, through `sag_count`: atomic when the program uses
+  `std::thread` (`SAG_THREADS`, [ADR-0045](adr/0045-threads-and-send.md)), plain otherwise,
+- threads for `std::thread` (`sag_thread_start`, `sag_thread_join`: pthreads or Windows'
+  `CreateThread`); the stack of objects being destroyed is per thread, and the first thread to
+  panic ends the program,
 - panic (message, file, line, exit code 101), including the array bounds check
   `sag_index_at`,
 - `String` storage and UTF-8 helpers, allocation,
@@ -253,6 +258,10 @@ Anything expressible in Sagitario belongs in `std/` instead.
   through a module-definition file (Windows), a version script (Linux) or an exported symbols
   list (macOS). `header.rs` writes a library's C header from the typed program, spelling
   `c_char` as `char` from the type written in the source.
+- Threads: the generated C of a program using `std::thread` (`GeneratedC::threads`) and its
+  runtime start with `#define SAG_THREADS 1`; they compile with `-pthread` outside Windows and
+  with `/experimental:c11atomics` under `cl`. `--sanitize=thread` uses `-fsanitize=thread` where
+  the target has it (not Windows), and otherwise the usual sanitizers.
 - Cross-compilation (`targets.rs`): a target gives the C compiler with the arguments every call
   needs (`CCompiler::args`: `--target=<triple>`, and `-isysroot` for iOS) and the facts the type
   checker needs (`TargetInfo` in `Package::target`: pointer width, size of C's `long`, sign of

@@ -41,6 +41,8 @@ struct Expectations {
   stdin: Vec<String>,
   /// Environment variables set for the program.
   env: Vec<(String, String)>,
+  /// `// sanitize: thread`: run with ThreadSanitizer where the C compiler has it.
+  thread_sanitizer: bool,
   /// `//~ ERROR Ennnn` and `//~ WARN Wnnnn` annotations.
   diagnostics: Vec<ExpectedDiagnostic>,
 }
@@ -83,6 +85,12 @@ fn parse_expectations(source: &str) -> Result<Expectations, String> {
       expectations.args.extend(rest.split_whitespace().map(str::to_string));
     } else if let Some(rest) = trimmed.strip_prefix("// stdin:") {
       expectations.stdin.push(rest.strip_prefix(' ').unwrap_or(rest).to_string());
+    } else if let Some(rest) = trimmed.strip_prefix("// sanitize:") {
+      if rest.trim() != "thread" {
+        return Err(format!("line {line_number}: `sanitize` takes `thread`"));
+      }
+
+      expectations.thread_sanitizer = true;
     } else if let Some(rest) = trimmed.strip_prefix("// env:") {
       let (name, value) = rest.trim().split_once('=').ok_or_else(|| format!("line {line_number}: `env` needs `NAME=value`"))?;
       expectations.env.push((name.to_string(), value.to_string()));
@@ -219,6 +227,7 @@ fn case_expectations(case: &Case) -> Result<Expectations, String> {
       expectations.args = parsed.args;
       expectations.stdin = parsed.stdin;
       expectations.env = parsed.env;
+      expectations.thread_sanitizer = parsed.thread_sanitizer;
     }
   }
 
@@ -260,7 +269,7 @@ fn run(expectations: &Expectations, file: &Path) -> Result<Output, String> {
   command.current_dir(&dir.path);
 
   if std::env::var("SAG_TEST_SANITIZE").map_or(true, |value| value != "0") {
-    command.arg("--sanitize");
+    command.arg(if expectations.thread_sanitizer { "--sanitize=thread" } else { "--sanitize" });
   }
 
   command.args(&expectations.flags).arg(file).arg("--").args(&expectations.args);

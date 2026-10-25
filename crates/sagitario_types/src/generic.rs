@@ -365,8 +365,13 @@ impl TypedModule {
       .unwrap_or_default()
   }
 
-  /// Whether values of `ty` implement `interface` (with the same type arguments).
+  /// Whether values of `ty` implement `interface` (with the same type arguments). The compiler
+  /// infers `Send`, which no type names after `impl`.
   pub fn implements(&self, ty: &Type, interface: &InterfaceRef) -> bool {
+    if self.prelude.send == Some(interface.id) {
+      return self.not_send_reason(ty).is_none();
+    }
+
     self.implemented_refs(ty).contains(interface)
   }
 
@@ -628,10 +633,14 @@ impl Checker<'_> {
             continue;
           }
 
-          self.diagnostics.push(
-            Diagnostic::error(codes::UNSATISFIED_BOUND, span, format!("`{arg}` does not implement `{bound_ty}`"))
-              .with_note(format!("the type parameter `{}` requires `{bound_ty}`", param.name)),
-          );
+          let mut diagnostic = Diagnostic::error(codes::UNSATISFIED_BOUND, span, format!("`{arg}` does not implement `{bound_ty}`"))
+            .with_note(format!("the type parameter `{}` requires `{bound_ty}`", param.name));
+
+          if let Some(reason) = self.typed.not_send_reason(arg).filter(|_| self.typed.prelude.send == Some(bound.id)) {
+            diagnostic = diagnostic.with_note(reason);
+          }
+
+          self.diagnostics.push(diagnostic);
         }
       }
     }

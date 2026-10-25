@@ -119,6 +119,11 @@ pub const INVALID_IMPL: Code = Code("E0329");
 pub const UNSATISFIED_BOUND: Code = Code("E0330");
 /// An assignment inside a closure to a binding it captures (captures are read-only copies).
 pub const CAPTURED_ASSIGNMENT: Code = Code("E0331");
+/// A value that is not `Send` crossing to another thread: a capture of the lambda of
+/// `thread::spawn`.
+pub const NOT_SEND: Code = Code("E0332");
+/// `thread::spawn` given something other than a lambda or a function name, or used as a value.
+pub const INVALID_SPAWN: Code = Code("E0333");
 
 /// A language feature that is specified but not implemented yet.
 pub const NOT_IMPLEMENTED: Code = Code("E0900");
@@ -194,6 +199,8 @@ pub const ALL: &[Code] = &[
   INVALID_IMPL,
   UNSATISFIED_BOUND,
   CAPTURED_ASSIGNMENT,
+  NOT_SEND,
+  INVALID_SPAWN,
   NOT_IMPLEMENTED,
   UNUSED_BINDING,
   UNNEEDED_VAR,

@@ -72,6 +72,14 @@ impl Checker<'_> {
     self.interface_types.truncate(mark);
 
     match named {
+      Type::Interface(interface) if self.is_send_interface(interface.id) => {
+        self.diagnostics.push(
+          Diagnostic::error(codes::INVALID_IMPL, ty.span, "`Send` cannot be implemented or extended")
+            .with_note("the compiler infers which types are `Send` from what they hold"),
+        );
+
+        None
+      }
       Type::Interface(interface) => Some(interface),
       Type::Error => None,
       other => {
@@ -138,7 +146,9 @@ impl Checker<'_> {
     }
 
     for (span, id) in std::mem::take(&mut self.interface_types) {
-      if self.typed.interface_def(id).is_some_and(|def| def.uses_self) {
+      if self.is_send_interface(id) {
+        self.send_used_as_type(span);
+      } else if self.typed.interface_def(id).is_some_and(|def| def.uses_self) {
         let name = self.typed.interface_def(id).map_or_else(String::new, |def| def.name.clone());
 
         self.diagnostics.push(

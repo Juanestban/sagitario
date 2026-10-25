@@ -37,7 +37,9 @@ refers to the type being declared (see [types](02-types.md#self)).
 These must be rejected as identifiers so they can be introduced later without breaking code:
 
 - Keywords: `async`, `await`.
-- Standard names reserved for the concurrency model: `Send`, `Sync`, `spawn`.
+- Names of the concurrency model, which programs cannot declare: `Send` (the prelude's
+  interface, F4) and `Sync` (reserved). `spawn`, reserved until F4, is now
+  `std::thread::spawn` and an ordinary name ([ADR-0045](../adr/0045-threads-and-send.md)).
 
 ## Identifiers and naming conventions
 

@@ -1,7 +1,8 @@
 # 11. Standard library (F3)
 
 Rationale: [ADR-0037](../adr/0037-standard-library-env-io-process.md),
-[ADR-0038](../adr/0038-file-system-and-paths.md), [ADR-0039](../adr/0039-time-and-commands.md).
+[ADR-0038](../adr/0038-file-system-and-paths.md), [ADR-0039](../adr/0039-time-and-commands.md),
+[ADR-0045](../adr/0045-threads-and-send.md).
 
 The standard library is the set of modules under the path root `std`. A program imports them
 with `use` like its own modules (`use std::io;`, `use std::env::args;`) or names them in full
@@ -16,6 +17,7 @@ functions it uses.
 | `std::fs` | Files and directories | F3 |
 | `std::path` | Joining paths and taking them apart | F3 |
 | `std::process` | `exit`, running programs | F3 |
+| `std::thread` | Threads | F4 |
 | `std::time` | Durations, clocks and `sleep` | F3 |
 
 Naming a module that does not exist (`std::net`) is an error.
@@ -204,6 +206,37 @@ pub struct Output {
 - Not yet: running a program in the background (`spawn`, `wait`, `kill`), redirecting to
   files, removing or clearing inherited variables, and connecting programs with pipes.
 
+## `std::thread`
+
+Rationale: [ADR-0045](../adr/0045-threads-and-send.md).
+
+```sag
+use std::thread;
+
+const name = "Ada";
+const handle = thread::spawn(() => `hello, ${name}`);
+println(handle.join());
+```
+
+| Item | Meaning |
+|---|---|
+| `spawn(body: fn() -> T) -> JoinHandle<T>` | Runs `body` in a new thread |
+| `JoinHandle<T>` | A thread started by `spawn` |
+| `handle.join() -> T` | Waits for the thread to finish and returns what `body` returned; again, the same value |
+
+- The argument of `spawn` is a lambda or the name of a function, not another function value.
+  Every binding the lambda captures must be `Send`
+  ([interfaces](05-interfaces-generics.md#send-f4)); the compiler reports each one that is not,
+  with the reason. `spawn` cannot be used as a value.
+- What `body` returns needs not be `Send`: everything the thread creates is reachable only from
+  it, and passes whole to the thread that calls `join`. A thread can build and return a `List`.
+- A panic in any thread ends the whole program with exit code 101, as in the main thread.
+- A thread that is never joined keeps running. When `main` returns, the program ends without
+  waiting for the threads still running; the leak check of the test harness only runs when none
+  is.
+- `JoinHandle::spawn(body)` is the same as `thread::spawn(body)`, which calls it.
+  `new JoinHandle<T>()` makes a handle without a thread, whose `join` panics.
+
 ## `std::time`
 
 Rationale: [ADR-0039](../adr/0039-time-and-commands.md).
@@ -237,7 +270,8 @@ The modules of `std`, except `std::ffi`, are written in Sagitario and embedded i
 They follow the rules of every module, with two exceptions that only the standard library has:
 
 - It may declare functions of the runtime in `extern "C"` blocks: names starting with `sag_`,
-  which may also take and return `String` (borrowed arguments, new references as results).
+  which may also take and return `String` and take `fn()` values (borrowed arguments, new
+  references as results).
 - It may name the prelude module as `std::prelude`, to implement the prelude's interfaces with
   types of the same name (`io::Error` implements `Error`).
 
@@ -245,4 +279,5 @@ They follow the rules of every module, with two exceptions that only the standar
 module's private items, only its submodules see them.
 
 `std::process::exit` is provided by the compiler, since no function written in Sagitario can
-declare that it never returns.
+declare that it never returns. The compiler also checks the arguments of `thread::spawn` and
+`JoinHandle::spawn` where code outside the standard library calls them.

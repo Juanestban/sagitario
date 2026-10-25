@@ -45,6 +45,9 @@ fn main() { ... }
   from every file of the program (each one matched against its own file).
 - `// sag-flags: --release` passes extra options to `sag run` (e.g. to test release-mode
   wrapping).
+- `// sanitize: thread` runs the case with `--sanitize=thread` instead of `--sanitize`:
+  ThreadSanitizer on Linux and macOS, ASan and UBSan elsewhere
+  ([ADR-0045](adr/0045-threads-and-send.md)).
 - `// args: a b` passes command-line arguments to the program, split on spaces.
   `// stdin: text` writes a line (`text` and `\n`) to its stdin and may repeat; stdin is closed
   after the last line, or at once without any. `// env: NAME=value` sets an environment

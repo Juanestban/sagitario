@@ -16,7 +16,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0005](0005-result-error-handling.md) | Errors as values with `Result` and `?` | Accepted (refined by 0031, 0033) |
 | [0006](0006-no-null-option.md) | No null; `Option<T>` only | Accepted |
 | [0007](0007-mutability-const-var.md) | Mutability with `const` / `var` | Accepted (amended by 0028) |
-| [0008](0008-concurrency-deferred.md) | Single-threaded MVP; Rust-style concurrency later | Accepted |
+| [0008](0008-concurrency-deferred.md) | Single-threaded MVP; Rust-style concurrency later | Accepted (superseded in part by 0045) |
 | [0009](0009-ffi-and-unsafe.md) | Rust-style FFI and `unsafe` | Accepted (refined by 0026) |
 | [0010](0010-modules-and-packages.md) | File-as-module, logical imports, packages | Accepted (amended by 0024, 0025; manifest superseded by 0040) |
 | [0011](0011-surface-syntax.md) | Surface syntax | Accepted (refined by 0035) |
@@ -53,6 +53,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0042](0042-library-outputs-and-linking-c.md) | Library outputs and linking C | Accepted (refined by 0044) |
 | [0043](0043-cross-compilation.md) | Cross-compilation to Android and iOS | Accepted |
 | [0044](0044-c-toolchains.md) | C toolchains: MSVC `cl` best-effort, no `zig cc`, and the F3 acceptance program | Accepted |
+| [0045](0045-threads-and-send.md) | Threads and `Send` | Accepted |
 
 ## Template
 

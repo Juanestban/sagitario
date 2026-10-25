@@ -51,6 +51,7 @@ Nova uses the nearest `Nova.toml` above.
 |---|---|---|
 | `--release` | build, run | Optimizes, and integer overflow wraps; output in `target/release/` |
 | `--sanitize` | build, run | AddressSanitizer and UndefinedBehaviorSanitizer, where the C compiler has them |
+| `--sanitize=thread` | build, run | ThreadSanitizer instead, where the C compiler has it (Linux, macOS) |
 | `--emit-c` | build, run | Also writes the generated C next to the executable or the library |
 | `--cc <compiler>` | build, run | The C compiler; overrides `SAG_CC` |
 | `--target <target>` | build, check | Compiles for another machine ([targets](#targets)) |

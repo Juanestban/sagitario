@@ -46,7 +46,7 @@ fn bindings_end_with_their_block() {
 fn reports_duplicates_reserved_names_and_missing_main() {
   assert_eq!(resolve_text("fn f() {}\nfn f() {}\npub fn main() {}").2, vec!["E0201"]);
   assert_eq!(resolve_text("fn f(a: i32, a: i32) {}\npub fn main() {}").2, vec!["E0201"]);
-  assert_eq!(resolve_text("pub fn main() { const spawn = 1; }").2, vec!["E0202"]);
+  assert_eq!(resolve_text("pub fn main() { const Sync = 1; }").2, vec!["E0202"]);
   assert_eq!(resolve_text("fn f() {}").2, vec!["E0203"]);
 }
 

@@ -20,6 +20,7 @@ pub struct PreludeItems {
   pub entry: Option<StructId>,
   pub iter: Option<ClassId>,
   pub map: Option<ClassId>,
+  pub send: Option<InterfaceId>,
 }
 
 /// The methods of `Iter` that lists and arrays also have, as shorthands for `.iter().method()`.
@@ -131,6 +132,7 @@ impl Checker<'_> {
       },
       iter: class("Iter"),
       map: class("Map"),
+      send: interface("Send"),
     };
   }
 
