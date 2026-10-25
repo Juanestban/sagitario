@@ -632,3 +632,65 @@ fn signature_text(name: String, sig: FnSig) -> String {
 
   "fn " + name + "(" + params.join(", ") + ")" + ret
 }
+
+/// A default method of an interface that a struct, enum or class implements.
+pub fn default_method(cx: Checker, owner: TypeItem, name: String) -> Option<u32> {
+  if let TypeItem::Interface(_) = owner {
+    return None;
+  }
+
+  for interface_id in cx.typed.implemented(owner) {
+    if let Some(def) = cx.typed.interface_def(interface_id) {
+      for method in def.methods {
+        if let Some(decl) = cx.resolution.fn_decl(cx.package, method) {
+          if decl.name.name == name && !decl.is_abstract {
+            return Some(method);
+          }
+        }
+      }
+    }
+  }
+
+  None
+}
+
+/// `value.name` where `value` has an interface type or is a type parameter: a field of one of
+/// its interfaces.
+pub fn interface_field_type(cx: Checker, base_ty: Type, name: Ident) -> Type {
+  for interface_ref in cx.typed.implemented_refs(base_ty) {
+    if let Some(def) = cx.typed.interface_def(interface_ref.id) {
+      for field in def.fields {
+        if field.name == name.name {
+          return types::substitute(field.ty, interface_subst(interface_ref, base_ty));
+        }
+      }
+    }
+  }
+
+  var diagnostic = Diagnostic::error(codes::UNKNOWN_MEMBER, name.span, "no field `" + name.name + "` on type `" + types::text(base_ty) + "`");
+
+  if interface_method_of(cx, base_ty, name.name).is_some() {
+    diagnostic = diagnostic.with_help("`" + name.name + "` is a method; call it with `" + name.name + "(...)`, or wrap it in a lambda to use it as a value");
+  }
+
+  cx.diagnostics.push(diagnostic);
+
+  types::error()
+}
+
+/// A method of the interfaces of an interface type or a type parameter.
+pub fn interface_method_of(cx: Checker, ty: Type, name: String) -> Option<u32> {
+  for interface_ref in cx.typed.implemented_refs(ty) {
+    if let Some(def) = cx.typed.interface_def(interface_ref.id) {
+      for method in def.methods {
+        if let Some(decl) = cx.resolution.fn_decl(cx.package, method) {
+          if decl.name.name == name {
+            return Some(method);
+          }
+        }
+      }
+    }
+  }
+
+  None
+}

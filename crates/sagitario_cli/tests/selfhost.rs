@@ -202,7 +202,8 @@ fn sagc_dumps_the_same_results() -> io::Result<()> {
 
   let mut differences = Vec::new();
 
-  let dumps = ["tokens", "ast", "resolve", "declarations"];
+  // `types` contains every table and diagnostic of `declarations`, which stays for debugging.
+  let dumps = ["tokens", "ast", "resolve", "types"];
 
   for file in &files {
     for (dump, format) in dumps.iter().flat_map(|dump| ["human", "short"].map(|format| (dump, format))) {

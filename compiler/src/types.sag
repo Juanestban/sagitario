@@ -16,7 +16,10 @@ use pkg::types::classes;
 use pkg::types::collections;
 use pkg::types::consts;
 use pkg::types::consts::ConstState;
+use pkg::types::exprs;
 use pkg::types::ffi;
+use pkg::types::flow;
+use pkg::types::flow::FlowOwner;
 use pkg::types::generic;
 use pkg::types::interfaces;
 use pkg::types::send;
@@ -455,6 +458,48 @@ pub struct Subst {
     self.params.is_empty() && self.self_ty.is_none()
   }
 
+  /// This substitution applied after `inner`: maps each parameter as `inner` does, then
+  /// substitutes the result with `self`.
+  pub fn after(self, inner: Subst) -> Subst {
+    const params: List<SubstEntry> = new List();
+
+    for entry in inner.params {
+      params.push(SubstEntry { owner: entry.owner, args: substitute_all(entry.args, self) });
+    }
+
+    for entry in self.params {
+      var present = false;
+
+      for existing in params {
+        if same_owner(existing.owner, entry.owner) {
+          present = true;
+        }
+      }
+
+      if !present {
+        params.push(entry);
+      }
+    }
+
+    const self_ty = match inner.self_ty {
+      Some(ty) => Some(substitute(ty, self)),
+      None => self.self_ty,
+    };
+
+    Subst { params: params, self_ty: self_ty }
+  }
+
+  /// The arguments for the parameters of `owner`, if it has some.
+  pub fn args_of(self, owner: ParamOwner) -> Option<List<Type>> {
+    for entry in self.params {
+      if same_owner(entry.owner, owner) {
+        return Some(entry.args);
+      }
+    }
+
+    None
+  }
+
   pub fn get(self, param: ParamRef) -> Option<Type> {
     if param.index == SELF_PARAM {
       return self.self_ty;
@@ -711,9 +756,8 @@ pub struct SpanInterface {
   pub id: u32;
 }
 
-/// Type checks up to and including `stage`. Only the declarations are ported yet: the bodies of
-/// functions come with F5 increment 5b.
-pub fn check_until(package: Package, resolution: Resolution, diagnostics: Diagnostics, _stage: Stage) -> TypedModule {
+/// Type checks up to and including `stage`.
+pub fn check_until(package: Package, resolution: Resolution, diagnostics: Diagnostics, stage: Stage) -> TypedModule {
   const checker = new Checker(package, resolution, diagnostics);
 
   collections::prelude_items(checker);
@@ -756,7 +800,96 @@ pub fn check_until(package: Package, resolution: Resolution, diagnostics: Diagno
     }
   }
 
-  checker.typed
+  if stage == Stage::Declarations {
+    return checker.typed;
+  }
+
+  for index in 0..resolution.functions.len() {
+    if let Some(decl) = resolution.fn_decl(package, index as u32) {
+      exprs::function(checker, index as u32, decl);
+    }
+  }
+
+  ffi::check_pointees(checker);
+  classes::infer_mutating_methods(checker);
+  // The bounds of the types written inside function bodies.
+  generic::check_type_bounds(checker);
+  send::check_send_types(checker);
+
+  const typed = checker.typed;
+
+  for index in 0..resolution.functions.len() {
+    const id = index as u32;
+    const decl = match resolution.fn_decl(package, id) {
+      Some(decl) => decl,
+      None => continue,
+    };
+
+    if decl.is_abstract {
+      continue;
+    }
+
+    var owner = FlowOwner::of_value();
+
+    match resolution.owner(id) {
+      Some(TypeItem::Class(class_id)) => {
+        owner = FlowOwner::of_class(None);
+
+        if let Some(def) = typed.class_def(class_id) {
+          if let Some(initializer) = def.initializer {
+            if initializer == id {
+              owner = FlowOwner::of_class(Some(def));
+            }
+          }
+        }
+      }
+      // In a default method, `self` is a reference to the implementing value.
+      Some(TypeItem::Interface(_)) => {
+        owner = FlowOwner::of_class(None);
+      }
+      _ => {}
+    }
+
+    flow::check_function(decl, resolution.function_locals(id), owner, resolution, typed, diagnostics);
+  }
+
+  typed
+}
+
+/// The kind of loop being checked.
+pub enum LoopKind {
+  Loop,
+  While,
+  For,
+}
+
+/// A loop being checked: the expected type of a `loop` expression, used to type `break` values.
+pub class LoopCx {
+  pub var kind: LoopKind;
+  pub var expected: Option<Type>;
+  pub var break_ty: Option<Type>;
+  pub var has_break: bool;
+
+  pub fn new(self, kind: LoopKind, expected: Option<Type>) {
+    self.kind = kind;
+    self.expected = expected;
+    self.break_ty = None;
+    self.has_break = false;
+  }
+}
+
+/// A method called on `self` (or a part of it) inside a method: the caller modifies `self` if
+/// the callee does.
+pub struct SelfCall {
+  pub caller: u32;
+  pub callee: u32;
+}
+
+/// A method called on a value that cannot be modified, with the error to report if the method
+/// turns out to modify `self`.
+pub struct ReceiverCheck {
+  pub callee: u32;
+  pub diagnostic: Diagnostic;
 }
 
 pub class Checker {
@@ -777,6 +910,24 @@ pub class Checker {
   pub var const_states: List<ConstState>;
   /// The `zod.new(...)` calls that start an initializer, the only place they are allowed.
   pub const zod_new_calls: List<u32>;
+  /// Types of the current function's locals; `None` until a declaration without type or value
+  /// is first assigned.
+  pub var locals: List<Option<Type>>;
+  pub var ret: Type;
+  /// The current function's return type annotation, for "expected because of" labels.
+  pub var ret_span: Option<Span>;
+  pub var function: u32;
+  pub var loops: List<LoopCx>;
+  /// The enclosing `unsafe` blocks, innermost last, with whether each one was needed.
+  pub var unsafe_blocks: List<bool>;
+  /// Whether each struct or enum method modifies `self` directly, by function id.
+  pub var mutates_self: List<bool>;
+  /// The lambdas being checked, innermost last.
+  pub var lambda_stack: List<u32>;
+  /// Whether the result of the lambda being checked comes from its body.
+  pub var inferring_ret: bool;
+  pub var self_calls: List<SelfCall>;
+  pub var receiver_checks: List<ReceiverCheck>;
 
   pub fn new(self, package: Package, resolution: Resolution, diagnostics: Diagnostics) {
     self.package = package;
@@ -790,6 +941,22 @@ pub class Checker {
     self.type_bounds = new List();
     self.const_states = new List();
     self.zod_new_calls = new List();
+    self.locals = new List();
+    self.ret = unit();
+    self.ret_span = None;
+    self.function = 0;
+    self.loops = new List();
+    self.unsafe_blocks = new List();
+    self.mutates_self = new List();
+
+    for _ in 0..resolution.functions.len() {
+      self.mutates_self.push(false);
+    }
+
+    self.lambda_stack = new List();
+    self.inferring_ret = false;
+    self.self_calls = new List();
+    self.receiver_checks = new List();
   }
 
   pub fn error(self, code: String, span: Span, message: String) {

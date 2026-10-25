@@ -75,6 +75,8 @@ pub enum Dump {
   Resolve,
   /// The declarations of the program, as the type checker defines them.
   Declarations,
+  /// The types of the program: its declarations and the bodies of its functions.
+  Types,
 }
 
 /// What `[link]` adds to a build: C libraries, where to find them, and C sources to compile.
@@ -137,7 +139,7 @@ pub fn on_large_stack(work: fn() -> std::process::ExitCode) -> std::process::Exi
 
 /// `sag check`: runs the front end only.
 pub fn check(options: &CompileOptions) -> u8 {
-  if let Some(dump @ (Dump::Resolve | Dump::Declarations)) = options.dump {
+  if let Some(dump @ (Dump::Resolve | Dump::Declarations | Dump::Types)) = options.dump {
     return dump_program(options, dump);
   }
 
@@ -236,7 +238,7 @@ fn dump_file(options: &CompileOptions, dump: Dump) -> u8 {
 
       print!("{}", sagitario_ast::dump::dump(&module));
     }
-    Dump::Ast | Dump::Resolve | Dump::Declarations => {}
+    Dump::Ast | Dump::Resolve | Dump::Declarations | Dump::Types => {}
   }
 
   match report(&mut diagnostics, &sources, options) {
@@ -245,8 +247,8 @@ fn dump_file(options: &CompileOptions, dump: Dump) -> u8 {
   }
 }
 
-/// `sag check --dump=resolve|declarations`: loads the program as `check` does, resolves it and
-/// prints the resolution, or type checks its declarations and prints them
+/// `sag check --dump=resolve|declarations|types`: loads the program as `check` does, resolves it
+/// and prints the resolution, or type checks its declarations or all of it and prints the result
 /// (docs/adr/0052-resolver-port-and-resolution-dumps.md,
 /// docs/adr/0053-type-checker-port-and-type-dumps.md).
 fn dump_program(options: &CompileOptions, dump: Dump) -> u8 {
@@ -259,7 +261,8 @@ fn dump_program(options: &CompileOptions, dump: Dump) -> u8 {
   if dump == Dump::Resolve {
     print!("{}", sagitario_resolve::dump::dump(&resolution));
   } else {
-    let typed = sagitario_types::check_until(&package, &resolution, &mut diagnostics, sagitario_types::Stage::Declarations);
+    let stage = if dump == Dump::Types { sagitario_types::Stage::Bodies } else { sagitario_types::Stage::Declarations };
+    let typed = sagitario_types::check_until(&package, &resolution, &mut diagnostics, stage);
 
     print!("{}", sagitario_types::dump::dump(&typed));
   }

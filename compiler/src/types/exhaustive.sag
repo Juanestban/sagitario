@@ -1,0 +1,367 @@
+//! Exhaustiveness and reachability of `match` arms, with the usefulness algorithm of rustc
+//! ("Warnings for pattern matching", Maranget 2007). The port of `sagitario_types::exhaustive`.
+//! Rust keeps integer literals as `i128`; here they are their normalized decimal text, since
+//! only equality matters.
+
+use pkg::types::{Type, TypeKind};
+use pkg::types;
+use pkg::types::typed::TypedModule;
+
+/// A way of building a value: a variant (by index), or a literal of a type with infinitely many
+/// values (only a `_` covers all of those).
+pub enum Ctor {
+  Variant(u32),
+  Bool(bool),
+  Int(String),
+  Char(char),
+  Str(String),
+}
+
+pub fn same_ctor(a: Ctor, b: Ctor) -> bool {
+  match a {
+    Ctor::Variant(x) => match b {
+      Ctor::Variant(y) => x == y,
+      _ => false,
+    },
+    Ctor::Bool(x) => match b {
+      Ctor::Bool(y) => x == y,
+      _ => false,
+    },
+    Ctor::Int(x) => match b {
+      Ctor::Int(y) => x == y,
+      _ => false,
+    },
+    Ctor::Char(x) => match b {
+      Ctor::Char(y) => x == y,
+      _ => false,
+    },
+    Ctor::Str(x) => match b {
+      Ctor::Str(y) => x == y,
+      _ => false,
+    },
+  }
+}
+
+/// A simplified pattern: anything, a constructor applied to sub-patterns, or alternatives. A
+/// class, since patterns contain patterns.
+pub class Pat {
+  pub const kind: PatKind;
+
+  pub fn new(self, kind: PatKind) {
+    self.kind = kind;
+  }
+}
+
+pub enum PatKind {
+  Wild,
+  Ctor { ctor: Ctor, args: List<Pat> },
+  Or(List<Pat>),
+}
+
+pub fn wild() -> Pat {
+  new Pat(PatKind::Wild)
+}
+
+pub fn ctor_pat(ctor: Ctor, args: List<Pat>) -> Pat {
+  new Pat(PatKind::Ctor { ctor: ctor, args: args })
+}
+
+fn is_wild(pat: Pat) -> bool {
+  match pat.kind {
+    PatKind::Wild => true,
+    _ => false,
+  }
+}
+
+fn wilds(count: usize) -> List<Pat> {
+  const result: List<Pat> = new List();
+
+  for _ in 0..count {
+    result.push(wild());
+  }
+
+  result
+}
+
+fn concat(a: List<Pat>, b: List<Pat>) -> List<Pat> {
+  const result: List<Pat> = new List();
+
+  for pat in a {
+    result.push(pat);
+  }
+
+  for pat in b {
+    result.push(pat);
+  }
+
+  result
+}
+
+fn concat_types(a: List<Type>, b: List<Type>) -> List<Type> {
+  const result: List<Type> = new List();
+
+  for ty in a {
+    result.push(ty);
+  }
+
+  for ty in b {
+    result.push(ty);
+  }
+
+  result
+}
+
+fn tail_of<T>(list: List<T>) -> List<T> {
+  const result: List<T> = new List();
+
+  for index in 1..list.len() {
+    result.push(list[index]);
+  }
+
+  result
+}
+
+/// A constructor with its field types.
+pub struct CtorFields {
+  pub ctor: Ctor;
+  pub fields: List<Type>;
+}
+
+/// Every constructor of a type with finitely many, with its field types; `None` otherwise.
+fn ctors(typed: TypedModule, ty: Type) -> Option<List<CtorFields>> {
+  if let TypeKind::Bool = ty.kind {
+    return Some(List::from([CtorFields { ctor: Ctor::Bool(false), fields: new List() }, CtorFields { ctor: Ctor::Bool(true), fields: new List() }]));
+  }
+
+  const variants = typed.variants(ty)?;
+  const result: List<CtorFields> = new List();
+
+  for index in 0..variants.len() {
+    result.push(CtorFields { ctor: Ctor::Variant(index as u32), fields: variants[index].field_types() });
+  }
+
+  Some(result)
+}
+
+/// Field types of `ctor`, padded with errors so they always number `arity`.
+fn fields(typed: TypedModule, ty: Type, ctor: Ctor, arity: usize) -> List<Type> {
+  var found: List<Type> = new List();
+
+  if let Ctor::Variant(index) = ctor {
+    if let Some(variants) = typed.variants(ty) {
+      if let Some(variant) = variants.get(index as usize) {
+        found = variant.field_types();
+      }
+    }
+  }
+
+  const result: List<Type> = new List();
+
+  for index in 0..arity {
+    result.push(found.get(index).unwrap_or(types::error()));
+  }
+
+  result
+}
+
+/// A value matched by `row` and by none of `rows`, as one pattern per column; `None` if `row` is
+/// useless.
+pub fn useful(typed: TypedModule, rows: List<List<Pat>>, row: List<Pat>, column_types: List<Type>) -> Option<List<Pat>> {
+  const head = match row.first() {
+    Some(head) => head,
+    None => return if rows.is_empty() { Some(new List()) } else { None },
+  };
+  const rest = tail_of(row);
+  const ty = column_types.first().unwrap_or(types::error());
+  const rest_types = tail_of(column_types);
+
+  match head.kind {
+    PatKind::Or(alternatives) => {
+      for alternative in alternatives {
+        if let Some(witness) = useful(typed, rows, concat(List::from([alternative]), rest), column_types) {
+          return Some(witness);
+        }
+      }
+
+      None
+    }
+    PatKind::Ctor { ctor, args } => {
+      const field_types = fields(typed, ty, ctor, args.len());
+      const witness = useful(typed, specialize(rows, ctor, args.len()), concat(args, rest), concat_types(field_types, rest_types))?;
+
+      Some(rebuild(ctor, args.len(), witness))
+    }
+    PatKind::Wild => {
+      const used = head_ctors(rows);
+      const all = ctors(typed, ty);
+
+      if let Some(every) = all {
+        var complete = !every.is_empty();
+
+        for entry in every {
+          if !contains_ctor(used, entry.ctor) {
+            complete = false;
+          }
+        }
+
+        if complete {
+          // Every constructor appears: `_` is useful if it is useful for one of them.
+          for entry in every {
+            const count = entry.fields.len();
+
+            if let Some(witness) = useful(typed, specialize(rows, entry.ctor, count), concat(wilds(count), rest), concat_types(entry.fields, rest_types)) {
+              return Some(rebuild(entry.ctor, count, witness));
+            }
+          }
+
+          return None;
+        }
+      }
+
+      // Some constructor is missing: only rows starting with `_` can cover it.
+      const witness = useful(typed, default_rows(rows), rest, rest_types)?;
+      var missing_head = wild();
+
+      if let Some(every) = all {
+        var found = false;
+
+        for entry in every {
+          if !found && !contains_ctor(used, entry.ctor) {
+            missing_head = ctor_pat(entry.ctor, wilds(entry.fields.len()));
+            found = true;
+          }
+        }
+      }
+
+      Some(concat(List::from([missing_head]), witness))
+    }
+  }
+}
+
+fn contains_ctor(list: List<Ctor>, ctor: Ctor) -> bool {
+  for other in list {
+    if same_ctor(other, ctor) {
+      return true;
+    }
+  }
+
+  false
+}
+
+fn collect_ctors(pat: Pat, out: List<Ctor>) {
+  match pat.kind {
+    PatKind::Ctor { ctor, .. } => {
+      if !contains_ctor(out, ctor) {
+        out.push(ctor);
+      }
+    }
+    PatKind::Or(alternatives) => {
+      for alternative in alternatives {
+        collect_ctors(alternative, out);
+      }
+    }
+    _ => {}
+  }
+}
+
+/// Constructors at the head of the rows, looking inside `|` patterns.
+fn head_ctors(rows: List<List<Pat>>) -> List<Ctor> {
+  const out: List<Ctor> = new List();
+
+  for row in rows {
+    if let Some(head) = row.first() {
+      collect_ctors(head, out);
+    }
+  }
+
+  out
+}
+
+/// Rows with `|` heads split into one row per alternative.
+fn expand(rows: List<List<Pat>>) -> List<List<Pat>> {
+  const out: List<List<Pat>> = new List();
+
+  for row in rows {
+    var split = false;
+
+    if let Some(head) = row.first() {
+      if let PatKind::Or(alternatives) = head.kind {
+        const rest = tail_of(row);
+        const parts: List<List<Pat>> = new List();
+
+        for alternative in alternatives {
+          parts.push(concat(List::from([alternative]), rest));
+        }
+
+        for part in expand(parts) {
+          out.push(part);
+        }
+
+        split = true;
+      }
+    }
+
+    if !split {
+      out.push(row);
+    }
+  }
+
+  out
+}
+
+/// The rows that match values built with `ctor`, with its fields in place of the head.
+fn specialize(rows: List<List<Pat>>, ctor: Ctor, arity: usize) -> List<List<Pat>> {
+  const out: List<List<Pat>> = new List();
+
+  for row in expand(rows) {
+    const head = match row.first() {
+      Some(head) => head,
+      None => continue,
+    };
+    const rest = tail_of(row);
+
+    match head.kind {
+      PatKind::Ctor { ctor: other, args } => {
+        if same_ctor(other, ctor) {
+          out.push(concat(args, rest));
+        }
+      }
+      PatKind::Wild => out.push(concat(wilds(arity), rest)),
+      _ => {}
+    }
+  }
+
+  out
+}
+
+/// The rows whose head matches anything, without it.
+fn default_rows(rows: List<List<Pat>>) -> List<List<Pat>> {
+  const out: List<List<Pat>> = new List();
+
+  for row in expand(rows) {
+    if let Some(head) = row.first() {
+      if is_wild(head) {
+        out.push(tail_of(row));
+      }
+    }
+  }
+
+  out
+}
+
+/// Puts the first `arity` patterns of `witness` back under `ctor`.
+fn rebuild(ctor: Ctor, arity: usize, witness: List<Pat>) -> List<Pat> {
+  const split = if arity < witness.len() { arity } else { witness.len() };
+  const args: List<Pat> = new List();
+  const rest: List<Pat> = new List();
+
+  for index in 0..witness.len() {
+    if index < split {
+      args.push(witness[index]);
+    } else {
+      rest.push(witness[index]);
+    }
+  }
+
+  concat(List::from([ctor_pat(ctor, args)]), rest)
+}

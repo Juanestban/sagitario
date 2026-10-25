@@ -1,13 +1,18 @@
-//! The foreign function interface (docs/spec/10-ffi.md): C types, raw pointers, `extern`
-//! declarations, exported functions and `@repr(C)` structs. The port of the declarations part of
+//! The foreign function interface (docs/spec/10-ffi.md): C types, raw pointers, `unsafe`,
+//! `extern` declarations, exported functions and `@repr(C)` structs. The port of
 //! `sagitario_types::ffi`.
 
-use pkg::ast::{FnDecl, TypeExpr};
+use pkg::ast::{Block, Expr, ExprKind, FnDecl, Ident, TypeExpr, UnaryOp};
 use pkg::diagnostics::Diagnostic;
 use pkg::diagnostics::codes;
+use pkg::resolve::TypeItem;
 use pkg::span::Span;
 use pkg::types::{Checker, FloatTy, FnSig, IntTy, SpanType, TargetInfo, Type, TypeKind};
 use pkg::types;
+use pkg::types::classes;
+use pkg::types::classes::PlaceUse;
+use pkg::types::exprs;
+use pkg::types::typed::BuiltinMethod;
 
 /// The Sagitario type of a C type, by its name, on the target: `long` has 32 bits on Windows and
 /// on 32-bit targets, and `char` is unsigned on Linux and Android for ARM.
@@ -344,4 +349,269 @@ pub fn check_symbols(cx: Checker) {
 
     symbols.insert(symbol, entry);
   }
+}
+
+/// `*const c_char`, the type of C strings.
+pub fn c_string_ptr(target: TargetInfo) -> Type {
+  types::of(TypeKind::Ptr { mutable: false, pointee: c_type("c_char", target) })
+}
+
+/// Pointers cannot point to values with ARC references: C would copy or free them unseen.
+pub fn check_pointees(cx: Checker) {
+  const pending = cx.pointees;
+
+  cx.pointees = new List<SpanType>();
+
+  for entry in pending {
+    if is_managed(cx, entry.ty, new List()) {
+      cx.diagnostics.push(
+        Diagnostic::error(codes::NOT_FFI_SAFE, entry.span, "a pointer cannot point to `" + types::text(entry.ty) + "`, which holds reference-counted values")
+          .with_note("pass strings to C as `CString` and read them back with `string_from_c`"),
+      );
+    }
+  }
+}
+
+/// Whether values of `ty` hold `String`s or other ARC references.
+pub fn is_managed(cx: Checker, ty: Type, visited: List<TypeItem>) -> bool {
+  match ty.kind {
+    TypeKind::String | TypeKind::StringBuilder | TypeKind::CString | TypeKind::Class(_) | TypeKind::List(_) => true,
+    TypeKind::Array { elem, .. } => is_managed(cx, elem, visited),
+    TypeKind::Option(elem) => is_managed(cx, elem, visited),
+    TypeKind::Result { value, error } => is_managed(cx, value, visited) || is_managed(cx, error, visited),
+    TypeKind::Struct(named) => {
+      for item in visited {
+        if let TypeItem::Struct(seen) = item {
+          if seen == named.id {
+            return false;
+          }
+        }
+      }
+
+      visited.push(TypeItem::Struct(named.id));
+
+      const fields: List<Type> = new List();
+
+      if let Some(def) = cx.typed.struct_def(named.id) {
+        for field in def.fields {
+          fields.push(field.ty);
+        }
+      }
+
+      for field in fields {
+        if is_managed(cx, field, visited) {
+          return true;
+        }
+      }
+
+      false
+    }
+    TypeKind::Enum(named) => {
+      for item in visited {
+        if let TypeItem::Enum(seen) = item {
+          if seen == named.id {
+            return false;
+          }
+        }
+      }
+
+      visited.push(TypeItem::Enum(named.id));
+
+      const parts: List<Type> = new List();
+
+      if let Some(variants) = cx.typed.variants(ty) {
+        for variant in variants {
+          for part in variant.field_types() {
+            parts.push(part);
+          }
+        }
+      }
+
+      for part in parts {
+        if is_managed(cx, part, visited) {
+          return true;
+        }
+      }
+
+      false
+    }
+    _ => false,
+  }
+}
+
+/// Marks the innermost `unsafe` block as needed, or reports that one is missing.
+pub fn require_unsafe(cx: Checker, span: Span, what: String) {
+  if !cx.unsafe_blocks.is_empty() {
+    cx.unsafe_blocks[cx.unsafe_blocks.len() - 1] = true;
+
+    return;
+  }
+
+  cx.diagnostics.push(
+    Diagnostic::error(codes::UNSAFE_REQUIRED, span, what + " is unsafe and needs an `unsafe` block")
+      .with_help("wrap it in `unsafe { ... }` after checking that the operation is valid"),
+  );
+}
+
+/// `unsafe { ... }`
+pub fn unsafe_block(cx: Checker, value: Expr, body: Block, expected: Option<Type>) -> Type {
+  cx.unsafe_blocks.push(false);
+
+  const ty = exprs::block(cx, body, expected);
+  const used = cx.unsafe_blocks.pop().unwrap_or(true);
+
+  if !used {
+    const keyword = Span::new(value.span.file, value.span.start, value.span.start + 6);
+
+    cx.diagnostics.push(
+      Diagnostic::warning(codes::UNUSED_UNSAFE, keyword, "unnecessary `unsafe` block").with_note("it contains no call to C, pointer dereference or pointer offset"),
+    );
+  }
+
+  ty
+}
+
+fn points_to_void(pointee: Type) -> bool {
+  match pointee.kind {
+    TypeKind::CVoid => true,
+    _ => false,
+  }
+}
+
+/// `*pointer`
+pub fn deref(cx: Checker, value: Expr, operand: Expr) -> Type {
+  const ty = exprs::expr(cx, operand, None);
+
+  match ty.kind {
+    TypeKind::Ptr { pointee, .. } => {
+      if points_to_void(pointee) {
+        cx.error(codes::INVALID_OPERAND, value.span, "cannot dereference a `" + types::text(ty) + "`; cast it to a pointer to a known type first");
+
+        return types::error();
+      }
+
+      require_unsafe(cx, value.span, "dereferencing a raw pointer");
+
+      pointee
+    }
+    TypeKind::Error | TypeKind::Never => types::error(),
+    _ => {
+      cx.error(codes::INVALID_OPERAND, value.span, "cannot dereference a value of type `" + types::text(ty) + "`; only raw pointers can be");
+
+      types::error()
+    }
+  }
+}
+
+/// The pointer a place is reached through (`*p`, `(*p).x`), if any.
+pub fn deref_pointer(place: Expr) -> Option<Expr> {
+  match place.kind {
+    ExprKind::Unary { op, operand } => if op == UnaryOp::Deref { Some(operand) } else { None },
+    ExprKind::Field { base, .. } => deref_pointer(base),
+    ExprKind::Index { base, .. } => deref_pointer(base),
+    _ => None,
+  }
+}
+
+/// Writing through a pointer needs a `*mut` one.
+pub fn check_pointer_write(cx: Checker, place: Expr, pointer: Expr) {
+  if let Some(ty) = cx.typed.expr_types.get(pointer.id) {
+    if let TypeKind::Ptr { mutable, .. } = ty.kind {
+      if !mutable {
+        cx.diagnostics.push(
+          Diagnostic::error(codes::IMMUTABLE_PLACE, place.span, "cannot modify a value through a `*const` pointer")
+            .with_help("use a `*mut` pointer, for example with `as *mut T`"),
+        );
+      }
+    }
+  }
+}
+
+fn runtime_method(function: String) -> BuiltinMethod {
+  BuiltinMethod::Runtime { function: function, located: false }
+}
+
+/// Methods of raw pointers, `CString` and the `as_ptr`/`as_mut_ptr` of arrays.
+pub fn ffi_method(cx: Checker, value: Expr, receiver: Expr, receiver_ty: Type, method: Ident, args: List<Expr>) -> Option<Type> {
+  const name = method.name;
+  var builtin = runtime_method("");
+  var params: List<Type> = new List();
+  var ret = types::error();
+
+  match receiver_ty.kind {
+    TypeKind::Ptr { pointee, .. } => {
+      if name == "is_null" {
+        builtin = runtime_method("SAG_PTR_IS_NULL");
+        ret = types::of(TypeKind::Bool);
+      } else if name == "add" {
+        if points_to_void(pointee) {
+          cx.error(codes::INVALID_OPERAND, method.span, "cannot offset a `" + types::text(receiver_ty) + "`; its pointee has no size");
+        } else {
+          require_unsafe(cx, value.span, "offsetting a raw pointer");
+        }
+
+        builtin = runtime_method("SAG_PTR_ADD");
+        params = List::from([types::int(IntTy::Usize)]);
+        ret = receiver_ty;
+      } else {
+        cx.diagnostics.push(
+          Diagnostic::error(codes::UNKNOWN_MEMBER, method.span, "no method `" + name + "` on type `" + types::text(receiver_ty) + "`")
+            .with_note("its methods are `is_null` and `add`"),
+        );
+        exprs::unchecked_args(cx, args);
+
+        return Some(types::error());
+      }
+    }
+    TypeKind::CString => {
+      if name == "as_ptr" {
+        builtin = runtime_method("sag_cstring_ptr");
+        ret = c_string_ptr(cx.target);
+      } else {
+        cx.diagnostics.push(
+          Diagnostic::error(codes::UNKNOWN_MEMBER, method.span, "no method `" + name + "` on type `" + types::text(receiver_ty) + "`").with_note("its methods are `as_ptr`"),
+        );
+        exprs::unchecked_args(cx, args);
+
+        return Some(types::error());
+      }
+    }
+    TypeKind::Array { elem, .. } => {
+      if name != "as_ptr" && name != "as_mut_ptr" {
+        return None;
+      }
+
+      const mutable = name == "as_mut_ptr";
+
+      if is_managed(cx, elem, new List()) {
+        cx.diagnostics.push(
+          Diagnostic::error(codes::NOT_FFI_SAFE, method.span, "a pointer cannot point to `" + types::text(elem) + "`, which holds reference-counted values"),
+        );
+      }
+
+      if mutable {
+        classes::check_mutable_place(cx, receiver, PlaceUse::Receiver("as_mut_ptr"));
+      }
+
+      builtin = runtime_method(if mutable { "SAG_ARRAY_MUT_PTR" } else { "SAG_ARRAY_PTR" });
+      ret = types::of(TypeKind::Ptr { mutable: mutable, pointee: elem });
+    }
+    _ => return None,
+  }
+
+  exprs::check_args(cx, value.span, "method", params, args);
+  cx.typed.builtin_methods.insert(value.id, builtin);
+
+  Some(ret)
+}
+
+/// The signature of a C function of an `extern` block.
+pub fn extern_call_sig(cx: Checker, callee: Expr, id: u32) -> Option<FnSig> {
+  const name = match cx.resolution.extern_decl(cx.package, id) {
+    Some(decl) => decl.name.name,
+    None => "",
+  };
+
+  require_unsafe(cx, callee.span, "calling the C function `" + name + "`");
+  cx.typed.extern_sig(id)
 }

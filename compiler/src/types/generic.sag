@@ -1,13 +1,17 @@
 //! Generics (docs/spec/05-interfaces-generics.md#generics, ADR-0032): the type parameters of each
-//! generic declaration with their bounds, and the bounds of type arguments. The port of
-//! `sagitario_types::generic`; substitution itself is in `types`.
+//! generic declaration with their bounds, the bounds of type arguments, and the inference of the
+//! type arguments of calls, literals and `new`. The port of `sagitario_types::generic`;
+//! substitution itself is in `types`.
 
+use pkg::ast::{Expr, ExprKind, Path};
 use pkg::diagnostics::Diagnostic;
 use pkg::diagnostics::codes;
 use pkg::resolve::{ParamOwner, TypeItem};
 use pkg::span::Span;
-use pkg::types::{Checker, GenericDef, NamedRef, SpanType, Subst, TypeKind};
+use pkg::types::{Checker, GenericDef, NamedRef, ParamRef, SpanType, Subst, SubstEntry, Type, TypeKind};
 use pkg::types;
+use pkg::types::exprs;
+use pkg::types::interfaces;
 use pkg::types::typed::{GenericsEntry, owner_key};
 
 /// The type parameters of every generic declaration, with their bounds.
@@ -132,4 +136,545 @@ pub fn check_bounds(cx: Checker, span: Span, subst: Subst) {
       }
     }
   }
+}
+
+/// One generic declaration whose type arguments are being inferred: one slot per parameter.
+pub struct UnknownGroup {
+  pub owner: ParamOwner;
+  pub slots: List<Option<Type>>;
+}
+
+/// The type arguments being inferred for some generic declarations.
+pub class Unknowns {
+  pub var groups: List<UnknownGroup>;
+
+  pub fn new(self) {
+    self.groups = new List();
+  }
+
+  /// Adds the parameters of `owner`, with the arguments given explicitly, if any.
+  pub fn add(self, owner: ParamOwner, count: usize, explicit: Option<List<Type>>) {
+    const slots: List<Option<Type>> = new List();
+
+    match explicit {
+      Some(args) => {
+        for arg in args {
+          slots.push(Some(arg));
+        }
+      }
+      None => {
+        for _ in 0..count {
+          slots.push(None);
+        }
+      }
+    }
+
+    self.groups.push(UnknownGroup { owner: owner, slots: slots });
+  }
+
+  pub fn is_empty(self) -> bool {
+    self.groups.is_empty()
+  }
+
+  /// Whether `param` is one of the parameters being inferred and its argument is not known yet.
+  pub fn is_unknown(self, param: ParamRef) -> bool {
+    for group in self.groups {
+      if types::same_owner(group.owner, param.owner) {
+        if let Some(slot) = group.slots.get(param.index as usize) {
+          if slot.is_none() {
+            return true;
+          }
+        }
+      }
+    }
+
+    false
+  }
+
+  /// The arguments known so far; unknown ones stay parameters.
+  pub fn subst(self) -> Subst {
+    const params: List<SubstEntry> = new List();
+
+    for group in self.groups {
+      const args: List<Type> = new List();
+
+      for index in 0..group.slots.len() {
+        match group.slots[index] {
+          Some(ty) => args.push(ty),
+          None => args.push(types::of(TypeKind::Param(ParamRef { owner: group.owner, index: index as u32, name: "" }))),
+        }
+      }
+
+      params.push(SubstEntry { owner: group.owner, args: args });
+    }
+
+    Subst { params: params, self_ty: None }
+  }
+
+  /// Learns arguments by matching the type `pattern`, which mentions the unknown parameters,
+  /// against the type `actual` of a value.
+  pub fn unify(self, pattern: Type, actual: Type) {
+    if types::is_never(actual) || types::is_error(actual) {
+      return;
+    }
+
+    match pattern.kind {
+      TypeKind::Param(param) => {
+        for group in self.groups {
+          if types::same_owner(group.owner, param.owner) {
+            const index = param.index as usize;
+
+            if index < group.slots.len() && group.slots[index].is_none() {
+              group.slots[index] = Some(actual);
+            }
+
+            return;
+          }
+        }
+      }
+      TypeKind::Option(inner) => {
+        if let TypeKind::Option(actual_inner) = actual.kind {
+          self.unify(inner, actual_inner);
+        }
+      }
+      TypeKind::Array { elem, .. } => {
+        if let TypeKind::Array { elem: actual_elem, .. } = actual.kind {
+          self.unify(elem, actual_elem);
+        }
+      }
+      TypeKind::List(elem) => {
+        if let TypeKind::List(actual_elem) = actual.kind {
+          self.unify(elem, actual_elem);
+        }
+      }
+      TypeKind::Ptr { pointee, .. } => {
+        if let TypeKind::Ptr { pointee: actual_pointee, .. } = actual.kind {
+          self.unify(pointee, actual_pointee);
+        }
+      }
+      TypeKind::Result { value, error } => {
+        if let TypeKind::Result { value: actual_value, error: actual_error } = actual.kind {
+          self.unify(value, actual_value);
+          self.unify(error, actual_error);
+        }
+      }
+      TypeKind::Struct(named) => {
+        if let TypeKind::Struct(other) = actual.kind {
+          if named.id == other.id {
+            self.unify_all(named.args, other.args);
+          }
+        }
+      }
+      TypeKind::Enum(named) => {
+        if let TypeKind::Enum(other) = actual.kind {
+          if named.id == other.id {
+            self.unify_all(named.args, other.args);
+          }
+        }
+      }
+      TypeKind::Class(named) => {
+        if let TypeKind::Class(other) = actual.kind {
+          if named.id == other.id {
+            self.unify_all(named.args, other.args);
+          }
+        }
+      }
+      TypeKind::Interface(named) => {
+        if let TypeKind::Interface(other) = actual.kind {
+          if named.id == other.id {
+            self.unify_all(named.args, other.args);
+          }
+        }
+      }
+      TypeKind::Function { params, ret } => {
+        if let TypeKind::Function { params: actual_params, ret: actual_ret } = actual.kind {
+          if params.len() == actual_params.len() {
+            self.unify_all(params, actual_params);
+            self.unify(ret, actual_ret);
+          }
+        }
+      }
+      _ => {}
+    }
+  }
+
+  prv fn unify_all(self, patterns: List<Type>, actuals: List<Type>) {
+    var index = 0usize;
+
+    while index < patterns.len() && index < actuals.len() {
+      self.unify(patterns[index], actuals[index]);
+      index += 1;
+    }
+  }
+}
+
+/// A parameter inference could not determine.
+struct Missing {
+  pub owner: ParamOwner;
+  pub index: usize;
+}
+
+/// Whether a type mentions a parameter whose argument is still unknown. A parameter given as its
+/// own argument (`new Box<T>(...)` inside `Box<T>`) is known.
+fn mentions_unknown(ty: Type, unknowns: Unknowns) -> bool {
+  match ty.kind {
+    TypeKind::Param(param) => unknowns.is_unknown(param),
+    TypeKind::Struct(named) => any_unknown(named.args, unknowns),
+    TypeKind::Enum(named) => any_unknown(named.args, unknowns),
+    TypeKind::Class(named) => any_unknown(named.args, unknowns),
+    TypeKind::Interface(named) => any_unknown(named.args, unknowns),
+    TypeKind::Array { elem, .. } => mentions_unknown(elem, unknowns),
+    TypeKind::List(elem) => mentions_unknown(elem, unknowns),
+    TypeKind::Option(elem) => mentions_unknown(elem, unknowns),
+    TypeKind::Ptr { pointee, .. } => mentions_unknown(pointee, unknowns),
+    TypeKind::Result { value, error } => mentions_unknown(value, unknowns) || mentions_unknown(error, unknowns),
+    TypeKind::Function { params, ret } => any_unknown(params, unknowns) || mentions_unknown(ret, unknowns),
+    _ => false,
+  }
+}
+
+fn any_unknown(list: List<Type>, unknowns: Unknowns) -> bool {
+  for ty in list {
+    if mentions_unknown(ty, unknowns) {
+      return true;
+    }
+  }
+
+  false
+}
+
+/// The type arguments written explicitly in a path, as types, with the segment they follow.
+pub struct Explicit {
+  pub segment: usize;
+  pub args: List<Type>;
+}
+
+pub fn explicit_args(cx: Checker, path: Path) -> Option<Explicit> {
+  const written = path.type_args?;
+  const args: List<Type> = new List();
+
+  for arg in written.args {
+    args.push(cx.type_expr(arg));
+  }
+
+  Some(Explicit { segment: written.segment, args: args })
+}
+
+pub fn is_lambda(expr: Expr) -> bool {
+  match expr.kind {
+    ExprKind::Lambda { .. } => true,
+    _ => false,
+  }
+}
+
+/// Checks call arguments against parameter types that may mention the parameters being
+/// inferred: each argument teaches `unknowns` what it can, and is checked against its type once
+/// known.
+pub fn generic_args(cx: Checker, span: Span, what: String, params: List<Type>, args: List<Expr>, fixed: Subst, unknowns: Unknowns) {
+  if args.len() != params.len() {
+    cx.error(codes::WRONG_ARGUMENT_COUNT, span, `this ${what} takes ${params.len()} argument${types::plural(params.len())} but ${args.len()} were supplied`);
+  }
+
+  // Lambdas come last, so their parameter types can come from the other arguments.
+  for lambdas in List::from([false, true]) {
+    for index in 0..args.len() {
+      const arg = args[index];
+
+      if is_lambda(arg) != lambdas {
+        continue;
+      }
+
+      match params.get(index) {
+        Some(param) => generic_arg(cx, arg, param, fixed, unknowns),
+        None => {
+          exprs::expr(cx, arg, None);
+        }
+      }
+    }
+  }
+}
+
+/// Checks one value against a type that may mention parameters being inferred.
+pub fn generic_arg(cx: Checker, arg: Expr, param: Type, fixed: Subst, unknowns: Unknowns) {
+  const pattern = types::substitute(param, fixed);
+  const known = types::substitute(pattern, unknowns.subst());
+
+  if !mentions_unknown(known, unknowns) {
+    exprs::expect(cx, arg, known);
+
+    return;
+  }
+
+  // A lambda whose parameter types are known infers the rest from its body.
+  var hint: Option<Type> = None;
+
+  if let TypeKind::Function { params, ret } = known.kind {
+    if is_lambda(arg) && !any_unknown(params, unknowns) {
+      const result = if mentions_unknown(ret, unknowns) { types::error() } else { ret };
+
+      hint = Some(types::of(TypeKind::Function { params: params, ret: result }));
+    }
+  }
+
+  const actual = exprs::expr(cx, arg, hint);
+
+  unknowns.unify(pattern, actual);
+
+  const expected = types::substitute(pattern, unknowns.subst());
+
+  if !mentions_unknown(expected, unknowns) && !cx.fits(actual, expected) {
+    exprs::mismatch(cx, arg.span, expected, actual);
+  }
+}
+
+/// The type arguments given for one declaration, or `{error}` for each parameter when their
+/// number is wrong.
+fn given_args(cx: Checker, span: Span, what: String, count: usize, args: List<Type>) -> List<Type> {
+  if cx.check_arg_count(span, what, count, args.len()) {
+    return args;
+  }
+
+  const errors: List<Type> = new List();
+
+  for _ in 0..count {
+    errors.push(types::error());
+  }
+
+  errors
+}
+
+/// A call of a module function or of a type's static function, inferring the type arguments of
+/// generic ones.
+pub fn fn_call(cx: Checker, expr: Expr, path: Path, function: u32, args: List<Expr>, expected: Option<Type>) -> Type {
+  const sig = match cx.typed.sig(function) {
+    Some(sig) => sig,
+    None => {
+      exprs::unchecked_args(cx, args);
+
+      return types::error();
+    }
+  };
+  const name = match cx.resolution.fn_decl(cx.package, function) {
+    Some(decl) => decl.name.name,
+    None => "",
+  };
+  const owner = cx.resolution.owner(function);
+  const owner_count = match owner {
+    Some(item) => cx.generic_count(ParamOwner::Item(item)),
+    None => 0,
+  };
+  const own_count = cx.generic_count(ParamOwner::Fn(function));
+  const explicit = explicit_args(cx, path);
+  const last = if path.segments.is_empty() { 0usize } else { path.segments.len() - 1 };
+
+  if owner_count == 0 && own_count == 0 {
+    if let Some(written) = explicit {
+      cx.check_arg_count(path.span, "`" + name + "`", 0, written.args.len());
+    }
+
+    exprs::check_args(cx, expr.span, "function", sig.params, args);
+
+    return sig.ret;
+  }
+
+  const unknowns = new Unknowns();
+
+  if let Some(item) = owner {
+    if owner_count > 0 {
+      var given: Option<List<Type>> = None;
+      var for_owner = false;
+
+      if let Some(written) = explicit {
+        if written.segment != last {
+          for_owner = true;
+          given = Some(given_args(cx, path.span, "`" + cx.resolution.type_name(cx.package, item) + "`", owner_count, written.args));
+        }
+      }
+
+      // `Self::f()` keeps the arguments of the type being declared.
+      if !for_owner {
+        if let Some(first) = path.segments.first() {
+          if first.name == "Self" {
+            given = Some(cx.identity_args(ParamOwner::Item(item)));
+          }
+        }
+      }
+
+      unknowns.add(ParamOwner::Item(item), owner_count, given);
+    }
+  }
+
+  var own_given: Option<List<Type>> = None;
+
+  if let Some(written) = explicit {
+    if written.segment == last {
+      own_given = Some(given_args(cx, path.span, "`" + name + "`", own_count, written.args));
+    }
+  }
+
+  unknowns.add(ParamOwner::Fn(function), own_count, own_given);
+
+  if let Some(ty) = expected {
+    unknowns.unify(sig.ret, ty);
+  }
+
+  generic_args(cx, expr.span, "function", sig.params, args, Subst::empty(), unknowns);
+
+  const subst = finish_inference(cx, expr.span, "`" + name + "`", unknowns);
+  const own = subst.args_of(ParamOwner::Fn(function)).unwrap_or(new List());
+
+  record_call_args(cx, expr.id, subst, function, own);
+
+  types::substitute(sig.ret, subst)
+}
+
+/// The arguments and result of a call to `function` on a receiver of type `receiver_ty`: the
+/// parameters of the type declaring it take the receiver's arguments, and its own are inferred.
+pub fn generic_method_call(cx: Checker, expr: Expr, receiver_ty: Type, function: u32, args: List<Expr>) -> Type {
+  const sig = match cx.typed.sig(function) {
+    Some(sig) => sig,
+    None => {
+      exprs::unchecked_args(cx, args);
+
+      return types::error();
+    }
+  };
+  const fixed = interfaces::inherited_subst(cx, receiver_ty, function);
+  const own_count = cx.generic_count(ParamOwner::Fn(function));
+  const unknowns = new Unknowns();
+
+  unknowns.add(ParamOwner::Fn(function), own_count, None);
+  generic_args(cx, expr.span, "method", sig.params, args, fixed, unknowns);
+
+  const name = match cx.resolution.fn_decl(cx.package, function) {
+    Some(decl) => decl.name.name,
+    None => "",
+  };
+  const own = finish_inference(cx, expr.span, "`" + name + "`", unknowns);
+  const own_args = match own.params.first() {
+    Some(entry) => entry.args,
+    None => new List(),
+  };
+  var subst = own.after(fixed).with(ParamOwner::Fn(function), own_args);
+
+  if let Some(self_ty) = fixed.self_ty {
+    subst = subst.with_self(self_ty);
+  }
+
+  record_call_args(cx, expr.id, fixed, function, own_args);
+
+  types::substitute(sig.ret, subst)
+}
+
+/// Reports the parameters inference could not determine, and returns the substitution.
+pub fn finish_inference(cx: Checker, span: Span, what: String, unknowns: Unknowns) -> Subst {
+  const params: List<SubstEntry> = new List();
+  const missing: List<Missing> = new List();
+
+  for group in unknowns.groups {
+    const args: List<Type> = new List();
+
+    for index in 0..group.slots.len() {
+      match group.slots[index] {
+        Some(ty) => args.push(ty),
+        None => {
+          missing.push(Missing { owner: group.owner, index: index });
+          args.push(types::error());
+        }
+      }
+    }
+
+    params.push(SubstEntry { owner: group.owner, args: args });
+  }
+
+  const subst = Subst { params: params, self_ty: None };
+
+  for entry in missing {
+    const name = match cx.typed.generic_params(entry.owner) {
+      Some(found) => match found.get(entry.index) {
+        Some(param) => param.name,
+        None => "",
+      },
+      None => "",
+    };
+
+    cx.diagnostics.push(
+      Diagnostic::error(codes::UNKNOWN_TYPE, span, "cannot infer the type parameter `" + name + "` of " + what)
+        .with_help("write the type arguments explicitly, such as `name<Type>(...)`, or annotate the expected type"),
+    );
+  }
+
+  check_bounds(cx, span, subst);
+
+  subst
+}
+
+/// Records the type arguments of a call to `function`: those its type receives in `subst`, then
+/// `own` for its own parameters. Nothing is recorded for calls without arguments.
+pub fn record_call_args(cx: Checker, id: u32, subst: Subst, function: u32, own: List<Type>) {
+  const args: List<Type> = new List();
+
+  if let Some(owner) = cx.resolution.owner(function) {
+    if let Some(found) = subst.args_of(ParamOwner::Item(owner)) {
+      for arg in found {
+        args.push(arg);
+      }
+    }
+  }
+
+  for arg in own {
+    args.push(arg);
+  }
+
+  if !args.is_empty() {
+    cx.typed.call_args.insert(id, args);
+  }
+}
+
+/// Like `record_call_args`, for a function without own type parameters.
+pub fn record_owner_args(cx: Checker, id: u32, subst: Subst, function: u32) {
+  record_call_args(cx, id, subst, function, new List());
+}
+
+/// The type arguments of a generic enum being inferred for one of its variants: from the path
+/// (`Tree<i32>::Leaf`) and the expected type.
+pub fn enum_unknowns(cx: Checker, id: u32, expected: Option<Type>, written: Option<Path>) -> Unknowns {
+  const owner = ParamOwner::Item(TypeItem::Enum(id));
+  const count = cx.generic_count(owner);
+  var explicit: Option<List<Type>> = None;
+
+  if let Some(path) = written {
+    if let Some(found) = explicit_args(cx, path) {
+      if cx.check_arg_count(path.span, "this enum", count, found.args.len()) {
+        explicit = Some(found.args);
+      }
+    }
+  }
+
+  const unknowns = new Unknowns();
+
+  unknowns.add(owner, count, explicit);
+
+  if let Some(ty) = expected {
+    unknowns.unify(cx.type_ref(TypeItem::Enum(id)), ty);
+  }
+
+  unknowns
+}
+
+/// The type of a generic enum once its arguments are inferred.
+pub fn finish_enum(cx: Checker, span: Span, id: u32, unknowns: Unknowns) -> Type {
+  const name = cx.resolution.type_name(cx.package, TypeItem::Enum(id));
+  const taken = new Unknowns();
+
+  taken.groups = unknowns.groups;
+  unknowns.groups = new List();
+
+  const subst = finish_inference(cx, span, "`" + name + "`", taken);
+  const args = match subst.params.first() {
+    Some(entry) => entry.args,
+    None => new List(),
+  };
+
+  cx.named_type(TypeItem::Enum(id), args)
 }

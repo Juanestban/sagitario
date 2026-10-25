@@ -1,0 +1,912 @@
+//! Flow analysis of one function: definite assignment, `const` bindings assigned at most once,
+//! reachability, and the binding warnings of docs/spec/03-memory.md. In a class's initializer the
+//! fields of `self` are tracked like bindings. The port of `sagitario_types::flow`.
+//!
+//! Loop bodies are analyzed twice: a silent first pass finds what may already be assigned when
+//! the body repeats, and the second pass starts from that state. Lists are references in
+//! Sagitario, so every state Rust clones is copied here with `copy_state`.
+
+use pkg::ast::{BinaryOp, Block, Expr, ExprKind, FnDecl, Pattern, PatternKind, Stmt, TemplatePart, UnaryOp};
+use pkg::diagnostics::{Diagnostic, Diagnostics};
+use pkg::diagnostics::codes;
+use pkg::resolve::{LambdaInfo, LocalInfo, LocalKind, Res, Resolution};
+use pkg::span::Span;
+use pkg::types::{ClassDef, FieldDef, Receiver, TypeKind};
+use pkg::types;
+use pkg::types::typed::{BuiltinMethod, TypedModule};
+
+/// The kind of type a function belongs to, for the rules about `self`: a value (module function,
+/// struct or enum function), or a class, with the class definition for its initializer.
+pub struct FlowOwner {
+  pub is_class: bool;
+  pub initializer: Option<ClassDef>;
+
+  pub fn of_value() -> FlowOwner {
+    FlowOwner { is_class: false, initializer: None }
+  }
+
+  pub fn of_class(initializer: Option<ClassDef>) -> FlowOwner {
+    FlowOwner { is_class: true, initializer: initializer }
+  }
+}
+
+/// Which bindings are assigned at a point.
+struct State {
+  /// Assigned on every path that reaches this point.
+  pub assigned: List<bool>;
+  /// Assigned on at least one path.
+  pub maybe: List<bool>;
+  pub reachable: bool;
+}
+
+fn copy_flags(flags: List<bool>) -> List<bool> {
+  const result: List<bool> = new List();
+
+  for flag in flags {
+    result.push(flag);
+  }
+
+  result
+}
+
+fn copy_state(state: State) -> State {
+  State { assigned: copy_flags(state.assigned), maybe: copy_flags(state.maybe), reachable: state.reachable }
+}
+
+fn falses(count: usize) -> List<bool> {
+  const result: List<bool> = new List();
+
+  for _ in 0..count {
+    result.push(false);
+  }
+
+  result
+}
+
+fn set(flags: List<bool>, id: u32, value: bool) {
+  if (id as usize) < flags.len() {
+    flags[id as usize] = value;
+  }
+}
+
+fn get(flags: List<bool>, id: u32) -> bool {
+  flags.get(id as usize).unwrap_or(false)
+}
+
+fn and(a: List<bool>, b: List<bool>) -> List<bool> {
+  const result: List<bool> = new List();
+  var index = 0usize;
+
+  while index < a.len() && index < b.len() {
+    result.push(a[index] && b[index]);
+    index += 1;
+  }
+
+  result
+}
+
+fn or(a: List<bool>, b: List<bool>) -> List<bool> {
+  const result: List<bool> = new List();
+  var index = 0usize;
+
+  while index < a.len() && index < b.len() {
+    result.push(a[index] || b[index]);
+    index += 1;
+  }
+
+  result
+}
+
+fn or_into(target: Option<List<bool>>, value: List<bool>) -> Option<List<bool>> {
+  match target {
+    Some(previous) => Some(or(previous, value)),
+    None => Some(copy_flags(value)),
+  }
+}
+
+/// What leaves or repeats a loop body.
+class LoopExits {
+  /// Intersection of `assigned` at each `break`; `None` while there are none.
+  pub var break_assigned: Option<List<bool>>;
+  /// Union of `maybe` at each `break`.
+  pub var break_maybe: Option<List<bool>>;
+  /// Union of `maybe` at each `continue`.
+  pub var continue_maybe: Option<List<bool>>;
+
+  pub fn new(self) {
+    self.break_assigned = None;
+    self.break_maybe = None;
+    self.continue_maybe = None;
+  }
+}
+
+pub fn check_function(decl: FnDecl, locals: List<LocalInfo>, owner: FlowOwner, resolution: Resolution, typed: TypedModule, diagnostics: Diagnostics) {
+  const fields = match owner.initializer {
+    Some(def) => def.fields.len(),
+    None => 0,
+  };
+  // The fields of an initializer's `self` follow the locals.
+  const count = locals.len() + fields;
+  const flow = new Flow(locals, owner, resolution, typed, diagnostics, count);
+
+  for index in 0..locals.len() {
+    if locals[index].kind == LocalKind::Param || locals[index].kind == LocalKind::SelfParam {
+      flow.define(index as u32, true);
+    }
+  }
+
+  flow.block(decl.body);
+
+  if flow.state.reachable {
+    flow.report_missing_fields(decl.name.span, false);
+  }
+
+  flow.warn_bindings();
+}
+
+class Flow {
+  prv const locals: List<LocalInfo>;
+  prv const owner: FlowOwner;
+  prv const resolution: Resolution;
+  prv const typed: TypedModule;
+  prv const diagnostics: Diagnostics;
+  /// While positive, diagnostics are not reported (first pass over a loop body).
+  prv var silent: usize;
+  pub var state: State;
+  prv var used: List<bool>;
+  prv var reassigned: List<bool>;
+  /// Whether an unassigned use was already reported for each binding or field.
+  prv var reported: List<bool>;
+  /// Whether a use of `self` before every field is assigned was already reported.
+  prv var self_reported: bool;
+  /// The lambdas being analyzed, innermost last.
+  prv var lambdas: List<LambdaInfo>;
+  prv var loops: List<LoopExits>;
+
+  pub fn new(self, locals: List<LocalInfo>, owner: FlowOwner, resolution: Resolution, typed: TypedModule, diagnostics: Diagnostics, count: usize) {
+    self.locals = locals;
+    self.owner = owner;
+    self.resolution = resolution;
+    self.typed = typed;
+    self.diagnostics = diagnostics;
+    self.silent = 0;
+    self.state = State { assigned: falses(count), maybe: falses(count), reachable: true };
+    self.used = falses(locals.len());
+    self.reassigned = falses(locals.len());
+    self.reported = falses(count);
+    self.self_reported = false;
+    self.lambdas = new List();
+    self.loops = new List();
+  }
+
+  prv fn report(self, diagnostic: Diagnostic) {
+    if self.silent == 0 {
+      self.diagnostics.push(diagnostic);
+    }
+  }
+
+  pub fn define(self, id: u32, assigned: bool) {
+    set(self.state.assigned, id, assigned);
+    set(self.state.maybe, id, assigned);
+  }
+
+  prv fn info(self, id: u32) -> Option<LocalInfo> {
+    self.locals.get(id as usize)
+  }
+
+  prv fn initializer_fields(self) -> Option<List<FieldDef>> {
+    match self.owner.initializer {
+      Some(def) => Some(def.fields),
+      None => None,
+    }
+  }
+
+  prv fn is_self(self, value: Expr) -> bool {
+    match self.resolution.paths.get(value.id) {
+      Some(Res::Local(id)) => match self.info(id) {
+        Some(info) => info.kind == LocalKind::SelfParam,
+        None => false,
+      },
+      _ => false,
+    }
+  }
+
+  /// `self.name` in an initializer: the slot that tracks the field.
+  prv fn self_field(self, value: Expr) -> Option<u32> {
+    const fields = self.initializer_fields()?;
+
+    if let ExprKind::Field { base, name } = value.kind {
+      if !self.is_self(base) {
+        return None;
+      }
+
+      for index in 0..fields.len() {
+        if fields[index].name == name.name {
+          return Some((self.locals.len() + index) as u32);
+        }
+      }
+    }
+
+    None
+  }
+
+  /// The field tracked by a slot.
+  prv fn slot_field(self, slot: u32) -> Option<FieldDef> {
+    const fields = self.initializer_fields()?;
+
+    fields.get((slot as usize) - self.locals.len())
+  }
+
+  /// The fields of an initializer's `self` that may still be unassigned.
+  prv fn missing_fields(self) -> List<FieldDef> {
+    const missing: List<FieldDef> = new List();
+
+    if let Some(fields) = self.initializer_fields() {
+      for index in 0..fields.len() {
+        if !get(self.state.assigned, (self.locals.len() + index) as u32) {
+          missing.push(fields[index]);
+        }
+      }
+    }
+
+    missing
+  }
+
+  /// Reports fields an initializer has not assigned when it returns.
+  pub fn report_missing_fields(self, span: Span, at_return: bool) {
+    const missing = self.missing_fields();
+
+    if missing.is_empty() {
+      return;
+    }
+
+    const names: List<String> = new List();
+
+    for field in missing {
+      names.push("`" + field.name + "`");
+    }
+
+    const fields = "field" + (if names.len() == 1 { "" } else { "s" }) + " " + names.join(", ");
+    const message = if at_return { "`new` returns before assigning the " + fields } else { "`new` does not assign the " + fields + " on every path" };
+    var diagnostic = Diagnostic::error(codes::UNINITIALIZED_FIELD, span, message);
+
+    for field in missing {
+      diagnostic = diagnostic.with_label(field.span, "declared here");
+    }
+
+    self.report(diagnostic.with_help("assign every field of `self` in `new`"));
+  }
+
+  /// Reading `self.name` in an initializer.
+  prv fn read_field(self, slot: u32, span: Span) {
+    if self.silent > 0 || !self.state.reachable || get(self.state.assigned, slot) || get(self.reported, slot) {
+      return;
+    }
+
+    set(self.reported, slot, true);
+
+    const field = match self.slot_field(slot) {
+      Some(field) => field,
+      None => return,
+    };
+    const message = if get(self.state.maybe, slot) {
+      "the field `" + field.name + "` may be read before being assigned"
+    } else {
+      "the field `" + field.name + "` is read before being assigned"
+    };
+
+    self.report(Diagnostic::error(codes::UNINITIALIZED_FIELD, span, message).with_label(field.span, "declared here"));
+  }
+
+  /// `self.name = value` in an initializer; a `const` field is assigned exactly once.
+  prv fn assign_field(self, target: Expr, compound: bool) {
+    const slot = match self.self_field(target) {
+      Some(slot) => slot,
+      None => return,
+    };
+
+    if let Some(field) = self.slot_field(slot) {
+      if !field.mutable && (compound || get(self.state.maybe, slot)) {
+        self.report(
+          Diagnostic::error(codes::ASSIGN_TO_CONST, target.span, "cannot assign twice to the `const` field `" + field.name + "`")
+            .with_label(field.span, "declared `const` here")
+            .with_help("declare it `var " + field.name + "` to assign it more than once"),
+        );
+      }
+    }
+
+    set(self.state.assigned, slot, true);
+    set(self.state.maybe, slot, true);
+  }
+
+  /// Using `self` in an initializer requires every field to be assigned.
+  prv fn use_self(self, span: Span) {
+    if self.self_reported || self.silent > 0 || !self.state.reachable {
+      return;
+    }
+
+    const missing: List<String> = new List();
+
+    for field in self.missing_fields() {
+      missing.push("`" + field.name + "`");
+    }
+
+    if missing.is_empty() {
+      return;
+    }
+
+    self.self_reported = true;
+    self.report(
+      Diagnostic::error(codes::UNINITIALIZED_FIELD, span, "`self` is used before every field is assigned")
+        .with_note("still unassigned here: " + missing.join(", "))
+        .with_help("assign every field before calling methods on `self` or passing it along"),
+    );
+  }
+
+  /// Joins the states of two paths that meet.
+  prv fn merge(self, other: State) {
+    const current = self.state;
+    const maybe = or(current.maybe, other.maybe);
+
+    if !current.reachable {
+      self.state = State { assigned: other.assigned, maybe: maybe, reachable: other.reachable };
+    } else if !other.reachable {
+      self.state = State { assigned: current.assigned, maybe: maybe, reachable: current.reachable };
+    } else {
+      self.state = State { assigned: and(current.assigned, other.assigned), maybe: maybe, reachable: true };
+    }
+  }
+
+  pub fn block(self, body: Block) {
+    var warned = false;
+
+    for statement in body.stmts {
+      const span = match statement {
+        Stmt::Let(decl) => decl.span,
+        Stmt::Assign { span, .. } => span,
+        Stmt::Expr(value) => value.span,
+      };
+
+      if !self.state.reachable && !warned {
+        self.report(Diagnostic::warning(codes::UNREACHABLE_CODE, span, "unreachable code"));
+        warned = true;
+      }
+
+      self.stmt(statement);
+    }
+
+    if let Some(tail) = body.tail {
+      if !self.state.reachable && !warned {
+        self.report(Diagnostic::warning(codes::UNREACHABLE_CODE, tail.span, "unreachable code"));
+      }
+
+      self.expr(tail);
+    }
+  }
+
+  prv fn stmt(self, statement: Stmt) {
+    match statement {
+      Stmt::Let(decl) => {
+        if let Some(init) = decl.init {
+          self.expr(init);
+        }
+
+        if let Some(id) = self.resolution.bindings.get(decl.id) {
+          self.define(id, decl.init.is_some());
+        }
+      }
+      Stmt::Assign { target, op, value, .. } => {
+        if self.self_field(target).is_some() {
+          if op.is_some() {
+            // A compound assignment reads the field first.
+            self.expr(target);
+          }
+
+          self.expr(value);
+          self.assign_field(target, op.is_some());
+
+          return;
+        }
+
+        const is_place = match target.kind {
+          ExprKind::Field { .. } | ExprKind::Index { .. } => true,
+          ExprKind::Unary { op: unary_op, .. } => unary_op == UnaryOp::Deref,
+          _ => false,
+        };
+
+        if is_place {
+          // Modifying a part of a binding reads the binding and counts as reassigning it.
+          self.expr(target);
+          self.expr(value);
+          self.mutate(target);
+
+          return;
+        }
+
+        const local = match self.resolution.paths.get(target.id) {
+          Some(Res::Local(id)) => Some(id),
+          _ => None,
+        };
+
+        if op.is_some() {
+          // A compound assignment reads the binding first.
+          self.expr(target);
+        }
+
+        self.expr(value);
+
+        if let Some(id) = local {
+          self.assign(id, target.span, op.is_some());
+        }
+      }
+      Stmt::Expr(value) => self.expr(value),
+    }
+  }
+
+  /// Marks the binding a place belongs to as modified, for the unneeded-`var` warning. The fields
+  /// of a class instance belong to the instance, not to the binding referring to it.
+  prv fn mutate(self, place: Expr) {
+    match place.kind {
+      ExprKind::Path(_) => {
+        if let Some(Res::Local(id)) = self.resolution.paths.get(place.id) {
+          set(self.reassigned, id, true);
+        }
+      }
+      ExprKind::Field { base, .. } => self.mutate_part(base),
+      ExprKind::Index { base, .. } => self.mutate_part(base),
+      _ => {}
+    }
+  }
+
+  prv fn mutate_part(self, base: Expr) {
+    const is_class = match self.typed.expr_types.get(base.id) {
+      Some(ty) => match ty.kind {
+        TypeKind::Class(_) => true,
+        _ => false,
+      },
+      None => false,
+    };
+
+    if !is_class {
+      self.mutate(base);
+    }
+  }
+
+  prv fn assign(self, id: u32, span: Span, compound: bool) {
+    // Assigning a capture inside a lambda is reported by the type checker.
+    if let Some(lambda) = self.lambdas.last() {
+      if !lambda.owns(id) {
+        return;
+      }
+    }
+
+    const info = match self.info(id) {
+      Some(info) => info,
+      None => return,
+    };
+    const again = compound || get(self.state.maybe, id);
+    var error: Option<String> = None;
+
+    match info.kind {
+      LocalKind::Var => {
+        if again {
+          set(self.reassigned, id, true);
+        }
+      }
+      LocalKind::Const => {
+        if again {
+          error = Some("cannot assign twice to the `const` binding `" + info.name + "`");
+        }
+      }
+      LocalKind::SelfParam => {
+        // A struct or enum method that replaces `self` modifies the caller's value.
+        if self.owner.is_class {
+          error = Some("cannot assign to `self` in a class");
+        }
+      }
+      LocalKind::Param => {
+        error = Some("cannot assign to the parameter `" + info.name + "`");
+      }
+      LocalKind::ForVar => {
+        error = Some("cannot assign to the loop variable `" + info.name + "`");
+      }
+      LocalKind::Pattern => {
+        error = Some("cannot assign to the pattern binding `" + info.name + "`");
+      }
+    }
+
+    if let Some(message) = error {
+      const declared = match info.kind {
+        LocalKind::Param => "parameter declared here",
+        LocalKind::ForVar => "loop variable declared here",
+        LocalKind::Pattern => "bound by the pattern here",
+        LocalKind::SelfParam => "`self` is the instance itself",
+        _ => "declared with `const` here",
+      };
+      const help = if info.kind == LocalKind::SelfParam { "assign the fields of `self` instead" } else { "declare `" + info.name + "` with `var` to reassign it" };
+
+      self.report(Diagnostic::error(codes::ASSIGN_TO_CONST, span, message).with_label(info.span, declared).with_help(help));
+    }
+
+    set(self.state.assigned, id, true);
+    set(self.state.maybe, id, true);
+  }
+
+  prv fn read(self, id: u32, span: Span) {
+    set(self.used, id, true);
+
+    if self.silent > 0 || !self.state.reachable || get(self.state.assigned, id) || get(self.reported, id) {
+      return;
+    }
+
+    set(self.reported, id, true);
+
+    const info = match self.info(id) {
+      Some(info) => info,
+      None => return,
+    };
+    const message = if get(self.state.maybe, id) { "`" + info.name + "` may be used before being assigned" } else { "`" + info.name + "` is used before being assigned" };
+
+    self.report(
+      Diagnostic::error(codes::UNASSIGNED_BINDING, span, message)
+        .with_label(info.span, "declared here without a value")
+        .with_help("assign it on every path before this use"),
+    );
+  }
+
+  prv fn expr(self, value: Expr) {
+    match value.kind {
+      ExprKind::Path(_) => {
+        if let Some(Res::Local(id)) = self.resolution.paths.get(value.id) {
+          self.read(id, value.span);
+
+          if self.owner.initializer.is_some() && self.is_self(value) {
+            self.use_self(value.span);
+          }
+        }
+      }
+      ExprKind::Call { callee, args } => {
+        self.expr(callee);
+        self.exprs(args);
+
+        // A call that never returns (`panic`) ends the path.
+        if let Some(ty) = self.typed.expr_types.get(value.id) {
+          if types::is_never(ty) {
+            self.state.reachable = false;
+          }
+        }
+      }
+      ExprKind::New { args, .. } => self.exprs(args),
+      ExprKind::MethodCall { receiver, method, args } => {
+        // `zod.new(...)` runs before the fields of `self` are assigned.
+        const zod_new = match receiver.kind {
+          ExprKind::Zod => method.name == "new",
+          _ => false,
+        };
+
+        if !zod_new {
+          self.expr(receiver);
+        }
+
+        self.exprs(args);
+
+        var as_mut_ptr = false;
+
+        if let Some(BuiltinMethod::Runtime { function, .. }) = self.typed.builtin_methods.get(value.id) {
+          as_mut_ptr = function == "SAG_ARRAY_MUT_PTR";
+        }
+
+        var by_var = false;
+
+        if let Some(function) = self.typed.method_calls.get(value.id) {
+          if let Some(sig) = self.typed.sig(function) {
+            if let Some(receiver_kind) = sig.receiver {
+              by_var = receiver_kind == Receiver::Var;
+            }
+          }
+        }
+
+        if as_mut_ptr || by_var {
+          self.mutate(receiver);
+        }
+      }
+      ExprKind::Lambda { body, .. } => {
+        const info = match self.resolution.lambdas.get(value.id) {
+          Some(info) => info,
+          None => return,
+        };
+
+        // The captures are copied when the lambda is created.
+        for capture in info.captures {
+          self.read(capture, value.span);
+        }
+
+        // The body runs later, maybe several times: it is analyzed apart and changes nothing
+        // here.
+        const saved_state = copy_state(self.state);
+        const saved_loops = self.loops;
+
+        self.loops = new List();
+
+        for param in info.params {
+          self.define(param, true);
+        }
+
+        self.state.reachable = true;
+        self.lambdas.push(info);
+        self.expr(body);
+        self.lambdas.pop();
+        self.state = saved_state;
+        self.loops = saved_loops;
+      }
+      // `zod.method(...)` uses `self`.
+      ExprKind::Zod => {
+        if self.owner.initializer.is_some() {
+          self.use_self(value.span);
+        }
+      }
+      ExprKind::Field { base, .. } => match self.self_field(value) {
+        Some(slot) => self.read_field(slot, value.span),
+        None => self.expr(base),
+      },
+      ExprKind::Index { base, index } => {
+        self.expr(base);
+        self.expr(index);
+      }
+      ExprKind::StructLit { fields, .. } => {
+        for field in fields {
+          self.expr(field.value);
+        }
+      }
+      ExprKind::ArrayLit(elems) => self.exprs(elems),
+      ExprKind::ArrayRepeat { value: repeated, .. } => self.expr(repeated),
+      ExprKind::Try(inner) => self.expr(inner),
+      ExprKind::Match { scrutinee, arms } => {
+        self.expr(scrutinee);
+
+        // Exactly one arm runs; each starts from the state after the scrutinee.
+        const before = copy_state(self.state);
+        var after: Option<State> = None;
+
+        for arm in arms {
+          self.state = copy_state(before);
+
+          const bound: List<u32> = new List();
+
+          self.pattern_bindings(arm.pattern, bound);
+
+          for local in bound {
+            self.define(local, true);
+          }
+
+          if let Some(guard) = arm.guard {
+            self.expr(guard);
+          }
+
+          self.expr(arm.body);
+
+          if let Some(previous) = after {
+            self.merge(previous);
+          }
+
+          after = Some(copy_state(self.state));
+        }
+
+        self.state = match after {
+          Some(found) => found,
+          None => State { assigned: before.assigned, maybe: before.maybe, reachable: false },
+        };
+      }
+      ExprKind::Template(parts) => {
+        for part in parts {
+          if let TemplatePart::Expr(inner) = part {
+            self.expr(inner);
+          }
+        }
+      }
+      ExprKind::Unary { operand, .. } => self.expr(operand),
+      ExprKind::Cast { expr: inner, .. } => self.expr(inner),
+      ExprKind::Binary { op, lhs, rhs } => {
+        self.expr(lhs);
+
+        if op == BinaryOp::And || op == BinaryOp::Or {
+          // The right operand may not run.
+          const skipped = copy_state(self.state);
+
+          self.expr(rhs);
+          self.merge(skipped);
+        } else {
+          self.expr(rhs);
+        }
+      }
+      ExprKind::Range { start, end, .. } => {
+        self.expr(start);
+        self.expr(end);
+      }
+      ExprKind::Block(body) => self.block(body),
+      ExprKind::Unsafe(body) => self.block(body),
+      ExprKind::If { cond, then_block, else_branch } => {
+        self.expr(cond);
+
+        const before = copy_state(self.state);
+
+        self.block(then_block);
+
+        const after_then = self.state;
+
+        self.state = before;
+
+        if let Some(branch) = else_branch {
+          self.expr(branch);
+        }
+
+        self.merge(after_then);
+      }
+      ExprKind::While { cond, body } => {
+        self.expr(cond);
+        self.repeating_body(body, None, false);
+      }
+      ExprKind::For { iter, body, .. } => {
+        self.expr(iter);
+        self.repeating_body(body, self.resolution.bindings.get(value.id), false);
+      }
+      ExprKind::Loop(body) => self.repeating_body(body, None, true),
+      ExprKind::Break(result) => {
+        if let Some(found) = result {
+          self.expr(found);
+        }
+
+        if self.state.reachable {
+          if let Some(exits) = self.loops.last() {
+            exits.break_assigned = match exits.break_assigned {
+              Some(previous) => Some(and(previous, self.state.assigned)),
+              None => Some(copy_flags(self.state.assigned)),
+            };
+            exits.break_maybe = or_into(exits.break_maybe, self.state.maybe);
+          }
+        }
+
+        self.state.reachable = false;
+      }
+      ExprKind::Continue => {
+        if self.state.reachable {
+          if let Some(exits) = self.loops.last() {
+            exits.continue_maybe = or_into(exits.continue_maybe, self.state.maybe);
+          }
+        }
+
+        self.state.reachable = false;
+      }
+      ExprKind::Return(result) => {
+        if let Some(found) = result {
+          self.expr(found);
+        }
+
+        // A `return` inside a lambda leaves the lambda, not the initializer.
+        if self.state.reachable && self.lambdas.is_empty() {
+          self.report_missing_fields(value.span, true);
+        }
+
+        self.state.reachable = false;
+      }
+      _ => {}
+    }
+  }
+
+  /// The locals a pattern binds.
+  prv fn pattern_bindings(self, pattern: Pattern, out: List<u32>) {
+    match pattern.kind {
+      PatternKind::Ident(_) => {
+        if let Some(local) = self.resolution.bindings.get(pattern.id) {
+          out.push(local);
+        }
+      }
+      PatternKind::Tuple { elems, .. } => {
+        for elem in elems {
+          self.pattern_bindings(elem, out);
+        }
+      }
+      PatternKind::Or(alternatives) => {
+        for alternative in alternatives {
+          self.pattern_bindings(alternative, out);
+        }
+      }
+      PatternKind::Named { fields, .. } => {
+        for field in fields {
+          self.pattern_bindings(field.pattern, out);
+        }
+      }
+      _ => {}
+    }
+  }
+
+  prv fn exprs(self, values: List<Expr>) {
+    for value in values {
+      self.expr(value);
+    }
+  }
+
+  /// Analyzes one run of a loop body starting from `start`, returning what left or repeated it;
+  /// the state at its end is left in `self.state`.
+  prv fn body_pass(self, start: State, body: Block, variable: Option<u32>) -> LoopExits {
+    self.state = start;
+
+    if let Some(id) = variable {
+      // The loop variable is a fresh binding on each iteration.
+      self.define(id, true);
+    }
+
+    self.loops.push(new LoopExits());
+    self.block(body);
+
+    self.loops.pop().unwrap_or(new LoopExits())
+  }
+
+  /// A loop body that may repeat. `while` and `for` bodies may also not run at all; a `loop` body
+  /// runs at least once and is only left through `break`.
+  prv fn repeating_body(self, body: Block, variable: Option<u32>, is_loop: bool) {
+    const before = copy_state(self.state);
+
+    self.silent += 1;
+
+    const first_exits = self.body_pass(copy_state(before), body, variable);
+    const first_end = copy_state(self.state);
+
+    self.silent -= 1;
+
+    var repeat_maybe = match first_exits.continue_maybe {
+      Some(found) => found,
+      None => falses(before.maybe.len()),
+    };
+
+    if first_end.reachable {
+      repeat_maybe = or(repeat_maybe, first_end.maybe);
+    }
+
+    const start = State { assigned: copy_flags(before.assigned), maybe: or(before.maybe, repeat_maybe), reachable: before.reachable };
+    const exits = self.body_pass(start, body, variable);
+    const end = copy_state(self.state);
+    var maybe = or(before.maybe, end.maybe);
+
+    if let Some(extra) = exits.break_maybe {
+      maybe = or(maybe, extra);
+    }
+
+    if let Some(extra) = exits.continue_maybe {
+      maybe = or(maybe, extra);
+    }
+
+    if is_loop {
+      self.state = match exits.break_assigned {
+        Some(assigned) => State { assigned: assigned, maybe: maybe, reachable: before.reachable },
+        None => State { assigned: before.assigned, maybe: maybe, reachable: false },
+      };
+    } else {
+      self.state = State { assigned: before.assigned, maybe: maybe, reachable: before.reachable };
+    }
+  }
+
+  pub fn warn_bindings(self) {
+    for index in 0..self.locals.len() {
+      const local = self.locals[index];
+
+      if local.kind == LocalKind::SelfParam {
+        continue;
+      }
+
+      const used = self.used.get(index).unwrap_or(true);
+      const reassigned = self.reassigned.get(index).unwrap_or(true);
+
+      if !used && !local.name.starts_with("_") {
+        self.diagnostics.push(
+          Diagnostic::warning(codes::UNUSED_BINDING, local.span, "unused binding `" + local.name + "`")
+            .with_help("prefix it with an underscore to silence this warning: `_" + local.name + "`"),
+        );
+      }
+
+      if local.kind == LocalKind::Var && !reassigned {
+        self.diagnostics.push(Diagnostic::warning(codes::UNNEEDED_VAR, local.span, "`" + local.name + "` is declared with `var` but never reassigned; use `const`"));
+      }
+    }
+  }
+}

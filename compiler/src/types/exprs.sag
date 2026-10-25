@@ -1,0 +1,2120 @@
+//! The bodies of functions: statements and expressions with local inference
+//! (docs/spec/02-types.md, 06-control-flow.md). The port of the expression checking of
+//! `sagitario_types` (its `lib.rs`), as functions taking the checker.
+
+use pkg::ast::{BinaryOp, Block, Expr, ExprKind, FieldInit, FnDecl, Ident, Path, Stmt, TemplatePart, TypeExpr, UnaryOp};
+use pkg::ast;
+use pkg::diagnostics;
+use pkg::diagnostics::Diagnostic;
+use pkg::diagnostics::codes;
+use pkg::resolve::{EnumKind, LocalKind, ParamOwner, Res, TypeItem, VariantRef};
+use pkg::span::Span;
+use pkg::types::{Checker, FloatTy, FnSig, IntTy, LoopCx, LoopKind, ParamRef, Receiver, SELF_PARAM, StructDef, Subst, TargetInfo, Type, TypeKind, VariantDef};
+use pkg::types;
+use pkg::types::classes;
+use pkg::types::classes::PlaceUse;
+use pkg::types::closures;
+use pkg::types::collections;
+use pkg::types::ffi;
+use pkg::types::generic;
+use pkg::types::generic::Unknowns;
+use pkg::types::inheritance;
+use pkg::types::interfaces;
+use pkg::types::patterns;
+use pkg::types::send;
+use pkg::types::strings;
+use pkg::types::typed::BuiltinMethod;
+
+/// The signature of a builtin, by its name.
+pub fn builtin_sig(name: String, target: TargetInfo) -> FnSig {
+  const string = types::string();
+
+  if name == "print" || name == "println" || name == "eprintln" {
+    return FnSig { receiver: None, params: List::from([string]), ret: types::unit() };
+  }
+
+  if name == "panic" {
+    return FnSig { receiver: None, params: List::from([string]), ret: types::of(TypeKind::Never) };
+  }
+
+  if name == "exit" {
+    return FnSig { receiver: None, params: List::from([types::int(IntTy::I32)]), ret: types::of(TypeKind::Never) };
+  }
+
+  if name == "CString::new" {
+    return FnSig { receiver: None, params: List::from([string]), ret: types::of(TypeKind::Result { value: types::of(TypeKind::CString), error: string }) };
+  }
+
+  if name == "string_from_c" {
+    return FnSig { receiver: None, params: List::from([ffi::c_string_ptr(target)]), ret: string };
+  }
+
+  if name == "include_str" {
+    return FnSig { receiver: None, params: List::from([string]), ret: string };
+  }
+
+  if name == "char::from_u32" {
+    return FnSig { receiver: None, params: List::from([types::int(IntTy::U32)]), ret: types::option(types::of(TypeKind::Char)) };
+  }
+
+  // `Error(message)` returns the prelude's `Error`, and `List::from` is generic over the array:
+  // the type checker handles both.
+  if name == "Error" {
+    return FnSig { receiver: None, params: List::from([string]), ret: types::error() };
+  }
+
+  FnSig { receiver: None, params: new List(), ret: types::error() }
+}
+
+pub fn is_numeric(ty: Type) -> bool {
+  match ty.kind {
+    TypeKind::Int(_) | TypeKind::Float(_) => true,
+    _ => false,
+  }
+}
+
+fn numeric_only(expected: Option<Type>) -> Option<Type> {
+  match expected {
+    Some(ty) => if is_numeric(ty) { Some(ty) } else { None },
+    None => None,
+  }
+}
+
+fn is_arithmetic(op: BinaryOp) -> bool {
+  op == BinaryOp::Add || op == BinaryOp::Sub || op == BinaryOp::Mul || op == BinaryOp::Div || op == BinaryOp::Rem
+}
+
+/// Checks the body of a function.
+pub fn function(cx: Checker, id: u32, decl: FnDecl) {
+  const sig = match cx.typed.sig(id) {
+    Some(sig) => sig,
+    None => return,
+  };
+  const local_count = cx.resolution.function_locals(id).len();
+
+  cx.function = id;
+  cx.owner = cx.resolution.owner(id);
+  cx.ret = sig.ret;
+  cx.ret_span = match decl.return_type {
+    Some(ty) => Some(ty.span),
+    None => None,
+  };
+
+  const locals: List<Option<Type>> = new List();
+
+  for _ in 0..local_count {
+    locals.push(None);
+  }
+
+  cx.locals = locals;
+
+  // `self` is the first local of a method, followed by the parameters. In a default method,
+  // `self` is the type implementing the interface: its `Self`.
+  const param_types: List<Type> = new List();
+
+  if sig.receiver.is_some() {
+    if let Some(owner) = cx.owner {
+      match owner {
+        TypeItem::Interface(interface_id) => {
+          param_types.push(types::of(TypeKind::Param(ParamRef { owner: ParamOwner::Item(TypeItem::Interface(interface_id)), index: SELF_PARAM, name: "Self" })));
+        }
+        _ => param_types.push(cx.type_ref(owner)),
+      }
+    }
+  }
+
+  for param in sig.params {
+    param_types.push(param);
+  }
+
+  for index in 0..param_types.len() {
+    if index < cx.locals.len() {
+      cx.locals[index] = Some(param_types[index]);
+    }
+  }
+
+  // An abstract method has no body to check.
+  const body_ty = if decl.is_abstract { sig.ret } else { block(cx, decl.body, Some(sig.ret)) };
+
+  if !cx.fits(body_ty, sig.ret) {
+    const span = match decl.body.tail {
+      Some(tail) => tail.span,
+      None => decl.body.span,
+    };
+    var diagnostic = Diagnostic::error(codes::MISMATCHED_TYPES, span, "expected `" + types::text(sig.ret) + "`, found `" + types::text(body_ty) + "`")
+      .with_note("the function `" + decl.name.name + "` must return a value of type `" + types::text(sig.ret) + "` on every path");
+
+    if let Some(ret_span) = cx.ret_span {
+      diagnostic = diagnostic.with_label(ret_span, "expected because of the return type");
+    }
+
+    cx.diagnostics.push(diagnostic);
+  }
+
+  const infos = cx.resolution.function_locals(id);
+  const found = cx.locals;
+  const result: List<Type> = new List();
+
+  cx.locals = new List();
+
+  for index in 0..found.len() {
+    match found[index] {
+      Some(ty) => result.push(ty),
+      None => {
+        if let Some(info) = infos.get(index) {
+          cx.error(codes::UNKNOWN_TYPE, info.span, "cannot infer the type of `" + info.name + "`; add a type annotation");
+        }
+
+        result.push(types::error());
+      }
+    }
+  }
+
+  cx.typed.local_types.push(result);
+}
+
+/// The local a path expression names.
+pub fn local(cx: Checker, expr: Expr) -> Option<u32> {
+  match cx.resolution.paths.get(expr.id) {
+    Some(Res::Local(id)) => Some(id),
+    _ => None,
+  }
+}
+
+pub fn local_type(cx: Checker, id: u32) -> Option<Type> {
+  match cx.locals.get(id as usize) {
+    Some(found) => found,
+    None => None,
+  }
+}
+
+pub fn set_local(cx: Checker, id: u32, ty: Type) {
+  if (id as usize) < cx.locals.len() {
+    cx.locals[id as usize] = Some(ty);
+  }
+}
+
+/// Checks a block; its type is the tail's type, `never` if it diverges, or `()`.
+pub fn block(cx: Checker, body: Block, expected: Option<Type>) -> Type {
+  var diverges = false;
+
+  for statement in body.stmts {
+    if types::is_never(stmt(cx, statement)) {
+      diverges = true;
+    }
+  }
+
+  match body.tail {
+    Some(tail) => {
+      const ty = expr(cx, tail, expected);
+
+      if diverges { types::of(TypeKind::Never) } else { ty }
+    }
+    None => if diverges { types::of(TypeKind::Never) } else { types::unit() },
+  }
+}
+
+/// Checks a statement and returns `never` if it diverges.
+fn stmt(cx: Checker, statement: Stmt) -> Type {
+  match statement {
+    Stmt::Let(decl) => {
+      const declared = match decl.ty {
+        Some(ty) => Some(cx.type_expr(ty)),
+        None => None,
+      };
+      const id = match cx.resolution.bindings.get(decl.id) {
+        Some(id) => id,
+        None => return types::error(),
+      };
+      var init_ty: Option<Type> = None;
+
+      if let Some(init) = decl.init {
+        match declared {
+          Some(declared_ty) => {
+            const because = match decl.ty {
+              Some(ty) => Some(Because { span: ty.span, message: "expected because of this type" }),
+              None => None,
+            };
+
+            expect_because(cx, init, declared_ty, because);
+            init_ty = Some(declared_ty);
+          }
+          None => {
+            init_ty = Some(expr(cx, init, None));
+          }
+        }
+      }
+
+      var local_ty: Option<Type> = None;
+
+      match declared {
+        Some(declared_ty) => {
+          local_ty = Some(declared_ty);
+        }
+        None => {
+          if let Some(ty) = init_ty {
+            local_ty = Some(if types::is_never(ty) { types::error() } else { ty });
+          }
+        }
+      }
+
+      if let Some(ty) = local_ty {
+        set_local(cx, id, ty);
+      }
+
+      const never = match init_ty {
+        Some(ty) => types::is_never(ty),
+        None => false,
+      };
+
+      if never { types::of(TypeKind::Never) } else { types::unit() }
+    }
+    Stmt::Assign { target, op, value, .. } => assign(cx, target, op, value),
+    Stmt::Expr(value) => expr(cx, value, None),
+  }
+}
+
+fn assign(cx: Checker, target: Expr, op: Option<BinaryOp>, value: Expr) -> Type {
+  const is_place = match target.kind {
+    ExprKind::Field { .. } | ExprKind::Index { .. } => true,
+    ExprKind::Unary { op: unary_op, .. } => unary_op == UnaryOp::Deref,
+    _ => false,
+  };
+
+  if is_place {
+    const target_ty = expr(cx, target, None);
+
+    classes::check_mutable_place(cx, target, PlaceUse::Assign);
+
+    if let Some(compound) = op {
+      check_compound_operand(cx, target, compound, target_ty);
+    }
+
+    expect(cx, value, target_ty);
+    closures::check_closure_cycle(cx, target, value);
+
+    const never = match cx.typed.expr_types.get(value.id) {
+      Some(ty) => types::is_never(ty),
+      None => false,
+    };
+
+    return if never { types::of(TypeKind::Never) } else { types::unit() };
+  }
+
+  const is_path = match target.kind {
+    ExprKind::Path(_) => true,
+    _ => false,
+  };
+  const target_local = if is_path { local(cx, target) } else { None };
+  const id = match target_local {
+    Some(id) => id,
+    None => {
+      // An unresolved name was already reported.
+      if !is_path || cx.resolution.paths.contains_key(target.id) {
+        cx.error(codes::INVALID_ASSIGNMENT_TARGET, target.span, "only bindings, fields and array elements can be assigned");
+      }
+
+      return expr(cx, value, None);
+    }
+  };
+  const current = local_type(cx, id);
+
+  if closures::is_captured(cx, id) {
+    const name = match cx.resolution.function_locals(cx.function).get(id as usize) {
+      Some(info) => info.name,
+      None => "",
+    };
+
+    cx.diagnostics.push(closures::captured_error(target.span, name));
+  }
+
+  // `self = value` in a class method is reported by the flow analysis.
+  const is_self = match cx.resolution.function_locals(cx.function).get(id as usize) {
+    Some(info) => info.kind == LocalKind::SelfParam,
+    None => false,
+  };
+  const reference_owner = match cx.owner {
+    Some(TypeItem::Class(_)) | Some(TypeItem::Interface(_)) => true,
+    _ => false,
+  };
+
+  if is_self && !reference_owner {
+    classes::mark_self_modified(cx);
+  }
+
+  cx.typed.expr_types.insert(target.id, current.unwrap_or(types::error()));
+
+  var value_ty = types::error();
+
+  match current {
+    Some(ty) => {
+      if let Some(compound) = op {
+        check_compound_operand(cx, target, compound, ty);
+      }
+
+      expect(cx, value, ty);
+      value_ty = ty;
+    }
+    None => {
+      if op.is_none() {
+        const ty = expr(cx, value, None);
+
+        if !types::is_never(ty) {
+          set_local(cx, id, ty);
+        }
+
+        value_ty = ty;
+      } else {
+        expr(cx, value, None);
+      }
+    }
+  }
+
+  if types::is_never(value_ty) { types::of(TypeKind::Never) } else { types::unit() }
+}
+
+fn check_compound_operand(cx: Checker, target: Expr, op: BinaryOp, ty: Type) {
+  const concatenation = types::is_string(ty) && op == BinaryOp::Add;
+
+  if !concatenation && !is_numeric(ty) && !types::is_error(ty) {
+    cx.error(codes::INVALID_OPERAND, target.span, "cannot apply `" + ast::binary_symbol(op) + "=` to a value of type `" + types::text(ty) + "`");
+  }
+}
+
+/// What imposes an expected type, for the label of a mismatch.
+pub struct Because {
+  pub span: Span;
+  pub message: String;
+}
+
+pub fn expect(cx: Checker, value: Expr, expected: Type) {
+  expect_because(cx, value, expected, None);
+}
+
+/// Like `expect`, pointing at what imposes the expected type when it is a mismatch.
+pub fn expect_because(cx: Checker, value: Expr, expected: Type, because: Option<Because>) {
+  const actual = expr(cx, value, Some(expected));
+
+  if cx.fits(actual, expected) {
+    return;
+  }
+
+  var diagnostic = Diagnostic::error(codes::MISMATCHED_TYPES, value.span, "expected `" + types::text(expected) + "`, found `" + types::text(actual) + "`");
+
+  if let Some(reason) = because {
+    diagnostic = diagnostic.with_label(reason.span, reason.message);
+  }
+
+  cx.diagnostics.push(diagnostic);
+}
+
+pub fn mismatch(cx: Checker, span: Span, expected: Type, actual: Type) {
+  cx.error(codes::MISMATCHED_TYPES, span, "expected `" + types::text(expected) + "`, found `" + types::text(actual) + "`");
+}
+
+/// Checks an expression, using `expected` to give unsuffixed literals their type.
+pub fn expr(cx: Checker, value: Expr, expected: Option<Type>) -> Type {
+  const ty = expr_kind(cx, value, expected);
+
+  cx.typed.expr_types.insert(value.id, ty);
+
+  ty
+}
+
+fn path_of(value: Expr) -> Option<Path> {
+  match value.kind {
+    ExprKind::Path(path) => Some(path),
+    _ => None,
+  }
+}
+
+fn expr_kind(cx: Checker, value: Expr, expected: Option<Type>) -> Type {
+  match value.kind {
+    ExprKind::Int { value: digits, suffix } => int_literal(cx, value.span, digits, false, suffix, expected),
+    ExprKind::Float { suffix, .. } => float_literal_type(suffix, expected),
+    ExprKind::Bool(_) => types::of(TypeKind::Bool),
+    ExprKind::Char(_) => types::of(TypeKind::Char),
+    ExprKind::Str(_) => types::string(),
+    ExprKind::Unit => types::unit(),
+    ExprKind::Lambda { params, body } => closures::lambda(cx, value, params, body, expected),
+    ExprKind::Zod => {
+      if cx.resolution.paths.contains_key(value.id) {
+        cx.diagnostics.push(
+          Diagnostic::error(codes::WRONG_CALL_FORM, value.span, "`zod` can only call a method of the parent class")
+            .with_help("write `zod.method(...)`, or use `self` to reach the instance"),
+        );
+      }
+
+      types::error()
+    }
+    ExprKind::Template(parts) => {
+      for part in parts {
+        if let TemplatePart::Expr(inner) = part {
+          const ty = expr(cx, inner, None);
+          const interpolable = match ty.kind {
+            TypeKind::Int(_) | TypeKind::Float(_) | TypeKind::Bool | TypeKind::Char | TypeKind::String | TypeKind::Never | TypeKind::Error => true,
+            _ => false,
+          };
+
+          if !interpolable {
+            cx.diagnostics.push(
+              Diagnostic::error(codes::NOT_INTERPOLABLE, inner.span, "a value of type `" + types::text(ty) + "` cannot be interpolated")
+                .with_note("integers, floats, `bool`, `char` and `String` can be interpolated; interpolate the fields instead"),
+            );
+          }
+        }
+      }
+
+      types::string()
+    }
+    ExprKind::Path(path) => match cx.resolution.paths.get(value.id) {
+      // An unassigned binding without a known type is reported by the flow analysis.
+      Some(Res::Local(id)) => local_type(cx, id).unwrap_or(types::error()),
+      Some(Res::Fn(id)) => closures::fn_value(cx, value, path, id, expected),
+      Some(Res::Const(id)) => cx.typed.const_types.get(id as usize).unwrap_or(types::error()),
+      Some(Res::Extern(_)) | Some(Res::Builtin(_)) => {
+        cx.diagnostics.push(
+          Diagnostic::error(codes::WRONG_CALL_FORM, value.span, "C functions and prelude functions cannot be used as values")
+            .with_help("wrap the call in a lambda, such as `(text) => println(text)`"),
+        );
+
+        types::error()
+      }
+      Some(Res::Variant(variant)) => variant_value(cx, value.span, variant, None, expected, Some(path)),
+      _ => types::error(),
+    },
+    ExprKind::Call { callee, args } => {
+      if let Some(Res::Variant(variant)) = cx.resolution.paths.get(callee.id) {
+        if let Some(path) = path_of(callee) {
+          const ty = variant_value(cx, value.span, variant, Some(args), expected, Some(path));
+
+          cx.typed.expr_types.insert(callee.id, ty);
+
+          return ty;
+        }
+      }
+
+      call(cx, value, callee, args, expected)
+    }
+    ExprKind::Try(inner) => try_expr(cx, inner),
+    ExprKind::New { path, args } => strings::new_expr(cx, value, path, args, expected),
+    ExprKind::Match { scrutinee, arms } => patterns::match_expr(cx, scrutinee, arms, expected),
+    ExprKind::MethodCall { receiver, method, args } => method_call(cx, value, receiver, method, args),
+    ExprKind::Field { base, name } => field(cx, base, name),
+    ExprKind::Index { base, index: position } => index(cx, base, position),
+    ExprKind::StructLit { path, fields } => struct_literal(cx, value, path, fields, expected),
+    ExprKind::ArrayLit(elems) => array_literal(cx, value.span, elems, expected),
+    ExprKind::ArrayRepeat { value: repeated, len } => {
+      var elem: Option<Type> = None;
+
+      if let Some(ty) = expected {
+        if let TypeKind::Array { elem: expected_elem, .. } = ty.kind {
+          elem = Some(expected_elem);
+        }
+      }
+
+      const value_ty = expr(cx, repeated, elem);
+
+      match cx.array_len(len) {
+        Some(count) => types::of(TypeKind::Array { elem: value_ty, len: count }),
+        None => types::error(),
+      }
+    }
+    ExprKind::Unary { op, operand } => unary(cx, value, op, operand, expected),
+    ExprKind::Binary { op, lhs, rhs } => binary(cx, op, lhs, rhs, expected),
+    ExprKind::Cast { expr: inner, ty } => cast(cx, inner, ty),
+    ExprKind::Range { start, end, .. } => collections::range_value(cx, value, start, end, expected),
+    ExprKind::Block(body) => block(cx, body, expected),
+    ExprKind::Unsafe(body) => ffi::unsafe_block(cx, value, body, expected),
+    ExprKind::If { cond, then_block, else_branch } => if_expr(cx, cond, then_block, else_branch, expected),
+    ExprKind::While { cond, body } => {
+      expect(cx, cond, types::of(TypeKind::Bool));
+      loop_body(cx, LoopKind::While, None, body);
+
+      types::unit()
+    }
+    ExprKind::Loop(body) => {
+      const loop_cx = loop_body(cx, LoopKind::Loop, expected, body);
+
+      if loop_cx.has_break { loop_cx.break_ty.unwrap_or(types::unit()) } else { types::of(TypeKind::Never) }
+    }
+    ExprKind::For { iter, body, .. } => {
+      const var_ty = for_iter(cx, iter);
+
+      if let Some(id) = cx.resolution.bindings.get(value.id) {
+        set_local(cx, id, var_ty);
+      }
+
+      loop_body(cx, LoopKind::For, None, body);
+
+      types::unit()
+    }
+    ExprKind::Break(result) => {
+      break_expr(cx, value.span, result);
+
+      types::of(TypeKind::Never)
+    }
+    ExprKind::Continue => {
+      if cx.loops.is_empty() {
+        cx.error(codes::BREAK_OUTSIDE_LOOP, value.span, "`continue` outside of a loop");
+      }
+
+      types::of(TypeKind::Never)
+    }
+    ExprKind::Return(result) => {
+      // In a lambda whose result is inferred, the first `return` decides it.
+      if cx.inferring_ret && types::is_never(cx.ret) {
+        cx.ret = match result {
+          Some(returned) => expr(cx, returned, None),
+          None => types::unit(),
+        };
+
+        return types::of(TypeKind::Never);
+      }
+
+      const ret = cx.ret;
+
+      match result {
+        Some(returned) => {
+          const because = match cx.ret_span {
+            Some(span) => Some(Because { span: span, message: "expected because of the return type" }),
+            None => None,
+          };
+
+          expect_because(cx, returned, ret, because);
+        }
+        None => {
+          if !types::plain_fits(types::unit(), ret) {
+            cx.error(codes::MISMATCHED_TYPES, value.span, "expected `" + types::text(ret) + "`, found `()`: `return` needs a value");
+          }
+        }
+      }
+
+      types::of(TypeKind::Never)
+    }
+  }
+}
+
+/// The type of an integer literal, reporting a value out of its range.
+fn int_literal(cx: Checker, span: Span, value: String, negative: bool, suffix: Option<String>, expected: Option<Type>) -> Type {
+  var int_ty = IntTy::I32;
+  var chosen = false;
+
+  if let Some(name) = suffix {
+    if let Some(found) = types::int_from_name(name) {
+      int_ty = found;
+      chosen = true;
+    }
+  }
+
+  if !chosen {
+    if let Some(ty) = expected {
+      if let TypeKind::Int(found) = ty.kind {
+        int_ty = found;
+      }
+    }
+  }
+
+  if negative && !types::is_signed(int_ty) {
+    cx.error(codes::INVALID_OPERAND, span, "cannot negate a value of the unsigned type `" + types::int_name(int_ty) + "`");
+
+    return types::int(int_ty);
+  }
+
+  // The most negative value has one more unit of magnitude than the maximum.
+  const max = types::int_max(int_ty, cx.target.pointer_width);
+  const limit = if negative { max + 1 } else { max };
+  const fits = match value.parse_u64() {
+    Ok(magnitude) => magnitude <= limit,
+    Err(_) => false,
+  };
+
+  if !fits {
+    const shown = if negative { "-" + value } else { value };
+
+    cx.diagnostics.push(
+      Diagnostic::error(codes::INTEGER_OUT_OF_RANGE, span, "the literal `" + shown + "` does not fit in `" + types::int_name(int_ty) + "`")
+        .with_note("the maximum value of `" + types::int_name(int_ty) + "` is `" + `${max}` + "`"),
+    );
+  }
+
+  types::int(int_ty)
+}
+
+fn unary(cx: Checker, value: Expr, op: UnaryOp, operand: Expr, expected: Option<Type>) -> Type {
+  if op == UnaryOp::Neg {
+    // `-128i8` is a single literal value, so its range is checked including the sign.
+    if let ExprKind::Int { value: digits, suffix } = operand.kind {
+      const ty = int_literal(cx, value.span, digits, true, suffix, expected);
+
+      cx.typed.expr_types.insert(operand.id, ty);
+
+      return ty;
+    }
+  }
+
+  match op {
+    UnaryOp::Deref => ffi::deref(cx, value, operand),
+    UnaryOp::Not => {
+      expect(cx, operand, types::of(TypeKind::Bool));
+
+      types::of(TypeKind::Bool)
+    }
+    UnaryOp::Neg => {
+      const ty = expr(cx, operand, numeric_only(expected));
+
+      match ty.kind {
+        TypeKind::Int(int_ty) => {
+          if types::is_signed(int_ty) {
+            return ty;
+          }
+
+          cx.error(codes::INVALID_OPERAND, value.span, "cannot negate a value of the unsigned type `" + types::text(ty) + "`");
+
+          types::error()
+        }
+        TypeKind::Float(_) | TypeKind::Error | TypeKind::Never => ty,
+        _ => {
+          cx.error(codes::INVALID_OPERAND, value.span, "cannot negate a value of type `" + types::text(ty) + "`");
+
+          types::error()
+        }
+      }
+    }
+  }
+}
+
+/// An unsuffixed numeric literal, possibly negated, whose type comes from context.
+fn is_untyped_literal(value: Expr) -> bool {
+  match value.kind {
+    ExprKind::Int { suffix, .. } => suffix.is_none(),
+    ExprKind::Float { suffix, .. } => suffix.is_none(),
+    ExprKind::Unary { op, operand } => op == UnaryOp::Neg && is_untyped_literal(operand),
+    _ => false,
+  }
+}
+
+/// Checks two operands that must share a type. An unsuffixed literal on the left takes its type
+/// from the right operand, so both `x + 1` and `1 + x` work for any integer `x`.
+pub fn same_type_operands(cx: Checker, lhs: Expr, rhs: Expr, hint: Option<Type>) -> Type {
+  var lhs_ty = types::error();
+  var rhs_ty = types::error();
+  var mismatch_on_right = true;
+
+  if is_untyped_literal(lhs) && !is_untyped_literal(rhs) {
+    rhs_ty = expr(cx, rhs, hint);
+    lhs_ty = expr(cx, lhs, Some(rhs_ty));
+    mismatch_on_right = false;
+  } else {
+    lhs_ty = expr(cx, lhs, hint);
+    rhs_ty = expr(cx, rhs, Some(lhs_ty));
+  }
+
+  if types::is_error(lhs_ty) || types::is_error(rhs_ty) {
+    return types::error();
+  }
+
+  if types::is_never(lhs_ty) {
+    return rhs_ty;
+  }
+
+  if types::is_never(rhs_ty) {
+    return lhs_ty;
+  }
+
+  if types::same_type(lhs_ty, rhs_ty) {
+    return lhs_ty;
+  }
+
+  // Instances of related classes compare by identity.
+  if cx.fits(lhs_ty, rhs_ty) {
+    return rhs_ty;
+  }
+
+  if cx.fits(rhs_ty, lhs_ty) {
+    return lhs_ty;
+  }
+
+  if mismatch_on_right {
+    mismatch(cx, rhs.span, lhs_ty, rhs_ty);
+  } else {
+    mismatch(cx, lhs.span, rhs_ty, lhs_ty);
+  }
+
+  types::error()
+}
+
+fn binary(cx: Checker, op: BinaryOp, lhs: Expr, rhs: Expr, expected: Option<Type>) -> Type {
+  const bool_ty = types::of(TypeKind::Bool);
+
+  if op == BinaryOp::And || op == BinaryOp::Or {
+    expect(cx, lhs, bool_ty);
+    expect(cx, rhs, bool_ty);
+
+    return bool_ty;
+  }
+
+  const hint = if is_arithmetic(op) { numeric_only(expected) } else { None };
+  const ty = same_type_operands(cx, lhs, rhs, hint);
+  const span = lhs.span.to(rhs.span);
+  const symbol = ast::binary_symbol(op);
+
+  if is_arithmetic(op) {
+    return match ty.kind {
+      TypeKind::Int(_) | TypeKind::Float(_) | TypeKind::Error | TypeKind::Never => ty,
+      TypeKind::String => {
+        if op == BinaryOp::Add {
+          return types::string();
+        }
+
+        cx.error(codes::INVALID_OPERAND, span, "cannot apply `" + symbol + "` to values of type `" + types::text(ty) + "`");
+
+        types::error()
+      }
+      _ => {
+        cx.error(codes::INVALID_OPERAND, span, "cannot apply `" + symbol + "` to values of type `" + types::text(ty) + "`");
+
+        types::error()
+      }
+    };
+  }
+
+  const equality = op == BinaryOp::Eq || op == BinaryOp::Ne;
+  var supported = false;
+
+  match ty.kind {
+    TypeKind::Int(_) | TypeKind::Float(_) | TypeKind::Char | TypeKind::Error | TypeKind::Never => {
+      supported = true;
+    }
+    TypeKind::Bool => {
+      supported = equality;
+    }
+    // Enums without data compare by variant (docs/spec/02-types.md#equality-f1f2).
+    TypeKind::Enum(_) => {
+      var fieldless = false;
+
+      if let Some(variants) = cx.typed.variants(ty) {
+        fieldless = true;
+
+        for variant in variants {
+          if !variant.fields.is_empty() {
+            fieldless = false;
+          }
+        }
+      }
+
+      if fieldless && equality {
+        supported = true;
+      } else {
+        cx.diagnostics.push(
+          Diagnostic::error(codes::INVALID_OPERAND, span, "cannot compare values of type `" + types::text(ty) + "` with `" + symbol + "`")
+            .with_note("only enums whose variants carry no data support `==` and `!=`; use `match` instead"),
+        );
+
+        return bool_ty;
+      }
+    }
+    // Byte-wise lexicographic order.
+    TypeKind::String => {
+      supported = true;
+    }
+    TypeKind::Class(class_ref) => {
+      // Iterators and maps are not compared; class instances compare by identity.
+      const is_iter = match cx.typed.prelude.iter {
+        Some(iter) => iter == class_ref.id,
+        None => false,
+      };
+      const is_map = match cx.typed.prelude.map {
+        Some(map) => map == class_ref.id,
+        None => false,
+      };
+
+      supported = !is_iter && !is_map && equality;
+    }
+    // Pointers compare by address.
+    TypeKind::Ptr { .. } => {
+      supported = equality;
+    }
+    _ => {}
+  }
+
+  if !supported {
+    cx.error(codes::INVALID_OPERAND, span, "cannot compare values of type `" + types::text(ty) + "` with `" + symbol + "`");
+  }
+
+  bool_ty
+}
+
+fn cast(cx: Checker, inner: Expr, ty: TypeExpr) -> Type {
+  const to = cx.type_expr(ty);
+  // `0 as *const T` is the null pointer: the literal is a `usize`.
+  const to_pointer = match to.kind {
+    TypeKind::Ptr { .. } => true,
+    _ => false,
+  };
+  const hint = if to_pointer { Some(types::int(IntTy::Usize)) } else { None };
+  const from = expr(cx, inner, hint);
+  var valid = false;
+
+  if types::is_error(from) || types::is_never(from) || types::is_error(to) || types::same_type(from, to) {
+    valid = true;
+  } else {
+    match from.kind {
+      TypeKind::Ptr { .. } => {
+        valid = match to.kind {
+          TypeKind::Ptr { .. } | TypeKind::Int(IntTy::Usize) => true,
+          _ => false,
+        };
+      }
+      TypeKind::Int(int_ty) => {
+        valid = match to.kind {
+          TypeKind::Int(_) | TypeKind::Float(_) => true,
+          TypeKind::Ptr { .. } => int_ty == IntTy::Usize,
+          TypeKind::Char => int_ty == IntTy::U8,
+          _ => false,
+        };
+      }
+      TypeKind::Float(_) => {
+        valid = match to.kind {
+          TypeKind::Int(_) | TypeKind::Float(_) => true,
+          _ => false,
+        };
+      }
+      TypeKind::Bool | TypeKind::Char => {
+        valid = match to.kind {
+          TypeKind::Int(_) => true,
+          _ => false,
+        };
+      }
+      _ => {}
+    }
+  }
+
+  if !valid {
+    cx.error(codes::INVALID_CAST, inner.span.to(ty.span), "cannot convert a value of type `" + types::text(from) + "` to `" + types::text(to) + "` with `as`");
+  }
+
+  to
+}
+
+fn if_expr(cx: Checker, cond: Expr, then_block: Block, else_branch: Option<Expr>, expected: Option<Type>) -> Type {
+  expect(cx, cond, types::of(TypeKind::Bool));
+
+  const then_ty = block(cx, then_block, expected);
+  const branch = match else_branch {
+    Some(branch) => branch,
+    None => {
+      if !types::plain_fits(then_ty, types::unit()) {
+        const span = match then_block.tail {
+          Some(tail) => tail.span,
+          None => then_block.span,
+        };
+
+        cx.diagnostics.push(
+          Diagnostic::error(codes::MISMATCHED_TYPES, span, "expected `()`, found `" + types::text(then_ty) + "`").with_note("an `if` without `else` has type `()`"),
+        );
+      }
+
+      return types::unit();
+    }
+  };
+  const else_expected = if types::is_never(then_ty) { expected } else { Some(then_ty) };
+  const else_ty = expr(cx, branch, else_expected);
+
+  if types::is_never(then_ty) {
+    return else_ty;
+  }
+
+  if types::is_never(else_ty) {
+    return then_ty;
+  }
+
+  if types::is_error(then_ty) || types::is_error(else_ty) {
+    return types::error();
+  }
+
+  if types::same_type(then_ty, else_ty) {
+    return then_ty;
+  }
+
+  if let Some(ty) = expected {
+    if cx.fits(then_ty, ty) && cx.fits(else_ty, ty) {
+      return ty;
+    }
+  }
+
+  if cx.fits(else_ty, then_ty) {
+    return then_ty;
+  }
+
+  if cx.fits(then_ty, else_ty) {
+    return else_ty;
+  }
+
+  var diagnostic = Diagnostic::error(codes::MISMATCHED_TYPES, branch.span, "expected `" + types::text(then_ty) + "`, found `" + types::text(else_ty) + "`")
+    .with_note("both branches of an `if` must have the same type");
+
+  if let Some(tail) = then_block.tail {
+    diagnostic = diagnostic.with_label(tail.span, "this branch has type `" + types::text(then_ty) + "`");
+  }
+
+  cx.diagnostics.push(diagnostic);
+
+  types::error()
+}
+
+fn loop_body(cx: Checker, kind: LoopKind, expected: Option<Type>, body: Block) -> LoopCx {
+  const loop_cx = new LoopCx(kind, expected);
+
+  cx.loops.push(loop_cx);
+
+  const body_ty = block(cx, body, Some(types::unit()));
+
+  if !types::plain_fits(body_ty, types::unit()) {
+    const span = match body.tail {
+      Some(tail) => tail.span,
+      None => body.span,
+    };
+
+    mismatch(cx, span, types::unit(), body_ty);
+  }
+
+  cx.loops.pop().unwrap_or(loop_cx)
+}
+
+fn for_iter(cx: Checker, iter: Expr) -> Type {
+  if let Some(elem) = strings::text_iterable(cx, iter) {
+    return elem;
+  }
+
+  const range = match iter.kind {
+    ExprKind::Range { start, end, .. } => Some(List::from([start, end])),
+    _ => None,
+  };
+  const bounds = match range {
+    Some(bounds) => bounds,
+    None => {
+      const ty = expr(cx, iter, None);
+
+      if let Some(elem) = cx.typed.collection_elem(ty) {
+        return elem;
+      }
+
+      return match ty.kind {
+        TypeKind::Array { elem, .. } => elem,
+        TypeKind::Error | TypeKind::Never => types::error(),
+        _ => {
+          cx.diagnostics.push(
+            Diagnostic::error(codes::INVALID_OPERAND, iter.span, "cannot iterate over a value of type `" + types::text(ty) + "`")
+              .with_note("`for` iterates over ranges, arrays, lists, maps and iterators"),
+          );
+
+          types::error()
+        }
+      };
+    }
+  };
+  const operands = same_type_operands(cx, bounds[0], bounds[1], None);
+  var ty = operands;
+
+  match operands.kind {
+    TypeKind::Int(_) | TypeKind::Error => {}
+    _ => {
+      cx.error(codes::INVALID_OPERAND, iter.span, "range bounds must be integers, found `" + types::text(operands) + "`");
+      ty = types::error();
+    }
+  }
+
+  cx.typed.expr_types.insert(iter.id, ty);
+
+  ty
+}
+
+fn break_expr(cx: Checker, span: Span, value: Option<Expr>) {
+  const current = match cx.loops.last() {
+    Some(found) => found,
+    None => {
+      cx.error(codes::BREAK_OUTSIDE_LOOP, span, "`break` outside of a loop");
+
+      if let Some(result) = value {
+        expr(cx, result, None);
+      }
+
+      return;
+    }
+  };
+
+  if current.kind != LoopKind::Loop {
+    if let Some(result) = value {
+      cx.error(codes::BREAK_WITH_VALUE, result.span, "`break` with a value is only allowed inside `loop`");
+      expr(cx, result, None);
+    }
+
+    return;
+  }
+
+  const known = current.break_ty;
+  var ty = types::unit();
+
+  match value {
+    Some(result) => match known {
+      Some(known_ty) => {
+        expect(cx, result, known_ty);
+        ty = known_ty;
+      }
+      None => {
+        ty = expr(cx, result, current.expected);
+      }
+    },
+    None => {
+      if let Some(known_ty) = known {
+        if !types::plain_fits(types::unit(), known_ty) {
+          mismatch(cx, span, known_ty, types::unit());
+        }
+
+        ty = known_ty;
+      }
+    }
+  }
+
+  current.has_break = true;
+
+  if current.break_ty.is_none() && !types::is_never(ty) {
+    current.break_ty = Some(ty);
+  }
+}
+
+fn call(cx: Checker, value: Expr, callee: Expr, args: List<Expr>, expected: Option<Type>) -> Type {
+  const path = match path_of(callee) {
+    Some(path) => path,
+    // A binding, field, call result or lambda of a function type.
+    None => return closures::call_value(cx, value, callee, args),
+  };
+  var sig: Option<FnSig> = None;
+
+  match cx.resolution.paths.get(callee.id) {
+    Some(Res::Fn(id)) => {
+      const ty = generic::fn_call(cx, value, path, id, args, expected);
+
+      if send::is_spawn(cx, id) {
+        send::check_spawn_argument(cx, args);
+      }
+
+      return ty;
+    }
+    Some(Res::Extern(id)) => {
+      sig = ffi::extern_call_sig(cx, callee, id);
+    }
+    Some(Res::Builtin(name)) => {
+      if name == "Error" {
+        const ret = match cx.typed.error_types {
+          Some(found) => cx.type_ref(TypeItem::Interface(found.interface_id)),
+          None => types::error(),
+        };
+
+        sig = Some(FnSig { receiver: None, params: List::from([types::string()]), ret: ret });
+      } else if name == "List::from" {
+        return collections::list_from(cx, value, callee, args, expected);
+      } else if name == "include_str" {
+        cx.diagnostics.push(
+          Diagnostic::error(codes::INVALID_INCLUDE, value.span, "`include_str` can only give the value of a module-level constant")
+            .with_help("declare `const TEXT: String = include_str(\"file\");` and use `TEXT`"),
+        );
+        unchecked_args(cx, args);
+
+        return types::string();
+      } else {
+        if name == "string_from_c" {
+          ffi::require_unsafe(cx, callee.span, "reading a C string");
+        }
+
+        sig = Some(builtin_sig(name, cx.target));
+      }
+    }
+    None => {}
+    _ => return closures::call_value(cx, value, callee, args),
+  }
+
+  const found = match sig {
+    Some(found) => found,
+    None => {
+      unchecked_args(cx, args);
+
+      return types::error();
+    }
+  };
+
+  check_args(cx, value.span, "function", found.params, args);
+
+  found.ret
+}
+
+pub fn unchecked_args(cx: Checker, args: List<Expr>) {
+  for arg in args {
+    expr(cx, arg, None);
+  }
+}
+
+pub fn check_args(cx: Checker, span: Span, what: String, params: List<Type>, values: List<Expr>) {
+  if values.len() != params.len() {
+    cx.error(codes::WRONG_ARGUMENT_COUNT, span, `this ${what} takes ${params.len()} argument${types::plural(params.len())} but ${values.len()} were supplied`);
+  }
+
+  for index in 0..values.len() {
+    match params.get(index) {
+      Some(param) => expect(cx, values[index], param),
+      None => {
+        expr(cx, values[index], None);
+      }
+    }
+  }
+}
+
+fn method_call(cx: Checker, value: Expr, receiver: Expr, method: Ident, args: List<Expr>) -> Type {
+  if let ExprKind::Zod = receiver.kind {
+    return inheritance::zod_call(cx, value, receiver, method, args);
+  }
+
+  const receiver_ty = expr(cx, receiver, None);
+  const name = method.name;
+
+  if let Some(ty) = ffi::ffi_method(cx, value, receiver, receiver_ty, method, args) {
+    return ty;
+  }
+
+  if let Some(ty) = collections::primitive_method(cx, value, receiver_ty, method, args) {
+    return ty;
+  }
+
+  if let Some(ty) = collections::range_rev(cx, value, receiver, receiver_ty, method, args) {
+    return ty;
+  }
+
+  if let TypeKind::Array { elem, .. } = receiver_ty.kind {
+    if let Some(ty) = collections::array_method(cx, value, receiver, elem, method, args) {
+      return ty;
+    }
+  }
+
+  // A type parameter has the methods of its bounds.
+  if let TypeKind::Param(_) = receiver_ty.kind {
+    const function = match interfaces::interface_method_of(cx, receiver_ty, name) {
+      Some(function) => function,
+      None => {
+        cx.error(codes::UNKNOWN_MEMBER, method.span, "no method `" + name + "` on type `" + types::text(receiver_ty) + "`");
+        unchecked_args(cx, args);
+
+        return types::error();
+      }
+    };
+
+    cx.typed.method_calls.insert(value.id, function);
+
+    return generic::generic_method_call(cx, value, receiver_ty, function, args);
+  }
+
+  var owner = TypeItem::Struct(0);
+
+  match receiver_ty.kind {
+    TypeKind::Struct(named) => {
+      owner = TypeItem::Struct(named.id);
+    }
+    TypeKind::Enum(named) => {
+      owner = TypeItem::Enum(named.id);
+    }
+    TypeKind::Class(named) => {
+      owner = TypeItem::Class(named.id);
+    }
+    TypeKind::Interface(named) => {
+      owner = TypeItem::Interface(named.id);
+    }
+    TypeKind::Option(_) | TypeKind::Result { .. } => return builtin_method(cx, value, receiver_ty, method, args),
+    TypeKind::List(_) => return collections::list_method(cx, value, receiver, receiver_ty, method, args),
+    TypeKind::Error | TypeKind::Never => {
+      unchecked_args(cx, args);
+
+      return types::error();
+    }
+    TypeKind::String | TypeKind::Char | TypeKind::StringBuilder => return strings::text_method(cx, value, receiver_ty, method, args),
+    TypeKind::Array { .. } => {
+      if name == "len" {
+        check_args(cx, value.span, "method", new List(), args);
+
+        return types::int(IntTy::Usize);
+      }
+
+      cx.diagnostics.push(
+        Diagnostic::error(codes::UNKNOWN_MEMBER, method.span, "no method `" + name + "` on type `" + types::text(receiver_ty) + "`")
+          .with_help("arrays have the methods `len()`, `iter()` and those of iterators, `as_ptr()` and `as_mut_ptr()`"),
+      );
+      unchecked_args(cx, args);
+
+      return types::error();
+    }
+    _ => {
+      cx.diagnostics.push(Diagnostic::error(codes::UNKNOWN_MEMBER, method.span, "no method `" + name + "` on type `" + types::text(receiver_ty) + "`"));
+      unchecked_args(cx, args);
+
+      return types::error();
+    }
+  }
+
+  var found = match owner {
+    TypeItem::Class(id) => inheritance::class_method(cx, id, name),
+    TypeItem::Interface(id) => match cx.typed.interface_method(id, name, cx.resolution, cx.package) {
+      Some(found_method) => Some(found_method.method),
+      None => None,
+    },
+    _ => cx.resolution.type_function(cx.package, owner, name),
+  };
+
+  // A default method of an interface the type implements.
+  if found.is_none() {
+    found = interfaces::default_method(cx, owner, name);
+  }
+
+  var resolved: Option<u32> = None;
+
+  if let Some(function) = found {
+    if cx.resolution.fn_decl(cx.package, function).is_some() {
+      resolved = Some(function);
+    }
+  }
+
+  const function = match resolved {
+    Some(function) => function,
+    None => {
+      // A field of a function type called like a method.
+      if let Some(field_ty) = closures::function_field(cx, receiver_ty, name) {
+        return closures::field_call(cx, value, field_ty, args);
+      }
+
+      var diagnostic = Diagnostic::error(codes::UNKNOWN_MEMBER, method.span, "no method `" + name + "` on type `" + types::text(receiver_ty) + "`");
+      const methods: List<String> = new List();
+
+      for candidate in cx.resolution.type_functions(cx.package, owner) {
+        if candidate.self_param.is_some() && candidate.name.name != "new" {
+          methods.push(candidate.name.name);
+        }
+      }
+
+      if let Some(similar) = diagnostics::closest_match(name, methods) {
+        diagnostic = diagnostic.with_help("a method with a similar name exists: `" + similar + "`");
+      }
+
+      cx.diagnostics.push(diagnostic);
+      unchecked_args(cx, args);
+
+      return types::error();
+    }
+  };
+  const decl = match cx.resolution.fn_decl(cx.package, function) {
+    Some(decl) => decl,
+    None => return types::error(),
+  };
+  const sig = match cx.typed.sig(function) {
+    Some(sig) => sig,
+    None => return types::error(),
+  };
+  const shown = types::text(receiver_ty);
+
+  match sig.receiver {
+    Some(Receiver::Init) => {
+      cx.diagnostics.push(
+        Diagnostic::error(codes::WRONG_CALL_FORM, method.span, "the initializer of `" + shown + "` cannot be called as a method")
+          .with_help("create a new instance with `new " + shown + "(...)`"),
+      );
+    }
+    None => {
+      cx.diagnostics.push(
+        Diagnostic::error(codes::WRONG_CALL_FORM, method.span, "`" + name + "` is a static function of `" + shown + "`, not a method")
+          .with_label(decl.name.span, "declared without a `self` parameter here")
+          .with_help("call it as `" + shown + "::" + name + "(...)`"),
+      );
+    }
+    Some(_) => {
+      // An inherited method is private to the class that declares it.
+      const function_owner = cx.resolution.owner(function);
+      const own = match cx.owner {
+        Some(current) => match function_owner {
+          Some(declaring) => resolve_same(current, declaring),
+          None => false,
+        },
+        None => function_owner.is_none(),
+      };
+
+      if types::is_private(decl.visibility) && !own {
+        cx.diagnostics.push(
+          Diagnostic::error(codes::PRIVATE_MEMBER, method.span, "the method `" + name + "` of `" + shown + "` is private").with_label(decl.name.span, "declared `prv` here"),
+        );
+      }
+
+      // Whether the method modifies `self` is only known once every body is checked. Default
+      // methods of interfaces receive the value as a reference instead.
+      const value_owner = match owner {
+        TypeItem::Struct(_) | TypeItem::Enum(_) => true,
+        _ => false,
+      };
+      const from_interface = match function_owner {
+        Some(TypeItem::Interface(_)) => true,
+        _ => false,
+      };
+
+      if value_owner && !from_interface {
+        classes::receiver_use(cx, receiver, function, name);
+      }
+
+      cx.typed.method_calls.insert(value.id, function);
+    }
+  }
+
+  generic::generic_method_call(cx, value, receiver_ty, function, args)
+}
+
+fn resolve_same(a: TypeItem, b: TypeItem) -> bool {
+  pkg::resolve::same_type_item(a, b)
+}
+
+fn field(cx: Checker, base: Expr, name: Ident) -> Type {
+  const base_ty = expr(cx, base, None);
+  const field_name = name.name;
+
+  if let TypeKind::Class(class_ref) = base_ty.kind {
+    return classes::class_field(cx, class_ref.id, base_ty, name);
+  }
+
+  match base_ty.kind {
+    TypeKind::Interface(_) | TypeKind::Param(_) => return interfaces::interface_field_type(cx, base_ty, name),
+    _ => {}
+  }
+
+  const owner = match base_ty.kind {
+    TypeKind::Struct(named) => named,
+    TypeKind::Error | TypeKind::Never => return types::error(),
+    _ => {
+      cx.error(codes::UNKNOWN_MEMBER, name.span, "no field `" + field_name + "` on type `" + types::text(base_ty) + "`");
+
+      return types::error();
+    }
+  };
+  const def = match cx.typed.struct_def(owner.id) {
+    Some(def) => def,
+    None => return types::error(),
+  };
+  var found: Option<types::FieldDef> = None;
+
+  for candidate in def.fields {
+    if found.is_none() && candidate.name == field_name {
+      found = Some(candidate);
+    }
+  }
+
+  const found_field = match found {
+    Some(found_field) => found_field,
+    None => {
+      var diagnostic = Diagnostic::error(codes::UNKNOWN_MEMBER, name.span, "no field `" + field_name + "` on type `" + types::text(base_ty) + "`");
+
+      if cx.resolution.type_function(cx.package, TypeItem::Struct(owner.id), field_name).is_some() {
+        diagnostic = diagnostic.with_help("`" + field_name + "` is a method; call it with `" + field_name + "(...)`, or wrap it in a lambda to use it as a value");
+      } else {
+        const names: List<String> = new List();
+
+        for candidate in def.fields {
+          names.push(candidate.name);
+        }
+
+        if let Some(similar) = diagnostics::closest_match(field_name, names) {
+          diagnostic = diagnostic.with_help("a field with a similar name exists: `" + similar + "`");
+        }
+      }
+
+      cx.diagnostics.push(diagnostic);
+
+      return types::error();
+    }
+  };
+  const own = match cx.owner {
+    Some(TypeItem::Struct(id)) => id == owner.id,
+    _ => false,
+  };
+
+  if !found_field.public && !own {
+    cx.diagnostics.push(
+      Diagnostic::error(codes::PRIVATE_MEMBER, name.span, "the field `" + field_name + "` of `" + types::text(base_ty) + "` is private")
+        .with_label(found_field.span, "declared `prv` here"),
+    );
+  }
+
+  types::substitute(found_field.ty, Subst::of(ParamOwner::Item(TypeItem::Struct(owner.id)), owner.args))
+}
+
+fn index(cx: Checker, base: Expr, position: Expr) -> Type {
+  const base_ty = expr(cx, base, None);
+
+  expect(cx, position, types::int(IntTy::Usize));
+
+  match base_ty.kind {
+    TypeKind::Array { elem, .. } => elem,
+    TypeKind::List(elem) => elem,
+    TypeKind::Error | TypeKind::Never => types::error(),
+    TypeKind::String => {
+      cx.diagnostics.push(
+        Diagnostic::error(codes::INVALID_OPERAND, base.span, "a `String` cannot be indexed").with_note("iterate over `chars()` or `bytes()` instead"),
+      );
+
+      types::error()
+    }
+    _ => {
+      cx.error(codes::INVALID_OPERAND, base.span, "cannot index a value of type `" + types::text(base_ty) + "`");
+
+      types::error()
+    }
+  }
+}
+
+/// A name already given in a literal or pattern, with where.
+pub struct Seen {
+  pub name: String;
+  pub span: Span;
+}
+
+pub fn find_seen(seen: List<Seen>, name: String) -> Option<Span> {
+  for entry in seen {
+    if entry.name == name {
+      return Some(entry.span);
+    }
+  }
+
+  None
+}
+
+fn struct_literal(cx: Checker, value: Expr, path: Path, fields: List<FieldInit>, expected: Option<Type>) -> Type {
+  const id = match cx.resolution.paths.get(value.id) {
+    Some(Res::Struct(id)) => id,
+    Some(Res::Variant(variant)) => return named_variant_literal(cx, path, variant, fields, expected),
+    _ => {
+      for init in fields {
+        expr(cx, init.value, None);
+      }
+
+      return types::error();
+    }
+  };
+  const def = cx.typed.struct_def(id).unwrap_or(StructDef { name: "", fields: new List() });
+  const seen: List<Seen> = new List();
+  // The type arguments of a generic struct come from the path, the expected type and the field
+  // values.
+  const owner = ParamOwner::Item(TypeItem::Struct(id));
+  const unknowns = new Unknowns();
+  const count = cx.generic_count(owner);
+
+  if count > 0 {
+    var explicit: Option<List<Type>> = None;
+
+    if let Some(written) = generic::explicit_args(cx, path) {
+      if cx.check_arg_count(path.span, "this struct", count, written.args.len()) {
+        explicit = Some(written.args);
+      }
+    }
+
+    const identity = cx.type_ref(TypeItem::Struct(id));
+
+    unknowns.add(owner, count, explicit);
+
+    if let Some(ty) = expected {
+      unknowns.unify(identity, ty);
+    }
+  }
+
+  for init in fields {
+    const name = init.name.name;
+
+    if let Some(previous) = find_seen(seen, name) {
+      cx.diagnostics.push(
+        Diagnostic::error(codes::DUPLICATE_DEFINITION, init.name.span, "the field `" + name + "` is initialized more than once")
+          .with_label(previous, "first initialized here"),
+      );
+      expr(cx, init.value, None);
+      continue;
+    }
+
+    seen.push(Seen { name: name, span: init.name.span });
+
+    var found: Option<types::FieldDef> = None;
+
+    for candidate in def.fields {
+      if found.is_none() && candidate.name == name {
+        found = Some(candidate);
+      }
+    }
+
+    match found {
+      Some(found_field) => generic::generic_arg(cx, init.value, found_field.ty, Subst::empty(), unknowns),
+      None => {
+        var diagnostic = Diagnostic::error(codes::UNKNOWN_MEMBER, init.name.span, "the struct `" + def.name + "` has no field `" + name + "`");
+        const names: List<String> = new List();
+
+        for candidate in def.fields {
+          names.push(candidate.name);
+        }
+
+        if let Some(similar) = diagnostics::closest_match(name, names) {
+          diagnostic = diagnostic.with_help("a field with a similar name exists: `" + similar + "`");
+        }
+
+        cx.diagnostics.push(diagnostic);
+        expr(cx, init.value, None);
+      }
+    }
+  }
+
+  var ty = cx.type_ref(TypeItem::Struct(id));
+
+  if !unknowns.is_empty() {
+    const subst = generic::finish_inference(cx, path.span, "`" + def.name + "`", unknowns);
+    const struct_args = match subst.params.first() {
+      Some(entry) => entry.args,
+      None => new List(),
+    };
+
+    ty = cx.named_type(TypeItem::Struct(id), struct_args);
+  }
+
+  const missing: List<String> = new List();
+
+  for candidate in def.fields {
+    if find_seen(seen, candidate.name).is_none() {
+      missing.push("`" + candidate.name + "`");
+    }
+  }
+
+  const shown = types::text(ty);
+
+  if !missing.is_empty() {
+    cx.diagnostics.push(
+      Diagnostic::error(codes::MISSING_FIELDS, path.span, "missing field" + types::plural(missing.len()) + " " + missing.join(", ") + " in the literal of `" + shown + "`")
+        .with_note("struct literals must initialize every field"),
+    );
+  }
+
+  const own = match cx.owner {
+    Some(TypeItem::Struct(owner_id)) => owner_id == id,
+    _ => false,
+  };
+
+  if !own {
+    var private: Option<types::FieldDef> = None;
+
+    for candidate in def.fields {
+      if private.is_none() && !candidate.public {
+        private = Some(candidate);
+      }
+    }
+
+    if let Some(found_field) = private {
+      cx.diagnostics.push(
+        Diagnostic::error(codes::PRIVATE_MEMBER, path.span, "cannot build `" + shown + "` with a literal here: the field `" + found_field.name + "` is private")
+          .with_label(found_field.span, "declared `prv` here")
+          .with_help("use a static function of `" + shown + "` that builds it, such as `" + shown + "::new(...)`"),
+      );
+    }
+  }
+
+  ty
+}
+
+/// The display path of a variant, such as `Shape::Circle` or `Some`.
+pub fn variant_path(cx: Checker, variant: VariantRef) -> String {
+  match variant.owner {
+    EnumKind::User(id) => {
+      const enum_name = cx.resolution.type_name(cx.package, TypeItem::Enum(id));
+      const variant_name = match cx.typed.enums.get(id as usize) {
+        Some(def) => match def.variants.get(variant.index as usize) {
+          Some(found) => found.name,
+          None => "",
+        },
+        None => "",
+      };
+
+      enum_name + "::" + variant_name
+    }
+    EnumKind::Option => if variant.index == 0 { "None" } else if variant.index == 1 { "Some" } else { "" },
+    EnumKind::Result => if variant.index == 0 { "Ok" } else if variant.index == 1 { "Err" } else { "" },
+  }
+}
+
+fn is_option_kind(kind: EnumKind) -> bool {
+  match kind {
+    EnumKind::Option => true,
+    _ => false,
+  }
+}
+
+/// The type of `variant` in a context expecting `expected`. Prelude variants take their type
+/// arguments from it: `None` and the other half of `Ok`/`Err` cannot be inferred otherwise.
+fn variant_type(cx: Checker, span: Span, variant: VariantRef, expected: Option<Type>) -> Type {
+  match variant.owner {
+    EnumKind::User(id) => cx.type_ref(TypeItem::Enum(id)),
+    EnumKind::Option => {
+      if let Some(ty) = expected {
+        if let TypeKind::Option(_) = ty.kind {
+          return ty;
+        }
+      }
+
+      cx.error(codes::UNKNOWN_TYPE, span, "cannot infer the type of `None`; add a type annotation such as `Option<i32>`");
+
+      types::error()
+    }
+    EnumKind::Result => {
+      if let Some(ty) = expected {
+        if let TypeKind::Result { .. } = ty.kind {
+          return ty;
+        }
+      }
+
+      const missing = if variant.index == 0 { "error" } else { "value" };
+
+      cx.error(codes::UNKNOWN_TYPE, span, "cannot infer the " + missing + " type of `" + variant_path(cx, variant) + "(...)`; add a type annotation such as `Result<i32, String>`");
+
+      types::error()
+    }
+  }
+}
+
+/// Whether a variant is used with the wrong form: `None` for the right one.
+fn form_error(path: String, args: Option<List<Expr>>, def: VariantDef) -> Option<String> {
+  const has_args = args.is_some();
+  const empty = def.fields.is_empty();
+
+  if has_args && empty {
+    return Some("`" + path + "` carries no data; write `" + path + "` without parentheses");
+  }
+
+  if !has_args && !empty && !def.named {
+    return Some("`" + path + "` carries data; write `" + path + "(...)`");
+  }
+
+  if !empty && def.named {
+    return Some("`" + path + "` has named fields; write `" + path + " { ... }`");
+  }
+
+  None
+}
+
+/// A variant used as a value: `Shape::Empty`, `None` (no `args`) or `Shape::Circle(r)`, `Some(x)`
+/// (with `args`).
+fn variant_value(cx: Checker, span: Span, variant: VariantRef, args: Option<List<Expr>>, expected: Option<Type>, written: Option<Path>) -> Type {
+  const path = variant_path(cx, variant);
+  // A variant of a generic enum infers the enum's type arguments.
+  var generic_id: Option<u32> = None;
+
+  if let EnumKind::User(id) = variant.owner {
+    if cx.generic_count(ParamOwner::Item(TypeItem::Enum(id))) > 0 {
+      generic_id = Some(id);
+    }
+  }
+
+  const unknowns = match generic_id {
+    Some(id) => Some(generic::enum_unknowns(cx, id, expected, written)),
+    None => None,
+  };
+
+  // `Some(x)` without an expected `Option`: the type comes from `x`.
+  var expects_option = false;
+
+  if let Some(ty) = expected {
+    if let TypeKind::Option(_) = ty.kind {
+      expects_option = true;
+    }
+  }
+
+  if is_option_kind(variant.owner) && variant.index == 1 && !expects_option {
+    return match args {
+      Some(values) => {
+        if values.len() == 1 {
+          const value_ty = expr(cx, values[0], None);
+
+          if types::is_never(value_ty) || types::is_error(value_ty) { types::error() } else { types::option(value_ty) }
+        } else {
+          check_args(cx, span, "variant", List::from([types::error()]), values);
+
+          types::error()
+        }
+      }
+      None => {
+        cx.error(codes::WRONG_CALL_FORM, span, "`Some` carries data; write `Some(...)`");
+
+        types::error()
+      }
+    };
+  }
+
+  const owner_ty = variant_type(cx, span, variant, expected);
+  var def: Option<VariantDef> = None;
+
+  if let Some(variants) = cx.typed.variants(owner_ty) {
+    def = variants.get(variant.index as usize);
+  }
+
+  const found = match def {
+    Some(found) => found,
+    None => {
+      unchecked_args(cx, args.unwrap_or(new List()));
+
+      return types::error();
+    }
+  };
+
+  if let Some(id) = generic_id {
+    if let Some(inferring) = unknowns {
+      match form_error(path, args, found) {
+        Some(message) => {
+          cx.error(codes::WRONG_CALL_FORM, span, message);
+          unchecked_args(cx, args.unwrap_or(new List()));
+        }
+        None => {
+          if let Some(values) = args {
+            generic::generic_args(cx, span, "variant", found.field_types(), values, Subst::empty(), inferring);
+          }
+        }
+      }
+
+      return generic::finish_enum(cx, span, id, inferring);
+    }
+  }
+
+  if let Some(message) = form_error(path, args, found) {
+    cx.error(codes::WRONG_CALL_FORM, span, message);
+    unchecked_args(cx, args.unwrap_or(new List()));
+
+    return owner_ty;
+  }
+
+  if let Some(values) = args {
+    check_args(cx, span, "variant", found.field_types(), values);
+  }
+
+  owner_ty
+}
+
+/// `Shape::Rect { w: 1.0, h: 2.0 }`
+fn named_variant_literal(cx: Checker, path: Path, variant: VariantRef, fields: List<FieldInit>, expected: Option<Type>) -> Type {
+  const name = variant_path(cx, variant);
+  var ty = types::error();
+  var unknowns: Option<Unknowns> = None;
+
+  if let EnumKind::User(id) = variant.owner {
+    ty = cx.type_ref(TypeItem::Enum(id));
+
+    if cx.generic_count(ParamOwner::Item(TypeItem::Enum(id))) > 0 {
+      unknowns = Some(generic::enum_unknowns(cx, id, expected, Some(path)));
+    }
+  }
+
+  var def: Option<VariantDef> = None;
+
+  if let Some(variants) = cx.typed.variants(ty) {
+    if let Some(found) = variants.get(variant.index as usize) {
+      if found.named {
+        def = Some(found);
+      }
+    }
+  }
+
+  const found = match def {
+    Some(found) => found,
+    None => {
+      cx.error(codes::WRONG_CALL_FORM, path.span, "`" + name + "` has no named fields");
+
+      for init in fields {
+        expr(cx, init.value, None);
+      }
+
+      return types::error();
+    }
+  };
+  const seen: List<Seen> = new List();
+
+  for init in fields {
+    const field_name = init.name.name;
+
+    if let Some(previous) = find_seen(seen, field_name) {
+      cx.diagnostics.push(
+        Diagnostic::error(codes::DUPLICATE_DEFINITION, init.name.span, "the field `" + field_name + "` is initialized more than once")
+          .with_label(previous, "first initialized here"),
+      );
+      expr(cx, init.value, None);
+      continue;
+    }
+
+    seen.push(Seen { name: field_name, span: init.name.span });
+
+    var field_ty: Option<Type> = None;
+
+    for field in found.fields {
+      if field_ty.is_none() {
+        if let Some(candidate) = field.name {
+          if candidate == field_name {
+            field_ty = Some(field.ty);
+          }
+        }
+      }
+    }
+
+    match field_ty {
+      Some(expected_ty) => match unknowns {
+        Some(inferring) => generic::generic_arg(cx, init.value, expected_ty, Subst::empty(), inferring),
+        None => expect(cx, init.value, expected_ty),
+      },
+      None => {
+        cx.error(codes::UNKNOWN_MEMBER, init.name.span, "the variant `" + name + "` has no field `" + field_name + "`");
+        expr(cx, init.value, None);
+      }
+    }
+  }
+
+  const missing: List<String> = new List();
+
+  for field in found.fields {
+    if let Some(field_name) = field.name {
+      if find_seen(seen, field_name).is_none() {
+        missing.push("`" + field_name + "`");
+      }
+    }
+  }
+
+  if !missing.is_empty() {
+    cx.error(codes::MISSING_FIELDS, path.span, "missing field" + types::plural(missing.len()) + " " + missing.join(", ") + " in the literal of `" + name + "`");
+  }
+
+  if let EnumKind::User(id) = variant.owner {
+    if let Some(inferring) = unknowns {
+      return generic::finish_enum(cx, path.span, id, inferring);
+    }
+  }
+
+  ty
+}
+
+/// A method of `Option` or `Result` (docs/spec/07-errors.md).
+fn builtin_method(cx: Checker, value: Expr, receiver_ty: Type, method: Ident, args: List<Expr>) -> Type {
+  if let Some(ty) = closures::closure_method(cx, value, receiver_ty, method, args) {
+    return ty;
+  }
+
+  const name = method.name;
+  var option_value: Option<Type> = None;
+  var result_value: Option<Type> = None;
+  var result_error: Option<Type> = None;
+
+  match receiver_ty.kind {
+    TypeKind::Option(inner) => {
+      option_value = Some(inner);
+    }
+    TypeKind::Result { value: inner, error } => {
+      result_value = Some(inner);
+      result_error = Some(error);
+    }
+    _ => {}
+  }
+
+  const inner = match option_value {
+    Some(found) => Some(found),
+    None => result_value,
+  };
+  var builtin: Option<BuiltinMethod> = None;
+  var params: List<Type> = new List();
+  var ret = types::error();
+  const bool_ty = types::of(TypeKind::Bool);
+
+  if option_value.is_some() && name == "is_some" {
+    builtin = Some(BuiltinMethod::IsSome);
+    ret = bool_ty;
+  } else if option_value.is_some() && name == "is_none" {
+    builtin = Some(BuiltinMethod::IsNone);
+    ret = bool_ty;
+  } else if result_value.is_some() && name == "is_ok" {
+    builtin = Some(BuiltinMethod::IsOk);
+    ret = bool_ty;
+  } else if result_value.is_some() && name == "is_err" {
+    builtin = Some(BuiltinMethod::IsErr);
+    ret = bool_ty;
+  } else if let Some(found) = inner {
+    if name == "unwrap" {
+      builtin = Some(BuiltinMethod::Unwrap);
+      ret = found;
+    } else if name == "expect" {
+      builtin = Some(BuiltinMethod::Expect);
+      params = List::from([types::string()]);
+      ret = found;
+    } else if name == "unwrap_or" {
+      builtin = Some(BuiltinMethod::UnwrapOr);
+      params = List::from([found]);
+      ret = found;
+    } else if name == "unwrap_err" {
+      if let Some(error) = result_error {
+        builtin = Some(BuiltinMethod::UnwrapErr);
+        ret = error;
+      }
+    }
+  }
+
+  const chosen = match builtin {
+    Some(chosen) => chosen,
+    None => {
+      const available = if option_value.is_some() {
+        "`is_some`, `is_none`, `unwrap`, `expect` and `unwrap_or`"
+      } else {
+        "`is_ok`, `is_err`, `unwrap`, `expect`, `unwrap_or` and `unwrap_err`"
+      };
+
+      cx.diagnostics.push(
+        Diagnostic::error(codes::UNKNOWN_MEMBER, method.span, "no method `" + name + "` on type `" + types::text(receiver_ty) + "`")
+          .with_note("in F1 its methods are " + available + "; methods taking closures arrive in F2"),
+      );
+      unchecked_args(cx, args);
+
+      return types::error();
+    }
+  };
+
+  check_args(cx, value.span, "method", params, args);
+  cx.typed.builtin_methods.insert(value.id, chosen);
+
+  ret
+}
+
+/// `value?` (docs/spec/07-errors.md#the--operator).
+fn try_expr(cx: Checker, inner: Expr) -> Type {
+  const ty = expr(cx, inner, None);
+  const ret = cx.ret;
+
+  match ty.kind {
+    TypeKind::Error | TypeKind::Never => types::error(),
+    TypeKind::Option(value) => {
+      match ret.kind {
+        TypeKind::Option(_) | TypeKind::Error => {}
+        _ => try_fails(cx, inner, ret, "`?` on an `Option` can only be used in a function that returns `Option`", None),
+      }
+
+      value
+    }
+    TypeKind::Result { value, error } => {
+      match ret.kind {
+        TypeKind::Result { error: expected, .. } => {
+          // Like Rust's `?` into `Box<dyn Error>`, a `String` error becomes an `Error`.
+          var into_error = false;
+
+          if types::is_string(error) {
+            if let Some(found) = cx.typed.error_types {
+              if let TypeKind::Interface(interface_ref) = expected.kind {
+                into_error = interface_ref.id == found.interface_id;
+              }
+            }
+          }
+
+          if !cx.fits(error, expected) && !into_error {
+            try_fails(
+              cx,
+              inner,
+              ret,
+              "the error type `" + types::text(error) + "` does not match the function's error type `" + types::text(expected) + "`",
+              Some("convert the error explicitly with a `match`; `?` never converts errors (`map_err` arrives with closures in F2)"),
+            );
+          }
+        }
+        TypeKind::Error => {}
+        _ => {
+          const is_main = match cx.resolution.main {
+            Some(main) => main == cx.function,
+            None => false,
+          };
+          const help: Option<String> = if is_main { Some("declare `main` as `pub fn main() -> Result<(), String>`") } else { None };
+
+          try_fails(cx, inner, ret, "`?` on a `Result` can only be used in a function that returns `Result`", help);
+        }
+      }
+
+      value
+    }
+    _ => {
+      cx.error(codes::INVALID_TRY, inner.span, "`?` applies to `Option` and `Result` values, found `" + types::text(ty) + "`");
+
+      types::error()
+    }
+  }
+}
+
+fn try_fails(cx: Checker, inner: Expr, ret: Type, message: String, help: Option<String>) {
+  var diagnostic = Diagnostic::error(codes::INVALID_TRY, inner.span, message);
+
+  if let Some(span) = cx.ret_span {
+    diagnostic = diagnostic.with_label(span, "this function returns `" + types::text(ret) + "`");
+  }
+
+  if let Some(text) = help {
+    diagnostic = diagnostic.with_help(text);
+  }
+
+  cx.diagnostics.push(diagnostic);
+}
+
+fn array_literal(cx: Checker, span: Span, elems: List<Expr>, expected: Option<Type>) -> Type {
+  var expected_elem: Option<Type> = None;
+
+  if let Some(ty) = expected {
+    if let TypeKind::Array { elem, .. } = ty.kind {
+      expected_elem = Some(elem);
+    }
+  }
+
+  const first = match elems.first() {
+    Some(first) => first,
+    None => {
+      return match expected_elem {
+        Some(elem) => types::of(TypeKind::Array { elem: elem, len: 0 }),
+        None => {
+          cx.error(codes::UNKNOWN_TYPE, span, "cannot infer the element type of an empty array; add a type annotation");
+
+          types::error()
+        }
+      };
+    }
+  };
+  const first_ty = expr(cx, first, expected_elem);
+  // With a known element type, elements may be instances of its subclasses.
+  var elem_ty = first_ty;
+
+  if let Some(known) = expected_elem {
+    if cx.fits(first_ty, known) && !types::is_never(first_ty) {
+      elem_ty = known;
+    }
+  }
+
+  for index in 1..elems.len() {
+    if types::is_never(elem_ty) {
+      elem_ty = expr(cx, elems[index], expected_elem);
+    } else {
+      expect_because(cx, elems[index], elem_ty, Some(Because { span: first.span, message: "the first element sets the element type" }));
+    }
+  }
+
+  types::of(TypeKind::Array { elem: elem_ty, len: elems.len() as u64 })
+}
+
+fn float_literal_type(suffix: Option<String>, expected: Option<Type>) -> Type {
+  if let Some(name) = suffix {
+    if let Some(found) = types::float_from_name(name) {
+      return types::of(TypeKind::Float(found));
+    }
+  }
+
+  if let Some(ty) = expected {
+    if let TypeKind::Float(found) = ty.kind {
+      return types::of(TypeKind::Float(found));
+    }
+  }
+
+  types::of(TypeKind::Float(FloatTy::F64))
+}

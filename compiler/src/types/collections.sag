@@ -1,10 +1,28 @@
 //! Collections and iteration (docs/spec/02-types.md#lists, docs/spec/08-closures.md#iterators,
-//! ADR-0034): the prelude items the compiler relies on. The port of
-//! `sagitario_types::collections`.
+//! ADR-0034): the built-in `List<T>`, the prelude's `Iter<T>` and `Map<K, V>`, ranges used as
+//! values, and the prelude interfaces `Eq`, `Ord` and `Hash`. Several methods are prelude
+//! functions that receive the receiver first. The port of `sagitario_types::collections`.
 
-use pkg::resolve::TypeItem;
-use pkg::types::Checker;
-use pkg::types::typed::PreludeItems;
+use pkg::ast::{Expr, ExprKind, Ident, Path};
+use pkg::diagnostics;
+use pkg::diagnostics::Diagnostic;
+use pkg::diagnostics::codes;
+use pkg::resolve::{ParamOwner, TypeItem};
+use pkg::types::{Checker, IntTy, Subst, Type, TypeKind};
+use pkg::types;
+use pkg::types::exprs;
+use pkg::types::generic;
+use pkg::types::inheritance;
+use pkg::types::typed::{BuiltinMethod, ListMethod, PreludeItems, ToIter};
+
+/// The methods of `Iter` that lists and arrays also have, as shorthands for `.iter().method()`.
+const ITER_METHODS: String = "map filter take skip step_by collect count fold for_each any all find";
+
+/// The methods of `List` implemented by the compiler.
+const LIST_METHODS: String = "len is_empty push pop get first last insert remove clear reverse";
+
+/// The methods of `List` implemented by prelude functions.
+const LIST_PRELUDE_METHODS: String = "iter contains index_of sort sort_by join";
 
 fn prelude_interface(cx: Checker, name: String) -> Option<u32> {
   match cx.resolution.prelude_type(name) {
@@ -41,4 +59,393 @@ pub fn prelude_items(cx: Checker) {
     map: prelude_class(cx, "Map"),
     send: prelude_interface(cx, "Send"),
   };
+}
+
+/// `new List<T>()`: the element type is written or comes from the expected type.
+pub fn new_list(cx: Checker, path: Path, args: List<Expr>, expected: Option<Type>) -> Type {
+  const explicit = generic::explicit_args(cx, path);
+
+  exprs::check_args(cx, path.span, "constructor", new List(), args);
+
+  var elem = types::error();
+
+  match explicit {
+    Some(written) => {
+      if !cx.check_arg_count(path.span, "`List`", 1, written.args.len()) {
+        return types::error();
+      }
+
+      elem = written.args.first().unwrap_or(types::error());
+    }
+    None => {
+      var known = false;
+
+      if let Some(ty) = expected {
+        if let TypeKind::List(expected_elem) = ty.kind {
+          elem = expected_elem;
+          known = true;
+        }
+      }
+
+      if !known {
+        cx.diagnostics.push(
+          Diagnostic::error(codes::UNKNOWN_TYPE, path.span, "cannot infer the element type of this list")
+            .with_help("write it, as in `new List<i32>()`, or annotate the binding: `const list: List<i32> = new List();`"),
+        );
+
+        return types::error();
+      }
+    }
+  }
+
+  types::of(TypeKind::List(elem))
+}
+
+fn array_of(elem: Type) -> Type {
+  types::of(TypeKind::Array { elem: elem, len: 0 })
+}
+
+/// `List::from(array)`: a list with copies of the elements of an array.
+pub fn list_from(cx: Checker, value: Expr, callee: Expr, args: List<Expr>, expected: Option<Type>) -> Type {
+  const explicit = match callee.kind {
+    ExprKind::Path(path) => generic::explicit_args(cx, path),
+    _ => None,
+  };
+  var written: Option<Type> = None;
+
+  if let Some(found) = explicit {
+    if cx.check_arg_count(callee.span, "`List`", 1, found.args.len()) {
+      written = found.args.first();
+    } else {
+      written = Some(types::error());
+    }
+  }
+
+  var hint = written;
+
+  if hint.is_none() {
+    if let Some(ty) = expected {
+      if let TypeKind::List(elem) = ty.kind {
+        hint = Some(elem);
+      }
+    }
+  }
+
+  if args.len() != 1 {
+    exprs::check_args(cx, value.span, "function", List::from([array_of(hint.unwrap_or(types::error()))]), args);
+
+    return types::error();
+  }
+
+  const array = args[0];
+  const array_hint = match hint {
+    Some(elem) => Some(array_of(elem)),
+    None => None,
+  };
+  const actual = exprs::expr(cx, array, array_hint);
+  const elem = match actual.kind {
+    TypeKind::Array { elem, .. } => elem,
+    TypeKind::Error | TypeKind::Never => return types::error(),
+    _ => {
+      cx.error(codes::MISMATCHED_TYPES, array.span, "expected an array, found `" + types::text(actual) + "`");
+
+      return types::error();
+    }
+  };
+
+  if let Some(written_elem) = written {
+    if !cx.fits(elem, written_elem) {
+      exprs::mismatch(cx, array.span, array_of(written_elem), array_of(elem));
+    }
+  }
+
+  types::of(TypeKind::List(elem))
+}
+
+/// A method call on a `List<T>`.
+pub fn list_method(cx: Checker, value: Expr, receiver: Expr, list_ty: Type, method: Ident, args: List<Expr>) -> Type {
+  const elem = match list_ty.kind {
+    TypeKind::List(elem) => elem,
+    _ => return types::error(),
+  };
+  const name = method.name;
+  const position = types::int(IntTy::Usize);
+  const option = types::option(elem);
+  var core: Option<ListMethod> = None;
+  var params: List<Type> = new List();
+  var ret = types::unit();
+
+  if name == "len" {
+    core = Some(ListMethod::Len);
+    ret = position;
+  } else if name == "is_empty" {
+    core = Some(ListMethod::IsEmpty);
+    ret = types::of(TypeKind::Bool);
+  } else if name == "push" {
+    core = Some(ListMethod::Push);
+    params = List::from([elem]);
+  } else if name == "pop" {
+    core = Some(ListMethod::Pop);
+    ret = option;
+  } else if name == "get" {
+    core = Some(ListMethod::Get);
+    params = List::from([position]);
+    ret = option;
+  } else if name == "first" {
+    core = Some(ListMethod::First);
+    ret = option;
+  } else if name == "last" {
+    core = Some(ListMethod::Last);
+    ret = option;
+  } else if name == "insert" {
+    core = Some(ListMethod::Insert);
+    params = List::from([position, elem]);
+  } else if name == "remove" {
+    core = Some(ListMethod::Remove);
+    params = List::from([position]);
+    ret = elem;
+  } else if name == "clear" {
+    core = Some(ListMethod::Clear);
+  } else if name == "reverse" {
+    core = Some(ListMethod::Reverse);
+  }
+
+  if let Some(op) = core {
+    exprs::check_args(cx, value.span, "method", params, args);
+    cx.typed.builtin_methods.insert(value.id, BuiltinMethod::List(op));
+
+    return ret;
+  }
+
+  if LIST_PRELUDE_METHODS.split(" ").contains(name) {
+    const is_text = match elem.kind {
+      TypeKind::String | TypeKind::Error => true,
+      _ => false,
+    };
+
+    if name == "join" && !is_text {
+      cx.diagnostics.push(
+        Diagnostic::error(codes::UNKNOWN_MEMBER, method.span, "no method `join` on type `" + types::text(list_ty) + "`")
+          .with_note("only lists of strings (`List<String>`) can be joined"),
+      );
+      exprs::unchecked_args(cx, args);
+
+      return types::error();
+    }
+
+    return prelude_method(cx, value, "list_" + name, List::from([elem]), args);
+  }
+
+  if ITER_METHODS.split(" ").contains(name) {
+    return iter_shorthand(cx, value, receiver, elem, method, args);
+  }
+
+  const names = LIST_METHODS.split(" ");
+
+  for other in LIST_PRELUDE_METHODS.split(" ") {
+    names.push(other);
+  }
+
+  for other in ITER_METHODS.split(" ") {
+    names.push(other);
+  }
+
+  var diagnostic = Diagnostic::error(codes::UNKNOWN_MEMBER, method.span, "no method `" + name + "` on type `" + types::text(list_ty) + "`");
+
+  if let Some(similar) = diagnostics::closest_match(name, names) {
+    diagnostic = diagnostic.with_help("a method with a similar name exists: `" + similar + "`");
+  }
+
+  cx.diagnostics.push(diagnostic);
+  exprs::unchecked_args(cx, args);
+
+  types::error()
+}
+
+/// `array.iter()` and the iterator methods of arrays, which work on a list with copies of the
+/// elements; `None` for other methods.
+pub fn array_method(cx: Checker, value: Expr, receiver: Expr, elem: Type, method: Ident, args: List<Expr>) -> Option<Type> {
+  if method.name == "iter" {
+    return Some(prelude_method(cx, value, "list_iter", List::from([elem]), args));
+  }
+
+  if ITER_METHODS.split(" ").contains(method.name) {
+    return Some(iter_shorthand(cx, value, receiver, elem, method, args));
+  }
+
+  None
+}
+
+/// A method implemented by a prelude function, which receives the receiver first and has the
+/// type arguments `type_args` if it is generic.
+pub fn prelude_method(cx: Checker, value: Expr, name: String, type_args: List<Type>, args: List<Expr>) -> Type {
+  var function = 0u32;
+  var sig: Option<types::FnSig> = None;
+
+  if let Some(found) = cx.resolution.prelude_fn(name) {
+    function = found;
+    sig = cx.typed.sig(found);
+  }
+
+  const found_sig = match sig {
+    Some(found_sig) => found_sig,
+    None => {
+      exprs::unchecked_args(cx, args);
+
+      return types::error();
+    }
+  };
+  const is_generic = cx.generic_count(ParamOwner::Fn(function)) > 0;
+  const subst = if is_generic { Subst::of(ParamOwner::Fn(function), type_args) } else { Subst::empty() };
+  const params: List<Type> = new List();
+
+  for index in 1..found_sig.params.len() {
+    params.push(types::substitute(found_sig.params[index], subst));
+  }
+
+  exprs::check_args(cx, value.span, "method", params, args);
+
+  if is_generic {
+    generic::check_bounds(cx, value.span, subst);
+    cx.typed.call_args.insert(value.id, type_args);
+  }
+
+  cx.typed.builtin_methods.insert(value.id, BuiltinMethod::Prelude(function));
+
+  types::substitute(found_sig.ret, subst)
+}
+
+/// `receiver.method(args)` on a list or array, for a method of `Iter`: the receiver becomes an
+/// iterator first.
+fn iter_shorthand(cx: Checker, value: Expr, receiver: Expr, elem: Type, method: Ident, args: List<Expr>) -> Type {
+  const found = match cx.typed.prelude.iter {
+    Some(iter) => inheritance::class_method(cx, iter, method.name),
+    None => None,
+  };
+  const to_iter = cx.resolution.prelude_fn("list_iter");
+
+  if found.is_none() || to_iter.is_none() {
+    exprs::unchecked_args(cx, args);
+
+    return types::error();
+  }
+
+  const function = found.unwrap_or(0);
+  const iter_ty = cx.typed.iter_type(elem);
+
+  cx.typed.to_iter.insert(receiver.id, ToIter { function: to_iter.unwrap_or(0), args: List::from([elem]) });
+  cx.typed.method_calls.insert(value.id, function);
+
+  generic::generic_method_call(cx, value, iter_ty, function, args)
+}
+
+/// `equals`, `compare` and `hash` on integers, `bool`, `char` and `String`, and `total_compare` on
+/// floats; `None` for other methods.
+pub fn primitive_method(cx: Checker, value: Expr, receiver_ty: Type, method: Ident, args: List<Expr>) -> Option<Type> {
+  const name = method.name;
+
+  if let TypeKind::Float(_) = receiver_ty.kind {
+    if name == "total_compare" {
+      exprs::check_args(cx, value.span, "method", List::from([receiver_ty]), args);
+      cx.typed.builtin_methods.insert(value.id, BuiltinMethod::TotalCompare);
+
+      return Some(cx.typed.ordering_type());
+    }
+
+    if name == "equals" || name == "compare" || name == "hash" {
+      cx.diagnostics.push(
+        Diagnostic::error(codes::UNKNOWN_MEMBER, method.span, "no method `" + name + "` on type `" + types::text(receiver_ty) + "`")
+          .with_note("floats do not implement `Eq`, `Ord` or `Hash`, since `NaN` is not equal to itself")
+          .with_help("compare floats with `==` and `<`, or order them with `total_compare`"),
+      );
+      exprs::unchecked_args(cx, args);
+
+      return Some(types::error());
+    }
+
+    return None;
+  }
+
+  const primitive = match receiver_ty.kind {
+    TypeKind::Int(_) | TypeKind::Bool | TypeKind::Char | TypeKind::String => true,
+    _ => false,
+  };
+
+  if !primitive {
+    return None;
+  }
+
+  const interface_id = if name == "equals" {
+    cx.typed.prelude.eq
+  } else if name == "compare" {
+    cx.typed.prelude.ord
+  } else if name == "hash" {
+    cx.typed.prelude.hash
+  } else {
+    None
+  }?;
+  const function = cx.typed.interface_def(interface_id)?.methods.first()?;
+
+  cx.typed.method_calls.insert(value.id, function);
+
+  Some(generic::generic_method_call(cx, value, receiver_ty, function, args))
+}
+
+/// `start..end` outside of `for`: an `Iter` over the integers in it.
+pub fn range_value(cx: Checker, value: Expr, start: Expr, end: Expr, expected: Option<Type>) -> Type {
+  var hint: Option<Type> = None;
+
+  if let Some(ty) = expected {
+    if let Some(elem) = cx.typed.iter_elem(ty) {
+      if let TypeKind::Int(_) = elem.kind {
+        hint = Some(elem);
+      }
+    }
+  }
+
+  const operands = exprs::same_type_operands(cx, start, end, hint);
+  const int_ty = match operands.kind {
+    TypeKind::Int(found) => found,
+    TypeKind::Error | TypeKind::Never => return types::error(),
+    _ => {
+      cx.error(codes::INVALID_OPERAND, value.span, "range bounds must be integers, found `" + types::text(operands) + "`");
+
+      return types::error();
+    }
+  };
+  const function = match cx.resolution.prelude_fn("range_" + types::int_name(int_ty)) {
+    Some(function) => function,
+    None => return types::error(),
+  };
+
+  cx.typed.ranges.insert(value.id, function);
+
+  cx.typed.iter_type(types::int(int_ty))
+}
+
+/// `(start..end).rev()`: the range's integers from the last one down.
+pub fn range_rev(cx: Checker, value: Expr, receiver: Expr, receiver_ty: Type, method: Ident, args: List<Expr>) -> Option<Type> {
+  if method.name != "rev" || cx.typed.iter_elem(receiver_ty).is_none() {
+    return None;
+  }
+
+  const is_range = match receiver.kind {
+    ExprKind::Range { .. } => true,
+    _ => false,
+  };
+
+  if !is_range {
+    cx.diagnostics.push(
+      Diagnostic::error(codes::UNKNOWN_MEMBER, method.span, "no method `rev` on type `" + types::text(receiver_ty) + "`")
+        .with_note("only ranges can be reversed, as in `(0..10).rev()`; collect other iterators into a list and call `reverse`"),
+    );
+    exprs::unchecked_args(cx, args);
+
+    return Some(types::error());
+  }
+
+  exprs::check_args(cx, value.span, "method", new List(), args);
+  cx.typed.builtin_methods.insert(value.id, BuiltinMethod::RangeRev);
+
+  Some(receiver_ty)
 }

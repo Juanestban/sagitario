@@ -22,6 +22,59 @@ pub struct PreludeItems {
   pub send: Option<u32>;
 }
 
+/// The methods of `List<T>` implemented by the compiler (docs/spec/02-types.md#arrays-and-lists).
+pub enum ListMethod {
+  Len,
+  IsEmpty,
+  Push,
+  Pop,
+  Get,
+  First,
+  Last,
+  Insert,
+  Remove,
+  Clear,
+  Reverse,
+}
+
+/// A method of `Option`, `Result`, `String`, `char`, `StringBuilder` or `List`, implemented by
+/// the compiler and the runtime.
+pub enum BuiltinMethod {
+  IsSome,
+  IsNone,
+  IsOk,
+  IsErr,
+  Unwrap,
+  Expect,
+  UnwrapOr,
+  UnwrapErr,
+  /// A runtime function taking the receiver and the arguments in order; `located` functions
+  /// also receive the source location.
+  Runtime { function: String, located: bool },
+  Find,
+  ToDigit,
+  Parse(Type),
+  Chars,
+  Bytes,
+  Map,
+  MapErr,
+  AndThen,
+  UnwrapOrElse,
+  Filter,
+  List(ListMethod),
+  /// A method implemented by a prelude function, which receives the receiver first.
+  Prelude(u32),
+  TotalCompare,
+  RangeRev,
+}
+
+/// A list or array used as an iterator: the prelude function making the iterator and its type
+/// arguments.
+pub struct ToIter {
+  pub function: u32;
+  pub args: List<Type>;
+}
+
 /// The interfaces a struct, enum or class declares with `impl`.
 pub struct ImplEntry {
   pub item: TypeItem;
@@ -108,6 +161,23 @@ pub class TypedModule {
   pub var const_types: List<Type>;
   /// The value of each module-level constant, or `None` if it has an error.
   pub var const_values: List<Option<ConstValue>>;
+  /// The type arguments of each use of a generic function, method or initializer, by node id.
+  pub var call_args: Map<u32, List<Type>>;
+  /// Calls to built-in methods, by node id.
+  pub var builtin_methods: Map<u32, BuiltinMethod>;
+  /// Type of each local binding, indexed by function id then local id.
+  pub var local_types: List<List<Type>>;
+  pub var expr_types: Map<u32, Type>;
+  /// The function called by each method call expression.
+  pub var method_calls: Map<u32, u32>;
+  /// Calls through `zod`, which run the named implementation without dynamic dispatch.
+  pub var zod_calls: Map<u32, bool>;
+  /// `value.name(args)` calling a field of a function type, by node id.
+  pub var field_calls: Map<u32, bool>;
+  /// Lists and arrays used as iterators, by node id.
+  pub var to_iter: Map<u32, ToIter>;
+  /// Ranges used as values, by node id: the prelude function making their iterator.
+  pub var ranges: Map<u32, u32>;
 
   pub fn new(self) {
     self.sigs = new List();
@@ -124,6 +194,94 @@ pub class TypedModule {
     self.sync_classes = new List();
     self.const_types = new List();
     self.const_values = new List();
+    self.call_args = new Map<u32, List<Type>>();
+    self.builtin_methods = new Map<u32, BuiltinMethod>();
+    self.local_types = new List();
+    self.expr_types = new Map<u32, Type>();
+    self.method_calls = new Map<u32, u32>();
+    self.zod_calls = new Map<u32, bool>();
+    self.field_calls = new Map<u32, bool>();
+    self.to_iter = new Map<u32, ToIter>();
+    self.ranges = new Map<u32, u32>();
+  }
+
+  /// Position of a field in its struct's declaration.
+  pub fn field_index(self, id: u32, name: String) -> Option<usize> {
+    const def = self.struct_def(id)?;
+
+    for index in 0..def.fields.len() {
+      if def.fields[index].name == name {
+        return Some(index);
+      }
+    }
+
+    None
+  }
+
+  /// `Iter<elem>`.
+  pub fn iter_type(self, elem: Type) -> Type {
+    match self.prelude.iter {
+      Some(id) => types::class_type(id, "Iter", List::from([elem])),
+      None => types::error(),
+    }
+  }
+
+  /// The element type of an `Iter<T>`.
+  pub fn iter_elem(self, ty: Type) -> Option<Type> {
+    if let TypeKind::Class(class_ref) = ty.kind {
+      if let Some(iter) = self.prelude.iter {
+        if iter == class_ref.id {
+          return class_ref.args.first();
+        }
+      }
+    }
+
+    None
+  }
+
+  /// The key and value types of a `Map<K, V>`.
+  pub fn map_args(self, ty: Type) -> Option<List<Type>> {
+    if let TypeKind::Class(class_ref) = ty.kind {
+      if let Some(map) = self.prelude.map {
+        if map == class_ref.id && class_ref.args.len() == 2 {
+          return Some(class_ref.args);
+        }
+      }
+    }
+
+    None
+  }
+
+  /// `Entry<K, V>`.
+  pub fn entry_type(self, key: Type, value: Type) -> Type {
+    match self.prelude.entry {
+      Some(id) => types::of(TypeKind::Struct(NamedRef { id: id, name: "Entry", args: List::from([key, value]) })),
+      None => types::error(),
+    }
+  }
+
+  /// The prelude's `Ordering`.
+  pub fn ordering_type(self) -> Type {
+    match self.prelude.ordering {
+      Some(id) => types::of(TypeKind::Enum(NamedRef { id: id, name: "Ordering", args: new List() })),
+      None => types::error(),
+    }
+  }
+
+  /// The element type `for` iterates over in a list, an iterator or a map (its entries).
+  pub fn collection_elem(self, ty: Type) -> Option<Type> {
+    if let TypeKind::List(elem) = ty.kind {
+      return Some(elem);
+    }
+
+    if let Some(elem) = self.iter_elem(ty) {
+      return Some(elem);
+    }
+
+    match self.map_args(ty) {
+      Some(args) => Some(self.entry_type(args[0], args[1])),
+      None => None,
+    }
   }
 
   pub fn sig(self, id: u32) -> Option<FnSig> {

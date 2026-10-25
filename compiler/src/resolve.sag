@@ -126,6 +126,11 @@ pub class LambdaInfo {
     self.end_local = 4294967295;
     self.captures = new List();
   }
+
+  /// Whether a local is declared inside the lambda.
+  pub fn owns(self, local: u32) -> bool {
+    local >= self.first_local && local < self.end_local
+  }
 }
 
 pub struct LocalInfo {
@@ -515,6 +520,19 @@ pub class Resolution {
     const declared = self.module(self.prelude?)?.items.get(name)?;
 
     Some(declared.item)
+  }
+
+  /// A function of the prelude module by name.
+  pub fn prelude_fn(self, name: String) -> Option<u32> {
+    match self.prelude_item(name) {
+      Some(ItemRef::Fn(id)) => Some(id),
+      _ => None,
+    }
+  }
+
+  /// The local bindings of a function.
+  pub fn function_locals(self, id: u32) -> List<LocalInfo> {
+    self.locals.get(id as usize).unwrap_or(new List())
   }
 
   /// A type of the prelude module by name.

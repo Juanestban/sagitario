@@ -1,12 +1,20 @@
-//! Classes (docs/spec/04-classes.md): their fields and the initializer `new`. The port of the
-//! declarations part of `sagitario_types::classes`; `types::inheritance` checks the hierarchy.
+//! Classes (docs/spec/04-classes.md): their fields, the initializer `new`, `new C(...)` and field
+//! access, with inherited fields looked up through the ancestors (`types::inheritance` checks the
+//! hierarchy itself). Also which places can be modified (docs/spec/03-memory.md), and which struct
+//! and enum methods modify `self` (ADR-0028). The port of `sagitario_types::classes`.
 
-use pkg::ast::{ExprKind, FieldDecl, Stmt};
+use pkg::ast::{Expr, ExprKind, FieldDecl, Ident, Path, Stmt};
 use pkg::diagnostics::Diagnostic;
 use pkg::diagnostics::codes;
-use pkg::resolve::TypeItem;
-use pkg::types::{Checker, ClassDef, FieldDef, Type, TypeKind};
+use pkg::resolve::{LocalKind, ParamOwner, TypeItem};
+use pkg::types::{Checker, ClassDef, FieldDef, Receiver, ReceiverCheck, SelfCall, Subst, Type, TypeKind};
 use pkg::types;
+use pkg::diagnostics;
+use pkg::types::closures;
+use pkg::types::exprs;
+use pkg::types::ffi;
+use pkg::types::generic;
+use pkg::types::generic::Unknowns;
 use pkg::types::inheritance;
 
 /// Resolves the parent and the field types of every class.
@@ -181,4 +189,478 @@ fn require_zod_new(cx: Checker, own: u32, inherited: u32) {
       .with_note("`" + parent + "` has an initializer, which runs before the fields of the subclass are assigned")
       .with_help("make `zod.new(...)` the first statement"),
   );
+}
+
+/// `new C(args)`: runs the initializer of `C`, if it has one, or else the one it inherits.
+pub fn new_instance(cx: Checker, value: Expr, path: Path, id: u32, args: List<Expr>, expected: Option<Type>) -> Type {
+  const name = cx.resolution.type_name(cx.package, TypeItem::Class(id));
+  const is_abstract = match cx.typed.class_def(id) {
+    Some(def) => def.is_abstract,
+    None => false,
+  };
+
+  if is_abstract {
+    cx.diagnostics.push(
+      Diagnostic::error(codes::INVALID_INHERITANCE, path.span, "cannot create an instance of the abstract class `" + name + "`")
+        .with_help("create an instance of a concrete subclass of `" + name + "`"),
+    );
+  }
+
+  // The type arguments of a generic class come from `new C<...>`, the expected type and the
+  // initializer's arguments.
+  const owner = ParamOwner::Item(TypeItem::Class(id));
+  const count = cx.generic_count(owner);
+  var explicit: Option<List<Type>> = None;
+
+  if let Some(written) = generic::explicit_args(cx, path) {
+    if cx.check_arg_count(path.span, "`" + name + "`", count, written.args.len()) {
+      explicit = Some(written.args);
+    }
+  }
+
+  const unknowns = new Unknowns();
+
+  unknowns.add(owner, count, explicit);
+
+  if let Some(ty) = expected {
+    unknowns.unify(cx.type_ref(TypeItem::Class(id)), ty);
+  }
+
+  const initializer = match cx.typed.class_def(id) {
+    Some(def) => def.initializer,
+    None => None,
+  };
+
+  if let Some(function) = initializer {
+    if let Some(decl) = cx.resolution.fn_decl(cx.package, function) {
+      const own = match cx.owner {
+        Some(TypeItem::Class(current)) => current == id,
+        _ => false,
+      };
+
+      if types::is_private(decl.visibility) && !own {
+        cx.diagnostics.push(
+          Diagnostic::error(codes::PRIVATE_MEMBER, path.span, "the initializer of `" + name + "` is private")
+            .with_label(decl.name.span, "declared `prv` here")
+            .with_help("create instances with a static function of `" + name + "`"),
+        );
+      }
+    }
+  }
+
+  const params = match initializer {
+    Some(function) => match cx.typed.sig(function) {
+      Some(sig) => sig.params,
+      None => new List(),
+    },
+    None => new List(),
+  };
+
+  generic::generic_args(cx, path.span, "initializer", params, args, Subst::empty(), unknowns);
+
+  const subst = if count == 0 { Subst::empty() } else { generic::finish_inference(cx, path.span, "`" + name + "`", unknowns) };
+  const class_args = match subst.params.first() {
+    Some(entry) => entry.args,
+    None => new List(),
+  };
+
+  if let Some(function) = initializer {
+    generic::record_owner_args(cx, value.id, subst, function);
+  }
+
+  cx.named_type(TypeItem::Class(id), class_args)
+}
+
+/// `instance.name`, a field of a class instance or one it inherits.
+pub fn class_field(cx: Checker, id: u32, base_ty: Type, name: Ident) -> Type {
+  const field_name = name.name;
+  const found = match cx.typed.class_field(id, field_name) {
+    Some(found) => found,
+    None => {
+      var diagnostic = Diagnostic::error(codes::UNKNOWN_MEMBER, name.span, "no field `" + field_name + "` on type `" + types::text(base_ty) + "`");
+      const fields: List<String> = new List();
+
+      for class_id in cx.typed.class_chain(id) {
+        if let Some(def) = cx.typed.class_def(class_id) {
+          for field in def.fields {
+            fields.push(field.name);
+          }
+        }
+      }
+
+      if inheritance::class_method(cx, id, field_name).is_some() {
+        diagnostic = diagnostic.with_help("`" + field_name + "` is a method; call it with `" + field_name + "(...)`, or wrap it in a lambda to use it as a value");
+      } else if let Some(similar) = diagnostics::closest_match(field_name, fields) {
+        diagnostic = diagnostic.with_help("a field with a similar name exists: `" + similar + "`");
+      }
+
+      cx.diagnostics.push(diagnostic);
+
+      return types::error();
+    }
+  };
+  // An inherited field is private to the class that declares it.
+  const own = match cx.owner {
+    Some(TypeItem::Class(current)) => current == found.class_id,
+    _ => false,
+  };
+
+  if !found.field.public && !own {
+    const owner = cx.resolution.type_name(cx.package, TypeItem::Class(found.class_id));
+
+    cx.diagnostics.push(
+      Diagnostic::error(codes::PRIVATE_MEMBER, name.span, "the field `" + field_name + "` of `" + owner + "` is private").with_label(found.field.span, "declared `prv` here"),
+    );
+  }
+
+  // The field's type with the type arguments of the class declaring it.
+  if let TypeKind::Class(class_ref) = base_ty.kind {
+    return match cx.typed.class_field_type(class_ref, field_name) {
+      Some(typed_field) => typed_field.ty,
+      None => found.field.ty,
+    };
+  }
+
+  found.field.ty
+}
+
+/// Records that the method being checked modifies `self`.
+pub fn mark_self_modified(cx: Checker) {
+  if (cx.function as usize) < cx.mutates_self.len() {
+    cx.mutates_self[cx.function as usize] = true;
+  }
+}
+
+/// What a place expression is used for.
+pub enum PlaceUse {
+  Assign,
+  /// The receiver of the named method, which modifies it.
+  Receiver(String),
+}
+
+/// What a place expression belongs to.
+enum PlaceBase {
+  /// A local binding.
+  Local(u32),
+  /// A field of a class instance: it can be modified through any reference if it is `var`.
+  ClassField { class_id: u32, name: Ident, base: Expr },
+  /// A field reached through an interface value: it can be modified if the interface says `var`.
+  InterfaceField { interface_id: u32, name: Ident },
+  /// An element of a list, `whole` or a part of one.
+  ListElement(bool),
+  /// A value that is not stored anywhere.
+  Temporary,
+  /// A name that is not a binding: already reported.
+  Unknown,
+}
+
+/// Whether a place can be modified: `Mutable`, a part of `self` (`OfSelf`), or not, with the
+/// error to report.
+enum PlaceAccess {
+  Mutable,
+  OfSelf,
+  Immutable(Diagnostic),
+}
+
+fn place_base(cx: Checker, place: Expr) -> PlaceBase {
+  match place.kind {
+    ExprKind::Path(_) => match exprs::local(cx, place) {
+      Some(id) => PlaceBase::Local(id),
+      None => PlaceBase::Unknown,
+    },
+    ExprKind::Field { base, name } => match cx.typed.expr_types.get(base.id) {
+      Some(ty) => match ty.kind {
+        TypeKind::Class(class_ref) => PlaceBase::ClassField { class_id: class_ref.id, name: name, base: base },
+        TypeKind::Interface(interface_ref) => PlaceBase::InterfaceField { interface_id: interface_ref.id, name: name },
+        _ => part_of(cx, base),
+      },
+      None => part_of(cx, base),
+    },
+    ExprKind::Index { base, .. } => {
+      if let Some(ty) = cx.typed.expr_types.get(base.id) {
+        if let TypeKind::List(_) = ty.kind {
+          return PlaceBase::ListElement(true);
+        }
+      }
+
+      part_of(cx, base)
+    }
+    _ => PlaceBase::Temporary,
+  }
+}
+
+/// The base of a place inside `base`.
+fn part_of(cx: Checker, base: Expr) -> PlaceBase {
+  match place_base(cx, base) {
+    PlaceBase::ListElement(_) => PlaceBase::ListElement(false),
+    other => other,
+  }
+}
+
+fn is_self(cx: Checker, value: Expr) -> bool {
+  match exprs::local(cx, value) {
+    Some(id) => match cx.resolution.function_locals(cx.function).get(id as usize) {
+      Some(info) => info.kind == LocalKind::SelfParam,
+      None => false,
+    },
+    None => false,
+  }
+}
+
+/// Whether `place` can be modified: it belongs to a `var` binding, to `self`, or to a `var` field
+/// of a class instance (or any field, while the class's initializer assigns `self`).
+fn place_access(cx: Checker, place: Expr, place_use: PlaceUse) -> PlaceAccess {
+  var code = codes::IMMUTABLE_PLACE;
+  var method_name = "";
+  var is_assign = true;
+
+  if let PlaceUse::Receiver(method) = place_use {
+    code = codes::IMMUTABLE_RECEIVER;
+    method_name = method;
+    is_assign = false;
+  }
+
+  match place_base(cx, place) {
+    PlaceBase::Unknown => PlaceAccess::Mutable,
+    PlaceBase::Temporary => {
+      const diagnostic = if is_assign {
+        Diagnostic::error(codes::INVALID_ASSIGNMENT_TARGET, place.span, "cannot assign to a part of a temporary value")
+      } else {
+        Diagnostic::error(code, place.span, "cannot call the method `" + method_name + "`, which modifies `self`, on a temporary value")
+      };
+
+      PlaceAccess::Immutable(diagnostic.with_help("store the value in a `var` binding first"))
+    }
+    PlaceBase::ListElement(whole) => {
+      if whole && is_assign {
+        return PlaceAccess::Mutable;
+      }
+
+      const diagnostic = if is_assign {
+        Diagnostic::error(codes::INVALID_ASSIGNMENT_TARGET, place.span, "cannot modify a part of a list element")
+      } else {
+        Diagnostic::error(code, place.span, "cannot call the method `" + method_name + "`, which modifies `self`, on a list element")
+      };
+
+      PlaceAccess::Immutable(
+        diagnostic
+          .with_note("reading `list[i]` gives a copy of the element")
+          .with_help("modify a copy and store it back: `var item = list[i]; ...; list[i] = item;`"),
+      )
+    }
+    PlaceBase::InterfaceField { interface_id, name } => {
+      const found = match cx.typed.interface_field(interface_id, name.name) {
+        Some(found) => found,
+        None => return PlaceAccess::Mutable,
+      };
+
+      if found.field.mutable {
+        return PlaceAccess::Mutable;
+      }
+
+      const owner = match cx.typed.interface_def(found.interface_id) {
+        Some(def) => def.name,
+        None => "",
+      };
+
+      PlaceAccess::Immutable(
+        Diagnostic::error(code, place.span, "cannot modify the field `" + name.name + "`: it is a `const` field of the interface `" + owner + "`")
+          .with_label(found.field.span, "declared `const` here"),
+      )
+    }
+    PlaceBase::ClassField { class_id, name, base } => {
+      const found = match cx.typed.class_field(class_id, name.name) {
+        Some(found) => found,
+        None => return PlaceAccess::Mutable,
+      };
+      const def = cx.typed.class_def(found.class_id);
+      // Only the initializer of the declaring class assigns a `const` field.
+      var initializing = false;
+
+      if let Some(declaring) = def {
+        if let Some(initializer) = declaring.initializer {
+          initializing = initializer == cx.function && is_self(cx, base);
+        }
+      }
+
+      if found.field.mutable || initializing {
+        return PlaceAccess::Mutable;
+      }
+
+      const class_name = match def {
+        Some(declaring) => declaring.name,
+        None => "",
+      };
+      const action = if is_assign {
+        "cannot modify the field `" + name.name + "`"
+      } else {
+        "cannot call the method `" + method_name + "`, which modifies `self`, on the field `" + name.name + "`"
+      };
+
+      PlaceAccess::Immutable(
+        Diagnostic::error(code, place.span, action + ": it is a `const` field of `" + class_name + "`")
+          .with_label(found.field.span, "declared `const` here")
+          .with_help("declare it `var " + name.name + "` to modify it after `new`"),
+      )
+    }
+    PlaceBase::Local(root) => {
+      if closures::is_captured(cx, root) {
+        const name = match cx.resolution.function_locals(cx.function).get(root as usize) {
+          Some(info) => info.name,
+          None => "",
+        };
+
+        return PlaceAccess::Immutable(closures::captured_error(place.span, name));
+      }
+
+      const info = match cx.resolution.function_locals(cx.function).get(root as usize) {
+        Some(info) => info,
+        None => return PlaceAccess::Mutable,
+      };
+      const name = info.name;
+      const action = if is_assign { "cannot modify `" + name + "`" } else { "cannot call the method `" + method_name + "`, which modifies `self`, on `" + name + "`" };
+      const copy = "copy it into a `var` binding: `var " + name + " = " + name + ";`";
+      var reason = "";
+      var label = "";
+      var help = "";
+
+      match info.kind {
+        LocalKind::Var => return PlaceAccess::Mutable,
+        LocalKind::SelfParam => {
+          // A class's `self` is a reference: its fields are checked as class fields.
+          return match cx.owner {
+            Some(TypeItem::Class(_)) | Some(TypeItem::Interface(_)) => PlaceAccess::Mutable,
+            _ => PlaceAccess::OfSelf,
+          };
+        }
+        LocalKind::Const => {
+          reason = "it is not declared with `var`";
+          label = "declared with `const` here";
+          help = "declare `" + name + "` with `var` to modify it";
+        }
+        LocalKind::Param => {
+          reason = "parameters are immutable";
+          label = "parameter declared here";
+          help = copy;
+        }
+        LocalKind::ForVar => {
+          reason = "loop variables are immutable";
+          label = "loop variable declared here";
+          help = copy;
+        }
+        LocalKind::Pattern => {
+          reason = "pattern bindings are immutable";
+          label = "bound by the pattern here";
+          help = copy;
+        }
+      }
+
+      PlaceAccess::Immutable(Diagnostic::error(code, place.span, action + ": " + reason).with_label(info.span, label).with_help(help))
+    }
+  }
+}
+
+/// A place that is modified right away: an assignment target or the receiver of a built-in
+/// method that writes to it.
+pub fn check_mutable_place(cx: Checker, place: Expr, place_use: PlaceUse) {
+  if let Some(pointer) = ffi::deref_pointer(place) {
+    ffi::check_pointer_write(cx, place, pointer);
+
+    return;
+  }
+
+  match place_access(cx, place, place_use) {
+    PlaceAccess::Mutable => {}
+    PlaceAccess::OfSelf => mark_self_modified(cx),
+    PlaceAccess::Immutable(diagnostic) => cx.diagnostics.push(diagnostic),
+  }
+}
+
+/// The receiver of a struct or enum method, which must be mutable if the method modifies `self`;
+/// that is decided by `infer_mutating_methods`.
+pub fn receiver_use(cx: Checker, receiver: Expr, function: u32, name: String) {
+  var access = PlaceAccess::Mutable;
+
+  match ffi::deref_pointer(receiver) {
+    Some(pointer) => {
+      if let Some(ty) = cx.typed.expr_types.get(pointer.id) {
+        if let TypeKind::Ptr { mutable, .. } = ty.kind {
+          if !mutable {
+            access = PlaceAccess::Immutable(
+              Diagnostic::error(codes::IMMUTABLE_RECEIVER, receiver.span, "cannot call the method `" + name + "`, which modifies `self`, through a `*const` pointer")
+                .with_help("use a `*mut` pointer, for example with `as *mut T`"),
+            );
+          }
+        }
+      }
+    }
+    None => {
+      access = place_access(cx, receiver, PlaceUse::Receiver(name));
+    }
+  }
+
+  match access {
+    PlaceAccess::Mutable => {}
+    PlaceAccess::OfSelf => cx.self_calls.push(SelfCall { caller: cx.function, callee: function }),
+    PlaceAccess::Immutable(diagnostic) => cx.receiver_checks.push(ReceiverCheck { callee: function, diagnostic: diagnostic }),
+  }
+}
+
+fn modifies(mutating: List<bool>, id: u32) -> bool {
+  mutating.get(id as usize).unwrap_or(false)
+}
+
+/// Decides which struct and enum methods modify `self` (also through the methods they call on
+/// it), makes them receive the caller's value, and reports calls to them on values that cannot
+/// be modified.
+pub fn infer_mutating_methods(cx: Checker) {
+  const mutating = cx.mutates_self;
+  const calls = cx.self_calls;
+
+  cx.mutates_self = new List();
+  cx.self_calls = new List();
+
+  while true {
+    var changed = false;
+
+    for call in calls {
+      if modifies(mutating, call.callee) && !modifies(mutating, call.caller) {
+        if (call.caller as usize) < mutating.len() {
+          mutating[call.caller as usize] = true;
+        }
+
+        changed = true;
+      }
+    }
+
+    if !changed {
+      break;
+    }
+  }
+
+  var index = 0usize;
+
+  while index < cx.typed.sigs.len() && index < mutating.len() {
+    const sig = cx.typed.sigs[index];
+    const by_value = match sig.receiver {
+      Some(receiver) => receiver == Receiver::Value,
+      None => false,
+    };
+
+    if mutating[index] && by_value {
+      cx.typed.sigs[index] = types::FnSig { receiver: Some(Receiver::Var), params: sig.params, ret: sig.ret };
+    }
+
+    index += 1;
+  }
+
+  const checks = cx.receiver_checks;
+
+  cx.receiver_checks = new List();
+
+  for check in checks {
+    if modifies(mutating, check.callee) {
+      cx.diagnostics.push(check.diagnostic);
+    }
+  }
 }

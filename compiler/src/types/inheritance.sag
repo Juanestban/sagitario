@@ -1,14 +1,16 @@
 //! Inheritance between classes (docs/spec/04-classes.md#inheritance, ADR-0029): the parent of
 //! each class, members inherited through the ancestors, `override` and `abstract`, and the
-//! vtables of methods dispatched dynamically. The port of the declarations part of
+//! vtables of methods dispatched dynamically, and calls through `zod`. The port of
 //! `sagitario_types::inheritance`.
 
-use pkg::ast::{Ident, TypeExpr};
+use pkg::ast::{Expr, Ident, TypeExpr};
 use pkg::diagnostics::Diagnostic;
 use pkg::diagnostics::codes;
 use pkg::resolve::TypeItem;
-use pkg::types::{Checker, NamedRef, TypeKind};
+use pkg::types::{Checker, NamedRef, Type, TypeKind};
 use pkg::types;
+use pkg::types::exprs;
+use pkg::types::generic;
 use pkg::types::interfaces;
 
 /// The class named after `extends`, with its type arguments.
@@ -490,4 +492,139 @@ pub fn build_vtables(cx: Checker) {
       def.vtable = vtable;
     }
   }
+}
+
+/// `zod.method(args)` or `zod.new(args)`: the parent's implementation, without dynamic dispatch.
+pub fn zod_call(cx: Checker, value: Expr, receiver: Expr, method: Ident, args: List<Expr>) -> Type {
+  var class_id = 0u32;
+  var in_class = false;
+
+  if let Some(TypeItem::Class(owner)) = cx.owner {
+    if cx.resolution.paths.contains_key(receiver.id) {
+      class_id = owner;
+      in_class = true;
+    }
+  }
+
+  // Outside a class's methods: already reported.
+  if !in_class {
+    exprs::unchecked_args(cx, args);
+
+    return types::error();
+  }
+
+  const parent_ref = match cx.typed.class_def(class_id) {
+    Some(def) => def.parent,
+    None => None,
+  };
+  const parent_named = match parent_ref {
+    Some(found) => found,
+    None => {
+      cx.diagnostics.push(
+        Diagnostic::error(codes::INVALID_INHERITANCE, receiver.span, "`zod` refers to the parent class, and `" + class_name(cx, class_id) + "` has none")
+          .with_help("use `self` to call the methods of this class"),
+      );
+      exprs::unchecked_args(cx, args);
+
+      return types::error();
+    }
+  };
+  const parent = parent_named.id;
+  const parent_ty = types::of(TypeKind::Class(parent_named));
+
+  cx.typed.expr_types.insert(receiver.id, parent_ty);
+
+  if method.name == "new" {
+    return zod_new(cx, value, parent_ty, class_id, args);
+  }
+
+  var function: Option<u32> = None;
+
+  if let Some(found) = class_method(cx, parent, method.name) {
+    if let Some(sig) = cx.typed.sig(found) {
+      if sig.receiver.is_some() {
+        function = Some(found);
+      }
+    }
+  }
+
+  const target = match function {
+    Some(target) => target,
+    None => {
+      cx.error(codes::UNKNOWN_MEMBER, method.span, "no method `" + method.name + "` in the parent class `" + types::text(parent_ty) + "`");
+      exprs::unchecked_args(cx, args);
+
+      return types::error();
+    }
+  };
+
+  if let Some(decl) = cx.resolution.fn_decl(cx.package, target) {
+    const own = match cx.owner {
+      Some(current) => match cx.resolution.owner(target) {
+        Some(declaring) => pkg::resolve::same_type_item(current, declaring),
+        None => false,
+      },
+      None => cx.resolution.owner(target).is_none(),
+    };
+
+    if decl.is_abstract {
+      cx.diagnostics.push(
+        Diagnostic::error(codes::INVALID_OVERRIDE, method.span, "`" + method.name + "` is abstract in `" + types::text(parent_ty) + "`: there is no implementation to call")
+          .with_label(decl.name.span, "declared `abstract` here"),
+      );
+    } else if types::is_private(decl.visibility) && !own {
+      cx.diagnostics.push(
+        Diagnostic::error(codes::PRIVATE_MEMBER, method.span, "the method `" + method.name + "` of `" + types::text(parent_ty) + "` is private")
+          .with_label(decl.name.span, "declared `prv` here"),
+      );
+    }
+  }
+
+  const subst = interfaces::inherited_subst(cx, parent_ty, target);
+  const sig = match cx.typed.sig(target) {
+    Some(found) => types::substitute_sig(found, subst),
+    None => return types::error(),
+  };
+
+  exprs::check_args(cx, value.span, "method", sig.params, args);
+  cx.typed.method_calls.insert(value.id, target);
+  cx.typed.zod_calls.insert(value.id, true);
+  generic::record_owner_args(cx, value.id, subst, target);
+
+  sig.ret
+}
+
+/// `zod.new(args)`, the first statement of the initializer of a class whose ancestor has one.
+fn zod_new(cx: Checker, value: Expr, parent_ty: Type, class_id: u32, args: List<Expr>) -> Type {
+  const initializer = match cx.typed.inherited_initializer(class_id) {
+    Some(found) => found,
+    None => {
+      cx.diagnostics.push(
+        Diagnostic::error(codes::INVALID_INITIALIZER, value.span, "`" + types::text(parent_ty) + "` has no initializer to call").with_help("remove `zod.new(...)`"),
+      );
+      exprs::unchecked_args(cx, args);
+
+      return types::unit();
+    }
+  };
+
+  if !cx.zod_new_calls.contains(value.id) {
+    cx.diagnostics.push(
+      Diagnostic::error(codes::INVALID_INITIALIZER, value.span, "`zod.new(...)` can only be the first statement of an initializer")
+        .with_note("the parent part of an instance is initialized once, before the subclass's fields"),
+    );
+  }
+
+  const subst = interfaces::inherited_subst(cx, parent_ty, initializer);
+  const params = match cx.typed.sig(initializer) {
+    Some(sig) => types::substitute_sig(sig, subst).params,
+    None => new List(),
+  };
+
+  exprs::check_args(cx, value.span, "initializer", params, args);
+  cx.typed.method_calls.insert(value.id, initializer);
+  cx.typed.zod_calls.insert(value.id, true);
+  generic::record_owner_args(cx, value.id, subst, initializer);
+
+  types::unit()
 }

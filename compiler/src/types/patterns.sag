@@ -1,0 +1,620 @@
+//! Type checking of `match` (docs/spec/06-control-flow.md#match): arm types, patterns against the
+//! scrutinee's type, guards, exhaustiveness and unreachable arms. The port of
+//! `sagitario_types::patterns`.
+
+use pkg::ast::{Expr, ExprKind, FieldPattern, MatchArm, Pattern, PatternKind, UnaryOp};
+use pkg::diagnostics::Diagnostic;
+use pkg::diagnostics::codes;
+use pkg::lexer;
+use pkg::resolve::{EnumKind, Res, VariantRef};
+use pkg::span::Span;
+use pkg::types::{Checker, Type, TypeKind, VariantDef};
+use pkg::types;
+use pkg::types::exhaustive;
+use pkg::types::exhaustive::{Ctor, Pat, PatKind};
+use pkg::types::exprs;
+use pkg::types::exprs::Seen;
+
+/// How a variant pattern is written.
+enum Shape {
+  /// `None`, `Shape::Empty`
+  Unit,
+  /// `Some(x)`, `Shape::Circle(r)`
+  Tuple(List<Pattern>),
+  /// `Shape::Rect { w, .. }`
+  Named { fields: List<FieldPattern>, rest: bool },
+}
+
+/// The enum whose variants make up values of this type.
+fn enum_kind(ty: Type) -> Option<EnumKind> {
+  match ty.kind {
+    TypeKind::Enum(named) => Some(EnumKind::User(named.id)),
+    TypeKind::Option(_) => Some(EnumKind::Option),
+    TypeKind::Result { .. } => Some(EnumKind::Result),
+    _ => None,
+  }
+}
+
+fn same_kind(a: EnumKind, b: EnumKind) -> bool {
+  match a {
+    EnumKind::User(x) => match b {
+      EnumKind::User(y) => x == y,
+      _ => false,
+    },
+    EnumKind::Option => match b {
+      EnumKind::Option => true,
+      _ => false,
+    },
+    EnumKind::Result => match b {
+      EnumKind::Result => true,
+      _ => false,
+    },
+  }
+}
+
+fn kind_matches(ty: Type, owner: EnumKind) -> bool {
+  match enum_kind(ty) {
+    Some(kind) => same_kind(kind, owner),
+    None => false,
+  }
+}
+
+pub fn match_expr(cx: Checker, scrutinee: Expr, arms: List<MatchArm>, expected: Option<Type>) -> Type {
+  const scrutinee_ty = exprs::expr(cx, scrutinee, None);
+  var result: Option<Type> = None;
+  var result_span = scrutinee.span;
+  var pattern_errors = false;
+
+  for arm in arms {
+    const errors = cx.diagnostics.error_count();
+
+    pattern(cx, arm.pattern, scrutinee_ty);
+
+    if cx.diagnostics.error_count() > errors {
+      pattern_errors = true;
+    }
+
+    if let Some(guard) = arm.guard {
+      exprs::expect(cx, guard, types::of(TypeKind::Bool));
+    }
+
+    const arm_expected = match result {
+      Some(ty) => Some(ty),
+      None => expected,
+    };
+    const ty = exprs::expr(cx, arm.body, arm_expected);
+
+    match result {
+      None => {
+        if !types::is_never(ty) {
+          // With a known type, arms may produce instances of its subclasses.
+          var chosen = ty;
+
+          if let Some(expected_ty) = expected {
+            if cx.fits(ty, expected_ty) {
+              chosen = expected_ty;
+            }
+          }
+
+          result = Some(chosen);
+          result_span = arm.body.span;
+        }
+      }
+      Some(first) => {
+        if !cx.fits(ty, first) {
+          cx.diagnostics.push(
+            Diagnostic::error(codes::MISMATCHED_TYPES, arm.body.span, "expected `" + types::text(first) + "`, found `" + types::text(ty) + "`")
+              .with_label(result_span, "this arm has type `" + types::text(first) + "`")
+              .with_note("all arms of a `match` must have the same type"),
+          );
+        }
+      }
+    }
+  }
+
+  // Erroneous patterns would make the analysis report misleading gaps or unreachable arms.
+  if !pattern_errors && !types::is_error(scrutinee_ty) && !types::is_never(scrutinee_ty) {
+    check_arms(cx, scrutinee, scrutinee_ty, arms);
+  }
+
+  result.unwrap_or(types::of(TypeKind::Never))
+}
+
+/// Checks a pattern against the type of the value it matches and types its bindings.
+fn pattern(cx: Checker, found: Pattern, ty: Type) {
+  match found.kind {
+    PatternKind::Wildcard => {}
+    PatternKind::Ident(name) => match cx.resolution.paths.get(found.id) {
+      Some(Res::Variant(variant)) => variant_pattern(cx, found.span, variant, ty, Shape::Unit),
+      _ => {
+        if let Some(local) = cx.resolution.bindings.get(found.id) {
+          bind(cx, local, name.name, name.span, ty);
+        }
+      }
+    },
+    PatternKind::Literal(value) => literal_pattern(cx, value, ty),
+    PatternKind::Path(_) => resolved_variant_pattern(cx, found, ty, Shape::Unit),
+    PatternKind::Tuple { elems, .. } => resolved_variant_pattern(cx, found, ty, Shape::Tuple(elems)),
+    PatternKind::Named { fields, rest, .. } => resolved_variant_pattern(cx, found, ty, Shape::Named { fields: fields, rest: rest }),
+    PatternKind::Or(alternatives) => {
+      for alternative in alternatives {
+        pattern(cx, alternative, ty);
+      }
+    }
+  }
+}
+
+/// Gives a pattern binding its type; the alternatives of `|` must agree on it.
+fn bind(cx: Checker, local: u32, name: String, span: Span, ty: Type) {
+  match exprs::local_type(cx, local) {
+    Some(previous) => {
+      if !types::plain_fits(ty, previous) && !types::plain_fits(previous, ty) {
+        cx.error(codes::MISMATCHED_TYPES, span, "`" + name + "` has type `" + types::text(ty) + "` here but `" + types::text(previous) + "` in the first alternative of the pattern");
+      }
+    }
+    None => exprs::set_local(cx, local, ty),
+  }
+}
+
+fn resolved_variant_pattern(cx: Checker, found: Pattern, ty: Type, shape: Shape) {
+  match cx.resolution.paths.get(found.id) {
+    Some(Res::Variant(variant)) => variant_pattern(cx, found.span, variant, ty, shape),
+    // Unresolved: already reported. Sub-patterns are still checked for their bindings.
+    _ => sub_patterns_unchecked(cx, shape),
+  }
+}
+
+fn sub_patterns_unchecked(cx: Checker, shape: Shape) {
+  match shape {
+    Shape::Unit => {}
+    Shape::Tuple(elems) => {
+      for elem in elems {
+        pattern(cx, elem, types::error());
+      }
+    }
+    Shape::Named { fields, .. } => {
+      for field in fields {
+        pattern(cx, field.pattern, types::error());
+      }
+    }
+  }
+}
+
+fn variant_pattern(cx: Checker, span: Span, variant: VariantRef, ty: Type, shape: Shape) {
+  const path = exprs::variant_path(cx, variant);
+
+  if types::is_error(ty) {
+    return sub_patterns_unchecked(cx, shape);
+  }
+
+  var def: Option<VariantDef> = None;
+
+  if kind_matches(ty, variant.owner) {
+    if let Some(variants) = cx.typed.variants(ty) {
+      def = variants.get(variant.index as usize);
+    }
+  }
+
+  const found = match def {
+    Some(found) => found,
+    None => {
+      cx.error(codes::MISMATCHED_TYPES, span, "expected a pattern of type `" + types::text(ty) + "`, found the variant `" + path + "`");
+
+      return sub_patterns_unchecked(cx, shape);
+    }
+  };
+
+  match shape {
+    Shape::Unit => {
+      if !found.fields.is_empty() {
+        var fix = "";
+
+        if found.named {
+          fix = path + " { .. }";
+        } else {
+          const blanks: List<String> = new List();
+
+          for _ in found.fields {
+            blanks.push("_");
+          }
+
+          fix = path + "(" + blanks.join(", ") + ")";
+        }
+
+        invalid_pattern(cx, span, "the variant `" + path + "` carries data", "match it with `" + fix + "`");
+      }
+    }
+    Shape::Tuple(elems) => tuple_pattern(cx, span, path, found, elems),
+    Shape::Named { fields, rest } => named_pattern(cx, span, path, found, fields, rest),
+  }
+}
+
+fn invalid_pattern(cx: Checker, span: Span, message: String, help: String) {
+  cx.diagnostics.push(Diagnostic::error(codes::INVALID_PATTERN, span, message).with_help(help));
+}
+
+fn tuple_pattern(cx: Checker, span: Span, path: String, def: VariantDef, elems: List<Pattern>) {
+  const fields = def.field_types();
+
+  if def.named || fields.is_empty() {
+    const help = if def.named { "match its fields by name: `" + path + " { .. }`" } else { "write `" + path + "` without parentheses" };
+    const message = if def.named { "the variant `" + path + "` has named fields" } else { "the variant `" + path + "` carries no data" };
+
+    invalid_pattern(cx, span, message, help);
+
+    for elem in elems {
+      pattern(cx, elem, types::error());
+    }
+
+    return;
+  }
+
+  if elems.len() != fields.len() {
+    invalid_pattern(
+      cx,
+      span,
+      `this pattern has ${elems.len()} field${types::plural(elems.len())}, but the variant \`${path}\` has ${fields.len()}`,
+      "use `_` for the fields you do not need",
+    );
+  }
+
+  for index in 0..elems.len() {
+    pattern(cx, elems[index], fields.get(index).unwrap_or(types::error()));
+  }
+}
+
+fn named_pattern(cx: Checker, span: Span, path: String, def: VariantDef, fields: List<FieldPattern>, rest: bool) {
+  if !def.named {
+    const help = if def.fields.is_empty() { "write `" + path + "` without braces" } else { "match its fields by position: `" + path + "(..)`" };
+
+    invalid_pattern(cx, span, "the variant `" + path + "` has no named fields", help);
+
+    for field in fields {
+      pattern(cx, field.pattern, types::error());
+    }
+
+    return;
+  }
+
+  const seen: List<Seen> = new List();
+
+  for field in fields {
+    const name = field.name.name;
+    var field_ty: Option<Type> = None;
+
+    for candidate in def.fields {
+      if field_ty.is_none() {
+        if let Some(candidate_name) = candidate.name {
+          if candidate_name == name {
+            field_ty = Some(candidate.ty);
+          }
+        }
+      }
+    }
+
+    if let Some(previous) = exprs::find_seen(seen, name) {
+      cx.diagnostics.push(
+        Diagnostic::error(codes::DUPLICATE_DEFINITION, field.name.span, "the field `" + name + "` appears more than once in the pattern")
+          .with_label(previous, "first used here"),
+      );
+    } else if field_ty.is_none() {
+      cx.error(codes::UNKNOWN_MEMBER, field.name.span, "the variant `" + path + "` has no field `" + name + "`");
+    }
+
+    seen.push(Seen { name: name, span: field.name.span });
+    pattern(cx, field.pattern, field_ty.unwrap_or(types::error()));
+  }
+
+  const missing: List<String> = new List();
+
+  for candidate in def.fields {
+    if let Some(candidate_name) = candidate.name {
+      if exprs::find_seen(seen, candidate_name).is_none() {
+        missing.push("`" + candidate_name + "`");
+      }
+    }
+  }
+
+  if !rest && !missing.is_empty() {
+    cx.diagnostics.push(
+      Diagnostic::error(codes::MISSING_FIELDS, span, "missing field" + types::plural(missing.len()) + " " + missing.join(", ") + " in the pattern of `" + path + "`")
+        .with_help("match them too, or add `..` to ignore the remaining fields"),
+    );
+  }
+}
+
+/// Integer, character, boolean and string literals; floats are rejected.
+fn literal_pattern(cx: Checker, value: Expr, ty: Type) {
+  var inner = value;
+
+  if let ExprKind::Unary { op, operand } = value.kind {
+    if op == UnaryOp::Neg {
+      inner = operand;
+    }
+  }
+
+  if let ExprKind::Float { .. } = inner.kind {
+    exprs::expr(cx, value, None);
+    invalid_pattern(cx, value.span, "float literals cannot be used in patterns", "compare the value with `if` instead");
+
+    return;
+  }
+
+  const hint = match ty.kind {
+    TypeKind::Int(_) => Some(ty),
+    _ => None,
+  };
+  const actual = exprs::expr(cx, value, hint);
+
+  if !types::plain_fits(actual, ty) {
+    exprs::mismatch(cx, value.span, ty, actual);
+  }
+}
+
+/// Reports unreachable arms and values no arm matches.
+fn check_arms(cx: Checker, scrutinee: Expr, ty: Type, arms: List<MatchArm>) {
+  const rows: List<List<Pat>> = new List();
+  const unreachable: List<Span> = new List();
+
+  for arm in arms {
+    const pat = simplify(cx, arm.pattern, ty);
+
+    if exhaustive::useful(cx.typed, rows, List::from([pat]), List::from([ty])).is_none() {
+      unreachable.push(arm.pattern.span);
+    }
+
+    // A guard may fail, so its arm does not cover the values of its pattern.
+    if arm.guard.is_none() {
+      rows.push(List::from([pat]));
+    }
+  }
+
+  const missing: List<String> = new List();
+
+  while missing.len() < 3 {
+    const witness = match exhaustive::useful(cx.typed, rows, List::from([exhaustive::wild()]), List::from([ty])) {
+      Some(witness) => witness,
+      None => break,
+    };
+    const pat = witness.first().unwrap_or(exhaustive::wild());
+
+    missing.push("`" + display(cx, pat, ty) + "`");
+    rows.push(List::from([pat]));
+  }
+
+  for span in unreachable {
+    cx.diagnostics.push(Diagnostic::warning(codes::UNREACHABLE_PATTERN, span, "unreachable pattern").with_note("earlier arms already match every value it matches"));
+  }
+
+  if !missing.is_empty() {
+    var list = "";
+
+    if missing.len() == 1 {
+      list = missing[0];
+    } else {
+      const init: List<String> = new List();
+
+      for index in 0..missing.len() - 1 {
+        init.push(missing[index]);
+      }
+
+      list = init.join(", ") + " and " + missing[missing.len() - 1];
+    }
+
+    cx.diagnostics.push(
+      Diagnostic::error(codes::NON_EXHAUSTIVE_MATCH, scrutinee.span, "non-exhaustive patterns: " + list + " not covered")
+        .with_note("the value has type `" + types::text(ty) + "`; a `match` must handle every possible value")
+        .with_help("add an arm for each missing case, or a final `_ => ...` arm"),
+    );
+  }
+}
+
+/// The pattern as constructors over sub-patterns. Erroneous parts become `_`.
+fn simplify(cx: Checker, found: Pattern, ty: Type) -> Pat {
+  var variant: Option<VariantRef> = None;
+
+  if let Some(Res::Variant(candidate)) = cx.resolution.paths.get(found.id) {
+    if kind_matches(ty, candidate.owner) {
+      variant = Some(candidate);
+    }
+  }
+
+  var def: Option<VariantDef> = None;
+
+  if let Some(chosen) = variant {
+    if let Some(variants) = cx.typed.variants(ty) {
+      def = variants.get(chosen.index as usize);
+    }
+  }
+
+  match found.kind {
+    PatternKind::Or(alternatives) => {
+      const simplified: List<Pat> = new List();
+
+      for alternative in alternatives {
+        simplified.push(simplify(cx, alternative, ty));
+      }
+
+      return new Pat(PatKind::Or(simplified));
+    }
+    PatternKind::Literal(value) => {
+      return match literal_ctor(value) {
+        Some(ctor) => exhaustive::ctor_pat(ctor, new List()),
+        None => exhaustive::wild(),
+      };
+    }
+    _ => {}
+  }
+
+  const chosen = match variant {
+    Some(chosen) => chosen,
+    None => return exhaustive::wild(),
+  };
+  const variant_def = match def {
+    Some(variant_def) => variant_def,
+    None => return exhaustive::wild(),
+  };
+
+  match found.kind {
+    PatternKind::Ident(_) | PatternKind::Path(_) => {
+      const args: List<Pat> = new List();
+
+      for _ in variant_def.fields {
+        args.push(exhaustive::wild());
+      }
+
+      exhaustive::ctor_pat(Ctor::Variant(chosen.index), args)
+    }
+    PatternKind::Tuple { elems, .. } => {
+      if variant_def.named {
+        return exhaustive::wild();
+      }
+
+      const field_types = variant_def.field_types();
+      const args: List<Pat> = new List();
+
+      for index in 0..field_types.len() {
+        match elems.get(index) {
+          Some(elem) => args.push(simplify(cx, elem, field_types[index])),
+          None => args.push(exhaustive::wild()),
+        }
+      }
+
+      exhaustive::ctor_pat(Ctor::Variant(chosen.index), args)
+    }
+    PatternKind::Named { fields, .. } => {
+      if !variant_def.named {
+        return exhaustive::wild();
+      }
+
+      const args: List<Pat> = new List();
+
+      for field in variant_def.fields {
+        var given: Option<FieldPattern> = None;
+
+        if let Some(field_name) = field.name {
+          for candidate in fields {
+            if given.is_none() && candidate.name.name == field_name {
+              given = Some(candidate);
+            }
+          }
+        }
+
+        match given {
+          Some(found_field) => args.push(simplify(cx, found_field.pattern, field.ty)),
+          None => args.push(exhaustive::wild()),
+        }
+      }
+
+      exhaustive::ctor_pat(Ctor::Variant(chosen.index), args)
+    }
+    _ => exhaustive::wild(),
+  }
+}
+
+/// A witness pattern as source text, such as `Shape::Rect { .. }` or `Some(false)`.
+fn display(cx: Checker, pat: Pat, ty: Type) -> String {
+  const ctor = match pat.kind {
+    PatKind::Ctor { ctor, .. } => ctor,
+    _ => return "_",
+  };
+  const args = match pat.kind {
+    PatKind::Ctor { args, .. } => args,
+    _ => new List(),
+  };
+
+  match ctor {
+    Ctor::Bool(value) => `${value}`,
+    Ctor::Int(text) => text,
+    Ctor::Char(value) => "'" + `${value}` + "'",
+    Ctor::Str(value) => lexer::quote(value),
+    Ctor::Variant(index) => {
+      const kind = match enum_kind(ty) {
+        Some(kind) => kind,
+        None => return "_",
+      };
+      const path = exprs::variant_path(cx, VariantRef { owner: kind, index: index });
+      var def: Option<VariantDef> = None;
+
+      if let Some(variants) = cx.typed.variants(ty) {
+        def = variants.get(index as usize);
+      }
+
+      const found = match def {
+        Some(found) => found,
+        None => return path,
+      };
+      const shown: List<String> = new List();
+      var position = 0usize;
+
+      while position < args.len() && position < found.fields.len() {
+        shown.push(display(cx, args[position], found.fields[position].ty));
+        position += 1;
+      }
+
+      if found.fields.is_empty() {
+        return path;
+      }
+
+      if found.named {
+        var all_blank = true;
+
+        for part in shown {
+          if part != "_" {
+            all_blank = false;
+          }
+        }
+
+        if all_blank {
+          return path + " { .. }";
+        }
+
+        const parts: List<String> = new List();
+        var index_part = 0usize;
+
+        while index_part < found.fields.len() && index_part < shown.len() {
+          parts.push(found.fields[index_part].name.unwrap_or("") + ": " + shown[index_part]);
+          index_part += 1;
+        }
+
+        return path + " { " + parts.join(", ") + " }";
+      }
+
+      path + "(" + shown.join(", ") + ")"
+    }
+  }
+}
+
+/// The largest `i128`, beyond which Rust's literal constructors are not made.
+const I128_MAX: String = "170141183460469231731687303715884105727";
+
+/// Whether decimal digits stay within `i128`.
+fn fits_i128(digits: String) -> bool {
+  digits.len() < I128_MAX.len() || (digits.len() == I128_MAX.len() && digits.compare(I128_MAX) != Ordering::Greater)
+}
+
+fn literal_ctor(value: Expr) -> Option<Ctor> {
+  match value.kind {
+    ExprKind::Int { value: digits, .. } => if fits_i128(digits) { Some(Ctor::Int(digits)) } else { None },
+    ExprKind::Unary { op, operand } => {
+      if op != UnaryOp::Neg {
+        return None;
+      }
+
+      match operand.kind {
+        ExprKind::Int { value: digits, .. } => {
+          if !fits_i128(digits) {
+            return None;
+          }
+
+          Some(Ctor::Int(if digits == "0" { digits } else { "-" + digits }))
+        }
+        _ => None,
+      }
+    }
+    ExprKind::Bool(found) => Some(Ctor::Bool(found)),
+    ExprKind::Char(found) => Some(Ctor::Char(found)),
+    ExprKind::Str(found) => Some(Ctor::Str(found)),
+    _ => None,
+  }
+}

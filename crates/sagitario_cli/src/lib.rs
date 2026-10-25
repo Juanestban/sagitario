@@ -127,7 +127,8 @@ fn parse_compile_options<I: Iterator<Item = String>>(mut args: I, mode: Mode) ->
           "ast" => Some(Dump::Ast),
           "resolve" => Some(Dump::Resolve),
           "declarations" => Some(Dump::Declarations),
-          other => return Err(usage_error(format!("unknown dump `{other}`; expected `tokens`, `ast`, `resolve` or `declarations`"))),
+          "types" => Some(Dump::Types),
+          other => return Err(usage_error(format!("unknown dump `{other}`; expected `tokens`, `ast`, `resolve`, `declarations` or `types`"))),
         };
       }
       "--diagnostic-format" => {

@@ -1,7 +1,7 @@
 //! `sagc`: the Sagitario compiler written in Sagitario (F5, docs/roadmap.md). While it is being
-//! ported it does what its passes allow: `sagc check --dump=tokens|ast|resolve|declarations
-//! <file.sag>`, which prints the tokens or the syntax tree of a file, or the resolution or the
-//! typed declarations of a program, like `sag check --dump=...`
+//! ported it does what its passes allow: `sagc check --dump=tokens|ast|resolve|declarations|types
+//! <file.sag>`, which prints the tokens or the syntax tree of a file, or the resolution, the typed
+//! declarations or the types of a program, like `sag check --dump=...`
 //! (docs/adr/0050-lexer-port-and-token-dumps.md, docs/adr/0051-parser-port-and-ast-dumps.md,
 //! docs/adr/0052-resolver-port-and-resolution-dumps.md,
 //! docs/adr/0053-type-checker-port-and-type-dumps.md).
@@ -21,7 +21,7 @@ use std::fs;
 use std::path;
 use std::process;
 
-const USAGE: String = "Usage: sagc check --dump=tokens|ast|resolve|declarations [--diagnostic-format human|short] <file.sag>";
+const USAGE: String = "Usage: sagc check --dump=tokens|ast|resolve|declarations|types [--diagnostic-format human|short] <file.sag>";
 
 /// Exit code for invalid command-line usage.
 const EXIT_USAGE: i32 = 2;
@@ -92,10 +92,10 @@ fn parse(args: List<String>) -> Result<Options, String> {
 
     if flag == "--dump" {
       match flag_value(inline, args, index) {
-        Some(value) if value == "tokens" || value == "ast" || value == "resolve" || value == "declarations" => {
+        Some(value) if value == "tokens" || value == "ast" || value == "resolve" || value == "declarations" || value == "types" => {
           options.dump = Some(value);
         }
-        Some(value) => return Err(`unknown dump \`${value}\`; expected \`tokens\`, \`ast\`, \`resolve\` or \`declarations\``),
+        Some(value) => return Err(`unknown dump \`${value}\`; expected \`tokens\`, \`ast\`, \`resolve\`, \`declarations\` or \`types\``),
         None => return Err("`--dump` requires a value"),
       }
     } else if flag == "--diagnostic-format" {
@@ -125,7 +125,7 @@ fn parse(args: List<String>) -> Result<Options, String> {
   }
 
   if options.dump.is_none() {
-    return Err("only `check --dump=tokens|ast|resolve|declarations` is ported yet");
+    return Err("only `check --dump=tokens|ast|resolve|declarations|types` is ported yet");
   }
 
   Ok(options)
@@ -204,9 +204,9 @@ fn dump_file(input: String, dump_kind: String, format: DiagnosticFormat) -> i32 
   if report(diagnostics, sources, format, input) { 1 } else { 0 }
 }
 
-/// `check --dump=resolve|declarations`: loads the program as a build does, resolves it and prints
-/// the resolution, or type checks its declarations and prints them. Lexical and syntax errors
-/// stop before resolving.
+/// `check --dump=resolve|declarations|types`: loads the program as a build does, resolves it and
+/// prints the resolution, or type checks its declarations or all of it and prints the result.
+/// Lexical and syntax errors stop before resolving.
 fn dump_program(input: String, dump_kind: String, format: DiagnosticFormat) -> i32 {
   const is_sag = match path::extension(input) {
     Some(extension) => extension == "sag",
@@ -247,7 +247,9 @@ fn dump_program(input: String, dump_kind: String, format: DiagnosticFormat) -> i
   if dump_kind == "resolve" {
     print(resolve::dump::dump(resolution));
   } else {
-    print(types::dump::dump(types::check_until(package, resolution, diagnostics, Stage::Declarations)));
+    const stage = if dump_kind == "types" { Stage::Bodies } else { Stage::Declarations };
+
+    print(types::dump::dump(types::check_until(package, resolution, diagnostics, stage)));
   }
 
   if report(diagnostics, sources, format, input) { 1 } else { 0 }

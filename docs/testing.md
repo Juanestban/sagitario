@@ -92,8 +92,8 @@ fn main() { ... }
 
 `crates/sagitario_cli/tests/selfhost.rs` builds `compiler/` (`sagc`) with `sag` and checks that,
 for every `.sag` file of the repository, both compilers give the same exit code, stdout and
-stderr: today for `check --dump=tokens`, `--dump=ast`, `--dump=resolve` and
-`--dump=declarations`, and for more passes as they are ported
+stderr: today for `check --dump=tokens`, `--dump=ast`, `--dump=resolve` and `--dump=types`
+(which includes everything `--dump=declarations` shows), and for more passes as they are ported
 ([ADR-0050](adr/0050-lexer-port-and-token-dumps.md),
 [ADR-0051](adr/0051-parser-port-and-ast-dumps.md),
 [ADR-0052](adr/0052-resolver-port-and-resolution-dumps.md),

@@ -1,5 +1,5 @@
-//! The typed module as text, the port of `sagitario_types::dump` (`check --dump=declarations`,
-//! docs/adr/0053-type-checker-port-and-type-dumps.md). Sections in a fixed order, one entry per
+//! The typed module as text, the port of `sagitario_types::dump` (`check --dump=declarations` and
+//! `--dump=types`, docs/adr/0053-type-checker-port-and-type-dumps.md). Sections in a fixed order, one entry per
 //! line; maps are sorted by key. Types carry the identity of program types and parameters:
 //! `Point#struct2<i32>`, `T#fn3.0`.
 
@@ -9,7 +9,7 @@ use pkg::span::Span;
 use pkg::types::{FieldDef, FnSig, NamedRef, Receiver, SELF_PARAM, Type, TypeKind};
 use pkg::types;
 use pkg::types::consts::ConstValue;
-use pkg::types::typed::{GenericsEntry, ImplEntry, TypedModule};
+use pkg::types::typed::{BuiltinMethod, GenericsEntry, ImplEntry, ListMethod, TypedModule};
 
 pub fn dump(typed: TypedModule) -> String {
   const out = new StringBuilder();
@@ -122,7 +122,110 @@ pub fn dump(typed: TypedModule) -> String {
     out.append(`const ${index} ${ty(typed.const_types[index])} = ${value}\n`);
   }
 
+  for function in 0..typed.local_types.len() {
+    const locals = typed.local_types[function];
+
+    out.append(`locals ${function}\n`);
+
+    for index in 0..locals.len() {
+      out.append(`  local ${index} ${ty(locals[index])}\n`);
+    }
+  }
+
+  for id in sorted(typed.expr_types.keys().collect()) {
+    if let Some(found) = typed.expr_types.get(id) {
+      out.append(`expr #${id} -> ${ty(found)}\n`);
+    }
+  }
+
+  for id in sorted(typed.call_args.keys().collect()) {
+    if let Some(args) = typed.call_args.get(id) {
+      out.append(`call_args #${id} -> ${types_text(args)}\n`);
+    }
+  }
+
+  for id in sorted(typed.builtin_methods.keys().collect()) {
+    if let Some(method) = typed.builtin_methods.get(id) {
+      out.append(`builtin_method #${id} -> ${builtin_method(method)}\n`);
+    }
+  }
+
+  for id in sorted(typed.method_calls.keys().collect()) {
+    if let Some(function) = typed.method_calls.get(id) {
+      out.append(`method_call #${id} -> fn ${function}\n`);
+    }
+  }
+
+  for id in sorted(typed.zod_calls.keys().collect()) {
+    out.append(`zod_call #${id}\n`);
+  }
+
+  for id in sorted(typed.field_calls.keys().collect()) {
+    out.append(`field_call #${id}\n`);
+  }
+
+  for id in sorted(typed.to_iter.keys().collect()) {
+    if let Some(entry) = typed.to_iter.get(id) {
+      out.append(`to_iter #${id} -> fn ${entry.function} ${types_text(entry.args)}\n`);
+    }
+  }
+
+  for id in sorted(typed.ranges.keys().collect()) {
+    if let Some(function) = typed.ranges.get(id) {
+      out.append(`range #${id} -> fn ${function}\n`);
+    }
+  }
+
   out.to_string()
+}
+
+fn sorted(ids: List<u32>) -> List<u32> {
+  ids.sort();
+  ids
+}
+
+fn list_method(method: ListMethod) -> String {
+  match method {
+    ListMethod::Len => "len",
+    ListMethod::IsEmpty => "is_empty",
+    ListMethod::Push => "push",
+    ListMethod::Pop => "pop",
+    ListMethod::Get => "get",
+    ListMethod::First => "first",
+    ListMethod::Last => "last",
+    ListMethod::Insert => "insert",
+    ListMethod::Remove => "remove",
+    ListMethod::Clear => "clear",
+    ListMethod::Reverse => "reverse",
+  }
+}
+
+fn builtin_method(method: BuiltinMethod) -> String {
+  match method {
+    BuiltinMethod::IsSome => "is_some",
+    BuiltinMethod::IsNone => "is_none",
+    BuiltinMethod::IsOk => "is_ok",
+    BuiltinMethod::IsErr => "is_err",
+    BuiltinMethod::Unwrap => "unwrap",
+    BuiltinMethod::Expect => "expect",
+    BuiltinMethod::UnwrapOr => "unwrap_or",
+    BuiltinMethod::UnwrapErr => "unwrap_err",
+    BuiltinMethod::Runtime { function, located } => "runtime " + function + (if located { " located" } else { "" }),
+    BuiltinMethod::Find => "find",
+    BuiltinMethod::ToDigit => "to_digit",
+    BuiltinMethod::Parse(target) => "parse " + ty(target),
+    BuiltinMethod::Chars => "chars",
+    BuiltinMethod::Bytes => "bytes",
+    BuiltinMethod::Map => "map",
+    BuiltinMethod::MapErr => "map_err",
+    BuiltinMethod::AndThen => "and_then",
+    BuiltinMethod::UnwrapOrElse => "unwrap_or_else",
+    BuiltinMethod::Filter => "filter",
+    BuiltinMethod::List(found) => "list " + list_method(found),
+    BuiltinMethod::Prelude(function) => `prelude fn ${function}`,
+    BuiltinMethod::TotalCompare => "total_compare",
+    BuiltinMethod::RangeRev => "range_rev",
+  }
 }
 
 fn const_value(value: ConstValue) -> String {
