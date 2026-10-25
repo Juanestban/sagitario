@@ -36,6 +36,8 @@ Options:
   --release                   Optimize; integer overflow wraps instead of panicking (build, run)
   --sanitize                  Detect memory errors and undefined behavior with ASan and UBSan,
                               where the C compiler supports them (build, run)
+  --sanitize=thread           Detect data races with TSan instead, where the C compiler supports
+                              it; elsewhere, ASan and UBSan (build, run)
   --emit-c                    Also write the generated C next to the executable (build, run)
   --cc <compiler>             C compiler to use; overrides SAG_CC (build, run)
   --target <target>           Compile for another machine, such as `aarch64-linux-android`
@@ -62,6 +64,8 @@ pub enum Command {
 pub struct Options {
   pub release: bool,
   pub sanitize: bool,
+  /// `--sanitize=thread`.
+  pub thread_sanitizer: bool,
   pub emit_c: bool,
   pub cc: Option<String>,
   pub diagnostic_format: DiagnosticFormat,
@@ -149,7 +153,14 @@ fn parse_options<I: Iterator<Item = String>>(mut args: I, command: &str) -> Resu
 
     match flag.as_str() {
       "--release" => options.release = true,
-      "--sanitize" => options.sanitize = true,
+      "--sanitize" => {
+        options.sanitize = true;
+        options.thread_sanitizer = match inline_value.as_deref() {
+          None => false,
+          Some("thread") => true,
+          Some(other) => return Err(usage_error(format!("unknown sanitizer `{other}`; `--sanitize=thread` is the only one to choose"))),
+        };
+      }
       "--emit-c" => options.emit_c = true,
       "--cc" => options.cc = Some(inline_value.or_else(|| args.next()).ok_or_else(|| usage_error("`--cc` requires a value"))?),
       "--target" => options.target = Some(inline_value.or_else(|| args.next()).ok_or_else(|| usage_error("`--target` requires a value"))?),
@@ -563,6 +574,7 @@ fn compile(options: &Options, mode: Mode) -> u8 {
     program_args: options.program_args.clone(),
     release: options.release,
     sanitize: options.sanitize,
+    thread_sanitizer: options.thread_sanitizer,
     output: Some(executable.clone()),
     library: package.lib,
     dependencies,
@@ -672,6 +684,11 @@ mod tests {
     let expected = Options { release: true, sanitize: true, cc: Some("gcc".to_string()), ..Options::default() };
 
     assert_eq!(parse(&["build", "--release", "--sanitize", "--cc=gcc"]), Ok(Command::Build(expected)));
+
+    let thread = Options { sanitize: true, thread_sanitizer: true, ..Options::default() };
+
+    assert_eq!(parse(&["run", "--sanitize=thread"]), Ok(Command::Run(thread)));
+    assert!(parse(&["run", "--sanitize=leak"]).is_err());
 
     let run = Options { program_args: vec!["a".to_string(), "--b".to_string()], ..Options::default() };
 

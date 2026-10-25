@@ -45,6 +45,9 @@ fn main() { ... }
   from every file of the program (each one matched against its own file).
 - `// sag-flags: --release` passes extra options to `sag run` (e.g. to test release-mode
   wrapping).
+- `// sanitize: thread` runs the case with `--sanitize=thread` instead of `--sanitize`:
+  ThreadSanitizer on Linux and macOS, ASan and UBSan elsewhere
+  ([ADR-0045](adr/0045-threads-and-send.md)).
 - `// args: a b` passes command-line arguments to the program, split on spaces.
   `// stdin: text` writes a line (`text` and `\n`) to its stdin and may repeat; stdin is closed
   after the last line, or at once without any. `// env: NAME=value` sets an environment
@@ -70,6 +73,8 @@ fn main() { ... }
   without sanitizers (MinGW) build without them. `SAG_TEST_SANITIZE=0` turns them off for faster
   local runs ([ADR-0036](adr/0036-sanitizers-and-the-reference-zoo.md)).
 - `tests/run-pass/reference_zoo/` is the reference program of the F2 acceptance criteria.
+- `tests/run-pass/reference_wordcount/` is the reference program of the F4 acceptance
+  criteria, run with ThreadSanitizer ([ADR-0048](adr/0048-async-await.md)).
 - `tests/acceptance/f3/` is the F3 acceptance program: the `wc` and `textcount` packages and a C
   program using the library, run by the Nova test `f3_acceptance`
   ([ADR-0044](adr/0044-c-toolchains.md)).

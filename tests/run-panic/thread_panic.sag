@@ -1,0 +1,13 @@
+// A panic in a thread ends the whole program with exit code 101 (ADR-0045).
+// expect-panic: boom in a thread
+use std::thread;
+
+fn fail() -> i32 {
+  panic("boom in a thread")
+}
+
+pub fn main() {
+  const handle = thread::spawn(fail);
+
+  println(`${handle.join()}`);
+}

@@ -1,0 +1,133 @@
+// Threads (docs/spec/11-standard-library.md#stdthread): `thread::spawn` with lambdas capturing
+// `Send` values (strings, immutable classes, structs, enums, bounded type parameters) and with
+// named functions; results that are not `Send` (lists) returned by `join`; joining twice; nested
+// threads; and many threads sharing one string and one object, whose reference counts are
+// atomic. The harness runs it with ThreadSanitizer where the C compiler has it, and fails it on
+// any leak.
+// sanitize: thread
+// expect-stdout: suma 0: 499500
+// expect-stdout: suma 1: 500500
+// expect-stdout: suma 2: 501501
+// expect-stdout: suma 3: 502503
+// expect-stdout: w0,w1,w2
+// expect-stdout: 42 42 x+x
+// expect-stdout: Circle 2 Point(1, 2) inner 7
+// expect-stdout: shared 8000
+
+use std::thread;
+use std::thread::JoinHandle;
+
+/// Only `const` fields holding `Send` values: `Send`.
+class Config {
+  pub const name: String;
+  pub const limit: i64;
+
+  pub fn new(self, name: String, limit: i64) {
+    self.name = name;
+    self.limit = limit;
+  }
+}
+
+struct Point {
+  pub x: i32;
+  pub y: i32;
+}
+
+enum Shape {
+  Circle(f64),
+  Square(f64),
+}
+
+fn sum_to(limit: i64) -> i64 {
+  var total: i64 = 0;
+
+  for i in 0..limit {
+    total += i;
+  }
+
+  total
+}
+
+fn answer() -> i32 {
+  42
+}
+
+fn twice<T: Send>(value: T) -> JoinHandle<List<T>> {
+  thread::spawn(() => List::from([value, value]))
+}
+
+fn describe(shape: Shape) -> String {
+  match shape {
+    Shape::Circle(r) => `Circle ${r}`,
+    Shape::Square(side) => `Square ${side}`,
+  }
+}
+
+pub fn main() {
+  const config = new Config("suma", 1000);
+  const handles: List<JoinHandle<String>> = new List();
+
+  for i in 0i64..4 {
+    handles.push(thread::spawn(() => `${config.name} ${i}: ${sum_to(config.limit + i)}`));
+  }
+
+  for handle in handles {
+    println(handle.join());
+  }
+
+  // A list built by the thread: no other thread can reach it.
+  const words = thread::spawn(() => {
+    const list: List<String> = new List();
+
+    for i in 0..3 {
+      list.push(`w${i}`);
+    }
+
+    list
+  });
+
+  println(words.join().join(","));
+
+  const named = thread::spawn(answer);
+
+  println(`${named.join()} ${named.join()} ${twice("x").join().join("+")}`);
+
+  const shape = Shape::Circle(2.0);
+  const point = Point { x: 1, y: 2 };
+  const nested = thread::spawn(() => {
+    const inner = thread::spawn(() => 7);
+
+    `${describe(shape)} Point(${point.x}, ${point.y}) inner ${inner.join()}`
+  });
+
+  println(nested.join());
+
+  // Eight threads retain and release the same string and object at once.
+  const text = `shared ${config.name}`;
+  const counters: List<JoinHandle<i64>> = new List();
+
+  for _ in 0..8 {
+    counters.push(thread::spawn(() => {
+      var count: i64 = 0;
+
+      for _ in 0..1000 {
+        const copy = text;
+        const same = config;
+
+        if copy.len() > 0 && same.limit > 0 {
+          count += 1;
+        }
+      }
+
+      count
+    }));
+  }
+
+  var total: i64 = 0;
+
+  for counter in counters {
+    total += counter.join();
+  }
+
+  println(`shared ${total}`);
+}

@@ -24,7 +24,8 @@
   destructors in the MVP. Chains of instances (a long linked list) are destroyed iteratively,
   without exhausting the stack.
 - Class instances are compared with `==`/`!=` by identity (the same instance).
-- In the MVP the program is single-threaded and reference counting is **non-atomic**.
+- Reference counting is **non-atomic**, except in programs using `std::thread` (F4), where
+  every count is atomic ([ADR-0045](../adr/0045-threads-and-send.md)).
 
 ## Bindings: `const` and `var` (F1)
 
@@ -132,5 +133,6 @@ struct Point impl Display {
   neither they nor their parts can change.
 - A `var` binding holding an instance counts as reassigned only when the binding itself is
   assigned, not when the instance's fields change.
-- Protection against data races is delegated to the future concurrency model
-  (`Send`/`Sync`, post-MVP); in the MVP there is a single thread.
+- Data races are prevented by `Send` (F4, [interfaces](05-interfaces-generics.md#send-f4)):
+  a thread can only receive values that no other thread can change, so a class instance with
+  `var` fields never reaches two threads.

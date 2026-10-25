@@ -1,0 +1,393 @@
+//! `std::sync`: values that threads share safely (docs/spec/11-standard-library.md#stdsync).
+//!
+//! A lock or an atomic cell belongs to the runtime. Each class holds it in a private `fn()` field
+//! whose environment the runtime creates, so that ARC frees it with the class's instance.
+
+extern "C" {
+  fn sag_sync_mutex_new() -> fn();
+  fn sag_sync_mutex_lock(mutex: fn());
+  fn sag_sync_mutex_unlock(mutex: fn());
+  fn sag_sync_mutex_wait(mutex: fn());
+  fn sag_sync_mutex_notify_all(mutex: fn());
+  fn sag_sync_atomic_new(value: u64) -> fn();
+  fn sag_sync_atomic_load(cell: fn()) -> u64;
+  fn sag_sync_atomic_store(cell: fn(), value: u64);
+  fn sag_sync_atomic_swap(cell: fn(), value: u64) -> u64;
+  fn sag_sync_atomic_add(cell: fn(), delta: u64, subtract: bool, bits: u32, is_signed: bool) -> u64;
+  fn sag_sync_atomic_compare_exchange(cell: fn(), expected: u64, desired: u64, actual: *mut u64) -> bool;
+}
+
+/// A value that threads share, changed by one thread at a time. `T` must be `Send`, so that what
+/// `get` returns can go on living in any thread.
+pub class Mutex<T: Send> {
+  prv const lock: fn();
+  prv var value: T;
+
+  pub fn new(self, value: T) {
+    self.lock = unsafe { sag_sync_mutex_new() };
+    self.value = value;
+  }
+
+  /// A copy of the value.
+  pub fn get(self) -> T {
+    unsafe { sag_sync_mutex_lock(self.lock) };
+    const value = self.value;
+    unsafe { sag_sync_mutex_unlock(self.lock) };
+    value
+  }
+
+  /// Replaces the value.
+  pub fn set(self, value: T) {
+    unsafe { sag_sync_mutex_lock(self.lock) };
+    self.value = value;
+    unsafe { sag_sync_mutex_unlock(self.lock) };
+  }
+
+  /// Replaces the value with what `f` returns for it, while no other thread can use the mutex,
+  /// and returns the new value. `f` must not use this mutex: that panics.
+  pub fn update(self, f: fn(T) -> T) -> T {
+    unsafe { sag_sync_mutex_lock(self.lock) };
+    const next = f(self.value);
+    self.value = next;
+    unsafe { sag_sync_mutex_unlock(self.lock) };
+    next
+  }
+}
+
+/// A queue of values that threads send to each other, without a limit. `receive` waits for a
+/// value; once the channel is closed and empty it returns `None`.
+pub class Channel<T: Send> {
+  prv const lock: fn();
+  /// Values sent, the newest last.
+  prv const inbox: List<T>;
+  /// Values to receive, the next one last.
+  prv const outbox: List<T>;
+  prv var closed: bool;
+
+  pub fn new(self) {
+    self.lock = unsafe { sag_sync_mutex_new() };
+    self.inbox = new List();
+    self.outbox = new List();
+    self.closed = false;
+  }
+
+  /// Adds `value` at the end of the queue. Sending on a closed channel panics.
+  pub fn send(self, value: T) {
+    unsafe { sag_sync_mutex_lock(self.lock) };
+
+    if self.closed {
+      unsafe { sag_sync_mutex_unlock(self.lock) };
+      panic("send on a closed channel");
+    }
+
+    self.inbox.push(value);
+    unsafe { sag_sync_mutex_notify_all(self.lock) };
+    unsafe { sag_sync_mutex_unlock(self.lock) };
+  }
+
+  /// The value at the front of the queue, waiting until there is one; `None` once the channel
+  /// is closed and empty.
+  pub fn receive(self) -> Option<T> {
+    unsafe { sag_sync_mutex_lock(self.lock) };
+
+    while self.outbox.is_empty() {
+      if !self.inbox.is_empty() {
+        // The oldest value of the inbox ends up last in the outbox.
+        while move_newest(self.inbox, self.outbox) {}
+      } else if self.closed {
+        unsafe { sag_sync_mutex_unlock(self.lock) };
+        return None;
+      } else {
+        unsafe { sag_sync_mutex_wait(self.lock) };
+      }
+    }
+
+    const value = self.outbox.pop();
+
+    unsafe { sag_sync_mutex_unlock(self.lock) };
+    value
+  }
+
+  /// No more values can be sent; those already sent are still received. Closing it again does
+  /// nothing.
+  pub fn close(self) {
+    unsafe { sag_sync_mutex_lock(self.lock) };
+    self.closed = true;
+    unsafe { sag_sync_mutex_notify_all(self.lock) };
+    unsafe { sag_sync_mutex_unlock(self.lock) };
+  }
+
+  /// The values received one by one, until the channel is closed and empty:
+  /// `for value in channel.iter() { ... }`.
+  pub fn iter(self) -> Iter<T> {
+    new Iter<T>(() => self.receive())
+  }
+}
+
+/// Moves the newest value of `from` to the end of `to`; false when `from` is empty.
+fn move_newest<T>(from: List<T>, to: List<T>) -> bool {
+  match from.pop() {
+    Some(value) => {
+      to.push(value);
+      true
+    }
+    None => false,
+  }
+}
+
+/// A `bool` that threads read and change at once.
+pub class AtomicBool {
+  prv const cell: fn();
+
+  pub fn new(self, value: bool) {
+    self.cell = unsafe { sag_sync_atomic_new(if value { 1 } else { 0 }) };
+  }
+
+  pub fn load(self) -> bool {
+    unsafe { sag_sync_atomic_load(self.cell) } != 0
+  }
+
+  pub fn store(self, value: bool) {
+    unsafe { sag_sync_atomic_store(self.cell, if value { 1 } else { 0 }) };
+  }
+
+  /// Stores `value` and returns the previous value.
+  pub fn swap(self, value: bool) -> bool {
+    unsafe { sag_sync_atomic_swap(self.cell, if value { 1 } else { 0 }) } != 0
+  }
+
+  /// Stores `desired` if the value is `expected`: `Ok(expected)` if it did, `Err(actual)` if not.
+  pub fn compare_exchange(self, expected: bool, desired: bool) -> Result<bool, bool> {
+    var actual = [0u64; 1];
+    const exchanged = unsafe {
+      sag_sync_atomic_compare_exchange(self.cell, if expected { 1 } else { 0 }, if desired { 1 } else { 0 }, actual.as_mut_ptr())
+    };
+
+    if exchanged { Ok(expected) } else { Err(actual[0] != 0) }
+  }
+}
+
+/// An `i32` that threads read and change at once.
+pub class AtomicI32 {
+  prv const cell: fn();
+
+  pub fn new(self, value: i32) {
+    self.cell = unsafe { sag_sync_atomic_new(value as u64) };
+  }
+
+  pub fn load(self) -> i32 {
+    const bits = unsafe { sag_sync_atomic_load(self.cell) };
+    bits as i32
+  }
+
+  pub fn store(self, value: i32) {
+    unsafe { sag_sync_atomic_store(self.cell, value as u64) };
+  }
+
+  /// Stores `value` and returns the previous value.
+  pub fn swap(self, value: i32) -> i32 {
+    const bits = unsafe { sag_sync_atomic_swap(self.cell, value as u64) };
+    bits as i32
+  }
+
+  /// Adds `n` and returns the previous value; the sum wraps around at the limits of `i32`.
+  pub fn fetch_add(self, n: i32) -> i32 {
+    const bits = unsafe { sag_sync_atomic_add(self.cell, n as u64, false, 32, true) };
+    bits as i32
+  }
+
+  /// Subtracts `n` and returns the previous value; the difference wraps around at the limits of
+  /// `i32`.
+  pub fn fetch_sub(self, n: i32) -> i32 {
+    const bits = unsafe { sag_sync_atomic_add(self.cell, n as u64, true, 32, true) };
+    bits as i32
+  }
+
+  /// Stores `desired` if the value is `expected`: `Ok(expected)` if it did, `Err(actual)` if not.
+  pub fn compare_exchange(self, expected: i32, desired: i32) -> Result<i32, i32> {
+    var actual = [0u64; 1];
+    const exchanged = unsafe { sag_sync_atomic_compare_exchange(self.cell, expected as u64, desired as u64, actual.as_mut_ptr()) };
+
+    if exchanged { Ok(expected) } else { Err(actual[0] as i32) }
+  }
+}
+
+/// An `i64` that threads read and change at once.
+pub class AtomicI64 {
+  prv const cell: fn();
+
+  pub fn new(self, value: i64) {
+    self.cell = unsafe { sag_sync_atomic_new(value as u64) };
+  }
+
+  pub fn load(self) -> i64 {
+    const bits = unsafe { sag_sync_atomic_load(self.cell) };
+    bits as i64
+  }
+
+  pub fn store(self, value: i64) {
+    unsafe { sag_sync_atomic_store(self.cell, value as u64) };
+  }
+
+  /// Stores `value` and returns the previous value.
+  pub fn swap(self, value: i64) -> i64 {
+    const bits = unsafe { sag_sync_atomic_swap(self.cell, value as u64) };
+    bits as i64
+  }
+
+  /// Adds `n` and returns the previous value; the sum wraps around at the limits of `i64`.
+  pub fn fetch_add(self, n: i64) -> i64 {
+    const bits = unsafe { sag_sync_atomic_add(self.cell, n as u64, false, 64, true) };
+    bits as i64
+  }
+
+  /// Subtracts `n` and returns the previous value; the difference wraps around at the limits of
+  /// `i64`.
+  pub fn fetch_sub(self, n: i64) -> i64 {
+    const bits = unsafe { sag_sync_atomic_add(self.cell, n as u64, true, 64, true) };
+    bits as i64
+  }
+
+  /// Stores `desired` if the value is `expected`: `Ok(expected)` if it did, `Err(actual)` if not.
+  pub fn compare_exchange(self, expected: i64, desired: i64) -> Result<i64, i64> {
+    var actual = [0u64; 1];
+    const exchanged = unsafe { sag_sync_atomic_compare_exchange(self.cell, expected as u64, desired as u64, actual.as_mut_ptr()) };
+
+    if exchanged { Ok(expected) } else { Err(actual[0] as i64) }
+  }
+}
+
+/// An `u32` that threads read and change at once.
+pub class AtomicU32 {
+  prv const cell: fn();
+
+  pub fn new(self, value: u32) {
+    self.cell = unsafe { sag_sync_atomic_new(value as u64) };
+  }
+
+  pub fn load(self) -> u32 {
+    const bits = unsafe { sag_sync_atomic_load(self.cell) };
+    bits as u32
+  }
+
+  pub fn store(self, value: u32) {
+    unsafe { sag_sync_atomic_store(self.cell, value as u64) };
+  }
+
+  /// Stores `value` and returns the previous value.
+  pub fn swap(self, value: u32) -> u32 {
+    const bits = unsafe { sag_sync_atomic_swap(self.cell, value as u64) };
+    bits as u32
+  }
+
+  /// Adds `n` and returns the previous value; the sum wraps around at the limits of `u32`.
+  pub fn fetch_add(self, n: u32) -> u32 {
+    const bits = unsafe { sag_sync_atomic_add(self.cell, n as u64, false, 32, false) };
+    bits as u32
+  }
+
+  /// Subtracts `n` and returns the previous value; the difference wraps around at the limits of
+  /// `u32`.
+  pub fn fetch_sub(self, n: u32) -> u32 {
+    const bits = unsafe { sag_sync_atomic_add(self.cell, n as u64, true, 32, false) };
+    bits as u32
+  }
+
+  /// Stores `desired` if the value is `expected`: `Ok(expected)` if it did, `Err(actual)` if not.
+  pub fn compare_exchange(self, expected: u32, desired: u32) -> Result<u32, u32> {
+    var actual = [0u64; 1];
+    const exchanged = unsafe { sag_sync_atomic_compare_exchange(self.cell, expected as u64, desired as u64, actual.as_mut_ptr()) };
+
+    if exchanged { Ok(expected) } else { Err(actual[0] as u32) }
+  }
+}
+
+/// An `u64` that threads read and change at once.
+pub class AtomicU64 {
+  prv const cell: fn();
+
+  pub fn new(self, value: u64) {
+    self.cell = unsafe { sag_sync_atomic_new(value as u64) };
+  }
+
+  pub fn load(self) -> u64 {
+    const bits = unsafe { sag_sync_atomic_load(self.cell) };
+    bits as u64
+  }
+
+  pub fn store(self, value: u64) {
+    unsafe { sag_sync_atomic_store(self.cell, value as u64) };
+  }
+
+  /// Stores `value` and returns the previous value.
+  pub fn swap(self, value: u64) -> u64 {
+    const bits = unsafe { sag_sync_atomic_swap(self.cell, value as u64) };
+    bits as u64
+  }
+
+  /// Adds `n` and returns the previous value; the sum wraps around at the limits of `u64`.
+  pub fn fetch_add(self, n: u64) -> u64 {
+    const bits = unsafe { sag_sync_atomic_add(self.cell, n as u64, false, 64, false) };
+    bits as u64
+  }
+
+  /// Subtracts `n` and returns the previous value; the difference wraps around at the limits of
+  /// `u64`.
+  pub fn fetch_sub(self, n: u64) -> u64 {
+    const bits = unsafe { sag_sync_atomic_add(self.cell, n as u64, true, 64, false) };
+    bits as u64
+  }
+
+  /// Stores `desired` if the value is `expected`: `Ok(expected)` if it did, `Err(actual)` if not.
+  pub fn compare_exchange(self, expected: u64, desired: u64) -> Result<u64, u64> {
+    var actual = [0u64; 1];
+    const exchanged = unsafe { sag_sync_atomic_compare_exchange(self.cell, expected as u64, desired as u64, actual.as_mut_ptr()) };
+
+    if exchanged { Ok(expected) } else { Err(actual[0] as u64) }
+  }
+}
+
+/// An `usize` that threads read and change at once.
+pub class AtomicUsize {
+  prv const cell: fn();
+
+  pub fn new(self, value: usize) {
+    self.cell = unsafe { sag_sync_atomic_new(value as u64) };
+  }
+
+  pub fn load(self) -> usize {
+    const bits = unsafe { sag_sync_atomic_load(self.cell) };
+    bits as usize
+  }
+
+  pub fn store(self, value: usize) {
+    unsafe { sag_sync_atomic_store(self.cell, value as u64) };
+  }
+
+  /// Stores `value` and returns the previous value.
+  pub fn swap(self, value: usize) -> usize {
+    const bits = unsafe { sag_sync_atomic_swap(self.cell, value as u64) };
+    bits as usize
+  }
+
+  /// Adds `n` and returns the previous value; the sum wraps around at the limits of `usize`.
+  pub fn fetch_add(self, n: usize) -> usize {
+    const bits = unsafe { sag_sync_atomic_add(self.cell, n as u64, false, 0, false) };
+    bits as usize
+  }
+
+  /// Subtracts `n` and returns the previous value; the difference wraps around at the limits of
+  /// `usize`.
+  pub fn fetch_sub(self, n: usize) -> usize {
+    const bits = unsafe { sag_sync_atomic_add(self.cell, n as u64, true, 0, false) };
+    bits as usize
+  }
+
+  /// Stores `desired` if the value is `expected`: `Ok(expected)` if it did, `Err(actual)` if not.
+  pub fn compare_exchange(self, expected: usize, desired: usize) -> Result<usize, usize> {
+    var actual = [0u64; 1];
+    const exchanged = unsafe { sag_sync_atomic_compare_exchange(self.cell, expected as u64, desired as u64, actual.as_mut_ptr()) };
+
+    if exchanged { Ok(expected) } else { Err(actual[0] as usize) }
+  }
+}

@@ -17,6 +17,18 @@ _Noreturn void sag_panic(const char *message);
 /* Prints `panic at file:line: message` to stderr and exits with code 101. */
 _Noreturn void sag_panic_at(const char *message, const char *file, int line);
 
+/* ---- Reference counts ------------------------------------------------------------------ */
+
+/* A program using `std::thread` is compiled with SAG_THREADS: its reference counts are atomic,
+ * since objects reachable from `Send` values are shared between threads (ADR-0045). Other
+ * programs keep plain counts. */
+#ifdef SAG_THREADS
+#include <stdatomic.h>
+typedef atomic_size_t sag_count;
+#else
+typedef size_t sag_count;
+#endif
+
 /* ---- Strings (ARC) --------------------------------------------------------------------- */
 
 typedef struct sag_string_buf sag_string_buf;
@@ -149,12 +161,13 @@ sag_string sag_builder_to_string(sag_builder builder);
 typedef void (*sag_method)(void);
 
 /* The header every class instance starts with. `strong` counts the references to the object;
- * when it reaches zero, `drop` releases the object's fields. The memory is freed once no weak
- * reference remains either. `vtable` lists the methods called with dynamic dispatch, or is NULL
- * when the class has none. */
+ * when it reaches zero, `drop` releases the object's fields. `weak` counts the weak references,
+ * plus one held by all the strong ones together; the memory is freed when it reaches zero.
+ * `vtable` lists the methods called with dynamic dispatch, or is NULL when the class has
+ * none. */
 typedef struct sag_object {
-  size_t strong;
-  size_t weak;
+  sag_count strong;
+  sag_count weak;
   void (*drop)(struct sag_object *object);
   const sag_method *vtable;
 } sag_object;
@@ -562,6 +575,42 @@ sag_string sag_process_run(sag_string argv, size_t argc, sag_string env, size_t 
 
 /* Whether paths follow Windows rules (`\` separators and drive letters). */
 bool sag_path_windows(void);
+
+/* ---- Standard library: std::thread (compiled with SAG_THREADS) ------------------------- */
+
+/* Runs `body` in a new thread, which holds a reference to it, and returns the thread; panics if
+ * the system cannot start one. */
+void *sag_thread_start(sag_fnval body);
+/* Waits for a thread to finish and frees it. */
+void sag_thread_join(void *thread);
+/* The number of logical processors, at least 1. */
+size_t sag_thread_available_parallelism(void);
+
+/* ---- Standard library: std::sync (compiled with SAG_THREADS) --------------------------- */
+
+/* Locks and atomic cells are runtime objects that `std::sync` holds as the environment of a
+ * `fn()` value, so that ARC frees them; calling that function panics. */
+sag_fnval sag_sync_mutex_new(void);
+/* Panics if this thread holds the lock already. */
+void sag_sync_mutex_lock(sag_fnval mutex);
+void sag_sync_mutex_unlock(sag_fnval mutex);
+/* Releases the lock, which this thread holds, until another thread calls
+ * `sag_sync_mutex_notify_all`, then takes it again. It may also return without one. */
+void sag_sync_mutex_wait(sag_fnval mutex);
+/* Wakes every thread waiting on the mutex. */
+void sag_sync_mutex_notify_all(sag_fnval mutex);
+/* A cell holds an integer of `bits` bits (0 for the width of `size_t`), signed or not, always
+ * in the canonical form `std::sync` writes: sign-extended or zero-extended to 64 bits. */
+sag_fnval sag_sync_atomic_new(uint64_t value);
+uint64_t sag_sync_atomic_load(sag_fnval cell);
+void sag_sync_atomic_store(sag_fnval cell, uint64_t value);
+uint64_t sag_sync_atomic_swap(sag_fnval cell, uint64_t value);
+/* Adds or subtracts `delta`, wrapping around at the limits of the cell's type, and returns the
+ * previous value. */
+uint64_t sag_sync_atomic_add(sag_fnval cell, uint64_t delta, bool subtract, uint32_t bits, bool is_signed);
+/* Stores `desired` if the value is `expected` and returns true; otherwise writes the value to
+ * `*actual` and returns false. */
+bool sag_sync_atomic_compare_exchange(sag_fnval cell, uint64_t expected, uint64_t desired, uint64_t *actual);
 
 /* ---- Program lifecycle ----------------------------------------------------------------- */
 

@@ -45,6 +45,11 @@ pub interface Hash extends Eq {
   fn hash(self) -> u64;
 }
 
+/// Values that can cross to another thread (docs/spec/05-interfaces-generics.md#send): those
+/// no other thread can change. The compiler infers which types are `Send`; no type names it
+/// after `impl`, and it is only a bound (`T: Send`), not a type.
+pub interface Send {}
+
 /// A key and its value, as a `Map` lists them.
 pub struct Entry<K, V> {
   pub key: K;

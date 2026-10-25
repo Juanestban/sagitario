@@ -1,0 +1,10 @@
+// Sending on a closed channel is a bug of the program (ADR-0047).
+// expect-panic: send on a closed channel
+use std::sync::Channel;
+
+pub fn main() {
+  const channel: Channel<i32> = new Channel();
+
+  channel.close();
+  channel.send(1);
+}

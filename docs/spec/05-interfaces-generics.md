@@ -137,6 +137,27 @@ Rationale: [ADR-0032](../adr/0032-generics.md).
 - Not in the MVP: higher-kinded types, specialization, variadic generics, default type
   arguments, constant generics.
 
+## `Send` (F4)
+
+Rationale: [ADR-0045](../adr/0045-threads-and-send.md).
+
+`Send` is the prelude's interface of the values that can cross to another thread: those no
+other thread can change. Sagitario has no move, so a value given to a thread is shared with
+the thread that gave it; `Send` is the only marker, and `Sync` stays reserved.
+
+- The compiler infers it; no type names it after `impl`, no interface extends it, and it is not
+  a type (`const x: Send` is an error). It is a bound: `fn f<T: Send>(value: T)`.
+- These types are `Send`: integers, floats, `bool`, `char`, `()`, `String`, `CString`; arrays,
+  `Option` and `Result` of `Send` types; structs and enums whose fields are all `Send`; type
+  parameters bounded by `Send`; classes whose fields, their own and inherited, are all
+  `const` and `Send`, if every subclass is `Send` as well (a reference to a class can refer to
+  an instance of a subclass); and the classes of `std::sync` (`Mutex<T>` when `T` is `Send`),
+  which guard their own state.
+- These are not: `List`, `Map` and other classes with a `var` or `weak` field, `StringBuilder`,
+  function values, raw pointers and interface values.
+- `thread::spawn` and `Mutex<T>` ask for `Send` values
+  ([threads](11-standard-library.md#stdthread), [sync](11-standard-library.md#stdsync)).
+
 ## Equality, order and hashing (F2)
 
 Rationale: [ADR-0034](../adr/0034-collections-and-iterators.md).

@@ -14,6 +14,7 @@ mod generic;
 mod inheritance;
 mod interfaces;
 mod patterns;
+mod send;
 mod text;
 
 use std::collections::{HashMap, HashSet};
@@ -587,6 +588,9 @@ pub struct TypedModule {
   pub to_iter: HashMap<NodeId, (FnId, Vec<Type>)>,
   /// Ranges used as values, by node id: the prelude function making their iterator.
   pub ranges: HashMap<NodeId, FnId>,
+  /// The classes of `std::sync`, which are `Send` when their type arguments are: they guard
+  /// their state themselves (ADR-0046).
+  pub sync_classes: Vec<ClassId>,
 }
 
 impl TypedModule {
@@ -826,6 +830,7 @@ pub fn check(package: &Package, resolution: &Resolution, diagnostics: &mut Diagn
   };
 
   checker.prelude_items();
+  checker.sync_classes();
   checker.struct_defs();
   checker.enum_defs();
   checker.class_defs();
@@ -865,6 +870,7 @@ pub fn check(package: &Package, resolution: &Resolution, diagnostics: &mut Diagn
   checker.infer_mutating_methods();
   // The bounds of the types written inside function bodies.
   checker.check_type_bounds();
+  checker.check_send_types();
 
   let typed = checker.typed;
 
@@ -2102,7 +2108,15 @@ impl Checker<'_> {
 
   fn call(&mut self, expr: &Expr, callee: &Expr, args: &[Expr], expected: Option<&Type>) -> Type {
     let sig = match (&callee.kind, self.resolution.paths.get(&callee.id).copied()) {
-      (ExprKind::Path(path), Some(Res::Fn(id))) => return self.fn_call(expr, path, id, args, expected),
+      (ExprKind::Path(path), Some(Res::Fn(id))) => {
+        let ty = self.fn_call(expr, path, id, args, expected);
+
+        if self.is_spawn(id) {
+          self.check_spawn_argument(args);
+        }
+
+        return ty;
+      }
       (ExprKind::Path(_), Some(Res::Extern(id))) => self.extern_call_sig(callee, id),
       (ExprKind::Path(_), Some(Res::Builtin(Builtin::ErrorNew))) => {
         let ret = self.typed.error_types.map_or(Type::Error, |(error, _)| self.type_ref(TypeItem::Interface(error)));

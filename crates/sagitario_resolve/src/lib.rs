@@ -638,13 +638,14 @@ fn is_initializer_decl(decl: &FnDecl) -> bool {
   decl.name.name == "new"
 }
 
-/// Names reserved for the future concurrency model (docs/spec/01-lexical.md).
-const RESERVED_NAMES: &[&str] = &["Send", "Sync", "spawn"];
+/// Names of the concurrency model that programs cannot declare (docs/spec/01-lexical.md):
+/// `Send` is the prelude's, and `Sync` is reserved.
+const RESERVED_NAMES: &[&str] = &["Send", "Sync"];
 
 /// Integer and float type names, which take precedence over program types.
 /// The modules of the standard library (docs/spec/11-standard-library.md). The driver provides
 /// the source of each one but `ffi`, which the compiler implements.
-pub const STD_MODULES: [&str; 7] = ["env", "ffi", "fs", "io", "path", "process", "time"];
+pub const STD_MODULES: [&str; 9] = ["env", "ffi", "fs", "io", "path", "process", "sync", "thread", "time"];
 
 const NUMERIC_TYPES: &[&str] = &["i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize", "f32", "f64"];
 
@@ -944,7 +945,10 @@ fn declare_items(resolution: &mut Resolution, source: usize, node: ModId, module
 /// Adds a module-level name, reporting a clash with another item or a submodule.
 fn declare_item(resolution: &mut Resolution, node: ModId, name: &Ident, item_ref: ItemRef, visibility: Visibility, diagnostics: &mut Diagnostics) {
   {
-    check_reserved(&name.name, name.span, diagnostics);
+    // The prelude declares `Send`.
+    if resolution.prelude != Some(node) {
+      check_reserved(&name.name, name.span, diagnostics);
+    }
 
     let Some(info) = resolution.modules.get_mut(node.0 as usize) else { return };
 
@@ -999,11 +1003,7 @@ fn check_members<'a>(owner: &str, note: &str, names: impl Iterator<Item = &'a sa
 
 fn check_reserved(name: &str, span: Span, diagnostics: &mut Diagnostics) {
   if RESERVED_NAMES.contains(&name) {
-    diagnostics.push(Diagnostic::error(
-      codes::RESERVED_NAME,
-      span,
-      format!("`{name}` is reserved for the future concurrency model and cannot be declared"),
-    ));
+    diagnostics.push(Diagnostic::error(codes::RESERVED_NAME, span, format!("`{name}` is reserved by the concurrency model and cannot be declared")));
   }
 }
 

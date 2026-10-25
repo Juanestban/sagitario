@@ -103,6 +103,16 @@ impl Checker<'_> {
     let Some(sig) = self.typed.sig(function).cloned() else { return Type::Error };
     let name = self.resolution.fn_decl(self.package, function).map(|decl| decl.name.name.clone()).unwrap_or_default();
 
+    // Its argument is checked where it is called.
+    if self.is_spawn(function) {
+      self.diagnostics.push(
+        Diagnostic::error(codes::INVALID_SPAWN, expr.span, "`thread::spawn` cannot be used as a value")
+          .with_note("the compiler checks what a thread captures where `thread::spawn` is called"),
+      );
+
+      return Type::Error;
+    }
+
     if sig.receiver.is_some() {
       let what = if sig.receiver == Some(Receiver::Init) { "an initializer" } else { "a method" };
 

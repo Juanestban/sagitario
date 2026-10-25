@@ -105,15 +105,39 @@ as `.a`/`.so`/`.dll` and is called from a C program; and the tool compiles (with
 for Android and iOS. iOS runs no standalone programs (ADR-0043), so there the library builds
 instead.
 
+## F4: Concurrency (post-MVP)
+
+Threads with data races prevented by `Send`, synchronization and message passing
+([ADR-0045](adr/0045-threads-and-send.md)).
+
+Increments:
+
+1. `Send` inferred by the compiler, `std::thread` (`spawn`, `JoinHandle::join`), atomic
+   reference counts in programs using threads, and `--sanitize=thread`
+   ([ADR-0045](adr/0045-threads-and-send.md)).
+2. `std::sync`: `Mutex<T>` and atomics per type (`AtomicI64`, ...)
+   ([ADR-0046](adr/0046-mutex-and-atomics.md)).
+3. `Channel<T>`, `thread::sleep` and `thread::available_parallelism`
+   ([ADR-0047](adr/0047-channels-and-thread-utilities.md)).
+4. The design of `async`/`await`, for F6, and the acceptance program
+   ([ADR-0048](adr/0048-async-await.md)).
+
+**Status:** done. The acceptance program is `tests/run-pass/reference_wordcount/`.
+
+**Acceptance:** a parallel word count: threads count files and return `Map`s through `join`, an
+`Atomic` tracks progress, and a producer feeds consumers through a `Channel`; it passes with
+ThreadSanitizer on Linux and macOS, and with the leak check.
+
 ## Later phases (post-MVP)
 
-- **F4 Concurrency:** `Send`/`Sync`, `spawn`, `Mutex`, `Atomic`, atomic ARC, then
-  `async`/`await`.
 - **F5 Self-hosting:** rewrite the compiler in Sagitario until it compiles itself.
+- **F6 `async`/`await`:** stackless tasks (`Task<T>`) on a single-threaded executor per thread,
+  as designed in [ADR-0048](adr/0048-async-await.md).
 
 ## Deferred decisions
 
-Revisit after the MVP: `protected` visibility, `weak` captures in closures, operator
+Revisit after the MVP: shared mutable collections between threads (ADR-0045), bounded
+channels, `try_receive` and timeouts (ADR-0047), `protected` visibility, `weak` captures in closures, operator
 overloading and derived `Eq`, binding generation, internationalized diagnostics, automatic
 error conversion with `From<T>` (and implementing one generic interface several times),
 `Error::source()` and backtraces, a `Display` interface, slices, open ranges, general tuples,

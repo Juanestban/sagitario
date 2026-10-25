@@ -1,0 +1,65 @@
+//! `std::thread`: threads that run a function while the program goes on
+//! (docs/spec/11-standard-library.md#stdthread).
+
+use std::ffi::c_void;
+use std::time;
+use std::time::Duration;
+
+extern "C" {
+  fn sag_thread_start(body: fn()) -> *mut c_void;
+  fn sag_thread_join(thread: *mut c_void);
+  fn sag_thread_available_parallelism() -> usize;
+}
+
+/// A thread started by `spawn`, whose result `join` waits for. A thread nobody joins keeps
+/// running; when `main` returns, the program ends without waiting for it.
+pub class JoinHandle<T> {
+  /// The runtime's thread, until it is joined.
+  prv var thread: *mut c_void;
+  /// What the thread's function returned, once it has.
+  prv var result: Option<T>;
+
+  /// A handle without a thread: only `spawn` starts threads.
+  pub fn new(self) {
+    self.thread = 0 as *mut c_void;
+    self.result = None;
+  }
+
+  /// `thread::spawn`, which calls it; the compiler checks its argument the same way.
+  pub fn spawn(body: fn() -> T) -> JoinHandle<T> {
+    const handle = new JoinHandle<T>();
+
+    handle.thread = unsafe { sag_thread_start(() => { handle.result = Some(body()); }) };
+    handle
+  }
+
+  /// Waits until the thread finishes and returns its result. Calling it again returns the same
+  /// result.
+  pub fn join(self) -> T {
+    if !self.thread.is_null() {
+      unsafe { sag_thread_join(self.thread) };
+      self.thread = 0 as *mut c_void;
+    }
+
+    match self.result {
+      Some(value) => value,
+      None => panic("this `JoinHandle` has no thread: only `thread::spawn` starts threads"),
+    }
+  }
+}
+
+/// Pauses the running thread for at least `duration`; the same as `time::sleep`.
+pub fn sleep(duration: Duration) {
+  time::sleep(duration);
+}
+
+/// The number of logical processors, at least 1: how many threads can run at once.
+pub fn available_parallelism() -> usize {
+  unsafe { sag_thread_available_parallelism() }
+}
+
+/// Runs `body` in a new thread. `body` is a lambda capturing only `Send` values, or the name of
+/// a function; what it returns needs not be `Send`, since no other thread can reach it.
+pub fn spawn<T>(body: fn() -> T) -> JoinHandle<T> {
+  JoinHandle::spawn(body)
+}

@@ -1,6 +1,7 @@
 # 0008. Single-threaded MVP; Rust-style concurrency later
 
-- Status: Accepted
+- Status: Accepted (superseded in part by [ADR-0045](0045-threads-and-send.md): a single
+  `Send`, and atomic counts for the whole program)
 - Date: 2026-10-21
 
 ## Context

@@ -1,0 +1,9 @@
+// The function given to `update` uses the same mutex: a panic instead of a deadlock (ADR-0046).
+// expect-panic: a thread locked a `Mutex` it already holds
+use std::sync::Mutex;
+
+pub fn main() {
+  const total = new Mutex(1);
+
+  total.update((value) => value + total.get());
+}

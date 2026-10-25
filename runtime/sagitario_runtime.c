@@ -4,6 +4,10 @@
 #if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
 #define _POSIX_C_SOURCE 200809L
 #endif
+/* Apple's headers hide `sysctlbyname` under strict POSIX. */
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE
+#endif
 
 #include "sagitario_runtime.h"
 
@@ -23,19 +27,93 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+#ifdef SAG_THREADS
+#include <pthread.h>
+#endif
+#ifdef __APPLE__
+#include <sys/sysctl.h>
+#endif
+#endif
+
+/* ---- Reference counts and thread-local state ------------------------------------------- */
+
+#ifdef SAG_THREADS
+#define SAG_THREAD_LOCAL _Thread_local
+
+static void sag_count_init(sag_count *count, size_t value) {
+  atomic_init(count, value);
+}
+static void sag_count_inc(sag_count *count) {
+  atomic_fetch_add_explicit(count, 1, memory_order_relaxed);
+}
+/* The new count. The release ordering publishes this thread's writes to the object; the acquire
+ * ordering lets the thread that drops it see the writes of every other one. */
+static size_t sag_count_dec(sag_count *count) {
+  return atomic_fetch_sub_explicit(count, 1, memory_order_acq_rel) - 1;
+}
+static size_t sag_count_get(sag_count *count) {
+  return atomic_load_explicit(count, memory_order_acquire);
+}
+/* Adds one unless the count is zero: a weak reference upgraded while another thread drops the
+ * last strong one. */
+static bool sag_count_inc_nonzero(sag_count *count) {
+  size_t value = atomic_load_explicit(count, memory_order_relaxed);
+  while (value != 0) {
+    if (atomic_compare_exchange_weak_explicit(count, &value, value + 1, memory_order_acquire, memory_order_relaxed)) {
+      return true;
+    }
+  }
+  return false;
+}
+#else
+#define SAG_THREAD_LOCAL
+
+static void sag_count_init(sag_count *count, size_t value) {
+  *count = value;
+}
+static void sag_count_inc(sag_count *count) {
+  (*count)++;
+}
+static size_t sag_count_dec(sag_count *count) {
+  return --*count;
+}
+static size_t sag_count_get(sag_count *count) {
+  return *count;
+}
+static bool sag_count_inc_nonzero(sag_count *count) {
+  if (*count == 0) {
+    return false;
+  }
+  (*count)++;
+  return true;
+}
 #endif
 
 /* ---- Panics ---------------------------------------------------------------------------- */
 
-_Noreturn void sag_panic(const char *message) {
+/* Starts ending the program. With threads, the first one to end it does; any other blocks until
+ * the program is gone, so that two threads never print a panic or call `exit` at once. */
+static void sag_end_begin(void) {
+#ifdef SAG_THREADS
+  static atomic_flag ending = ATOMIC_FLAG_INIT;
+  if (atomic_flag_test_and_set(&ending)) {
+    for (;;) {
+      sag_time_sleep(UINT64_C(1000000000));
+    }
+  }
+#endif
   fflush(stdout);
+}
+
+_Noreturn void sag_panic(const char *message) {
+  sag_end_begin();
   fprintf(stderr, "panic: %s\n", message);
   fflush(stderr);
   exit(101);
 }
 
 _Noreturn void sag_panic_at(const char *message, const char *file, int line) {
-  fflush(stdout);
+  sag_end_begin();
   fprintf(stderr, "panic at %s:%d: %s\n", file, line, message);
   fflush(stderr);
   exit(101);
@@ -48,7 +126,7 @@ _Noreturn void sag_index_out_of_bounds(size_t index, size_t len, const char *fil
 }
 
 _Noreturn void sag_panic_str_at(sag_string message, const char *file, int line) {
-  fflush(stdout);
+  sag_end_begin();
   fprintf(stderr, "panic at %s:%d: %.*s\n", file, line, (int)message.len, (const char *)message.ptr);
   fflush(stderr);
   exit(101);
@@ -57,13 +135,13 @@ _Noreturn void sag_panic_str_at(sag_string message, const char *file, int line) 
 /* ---- Strings (ARC) --------------------------------------------------------------------- */
 
 struct sag_string_buf {
-  size_t refcount;
+  sag_count refcount;
   size_t len;
   uint8_t bytes[];
 };
 
-/* Live ARC objects, checked at exit when SAG_LEAK_CHECK is set. Single-threaded MVP. */
-static size_t sag_live_objects = 0;
+/* Live ARC objects, checked at exit when SAG_LEAK_CHECK is set. */
+static sag_count sag_live_objects;
 
 sag_string sag_string_from_static(const char *bytes, size_t len) {
   sag_string s;
@@ -79,14 +157,14 @@ sag_string sag_string_empty(void) {
 
 void sag_string_retain(sag_string s) {
   if (s.buf != NULL) {
-    s.buf->refcount++;
+    sag_count_inc(&s.buf->refcount);
   }
 }
 
 void sag_string_release(sag_string s) {
-  if (s.buf != NULL && --s.buf->refcount == 0) {
+  if (s.buf != NULL && sag_count_dec(&s.buf->refcount) == 0) {
     free(s.buf);
-    sag_live_objects--;
+    sag_count_dec(&sag_live_objects);
   }
 }
 
@@ -269,12 +347,12 @@ sag_string sag_sb_finish(sag_sb *sb) {
     return sag_string_empty();
   }
   sag_string_buf *buf = sag_alloc(sizeof(sag_string_buf) + sb->len);
-  buf->refcount = 1;
+  sag_count_init(&buf->refcount, 1);
   buf->len = sb->len;
   memcpy(buf->bytes, sb->data, sb->len);
   free(sb->data);
   sag_sb_init(sb);
-  sag_live_objects++;
+  sag_count_inc(&sag_live_objects);
 
   sag_string s;
   s.ptr = buf->bytes;
@@ -628,29 +706,29 @@ uint32_t sag_char_to_digit_at(uint32_t c, uint32_t radix, const char *file, int 
 /* ---- StringBuilder ----------------------------------------------------------------------- */
 
 struct sag_builder_obj {
-  size_t refcount;
+  sag_count refcount;
   sag_sb sb;
 };
 
 sag_builder sag_builder_new(void) {
   sag_builder builder = sag_alloc(sizeof(struct sag_builder_obj));
-  builder->refcount = 1;
+  sag_count_init(&builder->refcount, 1);
   sag_sb_init(&builder->sb);
-  sag_live_objects++;
+  sag_count_inc(&sag_live_objects);
   return builder;
 }
 
 void sag_builder_retain(sag_builder builder) {
   if (builder != NULL) {
-    builder->refcount++;
+    sag_count_inc(&builder->refcount);
   }
 }
 
 void sag_builder_release(sag_builder builder) {
-  if (builder != NULL && --builder->refcount == 0) {
+  if (builder != NULL && sag_count_dec(&builder->refcount) == 0) {
     free(builder->sb.data);
     free(builder);
-    sag_live_objects--;
+    sag_count_dec(&sag_live_objects);
   }
 }
 
@@ -682,27 +760,35 @@ sag_string sag_builder_to_string(sag_builder builder) {
 
 /* Objects whose count reached zero and wait to be destroyed, and whether destruction is under
  * way. Single-threaded MVP. */
-static sag_object **sag_drop_stack = NULL;
-static size_t sag_drop_len = 0;
-static size_t sag_drop_cap = 0;
-static bool sag_dropping = false;
+/* Each thread destroys the objects it releases, with its own stack. */
+static SAG_THREAD_LOCAL sag_object **sag_drop_stack = NULL;
+static SAG_THREAD_LOCAL size_t sag_drop_len = 0;
+static SAG_THREAD_LOCAL size_t sag_drop_cap = 0;
+static SAG_THREAD_LOCAL bool sag_dropping = false;
+
+/* Frees the stack of this thread, when it ends. */
+static void sag_drop_free(void) {
+  free(sag_drop_stack);
+  sag_drop_stack = NULL;
+  sag_drop_cap = 0;
+}
 
 void *sag_object_alloc(size_t size) {
   return sag_alloc(size);
 }
 
 void sag_object_init(sag_object *object, void (*drop)(sag_object *object), const sag_method *vtable) {
-  object->strong = 1;
-  object->weak = 0;
+  sag_count_init(&object->strong, 1);
+  sag_count_init(&object->weak, 1);
   object->drop = drop;
   object->vtable = vtable;
-  sag_live_objects++;
+  sag_count_inc(&sag_live_objects);
 }
 
 void sag_object_retain(void *pointer) {
   sag_object *object = pointer;
   if (object != NULL) {
-    object->strong++;
+    sag_count_inc(&object->strong);
   }
 }
 
@@ -725,7 +811,7 @@ static void sag_drop_push(sag_object *object) {
 
 void sag_object_release(void *pointer) {
   sag_object *object = pointer;
-  if (object == NULL || --object->strong != 0) {
+  if (object == NULL || sag_count_dec(&object->strong) != 0) {
     return;
   }
   sag_drop_push(object);
@@ -735,9 +821,8 @@ void sag_object_release(void *pointer) {
   sag_dropping = true;
   while (sag_drop_len > 0) {
     sag_object *next = sag_drop_stack[--sag_drop_len];
-    /* Held while the fields are released, which may drop weak references to the object itself. */
-    next->weak++;
     next->drop(next);
+    /* The weak reference of the strong ones, kept while the fields were released. */
     sag_object_weak_release(next);
   }
   sag_dropping = false;
@@ -745,14 +830,14 @@ void sag_object_release(void *pointer) {
 
 static void sag_object_weak_retain(sag_object *object) {
   if (object != NULL) {
-    object->weak++;
+    sag_count_inc(&object->weak);
   }
 }
 
 void sag_object_weak_release(sag_object *object) {
-  if (object != NULL && --object->weak == 0 && object->strong == 0) {
+  if (object != NULL && sag_count_dec(&object->weak) == 0) {
     free(object);
-    sag_live_objects--;
+    sag_count_dec(&sag_live_objects);
   }
 }
 
@@ -763,11 +848,7 @@ void sag_object_weak_set(sag_object **slot, sag_object *object) {
 }
 
 sag_object *sag_object_upgrade(sag_object *object) {
-  if (object == NULL || object->strong == 0) {
-    return NULL;
-  }
-  object->strong++;
-  return object;
+  return object != NULL && sag_count_inc_nonzero(&object->strong) ? object : NULL;
 }
 
 /* ---- Lists ------------------------------------------------------------------------------- */
@@ -948,7 +1029,7 @@ int32_t sag_f64_total_compare(double a, double b) {
 /* ---- FFI --------------------------------------------------------------------------------- */
 
 struct sag_cstring_obj {
-  size_t refcount;
+  sag_count refcount;
   char bytes[];
 };
 
@@ -972,12 +1053,12 @@ bool sag_cstring_new(sag_string text, sag_cstring *out, sag_string *error) {
     sag_panic("capacity overflow");
   }
   sag_cstring c = sag_alloc(sizeof(struct sag_cstring_obj) + text.len + 1);
-  c->refcount = 1;
+  sag_count_init(&c->refcount, 1);
   if (text.len > 0) {
     memcpy(c->bytes, text.ptr, text.len);
   }
   c->bytes[text.len] = '\0';
-  sag_live_objects++;
+  sag_count_inc(&sag_live_objects);
   *out = c;
   *error = sag_string_empty();
   return true;
@@ -985,14 +1066,14 @@ bool sag_cstring_new(sag_string text, sag_cstring *out, sag_string *error) {
 
 void sag_cstring_retain(sag_cstring c) {
   if (c != NULL) {
-    c->refcount++;
+    sag_count_inc(&c->refcount);
   }
 }
 
 void sag_cstring_release(sag_cstring c) {
-  if (c != NULL && --c->refcount == 0) {
+  if (c != NULL && sag_count_dec(&c->refcount) == 0) {
     free(c);
-    sag_live_objects--;
+    sag_count_dec(&sag_live_objects);
   }
 }
 
@@ -1385,6 +1466,7 @@ sag_string sag_io_error_message(int32_t code) {
 _Noreturn void sag_process_exit(int32_t code) {
   /* `_Exit` skips the `atexit` handlers, so leak checkers do not report the objects still
    * alive. */
+  sag_end_begin();
   fflush(NULL);
   _Exit((int)code);
 }
@@ -2610,6 +2692,291 @@ sag_string sag_process_run(sag_string argv, size_t argc, sag_string env, size_t 
   return sag_process_result(&out, &err, split);
 }
 
+/* ---- Standard library: std::thread ----------------------------------------------------- */
+
+/* Threads still running: the leak check is only meaningful without them. */
+static sag_count sag_threads_running;
+
+#ifdef SAG_THREADS
+/* A thread started by `sag_thread_start`. Every thread not yet joined is in the list
+ * `sag_threads`, so that a thread nobody joins is not reported as leaked memory. */
+typedef struct sag_thread {
+  sag_fnval body;
+#ifdef _WIN32
+  void *handle;
+#else
+  pthread_t id;
+#endif
+  struct sag_thread *next;
+} sag_thread;
+
+static sag_thread *sag_threads = NULL;
+static atomic_flag sag_threads_lock = ATOMIC_FLAG_INIT;
+
+static void sag_threads_acquire(void) {
+  while (atomic_flag_test_and_set_explicit(&sag_threads_lock, memory_order_acquire)) {
+  }
+}
+
+static void sag_threads_release(void) {
+  atomic_flag_clear_explicit(&sag_threads_lock, memory_order_release);
+}
+
+static void sag_thread_run(sag_thread *thread) {
+  ((void (*)(sag_object *))thread->body.fn)(thread->body.env);
+  sag_fnval_release(thread->body);
+  sag_drop_free();
+  sag_count_dec(&sag_threads_running);
+}
+
+#ifdef _WIN32
+static unsigned long SAG_WINAPI sag_thread_main(void *thread) {
+  sag_thread_run(thread);
+  return 0;
+}
+#else
+static void *sag_thread_main(void *thread) {
+  sag_thread_run(thread);
+  return NULL;
+}
+#endif
+
+void *sag_thread_start(sag_fnval body) {
+  sag_thread *thread = sag_alloc(sizeof(sag_thread));
+  thread->body = body;
+  sag_fnval_retain(body);
+  sag_count_inc(&sag_threads_running);
+  sag_threads_acquire();
+  thread->next = sag_threads;
+  sag_threads = thread;
+  sag_threads_release();
+#ifdef _WIN32
+  thread->handle = CreateThread(NULL, 0, sag_thread_main, thread, 0, NULL);
+  bool started = thread->handle != NULL;
+#else
+  bool started = pthread_create(&thread->id, NULL, sag_thread_main, thread) == 0;
+#endif
+  if (!started) {
+    sag_panic("failed to spawn a thread");
+  }
+  return thread;
+}
+
+void sag_thread_join(void *pointer) {
+  sag_thread *thread = pointer;
+#ifdef _WIN32
+  WaitForSingleObject(thread->handle, SAG_WIN_INFINITE);
+  CloseHandle(thread->handle);
+#else
+  pthread_join(thread->id, NULL);
+#endif
+  sag_threads_acquire();
+  for (sag_thread **link = &sag_threads; *link != NULL; link = &(*link)->next) {
+    if (*link == thread) {
+      *link = thread->next;
+      break;
+    }
+  }
+  sag_threads_release();
+  free(thread);
+}
+
+#ifdef _WIN32
+extern unsigned long SAG_WINAPI GetActiveProcessorCount(unsigned short group);
+#endif
+
+size_t sag_thread_available_parallelism(void) {
+#if defined(_WIN32)
+  /* All processor groups. */
+  unsigned long count = GetActiveProcessorCount(0xFFFF);
+#elif defined(__APPLE__)
+  int count = 0;
+  size_t size = sizeof count;
+  if (sysctlbyname("hw.logicalcpu", &count, &size, NULL, 0) != 0) {
+    count = 0;
+  }
+#else
+  long count = sysconf(_SC_NPROCESSORS_ONLN);
+#endif
+  return count > 0 ? (size_t)count : 1;
+}
+
+/* ---- Standard library: std::sync ------------------------------------------------------- */
+
+#ifdef _WIN32
+extern void SAG_WINAPI InitializeSRWLock(void **lock);
+extern void SAG_WINAPI AcquireSRWLockExclusive(void **lock);
+extern void SAG_WINAPI ReleaseSRWLockExclusive(void **lock);
+extern void SAG_WINAPI InitializeConditionVariable(void **condition);
+extern int SAG_WINAPI SleepConditionVariableSRW(void **condition, void **lock, unsigned long milliseconds, unsigned long flags);
+extern void SAG_WINAPI WakeAllConditionVariable(void **condition);
+#endif
+
+/* Its address identifies the running thread. */
+static SAG_THREAD_LOCAL char sag_thread_marker;
+
+static void sag_sync_handle_called(sag_object *object) {
+  (void)object;
+  sag_panic("internal error: a runtime handle of std::sync was called");
+}
+
+static sag_fnval sag_sync_handle(sag_object *object) {
+  sag_fnval handle;
+  handle.fn = (sag_method)sag_sync_handle_called;
+  handle.env = object;
+  return handle;
+}
+
+typedef struct sag_mutex {
+  sag_object header;
+  /* The address of the marker of the thread holding the lock, or 0. */
+  atomic_uintptr_t owner;
+#ifdef _WIN32
+  void *lock;
+  void *condition;
+#else
+  pthread_mutex_t lock;
+  pthread_cond_t condition;
+#endif
+} sag_mutex;
+
+static void sag_mutex_drop(sag_object *object) {
+#ifdef _WIN32
+  (void)object;
+#else
+  pthread_cond_destroy(&((sag_mutex *)object)->condition);
+  pthread_mutex_destroy(&((sag_mutex *)object)->lock);
+#endif
+}
+
+sag_fnval sag_sync_mutex_new(void) {
+  sag_mutex *mutex = sag_object_alloc(sizeof(sag_mutex));
+  atomic_init(&mutex->owner, 0);
+#ifdef _WIN32
+  InitializeSRWLock(&mutex->lock);
+  InitializeConditionVariable(&mutex->condition);
+#else
+  if (pthread_mutex_init(&mutex->lock, NULL) != 0 || pthread_cond_init(&mutex->condition, NULL) != 0) {
+    sag_panic("failed to create a mutex");
+  }
+#endif
+  sag_object_init(&mutex->header, sag_mutex_drop, NULL);
+  return sag_sync_handle(&mutex->header);
+}
+
+void sag_sync_mutex_lock(sag_fnval handle) {
+  sag_mutex *mutex = (sag_mutex *)handle.env;
+  uintptr_t self = (uintptr_t)&sag_thread_marker;
+  if (atomic_load(&mutex->owner) == self) {
+    sag_panic("a thread locked a `Mutex` it already holds: the function given to `update` must not use the same mutex");
+  }
+#ifdef _WIN32
+  AcquireSRWLockExclusive(&mutex->lock);
+#else
+  pthread_mutex_lock(&mutex->lock);
+#endif
+  atomic_store(&mutex->owner, self);
+}
+
+void sag_sync_mutex_unlock(sag_fnval handle) {
+  sag_mutex *mutex = (sag_mutex *)handle.env;
+  atomic_store(&mutex->owner, 0);
+#ifdef _WIN32
+  ReleaseSRWLockExclusive(&mutex->lock);
+#else
+  pthread_mutex_unlock(&mutex->lock);
+#endif
+}
+
+void sag_sync_mutex_wait(sag_fnval handle) {
+  sag_mutex *mutex = (sag_mutex *)handle.env;
+  atomic_store(&mutex->owner, 0);
+#ifdef _WIN32
+  SleepConditionVariableSRW(&mutex->condition, &mutex->lock, SAG_WIN_INFINITE, 0);
+#else
+  pthread_cond_wait(&mutex->condition, &mutex->lock);
+#endif
+  atomic_store(&mutex->owner, (uintptr_t)&sag_thread_marker);
+}
+
+void sag_sync_mutex_notify_all(sag_fnval handle) {
+  sag_mutex *mutex = (sag_mutex *)handle.env;
+#ifdef _WIN32
+  WakeAllConditionVariable(&mutex->condition);
+#else
+  pthread_cond_broadcast(&mutex->condition);
+#endif
+}
+
+typedef struct sag_atomic_cell {
+  sag_object header;
+  _Atomic uint64_t value;
+} sag_atomic_cell;
+
+static void sag_atomic_cell_drop(sag_object *object) {
+  (void)object;
+}
+
+static _Atomic uint64_t *sag_atomic_value(sag_fnval handle) {
+  return &((sag_atomic_cell *)handle.env)->value;
+}
+
+sag_fnval sag_sync_atomic_new(uint64_t value) {
+  sag_atomic_cell *cell = sag_object_alloc(sizeof(sag_atomic_cell));
+  atomic_init(&cell->value, value);
+  sag_object_init(&cell->header, sag_atomic_cell_drop, NULL);
+  return sag_sync_handle(&cell->header);
+}
+
+uint64_t sag_sync_atomic_load(sag_fnval cell) {
+  return atomic_load(sag_atomic_value(cell));
+}
+
+void sag_sync_atomic_store(sag_fnval cell, uint64_t value) {
+  atomic_store(sag_atomic_value(cell), value);
+}
+
+uint64_t sag_sync_atomic_swap(sag_fnval cell, uint64_t value) {
+  return atomic_exchange(sag_atomic_value(cell), value);
+}
+
+/* `value` reduced to `bits` bits, then sign-extended or zero-extended back to 64. */
+static uint64_t sag_atomic_canonical(uint64_t value, uint32_t bits, bool is_signed) {
+  if (bits == 0) {
+    bits = (uint32_t)(sizeof(size_t) * CHAR_BIT);
+  }
+  if (bits >= 64) {
+    return value;
+  }
+  uint64_t mask = (UINT64_C(1) << bits) - 1;
+  value &= mask;
+  if (is_signed && (value >> (bits - 1)) != 0) {
+    value |= ~mask;
+  }
+  return value;
+}
+
+uint64_t sag_sync_atomic_add(sag_fnval cell, uint64_t delta, bool subtract, uint32_t bits, bool is_signed) {
+  _Atomic uint64_t *value = sag_atomic_value(cell);
+  uint64_t previous = atomic_load(value);
+  for (;;) {
+    uint64_t next = sag_atomic_canonical(subtract ? previous - delta : previous + delta, bits, is_signed);
+    if (atomic_compare_exchange_weak(value, &previous, next)) {
+      return previous;
+    }
+  }
+}
+
+bool sag_sync_atomic_compare_exchange(sag_fnval cell, uint64_t expected, uint64_t desired, uint64_t *actual) {
+  uint64_t current = expected;
+  if (atomic_compare_exchange_strong(sag_atomic_value(cell), &current, desired)) {
+    return true;
+  }
+  *actual = current;
+  return false;
+}
+#endif
+
 /* ---- Program lifecycle ----------------------------------------------------------------- */
 
 void sag_rt_init(int argc, char **argv) {
@@ -2626,11 +2993,11 @@ int sag_rt_finish(void) {
   if (fflush(stdout) != 0) {
     sag_panic("failed printing to stdout");
   }
-  free(sag_drop_stack);
-  sag_drop_stack = NULL;
-  sag_drop_cap = 0;
-  if (getenv("SAG_LEAK_CHECK") != NULL && sag_live_objects != 0) {
-    fprintf(stderr, "leak check: %zu ARC object(s) still alive at exit\n", sag_live_objects);
+  sag_drop_free();
+  /* Objects of threads still running are alive. */
+  size_t live = sag_count_get(&sag_live_objects);
+  if (getenv("SAG_LEAK_CHECK") != NULL && live != 0 && sag_count_get(&sag_threads_running) == 0) {
+    fprintf(stderr, "leak check: %zu ARC object(s) still alive at exit\n", live);
     return 102;
   }
   return 0;

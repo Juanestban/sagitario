@@ -1,7 +1,9 @@
 # 11. Standard library (F3)
 
 Rationale: [ADR-0037](../adr/0037-standard-library-env-io-process.md),
-[ADR-0038](../adr/0038-file-system-and-paths.md), [ADR-0039](../adr/0039-time-and-commands.md).
+[ADR-0038](../adr/0038-file-system-and-paths.md), [ADR-0039](../adr/0039-time-and-commands.md),
+[ADR-0045](../adr/0045-threads-and-send.md), [ADR-0046](../adr/0046-mutex-and-atomics.md),
+[ADR-0047](../adr/0047-channels-and-thread-utilities.md).
 
 The standard library is the set of modules under the path root `std`. A program imports them
 with `use` like its own modules (`use std::io;`, `use std::env::args;`) or names them in full
@@ -16,6 +18,8 @@ functions it uses.
 | `std::fs` | Files and directories | F3 |
 | `std::path` | Joining paths and taking them apart | F3 |
 | `std::process` | `exit`, running programs | F3 |
+| `std::sync` | `Mutex`, atomic values and channels, shared between threads | F4 |
+| `std::thread` | Threads | F4 |
 | `std::time` | Durations, clocks and `sleep` | F3 |
 
 Naming a module that does not exist (`std::net`) is an error.
@@ -204,6 +208,97 @@ pub struct Output {
 - Not yet: running a program in the background (`spawn`, `wait`, `kill`), redirecting to
   files, removing or clearing inherited variables, and connecting programs with pipes.
 
+## `std::sync`
+
+Rationale: [ADR-0046](../adr/0046-mutex-and-atomics.md),
+[ADR-0047](../adr/0047-channels-and-thread-utilities.md).
+
+```sag
+use std::sync::{AtomicI64, Mutex};
+use std::thread;
+
+const hits = new AtomicI64(0);
+const names = new Mutex("");
+const worker = thread::spawn(() => {
+  hits.fetch_add(1);
+  names.update((text) => `${text}a`);
+});
+
+worker.join();
+println(`${hits.load()} ${names.get()}`);
+```
+
+| Item | Meaning |
+|---|---|
+| `Mutex<T: Send>` | A value that threads share, changed by one thread at a time |
+| `new Mutex(value)`, `m.get() -> T`, `m.set(value)` | Creates it, copies the value out, replaces it |
+| `m.update(f: fn(T) -> T) -> T` | Replaces the value with `f(value)` while no other thread can use the mutex, and returns the new value |
+| `AtomicBool`, `AtomicI32`, `AtomicI64`, `AtomicU32`, `AtomicU64`, `AtomicUsize` | A value of that type that threads read and change at once |
+| `new AtomicI64(value)`, `a.load()`, `a.store(value)` | Creates it, reads it, writes it |
+| `a.swap(value)` | Writes `value` and returns the previous value |
+| `a.compare_exchange(expected, desired) -> Result<T, T>` | Writes `desired` if the value is `expected`: `Ok(expected)` if it did, `Err(actual)` if not |
+| `a.fetch_add(n)`, `a.fetch_sub(n)` | Integers only: adds or subtracts `n` and returns the previous value; the result wraps around at the type's limits, also in debug builds |
+| `Channel<T: Send>` | A queue of values that threads send to each other, without a limit |
+| `new Channel<T>()`, `c.send(value)` | Creates it; adds `value` at the end. Sending on a closed channel panics |
+| `c.receive() -> Option<T>` | The value at the front, waiting until there is one; `None` once the channel is closed and empty |
+| `c.close()` | No more values can be sent; those sent are still received. Closing again does nothing |
+| `c.iter() -> Iter<T>` | The values received one by one, until the channel is closed and empty |
+
+- `Mutex<T>` and the atomics are `Send` (a `Mutex<T>` when `T` is), so threads can capture
+  them. Since `T` must be `Send`, a mutex cannot hold a `List` or a class with `var` fields.
+- There are no lock guards: every method takes and releases the lock itself. A thread using a
+  mutex inside the function it gave to `update` of the same mutex panics instead of waiting
+  forever.
+- Atomic operations are sequentially consistent: every thread sees them in one order.
+- Any thread holding a channel may send, receive or close it. Several receivers share the
+  values: each value goes to one of them.
+
+```sag
+const jobs: Channel<i64> = new Channel();
+const worker = thread::spawn(() => {
+  for job in jobs.iter() {
+    println(`job ${job}`);
+  }
+});
+
+jobs.send(1);
+jobs.close();
+worker.join();
+```
+
+## `std::thread`
+
+Rationale: [ADR-0045](../adr/0045-threads-and-send.md).
+
+```sag
+use std::thread;
+
+const name = "Ada";
+const handle = thread::spawn(() => `hello, ${name}`);
+println(handle.join());
+```
+
+| Item | Meaning |
+|---|---|
+| `spawn(body: fn() -> T) -> JoinHandle<T>` | Runs `body` in a new thread |
+| `JoinHandle<T>` | A thread started by `spawn` |
+| `handle.join() -> T` | Waits for the thread to finish and returns what `body` returned; again, the same value |
+| `sleep(duration: Duration)` | Pauses the running thread for at least `duration`; the same as `time::sleep` |
+| `available_parallelism() -> usize` | The number of logical processors, at least 1 |
+
+- The argument of `spawn` is a lambda or the name of a function, not another function value.
+  Every binding the lambda captures must be `Send`
+  ([interfaces](05-interfaces-generics.md#send-f4)); the compiler reports each one that is not,
+  with the reason. `spawn` cannot be used as a value.
+- What `body` returns needs not be `Send`: everything the thread creates is reachable only from
+  it, and passes whole to the thread that calls `join`. A thread can build and return a `List`.
+- A panic in any thread ends the whole program with exit code 101, as in the main thread.
+- A thread that is never joined keeps running. When `main` returns, the program ends without
+  waiting for the threads still running; the leak check of the test harness only runs when none
+  is.
+- `JoinHandle::spawn(body)` is the same as `thread::spawn(body)`, which calls it.
+  `new JoinHandle<T>()` makes a handle without a thread, whose `join` panics.
+
 ## `std::time`
 
 Rationale: [ADR-0039](../adr/0039-time-and-commands.md).
@@ -237,7 +332,8 @@ The modules of `std`, except `std::ffi`, are written in Sagitario and embedded i
 They follow the rules of every module, with two exceptions that only the standard library has:
 
 - It may declare functions of the runtime in `extern "C"` blocks: names starting with `sag_`,
-  which may also take and return `String` (borrowed arguments, new references as results).
+  which may also take and return `String` and take `fn()` values (borrowed arguments, new
+  references as results).
 - It may name the prelude module as `std::prelude`, to implement the prelude's interfaces with
   types of the same name (`io::Error` implements `Error`).
 
@@ -245,4 +341,5 @@ They follow the rules of every module, with two exceptions that only the standar
 module's private items, only its submodules see them.
 
 `std::process::exit` is provided by the compiler, since no function written in Sagitario can
-declare that it never returns.
+declare that it never returns. The compiler also checks the arguments of `thread::spawn` and
+`JoinHandle::spawn` where code outside the standard library calls them.

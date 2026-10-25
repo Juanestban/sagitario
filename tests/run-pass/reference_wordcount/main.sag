@@ -1,0 +1,110 @@
+// The reference program of the F4 acceptance criteria (docs/roadmap.md): a parallel word count.
+// It writes 12 files, a producer thread sends their names through a `Channel`, workers (as many
+// as `available_parallelism`, from 2 to 4) count the words of each file into their own `Map`,
+// which `join` returns, an `AtomicI64` tracks progress and a `Mutex` the bytes read. The output
+// does not depend on the number of threads. The harness runs it with ThreadSanitizer where the
+// C compiler has it, and fails it on any leak.
+// sanitize: thread
+// expect-stdout: files 12, bytes 3996, words 780, distinct 8
+// expect-stdout: fuego 98
+// expect-stdout: mar 98
+// expect-stdout: nube 98
+// expect-stdout: sol 98
+// expect-stdout: luna 97
+// expect-stdout: monte 97
+// expect-stdout: rio 97
+// expect-stdout: viento 97
+
+use pkg::counting;
+use std::fs;
+use std::io;
+use std::sync::{AtomicI64, Channel, Mutex};
+use std::thread;
+use std::thread::JoinHandle;
+
+/// How many files the program writes and counts.
+fn file_count() -> i64 {
+  12
+}
+
+/// The text of the file number `file`: `(file + 1) * 10` words chosen from eight.
+fn text_of(file: i64) -> String {
+  const words = List::from(["sol", "luna", "mar", "rio", "monte", "nube", "viento", "fuego"]);
+  const builder = new StringBuilder();
+
+  for index in 0..(file + 1) * 10 {
+    if index > 0 {
+      builder.append(" ");
+    }
+
+    builder.append(words[((file * 7 + index * 3) % 8) as usize]);
+  }
+
+  builder.append("\n");
+  builder.to_string()
+}
+
+fn worker_count() -> usize {
+  const processors = thread::available_parallelism();
+
+  if processors < 2 { 2 } else if processors > 4 { 4 } else { processors }
+}
+
+pub fn main() -> Result<(), io::Error> {
+  for file in 0..file_count() {
+    fs::write(`file_${file}.txt`, text_of(file))?;
+  }
+
+  const names: Channel<String> = new Channel();
+  const done = new AtomicI64(0);
+  const bytes = new Mutex(0i64);
+  const producer = thread::spawn(() => {
+    for file in 0..file_count() {
+      names.send(`file_${file}.txt`);
+    }
+
+    names.close();
+  });
+  const workers: List<JoinHandle<Map<String, i64>>> = new List();
+
+  for _ in 0..worker_count() {
+    workers.push(thread::spawn(() => {
+      const counts = new Map<String, i64>();
+
+      for name in names.iter() {
+        const text = match fs::read_to_string(name) {
+          Ok(text) => text,
+          Err(error) => panic(error.message()),
+        };
+
+        bytes.update((total) => total + text.len() as i64);
+        counting::merge(counts, counting::count_words(text));
+        done.fetch_add(1);
+      }
+
+      counts
+    }));
+  }
+
+  producer.join();
+
+  const totals = new Map<String, i64>();
+
+  for worker in workers {
+    counting::merge(totals, worker.join());
+  }
+
+  var words: i64 = 0;
+
+  for count in totals.values() {
+    words += count;
+  }
+
+  println(`files ${done.load()}, bytes ${bytes.get()}, words ${words}, distinct ${totals.len()}`);
+
+  for entry in counting::ranked(totals) {
+    println(`${entry.key} ${entry.value}`);
+  }
+
+  Ok(())
+}
