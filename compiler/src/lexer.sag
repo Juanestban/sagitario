@@ -1,0 +1,878 @@
+//! Lexer: turns source text into tokens (docs/spec/01-lexical.md), the port of
+//! `sagitario_lexer`. It reads the text as bytes, decoding UTF-8 where it is not ASCII, so its
+//! spans are the same byte offsets.
+
+use pkg::diagnostics::{Diagnostic, Diagnostics};
+use pkg::diagnostics::codes;
+use pkg::span::Span;
+use pkg::unicode;
+
+pub struct Token {
+  pub kind: TokenKind;
+  pub span: Span;
+}
+
+pub enum TokenKind {
+  Ident(String),
+  /// A keyword, by its text.
+  Keyword(String),
+  /// An integer literal: the decimal digits of its value (`_` separators removed and the base
+  /// applied), which fits in 128 bits.
+  Int { value: String, suffix: Option<String> },
+  /// A float literal; `text` has `_` separators removed.
+  Float { text: String, suffix: Option<String> },
+  /// A plain string literal with escapes already processed.
+  Str(String),
+  /// A template string: literal text alternating with `${...}` interpolations.
+  Template(List<TemplatePart>),
+  Char(char),
+  /// `///` (outer) or `//!` (inner) documentation.
+  DocComment { inner: bool, text: String },
+  /// Punctuation or an operator, by its text: `(`, `::`, `+=`, ...
+  Punct(String),
+  Eof,
+}
+
+pub enum TemplatePart {
+  /// Literal text with escapes already processed.
+  Text(String),
+  /// The tokens of one `${...}` interpolation, ending with `Eof`.
+  Expr(List<Token>),
+}
+
+/// Whether `text` is a keyword (docs/spec/01-lexical.md#keywords-f1f2).
+pub fn is_keyword(text: String) -> bool {
+  match text {
+    "abstract" | "as" | "break" | "class" | "const" | "continue" | "else" | "enum" | "extends" | "extern" | "false" | "fn" | "for" | "if"
+      | "impl" | "in" | "interface" | "let" | "loop" | "match" | "new" | "override" | "pkg" | "prv" | "pub" | "return" | "self" | "Self"
+      | "struct" | "super" | "true" | "unsafe" | "use" | "var" | "weak" | "where" | "while" | "zod" | "async" | "await" => true,
+    _ => false,
+  }
+}
+
+pub fn is_int_suffix(text: String) -> bool {
+  match text {
+    "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize" => true,
+    _ => false,
+  }
+}
+
+pub fn is_float_suffix(text: String) -> bool {
+  text == "f32" || text == "f64"
+}
+
+/// Lexes a whole file. The result always ends with an `Eof` token.
+pub fn lex(file: u32, text: String, diagnostics: Diagnostics) -> List<Token> {
+  const lexer = new Lexer(file, text, diagnostics);
+
+  lexer.run();
+  lexer.tokens
+}
+
+/// The largest integer literal, `u128::MAX`.
+const U128_MAX: String = "340282366920938463463374607431768211455";
+
+class Lexer {
+  prv const file: u32;
+  prv const text: String;
+  prv const bytes: List<u8>;
+  prv var pos: usize;
+  pub var tokens: List<Token>;
+  prv const diagnostics: Diagnostics;
+
+  pub fn new(self, file: u32, text: String, diagnostics: Diagnostics) {
+    self.file = file;
+    self.text = text;
+    self.bytes = text.bytes().collect();
+    self.pos = 0;
+    self.tokens = new List<Token>();
+    self.diagnostics = diagnostics;
+  }
+
+  pub fn run(self) {
+    while let Some(c) = self.peek() {
+      self.step(c);
+    }
+
+    const end = self.pos;
+
+    self.push(TokenKind::Eof, end);
+  }
+
+  /// Lexes one token (or skips whitespace or a comment) starting with `c`.
+  prv fn step(self, c: char) {
+    const start = self.pos;
+
+    if unicode::is_whitespace(c as u32) {
+      self.bump();
+    } else if c == '/' && self.at(1, '/') {
+      self.line_comment(start);
+    } else if c == '/' && self.at(1, '*') {
+      self.block_comment(start);
+    } else if c.is_ascii_digit() {
+      self.number(start);
+    } else if c == '_' || unicode::is_alphabetic(c as u32) {
+      self.ident(start);
+    } else if c == '"' {
+      self.string(start);
+    } else if c == '\'' {
+      self.char_literal(start);
+    } else if c == '`' {
+      self.template(start);
+    } else {
+      self.punctuation(start, c);
+    }
+  }
+
+  /// The character starting at byte `at` and its length in bytes.
+  prv fn decode(self, at: usize) -> Option<Decoded> {
+    if at >= self.bytes.len() {
+      return None;
+    }
+
+    const first = self.bytes[at] as u32;
+
+    if first < 128 {
+      return Some(Decoded { code: first, len: 1 });
+    }
+
+    // The text is valid UTF-8: the high bits of each byte are those of its kind, so the low
+    // ones are a remainder.
+    const len = if first >= 240 { 4usize } else if first >= 224 { 3usize } else { 2usize };
+    var code = if len == 4 { first % 8 } else if len == 3 { first % 16 } else { first % 32 };
+
+    for index in 1..len {
+      code = code * 64 + self.bytes[at + index] as u32 % 64;
+    }
+
+    Some(Decoded { code: code, len: len })
+  }
+
+  prv fn peek(self) -> Option<char> {
+    self.peek_at(0)
+  }
+
+  /// Whether the `n`th character after the current one is `c`.
+  prv fn at(self, n: usize, c: char) -> bool {
+    is_char(self.peek_at(n), c)
+  }
+
+  /// The `n`th character after the current one (`0` is the current one).
+  prv fn peek_at(self, n: usize) -> Option<char> {
+    var at = self.pos;
+    var left = n;
+
+    loop {
+      const decoded = self.decode(at)?;
+
+      if left == 0 {
+        return char::from_u32(decoded.code);
+      }
+
+      at += decoded.len;
+      left -= 1;
+    }
+  }
+
+  prv fn bump(self) -> Option<char> {
+    const decoded = self.decode(self.pos)?;
+
+    self.pos += decoded.len;
+    char::from_u32(decoded.code)
+  }
+
+  prv fn eat(self, expected: char) -> bool {
+    if self.at(0, expected) {
+      self.bump();
+
+      return true;
+    }
+
+    false
+  }
+
+  prv fn span(self, start: usize) -> Span {
+    Span::new(self.file, start as u32, self.pos as u32)
+  }
+
+  prv fn push(self, kind: TokenKind, start: usize) {
+    self.tokens.push(Token { kind: kind, span: self.span(start) });
+  }
+
+  prv fn error(self, code: String, start: usize, message: String) {
+    self.diagnostics.push(Diagnostic::error(code, self.span(start), message));
+  }
+
+  prv fn slice(self, start: usize) -> String {
+    self.text.substring(start, self.pos)
+  }
+
+  prv fn line_comment(self, start: usize) {
+    self.pos += 2;
+
+    // `///` is an outer doc comment, but `////` is a plain comment (as in Rust).
+    const outer = self.at(0, '/') && !self.at(1, '/');
+    const inner = self.at(0, '!');
+
+    if outer || inner {
+      self.bump();
+    }
+
+    const text_start = self.pos;
+
+    while self.peek().is_some() && !self.at(0, '\n') {
+      self.bump();
+    }
+
+    if outer || inner {
+      var raw = self.slice(text_start);
+
+      if raw.starts_with(" ") {
+        raw = raw.substring(1, raw.len());
+      }
+
+      while raw.ends_with("\r") {
+        raw = raw.substring(0, raw.len() - 1);
+      }
+
+      self.push(TokenKind::DocComment { inner: inner, text: raw }, start);
+    }
+  }
+
+  prv fn block_comment(self, start: usize) {
+    self.pos += 2;
+
+    var depth = 1;
+
+    while depth > 0 {
+      const first = self.peek();
+      const second = self.peek_at(1);
+
+      if first.is_none() {
+        const span = Span::new(self.file, start as u32, start as u32 + 2);
+
+        self.diagnostics.push(Diagnostic::error(codes::UNTERMINATED_BLOCK_COMMENT, span, "unterminated block comment"));
+
+        return;
+      }
+
+      if is_char(first, '/') && is_char(second, '*') {
+        self.pos += 2;
+        depth += 1;
+      } else if is_char(first, '*') && is_char(second, '/') {
+        self.pos += 2;
+        depth -= 1;
+      } else {
+        self.bump();
+      }
+    }
+  }
+
+  /// Whether `c` continues an identifier or a suffix.
+  prv fn continues_name(self, c: Option<char>) -> bool {
+    match c {
+      Some(c) => c == '_' || unicode::is_alphanumeric(c as u32),
+      None => false,
+    }
+  }
+
+  prv fn ident(self, start: usize) {
+    while self.continues_name(self.peek()) {
+      self.bump();
+    }
+
+    const text = self.slice(start);
+
+    if is_keyword(text) {
+      self.push(TokenKind::Keyword(text), start);
+    } else {
+      self.push(TokenKind::Ident(text), start);
+    }
+  }
+
+  prv fn number(self, start: usize) {
+    var radix = 10u32;
+
+    if self.at(0, '0') {
+      if self.at(1, 'x') {
+        radix = 16;
+      } else if self.at(1, 'o') {
+        radix = 8;
+      } else if self.at(1, 'b') {
+        radix = 2;
+      }
+    }
+
+    if radix != 10 {
+      self.pos += 2;
+    }
+
+    const valid = new Flag();
+    const text = new StringBuilder();
+    var is_float = false;
+
+    text.append(self.digit_run(radix, valid));
+
+    if radix == 10 {
+      if self.at(0, '.') && is_ascii_digit(self.peek_at(1)) {
+        self.bump();
+        text.append(".");
+        text.append(self.digit_run(10, valid));
+        is_float = true;
+      }
+
+      const e = self.at(0, 'e') || self.at(0, 'E');
+      const signed = self.at(1, '+') || self.at(1, '-');
+      const exponent_follows = e && (is_ascii_digit(self.peek_at(1)) || (signed && is_ascii_digit(self.peek_at(2))));
+
+      if exponent_follows {
+        self.bump();
+        text.append("e");
+
+        if signed {
+          if let Some(sign) = self.bump() {
+            text.append_char(sign);
+          }
+        }
+
+        text.append(self.digit_run(10, valid));
+        is_float = true;
+      }
+    }
+
+    const suffix_start = self.pos;
+
+    while self.continues_name(self.peek()) {
+      self.bump();
+    }
+
+    const suffix_text = self.slice(suffix_start);
+    const suffix: Option<String> = if suffix_text.is_empty() { None } else { Some(suffix_text) };
+
+    if let Some(suffix) = suffix {
+      if is_float_suffix(suffix) {
+        if radix != 10 {
+          self.error(codes::INVALID_NUMBER, start, `a base ${radix} literal cannot have the float suffix \`${suffix}\``);
+          valid.value = false;
+        }
+
+        is_float = true;
+      } else if !is_int_suffix(suffix) || is_float {
+        self.error(codes::INVALID_NUMBER, start, `invalid suffix \`${suffix}\` for a numeric literal`);
+        valid.value = false;
+      }
+    }
+
+    const digits = text.to_string();
+
+    if !valid.value {
+      self.push(TokenKind::Int { value: "0", suffix: None }, start);
+    } else if is_float {
+      self.push(TokenKind::Float { text: digits, suffix: suffix }, start);
+    } else {
+      match to_decimal(digits, radix) {
+        Some(value) => self.push(TokenKind::Int { value: value, suffix: suffix }, start),
+        None => {
+          self.error(codes::INVALID_NUMBER, start, "integer literal is too large");
+          self.push(TokenKind::Int { value: "0", suffix: None }, start);
+        }
+      }
+    }
+  }
+
+  /// Consumes digits and `_` separators, returning the digits. Reports misplaced separators and
+  /// digits that do not belong to `radix`.
+  prv fn digit_run(self, radix: u32, valid: Flag) -> String {
+    const start = self.pos;
+    const digits = new StringBuilder();
+    var last: Option<char> = None;
+
+    while let Some(c) = self.peek() {
+      const is_digit = c.is_ascii_digit() || (radix == 16 && is_hex_digit(c));
+
+      if !is_digit && c != '_' {
+        break;
+      }
+
+      self.bump();
+      last = Some(c);
+
+      if c != '_' {
+        if digit_value(c) >= radix && valid.value {
+          self.error(codes::INVALID_NUMBER, start, `invalid digit \`${c}\` in a base ${radix} literal`);
+          valid.value = false;
+        }
+
+        digits.append_char(c);
+      }
+    }
+
+    const starts_with_separator = start < self.bytes.len() && self.bytes[start] == 95;
+
+    if valid.value && (digits.is_empty() || starts_with_separator || is_char(last, '_')) {
+      const message = if digits.is_empty() { "expected digits" } else { "`_` must appear between digits" };
+
+      self.error(codes::INVALID_NUMBER, start, message);
+      valid.value = false;
+    }
+
+    digits.to_string()
+  }
+
+  prv fn string(self, start: usize) {
+    self.bump();
+
+    const value = new StringBuilder();
+
+    while true {
+      match self.peek() {
+        None => {
+          self.error(codes::UNTERMINATED_STRING, start, "unterminated string literal");
+          break;
+        }
+        Some('"') => {
+          self.bump();
+          break;
+        }
+        Some('\\') => {
+          if let Some(c) = self.escape() {
+            value.append_char(c);
+          }
+        }
+        Some(c) => {
+          self.bump();
+          value.append_char(c);
+        }
+      }
+    }
+
+    self.push(TokenKind::Str(value.to_string()), start);
+  }
+
+  /// Consumes an escape sequence starting at `\`. Reports and returns `None` if it is invalid.
+  prv fn escape(self) -> Option<char> {
+    const start = self.pos;
+
+    self.bump();
+
+    const value = match self.bump() {
+      Some('n') => Some('\n'),
+      Some('r') => Some('\r'),
+      Some('t') => Some('\t'),
+      Some('0') => Some('\0'),
+      Some('\\') => Some('\\'),
+      Some('"') => Some('"'),
+      Some('\'') => Some('\''),
+      Some('`') => Some('`'),
+      Some('$') => Some('$'),
+      Some('x') => {
+        const digits = new StringBuilder();
+
+        if let Some(c) = self.bump() {
+          digits.append_char(c);
+        }
+
+        if let Some(c) = self.bump() {
+          digits.append_char(c);
+        }
+
+        const text = digits.to_string();
+
+        match parse_radix(text, 16) {
+          Some(byte) if text.len() == 2 && byte <= 127 => char::from_u32(byte),
+          _ => None,
+        }
+      }
+      Some('u') if self.eat('{') => {
+        const digits = new StringBuilder();
+
+        while let Some(c) = self.peek() {
+          if !is_hex_digit(c) {
+            break;
+          }
+
+          self.bump();
+          digits.append_char(c);
+        }
+
+        const closed = self.eat('}');
+        const text = digits.to_string();
+
+        match parse_radix(text, 16) {
+          Some(code) if closed && text.len() <= 6 => char::from_u32(code),
+          _ => None,
+        }
+      }
+      _ => None,
+    };
+
+    if value.is_none() {
+      const text = self.slice(start);
+
+      self.error(codes::INVALID_ESCAPE, start, `invalid escape sequence \`${text}\``);
+    }
+
+    value
+  }
+
+  prv fn char_literal(self, start: usize) {
+    self.bump();
+
+    const next = self.peek();
+
+    if next.is_none() || is_char(next, '\'') || is_char(next, '\n') {
+      self.eat('\'');
+      self.error(codes::INVALID_CHAR_LITERAL, start, "empty or unterminated character literal");
+      self.push(TokenKind::Char('\0'), start);
+
+      return;
+    }
+
+    const value = if is_char(next, '\\') { self.escape() } else { self.bump() };
+
+    if !self.eat('\'') {
+      while self.peek().is_some() && !self.at(0, '\'') && !self.at(0, '\n') {
+        self.bump();
+      }
+
+      const closed = self.eat('\'');
+      const message = if closed { "a character literal must contain exactly one character" } else { "unterminated character literal" };
+
+      self.error(codes::INVALID_CHAR_LITERAL, start, message);
+    }
+
+    self.push(TokenKind::Char(value.unwrap_or('\0')), start);
+  }
+
+  prv fn template(self, start: usize) {
+    self.bump();
+
+    const parts: List<TemplatePart> = new List();
+    const text = new StringBuilder();
+
+    while true {
+      match self.peek() {
+        None => {
+          self.error(codes::UNTERMINATED_STRING, start, "unterminated template string");
+          break;
+        }
+        Some('`') => {
+          self.bump();
+          break;
+        }
+        Some('\\') => {
+          if let Some(c) = self.escape() {
+            text.append_char(c);
+          }
+        }
+        Some('$') if self.at(1, '{') => {
+          self.pos += 2;
+
+          if !text.is_empty() {
+            parts.push(TemplatePart::Text(text.to_string()));
+            text.clear();
+          }
+
+          parts.push(TemplatePart::Expr(self.interpolation(start)));
+        }
+        Some(c) => {
+          self.bump();
+          text.append_char(c);
+        }
+      }
+    }
+
+    if !text.is_empty() {
+      parts.push(TemplatePart::Text(text.to_string()));
+    }
+
+    self.push(TokenKind::Template(parts), start);
+  }
+
+  /// Lexes the tokens of a `${...}` interpolation up to its closing `}`, which is consumed.
+  prv fn interpolation(self, template_start: usize) -> List<Token> {
+    const outer = self.tokens;
+
+    self.tokens = new List<Token>();
+
+    var depth = 0usize;
+
+    while true {
+      const c = match self.peek() {
+        Some(c) => c,
+        None => {
+          self.error(codes::UNTERMINATED_STRING, template_start, "unterminated interpolation in template string");
+          break;
+        }
+      };
+
+      if c == '}' && depth == 0 {
+        self.bump();
+        break;
+      }
+
+      self.step(c);
+
+      if let Some(last) = self.tokens.last() {
+        if let TokenKind::Punct(text) = last.kind {
+          if text == "{" {
+            depth += 1;
+          } else if text == "}" && depth > 0 {
+            depth -= 1;
+          }
+        }
+      }
+    }
+
+    const end = self.pos;
+
+    self.push(TokenKind::Eof, end);
+
+    const inner = self.tokens;
+
+    self.tokens = outer;
+    inner
+  }
+
+  prv fn punctuation(self, start: usize, c: char) {
+    self.bump();
+
+    const text = match c {
+      '(' | ')' | '{' | '}' | '[' | ']' | ',' | ';' | '@' | '?' => `${c}`,
+      ':' => if self.eat(':') { "::" } else { ":" },
+      '.' => if self.eat('.') { if self.eat('=') { "..=" } else { ".." } } else { "." },
+      '-' => if self.eat('>') { "->" } else if self.eat('=') { "-=" } else { "-" },
+      '=' => if self.eat('=') { "==" } else if self.eat('>') { "=>" } else { "=" },
+      '!' => if self.eat('=') { "!=" } else { "!" },
+      '<' => if self.eat('=') { "<=" } else { "<" },
+      '>' => if self.eat('=') { ">=" } else { ">" },
+      '+' => if self.eat('=') { "+=" } else { "+" },
+      '*' => if self.eat('=') { "*=" } else { "*" },
+      '/' => if self.eat('=') { "/=" } else { "/" },
+      '%' => if self.eat('=') { "%=" } else { "%" },
+      '&' if self.eat('&') => "&&",
+      '|' => if self.eat('|') { "||" } else { "|" },
+      other => {
+        self.error(codes::UNEXPECTED_CHARACTER, start, `unexpected character \`${other}\``);
+
+        return;
+      }
+    };
+
+    self.push(TokenKind::Punct(text), start);
+  }
+}
+
+/// A character decoded from UTF-8, with its length in bytes.
+struct Decoded {
+  pub code: u32;
+  pub len: usize;
+}
+
+/// Whether a number is still valid, shared by the steps that read its parts.
+class Flag {
+  pub var value: bool;
+
+  pub fn new(self) {
+    self.value = true;
+  }
+}
+
+fn is_char(found: Option<char>, c: char) -> bool {
+  match found {
+    Some(found) => found == c,
+    None => false,
+  }
+}
+
+fn is_ascii_digit(c: Option<char>) -> bool {
+  match c {
+    Some(c) => c.is_ascii_digit(),
+    None => false,
+  }
+}
+
+fn is_hex_digit(c: char) -> bool {
+  c.is_ascii_digit() || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+}
+
+/// The value of a digit of any base up to 36, or 99 for something else.
+fn digit_value(c: char) -> u32 {
+  if c.is_ascii_digit() {
+    c as u32 - 48
+  } else if c >= 'a' && c <= 'z' {
+    c as u32 - 87
+  } else if c >= 'A' && c <= 'Z' {
+    c as u32 - 55
+  } else {
+    99
+  }
+}
+
+/// `text` as an unsigned number in `radix`, like Rust's `u32::from_str_radix`: digits, after an
+/// optional `+`. `None` if it is empty, has another character, or does not fit in `u32`.
+fn parse_radix(text: String, radix: u32) -> Option<u32> {
+  const digits = if text.starts_with("+") { text.substring(1, text.len()) } else { text };
+
+  if digits.is_empty() {
+    return None;
+  }
+
+  var value = 0u64;
+
+  for c in digits.chars() {
+    const digit = digit_value(c);
+
+    if digit >= radix {
+      return None;
+    }
+
+    value = value * radix as u64 + digit as u64;
+
+    if value > 4294967295 {
+      return None;
+    }
+  }
+
+  Some(value as u32)
+}
+
+/// The digits of a number in `radix` as decimal digits, or `None` beyond `u128::MAX`. The number
+/// is kept in base 10^9 limbs, the lowest first.
+fn to_decimal(digits: String, radix: u32) -> Option<String> {
+  const limbs = List::from([0u64]);
+
+  for c in digits.chars() {
+    var carry = digit_value(c) as u64;
+
+    for index in 0..limbs.len() {
+      const value = limbs[index] * radix as u64 + carry;
+
+      limbs[index] = value % 1_000_000_000;
+      carry = value / 1_000_000_000;
+    }
+
+    if carry > 0 {
+      limbs.push(carry);
+    }
+  }
+
+  const text = new StringBuilder();
+  var index = limbs.len();
+
+  while index > 0 {
+    index -= 1;
+
+    const part = `${limbs[index]}`;
+
+    if index + 1 < limbs.len() {
+      text.append("0".repeat(9 - part.len()));
+    }
+
+    text.append(part);
+  }
+
+  const decimal = text.to_string();
+
+  if decimal.len() > U128_MAX.len() || (decimal.len() == U128_MAX.len() && decimal > U128_MAX) { None } else { Some(decimal) }
+}
+
+/// The tokens as text, one per line with its byte range (`sag check --dump=tokens`,
+/// docs/adr/0050-lexer-port-and-token-dumps.md). The parts of a template follow it, indented
+/// two spaces per level.
+pub fn dump(tokens: List<Token>) -> String {
+  const out = new StringBuilder();
+
+  dump_into(tokens, 0, out);
+  out.to_string()
+}
+
+fn dump_into(tokens: List<Token>, depth: usize, out: StringBuilder) {
+  const indent = "  ".repeat(depth);
+
+  for token in tokens {
+    const description = match token.kind {
+      TokenKind::Ident(name) => "ident " + name,
+      TokenKind::Keyword(keyword) => "keyword " + keyword,
+      TokenKind::Int { value, suffix } => "int " + value + suffixed(suffix),
+      TokenKind::Float { text, suffix } => "float " + text + suffixed(suffix),
+      TokenKind::Str(value) => "str " + quote(value),
+      TokenKind::Char(value) => "char " + quote(`${value}`),
+      TokenKind::DocComment { inner, text } => if inner { "doc inner " + quote(text) } else { "doc outer " + quote(text) },
+      TokenKind::Template(_) => "template",
+      TokenKind::Eof => "eof",
+      TokenKind::Punct(text) => "punct " + text,
+    };
+
+    out.append(`${indent}${token.span.start}..${token.span.end} ${description}\n`);
+
+    if let TokenKind::Template(parts) = token.kind {
+      for part in parts {
+        match part {
+          TemplatePart::Text(text) => out.append(`${indent}  text ${quote(text)}\n`),
+          TemplatePart::Expr(inner) => {
+            out.append(`${indent}  expr\n`);
+            dump_into(inner, depth + 2, out);
+          }
+        }
+      }
+    }
+  }
+}
+
+fn suffixed(suffix: Option<String>) -> String {
+  match suffix {
+    Some(suffix) => ` ${suffix}`,
+    None => "",
+  }
+}
+
+/// `text` between double quotes: printable ASCII as is, `\"`, `\\`, `\n`, `\r`, `\t`, and
+/// `\u{hex}` for anything else.
+fn quote(text: String) -> String {
+  const out = new StringBuilder();
+
+  out.append("\"");
+
+  for c in text.chars() {
+    if c == '"' {
+      out.append("\\\"");
+    } else if c == '\\' {
+      out.append("\\\\");
+    } else if c == '\n' {
+      out.append("\\n");
+    } else if c == '\r' {
+      out.append("\\r");
+    } else if c == '\t' {
+      out.append("\\t");
+    } else if c >= ' ' && c <= '~' {
+      out.append_char(c);
+    } else {
+      out.append(`\\u{${hex(c as u32)}}`);
+    }
+  }
+
+  out.append("\"");
+  out.to_string()
+}
+
+/// `value` in lowercase hexadecimal, without leading zeros.
+fn hex(value: u32) -> String {
+  if value == 0 {
+    return "0";
+  }
+
+  const digits = "0123456789abcdef";
+  const lowest_first: List<String> = new List();
+  var left = value;
+
+  while left > 0 {
+    const digit = (left % 16) as usize;
+
+    lowest_first.push(digits.substring(digit, digit + 1));
+    left /= 16;
+  }
+
+  lowest_first.reverse();
+  lowest_first.join("")
+}

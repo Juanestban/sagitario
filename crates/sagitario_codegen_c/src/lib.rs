@@ -1635,7 +1635,7 @@ fn callee_name(callee: &Callee) -> String {
     // Lowered to a call of `sag_cstring_new` with its outputs.
     Callee::Builtin(Builtin::CStringNew) => "sag_cstring_new".to_string(),
     // Lowered to a `MessageError` converted to `Error`, and to `Rvalue::ListFromArray`.
-    Callee::Builtin(Builtin::ErrorNew | Builtin::ListFrom | Builtin::IncludeStr) => String::new(),
+    Callee::Builtin(Builtin::ErrorNew | Builtin::ListFrom | Builtin::IncludeStr | Builtin::CharFromU32) => String::new(),
     Callee::Runtime { function, .. } => function.to_string(),
   }
 }

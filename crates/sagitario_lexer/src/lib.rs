@@ -788,6 +788,70 @@ impl Lexer<'_> {
   }
 }
 
+/// The tokens as text, one per line with its byte range, for the differential tests of the
+/// self-hosted compiler (`sag check --dump=tokens`, docs/adr/0050-lexer-port-and-token-dumps.md).
+/// The parts of a template follow it, indented two spaces per level.
+pub fn dump(tokens: &[Token]) -> String {
+  let mut out = String::new();
+
+  dump_into(tokens, 0, &mut out);
+  out
+}
+
+fn dump_into(tokens: &[Token], depth: usize, out: &mut String) {
+  let indent = "  ".repeat(depth);
+
+  for token in tokens {
+    let description = match &token.kind {
+      TokenKind::Ident(name) => format!("ident {name}"),
+      TokenKind::Keyword(keyword) => format!("keyword {}", keyword.as_str()),
+      TokenKind::Int { value, suffix } => format!("int {value}{}", suffix.as_ref().map_or(String::new(), |suffix| format!(" {suffix}"))),
+      TokenKind::Float { text, suffix } => format!("float {text}{}", suffix.as_ref().map_or(String::new(), |suffix| format!(" {suffix}"))),
+      TokenKind::Str(value) => format!("str {}", quote(value)),
+      TokenKind::Char(value) => format!("char {}", quote(&value.to_string())),
+      TokenKind::DocComment { inner, text } => format!("doc {} {}", if *inner { "inner" } else { "outer" }, quote(text)),
+      TokenKind::Template(_) => "template".to_string(),
+      TokenKind::Eof => "eof".to_string(),
+      other => format!("punct {}", other.punctuation()),
+    };
+
+    out.push_str(&format!("{indent}{}..{} {description}\n", token.span.start, token.span.end));
+
+    if let TokenKind::Template(parts) = &token.kind {
+      for part in parts {
+        match part {
+          TemplatePart::Text(text) => out.push_str(&format!("{indent}  text {}\n", quote(text))),
+          TemplatePart::Expr(tokens) => {
+            out.push_str(&format!("{indent}  expr\n"));
+            dump_into(tokens, depth + 2, out);
+          }
+        }
+      }
+    }
+  }
+}
+
+/// `text` between double quotes: printable ASCII as is, `\"`, `\\`, `\n`, `\r`, `\t`, and
+/// `\u{hex}` for anything else.
+fn quote(text: &str) -> String {
+  let mut out = String::from("\"");
+
+  for c in text.chars() {
+    match c {
+      '"' => out.push_str("\\\""),
+      '\\' => out.push_str("\\\\"),
+      '\n' => out.push_str("\\n"),
+      '\r' => out.push_str("\\r"),
+      '\t' => out.push_str("\\t"),
+      ' '..='~' => out.push(c),
+      other => out.push_str(&format!("\\u{{{:x}}}", u32::from(other))),
+    }
+  }
+
+  out.push('"');
+  out
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -987,6 +1051,33 @@ mod tests {
     assert_eq!(literal, " ${b} ");
     assert_eq!(braces.len(), 4);
     assert!(matches!(nested.first().map(|token| &token.kind), Some(TokenKind::Template(_))));
+  }
+
+  #[test]
+  fn dumps_tokens() {
+    let mut sources = SourceMap::new();
+    let text = "fn a() { `x ${b}ñ` 'é' 1u8 }";
+    let file = sources.add(PathBuf::from("test.sag"), text.to_string());
+    let tokens = lex(file, text, &mut Diagnostics::new());
+    let expected = "\
+0..2 keyword fn
+3..4 ident a
+4..5 punct (
+5..6 punct )
+7..8 punct {
+9..19 template
+  text \"x \"
+  expr
+    14..15 ident b
+    16..16 eof
+  text \"\\u{f1}\"
+20..24 char \"\\u{e9}\"
+25..28 int 1 u8
+29..30 punct }
+30..30 eof
+";
+
+    assert_eq!(dump(&tokens), expected);
   }
 
   #[test]

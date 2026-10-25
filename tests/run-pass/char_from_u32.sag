@@ -1,0 +1,21 @@
+// `char::from_u32` (docs/spec/02-types.md#conversions): a code point that is a character, and
+// the ones that are not (surrogates and values above 0x10FFFF).
+// expect-stdout: A ñ 🎉
+// expect-stdout: none none none
+// expect-stdout: 1114111
+
+fn show(code: u32) -> String {
+  match char::from_u32(code) {
+    Some(c) => `${c}`,
+    None => "none",
+  }
+}
+
+pub fn main() {
+  println(`${show(65)} ${show(241)} ${show(0x1F389)}`);
+  println(`${show(0xD800)} ${show(0xDFFF)} ${show(0x110000)}`);
+
+  if let Some(last) = char::from_u32(0x10FFFF) {
+    println(`${last as u32}`);
+  }
+}

@@ -88,6 +88,15 @@ fn main() { ... }
 - Benchmarks (fibonacci, n-body, binary-trees versus equivalent C) are informational and do
   not gate the MVP.
 
+## The self-hosted compiler
+
+`crates/sagitario_cli/tests/selfhost.rs` builds `compiler/` (`sagc`) with `sag` and checks that,
+for every `.sag` file of the repository, both compilers give the same exit code, stdout and
+stderr: today for `check --dump=tokens`, and for more passes as they are ported
+([ADR-0050](adr/0050-lexer-port-and-token-dumps.md)). `tests/lexer/` holds edge cases of the
+lexer. The test also checks the modules of `compiler/` generated from the Rust compiler;
+`SAG_BLESS=1 cargo test --test selfhost` rewrites them.
+
 ## CI
 
 GitHub Actions matrix on Windows, Linux and macOS running `cargo fmt --check`,

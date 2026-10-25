@@ -138,6 +138,11 @@ static inline uint32_t sag_char_to_ascii_uppercase(uint32_t c) {
 static inline uint32_t sag_char_to_ascii_lowercase(uint32_t c) {
   return sag_char_is_ascii_uppercase(c) ? c + 32 : c;
 }
+/* `code` if it is a Unicode scalar value (not a surrogate, at most 0x10FFFF), or UINT32_MAX:
+ * `char::from_u32`. */
+static inline uint32_t sag_char_from_u32(uint32_t code) {
+  return code <= 0x10FFFFu && (code < 0xD800u || code > 0xDFFFu) ? code : UINT32_MAX;
+}
 /* The digit's value in `radix` (2 to 36), or UINT32_MAX; panics on an invalid radix. */
 uint32_t sag_char_to_digit_at(uint32_t c, uint32_t radix, const char *file, int line);
 

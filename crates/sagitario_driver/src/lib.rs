@@ -59,6 +59,16 @@ pub struct CompileOptions {
   /// The name of the target to compile for (docs/nova.md#targets); the machine running the
   /// compiler when `None`.
   pub target: Option<String>,
+  /// `sag check --dump=...`: print an intermediate result instead of checking.
+  pub dump: Option<Dump>,
+}
+
+/// What `--dump` prints, for the differential tests of the self-hosted compiler
+/// (docs/adr/0050-lexer-port-and-token-dumps.md). It is not part of the documented interface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dump {
+  /// The tokens of the input file.
+  Tokens,
 }
 
 /// What `[link]` adds to a build: C libraries, where to find them, and C sources to compile.
@@ -105,8 +115,26 @@ const SANITIZE_FLAGS: [&str; 2] = ["-fsanitize=address,undefined", "-fno-sanitiz
 /// The C compiler flags of `--sanitize=thread`: a program with a data race exits with an error.
 const THREAD_SANITIZE_FLAGS: [&str; 1] = ["-fsanitize=thread"];
 
+/// The stack of the thread running the compiler. The passes recurse over the syntax tree, and
+/// deeply nested code needs more than the main thread's stack (1 MiB on Windows), above all in
+/// debug builds.
+const STACK_SIZE: usize = 64 << 20;
+
+/// Runs `work` (the whole command) on a thread with a large stack. A panic in it, which is an
+/// internal compiler error already printed, gives the exit code 101.
+pub fn on_large_stack(work: fn() -> std::process::ExitCode) -> std::process::ExitCode {
+  match std::thread::Builder::new().stack_size(STACK_SIZE).spawn(work).map(std::thread::JoinHandle::join) {
+    Ok(Ok(code)) => code,
+    _ => std::process::ExitCode::from(EXIT_ICE),
+  }
+}
+
 /// `sag check`: runs the front end only.
 pub fn check(options: &CompileOptions) -> u8 {
+  if options.dump == Some(Dump::Tokens) {
+    return dump_tokens(options);
+  }
+
   match front_end(options, false) {
     Ok(_) => 0,
     Err(code) => code,
@@ -166,6 +194,34 @@ pub fn run(options: &CompileOptions) -> u8 {
       eprintln!("error: cannot run `{}`: {error}", executable.display());
       EXIT_FAILURE
     }
+  }
+}
+
+/// `sag check --dump=tokens`: the tokens of the input file alone, and its lexical errors
+/// (docs/adr/0050-lexer-port-and-token-dumps.md).
+fn dump_tokens(options: &CompileOptions) -> u8 {
+  let input = &options.input;
+  let text = match fs::read_to_string(input) {
+    Ok(text) => text,
+    Err(error) => {
+      eprintln!("error: cannot read `{}`: {error}", input.display());
+      return EXIT_FAILURE;
+    }
+  };
+  let mut sources = SourceMap::new();
+  let mut diagnostics = Diagnostics::new();
+  let id = sources.add(input.clone(), text);
+  let Some(source) = sources.get(id) else {
+    eprintln!("internal compiler error: source file was not registered");
+    return EXIT_ICE;
+  };
+  let tokens = sagitario_lexer::lex(id, source.text(), &mut diagnostics);
+
+  print!("{}", sagitario_lexer::dump(&tokens));
+
+  match report(&mut diagnostics, &sources, options) {
+    Ok(()) => 0,
+    Err(code) => code,
   }
 }
 

@@ -393,6 +393,7 @@ pub fn builtin_sig(builtin: Builtin, target: &sagitario_ast::TargetInfo) -> FnSi
     // Generic over the array: checked by the type checker.
     Builtin::ListFrom => FnSig { receiver: None, params: Vec::new(), ret: Type::Error },
     Builtin::IncludeStr => FnSig { receiver: None, params: vec![Type::String], ret: Type::String },
+    Builtin::CharFromU32 => FnSig { receiver: None, params: vec![Type::Int(IntTy::U32)], ret: Type::Option(Box::new(Type::Char)) },
   }
 }
 

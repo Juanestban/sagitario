@@ -72,3 +72,29 @@ fn cl_needs_a_developer_command_prompt() -> io::Result<()> {
 
   Ok(())
 }
+
+#[test]
+fn checks_deeply_nested_code() -> io::Result<()> {
+  // An `if` nested 200 levels deep, each with a chain of `||`: more recursion than the main
+  // thread's stack allows in a debug build.
+  let mut body = String::from("false");
+
+  for depth in 0..200 {
+    body = format!("if c < {depth} {{ c == 1 || c == 2 || c == 3 }} else {{ {body} }}");
+  }
+
+  let dir = std::env::temp_dir().join(format!("sag-deep-{}", std::process::id()));
+
+  std::fs::create_dir_all(&dir)?;
+
+  let file = dir.join("deep.sag");
+
+  std::fs::write(&file, format!("fn test(c: u32) -> bool {{\n  {body}\n}}\n\npub fn main() {{\n  println(`${{test(5)}}`);\n}}\n"))?;
+
+  let output = sag(&["check", &file.display().to_string()])?;
+
+  let _ = std::fs::remove_dir_all(&dir);
+  assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+
+  Ok(())
+}

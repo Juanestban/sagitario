@@ -38,6 +38,8 @@ pub enum Builtin {
   Exit,
   /// `include_str(path)`: the text of a file, as the value of a module-level constant.
   IncludeStr,
+  /// `char::from_u32(code)`: the character with that code point, or `None`.
+  CharFromU32,
 }
 
 impl Builtin {
@@ -55,6 +57,7 @@ impl Builtin {
       Builtin::ListFrom => "List::from",
       Builtin::Exit => "exit",
       Builtin::IncludeStr => "include_str",
+      Builtin::CharFromU32 => "char::from_u32",
     }
   }
 
@@ -1066,6 +1069,8 @@ enum Named {
   Prelude(EnumKind),
   /// The prelude's `List`, a built-in type with the static function `from`.
   List,
+  /// The primitive `char`, with the static function `from_u32`.
+  Char,
 }
 
 /// A name bound by a pattern, for checking the alternatives of `|`.
@@ -1655,6 +1660,12 @@ impl<'a> Resolver<'a> {
 
         None
       }
+      (Named::Char, [member]) if member.name == "from_u32" => Some(Res::Builtin(Builtin::CharFromU32)),
+      (Named::Char, _) => {
+        self.error(last.span, "`char` has one static function, `char::from_u32`");
+
+        None
+      }
       (Named::Item(ItemRef::Type(item)), [member]) => {
         if let TypeItem::Enum(id) = item
           && let Some(decl) = self.resolution.enum_decl(self.package, id)
@@ -1795,6 +1806,7 @@ impl<'a> Resolver<'a> {
         None if name == "Option" => Named::Prelude(EnumKind::Option),
         None if name == "Result" => Named::Prelude(EnumKind::Result),
         None if name == "List" => Named::List,
+        None if name == "char" => Named::Char,
         None if name == "std" => Named::Item(ItemRef::Std(StdItem::Root)),
         // A dependency of the package, unless a name of the module hides it.
         None if self.resolution.dependency_root(self.package, self.module, name).is_some() => {

@@ -1,0 +1,201 @@
+//! `sagc`: the Sagitario compiler written in Sagitario (F5, docs/roadmap.md). While it is being
+//! ported it does what its passes allow: `sagc check --dump=tokens <file.sag>`, which prints the
+//! tokens of a file like `sag check --dump=tokens` (docs/adr/0050-lexer-port-and-token-dumps.md).
+
+use pkg::diagnostics;
+use pkg::diagnostics::{DiagnosticFormat, Diagnostics};
+use pkg::lexer;
+use pkg::span::SourceMap;
+use std::env;
+use std::fs;
+use std::process;
+
+const USAGE: String = "Usage: sagc check --dump=tokens [--diagnostic-format human|short] <file.sag>";
+
+/// Exit code for invalid command-line usage.
+const EXIT_USAGE: i32 = 2;
+
+/// What the command line asks for.
+class Options {
+  pub var input: Option<String>;
+  pub var dump: Option<String>;
+  pub var format: DiagnosticFormat;
+
+  pub fn new(self) {
+    self.input = None;
+    self.dump = None;
+    self.format = DiagnosticFormat::Human;
+  }
+}
+
+fn usage_error(message: String) -> i32 {
+  eprintln(`error: ${message}`);
+  eprintln("");
+  eprintln(USAGE);
+  EXIT_USAGE
+}
+
+/// `--flag=value` or `--flag value`: the value, taken from the next argument if needed.
+fn flag_value(inline: Option<String>, args: List<String>, index: Position) -> Option<String> {
+  match inline {
+    Some(value) => Some(value),
+    None => {
+      index.value += 1;
+      args.get(index.value)
+    }
+  }
+}
+
+/// The position of the argument being read.
+class Position {
+  pub var value: usize;
+
+  pub fn new(self, value: usize) {
+    self.value = value;
+  }
+}
+
+fn parse(args: List<String>) -> Result<Options, String> {
+  if args.len() < 2 {
+    return Err("missing command");
+  }
+
+  if args[1] != "check" {
+    return Err(`unknown command \`${args[1]}\``);
+  }
+
+  const options = new Options();
+  const index = new Position(2);
+
+  while index.value < args.len() {
+    const arg = args[index.value];
+    var flag = arg;
+    var inline: Option<String> = None;
+
+    if arg.starts_with("--") {
+      if let Some(equals) = arg.find("=") {
+        flag = arg.substring(0, equals);
+        inline = Some(arg.substring(equals + 1, arg.len()));
+      }
+    }
+
+    if flag == "--dump" {
+      match flag_value(inline, args, index) {
+        Some(value) if value == "tokens" => {
+          options.dump = Some(value);
+        }
+        Some(value) => return Err(`unknown dump \`${value}\`; expected \`tokens\``),
+        None => return Err("`--dump` requires a value"),
+      }
+    } else if flag == "--diagnostic-format" {
+      match flag_value(inline, args, index) {
+        Some(value) if value == "human" => {
+          options.format = DiagnosticFormat::Human;
+        }
+        Some(value) if value == "short" => {
+          options.format = DiagnosticFormat::Short;
+        }
+        Some(value) => return Err(`unknown diagnostic format \`${value}\`; expected \`human\` or \`short\``),
+        None => return Err("`--diagnostic-format` requires a value"),
+      }
+    } else if flag.starts_with("-") {
+      return Err(`unknown option \`${flag}\``);
+    } else if options.input.is_some() {
+      return Err(`unexpected argument \`${arg}\`; only one input file is accepted`);
+    } else {
+      options.input = Some(arg);
+    }
+
+    index.value += 1;
+  }
+
+  if options.input.is_none() {
+    return Err("missing input file");
+  }
+
+  if options.dump.is_none() {
+    return Err("only `check --dump=tokens` is ported yet");
+  }
+
+  Ok(options)
+}
+
+fn plural(count: usize) -> String {
+  if count == 1 { "" } else { "s" }
+}
+
+/// Colors only the human format, honoring `NO_COLOR`, when `CLICOLOR_FORCE` asks for them:
+/// Sagitario cannot tell yet whether stderr is a terminal.
+fn use_color(format: DiagnosticFormat) -> bool {
+  if format == DiagnosticFormat::Short {
+    return false;
+  }
+
+  if let Some(value) = env::variable("NO_COLOR") {
+    if !value.is_empty() {
+      return false;
+    }
+  }
+
+  match env::variable("CLICOLOR_FORCE") {
+    Some(value) => value != "0",
+    None => false,
+  }
+}
+
+/// Prints the diagnostics in source order, and a summary in the human format. Returns whether
+/// any of them is an error.
+fn report(diagnostics: Diagnostics, sources: SourceMap, format: DiagnosticFormat, input: String) -> bool {
+  const errors = diagnostics.error_count();
+  const warnings = diagnostics.warning_count();
+  const color = use_color(format);
+
+  for diagnostic in diagnostics.take() {
+    eprintln(diagnostics::render(diagnostic, sources, format, color));
+  }
+
+  if format == DiagnosticFormat::Human {
+    const warnings_text = `${warnings} warning${plural(warnings)}`;
+
+    if errors > 0 {
+      const also = if warnings > 0 { `; ${warnings_text} emitted` } else { "" };
+
+      eprintln(`error: could not compile \`${input}\` due to ${errors} previous error${plural(errors)}${also}`);
+    } else if warnings > 0 {
+      eprintln(`warning: \`${input}\` generated ${warnings_text}`);
+    }
+  }
+
+  errors > 0
+}
+
+/// `check --dump=tokens`: the tokens of the input file alone, and its lexical errors.
+fn dump_tokens(input: String, format: DiagnosticFormat) -> i32 {
+  const text = match fs::read_to_string(input) {
+    Ok(text) => text,
+    Err(error) => {
+      eprintln(`error: cannot read \`${input}\`: ${error.message()}`);
+      return 1;
+    }
+  };
+  const sources = new SourceMap();
+  const diagnostics = new Diagnostics();
+  const file = sources.add(input, text);
+  const tokens = lexer::lex(file, text, diagnostics);
+
+  print(lexer::dump(tokens));
+
+  if report(diagnostics, sources, format, input) { 1 } else { 0 }
+}
+
+pub fn main() {
+  const options = match parse(env::args()) {
+    Ok(options) => options,
+    Err(message) => process::exit(usage_error(message)),
+  };
+  const code = dump_tokens(options.input.unwrap_or(""), options.format);
+
+  if code != 0 {
+    process::exit(code);
+  }
+}

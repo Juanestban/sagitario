@@ -41,6 +41,7 @@ crates/
   sagitario_nova/         the `nova` binary: package manager, `Nova.toml` parser (docs/nova.md)
 runtime/            minimal C runtime (ARC, panic, String, allocation, I/O and the OS calls of std)
 tests/              end-to-end suites (see testing.md)
+compiler/           the compiler written in Sagitario (F5, `sagc`), ported pass by pass
 ```
 
 ## Crate dependency rule

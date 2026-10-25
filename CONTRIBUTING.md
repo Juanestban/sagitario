@@ -28,6 +28,7 @@ sag run --release main.sag      # optimized; integer overflow wraps
 sag run --sanitize main.sag     # with ASan and UBSan (the test harness always uses it)
 sag run --sanitize=thread main.sag   # with TSan instead, on Linux and macOS
 SAG_TEST_SANITIZE=0 cargo test --workspace   # faster local runs without sanitizers
+SAG_BLESS=1 cargo test --test selfhost      # regenerate the modules of compiler/ made from Rust
 ANDROID_NDK_HOME=/path/to/ndk cargo test --workspace   # also the Android cross-compilation tests
 SAG_CC=gcc sag build main.sag   # choose the C compiler (or --cc)
 SAG_CC=cl SAG_TEST_SANITIZE=0 cargo test --workspace   # with MSVC, in a Developer Command Prompt

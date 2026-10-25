@@ -137,7 +137,8 @@ against the Rust compiler's on every program under `tests/`.
 Increments:
 
 1. Language prerequisites: module-level constants, `include_str`, `if let` and `while let`.
-2. Dumps for differential tests (`--dump=...`), and `span`, `diagnostics` and `lexer`.
+2. Dumps for differential tests (`--dump=tokens`), and `span`, `diagnostics` and `lexer`;
+   `char::from_u32` ([ADR-0050](adr/0050-lexer-port-and-token-dumps.md)).
 3. `parser`.
 4. `resolve`.
 5. `types`.

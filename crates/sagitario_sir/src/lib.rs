@@ -1306,6 +1306,12 @@ impl FnLowering<'_> {
 
             return self.message_error(text);
           }
+          Some(Res::Builtin(Builtin::CharFromU32)) => {
+            let [code] = args.as_slice() else { return error("`char::from_u32` without one argument") };
+            let code = self.operand_as(code, &Type::Int(IntTy::U32))?;
+
+            return Ok(self.char_from_u32(&ty, code));
+          }
           Some(Res::Builtin(Builtin::CStringNew)) => {
             let [text] = args.as_slice() else { return error("`CString::new` without one argument") };
             let text = self.operand_as(text, &Type::String)?;

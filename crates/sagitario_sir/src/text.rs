@@ -59,6 +59,15 @@ impl FnLowering<'_> {
     }
   }
 
+  /// `char::from_u32(code)`: the runtime returns the code, or `UINT32_MAX` if it is not a
+  /// character.
+  pub(crate) fn char_from_u32(&mut self, ty: &Type, code: Operand) -> Operand {
+    let checked = self.new_value(Type::Int(IntTy::U32), Rvalue::Call { callee: runtime("sag_char_from_u32"), args: vec![code] });
+    let character = self.new_value(Type::Char, Rvalue::Cast { from: Type::Int(IntTy::U32), to: Type::Char, operand: checked });
+
+    self.sentinel_option(ty, character, Type::Int(IntTy::U32), u128::from(u32::MAX))
+  }
+
   /// `Some(value)` unless `value` is `sentinel`, then `None`.
   fn sentinel_option(&mut self, ty: &Type, value: Operand, value_ty: Type, sentinel: u128) -> Operand {
     let int_ty = match value_ty {
