@@ -169,12 +169,28 @@ fn run(program: &Path, args: &[&str]) -> io::Result<(Option<i32>, String, String
   Ok((output.status.code(), text(&output.stdout), text(&output.stderr)))
 }
 
+/// What `sag build compiler/src/main.sag` writes next to the source: the executable, and with
+/// the MSVC linker its incremental-link and debug files. Removed on drop, also when the test
+/// fails.
+struct BuiltSagc {
+  /// The path without extension.
+  base: PathBuf,
+}
+
+impl Drop for BuiltSagc {
+  fn drop(&mut self) {
+    for extension in ["", "exe", "ilk", "pdb"] {
+      let _ = fs::remove_file(self.base.with_extension(extension));
+    }
+  }
+}
+
 #[test]
 fn sagc_dumps_the_same_tokens() -> io::Result<()> {
   let sag = PathBuf::from(env!("CARGO_BIN_EXE_sag"));
-  // `sag build` writes the executable next to the source (ignored by git).
+  let built = BuiltSagc { base: root().join("compiler/src/main") };
   let (code, _, stderr) = run(&sag, &["build", "compiler/src/main.sag"])?;
-  let sagc = root().join("compiler/src/main").with_extension(std::env::consts::EXE_EXTENSION);
+  let sagc = built.base.with_extension(std::env::consts::EXE_EXTENSION);
 
   assert!(code == Some(0), "building `sagc` failed:\n{stderr}");
 
