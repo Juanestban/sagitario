@@ -1,0 +1,418 @@
+//! Closures (docs/spec/08-closures.md, ADR-0033). A function value is a function pointer and an
+//! environment: an ARC object holding copies of the captured bindings, or none. Each lambda
+//! becomes a function of its own that receives the environment first. The port of
+//! `sagitario_sir::closures`.
+
+use pkg::ast::Expr;
+use pkg::sir::{Callee, Function, Instance, LambdaFunction, Lowering, Operand, Place, Projection, Rvalue, Stmt, is_valueless, project, unit_operand};
+use pkg::sir::matching;
+use pkg::sir::mono;
+use pkg::types::{Type, TypeKind};
+use pkg::types;
+use pkg::types::typed::BuiltinMethod;
+
+/// The SIR local of a binding of the source function; inside a lambda, its own numbering.
+pub fn local_id(lw: Lowering, id: u32) -> u32 {
+  match lw.local_map {
+    Some(map) => map.get(id).unwrap_or(id),
+    None => id,
+  }
+}
+
+/// A captured binding: its id in the source function, its local outside and its type.
+struct Capture {
+  pub id: u32;
+  pub local: u32;
+  pub ty: Type;
+}
+
+/// `(params) => body`: lowers the body as a function of its own and creates the closure value.
+pub fn lambda(lw: Lowering, value: Expr, body: Expr, ty: Type) -> Result<Operand, String> {
+  const info = match lw.resolution.lambdas.get(value.id) {
+    Some(info) => info,
+    None => return Err("lambda without resolution"),
+  };
+  var params: List<Type> = new List();
+  var ret = types::unit();
+
+  match ty.kind {
+    TypeKind::Function { params: found_params, ret: found_ret } => {
+      params = found_params;
+      ret = found_ret;
+    }
+    _ => return Err("lambda without a function type"),
+  }
+
+  const captures: List<Capture> = new List();
+
+  for id in info.captures {
+    const local = local_id(lw, id);
+
+    captures.push(Capture { id: id, local: local, ty: lw.local_type(local) });
+  }
+
+  var env: Option<usize> = None;
+
+  if !captures.is_empty() {
+    const env_types: List<Type> = new List();
+
+    for capture in captures {
+      env_types.push(capture.ty);
+    }
+
+    lw.registry.envs.push(env_types);
+    env = Some(lw.registry.envs.len() - 1);
+  }
+
+  // The lambda's locals: the environment, its parameters, the captures, then its bindings.
+  const map = new Map<u32, u32>();
+  const locals = List::from([types::unit()]);
+  var index = 0usize;
+
+  while index < info.params.len() && index < params.len() {
+    map.insert(info.params[index], locals.len() as u32);
+    locals.push(params[index]);
+    index += 1;
+  }
+
+  for capture in captures {
+    map.insert(capture.id, locals.len() as u32);
+    locals.push(capture.ty);
+  }
+
+  var id = info.first_local;
+
+  while id < info.end_local {
+    if !map.contains_key(id) {
+      const local_ty = match lw.typed.local_type(lw.source_fn, id) {
+        Some(found) => types::substitute(found, lw.subst),
+        None => types::error(),
+      };
+
+      map.insert(id, locals.len() as u32);
+      locals.push(local_ty);
+    }
+
+    id += 1;
+  }
+
+  const slot = lw.registry.instances.len();
+
+  lw.registry.instances.push(Instance { template: lw.source_fn, subst: lw.subst, lambda: true });
+
+  const function = lw.registry.first_instance + slot as u32;
+  const param_count = 1 + params.len();
+  const lowering = new Lowering(lw.context(), ret, locals, lw.subst, body.span);
+
+  lowering.source_fn = lw.source_fn;
+  lowering.local_map = Some(map);
+  lambda_body(lowering, body, ret, env, captures, map)?;
+
+  const lowered = Function {
+    name: "lambda",
+    template: false,
+    closure: true,
+    param_count: param_count,
+    self_by_ref: false,
+    export: None,
+    ret: ret,
+    locals: lowering.locals,
+    body: lowering.buffers.pop().unwrap_or(new List()),
+  };
+
+  lw.registry.lambdas.push(LambdaFunction { slot: slot, function: lowered });
+
+  const values: List<Operand> = new List();
+
+  for capture in captures {
+    values.push(Operand::Local(capture.local));
+  }
+
+  Ok(lw.new_value(ty, Rvalue::Closure { function: function, env: env, captures: values }))
+}
+
+/// The body of a lambda: copies the captures out of the environment (local 0), runs the body and
+/// returns its value.
+fn lambda_body(lw: Lowering, body: Expr, ret: Type, env: Option<usize>, captures: List<Capture>, map: Map<u32, u32>) -> Result<(), String> {
+  const owned: List<u32> = new List();
+
+  if let Some(env_index) = env {
+    for index in 0..captures.len() {
+      const capture = captures[index];
+      const local = match map.get(capture.id) {
+        Some(local) => local,
+        None => continue,
+      };
+      const place = Place { local: 0, projections: List::from([Projection::EnvField { env: env_index, index: index }]), ty: capture.ty };
+
+      lw.store(local, Operand::Place(place));
+
+      if lw.managed(capture.ty) {
+        owned.push(local);
+      }
+    }
+  }
+
+  // Released when the lambda returns, like the bindings of its outermost block.
+  lw.scopes.push(owned);
+
+  const result: Option<u32> = if is_valueless(ret) { None } else { Some(lw.temp(ret)) };
+  const mark = lw.pending.len();
+  const value = lw.operand_as(body, ret)?;
+
+  if let Some(target) = result {
+    if !is_valueless(lw.type_of(body)?) {
+      lw.store(target, value);
+    }
+  }
+
+  lw.release_pending_from(mark);
+
+  const scope = lw.scopes.pop().unwrap_or(new List());
+  var index = scope.len();
+
+  while index > 0 {
+    index -= 1;
+    lw.emit(Stmt::Release(scope[index]));
+  }
+
+  const returned = match result {
+    Some(target) => Some(Operand::Local(target)),
+    None => None,
+  };
+
+  lw.emit(Stmt::Return(returned));
+
+  Ok(())
+}
+
+/// A named function used as a value: a closure without environment calling it.
+pub fn fn_value(lw: Lowering, value: Expr, function: u32, ty: Type) -> Operand {
+  const subst = mono::call_subst(lw, value.id, function, None);
+  const target = mono::instance(lw, function, subst);
+
+  if !lw.registry.wrapped.contains(target) {
+    lw.registry.wrapped.push(target);
+  }
+
+  lw.new_value(ty, Rvalue::FnValue(target))
+}
+
+/// Calls a function value with arguments (already converted to its parameter types).
+pub fn call_closure(lw: Lowering, value: Operand, args: List<Operand>, params: List<Type>, ret: Type) -> Operand {
+  const operands = List::from([value]);
+
+  for arg in args {
+    operands.push(arg);
+  }
+
+  lw.call(Callee::Closure { params: params, ret: ret }, operands, ret)
+}
+
+/// `callee(args)` where `callee` is a value of a function type.
+pub fn call_value(lw: Lowering, callee: Expr, args: List<Expr>) -> Result<Operand, String> {
+  const callee_ty = lw.type_of(callee)?;
+  var params: List<Type> = new List();
+  var ret = types::unit();
+
+  match callee_ty.kind {
+    TypeKind::Function { params: found_params, ret: found_ret } => {
+      params = found_params;
+      ret = found_ret;
+    }
+    _ => return Err("call of a value that is not a function"),
+  }
+
+  const callee_value = lw.expr(callee)?;
+  // The function value must stay alive while it runs, even if the call replaces its source.
+  const function_value = lw.owned_copy(callee_ty, callee_value);
+  const operands: List<Operand> = new List();
+  var index = 0usize;
+
+  while index < args.len() && index < params.len() {
+    operands.push(lw.operand_as(args[index], params[index])?);
+    index += 1;
+  }
+
+  Ok(call_closure(lw, function_value, operands, params, ret))
+}
+
+/// `value.name(args)` calling a field of a function type.
+pub fn field_call(lw: Lowering, receiver: Expr, name: String, args: List<Expr>) -> Result<Operand, String> {
+  const receiver_ty = lw.type_of(receiver)?;
+  var projection = Projection::Tag;
+  var field_ty = types::error();
+
+  match receiver_ty.kind {
+    TypeKind::Struct(owner) => {
+      const index = match lw.typed.field_index(owner.id, name) {
+        Some(index) => index,
+        None => return Err("unknown field `" + name + "`"),
+      };
+
+      projection = Projection::Field(index);
+      field_ty = lw.typed.struct_field_types(owner).get(index).unwrap_or(types::error());
+    }
+    TypeKind::Class(owner) => {
+      const found = match lw.typed.class_field_type(owner, name) {
+        Some(found) => found,
+        None => return Err("unknown field `" + name + "`"),
+      };
+
+      projection = Projection::ClassField { class_id: mono::class_instance(lw, found.ancestor), index: found.index };
+      field_ty = found.ty;
+    }
+    _ => return Err("field call on a value without fields"),
+  }
+
+  var params: List<Type> = new List();
+  var ret = types::unit();
+
+  match field_ty.kind {
+    TypeKind::Function { params: found_params, ret: found_ret } => {
+      params = found_params;
+      ret = found_ret;
+    }
+    _ => return Err("field call of a field that is not a function"),
+  }
+
+  const base = lw.base_place(receiver)?;
+  const place = project(base, projection, field_ty);
+  const function_value = lw.owned_copy(field_ty, Operand::Place(place));
+  const operands: List<Operand> = new List();
+  var index = 0usize;
+
+  while index < args.len() && index < params.len() {
+    operands.push(lw.operand_as(args[index], params[index])?);
+    index += 1;
+  }
+
+  Ok(call_closure(lw, function_value, operands, params, ret))
+}
+
+/// `map`, `map_err`, `and_then`, `unwrap_or_else` and `filter` of `Option` and `Result`.
+pub fn closure_method(lw: Lowering, method: BuiltinMethod, ty: Type, receiver: Expr, args: List<Expr>) -> Result<Operand, String> {
+  const receiver_ty = lw.type_of(receiver)?;
+  const place = matching::value_place(lw, receiver)?;
+  const arg = match args.first() {
+    Some(arg) => arg,
+    None => return Err("closure method without a closure"),
+  };
+  const arg_ty = lw.type_of(arg)?;
+  var params: List<Type> = new List();
+  var ret = types::unit();
+
+  match arg_ty.kind {
+    TypeKind::Function { params: found_params, ret: found_ret } => {
+      params = found_params;
+      ret = found_ret;
+    }
+    _ => return Err("closure method without a function"),
+  }
+
+  const closure_value = lw.expr(arg)?;
+  const closure = lw.owned_copy(arg_ty, closure_value);
+  var is_option = false;
+  var value_ty = types::error();
+  var error_ty = types::unit();
+
+  match receiver_ty.kind {
+    TypeKind::Option(inner) => {
+      is_option = true;
+      value_ty = inner;
+    }
+    TypeKind::Result { value: inner, error } => {
+      value_ty = inner;
+      error_ty = error;
+    }
+    _ => return Err("closure method on a value that is not an `Option` or a `Result`"),
+  }
+
+  const success: u32 = if is_option { 1 } else { 0 };
+  const dest = lw.temp(ty);
+  const cond = matching::tag_is(lw, place, success)?;
+  const ok_place = project(place, Projection::VariantField { variant: success, field: 0 }, value_ty);
+  const err_place = project(place, Projection::VariantField { variant: 1, field: 0 }, error_ty);
+  const receiver_copy = Operand::Place(place);
+  const then_mark = lw.open_buffer();
+  const read = matching::read(lw, ok_place);
+  var stored: Option<Operand> = None;
+
+  match method {
+    BuiltinMethod::Map => {
+      const mapped = call_closure(lw, closure, List::from([read]), params, ret);
+      const index: u32 = if is_option { 1 } else { 0 };
+
+      stored = Some(matching::variant(lw, ty, index, List::from([mapped])));
+    }
+    BuiltinMethod::MapErr => {
+      stored = Some(matching::variant(lw, ty, 0, List::from([read])));
+    }
+    BuiltinMethod::AndThen => {
+      stored = Some(call_closure(lw, closure, List::from([read]), params, ret));
+    }
+    BuiltinMethod::UnwrapOrElse => {
+      stored = Some(read);
+    }
+    BuiltinMethod::Filter => {
+      const keep = call_closure(lw, closure, List::from([read]), params, ret);
+      const kept_mark = lw.open_buffer();
+
+      lw.store(dest, receiver_copy);
+
+      const kept = lw.close_buffer(kept_mark);
+      const dropped_mark = lw.open_buffer();
+      const none = matching::variant(lw, ty, 0, new List());
+
+      lw.store(dest, none);
+
+      const dropped = lw.close_buffer(dropped_mark);
+
+      lw.emit(Stmt::If { cond: keep, then_body: kept, else_body: dropped });
+    }
+    _ => return Err("not a closure method"),
+  }
+
+  if let Some(result) = stored {
+    lw.store(dest, result);
+  }
+
+  const then_body = lw.close_buffer(then_mark);
+  const else_mark = lw.open_buffer();
+  var else_result = unit_operand();
+
+  match method {
+    BuiltinMethod::UnwrapOrElse => {
+      if is_option {
+        else_result = call_closure(lw, closure, new List(), params, ret);
+      } else {
+        const error_value = matching::read(lw, err_place);
+
+        else_result = call_closure(lw, closure, List::from([error_value]), params, ret);
+      }
+    }
+    BuiltinMethod::MapErr => {
+      const error_value = matching::read(lw, err_place);
+      const mapped = call_closure(lw, closure, List::from([error_value]), params, ret);
+
+      else_result = matching::variant(lw, ty, 1, List::from([mapped]));
+    }
+    _ => {
+      if is_option {
+        else_result = matching::variant(lw, ty, 0, new List());
+      } else {
+        const error_value = matching::read(lw, err_place);
+
+        else_result = matching::variant(lw, ty, 1, List::from([error_value]));
+      }
+    }
+  }
+
+  lw.store(dest, else_result);
+
+  const else_body = lw.close_buffer(else_mark);
+
+  lw.emit(Stmt::If { cond: cond, then_body: then_body, else_body: else_body });
+
+  Ok(lw.owned_result(Some(dest)))
+}

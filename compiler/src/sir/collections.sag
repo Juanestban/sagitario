@@ -1,0 +1,687 @@
+//! Lowering of lists, iterators and the prelude interfaces on primitives
+//! (docs/spec/02-types.md#arrays-and-lists, docs/spec/08-closures.md#iterators, ADR-0034). The
+//! port of `sagitario_sir::collections`.
+
+use pkg::ast::{BinaryOp, Block, Expr, ExprKind};
+use pkg::resolve::{ParamOwner, Res, TypeItem};
+use pkg::sir::{Callee, Lowering, Operand, Place, Projection, Rvalue, Stmt, bool_operand, int_operand, local_place, project, unit_operand};
+use pkg::sir::matching;
+use pkg::sir::mono;
+use pkg::types::{FloatTy, IntTy, Subst, Type, TypeKind};
+use pkg::types;
+use pkg::types::typed::{BuiltinMethod, ListMethod};
+
+fn usize_type() -> Type {
+  types::int(IntTy::Usize)
+}
+
+fn usize_const(value: u64) -> Operand {
+  int_operand(value, false, IntTy::Usize)
+}
+
+fn runtime(function: String) -> Callee {
+  Callee::Runtime { function: function, located: false }
+}
+
+fn bool_type() -> Type {
+  types::of(TypeKind::Bool)
+}
+
+/// A value that stays valid while the rest of the expression runs.
+fn stable(lw: Lowering, ty: Type, value: Operand) -> Operand {
+  match value {
+    Operand::Place(_) => lw.owned_copy(ty, value),
+    _ => value,
+  }
+}
+
+/// `List::from(array)`: the elements are retained for the new list.
+pub fn list_from(lw: Lowering, ty: Type, args: List<Expr>) -> Result<Operand, String> {
+  if args.len() != 1 {
+    return Err("`List::from` without one argument");
+  }
+
+  const array = args[0];
+  const array_ty = lw.type_of(array)?;
+  const value = lw.expr(array)?;
+
+  Ok(list_from_array(lw, ty, array_ty, value))
+}
+
+fn list_from_array(lw: Lowering, list_ty: Type, array_ty: Type, value: Operand) -> Operand {
+  if lw.managed(array_ty) {
+    lw.emit(Stmt::Retain(value));
+  }
+
+  lw.new_value(list_ty, Rvalue::ListFromArray { array: value, array_ty: array_ty })
+}
+
+/// The place of `list[index]`.
+pub fn list_elem_place(lw: Lowering, base: Expr, index: Expr, ty: Type) -> Result<Place, String> {
+  const list_ty = lw.type_of(base)?;
+  const list_value = lw.expr(base)?;
+  const list = stable(lw, list_ty, list_value);
+  const position = lw.expr(index)?;
+  const place = lw.operand_place(list, list_ty)?;
+
+  Ok(project(place, Projection::ListElem { index: position, elem: ty }, ty))
+}
+
+/// The element at `index` of `list` (of element type `elem`) as a new place.
+fn elem_of(lw: Lowering, list: Operand, list_ty: Type, index: Operand, elem: Type) -> Result<Place, String> {
+  const place = lw.operand_place(list, list_ty)?;
+
+  Ok(project(place, Projection::ListElem { index: index, elem: elem }, elem))
+}
+
+fn list_len(lw: Lowering, list: Operand) -> Operand {
+  lw.new_value(usize_type(), Rvalue::ListLen(list))
+}
+
+fn binary_value(lw: Lowering, result: Type, op: BinaryOp, ty: Type, lhs: Operand, rhs: Operand) -> Operand {
+  lw.new_value(result, Rvalue::Binary { op: op, ty: ty, lhs: lhs, rhs: rhs })
+}
+
+/// A method of `List` implemented by the compiler.
+pub fn list_method(lw: Lowering, method: ListMethod, ty: Type, receiver: Expr, args: List<Expr>) -> Result<Operand, String> {
+  const list_ty = lw.type_of(receiver)?;
+  const elem = match list_ty.kind {
+    TypeKind::List(found) => found,
+    _ => return Err("list method on a value that is not a list"),
+  };
+  const list_value = lw.expr(receiver)?;
+  const list = stable(lw, list_ty, list_value);
+  const operands: List<Operand> = new List();
+  var params: List<Type> = new List();
+
+  match method {
+    ListMethod::Push => {
+      params = List::from([elem]);
+    }
+    ListMethod::Get | ListMethod::Remove => {
+      params = List::from([usize_type()]);
+    }
+    ListMethod::Insert => {
+      params = List::from([usize_type(), elem]);
+    }
+    _ => {}
+  }
+
+  var index = 0usize;
+
+  while index < args.len() && index < params.len() {
+    const value = lw.operand_as(args[index], params[index])?;
+
+    operands.push(lw.owned_copy(params[index], value));
+    index += 1;
+  }
+
+  match method {
+    ListMethod::Len => Ok(list_len(lw, list)),
+    ListMethod::IsEmpty => {
+      const len = list_len(lw, list);
+
+      Ok(binary_value(lw, bool_type(), BinaryOp::Eq, usize_type(), len, usize_const(0)))
+    }
+    ListMethod::Push | ListMethod::Insert => {
+      const value = match operands.pop() {
+        Some(found) => found,
+        None => return Err("list method without its value"),
+      };
+
+      // The list takes a reference.
+      if lw.managed(elem) {
+        lw.emit(Stmt::Retain(value));
+      }
+
+      match operands.pop() {
+        Some(position) => lw.emit(Stmt::ListInsert { list: list, index: position, value: value }),
+        None => lw.emit(Stmt::ListPush { list: list, value: value }),
+      }
+
+      Ok(unit_operand())
+    }
+    ListMethod::Pop => {
+      const len = list_len(lw, list);
+      const cond = binary_value(lw, bool_type(), BinaryOp::Gt, usize_type(), len, usize_const(0));
+      const dest = lw.temp(ty);
+      const then_mark = lw.open_buffer();
+      // The element moves out of the list into the `Some`.
+      const popped = lw.temp(elem);
+
+      lw.emit(Stmt::Assign { dest: popped, value: Rvalue::ListPop(list) });
+      lw.emit(Stmt::Assign { dest: dest, value: Rvalue::Variant { index: 1, fields: List::from([Operand::Local(popped)]) } });
+
+      const then_body = lw.close_buffer(then_mark);
+      const else_mark = lw.open_buffer();
+
+      lw.emit(Stmt::Assign { dest: dest, value: Rvalue::Variant { index: 0, fields: new List() } });
+
+      const else_body = lw.close_buffer(else_mark);
+
+      lw.emit(Stmt::If { cond: cond, then_body: then_body, else_body: else_body });
+
+      Ok(lw.owned_result(Some(dest)))
+    }
+    ListMethod::Get | ListMethod::First | ListMethod::Last => {
+      const len = list_len(lw, list);
+      var position: Option<Operand> = None;
+      var is_get = false;
+
+      match method {
+        ListMethod::Get => {
+          is_get = true;
+          position = match operands.pop() {
+            Some(found) => Some(found),
+            None => return Err("`get` without an index"),
+          };
+        }
+        ListMethod::First => {
+          position = Some(usize_const(0));
+        }
+        // `len - 1`, computed once the list is known not to be empty.
+        _ => {}
+      }
+
+      var cond_value = Rvalue::Binary { op: BinaryOp::Gt, ty: usize_type(), lhs: len, rhs: usize_const(0) };
+
+      if is_get {
+        if let Some(found) = position {
+          cond_value = Rvalue::Binary { op: BinaryOp::Lt, ty: usize_type(), lhs: found, rhs: len };
+        }
+      }
+
+      const cond = lw.new_value(bool_type(), cond_value);
+      const dest = lw.temp(ty);
+      const then_mark = lw.open_buffer();
+      const chosen = match position {
+        Some(found) => found,
+        None => binary_value(lw, usize_type(), BinaryOp::Sub, usize_type(), len, usize_const(1)),
+      };
+      const place = elem_of(lw, list, list_ty, chosen, elem)?;
+      const some = matching::variant(lw, ty, 1, List::from([Operand::Place(place)]));
+
+      store_moved(lw, dest, some);
+
+      const then_body = lw.close_buffer(then_mark);
+      const else_mark = lw.open_buffer();
+
+      lw.emit(Stmt::Assign { dest: dest, value: Rvalue::Variant { index: 0, fields: new List() } });
+
+      const else_body = lw.close_buffer(else_mark);
+
+      lw.emit(Stmt::If { cond: cond, then_body: then_body, else_body: else_body });
+
+      Ok(lw.owned_result(Some(dest)))
+    }
+    ListMethod::Remove => {
+      const position = match operands.pop() {
+        Some(found) => found,
+        None => return Err("`remove` without an index"),
+      };
+
+      Ok(lw.new_value(elem, Rvalue::ListRemove { list: list, index: position }))
+    }
+    ListMethod::Clear => {
+      lw.emit(Stmt::ListClear(list));
+
+      Ok(unit_operand())
+    }
+    ListMethod::Reverse => {
+      lw.emit(Stmt::ListReverse(list));
+
+      Ok(unit_operand())
+    }
+  }
+}
+
+/// Moves a new value (a pending temporary) into `dest`, which takes over its reference.
+fn store_moved(lw: Lowering, dest: u32, value: Operand) {
+  if let Operand::Local(local) = value {
+    var position = lw.pending.len();
+
+    while position > 0 {
+      position -= 1;
+
+      if lw.pending[position] == local {
+        lw.pending.remove(position);
+        lw.emit(Stmt::Assign { dest: dest, value: Rvalue::Use(value) });
+
+        return;
+      }
+    }
+  }
+
+  lw.store(dest, value);
+}
+
+/// A method implemented by the prelude function `function`, called with the receiver first.
+pub fn prelude_method(lw: Lowering, value: Expr, function: u32, ty: Type, receiver: Expr, args: List<Expr>) -> Result<Operand, String> {
+  const subst = mono::call_subst(lw, value.id, function, None);
+  const params = match lw.typed.sig(function) {
+    Some(sig) => types::substitute_sig(sig, subst).params,
+    None => new List(),
+  };
+  const target = mono::instance(lw, function, subst);
+  const receiver_ty = lw.type_of(receiver)?;
+  var receiver_value = lw.expr(receiver)?;
+
+  // Arrays become lists.
+  if let TypeKind::Array { .. } = receiver_ty.kind {
+    if let Some(list_ty) = params.first() {
+      receiver_value = list_from_array(lw, list_ty, receiver_ty, receiver_value);
+    }
+  }
+
+  const operands = List::from([receiver_value]);
+  var index = 0usize;
+
+  while index < args.len() && index + 1 < params.len() {
+    operands.push(lw.operand_as(args[index], params[index + 1])?);
+    index += 1;
+  }
+
+  Ok(lw.call(Callee::Fn(target), operands, ty))
+}
+
+/// The receiver of an `Iter` method called on a list or array, as an iterator.
+pub fn iter_of(lw: Lowering, receiver: Expr, to_iter: u32, args: List<Type>) -> Result<Operand, String> {
+  // In generic code, the element type is in terms of the instance's parameters.
+  const substituted: List<Type> = new List();
+
+  for arg in args {
+    substituted.push(types::substitute(arg, lw.subst));
+  }
+
+  const subst = Subst::of(ParamOwner::Fn(to_iter), substituted);
+  var params: List<Type> = new List();
+  var ret = types::error();
+
+  if let Some(sig) = lw.typed.sig(to_iter) {
+    const found = types::substitute_sig(sig, subst);
+
+    params = found.params;
+    ret = found.ret;
+  }
+
+  const target = mono::instance(lw, to_iter, subst);
+  const receiver_ty = lw.type_of(receiver)?;
+  var receiver_value = lw.expr(receiver)?;
+
+  if let TypeKind::Array { .. } = receiver_ty.kind {
+    if let Some(list_ty) = params.first() {
+      receiver_value = list_from_array(lw, list_ty, receiver_ty, receiver_value);
+    }
+  }
+
+  Ok(lw.call(Callee::Fn(target), List::from([receiver_value]), ret))
+}
+
+/// `start..end` used as a value, or reversed with `rev()`.
+pub fn range_iter(lw: Lowering, range: Expr, reverse: bool, ty: Type) -> Result<Operand, String> {
+  var start: Option<Expr> = None;
+  var end: Option<Expr> = None;
+  var inclusive = false;
+
+  if let ExprKind::Range { start: found_start, end: found_end, inclusive: found_inclusive } = range.kind {
+    start = Some(found_start);
+    end = Some(found_end);
+    inclusive = found_inclusive;
+  }
+
+  const start_expr = match start {
+    Some(found) => found,
+    None => return Err("`rev` of something other than a range"),
+  };
+  const end_expr = end.unwrap_or(start_expr);
+  const function = match lw.typed.ranges.get(range.id) {
+    Some(found) => found,
+    None => return Err("range without its function"),
+  };
+  const target = mono::instance(lw, function, Subst::empty());
+  const int_ty = lw.type_of(start_expr)?;
+  const start_value = lw.operand_as(start_expr, int_ty)?;
+  const end_value = lw.operand_as(end_expr, int_ty)?;
+
+  Ok(lw.call(Callee::Fn(target), List::from([start_value, end_value, bool_operand(inclusive), bool_operand(reverse)]), ty))
+}
+
+/// `a.total_compare(b)` on floats.
+pub fn total_compare(lw: Lowering, ty: Type, receiver: Expr, args: List<Expr>) -> Result<Operand, String> {
+  const float = lw.type_of(receiver)?;
+
+  if args.len() != 1 {
+    return Err("`total_compare` without one argument");
+  }
+
+  const lhs = lw.expr(receiver)?;
+  const rhs = lw.operand_as(args[0], float)?;
+  const is_f32 = match float.kind {
+    TypeKind::Float(FloatTy::F32) => true,
+    _ => false,
+  };
+  const function = if is_f32 { "sag_f32_total_compare" } else { "sag_f64_total_compare" };
+  const order = lw.new_value(types::int(IntTy::I32), Rvalue::Call { callee: runtime(function), args: List::from([lhs, rhs]) });
+
+  Ok(ordering(lw, ty, order))
+}
+
+/// An `Ordering` from the sign of `order` (an `i32`): `Less` (0), `Equal` (1) or `Greater` (2).
+fn ordering(lw: Lowering, ty: Type, order: Operand) -> Operand {
+  const zero = int_operand(0, false, IntTy::I32);
+  const dest = lw.temp(ty);
+  const less = binary_value(lw, bool_type(), BinaryOp::Lt, types::int(IntTy::I32), order, zero);
+  const equal = binary_value(lw, bool_type(), BinaryOp::Eq, types::int(IntTy::I32), order, zero);
+  const inner = Stmt::If { cond: equal, then_body: set_variant(dest, 1), else_body: set_variant(dest, 2) };
+
+  lw.emit(Stmt::If { cond: less, then_body: set_variant(dest, 0), else_body: List::from([inner]) });
+
+  Operand::Local(dest)
+}
+
+fn set_variant(dest: u32, index: u32) -> List<Stmt> {
+  List::from([Stmt::Assign { dest: dest, value: Rvalue::Variant { index: index, fields: new List() } }])
+}
+
+fn is_primitive(ty: Type) -> bool {
+  match ty.kind {
+    TypeKind::Int(_) | TypeKind::Bool | TypeKind::Char | TypeKind::String => true,
+    _ => false,
+  }
+}
+
+fn same_option(id: u32, found: Option<u32>) -> bool {
+  match found {
+    Some(other) => other == id,
+    None => false,
+  }
+}
+
+/// Whether `function` is a method of the prelude's `Eq`, `Ord` or `Hash`, called on an integer,
+/// `bool`, `char` or `String`.
+pub fn is_primitive_method(lw: Lowering, function: u32, receiver_ty: Type) -> bool {
+  if !is_primitive(receiver_ty) {
+    return false;
+  }
+
+  match lw.resolution.owner(function) {
+    Some(TypeItem::Interface(id)) => same_option(id, lw.typed.prelude.eq) || same_option(id, lw.typed.prelude.ord) || same_option(id, lw.typed.prelude.hash),
+    _ => false,
+  }
+}
+
+/// `equals`, `compare` or `hash` on an integer, `bool`, `char` or `String`.
+pub fn primitive_method(lw: Lowering, function: u32, ty: Type, receiver: Expr, args: List<Expr>) -> Result<Operand, String> {
+  const receiver_ty = lw.type_of(receiver)?;
+  const lhs = lw.expr(receiver)?;
+  const interface_id = match lw.resolution.owner(function) {
+    Some(TypeItem::Interface(id)) => Some(id),
+    _ => None,
+  };
+  const is_hash = match interface_id {
+    Some(id) => same_option(id, lw.typed.prelude.hash),
+    None => lw.typed.prelude.hash.is_none(),
+  };
+
+  if is_hash {
+    const u64_type = types::int(IntTy::U64);
+
+    if types::is_string(receiver_ty) {
+      return Ok(lw.new_value(u64_type, Rvalue::Call { callee: runtime("sag_string_hash"), args: List::from([lhs]) }));
+    }
+
+    const bits = lw.new_value(u64_type, Rvalue::Cast { from: receiver_ty, to: u64_type, operand: lhs });
+
+    return Ok(lw.new_value(u64_type, Rvalue::Call { callee: runtime("sag_hash_u64"), args: List::from([bits]) }));
+  }
+
+  if args.len() != 1 {
+    return Err("comparison without one argument");
+  }
+
+  const rhs = lw.operand_as(args[0], receiver_ty)?;
+  const is_eq = match interface_id {
+    Some(id) => same_option(id, lw.typed.prelude.eq),
+    None => lw.typed.prelude.eq.is_none(),
+  };
+
+  if is_eq {
+    return Ok(pkg::sir::strings::binary(lw, BinaryOp::Eq, receiver_ty, lhs, rhs));
+  }
+
+  const i32_type = types::int(IntTy::I32);
+  var order = unit_operand();
+
+  if types::is_string(receiver_ty) {
+    order = lw.new_value(i32_type, Rvalue::Call { callee: runtime("sag_string_cmp"), args: List::from([lhs, rhs]) });
+  } else {
+    // -1, 0 or 1 from two comparisons.
+    const less = binary_value(lw, bool_type(), BinaryOp::Lt, receiver_ty, lhs, rhs);
+    const greater = binary_value(lw, bool_type(), BinaryOp::Gt, receiver_ty, lhs, rhs);
+    const less_int = lw.new_value(i32_type, Rvalue::Cast { from: bool_type(), to: i32_type, operand: less });
+    const greater_int = lw.new_value(i32_type, Rvalue::Cast { from: bool_type(), to: i32_type, operand: greater });
+
+    order = binary_value(lw, i32_type, BinaryOp::Sub, i32_type, greater_int, less_int);
+  }
+
+  Ok(ordering(lw, ty, order))
+}
+
+/// `for var in iter` over a list, an iterator or a map; `false` for other iterables.
+pub fn for_collection(lw: Lowering, variable: u32, iter: Expr, body: Block) -> Result<bool, String> {
+  const iter_ty = lw.type_of(iter)?;
+
+  if let TypeKind::List(elem) = iter_ty.kind {
+    for_list(lw, variable, iter, iter_ty, elem, body)?;
+
+    return Ok(true);
+  }
+
+  var source = unit_operand();
+
+  match lw.typed.map_args(iter_ty) {
+    Some(map_args) => {
+      // The entries of a map.
+      const entry = lw.typed.entry_type(map_args[0], map_args[1]);
+      const iter_of_entries = lw.typed.iter_type(entry);
+      const map = lw.expr(iter)?;
+      const class_ref = match iter_ty.kind {
+        TypeKind::Class(found) => found,
+        _ => return Err("map that is not a class"),
+      };
+      const entries = match lw.resolution.type_function(lw.package, TypeItem::Class(class_ref.id), "entries") {
+        Some(found) => found,
+        None => return Err("`Map` without `entries`"),
+      };
+      const target = mono::instance(lw, entries, Subst::of(ParamOwner::Item(TypeItem::Class(class_ref.id)), class_ref.args));
+
+      source = lw.call(Callee::Fn(target), List::from([map]), iter_of_entries);
+    }
+    None => {
+      if lw.typed.iter_elem(iter_ty).is_none() {
+        return Ok(false);
+      }
+
+      source = lw.expr(iter)?;
+    }
+  }
+
+  for_iter(lw, variable, source, body)?;
+
+  Ok(true)
+}
+
+/// The loop over a list: the length is read at every step, and `var` owns a copy of each element.
+fn for_list(lw: Lowering, variable: u32, iter: Expr, list_ty: Type, elem: Type, body: Block) -> Result<(), String> {
+  const value = lw.expr(iter)?;
+  const list_local = lw.temp(list_ty);
+
+  // The list stays alive during the loop.
+  lw.store(list_local, value);
+  lw.pending.push(list_local);
+
+  const index = lw.temp(usize_type());
+
+  lw.emit(Stmt::Assign { dest: index, value: Rvalue::Use(usize_const(0)) });
+
+  const list = Operand::Local(list_local);
+  const mark = lw.open_loop(None);
+  const len = lw.new_value(usize_type(), Rvalue::ListLen(list));
+  const more = binary_value(lw, bool_type(), BinaryOp::Lt, usize_type(), Operand::Local(index), len);
+
+  lw.emit(Stmt::If { cond: more, then_body: new List(), else_body: List::from([Stmt::Break]) });
+
+  const place = elem_of(lw, list, list_ty, Operand::Local(index), elem)?;
+
+  lw.store(variable, Operand::Place(place));
+  lw.emit(Stmt::Assign { dest: index, value: Rvalue::Binary { op: BinaryOp::Add, ty: usize_type(), lhs: Operand::Local(index), rhs: usize_const(1) } });
+  loop_var_body(lw, variable, body)?;
+
+  const loop_body = lw.close_loop(mark);
+
+  lw.emit(Stmt::Loop(loop_body));
+
+  Ok(())
+}
+
+/// The loop over an iterator: `next` is called until it returns `None`.
+fn for_iter(lw: Lowering, variable: u32, source: Operand, body: Block) -> Result<(), String> {
+  const source_local = match source {
+    Operand::Local(local) => local,
+    _ => return Err("iterator without a local"),
+  };
+  const iter_ty = lw.local_type(source_local);
+  const class_ref = match iter_ty.kind {
+    TypeKind::Class(found) => found,
+    _ => return Err("iterator that is not a class"),
+  };
+  const elem = class_ref.args.first().unwrap_or(types::error());
+  const iter = lw.temp(iter_ty);
+
+  // The iterator stays alive during the loop.
+  lw.store(iter, source);
+  lw.pending.push(iter);
+
+  const next = match lw.resolution.type_function(lw.package, TypeItem::Class(class_ref.id), "next") {
+    Some(found) => found,
+    None => return Err("`Iter` without `next`"),
+  };
+  const target = mono::instance(lw, next, Subst::of(ParamOwner::Item(TypeItem::Class(class_ref.id)), class_ref.args));
+  const option_ty = types::option(elem);
+  const mark = lw.open_loop(None);
+  // Not pending: the value moves into `var`.
+  const option = lw.temp(option_ty);
+
+  lw.emit(Stmt::Assign { dest: option, value: Rvalue::Call { callee: Callee::Fn(target), args: List::from([Operand::Local(iter)]) } });
+
+  const place = local_place(option, option_ty);
+  const more = matching::tag_is(lw, place, 1)?;
+
+  lw.emit(Stmt::If { cond: more, then_body: new List(), else_body: List::from([Stmt::Break]) });
+
+  const inner = project(place, Projection::VariantField { variant: 1, field: 0 }, elem);
+
+  lw.emit(Stmt::Assign { dest: variable, value: Rvalue::Use(Operand::Place(inner)) });
+  loop_var_body(lw, variable, body)?;
+
+  const loop_body = lw.close_loop(mark);
+
+  lw.emit(Stmt::Loop(loop_body));
+
+  Ok(())
+}
+
+/// The body of a loop whose variable owns its value: released at the end of each iteration, and
+/// by `break` and `continue`.
+fn loop_var_body(lw: Lowering, variable: u32, body: Block) -> Result<(), String> {
+  const owned: List<u32> = if lw.managed(lw.local_type(variable)) { List::from([variable]) } else { new List() };
+
+  lw.scopes.push(owned);
+  lw.block_into(body, None)?;
+
+  for local in lw.scopes.pop().unwrap_or(new List()) {
+    lw.emit(Stmt::Release(local));
+  }
+
+  Ok(())
+}
+
+/// `for var in (a..b).rev()` or `(a..b).step_by(n)`: a counting loop, without an iterator; `false`
+/// for other iterables.
+pub fn for_range_method(lw: Lowering, variable: u32, iter: Expr, body: Block) -> Result<bool, String> {
+  var receiver: Option<Expr> = None;
+  var method_name = "";
+  var args: List<Expr> = new List();
+
+  if let ExprKind::MethodCall { receiver: found, method, args: found_args } = iter.kind {
+    receiver = Some(found);
+    method_name = method.name;
+    args = found_args;
+  }
+
+  const range = match receiver {
+    Some(found) => found,
+    None => return Ok(false),
+  };
+  var start_expr: Option<Expr> = None;
+  var end_expr: Option<Expr> = None;
+  var inclusive = false;
+
+  if let ExprKind::Range { start, end, inclusive: found_inclusive } = range.kind {
+    start_expr = Some(start);
+    end_expr = Some(end);
+    inclusive = found_inclusive;
+  }
+
+  const start_found = match start_expr {
+    Some(found) => found,
+    None => return Ok(false),
+  };
+  const end_found = end_expr.unwrap_or(start_found);
+  const reverse = match lw.typed.builtin_methods.get(iter.id) {
+    Some(BuiltinMethod::RangeRev) => true,
+    _ => false,
+  };
+  const step_by = method_name == "step_by" && lw.typed.method_calls.contains_key(iter.id);
+
+  if !reverse && !step_by {
+    return Ok(false);
+  }
+
+  const start_ty = lw.type_of(start_found)?;
+  const int_ty = match start_ty.kind {
+    TypeKind::Int(found) => found,
+    _ => return Err("range without an integer type"),
+  };
+  const start_value = lw.operand_as(start_found, types::int(int_ty))?;
+  const start = lw.new_value(types::int(int_ty), Rvalue::Use(start_value));
+  const end_value = lw.operand_as(end_found, types::int(int_ty))?;
+  const end = lw.new_value(types::int(int_ty), Rvalue::Use(end_value));
+  var step: Option<Operand> = None;
+
+  if step_by {
+    if let Some(step_expr) = args.first() {
+      const step_value = lw.operand_as(step_expr, usize_type())?;
+
+      step = Some(lw.new_value(usize_type(), Rvalue::Use(step_value)));
+    }
+  }
+
+  const mark = lw.open_loop(None);
+
+  lw.block_into(body, None)?;
+
+  const loop_body = lw.close_loop(mark);
+
+  lw.emit(Stmt::ForRange { variable: variable, ty: int_ty, start: start, end: end, inclusive: inclusive, reverse: reverse, step: step, body: loop_body });
+
+  Ok(true)
+}
+
+/// Whether a call expression is `List::from(...)`.
+pub fn is_list_from(lw: Lowering, callee: Expr) -> bool {
+  match lw.resolution.paths.get(callee.id) {
+    Some(Res::Builtin(name)) => name == "List::from",
+    _ => false,
+  }
+}

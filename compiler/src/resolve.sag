@@ -543,6 +543,38 @@ pub class Resolution {
     }
   }
 
+  /// Whether a function (or the type declaring it) belongs to the prelude module.
+  pub fn in_prelude(self, id: u32) -> bool {
+    const source = match self.prelude {
+      Some(prelude) => match self.module(prelude) {
+        Some(module) => module.source,
+        None => None,
+      },
+      None => None,
+    };
+
+    match source {
+      Some(found) => match self.functions.get(id as usize) {
+        Some(info) => info.module == found,
+        None => false,
+      },
+      None => false,
+    }
+  }
+
+  /// Whether a function (or the type declaring it) belongs to the prelude or the standard
+  /// library, which programs only contain the parts of that they use.
+  pub fn in_library(self, id: u32) -> bool {
+    if self.in_prelude(id) {
+      return true;
+    }
+
+    match self.functions.get(id as usize) {
+      Some(info) => self.is_std_source(info.module),
+      None => false,
+    }
+  }
+
   /// Whether the module at this index of `Package::modules` belongs to the standard library.
   pub fn is_std_source(self, source: usize) -> bool {
     for module in self.modules {

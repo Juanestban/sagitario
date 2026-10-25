@@ -561,6 +561,47 @@ pub fn substitute_sig(sig: FnSig, subst: Subst) -> FnSig {
   FnSig { receiver: sig.receiver, params: substitute_all(sig.params, subst), ret: substitute(sig.ret, subst) }
 }
 
+/// How deeply generic types nest in the type, to stop instantiations that never end.
+pub fn depth(ty: Type) -> usize {
+  match ty.kind {
+    TypeKind::Struct(named) => 1 + max_depth(named.args),
+    TypeKind::Enum(named) => 1 + max_depth(named.args),
+    TypeKind::Class(named) => 1 + max_depth(named.args),
+    TypeKind::Interface(named) => 1 + max_depth(named.args),
+    TypeKind::Array { elem, .. } => 1 + depth(elem),
+    TypeKind::List(elem) => 1 + depth(elem),
+    TypeKind::Option(elem) => 1 + depth(elem),
+    TypeKind::Ptr { pointee, .. } => 1 + depth(pointee),
+    TypeKind::Result { value, error } => {
+      const a = depth(value);
+      const b = depth(error);
+
+      1 + (if a > b { a } else { b })
+    }
+    TypeKind::Function { params, ret } => {
+      const a = max_depth(params);
+      const b = depth(ret);
+
+      1 + (if a > b { a } else { b })
+    }
+    _ => 0,
+  }
+}
+
+fn max_depth(list: List<Type>) -> usize {
+  var deepest = 0usize;
+
+  for ty in list {
+    const found = depth(ty);
+
+    if found > deepest {
+      deepest = found;
+    }
+  }
+
+  deepest
+}
+
 /// Whether the type mentions the `Self` of an interface.
 pub fn has_self(ty: Type) -> bool {
   match ty.kind {

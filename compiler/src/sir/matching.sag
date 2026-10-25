@@ -1,0 +1,533 @@
+//! Lowering of enum values, `match`, `?` and the methods of `Option` and `Result`. A `match`
+//! becomes a sequence of arms guarded by a `done` flag; each arm tests its pattern without
+//! binding anything, then binds, checks the guard and runs the body. The port of
+//! `sagitario_sir::matching`.
+
+use pkg::ast::{BinaryOp, Expr, MatchArm, Pattern, PatternKind, UnaryOp};
+use pkg::resolve::Res;
+use pkg::sir::{Lowering, Operand, PanicMessage, Place, Projection, Rvalue, Stmt, bool_operand, int_operand, is_valueless, project, tag_type};
+use pkg::sir::closures;
+use pkg::sir::interfaces;
+use pkg::sir::strings;
+use pkg::types::{IntTy, Type, TypeKind};
+use pkg::types;
+use pkg::types::typed::BuiltinMethod;
+
+/// A field of the variant `variant` of the enum value at `place`.
+fn variant_place(place: Place, variant: u32, field: usize, ty: Type) -> Place {
+  project(place, Projection::VariantField { variant: variant, field: field }, ty)
+}
+
+pub fn variant_fields(lw: Lowering, ty: Type, index: u32) -> List<Type> {
+  match lw.layouts.variants(ty) {
+    Some(variants) => variants.get(index as usize).unwrap_or(new List()),
+    None => new List(),
+  }
+}
+
+/// A new enum value; its managed fields are retained for it.
+pub fn variant(lw: Lowering, ty: Type, index: u32, fields: List<Operand>) -> Operand {
+  const field_types = variant_fields(lw, ty, index);
+  var position = 0usize;
+
+  while position < fields.len() && position < field_types.len() {
+    if lw.managed(field_types[position]) {
+      lw.emit(Stmt::Retain(fields[position]));
+    }
+
+    position += 1;
+  }
+
+  lw.new_value(ty, Rvalue::Variant { index: index, fields: fields })
+}
+
+/// The tag of an enum value.
+pub fn tag(lw: Lowering, value: Operand, ty: Type) -> Result<Operand, String> {
+  const place = lw.operand_place(value, ty)?;
+
+  Ok(Operand::Place(project(place, Projection::Tag, tag_type())))
+}
+
+/// Whether the enum value at `place` is the variant `index`.
+pub fn tag_is(lw: Lowering, place: Place, index: u32) -> Result<Operand, String> {
+  const found = tag(lw, Operand::Place(place), place.ty)?;
+  const expected = int_operand(index as u64, false, IntTy::U32);
+
+  Ok(lw.new_value(types::of(TypeKind::Bool), Rvalue::Binary { op: BinaryOp::Eq, ty: tag_type(), lhs: found, rhs: expected }))
+}
+
+/// Reads a place: managed values are borrowed, others copied.
+pub fn read(lw: Lowering, place: Place) -> Operand {
+  if lw.managed(place.ty) {
+    return Operand::Place(place);
+  }
+
+  lw.new_value(place.ty, Rvalue::Use(Operand::Place(place)))
+}
+
+pub fn value_place(lw: Lowering, value: Expr) -> Result<Place, String> {
+  const ty = lw.type_of(value)?;
+  const operand = lw.expr(value)?;
+
+  lw.operand_place(operand, ty)
+}
+
+fn is_option(ty: Type) -> bool {
+  match ty.kind {
+    TypeKind::Option(_) => true,
+    _ => false,
+  }
+}
+
+/// `Option` has `None` (0) and `Some` (1); `Result` has `Ok` (0) and `Err` (1). The index of the
+/// variant holding the value.
+fn success_variant(ty: Type) -> u32 {
+  if is_option(ty) { 1 } else { 0 }
+}
+
+pub fn builtin_method(lw: Lowering, method: BuiltinMethod, ty: Type, receiver: Expr, args: List<Expr>) -> Result<Operand, String> {
+  const receiver_ty = lw.type_of(receiver)?;
+  const place = value_place(lw, receiver)?;
+  const success = success_variant(receiver_ty);
+  const option = is_option(receiver_ty);
+
+  match method {
+    BuiltinMethod::IsSome | BuiltinMethod::IsOk => tag_is(lw, place, success),
+    BuiltinMethod::IsNone | BuiltinMethod::IsErr => tag_is(lw, place, 1 - success),
+    BuiltinMethod::Unwrap | BuiltinMethod::Expect | BuiltinMethod::UnwrapErr => {
+      var wanted = success;
+      var message = PanicMessage::Static("called `Result::unwrap_err()` on an `Ok` value");
+
+      match method {
+        BuiltinMethod::Expect => {
+          const text = match args.first() {
+            Some(found) => found,
+            None => return Err("`expect` without a message"),
+          };
+
+          message = PanicMessage::Value(lw.operand_as(text, types::string())?);
+        }
+        BuiltinMethod::Unwrap => {
+          message = PanicMessage::Static(if option { "called `Option::unwrap()` on a `None` value" } else { "called `Result::unwrap()` on an `Err` value" });
+        }
+        _ => {
+          wanted = 1;
+        }
+      }
+
+      const cond = tag_is(lw, place, wanted)?;
+
+      lw.emit(Stmt::If { cond: cond, then_body: new List(), else_body: List::from([Stmt::Panic(message)]) });
+
+      Ok(read(lw, variant_place(place, wanted, 0, ty)))
+    }
+    BuiltinMethod::UnwrapOr => {
+      const fallback_expr = match args.first() {
+        Some(found) => found,
+        None => return Err("`unwrap_or` without a default"),
+      };
+      const fallback = lw.operand_as(fallback_expr, ty)?;
+      const dest = lw.temp(ty);
+      const cond = tag_is(lw, place, success)?;
+      const field = variant_place(place, success, 0, ty);
+      const then_mark = lw.open_buffer();
+      const value = read(lw, field);
+
+      lw.store(dest, value);
+
+      const then_body = lw.close_buffer(then_mark);
+      const else_mark = lw.open_buffer();
+
+      lw.store(dest, fallback);
+
+      const else_body = lw.close_buffer(else_mark);
+
+      lw.emit(Stmt::If { cond: cond, then_body: then_body, else_body: else_body });
+
+      Ok(lw.owned_result(Some(dest)))
+    }
+    _ => Err("not a method of `Option` or `Result`"),
+  }
+}
+
+/// `value?`: returns `None` or `Err(e)` from the function, or evaluates to the inner value.
+pub fn try_expr(lw: Lowering, inner: Expr) -> Result<Operand, String> {
+  const inner_ty = lw.type_of(inner)?;
+  const place = value_place(lw, inner)?;
+  const success = success_variant(inner_ty);
+  const failure = 1 - success;
+  const value_ty = variant_fields(lw, inner_ty, success).first().unwrap_or(types::error());
+  const failed = tag_is(lw, place, failure)?;
+  const ret = lw.ret;
+  var error_field: Option<Place> = None;
+
+  if let TypeKind::Result { error, .. } = inner_ty.kind {
+    error_field = Some(variant_place(place, failure, 0, error));
+  }
+
+  const then_mark = lw.open_buffer();
+  // The returned value is owned by the caller, so it is not a pending temporary.
+  const result = lw.temp(ret);
+  const fields: List<Operand> = new List();
+
+  // The error becomes the function's error type (an interface, or `Error` from a `String`).
+  if let Some(field_place) = error_field {
+    const to = match ret.kind {
+      TypeKind::Result { error, .. } => error,
+      _ => field_place.ty,
+    };
+    const field = interfaces::convert_error(lw, Operand::Place(field_place), field_place.ty, to)?;
+
+    if lw.managed(to) {
+      lw.emit(Stmt::Retain(field));
+    }
+
+    fields.push(field);
+  }
+
+  lw.emit(Stmt::Assign { dest: result, value: Rvalue::Variant { index: failure, fields: fields } });
+  lw.release_for_exit(0, 0);
+  lw.emit(Stmt::Return(Some(Operand::Local(result))));
+
+  const then_body = lw.close_buffer(then_mark);
+
+  lw.emit(Stmt::If { cond: failed, then_body: then_body, else_body: new List() });
+
+  Ok(read(lw, variant_place(place, success, 0, value_ty)))
+}
+
+pub fn match_expr(lw: Lowering, ty: Type, scrutinee: Expr, arms: List<MatchArm>) -> Result<Operand, String> {
+  const place = value_place(lw, scrutinee)?;
+  const dest: Option<u32> = if is_valueless(ty) { None } else { Some(lw.temp(ty)) };
+  const done = lw.temp(types::of(TypeKind::Bool));
+
+  lw.emit(Stmt::Assign { dest: done, value: Rvalue::Use(bool_operand(false)) });
+
+  for match_arm in arms {
+    const pending = lw.new_value(types::of(TypeKind::Bool), Rvalue::Unary { op: UnaryOp::Not, ty: types::of(TypeKind::Bool), operand: Operand::Local(done) });
+    const mark = lw.open_buffer();
+
+    arm(lw, match_arm, place, dest, done)?;
+
+    const body = lw.close_buffer(mark);
+
+    lw.emit(Stmt::If { cond: pending, then_body: body, else_body: new List() });
+  }
+
+  Ok(lw.owned_result(dest))
+}
+
+fn arm(lw: Lowering, match_arm: MatchArm, place: Place, dest: Option<u32>, done: u32) -> Result<(), String> {
+  const matched = test(lw, match_arm.pattern, place)?;
+  const then_mark = lw.open_buffer();
+
+  lw.scopes.push(new List());
+  bind(lw, match_arm.pattern, place)?;
+
+  const bound: List<u32> = new List();
+
+  pattern_locals(lw, match_arm.pattern, bound);
+
+  for local in bound {
+    if lw.managed(lw.local_type(local)) {
+      if let Some(scope) = lw.scopes.last() {
+        if !scope.contains(local) {
+          scope.push(local);
+        }
+      }
+    }
+  }
+
+  match match_arm.guard {
+    Some(guard) => {
+      const guard_mark = lw.pending.len();
+      const cond = lw.expr(guard)?;
+      const body_mark = lw.open_buffer();
+
+      arm_body(lw, match_arm, dest, done)?;
+
+      const body = lw.close_buffer(body_mark);
+
+      lw.emit(Stmt::If { cond: cond, then_body: body, else_body: new List() });
+      lw.release_pending_from(guard_mark);
+    }
+    None => arm_body(lw, match_arm, dest, done)?,
+  }
+
+  const scope = lw.scopes.pop().unwrap_or(new List());
+  var index = scope.len();
+
+  while index > 0 {
+    index -= 1;
+    lw.emit(Stmt::Release(scope[index]));
+  }
+
+  const then_body = lw.close_buffer(then_mark);
+
+  lw.emit(Stmt::If { cond: matched, then_body: then_body, else_body: new List() });
+
+  Ok(())
+}
+
+fn arm_body(lw: Lowering, match_arm: MatchArm, dest: Option<u32>, done: u32) -> Result<(), String> {
+  lw.emit(lw.line(match_arm.body.span));
+
+  const mark = lw.pending.len();
+  const value = lw.expr(match_arm.body)?;
+  const body_ty = lw.type_of(match_arm.body)?;
+
+  if let Some(target) = dest {
+    if !is_valueless(body_ty) {
+      lw.store_from(target, value, body_ty);
+    }
+  }
+
+  lw.release_pending_from(mark);
+  lw.emit(Stmt::Assign { dest: done, value: Rvalue::Use(bool_operand(true)) });
+
+  Ok(())
+}
+
+fn pattern_variant(lw: Lowering, pattern: Pattern) -> Option<u32> {
+  match lw.resolution.paths.get(pattern.id) {
+    Some(Res::Variant(found)) => Some(found.index),
+    _ => None,
+  }
+}
+
+/// Patterns that match every value: `_` and bindings.
+fn irrefutable(lw: Lowering, pattern: Pattern) -> bool {
+  match pattern.kind {
+    PatternKind::Wildcard => true,
+    PatternKind::Ident(_) => pattern_variant(lw, pattern).is_none(),
+    _ => false,
+  }
+}
+
+/// A sub-pattern of a variant pattern, with the place it matches.
+struct SubPattern {
+  pub pattern: Pattern;
+  pub place: Place;
+}
+
+/// The places of the sub-patterns of a variant pattern, with their patterns.
+fn sub_patterns(lw: Lowering, pattern: Pattern, place: Place, variant_index: u32) -> Result<List<SubPattern>, String> {
+  const field_types = variant_fields(lw, place.ty, variant_index);
+  const result: List<SubPattern> = new List();
+
+  match pattern.kind {
+    PatternKind::Tuple { elems, .. } => {
+      for index in 0..elems.len() {
+        result.push(SubPattern { pattern: elems[index], place: variant_place(place, variant_index, index, field_types.get(index).unwrap_or(types::error())) });
+      }
+    }
+    PatternKind::Named { fields, .. } => {
+      var def: Option<pkg::types::VariantDef> = None;
+
+      if let Some(variants) = lw.typed.variants(place.ty) {
+        def = variants.get(variant_index as usize);
+      }
+
+      const found = match def {
+        Some(found) => found,
+        None => return Err("unknown variant in pattern"),
+      };
+
+      for field in fields {
+        var position: Option<usize> = None;
+
+        for index in 0..found.fields.len() {
+          if let Some(name) = found.fields[index].name {
+            if position.is_none() && name == field.name.name {
+              position = Some(index);
+            }
+          }
+        }
+
+        const index = match position {
+          Some(index) => index,
+          None => return Err("unknown field in pattern"),
+        };
+
+        result.push(SubPattern { pattern: field.pattern, place: variant_place(place, variant_index, index, field_types.get(index).unwrap_or(types::error())) });
+      }
+    }
+    _ => {}
+  }
+
+  Ok(result)
+}
+
+/// Whether the value at `place` matches `pattern`, without binding anything.
+fn test(lw: Lowering, pattern: Pattern, place: Place) -> Result<Operand, String> {
+  if irrefutable(lw, pattern) {
+    return Ok(bool_operand(true));
+  }
+
+  match pattern.kind {
+    PatternKind::Literal(value) => {
+      const literal = lw.expr(value)?;
+
+      Ok(strings::binary(lw, BinaryOp::Eq, place.ty, Operand::Place(place), literal))
+    }
+    PatternKind::Or(alternatives) => {
+      const result = lw.temp(types::of(TypeKind::Bool));
+
+      lw.emit(Stmt::Assign { dest: result, value: Rvalue::Use(bool_operand(false)) });
+
+      for alternative in alternatives {
+        const matched = test(lw, alternative, place)?;
+
+        lw.emit(Stmt::If { cond: matched, then_body: List::from([Stmt::Assign { dest: result, value: Rvalue::Use(bool_operand(true)) }]), else_body: new List() });
+      }
+
+      Ok(Operand::Local(result))
+    }
+    _ => {
+      const variant_index = match pattern_variant(lw, pattern) {
+        Some(found) => found,
+        None => return Err("pattern without a variant"),
+      };
+      const subs: List<SubPattern> = new List();
+
+      for sub in sub_patterns(lw, pattern, place, variant_index)? {
+        if !irrefutable(lw, sub.pattern) {
+          subs.push(sub);
+        }
+      }
+
+      const tag_matches = tag_is(lw, place, variant_index)?;
+
+      if subs.is_empty() {
+        return Ok(tag_matches);
+      }
+
+      const result = lw.temp(types::of(TypeKind::Bool));
+
+      lw.emit(Stmt::Assign { dest: result, value: Rvalue::Use(bool_operand(false)) });
+
+      const mark = lw.open_buffer();
+
+      test_all(lw, subs, 0, result)?;
+
+      const inner = lw.close_buffer(mark);
+
+      lw.emit(Stmt::If { cond: tag_matches, then_body: inner, else_body: new List() });
+
+      Ok(Operand::Local(result))
+    }
+  }
+}
+
+/// Sets `result` if every sub-pattern from `from` matches, testing each only after the previous
+/// ones.
+fn test_all(lw: Lowering, subs: List<SubPattern>, from: usize, result: u32) -> Result<(), String> {
+  if from >= subs.len() {
+    lw.emit(Stmt::Assign { dest: result, value: Rvalue::Use(bool_operand(true)) });
+
+    return Ok(());
+  }
+
+  const sub = subs[from];
+  const matched = test(lw, sub.pattern, sub.place)?;
+  const mark = lw.open_buffer();
+
+  test_all(lw, subs, from + 1, result)?;
+
+  const inner = lw.close_buffer(mark);
+
+  lw.emit(Stmt::If { cond: matched, then_body: inner, else_body: new List() });
+
+  Ok(())
+}
+
+/// Stores copies of the matched parts in the pattern's bindings; the pattern is known to match.
+fn bind(lw: Lowering, pattern: Pattern, place: Place) -> Result<(), String> {
+  match pattern.kind {
+    PatternKind::Ident(_) => {
+      if pattern_variant(lw, pattern).is_none() {
+        if let Some(local) = lw.resolution.bindings.get(pattern.id) {
+          lw.store(closures::local_id(lw, local), Operand::Place(place));
+        }
+      }
+
+      Ok(())
+    }
+    PatternKind::Tuple { .. } | PatternKind::Named { .. } => {
+      const variant_index = match pattern_variant(lw, pattern) {
+        Some(found) => found,
+        None => return Err("pattern without a variant"),
+      };
+
+      for sub in sub_patterns(lw, pattern, place, variant_index)? {
+        bind(lw, sub.pattern, sub.place)?;
+      }
+
+      Ok(())
+    }
+    PatternKind::Or(alternatives) => {
+      const bound: List<u32> = new List();
+
+      pattern_locals(lw, pattern, bound);
+
+      if bound.is_empty() { Ok(()) } else { bind_first_match(lw, alternatives, 0, place) }
+    }
+    _ => Ok(()),
+  }
+}
+
+/// Binds the first alternative of `|`, from `from`, that matches.
+fn bind_first_match(lw: Lowering, alternatives: List<Pattern>, from: usize, place: Place) -> Result<(), String> {
+  if from >= alternatives.len() {
+    return Err("empty `|` pattern");
+  }
+
+  const first = alternatives[from];
+
+  if from + 1 == alternatives.len() {
+    return bind(lw, first, place);
+  }
+
+  const matched = test(lw, first, place)?;
+  const then_mark = lw.open_buffer();
+
+  bind(lw, first, place)?;
+
+  const then_body = lw.close_buffer(then_mark);
+  const else_mark = lw.open_buffer();
+
+  bind_first_match(lw, alternatives, from + 1, place)?;
+
+  const else_body = lw.close_buffer(else_mark);
+
+  lw.emit(Stmt::If { cond: matched, then_body: then_body, else_body: else_body });
+
+  Ok(())
+}
+
+/// The locals a pattern binds.
+fn pattern_locals(lw: Lowering, pattern: Pattern, out: List<u32>) {
+  match pattern.kind {
+    PatternKind::Ident(_) => {
+      if let Some(local) = lw.resolution.bindings.get(pattern.id) {
+        out.push(closures::local_id(lw, local));
+      }
+    }
+    PatternKind::Tuple { elems, .. } => {
+      for elem in elems {
+        pattern_locals(lw, elem, out);
+      }
+    }
+    PatternKind::Or(alternatives) => {
+      for alternative in alternatives {
+        pattern_locals(lw, alternative, out);
+      }
+    }
+    PatternKind::Named { fields, .. } => {
+      for field in fields {
+        pattern_locals(lw, field.pattern, out);
+      }
+    }
+    _ => {}
+  }
+}

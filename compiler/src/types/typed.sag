@@ -358,6 +358,44 @@ pub class TypedModule {
     None
   }
 
+  /// The positions in `parents` leading from interface `from` to its ancestor `to`.
+  pub fn interface_path(self, from: u32, to: u32) -> Option<List<usize>> {
+    const queue_ids = List::from([from]);
+    const queue_paths: List<List<usize>> = List::from([new List<usize>()]);
+    var next = 0usize;
+
+    while next < queue_ids.len() {
+      const current = queue_ids[next];
+      const path = queue_paths[next];
+
+      next += 1;
+
+      if current == to {
+        return Some(path);
+      }
+
+      if queue_ids.len() > self.interfaces.len() * self.interfaces.len() + 1 {
+        break;
+      }
+
+      if let Some(def) = self.interface_def(current) {
+        for index in 0..def.parents.len() {
+          const extended: List<usize> = new List();
+
+          for step in path {
+            extended.push(step);
+          }
+
+          extended.push(index);
+          queue_ids.push(def.parents[index].id);
+          queue_paths.push(extended);
+        }
+      }
+    }
+
+    None
+  }
+
   /// An interface followed by its ancestors, breadth first, without repetitions.
   pub fn interface_ancestors(self, id: u32) -> List<u32> {
     const found = List::from([id]);
@@ -730,6 +768,19 @@ pub class TypedModule {
     }
 
     result
+  }
+
+  /// The parent of a class type, with its type arguments.
+  pub fn class_parent(self, class_ref: NamedRef) -> Option<NamedRef> {
+    self.class_ancestors(class_ref).get(1)
+  }
+
+  /// The type of a local binding of a function.
+  pub fn local_type(self, function: u32, local: u32) -> Option<Type> {
+    match self.local_types.get(function as usize) {
+      Some(locals) => locals.get(local as usize),
+      None => None,
+    }
   }
 
   /// The ancestor of `ty` (itself included) declaring the class `id`, with its arguments.
