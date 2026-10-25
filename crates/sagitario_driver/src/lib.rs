@@ -428,6 +428,7 @@ impl Loader {
 
       module.path = path;
       module.package = package;
+      module.location = Some(file.display().to_string());
       self.modules.push(module);
     }
 

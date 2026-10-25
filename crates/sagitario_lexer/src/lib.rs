@@ -165,6 +165,8 @@ pub enum Keyword {
   Impl,
   In,
   Interface,
+  /// Only in `if let` and `while let`.
+  Let,
   Loop,
   Match,
   New,
@@ -209,6 +211,7 @@ const KEYWORDS: &[(&str, Keyword)] = &[
   ("impl", Keyword::Impl),
   ("in", Keyword::In),
   ("interface", Keyword::Interface),
+  ("let", Keyword::Let),
   ("loop", Keyword::Loop),
   ("match", Keyword::Match),
   ("new", Keyword::New),

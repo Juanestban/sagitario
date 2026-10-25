@@ -68,6 +68,7 @@ pub fn generate(program: &Program) -> GeneratedC {
     externs: &program.externs,
     envs: &program.envs,
     list_elems: Vec::new(),
+    long_strings: std::cell::RefCell::new(Vec::new()),
   };
   let order = generator.aggregate_order(program);
   let threads = program.externs.iter().any(|decl| decl.runtime && (decl.symbol == "sag_thread_start" || decl.symbol.starts_with("sag_sync_")));
@@ -94,6 +95,9 @@ pub fn generate(program: &Program) -> GeneratedC {
   }
 
   generator.out.push('\n');
+
+  let long_strings_at = generator.out.len();
+
   generator.list_support();
   generator.class_support(&order);
   generator.interface_support(program);
@@ -104,6 +108,10 @@ pub fn generate(program: &Program) -> GeneratedC {
   }
 
   generator.entry_point(program);
+
+  let long_strings = generator.long_string_definitions();
+
+  generator.out.insert_str(long_strings_at, &long_strings);
 
   let ffi = generator.ffi_unit(program);
 
@@ -156,7 +164,13 @@ struct Generator<'a> {
   /// The element types of the lists the program uses; `sag_elem_release_N` releases an element
   /// of the managed one at index `N`.
   list_elems: Vec<Type>,
+  /// Strings longer than C compilers must accept as literals; `sag_text_N` holds the bytes of
+  /// the one at index `N`.
+  long_strings: std::cell::RefCell<Vec<String>>,
 }
+
+/// The longest string literal every C11 compiler accepts (5.2.4.1); MSVC accepts little more.
+const MAX_LITERAL: usize = 4095;
 
 impl<'a> Generator<'a> {
   /// Every aggregate type, each after the ones it contains, as C requires.
@@ -1091,8 +1105,42 @@ impl<'a> Generator<'a> {
       Operand::Local(target) => self.local(*target),
       Operand::Place(place) => self.place(place),
       Operand::Ref(place) => format!("(&{})", self.place(place)),
+      Operand::Const(Const::Str(value)) if value.len() > MAX_LITERAL => self.long_string(value),
       Operand::Const(value) => constant(value),
     }
+  }
+
+  /// A string too long for a literal, as a static array of its bytes.
+  fn long_string(&self, value: &str) -> String {
+    let mut strings = self.long_strings.borrow_mut();
+    let index = strings.iter().position(|known| known == value).unwrap_or_else(|| {
+      strings.push(value.to_string());
+      strings.len() - 1
+    });
+
+    format!("sag_string_from_static((const char *)sag_text_{index}, {})", value.len())
+  }
+
+  /// The arrays of `long_string`, which the functions using them follow.
+  fn long_string_definitions(&self) -> String {
+    let mut out = String::new();
+
+    for (index, value) in self.long_strings.borrow().iter().enumerate() {
+      out.push_str(&format!("static const unsigned char sag_text_{index}[] = {{"));
+
+      for (position, byte) in value.bytes().enumerate() {
+        out.push_str(if position % 24 == 0 { "\n  " } else { " " });
+        out.push_str(&format!("{byte},"));
+      }
+
+      out.push_str("\n};\n");
+    }
+
+    if !out.is_empty() {
+      out.push('\n');
+    }
+
+    out
   }
 
   fn operand_type(&self, operand: &Operand) -> Type {
@@ -1587,7 +1635,7 @@ fn callee_name(callee: &Callee) -> String {
     // Lowered to a call of `sag_cstring_new` with its outputs.
     Callee::Builtin(Builtin::CStringNew) => "sag_cstring_new".to_string(),
     // Lowered to a `MessageError` converted to `Error`, and to `Rvalue::ListFromArray`.
-    Callee::Builtin(Builtin::ErrorNew | Builtin::ListFrom) => String::new(),
+    Callee::Builtin(Builtin::ErrorNew | Builtin::ListFrom | Builtin::IncludeStr) => String::new(),
     Callee::Runtime { function, .. } => function.to_string(),
   }
 }

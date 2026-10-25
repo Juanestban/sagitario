@@ -100,6 +100,9 @@ pub struct Module {
   /// Index in `Package::packages` of the package the file belongs to: 0 for the one being
   /// compiled (and for the prelude and the standard library).
   pub package: usize,
+  /// The file's path on disk, for `include_str`; `None` for the prelude and the standard
+  /// library, which the compiler embeds.
+  pub location: Option<String>,
   pub uses: Vec<UseDecl>,
   pub items: Vec<Item>,
 }
@@ -135,6 +138,18 @@ pub enum Item {
   Class(ClassDecl),
   Interface(InterfaceDecl),
   Extern(ExternBlock),
+  Const(ConstDecl),
+}
+
+/// `const NAME: Type = value;` at module level: a constant computed by the compiler
+/// (docs/spec/03-memory.md#module-level-constants).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConstDecl {
+  pub visibility: Visibility,
+  pub name: Ident,
+  pub ty: TypeExpr,
+  pub value: Expr,
+  pub span: Span,
 }
 
 /// `interface Name<T> extends A, B { fields and methods }` (docs/spec/05-interfaces-generics.md).

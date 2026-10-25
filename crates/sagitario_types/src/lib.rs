@@ -7,6 +7,7 @@
 mod classes;
 mod closures;
 mod collections;
+mod consts;
 mod exhaustive;
 mod ffi;
 mod flow;
@@ -31,6 +32,7 @@ use sagitario_resolve::{
 };
 
 pub use collections::{ITER_METHODS, PreludeItems};
+pub use consts::ConstValue;
 pub use generic::Subst;
 use sagitario_span::Span;
 
@@ -390,6 +392,7 @@ pub fn builtin_sig(builtin: Builtin, target: &sagitario_ast::TargetInfo) -> FnSi
     Builtin::ErrorNew => FnSig { receiver: None, params: vec![Type::String], ret: Type::Error },
     // Generic over the array: checked by the type checker.
     Builtin::ListFrom => FnSig { receiver: None, params: Vec::new(), ret: Type::Error },
+    Builtin::IncludeStr => FnSig { receiver: None, params: vec![Type::String], ret: Type::String },
   }
 }
 
@@ -591,6 +594,10 @@ pub struct TypedModule {
   /// The classes of `std::sync`, which are `Send` when their type arguments are: they guard
   /// their state themselves (ADR-0046).
   pub sync_classes: Vec<ClassId>,
+  /// The type of each module-level constant, indexed by `ConstId`.
+  pub const_types: Vec<Type>,
+  /// The value of each module-level constant, or `None` if it has an error.
+  pub const_values: Vec<Option<ConstValue>>,
 }
 
 impl TypedModule {
@@ -823,6 +830,7 @@ pub fn check(package: &Package, resolution: &Resolution, diagnostics: &mut Diagn
     interface_types: Vec::new(),
     type_bounds: Vec::new(),
     lambda_stack: Vec::new(),
+    const_states: Vec::new(),
     inferring_ret: false,
     self_calls: Vec::new(),
     receiver_checks: Vec::new(),
@@ -839,6 +847,7 @@ pub fn check(package: &Package, resolution: &Resolution, diagnostics: &mut Diagn
   checker.check_recursive_types();
   checker.check_repr_c_structs();
   checker.extern_sigs();
+  checker.const_defs();
 
   let decls = resolution.fn_decls(package);
 
@@ -940,6 +949,8 @@ struct Checker<'a> {
   type_bounds: Vec<(Span, Type)>,
   /// The lambdas being checked, innermost last.
   lambda_stack: Vec<NodeId>,
+  /// How far the computation of each module-level constant got.
+  const_states: Vec<consts::ConstState>,
   /// Whether the result of the lambda being checked comes from its body: the first `return`
   /// sets it.
   inferring_ret: bool,
@@ -1651,6 +1662,7 @@ impl Checker<'_> {
           ExprKind::Path(path) => self.fn_value(expr, path, *id, expected),
           _ => Type::Error,
         },
+        Some(Res::Const(id)) => self.typed.const_types.get(id.0 as usize).cloned().unwrap_or(Type::Error),
         Some(Res::Extern(_) | Res::Builtin(_)) => {
           self.diagnostics.push(
             Diagnostic::error(codes::WRONG_CALL_FORM, expr.span, "C functions and prelude functions cannot be used as values")
@@ -2124,6 +2136,15 @@ impl Checker<'_> {
         Some(FnSig { receiver: None, params: vec![Type::String], ret })
       }
       (ExprKind::Path(_), Some(Res::Builtin(Builtin::ListFrom))) => return self.list_from(expr, callee, args, expected),
+      (ExprKind::Path(_), Some(Res::Builtin(Builtin::IncludeStr))) => {
+        self.diagnostics.push(
+          Diagnostic::error(codes::INVALID_INCLUDE, expr.span, "`include_str` can only give the value of a module-level constant")
+            .with_help("declare `const TEXT: String = include_str(\"file\");` and use `TEXT`"),
+        );
+        self.unchecked_args(args);
+
+        return Type::String;
+      }
       (ExprKind::Path(_), Some(Res::Builtin(builtin))) => {
         if builtin == Builtin::StringFromC {
           self.require_unsafe(callee.span, "reading a C string");

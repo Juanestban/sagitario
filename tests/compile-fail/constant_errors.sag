@@ -1,0 +1,19 @@
+const TOO_BIG: u8 = 256; //~ ERROR E0334
+const OVERFLOW: i32 = 2147483647 + 1; //~ ERROR E0334
+const BY_ZERO: i32 = 1 / 0; //~ ERROR E0334
+const NOT_FINITE: f64 = 1.0 / 0.0; //~ ERROR E0334
+const SELF_NEEDED: i32 = SELF_NEEDED + 1; //~ ERROR E0334
+const LIST: List<i32> = List::from([1]); //~ ERROR E0334
+const CALL: i32 = compute(); //~ ERROR E0334
+const WRONG: i32 = "text"; //~ ERROR E0300
+const MISSING: String = include_str("does-not-exist.txt"); //~ ERROR E0335
+const NOT_LITERAL: String = include_str(NAME); //~ ERROR E0335
+const NAME: String = "x";
+
+fn compute() -> i32 {
+  1
+}
+
+pub fn main() {
+  const _text = include_str("constant_errors.sag"); //~ ERROR E0335
+}

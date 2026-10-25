@@ -43,7 +43,7 @@ use sagitario_resolve::{Builtin, ClassId, ExternId, FnId, ParamOwner, Res, Resol
 
 use crate::interfaces::Registry;
 use sagitario_span::{SourceMap, Span};
-use sagitario_types::{BuiltinMethod, ClassRef, EnumRef, FloatTy, IntTy, Receiver, StructRef, Subst, Type, TypedModule};
+use sagitario_types::{BuiltinMethod, ClassRef, ConstValue, EnumRef, FloatTy, IntTy, Receiver, StructRef, Subst, Type, TypedModule};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
@@ -1203,6 +1203,23 @@ impl FnLowering<'_> {
     }
   }
 
+  /// The value of a module-level constant, which the type checker computed.
+  fn const_operand(&self, id: sagitario_resolve::ConstId, ty: &Type) -> LResult<Operand> {
+    let Some(value) = self.typed.const_values.get(id.0 as usize).cloned().flatten() else {
+      return error(format!("constant {} without a value", id.0));
+    };
+    let constant = match (value, ty) {
+      (ConstValue::Bool(value), _) => Const::Bool(value),
+      (ConstValue::Char(value), _) => Const::Char(value),
+      (ConstValue::Str(value), _) => Const::Str(value),
+      (ConstValue::Int(value), Type::Int(int)) => Const::Int { value: value.unsigned_abs(), negative: value < 0, ty: *int },
+      (ConstValue::Float(value), Type::Float(float)) => Const::Float(format!("{value:?}"), *float),
+      (value, ty) => return error(format!("constant {value:?} typed as {ty}")),
+    };
+
+    Ok(Operand::Const(constant))
+  }
+
   /// Lowers an expression to an operand. Values of managed types that are newly created are
   /// pending temporaries; reading a binding, field or element of a managed type borrows it.
   fn expr(&mut self, expr: &Expr) -> LResult<Operand> {
@@ -1226,6 +1243,7 @@ impl FnLowering<'_> {
         Some(Res::Local(id)) => Ok(Operand::Local(self.local_id(*id))),
         Some(Res::Fn(id)) => Ok(self.fn_value(expr, *id, &ty)),
         Some(Res::Variant(variant)) => Ok(self.variant(ty, variant.index, Vec::new())),
+        Some(Res::Const(id)) => self.const_operand(*id, &ty),
         other => error(format!("unsupported path operand {other:?}")),
       },
       ExprKind::Try(inner) => self.try_expr(inner),

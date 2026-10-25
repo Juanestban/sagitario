@@ -502,6 +502,10 @@ fn item_paths(module: &Module) -> Vec<&Path> {
           }
         }
       }
+      Item::Const(decl) => {
+        type_paths(&decl.ty, &mut paths);
+        expr_paths(&decl.value, &mut paths);
+      }
     }
   }
 

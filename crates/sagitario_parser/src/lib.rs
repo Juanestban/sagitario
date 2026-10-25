@@ -3,10 +3,10 @@
 //! diagnostics and the parser recovers at item and statement boundaries.
 
 use sagitario_ast::{
-  ArrayLen, BinaryOp, Block, ClassDecl, EnumDecl, Export, Expr, ExprKind, ExternBlock, ExternFn, FieldDecl, FieldInit, FieldPattern, FnDecl,
-  GenericParam, Ident, InterfaceDecl, Item, LambdaParam, LetStmt, MatchArm, Module, NodeId, Param, Path, Pattern, PatternKind, SelfParam, Stmt,
-  StructDecl, TemplatePart, TypeArgs, TypeExpr, TypeExprKind, UnaryOp, UseDecl, UseTree, UseTreeKind, VariantDecl, VariantFieldDecl, VariantFields,
-  Visibility,
+  ArrayLen, BinaryOp, Block, ClassDecl, ConstDecl, EnumDecl, Export, Expr, ExprKind, ExternBlock, ExternFn, FieldDecl, FieldInit, FieldPattern,
+  FnDecl, GenericParam, Ident, InterfaceDecl, Item, LambdaParam, LetStmt, MatchArm, Module, NodeId, Param, Path, Pattern, PatternKind, SelfParam,
+  Stmt, StructDecl, TemplatePart, TypeArgs, TypeExpr, TypeExprKind, UnaryOp, UseDecl, UseTree, UseTreeKind, VariantDecl, VariantFieldDecl,
+  VariantFields, Visibility,
 };
 use sagitario_diagnostics::{Diagnostic, Diagnostics, codes};
 use sagitario_lexer::{self as lexer, Keyword, Token, TokenKind};
@@ -47,6 +47,7 @@ enum AttributeTarget {
   Interface,
   ExternBlock,
   Member,
+  Const,
 }
 
 /// Marker for a syntax error that has already been reported.
@@ -251,7 +252,7 @@ impl<'a> Parser<'a> {
       }
     }
 
-    Module { file, path: Vec::new(), package: 0, uses, items }
+    Module { file, path: Vec::new(), package: 0, location: None, uses, items }
   }
 
   /// `use tree;` (docs/spec/09-modules.md#imports).
@@ -386,13 +387,44 @@ impl<'a> Parser<'a> {
 
         Ok(Some(Item::Interface(decl)))
       }
-      TokenKind::Keyword(keyword @ Keyword::Const) => {
-        let span = self.span();
+      TokenKind::Keyword(Keyword::Const) => {
+        let decl = self.const_decl(visibility, start)?;
 
-        Err(self.not_implemented(span, &format!("`{}` items", keyword.as_str())))
+        self.apply_attributes(attributes, AttributeTarget::Const, None, None);
+
+        Ok(Some(Item::Const(decl)))
       }
       _ => Err(self.unexpected("an item")),
     }
+  }
+
+  /// `const NAME: Type = value;` at module level; the type is required.
+  fn const_decl(&mut self, visibility: Visibility, start: Span) -> PResult<ConstDecl> {
+    self.expect(&TokenKind::Keyword(Keyword::Const))?;
+
+    let name = self.ident("a constant name")?;
+
+    if !self.at(&TokenKind::Colon) {
+      let span = self.span();
+
+      self.diagnostics.push(
+        Diagnostic::error(codes::UNEXPECTED_TOKEN, span, "a module-level `const` needs a type")
+          .with_help(format!("write it after the name: `const {}: i32 = ...;`", name.name)),
+      );
+
+      return Err(ParseError);
+    }
+
+    self.advance();
+
+    let ty = self.type_expr()?;
+
+    self.expect(&TokenKind::Assign)?;
+
+    let value = self.expr()?;
+    let end = self.expect(&TokenKind::Semi)?.span;
+
+    Ok(ConstDecl { visibility, name, ty, value, span: start.to(end) })
   }
 
   /// `@name` or `@name(arg, ...)` before an item; the arguments are string literals or names
@@ -1851,6 +1883,10 @@ impl<'a> Parser<'a> {
       TokenKind::Keyword(Keyword::While) => {
         self.advance();
 
+        if self.eat(&TokenKind::Keyword(Keyword::Let)) {
+          return self.while_let(span);
+        }
+
         let cond = self.expr_with_struct_literals(false)?;
         let body = self.block()?;
         let span = span.to(body.span);
@@ -1996,27 +2032,91 @@ impl<'a> Parser<'a> {
 
   fn if_expr(&mut self) -> PResult<Expr> {
     let start = self.expect(&TokenKind::Keyword(Keyword::If))?.span;
+
+    if self.eat(&TokenKind::Keyword(Keyword::Let)) {
+      return self.if_let(start);
+    }
+
     let cond = self.expr_with_struct_literals(false)?;
     let then_block = self.block()?;
     let mut span = start.to(then_block.span);
-    let else_branch = if self.eat(&TokenKind::Keyword(Keyword::Else)) {
-      let branch = if self.at(&TokenKind::Keyword(Keyword::If)) {
-        self.if_expr()?
-      } else {
-        let block = self.block()?;
-        let span = block.span;
+    let else_branch = self.else_branch()?;
 
-        self.expr_node(ExprKind::Block(block), span)
-      };
-
+    if let Some(branch) = &else_branch {
       span = span.to(branch.span);
-
-      Some(Box::new(branch))
-    } else {
-      None
-    };
+    }
 
     Ok(self.expr_node(ExprKind::If { cond: Box::new(cond), then_block, else_branch }, span))
+  }
+
+  /// `else { ... }` or `else if ...` after the block of an `if`.
+  fn else_branch(&mut self) -> PResult<Option<Box<Expr>>> {
+    if !self.eat(&TokenKind::Keyword(Keyword::Else)) {
+      return Ok(None);
+    }
+
+    let branch = if self.at(&TokenKind::Keyword(Keyword::If)) {
+      self.if_expr()?
+    } else {
+      let block = self.block()?;
+      let span = block.span;
+
+      self.expr_node(ExprKind::Block(block), span)
+    };
+
+    Ok(Some(Box::new(branch)))
+  }
+
+  /// `pattern = value` after `if let` or `while let`.
+  fn let_binding(&mut self) -> PResult<(Pattern, Expr)> {
+    let pattern = self.pattern()?;
+
+    self.expect(&TokenKind::Assign)?;
+
+    Ok((pattern, self.expr_with_struct_literals(false)?))
+  }
+
+  fn wildcard(&mut self, span: Span) -> Pattern {
+    Pattern { id: self.next_id(), kind: PatternKind::Wildcard, span }
+  }
+
+  /// `if let pattern = value { ... } else ...` is `match value { pattern => { ... }, _ => else }`
+  /// (docs/spec/06-control-flow.md#if-let-and-while-let).
+  fn if_let(&mut self, start: Span) -> PResult<Expr> {
+    let (pattern, scrutinee) = self.let_binding()?;
+    let then_block = self.block()?;
+    let then_span = then_block.span;
+    let else_branch = match self.else_branch()? {
+      Some(branch) => *branch,
+      None => self.expr_node(ExprKind::Unit, then_span),
+    };
+    let span = start.to(else_branch.span).to(then_span);
+    let wildcard = self.wildcard(pattern.span);
+    let body = self.expr_node(ExprKind::Block(then_block), then_span);
+    let arms = vec![
+      MatchArm { span: pattern.span.to(then_span), pattern, guard: None, body },
+      MatchArm { span: else_branch.span, pattern: wildcard, guard: None, body: else_branch },
+    ];
+
+    Ok(self.expr_node(ExprKind::Match { scrutinee: Box::new(scrutinee), arms }, span))
+  }
+
+  /// `while let pattern = value { ... }` is `loop { match value { pattern => { ... }, _ => break } }`.
+  fn while_let(&mut self, start: Span) -> PResult<Expr> {
+    let (pattern, scrutinee) = self.let_binding()?;
+    let body = self.block()?;
+    let span = start.to(body.span);
+    let wildcard = self.wildcard(pattern.span);
+    let stop = self.expr_node(ExprKind::Break { value: None }, pattern.span);
+    let body_span = body.span;
+    let then = self.expr_node(ExprKind::Block(body), body_span);
+    let arms = vec![
+      MatchArm { span: pattern.span.to(body_span), pattern, guard: None, body: then },
+      MatchArm { span: stop.span, pattern: wildcard, guard: None, body: stop },
+    ];
+    let matching = self.expr_node(ExprKind::Match { scrutinee: Box::new(scrutinee), arms }, span);
+
+    Ok(self.expr_node(ExprKind::Loop { body: Block { stmts: vec![Stmt::Expr(matching)], tail: None, span } }, span))
   }
 
   /// `Name { a: 1, b }` after its path.
@@ -2403,6 +2503,24 @@ mod tests {
     assert!(matches!(&stmts[3], Stmt::Assign { op: Some(BinaryOp::Add), .. }));
     assert!(matches!(&stmts[4], Stmt::Expr(Expr { kind: ExprKind::If { else_branch: Some(_), .. }, .. })));
     assert!(matches!(&stmts[6], Stmt::Expr(Expr { kind: ExprKind::For { .. }, .. })));
+  }
+
+  #[test]
+  fn if_let_and_while_let_become_matches() {
+    let (module, errors) = parse("fn f() { if let Some(x) = a { b(x); } else { c(); } while let Some(y) = d() { e(y); } }");
+
+    assert!(errors.is_empty(), "{errors:?}");
+
+    let stmts = &only_fn(&module).body.stmts;
+    let Stmt::Expr(Expr { kind: ExprKind::Match { arms, .. }, .. }) = &stmts[0] else { panic!("expected a match: {:?}", stmts[0]) };
+
+    assert!(matches!(arms[1].pattern.kind, PatternKind::Wildcard));
+
+    // The loop ends the block, so it is its tail.
+    let Some(ExprKind::Loop { body }) = only_fn(&module).body.tail.as_deref().map(|tail| &tail.kind) else { panic!("expected a loop") };
+    let Some(Stmt::Expr(Expr { kind: ExprKind::Match { arms, .. }, .. })) = body.stmts.first() else { panic!("expected a match") };
+
+    assert!(matches!(arms[1].body.kind, ExprKind::Break { value: None }));
   }
 
   #[test]

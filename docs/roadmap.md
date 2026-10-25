@@ -128,9 +128,29 @@ Increments:
 `Atomic` tracks progress, and a producer feeds consumers through a `Channel`; it passes with
 ThreadSanitizer on Linux and macOS, and with the leak check.
 
+## F5: Self-hosting (post-MVP)
+
+Rewrite the compiler in Sagitario until it compiles itself
+([ADR-0049](adr/0049-self-hosting-plan-and-language-prerequisites.md)). Each pass is checked
+against the Rust compiler's on every program under `tests/`.
+
+Increments:
+
+1. Language prerequisites: module-level constants, `include_str`, `if let` and `while let`.
+2. Dumps for differential tests (`--dump=...`), and `span`, `diagnostics` and `lexer`.
+3. `parser`.
+4. `resolve`.
+5. `types`.
+6. `sir` and `codegen_c`.
+7. The driver and the CLI: `sagc` passes every suite.
+8. The bootstrap to the fixed point, its CI job and the acceptance.
+
+**Acceptance:** `sagc` built by the Rust compiler (stage 1) passes every suite on Windows, Linux
+and macOS with clang, gcc and MinGW, and `sagc` built by stage 1 (stage 2) generates the same C
+for the compiler as stage 1.
+
 ## Later phases (post-MVP)
 
-- **F5 Self-hosting:** rewrite the compiler in Sagitario until it compiles itself.
 - **F6 `async`/`await`:** stackless tasks (`Task<T>`) on a single-threaded executor per thread,
   as designed in [ADR-0048](adr/0048-async-await.md).
 
@@ -141,8 +161,7 @@ channels, `try_receive` and timeouts (ADR-0047), `protected` visibility, `weak` 
 overloading and derived `Eq`, binding generation, internationalized diagnostics, automatic
 error conversion with `From<T>` (and implementing one generic interface several times),
 `Error::source()` and backtraces, a `Display` interface, slices, open ranges, general tuples,
-raw strings, `@test` / `@deprecated`, static fields and mutable globals, `sag doc`, `if let` /
-`while let`, inference of `None`/`Ok`/`Err` from later uses, re-exports (`pub use`), glob
+raw strings, `@test` / `@deprecated`, static fields and mutable globals, `sag doc`, inference of `None`/`Ok`/`Err` from later uses, re-exports (`pub use`), glob
 imports, importing enum variants or a type's functions, `use` inside blocks.
 Undecided points needed during the MVP are tracked as open questions in the
 [spec index](spec/README.md#open-questions).
