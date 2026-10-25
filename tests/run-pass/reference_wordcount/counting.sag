@@ -1,0 +1,27 @@
+/// The number of times each word of `text` appears; words are separated by single spaces.
+pub fn count_words(text: String) -> Map<String, i64> {
+  const counts = new Map<String, i64>();
+
+  for word in text.trim().split(" ") {
+    if !word.is_empty() {
+      counts.insert(word, counts.get(word).unwrap_or(0) + 1);
+    }
+  }
+
+  counts
+}
+
+/// Adds the counts of `from` to those of `into`.
+pub fn merge(into: Map<String, i64>, from: Map<String, i64>) {
+  for entry in from {
+    into.insert(entry.key, into.get(entry.key).unwrap_or(0) + entry.value);
+  }
+}
+
+/// The words from the most frequent to the least; equally frequent words in alphabetical order.
+pub fn ranked(counts: Map<String, i64>) -> List<Entry<String, i64>> {
+  const entries: List<Entry<String, i64>> = counts.entries().collect();
+
+  entries.sort_by((a, b) => if a.value != b.value { b.value.compare(a.value) } else { a.key.compare(b.key) });
+  entries
+}

@@ -119,7 +119,10 @@ Increments:
    ([ADR-0046](adr/0046-mutex-and-atomics.md)).
 3. `Channel<T>`, `thread::sleep` and `thread::available_parallelism`
    ([ADR-0047](adr/0047-channels-and-thread-utilities.md)).
-4. A decision record for `async`/`await`, and the acceptance program.
+4. The design of `async`/`await`, for F6, and the acceptance program
+   ([ADR-0048](adr/0048-async-await.md)).
+
+**Status:** done. The acceptance program is `tests/run-pass/reference_wordcount/`.
 
 **Acceptance:** a parallel word count: threads count files and return `Map`s through `join`, an
 `Atomic` tracks progress, and a producer feeds consumers through a `Channel`; it passes with
@@ -127,8 +130,9 @@ ThreadSanitizer on Linux and macOS, and with the leak check.
 
 ## Later phases (post-MVP)
 
-- **`async`/`await`:** after F4, as its decision record settles.
 - **F5 Self-hosting:** rewrite the compiler in Sagitario until it compiles itself.
+- **F6 `async`/`await`:** stackless tasks (`Task<T>`) on a single-threaded executor per thread,
+  as designed in [ADR-0048](adr/0048-async-await.md).
 
 ## Deferred decisions
 

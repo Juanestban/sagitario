@@ -36,7 +36,7 @@ refers to the type being declared (see [types](02-types.md#self)).
 
 These must be rejected as identifiers so they can be introduced later without breaking code:
 
-- Keywords: `async`, `await`.
+- Keywords: `async`, `await`, for phase F6 ([ADR-0048](../adr/0048-async-await.md)).
 - Names of the concurrency model, which programs cannot declare: `Send` (the prelude's
   interface, F4) and `Sync` (reserved). `spawn`, reserved until F4, is now
   `std::thread::spawn` and an ordinary name ([ADR-0045](../adr/0045-threads-and-send.md)).

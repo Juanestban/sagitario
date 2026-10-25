@@ -73,6 +73,8 @@ fn main() { ... }
   without sanitizers (MinGW) build without them. `SAG_TEST_SANITIZE=0` turns them off for faster
   local runs ([ADR-0036](adr/0036-sanitizers-and-the-reference-zoo.md)).
 - `tests/run-pass/reference_zoo/` is the reference program of the F2 acceptance criteria.
+- `tests/run-pass/reference_wordcount/` is the reference program of the F4 acceptance
+  criteria, run with ThreadSanitizer ([ADR-0048](adr/0048-async-await.md)).
 - `tests/acceptance/f3/` is the F3 acceptance program: the `wc` and `textcount` packages and a C
   program using the library, run by the Nova test `f3_acceptance`
   ([ADR-0044](adr/0044-c-toolchains.md)).
