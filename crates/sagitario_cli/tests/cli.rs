@@ -48,3 +48,27 @@ fn non_sag_input_exits_with_1() {
   assert_eq!(output.status.code(), Some(1));
   assert!(String::from_utf8_lossy(&output.stderr).contains("is not a `.sag` file"));
 }
+
+#[test]
+fn targets_lists_the_cross_compilation_targets() {
+  let output = sag(&["targets"]).unwrap();
+
+  assert!(output.status.success());
+
+  let text = String::from_utf8_lossy(&output.stdout);
+
+  for target in ["aarch64-linux-android", "armv7-linux-androideabi", "x86_64-linux-android", "aarch64-apple-ios", "aarch64-apple-ios-sim"] {
+    assert!(text.contains(target), "{text}");
+  }
+}
+
+#[test]
+fn cl_needs_a_developer_command_prompt() -> io::Result<()> {
+  let output =
+    Command::new(env!("CARGO_BIN_EXE_sag")).args(["run", "--cc", "cl", "../../tests/run-pass/control_flow.sag"]).env_remove("INCLUDE").output()?;
+
+  assert_eq!(output.status.code(), Some(1));
+  assert!(String::from_utf8_lossy(&output.stderr).contains("Developer Command Prompt"), "{}", String::from_utf8_lossy(&output.stderr));
+
+  Ok(())
+}

@@ -37,8 +37,8 @@ crates/
   sagitario_codegen_c/    SIR → C11 text
   sagitario_driver/       orchestrates the pipeline, embeds the runtime, invokes the C compiler
   sagitario_cli/          the `sag` binary
-runtime/            minimal C runtime (ARC, panic, String, allocation, basic I/O)
-std/                standard library written in Sagitario
+  sagitario_nova/         the `nova` binary: package manager, `Nova.toml` parser (docs/nova.md)
+runtime/            minimal C runtime (ARC, panic, String, allocation, I/O and the OS calls of std)
 tests/              end-to-end suites (see testing.md)
 ```
 
@@ -50,6 +50,8 @@ Dependencies flow strictly forward through the pipeline:
 span ◀─ diagnostics ◀─ lexer ◀─ parser ─▶ ast
                                   ▲
 resolve ◀─ types ◀─ sir ◀─ codegen_c ◀─ driver ◀─ cli
+                                          ▲
+                                          └──── nova
 ```
 
 - A crate never depends on a later phase.
@@ -149,6 +151,13 @@ could be added.
   `Callee::Closure` calls a value, casting the pointer to the exact signature and passing the
   environment first. Named functions used as values (`Rvalue::FnValue`) are called through
   wrappers `sag_wrap_N` that ignore the environment.
+- A program can span several packages (`Package::packages`): the one being compiled, then its
+  dependencies, each with its own module tree (`Module::package`, `Resolution::package_roots`).
+  The driver loads each dependency's root module and the modules its paths reach
+  (`sagitario_resolve::module_references` tells which package each one belongs to). `pkg` names
+  the root of the current module's package, and a dependency's name is a further path root.
+  Everything is then checked and lowered as one program. Nova, not the compiler, reads the
+  manifests and checks the graph (names, libraries, no cycles).
 - The prelude part written in Sagitario (`crates/sagitario_driver/src/prelude.sag`, followed by
   one range function per integer type that the driver generates) is embedded by the driver as a
   module outside the package tree; the resolver looks names up there after a module's own items
@@ -157,6 +166,25 @@ could be added.
   private functions behind methods such as `List::sort` or `String::split`
   (`BuiltinMethod::Prelude`, called with the receiver first). Prelude functions are templates,
   lowered only when used.
+- The standard library modules written in Sagitario (`crates/sagitario_driver/src/std/*.sag`)
+  are embedded by the driver too. It loads one when a loaded module names it
+  (`sagitario_resolve::std_references`) and lists them in `Package::std`; the resolver makes
+  them children of a `std` module outside the package tree (`Resolution::std_root`), next to
+  `std::ffi`, which the compiler implements. `std` has its own file (`std/std.sag`, loaded with
+  the first module of `std`) for helpers that only its modules see. Their functions are templates like the prelude's
+  (`Resolution::in_library`). Their `extern` blocks declare runtime functions
+  (`Resolution::is_runtime_extern`: names starting with `sag_`, which may take and return
+  `String`); the C backend calls those directly, without an FFI wrapper. `std::process::exit`
+  is `Builtin::Exit`, typed `Never` like `panic`.
+- The runtime's operating system calls are standard C where possible. `std::fs` needs POSIX on
+  Linux and macOS (`_POSIX_C_SOURCE`) and the UTF-16 functions of kernel32 on Windows, which
+  the runtime declares itself instead of including `<windows.h>`; Windows error codes are
+  translated to `errno` values so that error kinds and messages match on every system.
+- `Command` runs programs with `fork` and `execve` on POSIX systems (a close-on-exec pipe
+  reports a failed `execve`, and `poll` reads stdout and stderr while writing stdin) and with
+  `CreateProcessW` on Windows, where a runtime thread reads each captured pipe. Those threads
+  only copy bytes and never touch ARC objects. Lists cross into the runtime as strings joined
+  by NUL characters.
 - A `List<T>` is a `sag_object *` to a `sag_list`: the elements in a buffer with one spare slot,
   and a function releasing one element (`sag_elem_release_N`) when they are managed. An element
   is a place behind the list (`Projection::ListElem`, bounds-checked by `sag_list_at`); like a
@@ -213,6 +241,22 @@ Anything expressible in Sagitario belongs in `std/` instead.
   LLVM clang targeting `x86_64-pc-windows-msvc`. MinGW clang (`*-windows-gnu`, detected with
   `-dumpmachine`) is tolerated with a warning and without sanitizers. When running sanitized
   programs, the driver adds the sanitizer runtime directory to the child `PATH`.
+- MSVC `cl` ([ADR-0044](adr/0044-c-toolchains.md)) is tolerated too, without sanitizers. It is
+  recognized by its file name (`CCompiler::cl`), needs a Developer Command Prompt (`INCLUDE`),
+  and has its own options in `Toolchain` (`/std:c11`, `/Fo`, `/Fe`, `/link`, `/LD`), with
+  `lib.exe` for static libraries. `zig cc` is not supported.
+- Builds go through objects: the generated C (strict C11, `-pedantic-errors`) and the
+  package's C sources (C11) are compiled separately, then linked into an executable, archived
+  into a static library or linked into a dynamic one (`-fPIC` outside Windows). A failure in the
+  generated C alone is an internal compiler error; one in the package's sources or libraries is
+  an error of the package. A dynamic library exports only the `extern "C" fn` functions,
+  through a module-definition file (Windows), a version script (Linux) or an exported symbols
+  list (macOS). `header.rs` writes a library's C header from the typed program, spelling
+  `c_char` as `char` from the type written in the source.
+- Cross-compilation (`targets.rs`): a target gives the C compiler with the arguments every call
+  needs (`CCompiler::args`: `--target=<triple>`, and `-isysroot` for iOS) and the facts the type
+  checker needs (`TargetInfo` in `Package::target`: pointer width, size of C's `long`, sign of
+  C's `char`). Without `--target` they are those of the machine running the compiler.
 
 ## CLI
 

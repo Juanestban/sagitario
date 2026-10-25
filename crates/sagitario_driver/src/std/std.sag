@@ -1,0 +1,27 @@
+//! `std` itself (docs/spec/11-standard-library.md#implementation-rules): helpers shared by the
+//! standard library modules, which reach them through `super::`. Programs cannot name them.
+
+use std::io;
+use std::io::ErrorKind;
+
+extern "C" {
+  fn sag_io_error_kind(code: i32) -> i32;
+  fn sag_io_error_message(code: i32) -> String;
+}
+
+/// The error with this runtime code (an `errno` value, or one of the runtime's own codes),
+/// described as `context: system message`, or by the system message alone without a context.
+fn os_error(code: i32, context: String) -> io::Error {
+  const kind = match unsafe { sag_io_error_kind(code) } {
+    0 => ErrorKind::NotFound,
+    1 => ErrorKind::PermissionDenied,
+    2 => ErrorKind::AlreadyExists,
+    3 => ErrorKind::InvalidInput,
+    4 => ErrorKind::InvalidData,
+    5 => ErrorKind::UnexpectedEof,
+    _ => ErrorKind::Other,
+  };
+  const message = unsafe { sag_io_error_message(code) };
+
+  if context.is_empty() { new io::Error(kind, message) } else { new io::Error(kind, `${context}: ${message}`) }
+}

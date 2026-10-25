@@ -1,0 +1,117 @@
+// `std::fs`: files and directories, with non-ASCII names, contents kept byte for byte, and
+// errors that name the operation and the path. The harness runs it in an empty directory.
+// expect-stdout: before: false false false
+// expect-stdout: after: true true false
+// expect-stdout: read: [línea 1<CR><LF>línea 2<LF>más]
+// expect-stdout: copy: [línea 1<CR><LF>línea 2<LF>más]
+// expect-stdout: entries: [año, notas.txt, zeta.txt]
+// expect-stdout: empty: []
+// expect-stdout: cannot read "nada.txt": No such file or directory
+// expect-stdout: missing: NotFound
+// expect-stdout: directory as file: Other
+// expect-stdout: not empty: Other
+// expect-stdout: already exists: AlreadyExists
+// expect-stdout: list a file: Other
+// expect-stdout: replaced: nuevo
+// expect-stdout: invalid UTF-8 file: InvalidData
+// expect-stdout: left: []
+
+use std::ffi::{c_char, c_int, c_void, CString};
+use std::fs;
+use std::io;
+use std::io::ErrorKind;
+
+extern "C" {
+  fn fopen(path: *const c_char, mode: *const c_char) -> *mut c_void;
+  fn fputc(byte: c_int, file: *mut c_void) -> c_int;
+  fn fclose(file: *mut c_void) -> c_int;
+}
+
+/// Writes a file holding the byte 0xFF, which no `String` can contain.
+fn write_invalid_utf8(path: String) {
+  const path = CString::new(path).unwrap();
+  const mode = CString::new("wb").unwrap();
+
+  unsafe {
+    const file = fopen(path.as_ptr(), mode.as_ptr());
+
+    fputc(255, file);
+    fclose(file);
+  }
+}
+
+fn kind_name(error: io::Error) -> String {
+  match error.kind() {
+    ErrorKind::NotFound => "NotFound",
+    ErrorKind::PermissionDenied => "PermissionDenied",
+    ErrorKind::AlreadyExists => "AlreadyExists",
+    ErrorKind::InvalidInput => "InvalidInput",
+    ErrorKind::InvalidData => "InvalidData",
+    ErrorKind::UnexpectedEof => "UnexpectedEof",
+    ErrorKind::Other => "Other",
+  }
+}
+
+fn failure<T>(result: Result<T, io::Error>) -> String {
+  match result {
+    Ok(_) => "no error",
+    Err(error) => kind_name(error),
+  }
+}
+
+fn visible(text: String) -> String {
+  text.replace("\r", "<CR>").replace("\n", "<LF>")
+}
+
+fn main() -> Result<(), io::Error> {
+  const dir = "datos/año";
+  const file = "datos/año/notas.txt";
+
+  println(`before: ${fs::exists("datos")} ${fs::is_dir(dir)} ${fs::is_file(file)}`);
+
+  fs::create_dir_all(dir)?;
+  fs::create_dir_all(dir)?;
+  fs::write(file, "línea 1\r\n")?;
+  fs::append(file, "línea 2\n")?;
+  fs::append(file, "más")?;
+
+  println(`after: ${fs::is_dir(dir)} ${fs::is_file(file)} ${fs::is_file(dir)}`);
+  println(`read: [${visible(fs::read_to_string(file)?)}]`);
+
+  fs::copy(file, "datos/copia.txt")?;
+  fs::rename("datos/copia.txt", "datos/año/zeta.txt")?;
+  println(`copy: [${visible(fs::read_to_string("datos/año/zeta.txt")?)}]`);
+
+  fs::create_dir("datos/año/año")?;
+  // The sorted names: `año` comes first because `a` < `n` < `z`.
+  println(`entries: [${fs::read_dir(dir)?.join(", ")}]`);
+  println(`empty: [${fs::read_dir("datos/año/año")?.join(", ")}]`);
+
+  match fs::read_to_string("nada.txt") {
+    Ok(_) => println("read a missing file"),
+    Err(error) => println(error.message()),
+  }
+
+  println(`missing: ${failure(fs::remove_file("nada.txt"))}`);
+  println(`directory as file: ${failure(fs::read_to_string(dir))}`);
+  println(`not empty: ${failure(fs::remove_dir(dir))}`);
+  println(`already exists: ${failure(fs::create_dir(dir))}`);
+  println(`list a file: ${failure(fs::read_dir(file))}`);
+
+  fs::write("datos/otro.txt", "nuevo")?;
+  fs::rename("datos/otro.txt", "datos/año/zeta.txt")?;
+  println(`replaced: ${fs::read_to_string("datos/año/zeta.txt")?}`);
+
+  write_invalid_utf8("datos/medio.txt");
+  println(`invalid UTF-8 file: ${failure(fs::read_to_string("datos/medio.txt"))}`);
+
+  fs::remove_file("datos/medio.txt")?;
+  fs::remove_file(file)?;
+  fs::remove_file("datos/año/zeta.txt")?;
+  fs::remove_dir("datos/año/año")?;
+  fs::remove_dir(dir)?;
+  fs::remove_dir("datos")?;
+  println(`left: [${fs::read_dir(".")?.join(", ")}]`);
+
+  Ok(())
+}

@@ -18,23 +18,23 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0007](0007-mutability-const-var.md) | Mutability with `const` / `var` | Accepted (amended by 0028) |
 | [0008](0008-concurrency-deferred.md) | Single-threaded MVP; Rust-style concurrency later | Accepted |
 | [0009](0009-ffi-and-unsafe.md) | Rust-style FFI and `unsafe` | Accepted (refined by 0026) |
-| [0010](0010-modules-and-packages.md) | File-as-module, logical imports, packages | Accepted (amended by 0024, 0025) |
+| [0010](0010-modules-and-packages.md) | File-as-module, logical imports, packages | Accepted (amended by 0024, 0025; manifest superseded by 0040) |
 | [0011](0011-surface-syntax.md) | Surface syntax | Accepted (refined by 0035) |
 | [0012](0012-closures.md) | Closures capture by value, read-only | Accepted (refined by 0033) |
 | [0013](0013-primitive-semantics.md) | Semantics of primitives and `String` | Accepted (refined by 0034) |
 | [0014](0014-mvp-scope.md) | MVP scope: F0 + F1 + F2, desktop only | Accepted |
-| [0015](0015-compiler-architecture-and-toolchain.md) | Compiler architecture and C toolchain | Accepted |
+| [0015](0015-compiler-architecture-and-toolchain.md) | Compiler architecture and C toolchain | Accepted (refined by 0044) |
 | [0016](0016-engineering-process.md) | Testing, quality gates, conventions and license | Accepted (refined by 0036) |
 | [0017](0017-resolution-of-open-questions-q1-q11.md) | Resolution of open questions Q1–Q11 | Accepted (refined by 0034) |
-| [0018](0018-windows-c-toolchain.md) | Windows C toolchain: official LLVM (MSVC target), MinGW clang tolerated | Accepted (refined by 0036) |
-| [0019](0019-prelude-and-printing.md) | Prelude and printing | Accepted |
+| [0018](0018-windows-c-toolchain.md) | Windows C toolchain: official LLVM (MSVC target), MinGW clang tolerated | Accepted (refined by 0036, 0044) |
+| [0019](0019-prelude-and-printing.md) | Prelude and printing | Accepted (refined by 0037) |
 | [0020](0020-expressions-bindings-and-build-modes.md) | Operators, bindings, control flow, interpolation and build modes | Accepted |
 | [0021](0021-structs-and-fixed-arrays.md) | Structs, methods and fixed arrays | Accepted (amended by 0028) |
 | [0022](0022-enums-match-option-result.md) | Enums, `match`, `Option`/`Result` and `?` | Accepted |
 | [0023](0023-string-api-and-panic.md) | The `String` API, `StringBuilder` and `panic` | Accepted |
-| [0024](0024-modules-imports-and-visibility.md) | Modules, imports, visibility and the entry point | Accepted (amended by 0025) |
+| [0024](0024-modules-imports-and-visibility.md) | Modules, imports, visibility and the entry point | Accepted (amended by 0025; refined by 0037) |
 | [0025](0025-single-pub-visibility.md) | A single `pub` visibility, without `pub(pkg)` | Accepted |
-| [0026](0026-ffi-details.md) | FFI details: pointers, `unsafe`, `std::ffi` and exports | Accepted |
+| [0026](0026-ffi-details.md) | FFI details: pointers, `unsafe`, `std::ffi` and exports | Accepted (refined by 0043) |
 | [0027](0027-classes-and-arc.md) | Classes, construction, ARC objects and `weak` references | Accepted (refined by 0030, 0035) |
 | [0028](0028-inferred-self-mutation.md) | `self` without `var`: methods that modify `self` are inferred | Accepted |
 | [0029](0029-inheritance.md) | Inheritance: construction, overriding, subtyping and dispatch | Accepted |
@@ -45,6 +45,14 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0034](0034-collections-and-iterators.md) | Collections, iterators, and equality, order and hashing | Accepted |
 | [0035](0035-explicit-self-in-initializers.md) | Initializers declare `self` | Accepted |
 | [0036](0036-sanitizers-and-the-reference-zoo.md) | Sanitizers and the reference "zoo" program | Accepted |
+| [0037](0037-standard-library-env-io-process.md) | The standard library: `std::env`, `std::io` and `std::process` | Accepted |
+| [0038](0038-file-system-and-paths.md) | `std::fs` and `std::path` | Accepted |
+| [0039](0039-time-and-commands.md) | `std::time` and `std::process::Command` | Accepted |
+| [0040](0040-nova-package-manager.md) | Nova, the package manager | Accepted |
+| [0041](0041-dependencies-by-path.md) | Dependencies by path | Accepted |
+| [0042](0042-library-outputs-and-linking-c.md) | Library outputs and linking C | Accepted (refined by 0044) |
+| [0043](0043-cross-compilation.md) | Cross-compilation to Android and iOS | Accepted |
+| [0044](0044-c-toolchains.md) | C toolchains: MSVC `cl` best-effort, no `zig cc`, and the F3 acceptance program | Accepted |
 
 ## Template
 

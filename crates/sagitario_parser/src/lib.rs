@@ -251,7 +251,7 @@ impl<'a> Parser<'a> {
       }
     }
 
-    Module { file, path: Vec::new(), uses, items }
+    Module { file, path: Vec::new(), package: 0, uses, items }
   }
 
   /// `use tree;` (docs/spec/09-modules.md#imports).

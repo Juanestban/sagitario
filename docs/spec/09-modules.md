@@ -2,15 +2,19 @@
 
 Rationale: [ADR-0010](../adr/0010-modules-and-packages.md),
 [ADR-0024](../adr/0024-modules-imports-and-visibility.md),
-[ADR-0025](../adr/0025-single-pub-visibility.md).
+[ADR-0025](../adr/0025-single-pub-visibility.md), [ADR-0040](../adr/0040-nova-package-manager.md),
+[ADR-0041](../adr/0041-dependencies-by-path.md).
 
 ## Packages
 
-- A package is the unit of compilation and distribution. With the package manager (post-MVP)
-  it is described by `sagitario.toml` (name, version, kind `bin` or `lib`), with the entry
-  points `src/main.sag` for binaries and `src/lib.sag` for libraries.
-- **F1:** a program is built from its entry file, `sag build dir/main.sag`. The entry file is
-  the root module, `pkg`, and its directory is the package root.
+- A package is the unit of compilation and distribution. It is described by `Nova.toml` and
+  built by Nova, the package manager ([reference](../nova.md)). Its root module `pkg` is
+  `src/main.sag` for a program or `src/lib.sag` for a library (F3), and its other modules are
+  the files under `src/`.
+- A single program can also be built from its entry file without a package,
+  `sag build dir/main.sag` (F1). The entry file is the root module, `pkg`, and its directory is
+  the package root.
+- A library needs no `main`; a function called `main` in it is an ordinary function (F3).
 
 ## Modules
 
@@ -36,10 +40,12 @@ Paths are logical, never relative file paths. Their first segment is one of:
 | `pkg` | The root of the current package (Rust's `crate`) |
 | `self` | The current module |
 | `super` | The parent module; it can repeat at the start: `super::super::x` |
-| `std` | The standard library (not available yet) |
+| `std` | The standard library ([chapter 11](11-standard-library.md)) |
+| A dependency's name | The root of that dependency of the current package (F3, [Nova](../nova.md#dependencies)) |
 | A name in scope | An item or import of the current module, such as an imported module |
 
-Dependency packages will be further roots once the package manager exists.
+An item or import of the current module hides a dependency with the same name. In a dependency,
+`pkg` is the root of that dependency.
 
 Qualified paths can be written wherever a name can: `pkg::util::format(x)`,
 `geo::Point { x: 1, y: 2 }`, `const p: geo::Point = ...`, `shapes::Shape::Circle(r)` in a
@@ -58,7 +64,8 @@ use super::shapes;
 - `use` brings a module, function, struct or enum into the current module under its last
   name, or under the name given with `as`. Inside braces, `self` names the module before the
   braces, and groups can nest: `use pkg::{a::B, c::{self, D}};`.
-- A `use` path starts with `pkg`, `self`, `super` or `std`.
+- A `use` path starts with `pkg`, `self`, `super`, `std` or the name of one of the package's
+  dependencies.
 - `use` declarations appear at module level, in any position, and apply to the whole module.
 - An imported name shadows a prelude name, like a declared one. Importing a name that is
   already declared or imported in the module is an error; an import that is never used is a

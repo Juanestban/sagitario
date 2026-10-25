@@ -69,11 +69,44 @@ Increments ([ADR-0027](adr/0027-classes-and-arc.md)):
 interfaces as types, bounded generics, `List`/`Map`, lambdas and `map`/`filter` passes with
 zero live ARC objects at exit and clean ASan.
 
-## Post-MVP
+## F3: Platform (post-MVP)
 
-- **F3 Platform:** extended standard library (fs, process, time), library outputs
-  (`.a`/`.so`/`.dll`) with exports, package manager and dependencies, cross-compilation to
-  Android and iOS, re-evaluate MSVC `cl.exe` and `zig cc`.
+Extended standard library (fs, process, time), library outputs (`.a`/`.so`/`.dll`) with
+exports, package manager and dependencies, cross-compilation to Android and iOS, re-evaluate
+MSVC `cl.exe` and `zig cc`.
+
+Increments:
+
+1. The standard library's foundation, `std::env`, `std::process::exit` and `std::io`
+   ([ADR-0037](adr/0037-standard-library-env-io-process.md)).
+2. `std::fs`: reading, writing and appending files, existence checks, removal, directories
+   and the current directory; `std::path` ([ADR-0038](adr/0038-file-system-and-paths.md)).
+3. `std::time` (`Instant`, `Duration`, system time) and `std::process::Command` (run a program,
+   capture its output and exit status) ([ADR-0039](adr/0039-time-and-commands.md)).
+4. Packages with Nova, the package manager: `Nova.toml`, `nova new`, `nova build`/`run`/`check`
+   with `src/main.sag` or `src/lib.sag` ([ADR-0040](adr/0040-nova-package-manager.md)).
+5. Dependencies: packages by path, dependency names as path roots, no cycles between packages
+   ([ADR-0041](adr/0041-dependencies-by-path.md)). `Nova.lock` waits for dependencies from git or
+   a registry.
+6. Library outputs: a library builds `.a`/`.so`/`.dylib`/`.dll` with the exported functions and
+   a generated C header; `[link]` for C libraries and sources
+   ([ADR-0042](adr/0042-library-outputs-and-linking-c.md)).
+7. Cross-compilation: `--target`, Android (NDK) and iOS, with `c_long`/`c_char` per target
+   ([ADR-0043](adr/0043-cross-compilation.md)).
+8. MSVC `cl` supported best-effort, `zig cc` not adopted, `c_char` spelled `char` in headers,
+   and the acceptance program ([ADR-0044](adr/0044-c-toolchains.md)).
+
+**Status:** done. The acceptance program is `tests/acceptance/f3/`, run by the Nova test
+`f3_acceptance`.
+
+**Acceptance:** a command-line tool (a small `grep` or `wc`) built as a package reads files and
+stdin, depends on a local library package and passes with sanitizers; the same library builds
+as `.a`/`.so`/`.dll` and is called from a C program; and the tool compiles (without running)
+for Android and iOS. iOS runs no standalone programs (ADR-0043), so there the library builds
+instead.
+
+## Later phases (post-MVP)
+
 - **F4 Concurrency:** `Send`/`Sync`, `spawn`, `Mutex`, `Atomic`, atomic ARC, then
   `async`/`await`.
 - **F5 Self-hosting:** rewrite the compiler in Sagitario until it compiles itself.

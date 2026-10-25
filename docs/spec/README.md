@@ -16,14 +16,15 @@ what it means, and what the compiler must reject. The reasons behind each decisi
 8. [Closures](08-closures.md)
 9. [Modules and packages](09-modules.md)
 10. [Foreign function interface](10-ffi.md)
+11. [Standard library](11-standard-library.md)
 
 ## Conventions
 
 - "must" / "must not" are requirements on programs or on the compiler; a program that
   violates a "must" is rejected with a diagnostic.
-- Each chapter marks which milestone delivers each feature: **F1** (procedural core) or
-  **F2** (OOP, generics, closures). Features marked **post-MVP** are reserved and must not
-  be implemented yet. See [`../roadmap.md`](../roadmap.md).
+- Each chapter marks which milestone delivers each feature: **F1** (procedural core),
+  **F2** (OOP, generics, closures) or **F3** (platform). Features marked **post-MVP** are
+  reserved and must not be implemented until their phase. See [`../roadmap.md`](../roadmap.md).
 - Code blocks use the `.sag` syntax and are illustrative unless stated otherwise.
 
 ## A complete example

@@ -1,0 +1,32 @@
+// `std::process::exit` ends the program from anywhere with an exit code, without running the
+// pending releases: the objects still alive are not reported as leaks.
+// expect-stdout: before exit
+// expect-exit: 7
+
+use std::process;
+use std::process::exit;
+
+class Resource {
+  pub const name: String;
+
+  pub fn new(self, name: String) {
+    self.name = name;
+  }
+}
+
+/// `exit` never returns, so it can stand where a value is expected.
+fn code_or_exit(found: bool) -> i32 {
+  if found { 0 } else { exit(7) }
+}
+
+fn main() {
+  const resource = new Resource("kept alive");
+  const list = List::from([resource]);
+
+  println("before exit");
+
+  const code = code_or_exit(list.is_empty());
+
+  println(`not reached: ${code}`);
+  process::exit(code);
+}

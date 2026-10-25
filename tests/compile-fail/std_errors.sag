@@ -1,0 +1,24 @@
+// The standard library: private items, the compiler-provided `exit`, the prelude module, the
+// runtime's functions and the C types of `std::ffi` keep their rules.
+
+use std::fs;
+use std::io;
+use std::process;
+use std::prelude::Error as Base; //~ ERROR E0200
+
+extern "C" {
+  fn sag_io_flush() -> i32; //~ ERROR E0208
+  fn takes_text(text: String); //~ ERROR E0322
+}
+
+fn main() {
+  io::error_from(1); //~ ERROR E0207
+  fs::kind_of("a.txt"); //~ ERROR E0207
+  io::missing(); //~ ERROR E0200
+  std::nett::get(); //~ ERROR E0200
+  // The helpers of `std` itself are only visible to its modules.
+  std::os_error(1, ""); //~ ERROR E0200
+  const _x: i32 = process::exit; //~ ERROR E0314
+  // `exit` never returns, even when called wrongly.
+  process::exit("now"); //~ ERROR E0300
+}

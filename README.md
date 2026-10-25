@@ -12,7 +12,9 @@ aims to run on every desktop and mobile platform and eventually compile itself.
 > **Status:** the desktop MVP (phases F0–F2) works: modules, structs, enums and `match`,
 > classes with inheritance, interfaces, generics, closures, lists, maps and iterators, compiled
 > to C11 with ARC. The [reference zoo program](tests/run-pass/reference_zoo/main.sag) shows them
-> together. Concurrency, mobile targets and self-hosting come later (see the
+> together. Phase F3 (platform) has started with the first modules of the
+> [standard library](docs/spec/11-standard-library.md): `std::env`, `std::io`, `std::fs`, `std::path`, `std::process` and `std::time`.
+> Packages, mobile targets, concurrency and self-hosting come later (see the
 > [roadmap](docs/roadmap.md)).
 
 ```sag
@@ -35,9 +37,17 @@ fn main() {
 }
 ```
 
+Packages are created and built with Nova, the package manager:
+
+```sh
+nova new hello && cd hello
+nova run
+```
+
 ## Documentation
 
 - [Language specification](docs/spec/README.md)
+- [Nova, the package manager](docs/nova.md)
 - [Design decisions (ADRs)](docs/adr/README.md)
 - [Compiler architecture](docs/architecture.md)
 - [Roadmap](docs/roadmap.md)

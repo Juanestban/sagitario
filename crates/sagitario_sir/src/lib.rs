@@ -57,7 +57,8 @@ pub struct Program {
   pub envs: Vec<Vec<Type>>,
   /// The named functions used as values, which get a wrapper taking an environment.
   pub wrapped: Vec<FnId>,
-  pub entry: FnId,
+  /// `main`; a library has none, and C calls its exported functions instead.
+  pub entry: Option<FnId>,
   /// Path of each source file, by `FileId` index, for `#line` directives.
   pub source_paths: Vec<String>,
   /// The C functions of the `extern` blocks, indexed by `ExternId`.
@@ -85,6 +86,8 @@ pub struct ExternDecl {
   pub symbol: String,
   pub params: Vec<Type>,
   pub ret: Type,
+  /// A function of the runtime, declared by its header and called directly.
+  pub runtime: bool,
 }
 
 /// The fields of the program's structs and enums, with type parameters in generic ones.
@@ -479,7 +482,12 @@ pub fn lower(
   sources: &SourceMap,
   diagnostics: &mut Diagnostics,
 ) -> LResult<Program> {
-  let entry = resolution.main.ok_or_else(|| LowerError("program without `main`".to_string()))?;
+  let entry = resolution.main;
+
+  if entry.is_none() && !package.library {
+    return error("program without `main`");
+  }
+
   let structs = typed
     .structs
     .iter()
@@ -516,7 +524,7 @@ pub fn lower(
     functions.push(lower_function(id, decl, Subst::default(), &mut cx)?);
   }
 
-  let main_error = main_error(entry, package, resolution, typed, &layouts, sources, &mut registry);
+  let main_error = entry.and_then(|entry| main_error(entry, package, resolution, typed, &layouts, sources, &mut registry));
   let mut instances: Vec<Option<Function>> = Vec::new();
 
   // Lowering an instance may need more instances.
@@ -563,7 +571,9 @@ pub fn lower(
   for (id, decl) in resolution.extern_decls(package) {
     let sig = typed.extern_sig(id).ok_or_else(|| LowerError(format!("no signature for the C function `{}`", decl.name.name)))?;
 
-    externs.push(ExternDecl { symbol: decl.name.name.clone(), params: sig.params.clone(), ret: sig.ret.clone() });
+    let runtime = resolution.is_runtime_extern(package, id);
+
+    externs.push(ExternDecl { symbol: decl.name.name.clone(), params: sig.params.clone(), ret: sig.ret.clone(), runtime });
   }
 
   Ok(Program {
@@ -1301,7 +1311,7 @@ impl FnLowering<'_> {
         let params = match &callee {
           Callee::Fn(id) | Callee::Virtual { function: id, .. } => self.typed.sig(*id).map(|sig| sig.params.clone()),
           Callee::Extern(id) => self.typed.extern_sig(*id).map(|sig| sig.params.clone()),
-          Callee::Builtin(builtin) => Some(sagitario_types::builtin_sig(*builtin).params),
+          Callee::Builtin(builtin) => Some(sagitario_types::builtin_sig(*builtin, &self.package.target).params),
           Callee::Dyn { params, .. } | Callee::Closure { params, .. } => Some(params.clone()),
           Callee::Runtime { .. } => None,
         }

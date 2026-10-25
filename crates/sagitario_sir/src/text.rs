@@ -83,7 +83,7 @@ impl FnLowering<'_> {
   fn parse(&mut self, ty: &Type, target: &Type, mut operands: Vec<Operand>) -> LResult<Operand> {
     let (raw_ty, function) = match target {
       Type::Int(int_ty) if int_ty.is_signed() => {
-        let max = int_ty.max();
+        let max = int_ty.max(self.package.target.pointer_width);
 
         operands.push(int(max + 1, true, IntTy::I64));
         operands.push(int(max, false, IntTy::I64));
@@ -91,7 +91,7 @@ impl FnLowering<'_> {
         (Type::Int(IntTy::I64), "sag_parse_signed")
       }
       Type::Int(int_ty) => {
-        operands.push(int(int_ty.max(), false, IntTy::U64));
+        operands.push(int(int_ty.max(self.package.target.pointer_width), false, IntTy::U64));
 
         (Type::Int(IntTy::U64), "sag_parse_unsigned")
       }

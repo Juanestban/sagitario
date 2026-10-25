@@ -38,10 +38,11 @@ pub(crate) struct Instance {
 const MAX_DEPTH: usize = 64;
 
 /// Whether a function is lowered only through instances: it has type parameters, belongs to a
-/// generic type, or belongs to an interface (its `Self` is the implementing type). Prelude
-/// functions are also lowered on demand, so programs only contain those they use.
+/// generic type, or belongs to an interface (its `Self` is the implementing type). Functions of
+/// the prelude and the standard library are also lowered on demand, so programs only contain
+/// those they use.
 pub(crate) fn is_template(resolution: &Resolution, typed: &TypedModule, function: FnId) -> bool {
-  if resolution.in_prelude(function) {
+  if resolution.in_library(function) {
     return true;
   }
 

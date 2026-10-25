@@ -1,0 +1,68 @@
+// `std::io`: reading stdin line by line and to its end, writing with errors as values, and
+// `io::Error` as an `Error`.
+// stdin: first line
+// stdin: segunda línea
+// stdin:
+// stdin: rest 1
+// stdin: rest 2
+// expect-stdout: 1: first line
+// expect-stdout: 2: segunda línea
+// expect-stdout: 3:
+// expect-stdout: rest: [rest 1|rest 2|]
+// expect-stdout: after the end: none, ""
+// expect-stdout: no newline, then a newline
+// expect-stdout: NotFound: no such thing
+// expect-stdout: as Error: no such thing
+
+use std::io;
+use std::io::ErrorKind;
+
+/// An `io::Error` converts to the `Error` interface with `?`.
+fn fail() -> Result<(), Error> {
+  const result: Result<(), io::Error> = Err(new io::Error(ErrorKind::NotFound, "no such thing"));
+  result?;
+  Ok(())
+}
+
+fn describe(kind: ErrorKind) -> String {
+  match kind {
+    ErrorKind::NotFound => "NotFound",
+    ErrorKind::PermissionDenied => "PermissionDenied",
+    ErrorKind::AlreadyExists => "AlreadyExists",
+    ErrorKind::InvalidInput => "InvalidInput",
+    ErrorKind::InvalidData => "InvalidData",
+    ErrorKind::UnexpectedEof => "UnexpectedEof",
+    ErrorKind::Other => "Other",
+  }
+}
+
+fn main() -> Result<(), io::Error> {
+  // The first three lines, the third one empty.
+  for number in 1..=3 {
+    const line = io::read_line()?.unwrap_or("<end>");
+    io::println(`${number}: ${line}`.trim_end())?;
+  }
+
+  const rest = io::read_to_string()?;
+  io::println(`rest: [${rest.replace("\n", "|")}]`)?;
+
+  const line = io::read_line()?;
+  const more = io::read_to_string()?;
+  io::println(`after the end: ${line.unwrap_or("none")}, "${more}"`)?;
+
+  io::print("no newline, ")?;
+  io::print("then a newline\n")?;
+  io::flush()?;
+  io::eprintln("to stderr")?;
+  io::eprint("")?;
+
+  const error = new io::Error(ErrorKind::NotFound, "no such thing");
+  println(`${describe(error.kind())}: ${error.message()}`);
+
+  match fail() {
+    Ok(_) => println("no error"),
+    Err(error) => println(`as Error: ${error.message()}`),
+  }
+
+  Ok(())
+}

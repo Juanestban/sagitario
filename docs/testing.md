@@ -41,10 +41,16 @@ fn main() { ... }
 ```
 
 - `expect-stdout` may appear several times; lines are matched in order. In a multi-file case,
-  `expect-*` and `sag-flags` annotations are read from `main.sag`, and `//~` annotations
+  `expect-*`, `sag-flags`, `args`, `stdin` and `env` annotations are read from `main.sag`, and `//~` annotations
   from every file of the program (each one matched against its own file).
 - `// sag-flags: --release` passes extra options to `sag run` (e.g. to test release-mode
   wrapping).
+- `// args: a b` passes command-line arguments to the program, split on spaces.
+  `// stdin: text` writes a line (`text` and `\n`) to its stdin and may repeat; stdin is closed
+  after the last line, or at once without any. `// env: NAME=value` sets an environment
+  variable for the program and may repeat.
+- `run-pass` and `run-panic` programs run in a new empty working directory, removed afterwards,
+  so they can create files with relative paths.
 - Panics print `panic at <file>:<line>: <message>`; `expect-panic` matches a substring.
 - `//~ ERROR Ennnn` and `//~ WARN Wnnnn` assert a diagnostic with that code on the same line.
   Several can share a line: `//~ ERROR E0311, WARN W0001 WARN W0002`.
@@ -64,6 +70,9 @@ fn main() { ... }
   without sanitizers (MinGW) build without them. `SAG_TEST_SANITIZE=0` turns them off for faster
   local runs ([ADR-0036](adr/0036-sanitizers-and-the-reference-zoo.md)).
 - `tests/run-pass/reference_zoo/` is the reference program of the F2 acceptance criteria.
+- `tests/acceptance/f3/` is the F3 acceptance program: the `wc` and `textcount` packages and a C
+  program using the library, run by the Nova test `f3_acceptance`
+  ([ADR-0044](adr/0044-c-toolchains.md)).
 
 ## Rules
 
@@ -78,4 +87,5 @@ fn main() { ... }
 
 GitHub Actions matrix on Windows, Linux and macOS running `cargo fmt --check`,
 `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` with
-clang, plus a Linux job with `SAG_CC=gcc`.
+clang, plus a Linux job with `SAG_CC=gcc` and a Windows job with `SAG_CC=cl` (without
+sanitizers). The Ubuntu job requires the Android NDK (`SAG_REQUIRE_NDK=1`).

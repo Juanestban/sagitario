@@ -14,6 +14,13 @@ use sagitario_diagnostics::{Diagnostic, Diagnostics, codes};
 /// the module of each file, by its index in `Package::modules`.
 pub(crate) fn build_tree(resolution: &mut Resolution, package: &Package) -> Vec<ModId> {
   resolution.modules.push(ModuleInfo::default());
+  resolution.package_roots.push(ModId(0));
+
+  // Each dependency has a tree of its own, whose root its dependents name by its name.
+  for (index, info) in package.packages.iter().enumerate().skip(1) {
+    resolution.package_roots.push(ModId(resolution.modules.len() as u32));
+    resolution.modules.push(ModuleInfo { package: index, root: info.name.clone(), ..ModuleInfo::default() });
+  }
 
   let mut ids = Vec::new();
 
@@ -29,7 +36,48 @@ pub(crate) fn build_tree(resolution: &mut Resolution, package: &Package) -> Vec<
       continue;
     }
 
-    let mut node = ModId(0);
+    // The standard library modules are children of `std`, outside the tree of `pkg` too. `std`
+    // itself has a file whose private items only its modules see.
+    if package.std.contains(&source) {
+      let root = *resolution.std_root.get_or_insert_with(|| {
+        let root = ModId(resolution.modules.len() as u32);
+
+        resolution.modules.push(ModuleInfo { path: vec!["std".to_string()], in_std: true, ..ModuleInfo::default() });
+
+        root
+      });
+
+      if module.path.len() == 1 {
+        if let Some(info) = resolution.modules.get_mut(root.0 as usize) {
+          info.source = Some(source);
+        }
+
+        ids.push(root);
+
+        continue;
+      }
+
+      let node = ModId(resolution.modules.len() as u32);
+      let name = module.path.last().cloned().unwrap_or_default();
+
+      resolution.modules.push(ModuleInfo {
+        path: module.path.clone(),
+        in_std: true,
+        source: Some(source),
+        parent: Some(root),
+        ..ModuleInfo::default()
+      });
+
+      if let Some(info) = resolution.modules.get_mut(root.0 as usize) {
+        info.children.insert(name, node);
+      }
+
+      ids.push(node);
+
+      continue;
+    }
+
+    let mut node = resolution.package_roots.get(module.package).copied().unwrap_or(ModId(0));
 
     for segment in &module.path {
       node = child_module(resolution, node, segment);
@@ -55,9 +103,10 @@ fn child_module(resolution: &mut Resolution, parent: ModId, name: &str) -> ModId
 
   let child = ModId(resolution.modules.len() as u32);
   let mut path = info.path.clone();
+  let (package, root) = (info.package, info.root.clone());
 
   path.push(name.to_string());
-  resolution.modules.push(ModuleInfo { path, parent: Some(parent), ..ModuleInfo::default() });
+  resolution.modules.push(ModuleInfo { path, parent: Some(parent), package, root, ..ModuleInfo::default() });
 
   if let Some(info) = resolution.modules.get_mut(parent.0 as usize) {
     info.children.insert(name.to_string(), child);
@@ -109,10 +158,12 @@ pub(crate) fn resolve_imports(resolution: &mut Resolution, package: &Package, no
     let Some(last) = import.segments.last() else { continue };
     let name = import.alias.unwrap_or(last);
 
-    if !matches!(first.name.as_str(), "pkg" | "self" | "super" | "std") {
+    let root = matches!(first.name.as_str(), "pkg" | "self" | "super" | "std");
+
+    if !root && resolution.dependency_root(package, node, &first.name).is_none() {
       diagnostics.push(
         Diagnostic::error(codes::UNRESOLVED_NAME, first.span, format!("cannot find `{}` to import", first.name))
-          .with_help(format!("`use` paths start with `pkg`, `self`, `super` or `std`: `use pkg::{}`", first.name)),
+          .with_help(format!("`use` paths start with `pkg`, `self`, `super`, `std` or the name of a dependency: `use pkg::{}`", first.name)),
       );
 
       continue;
@@ -321,10 +372,18 @@ fn type_paths<'a>(ty: &'a TypeExpr, out: &mut Vec<&'a Path>) {
   }
 }
 
-/// The logical paths, from the package root, of the modules a file may refer to: every prefix of
-/// its `use` paths and of the paths that start with `pkg`, `self`, `super` or an imported name.
-/// The driver loads the ones that exist as files, then asks again for each loaded file.
-pub fn module_references(module: &Module) -> Vec<Vec<String>> {
+/// A module a file may refer to: its path from the root of its package, which is the file's own
+/// package, or the dependency called `dependency`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ModuleRef {
+  pub dependency: Option<String>,
+  pub path: Vec<String>,
+}
+
+/// The modules a file may refer to: every prefix of its `use` paths and of the paths that start
+/// with `pkg`, `self`, `super`, the name of one of its package's `dependencies` or an imported
+/// name. The driver loads the ones that exist as files, then asks again for each loaded file.
+pub fn module_references(module: &Module, dependencies: &[String]) -> Vec<ModuleRef> {
   let mut flat = Vec::new();
 
   for decl in &module.uses {
@@ -332,20 +391,69 @@ pub fn module_references(module: &Module) -> Vec<Vec<String>> {
   }
 
   let mut found = BTreeSet::new();
-  let mut aliases: Vec<(String, Vec<String>)> = Vec::new();
+  let mut aliases: Vec<(String, ModuleRef)> = Vec::new();
 
   for import in &flat {
     let names: Vec<&str> = import.segments.iter().map(|segment| segment.name.as_str()).collect();
 
-    if let Some(absolute) = absolute(&names, &module.path) {
-      add_prefixes(&absolute, &mut found);
+    if let Some(target) = absolute(&names, &module.path, dependencies) {
+      add_prefixes(&target, &mut found);
 
       if let Some(name) = import.alias.or(import.segments.last().copied()) {
-        aliases.push((name.name.clone(), absolute));
+        aliases.push((name.name.clone(), target));
       }
     }
   }
 
+  for path in item_paths(module) {
+    let names: Vec<&str> = path.segments.iter().map(|segment| segment.name.as_str()).collect();
+    let Some((first, rest)) = names.split_first() else { continue };
+
+    if rest.is_empty() {
+      continue;
+    }
+
+    let target = match aliases.iter().find(|(alias, _)| alias == first) {
+      Some((_, target)) => Some(ModuleRef {
+        dependency: target.dependency.clone(),
+        path: target.path.iter().cloned().chain(rest.iter().map(|name| name.to_string())).collect(),
+      }),
+      None => absolute(&names, &module.path, dependencies),
+    };
+
+    if let Some(target) = target {
+      add_prefixes(&target, &mut found);
+    }
+  }
+
+  found.remove(&ModuleRef { dependency: None, path: module.path.clone() });
+  found.into_iter().collect()
+}
+
+/// The standard library modules a file may refer to: the second segment of its `use` paths and
+/// other paths that start with `std`. The driver loads the ones the standard library has.
+pub fn std_references(module: &Module) -> Vec<String> {
+  let mut flat = Vec::new();
+
+  for decl in &module.uses {
+    flatten(&decl.tree, &[], &mut flat);
+  }
+
+  let used = flat.iter().map(|import| import.segments.iter().map(|segment| segment.name.as_str()).collect::<Vec<_>>());
+  let written = item_paths(module).into_iter().map(|path| path.segments.iter().map(|segment| segment.name.as_str()).collect::<Vec<_>>());
+  let mut found = BTreeSet::new();
+
+  for names in used.chain(written) {
+    if let ["std", name, ..] = names.as_slice() {
+      found.insert(name.to_string());
+    }
+  }
+
+  found.into_iter().collect()
+}
+
+/// The paths written in the items of a file, outside its `use` declarations.
+fn item_paths(module: &Module) -> Vec<&Path> {
   let mut paths = Vec::new();
 
   for item in &module.items {
@@ -397,34 +505,20 @@ pub fn module_references(module: &Module) -> Vec<Vec<String>> {
     }
   }
 
-  for path in paths {
-    let names: Vec<&str> = path.segments.iter().map(|segment| segment.name.as_str()).collect();
-    let Some((first, rest)) = names.split_first() else { continue };
-
-    if rest.is_empty() {
-      continue;
-    }
-
-    let absolute = match aliases.iter().find(|(alias, _)| alias == first) {
-      Some((_, target)) => Some(target.iter().cloned().chain(rest.iter().map(|name| name.to_string())).collect()),
-      None => absolute(&names, &module.path),
-    };
-
-    if let Some(absolute) = absolute {
-      add_prefixes(&absolute, &mut found);
-    }
-  }
-
-  found.remove(&module.path);
-  found.into_iter().collect()
+  paths
 }
 
-/// The path from the package root named by a path starting with `pkg`, `self` or `super`.
-fn absolute(names: &[&str], current: &[String]) -> Option<Vec<String>> {
+/// The module named by a path starting with `pkg`, `self`, `super` or a dependency's name.
+fn absolute(names: &[&str], current: &[String], dependencies: &[String]) -> Option<ModuleRef> {
   let (first, rest) = names.split_first()?;
+  let mut dependency = None;
   let mut base: Vec<String> = match *first {
     "pkg" => Vec::new(),
     "self" | "super" => current.to_vec(),
+    name if dependencies.iter().any(|dependency| dependency == name) => {
+      dependency = Some(name.to_string());
+      Vec::new()
+    }
     _ => return None,
   };
   let mut rest = rest;
@@ -440,15 +534,15 @@ fn absolute(names: &[&str], current: &[String]) -> Option<Vec<String>> {
 
   base.extend(rest.iter().map(|name| name.to_string()));
 
-  Some(base)
+  Some(ModuleRef { dependency, path: base })
 }
 
-fn add_prefixes(path: &[String], found: &mut BTreeSet<Vec<String>>) {
+fn add_prefixes(target: &ModuleRef, found: &mut BTreeSet<ModuleRef>) {
   let mut prefix = Vec::new();
 
-  for segment in path {
+  for segment in &target.path {
     prefix.push(segment.clone());
-    found.insert(prefix.clone());
+    found.insert(ModuleRef { dependency: target.dependency.clone(), path: prefix.clone() });
   }
 }
 

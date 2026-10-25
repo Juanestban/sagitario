@@ -1,0 +1,132 @@
+//! `std::time`: spans of time, a monotonic clock for measuring, the system clock and `sleep`
+//! (docs/spec/11-standard-library.md#stdtime).
+
+extern "C" {
+  fn sag_time_monotonic() -> u64;
+  fn sag_time_system() -> u64;
+  fn sag_time_sleep(nanos: u64);
+}
+
+/// A span of time with nanosecond precision, up to about 584 years. Creating or adding
+/// durations beyond that overflows like any `u64`.
+pub struct Duration impl Ord {
+  prv nanos: u64;
+
+  pub fn from_secs(secs: u64) -> Duration {
+    Duration { nanos: secs * 1_000_000_000 }
+  }
+
+  pub fn from_millis(millis: u64) -> Duration {
+    Duration { nanos: millis * 1_000_000 }
+  }
+
+  pub fn from_micros(micros: u64) -> Duration {
+    Duration { nanos: micros * 1_000 }
+  }
+
+  pub fn from_nanos(nanos: u64) -> Duration {
+    Duration { nanos: nanos }
+  }
+
+  /// The whole seconds; the other `as_` functions also truncate.
+  pub fn as_secs(self) -> u64 {
+    self.nanos / 1_000_000_000
+  }
+
+  pub fn as_millis(self) -> u64 {
+    self.nanos / 1_000_000
+  }
+
+  pub fn as_micros(self) -> u64 {
+    self.nanos / 1_000
+  }
+
+  pub fn as_nanos(self) -> u64 {
+    self.nanos
+  }
+
+  /// The seconds with their fraction.
+  pub fn as_secs_f64(self) -> f64 {
+    self.nanos as f64 / 1_000_000_000.0
+  }
+
+  pub fn plus(self, other: Duration) -> Duration {
+    Duration { nanos: self.nanos + other.nanos }
+  }
+
+  /// Panics if `other` is longer: durations are never negative.
+  pub fn minus(self, other: Duration) -> Duration {
+    if other.nanos > self.nanos {
+      panic("cannot subtract a longer duration from a shorter one");
+    }
+
+    Duration { nanos: self.nanos - other.nanos }
+  }
+
+  pub fn times(self, factor: u64) -> Duration {
+    Duration { nanos: self.nanos * factor }
+  }
+
+  pub fn equals(self, other: Duration) -> bool {
+    self.nanos == other.nanos
+  }
+
+  pub fn compare(self, other: Duration) -> Ordering {
+    self.nanos.compare(other.nanos)
+  }
+}
+
+/// A point of a monotonic clock, which never goes back: what `elapsed` measures from. It means
+/// nothing outside the running program.
+pub struct Instant impl Ord {
+  prv nanos: u64;
+
+  pub fn now() -> Instant {
+    Instant { nanos: unsafe { sag_time_monotonic() } }
+  }
+
+  /// The time since this instant.
+  pub fn elapsed(self) -> Duration {
+    Instant::now().duration_since(self)
+  }
+
+  /// The time from `earlier` to this instant, or zero if `earlier` is later.
+  pub fn duration_since(self, earlier: Instant) -> Duration {
+    if earlier.nanos > self.nanos { Duration::from_nanos(0) } else { Duration::from_nanos(self.nanos - earlier.nanos) }
+  }
+
+  pub fn equals(self, other: Instant) -> bool {
+    self.nanos == other.nanos
+  }
+
+  pub fn compare(self, other: Instant) -> Ordering {
+    self.nanos.compare(other.nanos)
+  }
+}
+
+/// A point of the system clock, which the user or the network may change.
+pub struct SystemTime impl Ord {
+  prv nanos: u64;
+
+  pub fn now() -> SystemTime {
+    SystemTime { nanos: unsafe { sag_time_system() } }
+  }
+
+  /// The time since 1970-01-01 00:00:00 UTC, or zero for an earlier time.
+  pub fn since_unix_epoch(self) -> Duration {
+    Duration::from_nanos(self.nanos)
+  }
+
+  pub fn equals(self, other: SystemTime) -> bool {
+    self.nanos == other.nanos
+  }
+
+  pub fn compare(self, other: SystemTime) -> Ordering {
+    self.nanos.compare(other.nanos)
+  }
+}
+
+/// Pauses the program for at least `duration`.
+pub fn sleep(duration: Duration) {
+  unsafe { sag_time_sleep(duration.as_nanos()) };
+}

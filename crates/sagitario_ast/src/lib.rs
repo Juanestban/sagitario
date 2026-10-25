@@ -32,12 +32,61 @@ pub struct Package {
   /// Index in `modules` of the prelude written in Sagitario, whose public items every module
   /// sees; it is not part of the module tree.
   pub prelude: Option<usize>,
+  /// Indices in `modules` of the standard library modules the program uses, such as `std::io`
+  /// with the path `["std", "io"]`; they are not part of the module tree either.
+  pub std: Vec<usize>,
+  /// A library: it needs no `main`, and a function called `main` is an ordinary one.
+  pub library: bool,
+  /// The package being compiled first, then its dependencies (docs/nova.md#dependencies), which
+  /// `Module::package` indexes. Empty for a program without dependencies.
+  pub packages: Vec<PackageInfo>,
+  /// The machine the program is compiled for.
+  pub target: TargetInfo,
+}
+
+/// What the compiler needs to know about the machine a program runs on (docs/nova.md#targets).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TargetInfo {
+  /// The width of pointers, `isize` and `usize`: 32 or 64.
+  pub pointer_width: u32,
+  /// Whether C's `long` has 32 bits: on Windows and on 32-bit targets.
+  pub long_is_32: bool,
+  /// Whether C's `char` is unsigned: on Linux and Android for ARM.
+  pub char_is_unsigned: bool,
+}
+
+impl TargetInfo {
+  /// The machine running the compiler.
+  pub fn host() -> TargetInfo {
+    let pointer_width = if cfg!(target_pointer_width = "32") { 32 } else { 64 };
+
+    TargetInfo {
+      pointer_width,
+      long_is_32: cfg!(windows) || pointer_width == 32,
+      char_is_unsigned: cfg!(all(any(target_os = "linux", target_os = "android"), any(target_arch = "aarch64", target_arch = "arm"))),
+    }
+  }
+}
+
+impl Default for TargetInfo {
+  fn default() -> TargetInfo {
+    TargetInfo::host()
+  }
+}
+
+/// A package of a program: the one being compiled, or a dependency.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageInfo {
+  /// The name its dependents use as a path root; unused for the package being compiled.
+  pub name: String,
+  /// Indices in `Package::packages` of the packages it depends on directly.
+  pub dependencies: Vec<usize>,
 }
 
 impl Package {
   /// A program made of one file.
   pub fn single(module: Module) -> Package {
-    Package { modules: vec![module], prelude: None }
+    Package { modules: vec![module], prelude: None, std: Vec::new(), library: false, packages: Vec::new(), target: TargetInfo::host() }
   }
 }
 
@@ -48,6 +97,9 @@ pub struct Module {
   /// The logical path from the package root: empty for the root, `["net", "http"]` for
   /// `net/http.sag`.
   pub path: Vec<String>,
+  /// Index in `Package::packages` of the package the file belongs to: 0 for the one being
+  /// compiled (and for the prelude and the standard library).
+  pub package: usize,
   pub uses: Vec<UseDecl>,
   pub items: Vec<Item>,
 }

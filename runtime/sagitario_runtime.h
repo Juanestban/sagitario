@@ -419,6 +419,15 @@ static inline float sag_f64_to_f32(double x) {
   return (float)x;
 }
 
+/* The division of two constants: MSVC rejects a constant division by zero, which IEEE 754
+ * defines as an infinity or NaN (docs/adr/0044-c-toolchains.md). */
+static inline float sag_div_f32(float a, float b) {
+  return a / b;
+}
+static inline double sag_div_f64(double a, double b) {
+  return a / b;
+}
+
 /* ---- Lists (docs/spec/02-types.md#arrays-and-lists) -------------------------------------- */
 
 /* A `List<T>`: an object holding `len` elements of `size` bytes in `data`, which has room for
@@ -485,6 +494,74 @@ SAG_FROM_UINTMAX(u16, uint16_t)
 SAG_FROM_UINTMAX(u32, uint32_t)
 SAG_FROM_UINTMAX(u64, uint64_t)
 SAG_FROM_UINTMAX(usize, size_t)
+
+/* ---- Standard library: std::env, std::io, std::process --------------------------------- *
+ * Declared in Sagitario by the standard library modules (docs/spec/11-standard-library.md).
+ * They borrow their string arguments and return new references. */
+
+/* Codes of I/O errors: `errno` values are positive, the runtime's own are negative. */
+#define SAG_IO_INVALID_DATA (-2)
+#define SAG_IO_UNKNOWN (-3)
+/* The status of a read at the end of the input. */
+#define SAG_IO_END (-1)
+/* Indices of the variants of `std::io::ErrorKind`. */
+#define SAG_IO_KIND_NOT_FOUND 0
+#define SAG_IO_KIND_PERMISSION_DENIED 1
+#define SAG_IO_KIND_ALREADY_EXISTS 2
+#define SAG_IO_KIND_INVALID_INPUT 3
+#define SAG_IO_KIND_INVALID_DATA 4
+#define SAG_IO_KIND_OTHER 6
+
+size_t sag_env_arg_count(void);
+/* Arguments and variables that are not valid UTF-8 get each bad sequence replaced by U+FFFD. */
+sag_string sag_env_arg(size_t index);
+sag_string sag_env_var(sag_string name, bool *found);
+/* Writes to stdout (stream 1) or stderr (2); returns 0 or an error code. */
+int32_t sag_io_write(int32_t stream, sag_string text, bool newline);
+int32_t sag_io_flush(void);
+/* `*status` becomes 0, SAG_IO_END or an error code. */
+sag_string sag_io_read_line(int32_t *status);
+sag_string sag_io_read_all(int32_t *status);
+int32_t sag_io_error_kind(int32_t code);
+sag_string sag_io_error_message(int32_t code);
+/* Flushes output and ends the program without running pending releases. */
+_Noreturn void sag_process_exit(int32_t code);
+
+/* What a path names, for std::fs; errors count as missing. */
+#define SAG_FS_MISSING 0
+#define SAG_FS_FILE 1
+#define SAG_FS_DIR 2
+#define SAG_FS_OTHER 3
+
+/* Each returns 0 or an error code, or sets `*status` to one. Paths with NUL are EINVAL. */
+int32_t sag_fs_kind(sag_string path);
+sag_string sag_fs_read(sag_string path, int32_t *status);
+int32_t sag_fs_write(sag_string path, sag_string text, bool append);
+int32_t sag_fs_create_dir(sag_string path);
+int32_t sag_fs_remove_dir(sag_string path);
+int32_t sag_fs_remove_file(sag_string path);
+/* Replaces the target if it exists, on every system. */
+int32_t sag_fs_rename(sag_string from, sag_string to);
+int32_t sag_fs_copy(sag_string from, sag_string to);
+/* The names in a directory, without `.` and `..`, separated by NUL characters. */
+sag_string sag_fs_read_dir(sag_string path, int32_t *status);
+sag_string sag_fs_current_dir(int32_t *status);
+/* Nanoseconds of a monotonic clock, and since the Unix epoch (0 before it). */
+uint64_t sag_time_monotonic(void);
+uint64_t sag_time_system(void);
+/* Sleeps at least `nanos` nanoseconds. */
+void sag_time_sleep(uint64_t nanos);
+
+/* Runs the program `argv` (`argc` parts separated by NUL, the program first) with the
+ * `NAME=value` entries of `env` added to the environment, in `cwd` unless it is empty, with
+ * `input` as stdin if `has_input`, capturing stdout and stderr if `capture`. Sets results[0] to
+ * an error code or 0, results[1] to the exit code and results[2] to whether there is one, and
+ * returns stdout followed by stderr, `*split` being the length of stdout. */
+sag_string sag_process_run(sag_string argv, size_t argc, sag_string env, size_t env_count, sag_string cwd, sag_string input, bool has_input,
+                           bool capture, int32_t *results, size_t *split);
+
+/* Whether paths follow Windows rules (`\` separators and drive letters). */
+bool sag_path_windows(void);
 
 /* ---- Program lifecycle ----------------------------------------------------------------- */
 

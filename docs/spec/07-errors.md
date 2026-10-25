@@ -72,6 +72,7 @@ a return type on `main` is optional. When it returns `Result<(), E>`:
 | `main` returns normally or returns `Ok` | `0` |
 | `main` returns `Err(e)` (`error: <e>` is printed to stderr) | `1` |
 | A panic occurs | `101` |
+| `std::process::exit(code)` is called (F3) | `code` |
 
 Command-line arguments are read with `std::env::args()`; they are not part of `main`'s
-signature.
+signature ([standard library](11-standard-library.md)).

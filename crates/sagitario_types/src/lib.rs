@@ -73,17 +73,20 @@ impl IntTy {
     matches!(self, IntTy::I8 | IntTy::I16 | IntTy::I32 | IntTy::I64 | IntTy::Isize)
   }
 
-  /// The largest value of the type. `isize`/`usize` assume 64-bit targets, the only ones the MVP
-  /// supports.
-  pub fn max(self) -> u128 {
+  /// The largest value of the type on a target whose pointers have `pointer_width` bits.
+  pub fn max(self, pointer_width: u32) -> u128 {
+    let narrow = pointer_width == 32;
+
     match self {
       IntTy::I8 => i8::MAX as u128,
       IntTy::I16 => i16::MAX as u128,
       IntTy::I32 => i32::MAX as u128,
+      IntTy::Isize if narrow => i32::MAX as u128,
       IntTy::I64 | IntTy::Isize => i64::MAX as u128,
       IntTy::U8 => u8::MAX as u128,
       IntTy::U16 => u16::MAX as u128,
       IntTy::U32 => u32::MAX as u128,
+      IntTy::Usize if narrow => u32::MAX as u128,
       IntTy::U64 | IntTy::Usize => u64::MAX as u128,
     }
   }
@@ -375,12 +378,13 @@ pub struct FnSig {
   pub ret: Type,
 }
 
-pub fn builtin_sig(builtin: Builtin) -> FnSig {
+pub fn builtin_sig(builtin: Builtin, target: &sagitario_ast::TargetInfo) -> FnSig {
   match builtin {
     Builtin::Print | Builtin::Println | Builtin::Eprintln => FnSig { receiver: None, params: vec![Type::String], ret: Type::Unit },
     Builtin::Panic => FnSig { receiver: None, params: vec![Type::String], ret: Type::Never },
+    Builtin::Exit => FnSig { receiver: None, params: vec![Type::Int(IntTy::I32)], ret: Type::Never },
     Builtin::CStringNew => FnSig { receiver: None, params: vec![Type::String], ret: Type::Result(Box::new(Type::CString), Box::new(Type::String)) },
-    Builtin::StringFromC => FnSig { receiver: None, params: vec![ffi::c_string_ptr()], ret: Type::String },
+    Builtin::StringFromC => FnSig { receiver: None, params: vec![ffi::c_string_ptr(target)], ret: Type::String },
     // The result is the prelude's `Error`, which the type checker knows.
     Builtin::ErrorNew => FnSig { receiver: None, params: vec![Type::String], ret: Type::Error },
     // Generic over the array: checked by the type checker.
@@ -1323,7 +1327,7 @@ impl Checker<'_> {
             return Type::Param(ParamRef { owner: *owner, index: *index, name });
           }
           Some(TypeRes::CType(CType::Void)) if !behind_pointer => return self.bare_c_void(path.span),
-          Some(TypeRes::CType(c)) => return ffi::c_type(*c),
+          Some(TypeRes::CType(c)) => return ffi::c_type(*c, &self.package.target),
           Some(TypeRes::CString) => return Type::CString,
           Some(TypeRes::Error) => return Type::Error,
           _ => {}
@@ -1781,7 +1785,8 @@ impl Checker<'_> {
     }
 
     // The most negative value has one more unit of magnitude than the maximum.
-    let limit = if negative { int.max() + 1 } else { int.max() };
+    let max = int.max(self.package.target.pointer_width);
+    let limit = if negative { max + 1 } else { max };
 
     if value > limit {
       let shown = if negative { format!("-{value}") } else { value.to_string() };
@@ -1790,7 +1795,7 @@ impl Checker<'_> {
         Diagnostic::error(codes::INTEGER_OUT_OF_RANGE, span, format!("the literal `{shown}` does not fit in `{}`", int.name())).with_note(format!(
           "the maximum value of `{}` is `{}`",
           int.name(),
-          int.max()
+          max
         )),
       );
     }
@@ -2110,7 +2115,7 @@ impl Checker<'_> {
           self.require_unsafe(callee.span, "reading a C string");
         }
 
-        Some(builtin_sig(builtin))
+        Some(builtin_sig(builtin, &self.package.target))
       }
       (ExprKind::Path(_), None) => None,
       // A binding, field, call result or lambda of a function type.

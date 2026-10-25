@@ -1,0 +1,37 @@
+// `std::time`: durations, the monotonic and system clocks, and `sleep`. Clock readings are
+// checked with tolerant bounds.
+// expect-stdout: 2 2500 2500000 2500000000 2.5
+// expect-stdout: plus: 1500 minus: 500 times: 3000
+// expect-stdout: sorted: 1 2 3
+// expect-stdout: equal: true
+// expect-stdout: slept at least 20 ms: true
+// expect-stdout: monotonic: true
+// expect-stdout: after 2020: true
+
+use std::time;
+use std::time::{Duration, Instant, SystemTime};
+
+fn main() {
+  const d = Duration::from_millis(2500);
+  println(`${d.as_secs()} ${d.as_millis()} ${d.as_micros()} ${d.as_nanos()} ${d.as_secs_f64()}`);
+
+  const second = Duration::from_secs(1);
+  const half = Duration::from_micros(500_000);
+  println(`plus: ${second.plus(half).as_millis()} minus: ${second.minus(half).as_millis()} times: ${second.times(3).as_millis()}`);
+
+  const durations = List::from([Duration::from_secs(3), Duration::from_nanos(1_000_000_000), Duration::from_secs(2)]);
+  durations.sort();
+  println(`sorted: ${durations.iter().map((d) => `${d.as_secs()}`).collect().join(" ")}`);
+  println(`equal: ${Duration::from_secs(1).equals(Duration::from_millis(1000))}`);
+
+  const start = Instant::now();
+  time::sleep(Duration::from_millis(20));
+  const later = Instant::now();
+  println(`slept at least 20 ms: ${start.elapsed().as_millis() >= 20}`);
+
+  // A later instant measured from an earlier one, and the reverse saturating at zero.
+  println(`monotonic: ${later.compare(start) == Ordering::Greater && start.duration_since(later).as_nanos() == 0}`);
+
+  // 2020-01-01 00:00:00 UTC.
+  println(`after 2020: ${SystemTime::now().since_unix_epoch().as_secs() > 1_577_836_800}`);
+}

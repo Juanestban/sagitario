@@ -62,6 +62,7 @@ pub fn generate(program: &Program) -> GeneratedC {
     class_queue: Vec::new(),
     classes: &program.classes,
     functions: &program.functions,
+    externs: &program.externs,
     envs: &program.envs,
     list_elems: Vec::new(),
   };
@@ -71,7 +72,7 @@ pub fn generate(program: &Program) -> GeneratedC {
   generator.out.push_str(&format!("#include \"{RUNTIME_HEADER}\"\n\n"));
   generator.type_definitions(&order);
 
-  for (index, decl) in program.externs.iter().enumerate() {
+  for (index, decl) in program.externs.iter().enumerate().filter(|(_, decl)| !decl.runtime) {
     let prototype = generator.extern_prototype(index, decl);
 
     generator.out.push_str(&format!("{prototype};\n"));
@@ -139,6 +140,8 @@ struct Generator<'a> {
   classes: &'a [ClassInstance],
   /// The program's functions, for the signatures of calls through vtables.
   functions: &'a [Function],
+  /// The C functions the program calls, indexed by `ExternId`.
+  externs: &'a [ExternDecl],
   /// The types captured by each closure environment.
   envs: &'a [Vec<Type>],
   /// The element types of the lists the program uses; `sag_elem_release_N` releases an element
@@ -795,14 +798,16 @@ impl<'a> Generator<'a> {
   }
 
   /// The C `main`: runs the entry function and turns an `Err` from `main` into exit code 1.
+  /// The C `main`, which calls the program's `main`; a library has none.
   fn entry_point(&mut self, program: &Program) {
-    let entry = fn_name(program.entry);
-    let returns_result = program.functions.get(program.entry.0 as usize).is_some_and(|function| matches!(function.ret, Type::Result(..)));
+    let Some(entry_id) = program.entry else { return };
+    let entry = fn_name(entry_id);
+    let returns_result = program.functions.get(entry_id.0 as usize).is_some_and(|function| matches!(function.ret, Type::Result(..)));
 
     self.out.push_str("int main(int argc, char **argv) {\n");
     self.out.push_str("  sag_rt_init(argc, argv);\n");
 
-    if let Some(function) = program.functions.get(program.entry.0 as usize).filter(|_| returns_result) {
+    if let Some(function) = program.functions.get(entry_id.0 as usize).filter(|_| returns_result) {
       let ty = self.c_type(&function.ret);
 
       self.out.push_str(&format!("  {ty} result = {entry}();\n"));
@@ -870,13 +875,15 @@ impl<'a> Generator<'a> {
     let exports: Vec<(usize, &Function, &String)> =
       program.functions.iter().enumerate().filter_map(|(index, function)| function.export.as_ref().map(|symbol| (index, function, symbol))).collect();
 
-    if program.externs.is_empty() && exports.is_empty() {
+    let externs: Vec<(usize, &ExternDecl)> = program.externs.iter().enumerate().filter(|(_, decl)| !decl.runtime).collect();
+
+    if externs.is_empty() && exports.is_empty() {
       return None;
     }
 
     let mut declared = Vec::new();
     let mut defined = Vec::new();
-    let signature_types = program.externs.iter().flat_map(|decl| decl.params.iter().chain([&decl.ret]));
+    let signature_types = externs.iter().flat_map(|(_, decl)| decl.params.iter().chain([&decl.ret]));
     let export_types = exports.iter().flat_map(|(_, function, _)| function.locals.iter().take(function.param_count).chain([&function.ret]));
 
     for ty in signature_types.chain(export_types) {
@@ -895,7 +902,7 @@ impl<'a> Generator<'a> {
       out.push_str(&self.definition(ty));
     }
 
-    for (index, decl) in program.externs.iter().enumerate() {
+    for (index, decl) in externs {
       let args: Vec<String> = (0..decl.params.len()).map(|arg| format!("a{arg}")).collect();
       let call = format!("{}({})", decl.symbol, args.join(", "));
       let body = if matches!(decl.ret, Type::Unit | Type::Never) { format!("{call};") } else { format!("return {call};") };
@@ -1331,6 +1338,10 @@ impl<'a> Generator<'a> {
       Rvalue::Unary { op: UnaryOp::Neg, operand: value, .. } => format!("(-{})", self.operand(value)),
       // Dereferences are places (`Projection::Deref`); this form is not produced.
       Rvalue::Unary { op: UnaryOp::Deref, operand: value, .. } => format!("(*{})", self.operand(value)),
+      // MSVC rejects dividing constants by zero, which C11 with IEEE 754 defines.
+      Rvalue::Binary { op: BinaryOp::Div, ty: Type::Float(float), lhs: lhs @ Operand::Const(_), rhs: rhs @ Operand::Const(_) } => {
+        format!("sag_div_{}({}, {})", float.name(), self.operand(lhs), self.operand(rhs))
+      }
       Rvalue::Binary { op, ty, lhs, rhs } => binary(*op, ty, &self.operand(lhs), &self.operand(rhs)),
       Rvalue::Cast { from, to, operand: value } => match (from, to) {
         (Type::Ptr { .. }, Type::Ptr { .. }) => format!("(({}){})", self.c_type(to), self.operand(value)),
@@ -1371,7 +1382,12 @@ impl<'a> Generator<'a> {
           args.push("__LINE__".to_string());
         }
 
-        format!("{}({})", callee_name(callee), args.join(", "))
+        let name = match callee {
+          Callee::Extern(id) => self.externs.get(id.0 as usize).filter(|decl| decl.runtime).map(|decl| decl.symbol.clone()),
+          _ => None,
+        };
+
+        format!("{}({})", name.unwrap_or_else(|| callee_name(callee)), args.join(", "))
       }
       Rvalue::Aggregate(parts) => {
         let parts: Vec<String> = parts.iter().map(|part| self.operand(part)).collect();
@@ -1557,6 +1573,7 @@ fn callee_name(callee: &Callee) -> String {
     Callee::Builtin(Builtin::Println) => "sag_println".to_string(),
     Callee::Builtin(Builtin::Eprintln) => "sag_eprintln".to_string(),
     Callee::Builtin(Builtin::Panic) => "sag_panic_str_at".to_string(),
+    Callee::Builtin(Builtin::Exit) => "sag_process_exit".to_string(),
     Callee::Builtin(Builtin::StringFromC) => "sag_string_from_c_at".to_string(),
     // Lowered to a call of `sag_cstring_new` with its outputs.
     Callee::Builtin(Builtin::CStringNew) => "sag_cstring_new".to_string(),

@@ -1,0 +1,29 @@
+// `std::env`: arguments (with non-ASCII text, which Windows passes as UTF-16) and variables.
+// args: uno dós a\b"c
+// env: SAG_TEST_GREETING=¡hola!
+// expect-stdout: 3 arguments after the program
+// expect-stdout: uno|dós|a\b"c
+// expect-stdout: greeting: ¡hola!
+// expect-stdout: missing: none
+// expect-stdout: invalid name: none
+
+use std::env;
+
+fn main() {
+  const args = env::args();
+
+  if args[0].is_empty() {
+    panic("the program has no name");
+  }
+
+  println(`${args.len() - 1} arguments after the program`);
+  println(args.iter().skip(1).collect().join("|"));
+
+  match env::variable("SAG_TEST_GREETING") {
+    Some(value) => println(`greeting: ${value}`),
+    None => println("greeting: none"),
+  }
+
+  println(`missing: ${env::variable("SAG_TEST_MISSING_VARIABLE").unwrap_or("none")}`);
+  println(`invalid name: ${env::variable("A=B").unwrap_or("none")}`);
+}

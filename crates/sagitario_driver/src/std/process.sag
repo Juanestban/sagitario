@@ -1,0 +1,180 @@
+//! `std::process`: the running program and the programs it runs
+//! (docs/spec/11-standard-library.md#stdprocess).
+//!
+//! `exit(code: i32)` ends the program with an exit code. It never returns, which no function
+//! written in Sagitario can declare, so the compiler provides it like `panic`.
+
+use std::io;
+use std::io::ErrorKind;
+
+extern "C" {
+  fn sag_process_run(
+    argv: String,
+    argc: usize,
+    env: String,
+    env_count: usize,
+    cwd: String,
+    input: String,
+    has_input: bool,
+    capture: bool,
+    results: *mut i32,
+    split: *mut usize,
+  ) -> String;
+}
+
+/// How a program ended.
+pub struct ExitStatus {
+  /// Its exit code, or `None` if a signal ended it (POSIX systems).
+  pub code: Option<i32>;
+
+  /// Whether it ended with the exit code 0.
+  pub fn success(self) -> bool {
+    match self.code {
+      Some(code) => code == 0,
+      None => false,
+    }
+  }
+}
+
+/// What a program printed and how it ended.
+pub struct Output {
+  pub status: ExitStatus;
+  /// Its stdout; bytes that are not UTF-8 are replaced by U+FFFD.
+  pub stdout: String;
+  /// Its stderr; bytes that are not UTF-8 are replaced by U+FFFD.
+  pub stderr: String;
+}
+
+/// A program to run, with its arguments, environment, directory and input. Each method returns
+/// the command itself, so calls chain: `new Command("git").arg("status").output()`.
+pub class Command {
+  prv const program: String;
+  prv const arguments: List<String>;
+  /// `NAME=value` entries added to the environment.
+  prv const variables: List<String>;
+  prv var directory: Option<String>;
+  prv var stdin_text: Option<String>;
+  /// Whether `env` received a name that is empty or contains `=`.
+  prv var invalid_name: bool;
+
+  /// `program` is looked up in the directories of `PATH` unless it contains a separator.
+  pub fn new(self, program: String) {
+    self.program = program;
+    self.arguments = new List<String>();
+    self.variables = new List<String>();
+    self.directory = None;
+    self.stdin_text = None;
+    self.invalid_name = false;
+  }
+
+  pub fn arg(self, arg: String) -> Command {
+    self.arguments.push(arg);
+    self
+  }
+
+  pub fn args(self, args: List<String>) -> Command {
+    for arg in args {
+      self.arguments.push(arg);
+    }
+
+    self
+  }
+
+  /// Sets an environment variable for the program; the others are inherited.
+  pub fn env(self, name: String, value: String) -> Command {
+    if name.is_empty() || name.contains("=") {
+      self.invalid_name = true;
+    }
+
+    self.variables.push(`${name}=${value}`);
+    self
+  }
+
+  /// The program's working directory, instead of the current one.
+  pub fn current_dir(self, path: String) -> Command {
+    self.directory = Some(path);
+    self
+  }
+
+  /// Text written to the program's stdin, which is then closed. Without it, the program reads
+  /// this program's stdin.
+  pub fn input(self, text: String) -> Command {
+    self.stdin_text = Some(text);
+    self
+  }
+
+  /// Runs the program to its end and captures its stdout and stderr.
+  pub fn output(self) -> Result<Output, io::Error> {
+    self.run(true)
+  }
+
+  /// Runs the program to its end, printing to this program's stdout and stderr.
+  pub fn status(self) -> Result<ExitStatus, io::Error> {
+    Ok(self.run(false)?.status)
+  }
+
+  prv fn run(self, capture: bool) -> Result<Output, io::Error> {
+    const action = `cannot run "${self.program}"`;
+    const nul = "\0";
+    const texts = List::from([self.program]);
+
+    for arg in self.arguments {
+      texts.push(arg);
+    }
+
+    for entry in self.variables {
+      texts.push(entry);
+    }
+
+    match self.directory {
+      Some(dir) => texts.push(dir),
+      None => {}
+    }
+
+    if self.invalid_name {
+      return Err(new io::Error(ErrorKind::InvalidInput, `${action}: an environment variable name is empty or contains "="`));
+    }
+
+    if texts.iter().any((text) => text.contains(nul)) {
+      return Err(new io::Error(ErrorKind::InvalidInput, `${action}: an argument, variable or directory contains a NUL character`));
+    }
+
+    const argv = List::from([self.program]);
+
+    for arg in self.arguments {
+      argv.push(arg);
+    }
+
+    var results = [0i32; 3];
+    var split = [0usize; 1];
+    const input = self.stdin_text.unwrap_or("");
+    const has_input = self.stdin_text.is_some();
+    const dir = self.directory.unwrap_or("");
+    const printed = unsafe {
+      sag_process_run(
+        argv.join(nul),
+        argv.len(),
+        self.variables.join(nul),
+        self.variables.len(),
+        dir,
+        input,
+        has_input,
+        capture,
+        results.as_mut_ptr(),
+        split.as_mut_ptr(),
+      )
+    };
+
+    if results[0] != 0 {
+      return Err(super::os_error(results[0], action));
+    }
+
+    const code = if results[2] == 1 { Some(results[1]) } else { None };
+
+    Ok(Output {
+      status: ExitStatus { code: code },
+      stdout: printed.substring(0, split[0]),
+      stderr: printed.substring(split[0], printed.len()),
+    })
+  }
+}
