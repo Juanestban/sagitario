@@ -269,8 +269,11 @@ mod tests {
   fn parses_the_hidden_dump() {
     let expected = CompileOptions { dump: Some(Dump::Tokens), ..options("main.sag") };
 
+    let types = CompileOptions { dump: Some(Dump::Types), ..options("main.sag") };
+
     assert_eq!(parse(&["check", "--dump=tokens", "main.sag"]), Ok(Command::Check(expected)));
-    assert!(parse(&["check", "--dump=types", "main.sag"]).is_err());
+    assert_eq!(parse(&["check", "--dump=types", "main.sag"]), Ok(Command::Check(types)));
+    assert!(parse(&["check", "--dump=sir", "main.sag"]).is_err());
     assert!(parse(&["build", "--dump=tokens", "main.sag"]).is_err());
   }
 
