@@ -6,6 +6,7 @@
 //! interfaces and imports share one namespace per module; the members of a struct or class (fields
 //! and functions) or of an enum (variants and functions) share another one per type.
 
+pub mod dump;
 mod modules;
 
 use std::collections::{HashMap, HashSet};
@@ -1261,11 +1262,15 @@ impl<'a> Resolver<'a> {
     prelude.items.get(name).filter(|declared| declared.visibility == Visibility::Public).map(|declared| declared.item)
   }
 
-  /// Names of the current module's items and imports, for "similar name" suggestions.
+  /// Names of the current module's items and imports, for "similar name" suggestions. They are
+  /// sorted: among equally close names, the suggestion must not depend on the order of a hash
+  /// map.
   fn item_names(&self) -> Vec<String> {
     let Some(info) = self.resolution.module(self.module) else { return Vec::new() };
+    let mut names: Vec<String> = info.items.keys().chain(info.imports.keys()).cloned().collect();
 
-    info.items.keys().chain(info.imports.keys()).cloned().collect()
+    names.sort();
+    names
   }
 
   fn block(&mut self, block: &Block) {
@@ -1946,7 +1951,9 @@ impl<'a> Resolver<'a> {
 
     let mut diagnostic =
       Diagnostic::error(codes::UNRESOLVED_NAME, segment.span, format!("cannot find `{name}` in the module `{}`", info.display_path()));
-    let candidates: Vec<&str> = info.items.keys().chain(info.children.keys()).map(String::as_str).collect();
+    let mut candidates: Vec<&str> = info.items.keys().chain(info.children.keys()).map(String::as_str).collect();
+
+    candidates.sort_unstable();
 
     if let Some(similar) = sagitario_diagnostics::closest_match(name, candidates) {
       diagnostic = diagnostic.with_help(format!("a name with a similar spelling exists: `{similar}`"));

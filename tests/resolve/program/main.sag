@@ -1,0 +1,38 @@
+// A program of several modules: imports, aliases, groups, `self` and `super`, visibility and the
+// warnings about unused imports and private types in public interfaces.
+
+use pkg::net;
+use pkg::net::http::{self, get as fetch, Status};
+use pkg::tools::text::shout;
+use pkg::net::http::Status::Ok;
+use pkg::net::http::get::inner;
+use pkg::net::secret;
+use pkg::unused_module;
+use pkg::net::ping;
+use std::process;
+use std::fs as files;
+
+pub fn exposed(value: Hidden) -> Hidden {
+  value
+}
+
+struct Hidden {
+  pub value: i32;
+}
+
+fn main() {
+  const status = fetch("x");
+  const again = http::get("y");
+  const loud = shout("hi");
+  const code = net::port();
+  const nested = pkg::net::http::Status::Found;
+  const missing = pkg::net::http::gett("z");
+  const private = net::internal();
+  const deeper = net::http::helper();
+
+  if !files::exists("nothing") {
+    process::exit(0);
+  }
+
+  println(`${loud} ${code}`);
+}

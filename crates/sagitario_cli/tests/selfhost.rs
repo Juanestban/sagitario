@@ -186,7 +186,7 @@ impl Drop for BuiltSagc {
 }
 
 #[test]
-fn sagc_dumps_the_same_tokens_and_trees() -> io::Result<()> {
+fn sagc_dumps_the_same_results() -> io::Result<()> {
   let sag = PathBuf::from(env!("CARGO_BIN_EXE_sag"));
   let built = BuiltSagc { base: root().join("compiler/src/main") };
   let (code, _, stderr) = run(&sag, &["build", "compiler/src/main.sag"])?;
@@ -202,7 +202,7 @@ fn sagc_dumps_the_same_tokens_and_trees() -> io::Result<()> {
 
   let mut differences = Vec::new();
 
-  let dumps = ["tokens", "ast"];
+  let dumps = ["tokens", "ast", "resolve"];
 
   for file in &files {
     for (dump, format) in dumps.iter().flat_map(|dump| ["human", "short"].map(|format| (dump, format))) {

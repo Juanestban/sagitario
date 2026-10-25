@@ -71,6 +71,8 @@ pub enum Dump {
   Tokens,
   /// The syntax tree of the input file.
   Ast,
+  /// The names of the program, as the resolver binds them.
+  Resolve,
 }
 
 /// What `[link]` adds to a build: C libraries, where to find them, and C sources to compile.
@@ -133,6 +135,10 @@ pub fn on_large_stack(work: fn() -> std::process::ExitCode) -> std::process::Exi
 
 /// `sag check`: runs the front end only.
 pub fn check(options: &CompileOptions) -> u8 {
+  if options.dump == Some(Dump::Resolve) {
+    return dump_resolution(options);
+  }
+
   if let Some(dump) = options.dump {
     return dump_file(options, dump);
   }
@@ -228,8 +234,25 @@ fn dump_file(options: &CompileOptions, dump: Dump) -> u8 {
 
       print!("{}", sagitario_ast::dump::dump(&module));
     }
-    Dump::Ast => {}
+    Dump::Ast | Dump::Resolve => {}
   }
+
+  match report(&mut diagnostics, &sources, options) {
+    Ok(()) => 0,
+    Err(code) => code,
+  }
+}
+
+/// `sag check --dump=resolve`: loads the program as `check` does, resolves it and prints the
+/// resolution (docs/adr/0052-resolver-port-and-resolution-dumps.md).
+fn dump_resolution(options: &CompileOptions) -> u8 {
+  let (package, sources, mut diagnostics) = match load_package(options) {
+    Ok(loaded) => loaded,
+    Err(code) => return code,
+  };
+  let resolution = sagitario_resolve::resolve(&package, &mut diagnostics);
+
+  print!("{}", sagitario_resolve::dump::dump(&resolution));
 
   match report(&mut diagnostics, &sources, options) {
     Ok(()) => 0,
@@ -247,6 +270,38 @@ struct FrontEnd {
 
 /// Lexes, parses, resolves and type checks; with `generate`, also lowers to SIR and emits C.
 fn front_end(options: &CompileOptions, generate: bool) -> Result<FrontEnd, u8> {
+  let (package, sources, mut diagnostics) = load_package(options)?;
+  let resolution = sagitario_resolve::resolve(&package, &mut diagnostics);
+  let typed = sagitario_types::check(&package, &resolution, &mut diagnostics);
+
+  report(&mut diagnostics, &sources, options)?;
+
+  let (header, exports) = if options.library && generate {
+    let exports = header::exports(&package, &resolution, &typed).into_iter().map(|export| export.symbol).collect();
+
+    (Some(header::generate(&options.name, &package, &resolution, &typed, &sources)), exports)
+  } else {
+    (None, Vec::new())
+  };
+
+  let program = sagitario_sir::lower(&package, &resolution, &typed, &sources, &mut diagnostics).map_err(|error| {
+    eprintln!("internal compiler error: {}", error.0);
+    EXIT_ICE
+  })?;
+
+  // Generic code may instantiate itself endlessly, found while lowering.
+  report(&mut diagnostics, &sources, options)?;
+
+  if !generate {
+    return Ok(FrontEnd { c_source: None, header, exports });
+  }
+  Ok(FrontEnd { c_source: Some(sagitario_codegen_c::generate(&program)), header, exports })
+}
+
+/// Reads, lexes and parses the input's modules, those of its dependencies, the standard
+/// library modules they name and the prelude. Lexical and syntax errors are reported, and stop
+/// the pipeline.
+fn load_package(options: &CompileOptions) -> Result<(Package, SourceMap, Diagnostics), u8> {
   let input = &options.input;
   if input.extension().and_then(|extension| extension.to_str()) != Some("sag") {
     eprintln!("error: `{}` is not a `.sag` file", input.display());
@@ -322,31 +377,8 @@ fn front_end(options: &CompileOptions, generate: bool) -> Result<FrontEnd, u8> {
     None => TargetInfo::host(),
   };
   let package = Package { modules: loader.modules, prelude: Some(prelude), std: loader.std, library: options.library, packages: infos, target };
-  let resolution = sagitario_resolve::resolve(&package, &mut diagnostics);
-  let typed = sagitario_types::check(&package, &resolution, &mut diagnostics);
 
-  report(&mut diagnostics, &sources, options)?;
-
-  let (header, exports) = if options.library && generate {
-    let exports = header::exports(&package, &resolution, &typed).into_iter().map(|export| export.symbol).collect();
-
-    (Some(header::generate(&options.name, &package, &resolution, &typed, &sources)), exports)
-  } else {
-    (None, Vec::new())
-  };
-
-  let program = sagitario_sir::lower(&package, &resolution, &typed, &sources, &mut diagnostics).map_err(|error| {
-    eprintln!("internal compiler error: {}", error.0);
-    EXIT_ICE
-  })?;
-
-  // Generic code may instantiate itself endlessly, found while lowering.
-  report(&mut diagnostics, &sources, options)?;
-
-  if !generate {
-    return Ok(FrontEnd { c_source: None, header, exports });
-  }
-  Ok(FrontEnd { c_source: Some(sagitario_codegen_c::generate(&program)), header, exports })
+  Ok((package, sources, diagnostics))
 }
 
 /// The part of the prelude written in Sagitario.

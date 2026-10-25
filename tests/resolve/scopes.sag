@@ -1,0 +1,102 @@
+// Scopes, shadowing, captures, patterns and the names every module sees.
+
+use std::ffi::{CString, c_int};
+
+const LIMIT: i32 = 10;
+const DOUBLE: i32 = LIMIT * 2;
+
+enum Shape<T> {
+  Circle(T),
+  Square { side: T },
+  Empty,
+
+  pub fn empty() -> Shape<T> {
+    Self::Empty
+  }
+
+  pub fn size(self) -> i32 {
+    match self {
+      Shape::Circle(_) | Self::Empty => 1,
+      Shape::Square { .. } => 2,
+    }
+  }
+}
+
+struct Point {
+  pub x: i32;
+  pub y: i32;
+
+  pub fn origin() -> Point {
+    Point { x: 0, y: 0 }
+  }
+
+  prv fn hidden() -> i32 {
+    Point::origin().x
+  }
+}
+
+class Animal {
+  pub const name: String;
+
+  pub fn new(self, name: String) {
+    self.name = name;
+  }
+
+  pub fn speak(self) -> String {
+    self.name
+  }
+}
+
+class Dog extends Animal {
+  pub fn new(self, name: String) {
+    zod.new(name);
+  }
+
+  pub fn speak(self) -> String {
+    zod.speak() + "!"
+  }
+}
+
+fn apply<T>(value: T, f: fn(T) -> T) -> T {
+  f(value)
+}
+
+fn main() {
+  const x = 1;
+  const x = x + 1;
+  var total = 0;
+
+  for i in 0..LIMIT {
+    const step = (n: i32) => {
+      const inner = (m: i32) => m + n + i + x;
+
+      inner(total)
+    };
+
+    total = step(i);
+  }
+
+  const shape = Shape::Circle(2);
+
+  match shape {
+    Shape::Circle(r) | Shape::Square { side: r } => println(`${r}`),
+    Shape::Empty => {}
+  }
+
+  if let Some(value) = List::from([1, 2]).first() {
+    println(`${value}`);
+  }
+
+  while let Some(c) = char::from_u32(65) {
+    println(`${c}`);
+    break;
+  }
+
+  const result: Result<i32, Error> = Err(Error("failed"));
+  const text = CString::new("hi");
+  const n: c_int = 3;
+  const dog: Animal = new Dog("rex");
+  const sum = apply(DOUBLE, v => v + 1);
+
+  println(`${total} ${sum} ${dog.speak()} ${Shape::empty().size()} ${Point::origin().x}`);
+}

@@ -1,19 +1,23 @@
 //! `sagc`: the Sagitario compiler written in Sagitario (F5, docs/roadmap.md). While it is being
-//! ported it does what its passes allow: `sagc check --dump=tokens|ast <file.sag>`, which prints
-//! the tokens or the syntax tree of a file like `sag check --dump=...`
-//! (docs/adr/0050-lexer-port-and-token-dumps.md, docs/adr/0051-parser-port-and-ast-dumps.md).
+//! ported it does what its passes allow: `sagc check --dump=tokens|ast|resolve <file.sag>`, which
+//! prints the tokens or the syntax tree of a file, or the resolution of a program, like
+//! `sag check --dump=...` (docs/adr/0050-lexer-port-and-token-dumps.md,
+//! docs/adr/0051-parser-port-and-ast-dumps.md, docs/adr/0052-resolver-port-and-resolution-dumps.md).
 
 use pkg::ast::dump;
 use pkg::diagnostics;
 use pkg::diagnostics::{DiagnosticFormat, Diagnostics};
 use pkg::lexer;
+use pkg::loader::Loader;
 use pkg::parser;
+use pkg::resolve;
 use pkg::span::SourceMap;
 use std::env;
 use std::fs;
+use std::path;
 use std::process;
 
-const USAGE: String = "Usage: sagc check --dump=tokens|ast [--diagnostic-format human|short] <file.sag>";
+const USAGE: String = "Usage: sagc check --dump=tokens|ast|resolve [--diagnostic-format human|short] <file.sag>";
 
 /// Exit code for invalid command-line usage.
 const EXIT_USAGE: i32 = 2;
@@ -84,10 +88,10 @@ fn parse(args: List<String>) -> Result<Options, String> {
 
     if flag == "--dump" {
       match flag_value(inline, args, index) {
-        Some(value) if value == "tokens" || value == "ast" => {
+        Some(value) if value == "tokens" || value == "ast" || value == "resolve" => {
           options.dump = Some(value);
         }
-        Some(value) => return Err(`unknown dump \`${value}\`; expected \`tokens\` or \`ast\``),
+        Some(value) => return Err(`unknown dump \`${value}\`; expected \`tokens\`, \`ast\` or \`resolve\``),
         None => return Err("`--dump` requires a value"),
       }
     } else if flag == "--diagnostic-format" {
@@ -117,7 +121,7 @@ fn parse(args: List<String>) -> Result<Options, String> {
   }
 
   if options.dump.is_none() {
-    return Err("only `check --dump=tokens` and `check --dump=ast` are ported yet");
+    return Err("only `check --dump=tokens`, `check --dump=ast` and `check --dump=resolve` are ported yet");
   }
 
   Ok(options)
@@ -196,12 +200,57 @@ fn dump_file(input: String, dump_kind: String, format: DiagnosticFormat) -> i32 
   if report(diagnostics, sources, format, input) { 1 } else { 0 }
 }
 
+/// `check --dump=resolve`: loads the program as a build does, resolves it and prints the
+/// resolution. Lexical and syntax errors stop before resolving.
+fn dump_resolution(input: String, format: DiagnosticFormat) -> i32 {
+  const is_sag = match path::extension(input) {
+    Some(extension) => extension == "sag",
+    None => false,
+  };
+
+  if !is_sag {
+    eprintln(`error: \`${input}\` is not a \`.sag\` file`);
+    return 1;
+  }
+
+  if !fs::is_file(input) {
+    eprintln(`error: cannot find \`${input}\``);
+    return 1;
+  }
+
+  const sources = new SourceMap();
+  const diagnostics = new Diagnostics();
+  const loader = new Loader(input);
+
+  if !loader.load(input, new List(), sources, diagnostics) || !loader.load_references(sources, diagnostics) {
+    return 1;
+  }
+
+  if report(diagnostics, sources, format, input) {
+    return 1;
+  }
+
+  const prelude = loader.load_prelude(sources, diagnostics);
+
+  if report(diagnostics, sources, format, input) {
+    return 1;
+  }
+
+  const resolution = resolve::resolve(loader.package(prelude), diagnostics);
+
+  print(resolve::dump::dump(resolution));
+
+  if report(diagnostics, sources, format, input) { 1 } else { 0 }
+}
+
 pub fn main() {
   const options = match parse(env::args()) {
     Ok(options) => options,
     Err(message) => process::exit(usage_error(message)),
   };
-  const code = dump_file(options.input.unwrap_or(""), options.dump.unwrap_or("tokens"), options.format);
+  const input = options.input.unwrap_or("");
+  const dump_kind = options.dump.unwrap_or("tokens");
+  const code = if dump_kind == "resolve" { dump_resolution(input, options.format) } else { dump_file(input, dump_kind, options.format) };
 
   if code != 0 {
     process::exit(code);

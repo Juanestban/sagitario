@@ -1,0 +1,326 @@
+//! Reads, lexes and parses the modules of a program (docs/spec/09-modules.md), the port of the
+//! loader of `sagitario_driver`: the entry file is the root module `pkg`, and `pkg::net::http` is
+//! the file `net/http.sag` next to it. The standard library modules a program names and the
+//! prelude are embedded. Nova dependencies are not loaded yet
+//! (docs/adr/0052-resolver-port-and-resolution-dumps.md).
+
+use pkg::ast::{Module, Package, PackageInfo};
+use pkg::diagnostics::Diagnostics;
+use pkg::lexer;
+use pkg::parser;
+use pkg::parser::Ids;
+use pkg::resolve::modules;
+use pkg::resolve::modules::ModuleRef;
+use pkg::span::SourceMap;
+use std::fs;
+use std::path;
+
+/// The part of the prelude written in Sagitario.
+const PRELUDE: String = include_str("../../crates/sagitario_driver/src/prelude.sag");
+
+/// The file of `std` itself: helpers shared by its modules, which programs cannot name.
+const STD_ROOT: String = include_str("../../crates/sagitario_driver/src/std/std.sag");
+
+const STD_ENV: String = include_str("../../crates/sagitario_driver/src/std/env.sag");
+const STD_FS: String = include_str("../../crates/sagitario_driver/src/std/fs.sag");
+const STD_IO: String = include_str("../../crates/sagitario_driver/src/std/io.sag");
+const STD_PATH: String = include_str("../../crates/sagitario_driver/src/std/path.sag");
+const STD_PROCESS: String = include_str("../../crates/sagitario_driver/src/std/process.sag");
+const STD_SYNC: String = include_str("../../crates/sagitario_driver/src/std/sync.sag");
+const STD_THREAD: String = include_str("../../crates/sagitario_driver/src/std/thread.sag");
+const STD_TIME: String = include_str("../../crates/sagitario_driver/src/std/time.sag");
+
+/// The source of the standard library module `std::name` written in Sagitario.
+fn std_source(name: String) -> Option<String> {
+  if name == "env" {
+    Some(STD_ENV)
+  } else if name == "fs" {
+    Some(STD_FS)
+  } else if name == "io" {
+    Some(STD_IO)
+  } else if name == "path" {
+    Some(STD_PATH)
+  } else if name == "process" {
+    Some(STD_PROCESS)
+  } else if name == "sync" {
+    Some(STD_SYNC)
+  } else if name == "thread" {
+    Some(STD_THREAD)
+  } else if name == "time" {
+    Some(STD_TIME)
+  } else {
+    None
+  }
+}
+
+/// The integer types, each with a function `range_<type>` in the prelude.
+const INT_TYPES: String = "i8 i16 i32 i64 isize u8 u16 u32 u64 usize";
+
+/// `start..end` (or `..=`) outside of `for`, forwards or reversed, for integers of type `TYPE`:
+/// the iterator a range is. Written line by line, so the text does not depend on the line
+/// endings of this file.
+fn range_template() -> String {
+  const lines = List::from([
+    "",
+    "fn range_TYPE(start: TYPE, end: TYPE, inclusive: bool, reverse: bool) -> Iter<TYPE> {",
+    "  const cursor = new Cell<TYPE>(if reverse { end } else { start });",
+    "  const done = new Cell<bool>(false);",
+    "",
+    "  new Iter<TYPE>(() => {",
+    "    if done.value {",
+    "      return None;",
+    "    }",
+    "",
+    "    const value = cursor.value;",
+    "",
+    "    if reverse {",
+    "      if inclusive {",
+    "        if value < start {",
+    "          done.value = true;",
+    "          return None;",
+    "        }",
+    "",
+    "        if value == start { done.value = true; } else { cursor.value = value - 1; }",
+    "        Some(value)",
+    "      } else {",
+    "        if value <= start {",
+    "          done.value = true;",
+    "          return None;",
+    "        }",
+    "",
+    "        cursor.value = value - 1;",
+    "        Some(value - 1)",
+    "      }",
+    "    } else if inclusive {",
+    "      if value > end {",
+    "        done.value = true;",
+    "        return None;",
+    "      }",
+    "",
+    "      if value == end { done.value = true; } else { cursor.value = value + 1; }",
+    "      Some(value)",
+    "    } else {",
+    "      if value >= end {",
+    "        done.value = true;",
+    "        return None;",
+    "      }",
+    "",
+    "      cursor.value = value + 1;",
+    "      Some(value)",
+    "    }",
+    "  })",
+    "}",
+    "",
+  ]);
+
+  lines.join("\n")
+}
+
+/// The prelude's source: `prelude.sag` followed by the range functions.
+fn prelude_source() -> String {
+  const source = new StringBuilder();
+  const template = range_template();
+
+  source.append(PRELUDE);
+
+  for ty in INT_TYPES.split(" ") {
+    source.append(template.replace("TYPE", ty));
+  }
+
+  source.to_string()
+}
+
+/// Whether paths use `\` as their separator, as Rust's `PathBuf::push` does on Windows: only
+/// there does `std::path` treat `\` as a separator.
+fn windows() -> bool {
+  path::join("x\\", "y") == "x\\y"
+}
+
+/// `name` after `dir`, as Rust's `PathBuf::push` writes it: the driver builds module paths that
+/// way, and the diagnostics of both compilers must name the same files.
+fn push_path(dir: String, name: String) -> String {
+  if dir.is_empty() {
+    return name;
+  }
+
+  const separator = if windows() { "\\" } else { "/" };
+
+  if dir.ends_with("/") || dir.ends_with(separator) {
+    return dir + name;
+  }
+
+  dir + separator + name
+}
+
+/// Whether `dir` has an entry with exactly this name that is a directory (or a file), also on
+/// case-insensitive file systems.
+fn has_entry(dir: String, name: String, directory: bool) -> bool {
+  const base = if dir.is_empty() { "." } else { dir };
+  const entries = match fs::read_dir(base) {
+    Ok(entries) => entries,
+    Err(_) => return false,
+  };
+
+  entries.contains(name) && fs::is_dir(push_path(base, name)) == directory
+}
+
+pub class Loader {
+  /// The input file, the root module of the program's package.
+  prv const entry: String;
+  /// The directory of the root module, which holds the other modules.
+  prv const root: String;
+  /// Keeps node ids unique across modules.
+  prv const ids: Ids;
+  pub const modules: List<Module>;
+  /// Indices in `modules` of the standard library modules.
+  pub const std: List<usize>;
+
+  pub fn new(self, entry: String) {
+    self.entry = entry;
+    self.root = path::parent(entry).unwrap_or("");
+    self.ids = new Ids(0);
+    self.modules = new List();
+    self.std = new List();
+  }
+
+  /// Adds a module unless it has lexical errors, which are reported later with the others.
+  /// Returns `false`, after printing why, if the file cannot be read.
+  pub fn load(self, file: String, module_path: List<String>, sources: SourceMap, diagnostics: Diagnostics) -> bool {
+    const text = match fs::read_to_string(file) {
+      Ok(text) => text,
+      Err(error) => {
+        eprintln(`error: cannot read \`${file}\`: ${error.message()}`);
+        return false;
+      }
+    };
+    const id = sources.add(file, text);
+    const errors = diagnostics.error_count();
+    const tokens = lexer::lex(id, text, diagnostics);
+
+    if diagnostics.error_count() == errors {
+      var module = parser::parse_module_from(id, tokens, self.ids, diagnostics);
+
+      module.path = module_path;
+      module.package = 0;
+      module.location = Some(file);
+      self.modules.push(module);
+    }
+
+    true
+  }
+
+  /// Loads the modules the loaded ones refer to that exist as files, and the standard library
+  /// modules they name, until no module names a new one.
+  pub fn load_references(self, sources: SourceMap, diagnostics: Diagnostics) -> bool {
+    const attempted = new Map<String, bool>();
+    const attempted_std = new Map<String, bool>();
+    var index = 0usize;
+
+    while index < self.modules.len() {
+      const module = self.modules[index];
+      const targets = if self.std.contains(index) { new List<ModuleRef>() } else { modules::module_references(module, new List()) };
+
+      for target in targets {
+        // Paths into dependencies cannot name a file: there are none yet.
+        if target.dependency.is_some() {
+          continue;
+        }
+
+        const key = target.path.join("::");
+
+        if attempted.contains_key(key) {
+          continue;
+        }
+
+        attempted.insert(key, true);
+
+        if let Some(file) = self.module_file(target.path) {
+          if !self.load(file, target.path, sources, diagnostics) {
+            return false;
+          }
+        }
+      }
+
+      for name in modules::std_references(module) {
+        if attempted_std.contains_key(name) {
+          continue;
+        }
+
+        attempted_std.insert(name, true);
+
+        if let Some(text) = std_source(name) {
+          self.load_std(name, text, sources, diagnostics);
+        }
+      }
+
+      index += 1;
+    }
+
+    true
+  }
+
+  /// Adds the prelude module, which every program sees, and returns its index.
+  pub fn load_prelude(self, sources: SourceMap, diagnostics: Diagnostics) -> usize {
+    self.load_embedded("<prelude>", prelude_source(), List::from(["std", "prelude"]), sources, diagnostics)
+  }
+
+  /// Adds the standard library module `std::name`. The first one comes with the file of `std`
+  /// itself.
+  prv fn load_std(self, name: String, text: String, sources: SourceMap, diagnostics: Diagnostics) {
+    if self.std.is_empty() {
+      self.std.push(self.load_embedded("<std>", STD_ROOT, List::from(["std"]), sources, diagnostics));
+    }
+
+    self.std.push(self.load_embedded(`<std::${name}>`, text, List::from(["std", name]), sources, diagnostics));
+  }
+
+  /// Adds a module whose source the compiler embeds, even with lexical errors.
+  prv fn load_embedded(self, file: String, text: String, module_path: List<String>, sources: SourceMap, diagnostics: Diagnostics) -> usize {
+    const id = sources.add(file, text);
+    const tokens = lexer::lex(id, text, diagnostics);
+    var module = parser::parse_module_from(id, tokens, self.ids, diagnostics);
+
+    module.path = module_path;
+    self.modules.push(module);
+
+    self.modules.len() - 1
+  }
+
+  /// The file of the module at `module_path`, if it exists with exactly these names and is not
+  /// the entry file. Unlike the driver, which compares canonical paths, the entry file is
+  /// recognized by its name: a module of the root directory with the entry's name.
+  prv fn module_file(self, module_path: List<String>) -> Option<String> {
+    const last = module_path.last()?;
+    var dir = self.root;
+
+    for index in 0..module_path.len() - 1 {
+      const name = module_path[index];
+
+      if !has_entry(dir, name, true) {
+        return None;
+      }
+
+      dir = push_path(dir, name);
+    }
+
+    const name = last + ".sag";
+
+    if !has_entry(dir, name, false) {
+      return None;
+    }
+
+    const same = module_path.len() == 1 && match path::file_name(self.entry) {
+      Some(entry_name) => entry_name == name,
+      None => false,
+    };
+
+    if same { None } else { Some(push_path(dir, name)) }
+  }
+
+  /// The package of the program: its modules, the prelude and the standard library modules.
+  pub fn package(self, prelude: usize) -> Package {
+    const info = PackageInfo { name: "", dependencies: new List() };
+
+    Package { modules: self.modules, prelude: Some(prelude), std: self.std, library: false, packages: List::from([info]) }
+  }
+}

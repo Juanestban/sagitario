@@ -121,6 +121,69 @@ pub class Diagnostics {
   }
 }
 
+/// The closest of `candidates` to `name` by edit distance, if it is close enough to be a likely
+/// typo (at most a third of the name's length, and at least one edit). Among equally close
+/// candidates, the first one.
+pub fn closest_match(name: String, candidates: List<String>) -> Option<String> {
+  const third = char_count(name) / 3;
+  const limit = if third < 1 { 1usize } else { third };
+  var best: Option<String> = None;
+  var best_distance = 0usize;
+
+  for candidate in candidates {
+    if candidate == name {
+      continue;
+    }
+
+    const distance = edit_distance(name, candidate);
+
+    if distance <= limit && (best.is_none() || distance < best_distance) {
+      best = Some(candidate);
+      best_distance = distance;
+    }
+  }
+
+  best
+}
+
+/// Levenshtein distance over Unicode scalar values.
+fn edit_distance(a: String, b: String) -> usize {
+  const b_chars: List<char> = b.chars().collect();
+  var previous: List<usize> = new List();
+
+  for index in 0..b_chars.len() + 1 {
+    previous.push(index);
+  }
+
+  var i = 0usize;
+
+  for ca in a.chars() {
+    const current = List::from([i + 1]);
+
+    for j in 0..b_chars.len() {
+      const substitution = previous[j] + (if ca != b_chars[j] { 1usize } else { 0usize });
+      const deletion = previous[j + 1] + 1;
+      const insertion = current[j] + 1;
+      var smallest = substitution;
+
+      if deletion < smallest {
+        smallest = deletion;
+      }
+
+      if insertion < smallest {
+        smallest = insertion;
+      }
+
+      current.push(smallest);
+    }
+
+    previous = current;
+    i += 1;
+  }
+
+  previous.last().unwrap_or(0)
+}
+
 /// How diagnostics are printed: multi-line with source excerpts, or one line each.
 pub enum DiagnosticFormat {
   Human,

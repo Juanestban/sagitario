@@ -1,0 +1,1062 @@
+//! The module tree of a package, `use` declarations, the warnings about imports and visibility,
+//! and the discovery of the modules a file refers to (docs/spec/09-modules.md), the port of
+//! `sagitario_resolve::modules`.
+
+use pkg::ast::{
+  Block, Expr, ExprKind, FnDecl, Ident, Item, Module, Package, Path, Pattern, PatternKind, Stmt, TemplatePart, TypeExpr, TypeExprKind, UseTree,
+  UseTreeKind, VariantFields, Visibility,
+};
+use pkg::diagnostics::{Diagnostic, Diagnostics};
+use pkg::diagnostics::codes;
+use pkg::resolve;
+use pkg::resolve::{Imported, ItemRef, ModuleInfo, Resolution, Resolver, Start, StdItem, TypeItem, TypeRes};
+use pkg::span::Span;
+
+/// Creates a module for every file of the package and for the directories above them. Returns
+/// the module of each file, by its index in `Package::modules`.
+pub fn build_tree(resolution: Resolution, package: Package) -> List<u32> {
+  resolution.modules.push(new ModuleInfo());
+  resolution.package_roots.push(0);
+
+  // Each dependency has a tree of its own, whose root its dependents name by its name.
+  for index in 1..package.packages.len() {
+    const info = new ModuleInfo();
+
+    info.package = index;
+    info.root = package.packages[index].name;
+    resolution.package_roots.push(resolution.modules.len() as u32);
+    resolution.modules.push(info);
+  }
+
+  const ids: List<u32> = new List();
+
+  for source in 0..package.modules.len() {
+    const module = package.modules[source];
+    const is_prelude = match package.prelude {
+      Some(prelude) => prelude == source,
+      None => false,
+    };
+
+    // The prelude is a module of its own, outside the tree of `pkg`.
+    if is_prelude {
+      const node = resolution.modules.len() as u32;
+      const info = new ModuleInfo();
+
+      info.path = module.path;
+      info.source = Some(source);
+      resolution.modules.push(info);
+      resolution.prelude = Some(node);
+      ids.push(node);
+      continue;
+    }
+
+    // The standard library modules are children of `std`, outside the tree of `pkg` too. `std`
+    // itself has a file whose private items only its modules see.
+    if package.std.contains(source) {
+      var root = 0u32;
+
+      match resolution.std_root {
+        Some(existing) => {
+          root = existing;
+        }
+        None => {
+          root = resolution.modules.len() as u32;
+
+          const info = new ModuleInfo();
+
+          info.path = List::from(["std"]);
+          info.in_std = true;
+          resolution.modules.push(info);
+          resolution.std_root = Some(root);
+        }
+      }
+
+      if module.path.len() == 1 {
+        if let Some(info) = resolution.module(root) {
+          info.source = Some(source);
+        }
+
+        ids.push(root);
+        continue;
+      }
+
+      const node = resolution.modules.len() as u32;
+      const info = new ModuleInfo();
+
+      info.path = module.path;
+      info.in_std = true;
+      info.source = Some(source);
+      info.parent = Some(root);
+      resolution.modules.push(info);
+
+      if let Some(root_info) = resolution.module(root) {
+        root_info.children.insert(module.path.last().unwrap_or(""), node);
+      }
+
+      ids.push(node);
+      continue;
+    }
+
+    var node = resolution.package_roots.get(module.package).unwrap_or(0);
+
+    for segment in module.path {
+      node = child_module(resolution, node, segment);
+    }
+
+    if let Some(info) = resolution.module(node) {
+      info.source = Some(source);
+    }
+
+    ids.push(node);
+  }
+
+  ids
+}
+
+/// The submodule `name` of `parent`, created if needed.
+fn child_module(resolution: Resolution, parent: u32, name: String) -> u32 {
+  const info = match resolution.module(parent) {
+    Some(info) => info,
+    None => return parent,
+  };
+
+  if let Some(child) = info.children.get(name) {
+    return child;
+  }
+
+  const child = resolution.modules.len() as u32;
+  const created = new ModuleInfo();
+  const path: List<String> = new List();
+
+  for segment in info.path {
+    path.push(segment);
+  }
+
+  path.push(name);
+  created.path = path;
+  created.parent = Some(parent);
+  created.package = info.package;
+  created.root = info.root;
+  resolution.modules.push(created);
+  info.children.insert(name, child);
+
+  child
+}
+
+/// One name imported by a `use` declaration: the path to it and its alias.
+struct FlatImport {
+  pub segments: List<Ident>;
+  pub alias: Option<Ident>;
+}
+
+/// Expands the groups of a `use` tree; a trailing `self` inside braces names the prefix.
+fn flatten(tree: UseTree, prefix: List<Ident>, out: List<FlatImport>) {
+  const segments: List<Ident> = new List();
+
+  for segment in prefix {
+    segments.push(segment);
+  }
+
+  for segment in tree.prefix {
+    segments.push(segment);
+  }
+
+  match tree.kind {
+    UseTreeKind::Simple(alias) => {
+      if segments.len() > 1 {
+        if let Some(last) = segments.last() {
+          if last.name == "self" {
+            segments.pop();
+          }
+        }
+      }
+
+      out.push(FlatImport { segments: segments, alias: alias });
+    }
+    UseTreeKind::Group(trees) => {
+      for inner in trees {
+        flatten(inner, segments, out);
+      }
+    }
+  }
+}
+
+fn flat_imports(module: Module) -> List<FlatImport> {
+  const flat: List<FlatImport> = new List();
+
+  for decl in module.uses {
+    flatten(decl.tree, new List(), flat);
+  }
+
+  flat
+}
+
+/// Resolves the `use` declarations of one module and adds the imported names to it.
+pub fn resolve_imports(resolution: Resolution, package: Package, node: u32, module: Module, diagnostics: Diagnostics) {
+  const imports: List<NamedImport> = new List();
+
+  for import in flat_imports(module) {
+    const first = match import.segments.first() {
+      Some(first) => first,
+      None => continue,
+    };
+    const last = match import.segments.last() {
+      Some(last) => last,
+      None => continue,
+    };
+    const name = import.alias.unwrap_or(last);
+    const root = first.name == "pkg" || first.name == "self" || first.name == "super" || first.name == "std";
+
+    if !root && resolution.dependency_root(package, node, first.name).is_none() {
+      diagnostics.push(
+        Diagnostic::error(codes::UNRESOLVED_NAME, first.span, "cannot find `" + first.name + "` to import")
+          .with_help("`use` paths start with `pkg`, `self`, `super`, `std` or the name of a dependency: `use pkg::" + first.name + "`"),
+      );
+      continue;
+    }
+
+    if name.name == "pkg" || name.name == "self" || name.name == "super" {
+      diagnostics.push(
+        Diagnostic::error(codes::UNRESOLVED_NAME, name.span, "importing `" + name.name + "` needs a name")
+          .with_help("give it one with `as`: `use " + name.name + " as name;`"),
+      );
+      continue;
+    }
+
+    const resolver = new Resolver(package, resolution, node, None, diagnostics);
+    const qualified = match resolver.qualified(import.segments) {
+      Some(qualified) => qualified,
+      None => continue,
+    };
+    var item: Option<ItemRef> = None;
+
+    if qualified.rest.is_empty() {
+      if let Start::Item(found) = qualified.start {
+        item = Some(found);
+      }
+    }
+
+    if item.is_none() {
+      const of_type = match qualified.start {
+        Start::Item(ItemRef::Type(_)) | Start::Item(ItemRef::Std(StdItem::CString)) | Start::Prelude(_) => true,
+        _ => false,
+      };
+
+      if of_type {
+        diagnostics.push(
+          Diagnostic::error(
+            codes::NOT_IMPLEMENTED,
+            last.span,
+            "importing the variants or functions of a type is not implemented yet; import the type and write `Type::name`",
+          ),
+        );
+      } else {
+        diagnostics.push(Diagnostic::error(codes::UNRESOLVED_NAME, last.span, "`" + qualified.last.name + "` is a function, not a module"));
+      }
+
+      continue;
+    }
+
+    if let Some(found) = item {
+      imports.push(NamedImport { name: name.name, imported: Imported { item: found, span: name.span } });
+    }
+  }
+
+  const info = match resolution.module(node) {
+    Some(info) => info,
+    None => return,
+  };
+
+  for entry in imports {
+    const name = entry.name;
+    const imported = entry.imported;
+
+    resolve::check_reserved(name, imported.span, diagnostics);
+
+    var previous: Option<Span> = None;
+
+    if let Some(declared) = info.items.get(name) {
+      previous = Some(declared.span);
+    } else if let Some(other) = info.imports.get(name) {
+      previous = Some(other.span);
+    }
+
+    match previous {
+      Some(span) => {
+        diagnostics.push(
+          Diagnostic::error(codes::DUPLICATE_DEFINITION, imported.span, "the name `" + name + "` is defined more than once")
+            .with_label(span, "previous definition here")
+            .with_help("import it under another name: `as other_" + name + "`"),
+        );
+      }
+      None => {
+        info.imports.insert(name, imported);
+      }
+    }
+  }
+}
+
+struct NamedImport {
+  pub name: String;
+  pub imported: Imported;
+}
+
+pub fn report_unused_imports(resolution: Resolution, used: Map<String, bool>, diagnostics: Diagnostics) {
+  for index in 0..resolution.modules.len() {
+    for entry in resolution.modules[index].imports.entries() {
+      if !used.contains_key(resolve::used_key(index as u32, entry.key)) {
+        diagnostics.push(Diagnostic::warning(codes::UNUSED_IMPORT, entry.value.span, "unused import `" + entry.key + "`").with_help("remove it"));
+      }
+    }
+  }
+}
+
+/// The types an item exposes, named after the item.
+struct Check {
+  pub owner: String;
+  pub types: List<TypeExpr>;
+}
+
+fn is_public(visibility: Visibility) -> bool {
+  match visibility {
+    Visibility::Public => true,
+    _ => false,
+  }
+}
+
+fn is_private(visibility: Visibility) -> bool {
+  match visibility {
+    Visibility::Private => true,
+    _ => false,
+  }
+}
+
+fn function_checks(checks: List<Check>, functions: List<FnDecl>, all: bool) {
+  for function in functions {
+    if all || !is_private(function.visibility) {
+      checks.push(Check { owner: function.name.name, types: signature_types(function) });
+    }
+  }
+}
+
+/// Warns when an item visible to the whole package mentions, in its signature or fields, a type
+/// that only its own module can see (as Rust's `private_interfaces` lint).
+pub fn report_private_interfaces(resolution: Resolution, package: Package, diagnostics: Diagnostics) {
+  for module in package.modules {
+    for item in module.items {
+      const checks: List<Check> = new List();
+
+      match item {
+        Item::Fn(decl) => {
+          if is_public(decl.visibility) {
+            checks.push(Check { owner: decl.name.name, types: signature_types(decl) });
+          }
+        }
+        Item::Struct(decl) => {
+          if is_public(decl.visibility) {
+            const fields: List<TypeExpr> = new List();
+
+            for field in decl.fields {
+              if !is_private(field.visibility) {
+                fields.push(field.ty);
+              }
+            }
+
+            checks.push(Check { owner: decl.name.name, types: fields });
+            function_checks(checks, decl.functions, false);
+          }
+        }
+        Item::Class(decl) => {
+          if is_public(decl.visibility) {
+            const fields: List<TypeExpr> = new List();
+
+            for field in decl.fields {
+              if !is_private(field.visibility) {
+                fields.push(field.ty);
+              }
+            }
+
+            checks.push(Check { owner: decl.name.name, types: fields });
+
+            const supertypes: List<TypeExpr> = new List();
+
+            if let Some(parent) = decl.parent {
+              supertypes.push(parent);
+            }
+
+            for ty in decl.impls {
+              supertypes.push(ty);
+            }
+
+            checks.push(Check { owner: decl.name.name, types: supertypes });
+            function_checks(checks, decl.functions, false);
+          }
+        }
+        Item::Enum(decl) => {
+          if is_public(decl.visibility) {
+            const fields: List<TypeExpr> = new List();
+
+            for variant in decl.variants {
+              match variant.fields {
+                VariantFields::Unit => {}
+                VariantFields::Tuple(types) => {
+                  for ty in types {
+                    fields.push(ty);
+                  }
+                }
+                VariantFields::Named(named) => {
+                  for field in named {
+                    fields.push(field.ty);
+                  }
+                }
+              }
+            }
+
+            checks.push(Check { owner: decl.name.name, types: fields });
+            function_checks(checks, decl.functions, false);
+          }
+        }
+        Item::Interface(decl) => {
+          if is_public(decl.visibility) {
+            const fields: List<TypeExpr> = new List();
+
+            for field in decl.fields {
+              fields.push(field.ty);
+            }
+
+            checks.push(Check { owner: decl.name.name, types: fields });
+            checks.push(Check { owner: decl.name.name, types: decl.parents });
+            function_checks(checks, decl.functions, true);
+          }
+        }
+        Item::Extern(block) => {
+          for function in block.functions {
+            if is_public(function.visibility) {
+              const types: List<TypeExpr> = new List();
+
+              for param in function.params {
+                types.push(param.ty);
+              }
+
+              if let Some(ty) = function.return_type {
+                types.push(ty);
+              }
+
+              checks.push(Check { owner: function.name.name, types: types });
+            }
+          }
+        }
+        Item::Const(_) => {}
+      }
+
+      for check in checks {
+        const paths: List<Path> = new List();
+
+        for ty in check.types {
+          type_paths(ty, paths);
+        }
+
+        for path in paths {
+          const item_type = match resolution.type_paths.get(path.id) {
+            Some(TypeRes::Item(found)) => found,
+            _ => continue,
+          };
+          const declared = declared_type(resolution, package, item_type);
+
+          if let Some(found) = declared {
+            if let Visibility::Module = found.visibility {
+              const name = found.name.name;
+              const owner = check.owner;
+
+              diagnostics.push(
+                Diagnostic::warning(codes::PRIVATE_INTERFACE, path.span, "the private type `" + name + "` appears in the public interface of `" + owner + "`")
+                  .with_label(found.name.span, "declared without `pub` here")
+                  .with_help("mark `" + name + "` as `pub`, or make `" + owner + "` private"),
+              );
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+/// The name and visibility of a declared type.
+struct DeclaredType {
+  pub name: Ident;
+  pub visibility: Visibility;
+}
+
+fn declared_type(resolution: Resolution, package: Package, item: TypeItem) -> Option<DeclaredType> {
+  match item {
+    TypeItem::Struct(id) => match resolution.struct_decl(package, id) {
+      Some(decl) => Some(DeclaredType { name: decl.name, visibility: decl.visibility }),
+      None => None,
+    },
+    TypeItem::Enum(id) => match resolution.enum_decl(package, id) {
+      Some(decl) => Some(DeclaredType { name: decl.name, visibility: decl.visibility }),
+      None => None,
+    },
+    TypeItem::Class(id) => match resolution.class_decl(package, id) {
+      Some(decl) => Some(DeclaredType { name: decl.name, visibility: decl.visibility }),
+      None => None,
+    },
+    TypeItem::Interface(id) => match resolution.interface_decl(package, id) {
+      Some(decl) => Some(DeclaredType { name: decl.name, visibility: decl.visibility }),
+      None => None,
+    },
+  }
+}
+
+fn signature_types(decl: FnDecl) -> List<TypeExpr> {
+  const types: List<TypeExpr> = new List();
+
+  for param in decl.params {
+    types.push(param.ty);
+  }
+
+  if let Some(ty) = decl.return_type {
+    types.push(ty);
+  }
+
+  types
+}
+
+/// Every path inside a type expression.
+fn type_paths(ty: TypeExpr, out: List<Path>) {
+  match ty.kind {
+    TypeExprKind::Unit => {}
+    TypeExprKind::Path(path) => out.push(path),
+    TypeExprKind::Generic { path, args } => {
+      out.push(path);
+
+      for arg in args {
+        type_paths(arg, out);
+      }
+    }
+    TypeExprKind::Array { elem, .. } => type_paths(elem, out),
+    TypeExprKind::Ptr { pointee, .. } => type_paths(pointee, out),
+    TypeExprKind::Fn { params, ret } => {
+      for param in params {
+        type_paths(param, out);
+      }
+
+      if let Some(ret) = ret {
+        type_paths(ret, out);
+      }
+    }
+  }
+}
+
+/// A module a file may refer to: its path from the root of its package, which is the file's own
+/// package, or the dependency called `dependency`.
+pub struct ModuleRef {
+  pub dependency: Option<String>;
+  pub path: List<String>;
+}
+
+/// The order of `ModuleRef`s: by dependency (none first), then by path, segment by segment.
+fn compare_refs(a: ModuleRef, b: ModuleRef) -> Ordering {
+  match a.dependency {
+    None => {
+      if b.dependency.is_some() {
+        return Ordering::Less;
+      }
+    }
+    Some(x) => match b.dependency {
+      None => return Ordering::Greater,
+      Some(y) => {
+        if x != y {
+          return x.compare(y);
+        }
+      }
+    },
+  }
+
+  compare_paths(a.path, b.path)
+}
+
+fn compare_paths(a: List<String>, b: List<String>) -> Ordering {
+  var index = 0usize;
+
+  while index < a.len() && index < b.len() {
+    if a[index] != b[index] {
+      return a[index].compare(b[index]);
+    }
+
+    index += 1;
+  }
+
+  a.len().compare(b.len())
+}
+
+fn same_ref(a: ModuleRef, b: ModuleRef) -> bool {
+  match compare_refs(a, b) {
+    Ordering::Equal => true,
+    _ => false,
+  }
+}
+
+/// The modules a file may refer to: every prefix of its `use` paths and of the paths that start
+/// with `pkg`, `self`, `super`, the name of one of its package's `dependencies` or an imported
+/// name. The loader loads the ones that exist as files, then asks again for each loaded file.
+/// Sorted, without repetitions.
+pub fn module_references(module: Module, dependencies: List<String>) -> List<ModuleRef> {
+  const found: List<ModuleRef> = new List();
+  const alias_names: List<String> = new List();
+  const alias_targets: List<ModuleRef> = new List();
+
+  for import in flat_imports(module) {
+    if let Some(target) = absolute(names_of(import.segments), module.path, dependencies) {
+      add_prefixes(target, found);
+
+      const name = match import.alias {
+        Some(alias) => Some(alias),
+        None => import.segments.last(),
+      };
+
+      if let Some(name) = name {
+        alias_names.push(name.name);
+        alias_targets.push(target);
+      }
+    }
+  }
+
+  for path in item_paths(module) {
+    const names = names_of(path.segments);
+
+    if names.len() < 2 {
+      continue;
+    }
+
+    var target: Option<ModuleRef> = None;
+
+    match alias_names.index_of(names[0]) {
+      Some(position) => {
+        const aliased = alias_targets[position];
+        const full: List<String> = new List();
+
+        for segment in aliased.path {
+          full.push(segment);
+        }
+
+        for index in 1..names.len() {
+          full.push(names[index]);
+        }
+
+        target = Some(ModuleRef { dependency: aliased.dependency, path: full });
+      }
+      None => {
+        target = absolute(names, module.path, dependencies);
+      }
+    }
+
+    if let Some(target) = target {
+      add_prefixes(target, found);
+    }
+  }
+
+  found.sort_by((a, b) => compare_refs(a, b));
+
+  const own = ModuleRef { dependency: None, path: module.path };
+  const result: List<ModuleRef> = new List();
+
+  for target in found {
+    var repeated = false;
+
+    if let Some(previous) = result.last() {
+      repeated = same_ref(previous, target);
+    }
+
+    if !repeated && !same_ref(target, own) {
+      result.push(target);
+    }
+  }
+
+  result
+}
+
+fn names_of(segments: List<Ident>) -> List<String> {
+  const names: List<String> = new List();
+
+  for segment in segments {
+    names.push(segment.name);
+  }
+
+  names
+}
+
+/// The standard library modules a file may refer to: the second segment of its `use` paths and
+/// other paths that start with `std`. The loader loads the ones the standard library has. Sorted,
+/// without repetitions.
+pub fn std_references(module: Module) -> List<String> {
+  const found: List<String> = new List();
+
+  for import in flat_imports(module) {
+    add_std_name(names_of(import.segments), found);
+  }
+
+  for path in item_paths(module) {
+    add_std_name(names_of(path.segments), found);
+  }
+
+  found.sort();
+
+  const result: List<String> = new List();
+
+  for name in found {
+    var repeated = false;
+
+    if let Some(previous) = result.last() {
+      repeated = previous == name;
+    }
+
+    if !repeated {
+      result.push(name);
+    }
+  }
+
+  result
+}
+
+fn add_std_name(names: List<String>, found: List<String>) {
+  if names.len() >= 2 && names[0] == "std" {
+    found.push(names[1]);
+  }
+}
+
+/// The paths written in the items of a file, outside its `use` declarations.
+fn item_paths(module: Module) -> List<Path> {
+  const paths: List<Path> = new List();
+
+  for item in module.items {
+    match item {
+      Item::Fn(decl) => fn_paths(decl, paths),
+      Item::Struct(decl) => {
+        for ty in decl.impls {
+          type_paths(ty, paths);
+        }
+
+        for field in decl.fields {
+          type_paths(field.ty, paths);
+        }
+
+        for function in decl.functions {
+          fn_paths(function, paths);
+        }
+      }
+      Item::Class(decl) => {
+        if let Some(parent) = decl.parent {
+          type_paths(parent, paths);
+        }
+
+        for ty in decl.impls {
+          type_paths(ty, paths);
+        }
+
+        for field in decl.fields {
+          type_paths(field.ty, paths);
+        }
+
+        for function in decl.functions {
+          fn_paths(function, paths);
+        }
+      }
+      Item::Interface(decl) => {
+        for ty in decl.parents {
+          type_paths(ty, paths);
+        }
+
+        for field in decl.fields {
+          type_paths(field.ty, paths);
+        }
+
+        for function in decl.functions {
+          fn_paths(function, paths);
+        }
+      }
+      Item::Enum(decl) => {
+        for ty in decl.impls {
+          type_paths(ty, paths);
+        }
+
+        for variant in decl.variants {
+          match variant.fields {
+            VariantFields::Unit => {}
+            VariantFields::Tuple(types) => {
+              for ty in types {
+                type_paths(ty, paths);
+              }
+            }
+            VariantFields::Named(fields) => {
+              for field in fields {
+                type_paths(field.ty, paths);
+              }
+            }
+          }
+        }
+
+        for function in decl.functions {
+          fn_paths(function, paths);
+        }
+      }
+      Item::Extern(block) => {
+        for function in block.functions {
+          for param in function.params {
+            type_paths(param.ty, paths);
+          }
+
+          if let Some(ty) = function.return_type {
+            type_paths(ty, paths);
+          }
+        }
+      }
+      Item::Const(decl) => {
+        type_paths(decl.ty, paths);
+        expr_paths(decl.value, paths);
+      }
+    }
+  }
+
+  paths
+}
+
+/// The module named by a path starting with `pkg`, `self`, `super` or a dependency's name.
+fn absolute(names: List<String>, current: List<String>, dependencies: List<String>) -> Option<ModuleRef> {
+  const first = names.first()?;
+  var dependency: Option<String> = None;
+  const base: List<String> = new List();
+
+  if first == "self" || first == "super" {
+    for segment in current {
+      base.push(segment);
+    }
+  } else if dependencies.contains(first) && first != "pkg" {
+    dependency = Some(first);
+  } else if first != "pkg" {
+    return None;
+  }
+
+  var index = 1usize;
+
+  if first == "super" {
+    base.pop()?;
+
+    while index < names.len() && names[index] == "super" {
+      base.pop()?;
+      index += 1;
+    }
+  }
+
+  while index < names.len() {
+    base.push(names[index]);
+    index += 1;
+  }
+
+  Some(ModuleRef { dependency: dependency, path: base })
+}
+
+fn add_prefixes(target: ModuleRef, found: List<ModuleRef>) {
+  const prefix: List<String> = new List();
+
+  for segment in target.path {
+    prefix.push(segment);
+
+    const copy: List<String> = new List();
+
+    for part in prefix {
+      copy.push(part);
+    }
+
+    found.push(ModuleRef { dependency: target.dependency, path: copy });
+  }
+}
+
+/// A path in an expression and the paths in its type arguments.
+fn expr_path(path: Path, out: List<Path>) {
+  out.push(path);
+
+  if let Some(args) = path.type_args {
+    for arg in args.args {
+      type_paths(arg, out);
+    }
+  }
+}
+
+fn fn_paths(decl: FnDecl, out: List<Path>) {
+  for ty in signature_types(decl) {
+    type_paths(ty, out);
+  }
+
+  for param in decl.generics {
+    for bound in param.bounds {
+      type_paths(bound, out);
+    }
+  }
+
+  block_paths(decl.body, out);
+}
+
+fn block_paths(block: Block, out: List<Path>) {
+  for stmt in block.stmts {
+    match stmt {
+      Stmt::Let(decl) => {
+        if let Some(ty) = decl.ty {
+          type_paths(ty, out);
+        }
+
+        if let Some(init) = decl.init {
+          expr_paths(init, out);
+        }
+      }
+      Stmt::Assign { target, value, .. } => {
+        expr_paths(target, out);
+        expr_paths(value, out);
+      }
+      Stmt::Expr(expr) => expr_paths(expr, out),
+    }
+  }
+
+  if let Some(tail) = block.tail {
+    expr_paths(tail, out);
+  }
+}
+
+fn exprs_paths(exprs: List<Expr>, out: List<Path>) {
+  for expr in exprs {
+    expr_paths(expr, out);
+  }
+}
+
+fn expr_paths(expr: Expr, out: List<Path>) {
+  match expr.kind {
+    ExprKind::Path(path) => expr_path(path, out),
+    ExprKind::Lambda { params, body } => {
+      for param in params {
+        if let Some(ty) = param.ty {
+          type_paths(ty, out);
+        }
+      }
+
+      expr_paths(body, out);
+    }
+    ExprKind::Call { callee, args } => {
+      expr_paths(callee, out);
+      exprs_paths(args, out);
+    }
+    ExprKind::MethodCall { receiver, args, .. } => {
+      expr_paths(receiver, out);
+      exprs_paths(args, out);
+    }
+    ExprKind::Field { base, .. } => expr_paths(base, out),
+    ExprKind::Index { base, index } => {
+      expr_paths(base, out);
+      expr_paths(index, out);
+    }
+    ExprKind::StructLit { path, fields } => {
+      expr_path(path, out);
+
+      for field in fields {
+        expr_paths(field.value, out);
+      }
+    }
+    ExprKind::ArrayLit(elems) => exprs_paths(elems, out),
+    ExprKind::ArrayRepeat { value, .. } => expr_paths(value, out),
+    ExprKind::Try(value) => expr_paths(value, out),
+    ExprKind::Unary { operand, .. } => expr_paths(operand, out),
+    ExprKind::New { path, args } => {
+      expr_path(path, out);
+      exprs_paths(args, out);
+    }
+    ExprKind::Match { scrutinee, arms } => {
+      expr_paths(scrutinee, out);
+
+      for arm in arms {
+        pattern_paths(arm.pattern, out);
+
+        if let Some(guard) = arm.guard {
+          expr_paths(guard, out);
+        }
+
+        expr_paths(arm.body, out);
+      }
+    }
+    ExprKind::Template(parts) => {
+      for part in parts {
+        if let TemplatePart::Expr(inner) = part {
+          expr_paths(inner, out);
+        }
+      }
+    }
+    ExprKind::Binary { lhs, rhs, .. } => {
+      expr_paths(lhs, out);
+      expr_paths(rhs, out);
+    }
+    ExprKind::Cast { expr: inner, ty } => {
+      expr_paths(inner, out);
+      type_paths(ty, out);
+    }
+    ExprKind::Range { start, end, .. } => {
+      expr_paths(start, out);
+      expr_paths(end, out);
+    }
+    ExprKind::Block(block) => block_paths(block, out),
+    ExprKind::Loop(block) => block_paths(block, out),
+    ExprKind::Unsafe(block) => block_paths(block, out),
+    ExprKind::If { cond, then_block, else_branch } => {
+      expr_paths(cond, out);
+      block_paths(then_block, out);
+
+      if let Some(branch) = else_branch {
+        expr_paths(branch, out);
+      }
+    }
+    ExprKind::While { cond, body } => {
+      expr_paths(cond, out);
+      block_paths(body, out);
+    }
+    ExprKind::For { iter, body, .. } => {
+      expr_paths(iter, out);
+      block_paths(body, out);
+    }
+    ExprKind::Break(value) => {
+      if let Some(value) = value {
+        expr_paths(value, out);
+      }
+    }
+    ExprKind::Return(value) => {
+      if let Some(value) = value {
+        expr_paths(value, out);
+      }
+    }
+    _ => {}
+  }
+}
+
+fn pattern_paths(pattern: Pattern, out: List<Path>) {
+  match pattern.kind {
+    PatternKind::Wildcard => {}
+    PatternKind::Ident(_) => {}
+    PatternKind::Literal(expr) => expr_paths(expr, out),
+    PatternKind::Path(path) => out.push(path),
+    PatternKind::Tuple { path, elems } => {
+      out.push(path);
+
+      for elem in elems {
+        pattern_paths(elem, out);
+      }
+    }
+    PatternKind::Named { path, fields, .. } => {
+      out.push(path);
+
+      for field in fields {
+        pattern_paths(field.pattern, out);
+      }
+    }
+    PatternKind::Or(alternatives) => {
+      for alternative in alternatives {
+        pattern_paths(alternative, out);
+      }
+    }
+  }
+}

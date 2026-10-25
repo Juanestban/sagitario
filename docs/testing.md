@@ -92,10 +92,11 @@ fn main() { ... }
 
 `crates/sagitario_cli/tests/selfhost.rs` builds `compiler/` (`sagc`) with `sag` and checks that,
 for every `.sag` file of the repository, both compilers give the same exit code, stdout and
-stderr: today for `check --dump=tokens` and `check --dump=ast`, and for more passes as they are
-ported ([ADR-0050](adr/0050-lexer-port-and-token-dumps.md),
-[ADR-0051](adr/0051-parser-port-and-ast-dumps.md)). `tests/lexer/` and `tests/parser/` hold edge
-cases of the lexer and the parser. The test also checks the modules of `compiler/` generated from the Rust compiler;
+stderr: today for `check --dump=tokens`, `check --dump=ast` and `check --dump=resolve`, and for
+more passes as they are ported ([ADR-0050](adr/0050-lexer-port-and-token-dumps.md),
+[ADR-0051](adr/0051-parser-port-and-ast-dumps.md),
+[ADR-0052](adr/0052-resolver-port-and-resolution-dumps.md)). `tests/lexer/`, `tests/parser/` and
+`tests/resolve/` hold edge cases of the lexer, the parser and the resolver. The test also checks the modules of `compiler/` generated from the Rust compiler;
 `SAG_BLESS=1 cargo test --test selfhost` rewrites them.
 
 ## CI

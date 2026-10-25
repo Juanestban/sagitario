@@ -140,7 +140,8 @@ Increments:
 2. Dumps for differential tests (`--dump=tokens`), and `span`, `diagnostics` and `lexer`;
    `char::from_u32` ([ADR-0050](adr/0050-lexer-port-and-token-dumps.md)).
 3. `parser`, with AST dumps (`--dump=ast`) ([ADR-0051](adr/0051-parser-port-and-ast-dumps.md)).
-4. `resolve`.
+4. `resolve` and the module loader, with resolution dumps (`--dump=resolve`)
+   ([ADR-0052](adr/0052-resolver-port-and-resolution-dumps.md)).
 5. `types`.
 6. `sir` and `codegen_c`.
 7. The driver and the CLI: `sagc` passes every suite.

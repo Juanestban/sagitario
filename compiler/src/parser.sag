@@ -29,6 +29,14 @@ pub fn parse_module(file: u32, tokens: List<Token>, diagnostics: Diagnostics) ->
   parser.module(file)
 }
 
+/// Parses one module of a package; node ids continue from `ids`, so they stay unique across the
+/// modules of the package.
+pub fn parse_module_from(file: u32, tokens: List<Token>, ids: Ids, diagnostics: Diagnostics) -> Module {
+  const parser = new Parser(file, tokens, ids, diagnostics);
+
+  parser.module(file)
+}
+
 /// An attribute as written; `Parser::apply_attributes` checks it against its item.
 struct Attribute {
   pub name: Ident;
@@ -373,7 +381,7 @@ class Parser {
       }
     }
 
-    Module { file: file, uses: uses, items: items }
+    Module { file: file, path: new List(), package: 0, location: None, uses: uses, items: items }
   }
 
   /// `use tree;`

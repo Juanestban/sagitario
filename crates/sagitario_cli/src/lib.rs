@@ -125,7 +125,8 @@ fn parse_compile_options<I: Iterator<Item = String>>(mut args: I, mode: Mode) ->
         options.dump = match flag_value(&flag, inline_value, &mut args)?.as_str() {
           "tokens" => Some(Dump::Tokens),
           "ast" => Some(Dump::Ast),
-          other => return Err(usage_error(format!("unknown dump `{other}`; expected `tokens` or `ast`"))),
+          "resolve" => Some(Dump::Resolve),
+          other => return Err(usage_error(format!("unknown dump `{other}`; expected `tokens`, `ast` or `resolve`"))),
         };
       }
       "--diagnostic-format" => {

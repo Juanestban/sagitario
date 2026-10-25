@@ -19,9 +19,38 @@ pub enum Visibility {
   Private,
 }
 
+/// The modules of a program: the root module (the entry file) first, then every module it
+/// reaches through paths.
+pub struct Package {
+  pub modules: List<Module>;
+  /// Index in `modules` of the prelude written in Sagitario.
+  pub prelude: Option<usize>;
+  /// Indices in `modules` of the standard library modules the program uses.
+  pub std: List<usize>;
+  /// A library: it needs no `main`.
+  pub library: bool;
+  /// The package being compiled first, then its dependencies.
+  pub packages: List<PackageInfo>;
+}
+
+/// A package of a program: the one being compiled, or a dependency.
+pub struct PackageInfo {
+  /// The name its dependents use as a path root; unused for the package being compiled.
+  pub name: String;
+  /// Indices in `Package::packages` of the packages it depends on directly.
+  pub dependencies: List<usize>;
+}
+
 /// One source file.
 pub struct Module {
   pub file: u32;
+  /// The logical path from the package root: empty for the root, `["net", "http"]` for
+  /// `net/http.sag`.
+  pub path: List<String>;
+  /// Index in `Package::packages` of the package the file belongs to.
+  pub package: usize;
+  /// The file's path on disk, for `include_str`; `None` for embedded modules.
+  pub location: Option<String>;
   pub uses: List<UseDecl>;
   pub items: List<Item>;
 }
