@@ -2,7 +2,8 @@
 
 Rationale: [ADR-0037](../adr/0037-standard-library-env-io-process.md),
 [ADR-0038](../adr/0038-file-system-and-paths.md), [ADR-0039](../adr/0039-time-and-commands.md),
-[ADR-0045](../adr/0045-threads-and-send.md), [ADR-0046](../adr/0046-mutex-and-atomics.md).
+[ADR-0045](../adr/0045-threads-and-send.md), [ADR-0046](../adr/0046-mutex-and-atomics.md),
+[ADR-0047](../adr/0047-channels-and-thread-utilities.md).
 
 The standard library is the set of modules under the path root `std`. A program imports them
 with `use` like its own modules (`use std::io;`, `use std::env::args;`) or names them in full
@@ -17,7 +18,7 @@ functions it uses.
 | `std::fs` | Files and directories | F3 |
 | `std::path` | Joining paths and taking them apart | F3 |
 | `std::process` | `exit`, running programs | F3 |
-| `std::sync` | `Mutex` and atomic values, shared between threads | F4 |
+| `std::sync` | `Mutex`, atomic values and channels, shared between threads | F4 |
 | `std::thread` | Threads | F4 |
 | `std::time` | Durations, clocks and `sleep` | F3 |
 
@@ -209,7 +210,8 @@ pub struct Output {
 
 ## `std::sync`
 
-Rationale: [ADR-0046](../adr/0046-mutex-and-atomics.md).
+Rationale: [ADR-0046](../adr/0046-mutex-and-atomics.md),
+[ADR-0047](../adr/0047-channels-and-thread-utilities.md).
 
 ```sag
 use std::sync::{AtomicI64, Mutex};
@@ -236,6 +238,11 @@ println(`${hits.load()} ${names.get()}`);
 | `a.swap(value)` | Writes `value` and returns the previous value |
 | `a.compare_exchange(expected, desired) -> Result<T, T>` | Writes `desired` if the value is `expected`: `Ok(expected)` if it did, `Err(actual)` if not |
 | `a.fetch_add(n)`, `a.fetch_sub(n)` | Integers only: adds or subtracts `n` and returns the previous value; the result wraps around at the type's limits, also in debug builds |
+| `Channel<T: Send>` | A queue of values that threads send to each other, without a limit |
+| `new Channel<T>()`, `c.send(value)` | Creates it; adds `value` at the end. Sending on a closed channel panics |
+| `c.receive() -> Option<T>` | The value at the front, waiting until there is one; `None` once the channel is closed and empty |
+| `c.close()` | No more values can be sent; those sent are still received. Closing again does nothing |
+| `c.iter() -> Iter<T>` | The values received one by one, until the channel is closed and empty |
 
 - `Mutex<T>` and the atomics are `Send` (a `Mutex<T>` when `T` is), so threads can capture
   them. Since `T` must be `Send`, a mutex cannot hold a `List` or a class with `var` fields.
@@ -243,6 +250,21 @@ println(`${hits.load()} ${names.get()}`);
   mutex inside the function it gave to `update` of the same mutex panics instead of waiting
   forever.
 - Atomic operations are sequentially consistent: every thread sees them in one order.
+- Any thread holding a channel may send, receive or close it. Several receivers share the
+  values: each value goes to one of them.
+
+```sag
+const jobs: Channel<i64> = new Channel();
+const worker = thread::spawn(() => {
+  for job in jobs.iter() {
+    println(`job ${job}`);
+  }
+});
+
+jobs.send(1);
+jobs.close();
+worker.join();
+```
 
 ## `std::thread`
 
@@ -261,6 +283,8 @@ println(handle.join());
 | `spawn(body: fn() -> T) -> JoinHandle<T>` | Runs `body` in a new thread |
 | `JoinHandle<T>` | A thread started by `spawn` |
 | `handle.join() -> T` | Waits for the thread to finish and returns what `body` returned; again, the same value |
+| `sleep(duration: Duration)` | Pauses the running thread for at least `duration`; the same as `time::sleep` |
+| `available_parallelism() -> usize` | The number of logical processors, at least 1 |
 
 - The argument of `spawn` is a lambda or the name of a function, not another function value.
   Every binding the lambda captures must be `Send`

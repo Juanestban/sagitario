@@ -2,10 +2,13 @@
 //! (docs/spec/11-standard-library.md#stdthread).
 
 use std::ffi::c_void;
+use std::time;
+use std::time::Duration;
 
 extern "C" {
   fn sag_thread_start(body: fn()) -> *mut c_void;
   fn sag_thread_join(thread: *mut c_void);
+  fn sag_thread_available_parallelism() -> usize;
 }
 
 /// A thread started by `spawn`, whose result `join` waits for. A thread nobody joins keeps
@@ -43,6 +46,16 @@ pub class JoinHandle<T> {
       None => panic("this `JoinHandle` has no thread: only `thread::spawn` starts threads"),
     }
   }
+}
+
+/// Pauses the running thread for at least `duration`; the same as `time::sleep`.
+pub fn sleep(duration: Duration) {
+  time::sleep(duration);
+}
+
+/// The number of logical processors, at least 1: how many threads can run at once.
+pub fn available_parallelism() -> usize {
+  unsafe { sag_thread_available_parallelism() }
 }
 
 /// Runs `body` in a new thread. `body` is a lambda capturing only `Send` values, or the name of

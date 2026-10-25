@@ -4,6 +4,10 @@
 #if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
 #define _POSIX_C_SOURCE 200809L
 #endif
+/* Apple's headers hide `sysctlbyname` under strict POSIX. */
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE
+#endif
 
 #include "sagitario_runtime.h"
 
@@ -25,6 +29,9 @@
 #include <unistd.h>
 #ifdef SAG_THREADS
 #include <pthread.h>
+#endif
+#ifdef __APPLE__
+#include <sys/sysctl.h>
 #endif
 #endif
 
@@ -2774,12 +2781,35 @@ void sag_thread_join(void *pointer) {
   free(thread);
 }
 
+#ifdef _WIN32
+extern unsigned long SAG_WINAPI GetActiveProcessorCount(unsigned short group);
+#endif
+
+size_t sag_thread_available_parallelism(void) {
+#if defined(_WIN32)
+  /* All processor groups. */
+  unsigned long count = GetActiveProcessorCount(0xFFFF);
+#elif defined(__APPLE__)
+  int count = 0;
+  size_t size = sizeof count;
+  if (sysctlbyname("hw.logicalcpu", &count, &size, NULL, 0) != 0) {
+    count = 0;
+  }
+#else
+  long count = sysconf(_SC_NPROCESSORS_ONLN);
+#endif
+  return count > 0 ? (size_t)count : 1;
+}
+
 /* ---- Standard library: std::sync ------------------------------------------------------- */
 
 #ifdef _WIN32
 extern void SAG_WINAPI InitializeSRWLock(void **lock);
 extern void SAG_WINAPI AcquireSRWLockExclusive(void **lock);
 extern void SAG_WINAPI ReleaseSRWLockExclusive(void **lock);
+extern void SAG_WINAPI InitializeConditionVariable(void **condition);
+extern int SAG_WINAPI SleepConditionVariableSRW(void **condition, void **lock, unsigned long milliseconds, unsigned long flags);
+extern void SAG_WINAPI WakeAllConditionVariable(void **condition);
 #endif
 
 /* Its address identifies the running thread. */
@@ -2803,8 +2833,10 @@ typedef struct sag_mutex {
   atomic_uintptr_t owner;
 #ifdef _WIN32
   void *lock;
+  void *condition;
 #else
   pthread_mutex_t lock;
+  pthread_cond_t condition;
 #endif
 } sag_mutex;
 
@@ -2812,6 +2844,7 @@ static void sag_mutex_drop(sag_object *object) {
 #ifdef _WIN32
   (void)object;
 #else
+  pthread_cond_destroy(&((sag_mutex *)object)->condition);
   pthread_mutex_destroy(&((sag_mutex *)object)->lock);
 #endif
 }
@@ -2821,8 +2854,9 @@ sag_fnval sag_sync_mutex_new(void) {
   atomic_init(&mutex->owner, 0);
 #ifdef _WIN32
   InitializeSRWLock(&mutex->lock);
+  InitializeConditionVariable(&mutex->condition);
 #else
-  if (pthread_mutex_init(&mutex->lock, NULL) != 0) {
+  if (pthread_mutex_init(&mutex->lock, NULL) != 0 || pthread_cond_init(&mutex->condition, NULL) != 0) {
     sag_panic("failed to create a mutex");
   }
 #endif
@@ -2851,6 +2885,26 @@ void sag_sync_mutex_unlock(sag_fnval handle) {
   ReleaseSRWLockExclusive(&mutex->lock);
 #else
   pthread_mutex_unlock(&mutex->lock);
+#endif
+}
+
+void sag_sync_mutex_wait(sag_fnval handle) {
+  sag_mutex *mutex = (sag_mutex *)handle.env;
+  atomic_store(&mutex->owner, 0);
+#ifdef _WIN32
+  SleepConditionVariableSRW(&mutex->condition, &mutex->lock, SAG_WIN_INFINITE, 0);
+#else
+  pthread_cond_wait(&mutex->condition, &mutex->lock);
+#endif
+  atomic_store(&mutex->owner, (uintptr_t)&sag_thread_marker);
+}
+
+void sag_sync_mutex_notify_all(sag_fnval handle) {
+  sag_mutex *mutex = (sag_mutex *)handle.env;
+#ifdef _WIN32
+  WakeAllConditionVariable(&mutex->condition);
+#else
+  pthread_cond_broadcast(&mutex->condition);
 #endif
 }
 

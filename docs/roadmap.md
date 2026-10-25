@@ -117,7 +117,8 @@ Increments:
    ([ADR-0045](adr/0045-threads-and-send.md)).
 2. `std::sync`: `Mutex<T>` and atomics per type (`AtomicI64`, ...)
    ([ADR-0046](adr/0046-mutex-and-atomics.md)).
-3. `Channel<T>`, `thread::sleep` and `thread::available_parallelism`.
+3. `Channel<T>`, `thread::sleep` and `thread::available_parallelism`
+   ([ADR-0047](adr/0047-channels-and-thread-utilities.md)).
 4. A decision record for `async`/`await`, and the acceptance program.
 
 **Acceptance:** a parallel word count: threads count files and return `Map`s through `join`, an
@@ -131,7 +132,8 @@ ThreadSanitizer on Linux and macOS, and with the leak check.
 
 ## Deferred decisions
 
-Revisit after the MVP: shared mutable collections between threads (ADR-0045), `protected` visibility, `weak` captures in closures, operator
+Revisit after the MVP: shared mutable collections between threads (ADR-0045), bounded
+channels, `try_receive` and timeouts (ADR-0047), `protected` visibility, `weak` captures in closures, operator
 overloading and derived `Eq`, binding generation, internationalized diagnostics, automatic
 error conversion with `From<T>` (and implementing one generic interface several times),
 `Error::source()` and backtraces, a `Display` interface, slices, open ranges, general tuples,

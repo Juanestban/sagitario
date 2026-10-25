@@ -583,6 +583,8 @@ bool sag_path_windows(void);
 void *sag_thread_start(sag_fnval body);
 /* Waits for a thread to finish and frees it. */
 void sag_thread_join(void *thread);
+/* The number of logical processors, at least 1. */
+size_t sag_thread_available_parallelism(void);
 
 /* ---- Standard library: std::sync (compiled with SAG_THREADS) --------------------------- */
 
@@ -592,6 +594,11 @@ sag_fnval sag_sync_mutex_new(void);
 /* Panics if this thread holds the lock already. */
 void sag_sync_mutex_lock(sag_fnval mutex);
 void sag_sync_mutex_unlock(sag_fnval mutex);
+/* Releases the lock, which this thread holds, until another thread calls
+ * `sag_sync_mutex_notify_all`, then takes it again. It may also return without one. */
+void sag_sync_mutex_wait(sag_fnval mutex);
+/* Wakes every thread waiting on the mutex. */
+void sag_sync_mutex_notify_all(sag_fnval mutex);
 /* A cell holds an integer of `bits` bits (0 for the width of `size_t`), signed or not, always
  * in the canonical form `std::sync` writes: sign-extended or zero-extended to 64 bits. */
 sag_fnval sag_sync_atomic_new(uint64_t value);

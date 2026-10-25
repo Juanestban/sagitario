@@ -218,8 +218,10 @@ Minimal C, embedded in the `sag` binary and compiled with every program:
 - threads for `std::thread` (`sag_thread_start`, `sag_thread_join`: pthreads or Windows'
   `CreateThread`); the stack of objects being destroyed is per thread, and the first thread to
   panic ends the program,
-- locks and atomic cells for `std::sync` (`sag_sync_*`, [ADR-0046](adr/0046-mutex-and-atomics.md)):
-  runtime objects returned as the environment of a `fn()` value, so ARC frees them,
+- locks (with a condition variable, for channels) and atomic cells for `std::sync`
+  (`sag_sync_*`, [ADR-0046](adr/0046-mutex-and-atomics.md)): runtime objects returned as the
+  environment of a `fn()` value, so ARC frees them; the number of processors for
+  `thread::available_parallelism`,
 - panic (message, file, line, exit code 101), including the array bounds check
   `sag_index_at`,
 - `String` storage and UTF-8 helpers, allocation,

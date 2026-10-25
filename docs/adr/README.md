@@ -47,14 +47,15 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0036](0036-sanitizers-and-the-reference-zoo.md) | Sanitizers and the reference "zoo" program | Accepted |
 | [0037](0037-standard-library-env-io-process.md) | The standard library: `std::env`, `std::io` and `std::process` | Accepted |
 | [0038](0038-file-system-and-paths.md) | `std::fs` and `std::path` | Accepted |
-| [0039](0039-time-and-commands.md) | `std::time` and `std::process::Command` | Accepted |
+| [0039](0039-time-and-commands.md) | `std::time` and `std::process::Command` | Accepted (refined by 0047) |
 | [0040](0040-nova-package-manager.md) | Nova, the package manager | Accepted |
 | [0041](0041-dependencies-by-path.md) | Dependencies by path | Accepted |
 | [0042](0042-library-outputs-and-linking-c.md) | Library outputs and linking C | Accepted (refined by 0044) |
 | [0043](0043-cross-compilation.md) | Cross-compilation to Android and iOS | Accepted |
 | [0044](0044-c-toolchains.md) | C toolchains: MSVC `cl` best-effort, no `zig cc`, and the F3 acceptance program | Accepted |
-| [0045](0045-threads-and-send.md) | Threads and `Send` | Accepted (refined by 0046) |
+| [0045](0045-threads-and-send.md) | Threads and `Send` | Accepted (refined by 0046, 0047) |
 | [0046](0046-mutex-and-atomics.md) | `std::sync`: `Mutex` and atomics | Accepted |
+| [0047](0047-channels-and-thread-utilities.md) | Channels and thread utilities | Accepted |
 
 ## Template
 

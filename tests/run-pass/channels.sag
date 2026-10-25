@@ -1,0 +1,78 @@
+// Channels (docs/spec/11-standard-library.md#stdsync): one producer and four consumers sharing
+// 10000 values, `iter()` until the channel is closed, `None` after closing, values sent before
+// `close` still received, closing twice, `thread::sleep` and `thread::available_parallelism`.
+// The harness runs it with ThreadSanitizer where the C compiler has it, and fails it on any
+// leak.
+// sanitize: thread
+// expect-stdout: received 10000 values adding up to 50005000
+// expect-stdout: first a, then b, then nothing: true
+// expect-stdout: words: hola mundo
+// expect-stdout: parallelism at least 1: true
+
+use std::sync::{AtomicI64, Channel};
+use std::thread;
+use std::thread::JoinHandle;
+use std::time::Duration;
+
+pub fn main() {
+  const jobs: Channel<i64> = new Channel();
+  const sum = new AtomicI64(0);
+  const count = new AtomicI64(0);
+  const consumers: List<JoinHandle<()>> = new List();
+
+  for _ in 0..4 {
+    consumers.push(thread::spawn(() => {
+      for job in jobs.iter() {
+        sum.fetch_add(job);
+        count.fetch_add(1);
+      }
+    }));
+  }
+
+  const producer = thread::spawn(() => {
+    for value in 1i64..=10000 {
+      jobs.send(value);
+    }
+
+    jobs.close();
+  });
+
+  producer.join();
+
+  for consumer in consumers {
+    consumer.join();
+  }
+
+  println(`received ${count.load()} values adding up to ${sum.load()}`);
+
+  const letters: Channel<String> = new Channel();
+
+  letters.send("a");
+  letters.send("b");
+  letters.close();
+  letters.close();
+
+  const first = letters.receive();
+  const second = letters.receive();
+  const third = letters.receive();
+
+  println(`first ${first.unwrap()}, then ${second.unwrap()}, then nothing: ${third.is_none()}`);
+
+  // The receiver waits until the sender, which sleeps first, has sent.
+  const words: Channel<String> = new Channel();
+  const sender = thread::spawn(() => {
+    thread::sleep(Duration::from_millis(50));
+    words.send("hola");
+    words.send("mundo");
+    words.close();
+  });
+  const received: List<String> = new List();
+
+  for word in words.iter() {
+    received.push(word);
+  }
+
+  sender.join();
+  println(`words: ${received.join(" ")}`);
+  println(`parallelism at least 1: ${thread::available_parallelism() >= 1}`);
+}

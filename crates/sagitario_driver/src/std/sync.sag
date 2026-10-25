@@ -7,6 +7,8 @@ extern "C" {
   fn sag_sync_mutex_new() -> fn();
   fn sag_sync_mutex_lock(mutex: fn());
   fn sag_sync_mutex_unlock(mutex: fn());
+  fn sag_sync_mutex_wait(mutex: fn());
+  fn sag_sync_mutex_notify_all(mutex: fn());
   fn sag_sync_atomic_new(value: u64) -> fn();
   fn sag_sync_atomic_load(cell: fn()) -> u64;
   fn sag_sync_atomic_store(cell: fn(), value: u64);
@@ -49,6 +51,87 @@ pub class Mutex<T: Send> {
     self.value = next;
     unsafe { sag_sync_mutex_unlock(self.lock) };
     next
+  }
+}
+
+/// A queue of values that threads send to each other, without a limit. `receive` waits for a
+/// value; once the channel is closed and empty it returns `None`.
+pub class Channel<T: Send> {
+  prv const lock: fn();
+  /// Values sent, the newest last.
+  prv const inbox: List<T>;
+  /// Values to receive, the next one last.
+  prv const outbox: List<T>;
+  prv var closed: bool;
+
+  pub fn new(self) {
+    self.lock = unsafe { sag_sync_mutex_new() };
+    self.inbox = new List();
+    self.outbox = new List();
+    self.closed = false;
+  }
+
+  /// Adds `value` at the end of the queue. Sending on a closed channel panics.
+  pub fn send(self, value: T) {
+    unsafe { sag_sync_mutex_lock(self.lock) };
+
+    if self.closed {
+      unsafe { sag_sync_mutex_unlock(self.lock) };
+      panic("send on a closed channel");
+    }
+
+    self.inbox.push(value);
+    unsafe { sag_sync_mutex_notify_all(self.lock) };
+    unsafe { sag_sync_mutex_unlock(self.lock) };
+  }
+
+  /// The value at the front of the queue, waiting until there is one; `None` once the channel
+  /// is closed and empty.
+  pub fn receive(self) -> Option<T> {
+    unsafe { sag_sync_mutex_lock(self.lock) };
+
+    while self.outbox.is_empty() {
+      if !self.inbox.is_empty() {
+        // The oldest value of the inbox ends up last in the outbox.
+        while move_newest(self.inbox, self.outbox) {}
+      } else if self.closed {
+        unsafe { sag_sync_mutex_unlock(self.lock) };
+        return None;
+      } else {
+        unsafe { sag_sync_mutex_wait(self.lock) };
+      }
+    }
+
+    const value = self.outbox.pop();
+
+    unsafe { sag_sync_mutex_unlock(self.lock) };
+    value
+  }
+
+  /// No more values can be sent; those already sent are still received. Closing it again does
+  /// nothing.
+  pub fn close(self) {
+    unsafe { sag_sync_mutex_lock(self.lock) };
+    self.closed = true;
+    unsafe { sag_sync_mutex_notify_all(self.lock) };
+    unsafe { sag_sync_mutex_unlock(self.lock) };
+  }
+
+  /// The values received one by one, until the channel is closed and empty:
+  /// `for value in channel.iter() { ... }`.
+  pub fn iter(self) -> Iter<T> {
+    new Iter<T>(() => self.receive())
+  }
+}
+
+/// Moves the newest value of `from` to the end of `to`; false when `from` is empty.
+fn move_newest<T>(from: List<T>, to: List<T>) -> bool {
+  match from.pop() {
+    Some(value) => {
+      to.push(value);
+      true
+    }
+    None => false,
   }
 }
 
