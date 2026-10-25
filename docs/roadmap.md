@@ -139,7 +139,7 @@ Increments:
 1. Language prerequisites: module-level constants, `include_str`, `if let` and `while let`.
 2. Dumps for differential tests (`--dump=tokens`), and `span`, `diagnostics` and `lexer`;
    `char::from_u32` ([ADR-0050](adr/0050-lexer-port-and-token-dumps.md)).
-3. `parser`.
+3. `parser`, with AST dumps (`--dump=ast`) ([ADR-0051](adr/0051-parser-port-and-ast-dumps.md)).
 4. `resolve`.
 5. `types`.
 6. `sir` and `codegen_c`.

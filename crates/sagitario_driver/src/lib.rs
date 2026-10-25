@@ -69,6 +69,8 @@ pub struct CompileOptions {
 pub enum Dump {
   /// The tokens of the input file.
   Tokens,
+  /// The syntax tree of the input file.
+  Ast,
 }
 
 /// What `[link]` adds to a build: C libraries, where to find them, and C sources to compile.
@@ -131,8 +133,8 @@ pub fn on_large_stack(work: fn() -> std::process::ExitCode) -> std::process::Exi
 
 /// `sag check`: runs the front end only.
 pub fn check(options: &CompileOptions) -> u8 {
-  if options.dump == Some(Dump::Tokens) {
-    return dump_tokens(options);
+  if let Some(dump) = options.dump {
+    return dump_file(options, dump);
   }
 
   match front_end(options, false) {
@@ -197,9 +199,11 @@ pub fn run(options: &CompileOptions) -> u8 {
   }
 }
 
-/// `sag check --dump=tokens`: the tokens of the input file alone, and its lexical errors
-/// (docs/adr/0050-lexer-port-and-token-dumps.md).
-fn dump_tokens(options: &CompileOptions) -> u8 {
+/// `sag check --dump=...`: the tokens or the syntax tree of the input file alone, and its
+/// diagnostics (docs/adr/0050-lexer-port-and-token-dumps.md,
+/// docs/adr/0051-parser-port-and-ast-dumps.md). A file with lexical errors is not parsed, as in
+/// a build.
+fn dump_file(options: &CompileOptions, dump: Dump) -> u8 {
   let input = &options.input;
   let text = match fs::read_to_string(input) {
     Ok(text) => text,
@@ -217,7 +221,15 @@ fn dump_tokens(options: &CompileOptions) -> u8 {
   };
   let tokens = sagitario_lexer::lex(id, source.text(), &mut diagnostics);
 
-  print!("{}", sagitario_lexer::dump(&tokens));
+  match dump {
+    Dump::Tokens => print!("{}", sagitario_lexer::dump(&tokens)),
+    Dump::Ast if !diagnostics.has_errors() => {
+      let module = sagitario_parser::parse_module(id, tokens, &mut diagnostics);
+
+      print!("{}", sagitario_ast::dump::dump(&module));
+    }
+    Dump::Ast => {}
+  }
 
   match report(&mut diagnostics, &sources, options) {
     Ok(()) => 0,

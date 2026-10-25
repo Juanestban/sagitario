@@ -1,6 +1,8 @@
 //! Abstract syntax tree. It mirrors the source closely; names and types are resolved by later
 //! phases, which refer to nodes by `NodeId`.
 
+pub mod dump;
+
 use sagitario_span::{FileId, Span};
 
 /// Identifies an expression or declaration so later phases can attach information to it.

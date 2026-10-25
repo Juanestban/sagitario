@@ -1,16 +1,19 @@
 //! `sagc`: the Sagitario compiler written in Sagitario (F5, docs/roadmap.md). While it is being
-//! ported it does what its passes allow: `sagc check --dump=tokens <file.sag>`, which prints the
-//! tokens of a file like `sag check --dump=tokens` (docs/adr/0050-lexer-port-and-token-dumps.md).
+//! ported it does what its passes allow: `sagc check --dump=tokens|ast <file.sag>`, which prints
+//! the tokens or the syntax tree of a file like `sag check --dump=...`
+//! (docs/adr/0050-lexer-port-and-token-dumps.md, docs/adr/0051-parser-port-and-ast-dumps.md).
 
+use pkg::ast::dump;
 use pkg::diagnostics;
 use pkg::diagnostics::{DiagnosticFormat, Diagnostics};
 use pkg::lexer;
+use pkg::parser;
 use pkg::span::SourceMap;
 use std::env;
 use std::fs;
 use std::process;
 
-const USAGE: String = "Usage: sagc check --dump=tokens [--diagnostic-format human|short] <file.sag>";
+const USAGE: String = "Usage: sagc check --dump=tokens|ast [--diagnostic-format human|short] <file.sag>";
 
 /// Exit code for invalid command-line usage.
 const EXIT_USAGE: i32 = 2;
@@ -81,10 +84,10 @@ fn parse(args: List<String>) -> Result<Options, String> {
 
     if flag == "--dump" {
       match flag_value(inline, args, index) {
-        Some(value) if value == "tokens" => {
+        Some(value) if value == "tokens" || value == "ast" => {
           options.dump = Some(value);
         }
-        Some(value) => return Err(`unknown dump \`${value}\`; expected \`tokens\``),
+        Some(value) => return Err(`unknown dump \`${value}\`; expected \`tokens\` or \`ast\``),
         None => return Err("`--dump` requires a value"),
       }
     } else if flag == "--diagnostic-format" {
@@ -114,7 +117,7 @@ fn parse(args: List<String>) -> Result<Options, String> {
   }
 
   if options.dump.is_none() {
-    return Err("only `check --dump=tokens` is ported yet");
+    return Err("only `check --dump=tokens` and `check --dump=ast` are ported yet");
   }
 
   Ok(options)
@@ -169,8 +172,9 @@ fn report(diagnostics: Diagnostics, sources: SourceMap, format: DiagnosticFormat
   errors > 0
 }
 
-/// `check --dump=tokens`: the tokens of the input file alone, and its lexical errors.
-fn dump_tokens(input: String, format: DiagnosticFormat) -> i32 {
+/// `check --dump=...`: the tokens or the syntax tree of the input file alone, and its
+/// diagnostics. A file with lexical errors is not parsed, as in a build.
+fn dump_file(input: String, dump_kind: String, format: DiagnosticFormat) -> i32 {
   const text = match fs::read_to_string(input) {
     Ok(text) => text,
     Err(error) => {
@@ -183,7 +187,11 @@ fn dump_tokens(input: String, format: DiagnosticFormat) -> i32 {
   const file = sources.add(input, text);
   const tokens = lexer::lex(file, text, diagnostics);
 
-  print(lexer::dump(tokens));
+  if dump_kind == "tokens" {
+    print(lexer::dump(tokens));
+  } else if !diagnostics.has_errors() {
+    print(dump::dump(parser::parse_module(file, tokens, diagnostics)));
+  }
 
   if report(diagnostics, sources, format, input) { 1 } else { 0 }
 }
@@ -193,7 +201,7 @@ pub fn main() {
     Ok(options) => options,
     Err(message) => process::exit(usage_error(message)),
   };
-  const code = dump_tokens(options.input.unwrap_or(""), options.format);
+  const code = dump_file(options.input.unwrap_or(""), options.dump.unwrap_or("tokens"), options.format);
 
   if code != 0 {
     process::exit(code);

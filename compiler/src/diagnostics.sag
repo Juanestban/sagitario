@@ -83,6 +83,13 @@ pub class Diagnostics {
     self.items.len()
   }
 
+  /// Drops the diagnostics after the first `len`: those of an attempt the parser abandons.
+  pub fn truncate(self, len: usize) {
+    while self.items.len() > len {
+      self.items.pop();
+    }
+  }
+
   pub fn error_count(self) -> usize {
     var count = 0usize;
 

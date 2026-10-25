@@ -186,7 +186,7 @@ impl Drop for BuiltSagc {
 }
 
 #[test]
-fn sagc_dumps_the_same_tokens() -> io::Result<()> {
+fn sagc_dumps_the_same_tokens_and_trees() -> io::Result<()> {
   let sag = PathBuf::from(env!("CARGO_BIN_EXE_sag"));
   let built = BuiltSagc { base: root().join("compiler/src/main") };
   let (code, _, stderr) = run(&sag, &["build", "compiler/src/main.sag"])?;
@@ -202,15 +202,18 @@ fn sagc_dumps_the_same_tokens() -> io::Result<()> {
 
   let mut differences = Vec::new();
 
+  let dumps = ["tokens", "ast"];
+
   for file in &files {
-    for format in ["human", "short"] {
-      let args = ["check", "--dump=tokens", "--diagnostic-format", format, file.as_str()];
+    for (dump, format) in dumps.iter().flat_map(|dump| ["human", "short"].map(|format| (dump, format))) {
+      let dump_flag = format!("--dump={dump}");
+      let args = ["check", dump_flag.as_str(), "--diagnostic-format", format, file.as_str()];
       let expected = run(&sag, &args)?;
       let actual = run(&sagc, &args)?;
 
       if expected != actual {
         differences.push(format!(
-          "{file} ({format}): exit {:?} vs {:?}\n--- sag stderr\n{}\n--- sagc stderr\n{}\n--- first differing stdout line\n{}",
+          "{file} ({dump}, {format}): exit {:?} vs {:?}\n--- sag stderr\n{}\n--- sagc stderr\n{}\n--- first differing stdout line\n{}",
           expected.0,
           actual.0,
           expected.2,
@@ -225,7 +228,7 @@ fn sagc_dumps_the_same_tokens() -> io::Result<()> {
     differences.is_empty(),
     "{} of {} runs differ:\n\n{}",
     differences.len(),
-    files.len() * 2,
+    files.len() * dumps.len() * 2,
     differences.iter().take(5).cloned().collect::<Vec<_>>().join("\n\n")
   );
 

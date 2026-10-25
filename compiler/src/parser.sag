@@ -1,0 +1,2660 @@
+//! Parser: recursive descent from tokens to the AST, with Pratt parsing for binary operators, the
+//! port of `sagitario_parser`. Errors are reported as diagnostics (`Err(())` means "already
+//! reported") and the parser recovers at item and statement boundaries.
+
+use pkg::ast::{
+  ArrayLen, BinaryOp, Block, ClassDecl, ConstDecl, EnumDecl, Export, Expr, ExprKind, ExternBlock, ExternFn, FieldDecl, FieldInit, FieldPattern,
+  FnDecl, GenericParam, Ident, InterfaceDecl, Item, LambdaParam, LetStmt, MatchArm, Module, Param, Path, Pattern, PatternKind, Stmt,
+  StructDecl, TemplatePart, TypeArgs, TypeExpr, TypeExprKind, UnaryOp, UseDecl, UseTree, UseTreeKind, VariantDecl, VariantFieldDecl,
+  VariantFields, Visibility,
+};
+use pkg::diagnostics::{Diagnostic, Diagnostics};
+use pkg::diagnostics::codes;
+use pkg::lexer;
+use pkg::lexer::{Token, TokenKind};
+use pkg::span::Span;
+
+/// The next node id, shared by the parsers of a module and of its template interpolations.
+pub class Ids {
+  pub var next: u32;
+
+  pub fn new(self, next: u32) {
+    self.next = next;
+  }
+}
+
+pub fn parse_module(file: u32, tokens: List<Token>, diagnostics: Diagnostics) -> Module {
+  const parser = new Parser(file, tokens, new Ids(0), diagnostics);
+
+  parser.module(file)
+}
+
+/// An attribute as written; `Parser::apply_attributes` checks it against its item.
+struct Attribute {
+  pub name: Ident;
+  pub args: List<AttributeArg>;
+  pub span: Span;
+}
+
+enum AttributeArg {
+  Str(String),
+  Name(String),
+}
+
+/// What an attribute is written before.
+enum AttributeTarget {
+  Fn,
+  /// `extern "C" fn`
+  ExternFn,
+  Struct,
+  Enum,
+  Class,
+  Interface,
+  ExternBlock,
+  Member,
+  Const,
+}
+
+/// What the attributes of an item set.
+struct Applied {
+  pub export: Option<Export>;
+  pub repr_c: bool;
+}
+
+/// What an infix token does, with its binding power (higher binds tighter).
+struct Infix {
+  pub prec: u8;
+  pub kind: InfixKind;
+}
+
+enum InfixKind {
+  Binary(BinaryOp),
+  Range(bool),
+  As,
+}
+
+const PREC_RANGE: u8 = 1;
+const PREC_OR: u8 = 2;
+const PREC_AND: u8 = 3;
+const PREC_COMPARE: u8 = 4;
+const PREC_ADD: u8 = 5;
+const PREC_MUL: u8 = 6;
+const PREC_AS: u8 = 7;
+
+fn binary(prec: u8, op: BinaryOp) -> Option<Infix> {
+  Some(Infix { prec: prec, kind: InfixKind::Binary(op) })
+}
+
+fn infix(kind: TokenKind) -> Option<Infix> {
+  match kind {
+    TokenKind::Punct(text) => match text {
+      ".." => Some(Infix { prec: PREC_RANGE, kind: InfixKind::Range(false) }),
+      "..=" => Some(Infix { prec: PREC_RANGE, kind: InfixKind::Range(true) }),
+      "||" => binary(PREC_OR, BinaryOp::Or),
+      "&&" => binary(PREC_AND, BinaryOp::And),
+      "==" => binary(PREC_COMPARE, BinaryOp::Eq),
+      "!=" => binary(PREC_COMPARE, BinaryOp::Ne),
+      "<" => binary(PREC_COMPARE, BinaryOp::Lt),
+      "<=" => binary(PREC_COMPARE, BinaryOp::Le),
+      ">" => binary(PREC_COMPARE, BinaryOp::Gt),
+      ">=" => binary(PREC_COMPARE, BinaryOp::Ge),
+      "+" => binary(PREC_ADD, BinaryOp::Add),
+      "-" => binary(PREC_ADD, BinaryOp::Sub),
+      "*" => binary(PREC_MUL, BinaryOp::Mul),
+      "/" => binary(PREC_MUL, BinaryOp::Div),
+      "%" => binary(PREC_MUL, BinaryOp::Rem),
+      _ => None,
+    },
+    TokenKind::Keyword(text) if text == "as" => Some(Infix { prec: PREC_AS, kind: InfixKind::As }),
+    _ => None,
+  }
+}
+
+/// The operator of an assignment token: `=` (with no operator) or a compound one such as `+=`.
+struct Assignment {
+  pub op: Option<BinaryOp>;
+}
+
+fn assignment_op(kind: TokenKind) -> Option<Assignment> {
+  match kind {
+    TokenKind::Punct(text) => match text {
+      "=" => Some(Assignment { op: None }),
+      "+=" => Some(Assignment { op: Some(BinaryOp::Add) }),
+      "-=" => Some(Assignment { op: Some(BinaryOp::Sub) }),
+      "*=" => Some(Assignment { op: Some(BinaryOp::Mul) }),
+      "/=" => Some(Assignment { op: Some(BinaryOp::Div) }),
+      "%=" => Some(Assignment { op: Some(BinaryOp::Rem) }),
+      _ => None,
+    },
+    _ => None,
+  }
+}
+
+fn is_punct(kind: TokenKind, text: String) -> bool {
+  match kind {
+    TokenKind::Punct(found) => found == text,
+    _ => false,
+  }
+}
+
+fn is_keyword(kind: TokenKind, text: String) -> bool {
+  match kind {
+    TokenKind::Keyword(found) => found == text,
+    _ => false,
+  }
+}
+
+fn is_ident(kind: TokenKind) -> bool {
+  match kind {
+    TokenKind::Ident(_) => true,
+    _ => false,
+  }
+}
+
+fn is_eof(kind: TokenKind) -> bool {
+  match kind {
+    TokenKind::Eof => true,
+    _ => false,
+  }
+}
+
+fn is_reserved(keyword: String) -> bool {
+  keyword == "async" || keyword == "await"
+}
+
+/// Tokens that end an expression, so `break`/`return` before them carry no value.
+fn ends_expression(kind: TokenKind) -> bool {
+  match kind {
+    TokenKind::Punct(text) => text == ";" || text == "}" || text == ")" || text == "]" || text == ",",
+    TokenKind::Eof => true,
+    _ => false,
+  }
+}
+
+/// How a token is named in diagnostics, e.g. "`;`" or "identifier `x`".
+pub fn describe(kind: TokenKind) -> String {
+  match kind {
+    TokenKind::Ident(name) => "identifier `" + name + "`",
+    TokenKind::Keyword(keyword) => "keyword `" + keyword + "`",
+    TokenKind::Int { .. } => "integer literal",
+    TokenKind::Float { .. } => "float literal",
+    TokenKind::Str(_) => "string literal",
+    TokenKind::Template(_) => "template string",
+    TokenKind::Char(_) => "character literal",
+    TokenKind::DocComment { .. } => "documentation comment",
+    TokenKind::Eof => "end of file",
+    TokenKind::Punct(text) => "`" + text + "`",
+  }
+}
+
+enum Member {
+  Field(FieldDecl),
+  Fn(FnDecl),
+}
+
+/// What follows the signature of a function.
+enum Body {
+  /// A block.
+  Block,
+  /// An interface method: a block (a default) or `;` (required).
+  Interface,
+  /// An abstract method: `;`.
+  Abstract,
+}
+
+enum StmtOrTail {
+  Stmt(Stmt),
+  /// An expression without `;`: the block's value if `}` follows, otherwise a block-like
+  /// expression statement.
+  Tail(Expr),
+}
+
+class Parser {
+  prv const tokens: List<Token>;
+  prv var pos: usize;
+  prv const eof: Token;
+  prv const ids: Ids;
+  prv const diagnostics: Diagnostics;
+  /// Set in the condition of `if`/`while` and the iterable of `for`, where `{` starts the body.
+  prv var no_struct_literal: bool;
+  /// Set in the guard of a `match` arm, where `name =>` ends the guard instead of starting a
+  /// lambda.
+  prv var in_guard: bool;
+
+  pub fn new(self, file: u32, tokens: List<Token>, ids: Ids, diagnostics: Diagnostics) {
+    // Documentation comments are not processed in the MVP (docs/spec/01-lexical.md).
+    const kept: List<Token> = new List();
+
+    for token in tokens {
+      match token.kind {
+        TokenKind::DocComment { .. } => {}
+        _ => kept.push(token),
+      }
+    }
+
+    const eof_span = match kept.last() {
+      Some(token) => token.span,
+      None => Span::new(file, 0, 0),
+    };
+
+    self.tokens = kept;
+    self.pos = 0;
+    self.eof = Token { kind: TokenKind::Eof, span: eof_span };
+    self.ids = ids;
+    self.diagnostics = diagnostics;
+    self.no_struct_literal = false;
+    self.in_guard = false;
+  }
+
+  prv fn current(self) -> Token {
+    self.tokens.get(self.pos).unwrap_or(self.eof)
+  }
+
+  prv fn kind(self) -> TokenKind {
+    self.current().kind
+  }
+
+  prv fn nth_kind(self, n: usize) -> TokenKind {
+    match self.tokens.get(self.pos + n) {
+      Some(token) => token.kind,
+      None => self.eof.kind,
+    }
+  }
+
+  prv fn span(self) -> Span {
+    self.current().span
+  }
+
+  prv fn at(self, text: String) -> bool {
+    is_punct(self.kind(), text)
+  }
+
+  prv fn at_keyword(self, text: String) -> bool {
+    is_keyword(self.kind(), text)
+  }
+
+  prv fn at_eof(self) -> bool {
+    is_eof(self.kind())
+  }
+
+  prv fn advance(self) -> Token {
+    const token = self.current();
+
+    if self.pos < self.tokens.len() {
+      self.pos += 1;
+    }
+
+    token
+  }
+
+  prv fn eat(self, text: String) -> bool {
+    if self.at(text) {
+      self.advance();
+
+      return true;
+    }
+
+    false
+  }
+
+  prv fn eat_keyword(self, text: String) -> bool {
+    if self.at_keyword(text) {
+      self.advance();
+
+      return true;
+    }
+
+    false
+  }
+
+  prv fn expect(self, text: String) -> Result<Token, ()> {
+    if self.at(text) {
+      return Ok(self.advance());
+    }
+
+    Err(self.unexpected(describe(TokenKind::Punct(text))))
+  }
+
+  prv fn expect_keyword(self, text: String) -> Result<Token, ()> {
+    if self.at_keyword(text) {
+      return Ok(self.advance());
+    }
+
+    Err(self.unexpected(describe(TokenKind::Keyword(text))))
+  }
+
+  prv fn next_id(self) -> u32 {
+    const id = self.ids.next;
+
+    self.ids.next += 1;
+    id
+  }
+
+  prv fn expr_node(self, kind: ExprKind, span: Span) -> Expr {
+    new Expr(self.next_id(), kind, span)
+  }
+
+  prv fn unexpected(self, expected: String) {
+    const found = describe(self.kind());
+
+    self.diagnostics.push(Diagnostic::error(codes::UNEXPECTED_TOKEN, self.span(), "expected " + expected + ", found " + found));
+  }
+
+  prv fn not_implemented(self, span: Span, what: String) {
+    self.diagnostics.push(Diagnostic::error(codes::NOT_IMPLEMENTED, span, what + " are not implemented yet"));
+  }
+
+  prv fn reserved_keyword(self, keyword: String) {
+    self.diagnostics.push(Diagnostic::error(codes::RESERVED_KEYWORD, self.span(), "`" + keyword + "` is reserved for a future version of Sagitario"));
+  }
+
+  pub fn module(self, file: u32) -> Module {
+    const uses: List<UseDecl> = new List();
+    const items: List<Item> = new List();
+
+    while !self.at_eof() {
+      const start = self.pos;
+
+      if self.at_keyword("use") {
+        match self.use_decl() {
+          Ok(decl) => uses.push(decl),
+          Err(_) => self.skip_item(),
+        }
+      } else {
+        match self.item() {
+          Ok(Some(item)) => items.push(item),
+          Ok(None) => {}
+          Err(_) => self.skip_item(),
+        }
+      }
+
+      if self.pos == start {
+        self.advance();
+      }
+    }
+
+    Module { file: file, uses: uses, items: items }
+  }
+
+  /// `use tree;`
+  prv fn use_decl(self) -> Result<UseDecl, ()> {
+    const start = self.expect_keyword("use")?.span;
+    const tree = self.use_tree()?;
+    const end = self.expect(";")?.span;
+
+    Ok(UseDecl { tree: tree, span: start.to(end) })
+  }
+
+  /// `a::b`, `a::b as c` or `a::{tree, ...}`.
+  prv fn use_tree(self) -> Result<UseTree, ()> {
+    const start = self.span();
+    const prefix = List::from([self.path_segment()?]);
+
+    while self.eat("::") {
+      if self.at("{") {
+        self.advance();
+
+        const trees: List<UseTree> = new List();
+
+        while !self.at("}") {
+          trees.push(self.use_tree()?);
+
+          if !self.eat(",") {
+            break;
+          }
+        }
+
+        const end = self.expect("}")?.span;
+
+        return Ok(UseTree { prefix: prefix, kind: UseTreeKind::Group(trees), span: start.to(end) });
+      }
+
+      prefix.push(self.path_segment()?);
+    }
+
+    const alias: Option<Ident> = if self.eat_keyword("as") { Some(self.ident("a name")?) } else { None };
+    var end = start;
+
+    if let Some(name) = alias {
+      end = name.span;
+    } else if let Some(last) = prefix.last() {
+      end = last.span;
+    }
+
+    Ok(UseTree { prefix: prefix, kind: UseTreeKind::Simple(alias), span: start.to(end) })
+  }
+
+  /// A segment of a path: a name, or one of the keywords `pkg`, `self`, `super` and `Self`.
+  prv fn path_segment(self) -> Result<Ident, ()> {
+    if let TokenKind::Keyword(keyword) = self.kind() {
+      if keyword == "pkg" || keyword == "self" || keyword == "super" || keyword == "Self" {
+        const span = self.advance().span;
+
+        return Ok(Ident { name: keyword, span: span });
+      }
+    }
+
+    self.member_name("a name")
+  }
+
+  /// Skips to the end of the current item: a `;` or a closing `}` at nesting depth zero.
+  prv fn skip_item(self) {
+    var depth = 0usize;
+
+    loop {
+      const kind = self.kind();
+
+      if is_eof(kind) {
+        return;
+      }
+
+      if is_punct(kind, "{") || is_punct(kind, "(") || is_punct(kind, "[") {
+        depth += 1;
+      } else if is_punct(kind, ")") || is_punct(kind, "]") {
+        if depth > 0 {
+          depth -= 1;
+        }
+      } else if is_punct(kind, "}") {
+        if depth > 0 {
+          depth -= 1;
+        }
+
+        if depth == 0 {
+          self.advance();
+
+          return;
+        }
+      } else if is_punct(kind, ";") && depth == 0 {
+        self.advance();
+
+        return;
+      }
+
+      self.advance();
+    }
+  }
+
+  prv fn item(self) -> Result<Option<Item>, ()> {
+    const start = self.span();
+    const attributes = self.attributes()?;
+    const visibility = self.visibility();
+    const kind = self.kind();
+
+    if is_keyword(kind, "fn") {
+      const decl = self.fn_decl(visibility, start, false)?;
+
+      self.apply_attributes(attributes, AttributeTarget::Fn);
+
+      return Ok(Some(Item::Fn(decl)));
+    }
+
+    if is_keyword(kind, "struct") {
+      var decl = self.struct_decl(visibility, start)?;
+
+      decl.repr_c = self.apply_attributes(attributes, AttributeTarget::Struct).repr_c;
+
+      return Ok(Some(Item::Struct(decl)));
+    }
+
+    if is_keyword(kind, "enum") {
+      const decl = self.enum_decl(visibility, start)?;
+
+      self.apply_attributes(attributes, AttributeTarget::Enum);
+
+      return Ok(Some(Item::Enum(decl)));
+    }
+
+    if is_keyword(kind, "class") || is_keyword(kind, "abstract") {
+      const decl = self.class_decl(visibility, start)?;
+
+      self.apply_attributes(attributes, AttributeTarget::Class);
+
+      return Ok(Some(Item::Class(decl)));
+    }
+
+    if is_keyword(kind, "extern") {
+      return Ok(Some(self.extern_item(visibility, start, attributes)?));
+    }
+
+    if is_keyword(kind, "use") {
+      return Err(self.not_implemented(self.span(), "re-exports (`pub use`)"));
+    }
+
+    if is_keyword(kind, "interface") {
+      const decl = self.interface_decl(visibility, start)?;
+
+      self.apply_attributes(attributes, AttributeTarget::Interface);
+
+      return Ok(Some(Item::Interface(decl)));
+    }
+
+    if is_keyword(kind, "const") {
+      const decl = self.const_decl(visibility, start)?;
+
+      self.apply_attributes(attributes, AttributeTarget::Const);
+
+      return Ok(Some(Item::Const(decl)));
+    }
+
+    Err(self.unexpected("an item"))
+  }
+
+  /// `const NAME: Type = value;` at module level; the type is required.
+  prv fn const_decl(self, visibility: Visibility, start: Span) -> Result<ConstDecl, ()> {
+    self.expect_keyword("const")?;
+
+    const name = self.ident("a constant name")?;
+
+    if !self.at(":") {
+      self.diagnostics.push(
+        Diagnostic::error(codes::UNEXPECTED_TOKEN, self.span(), "a module-level `const` needs a type")
+          .with_help("write it after the name: `const " + name.name + ": i32 = ...;`"),
+      );
+
+      return Err(());
+    }
+
+    self.advance();
+
+    const ty = self.type_expr()?;
+
+    self.expect("=")?;
+
+    const value = self.expr()?;
+    const end = self.expect(";")?.span;
+
+    Ok(ConstDecl { visibility: visibility, name: name, ty: ty, value: value, span: start.to(end) })
+  }
+
+  /// `@name` or `@name(arg, ...)` before an item; the arguments are string literals or names.
+  prv fn attributes(self) -> Result<List<Attribute>, ()> {
+    const attributes: List<Attribute> = new List();
+
+    while self.at("@") {
+      const start = self.advance().span;
+      const name = self.ident("an attribute name")?;
+      const args: List<AttributeArg> = new List();
+      var end = name.span;
+
+      if self.eat("(") {
+        while !self.at(")") {
+          const arg = match self.kind() {
+            TokenKind::Str(text) => AttributeArg::Str(text),
+            TokenKind::Ident(text) => AttributeArg::Name(text),
+            _ => return Err(self.unexpected("a string or a name")),
+          };
+
+          self.advance();
+          args.push(arg);
+
+          if !self.eat(",") {
+            break;
+          }
+        }
+
+        end = self.expect(")")?.span;
+      }
+
+      attributes.push(Attribute { name: name, args: args, span: start.to(end) });
+    }
+
+    Ok(attributes)
+  }
+
+  /// Checks the attributes of an item: `@export("symbol")` on an `extern "C" fn`, `@repr(C)` on
+  /// a struct. Errors are reported and the attribute is ignored.
+  prv fn apply_attributes(self, attributes: List<Attribute>, target: AttributeTarget) -> Applied {
+    var applied = Applied { export: None, repr_c: false };
+    const seen: List<String> = new List();
+
+    for attribute in attributes {
+      const name = attribute.name.name;
+
+      if seen.contains(name) {
+        self.attribute_error(attribute.span, "the attribute `@" + name + "` is repeated", None);
+        continue;
+      }
+
+      seen.push(name);
+
+      const extern_fn = match target {
+        AttributeTarget::ExternFn => true,
+        _ => false,
+      };
+      const is_struct = match target {
+        AttributeTarget::Struct => true,
+        _ => false,
+      };
+      const is_enum = match target {
+        AttributeTarget::Enum => true,
+        _ => false,
+      };
+
+      if name == "export" && extern_fn {
+        var symbol: Option<String> = None;
+
+        if attribute.args.len() == 1 {
+          if let Some(AttributeArg::Str(text)) = attribute.args.first() {
+            symbol = Some(text);
+          }
+        }
+
+        match symbol {
+          Some(text) => {
+            applied.export = Some(Export { symbol: text, span: attribute.span });
+          }
+          None => self.attribute_error(attribute.span, "`@export` takes the exported symbol as a string: `@export(\"name\")`", None),
+        }
+      } else if name == "repr" && is_struct {
+        var c = false;
+
+        if attribute.args.len() == 1 {
+          if let Some(AttributeArg::Name(text)) = attribute.args.first() {
+            c = text == "C";
+          }
+        }
+
+        if c {
+          applied.repr_c = true;
+        } else {
+          self.attribute_error(attribute.span, "the only representation is `@repr(C)`", None);
+        }
+      } else if name == "repr" && is_enum {
+        self.diagnostics.push(Diagnostic::error(codes::NOT_IMPLEMENTED, attribute.span, "`@repr(C)` on enums is not implemented yet"));
+      } else if name == "test" || name == "deprecated" {
+        self.diagnostics.push(Diagnostic::error(codes::NOT_IMPLEMENTED, attribute.span, "the attribute `@" + name + "` is not implemented yet"));
+      } else if name == "export" {
+        self.attribute_error(attribute.span, "`@export` applies to `extern \"C\"` functions", Some("write `@export(\"name\") extern \"C\" fn ...`"));
+      } else if name == "repr" {
+        self.attribute_error(attribute.span, "`@repr(C)` applies to structs", None);
+      } else {
+        self.attribute_error(attribute.span, "unknown attribute `@" + name + "`", Some("the attributes are `@export(\"symbol\")` and `@repr(C)`"));
+      }
+    }
+
+    applied
+  }
+
+  prv fn attribute_error(self, span: Span, message: String, help: Option<String>) {
+    var diagnostic = Diagnostic::error(codes::INVALID_ATTRIBUTE, span, message);
+
+    if let Some(help) = help {
+      diagnostic = diagnostic.with_help(help);
+    }
+
+    self.diagnostics.push(diagnostic);
+  }
+
+  /// `extern "C" fn ...` (a function C can call) or `extern "C" { ... }` (C functions to call).
+  prv fn extern_item(self, visibility: Visibility, start: Span, attributes: List<Attribute>) -> Result<Item, ()> {
+    self.expect_keyword("extern")?;
+
+    match self.kind() {
+      TokenKind::Str(abi) => {
+        const span = self.advance().span;
+
+        if abi != "C" {
+          self.diagnostics.push(Diagnostic::error(codes::NOT_IMPLEMENTED, span, "the ABI \"" + abi + "\" is not supported; write `extern \"C\"`"));
+        }
+      }
+      _ => return Err(self.unexpected("an ABI string such as `\"C\"`")),
+    }
+
+    if self.at_keyword("fn") {
+      var decl = self.fn_decl(visibility, start, false)?;
+
+      decl.extern_c = true;
+      decl.export = self.apply_attributes(attributes, AttributeTarget::ExternFn).export;
+
+      return Ok(Item::Fn(decl));
+    }
+
+    self.apply_attributes(attributes, AttributeTarget::ExternBlock);
+
+    match visibility {
+      Visibility::Module => {}
+      _ => {
+        self.diagnostics.push(
+          Diagnostic::error(codes::UNEXPECTED_TOKEN, start, "an `extern` block has no visibility").with_help("write `pub` on each function of the block instead"),
+        );
+      }
+    }
+
+    self.expect("{")?;
+
+    const functions: List<ExternFn> = new List();
+
+    while !self.at("}") && !self.at_eof() {
+      const before = self.pos;
+
+      match self.extern_fn() {
+        Ok(function) => functions.push(function),
+        Err(_) => self.skip_member(),
+      }
+
+      if self.pos == before {
+        self.advance();
+      }
+    }
+
+    const end = self.expect("}")?.span;
+
+    Ok(Item::Extern(ExternBlock { functions: functions, span: start.to(end) }))
+  }
+
+  /// `fn name(params) -> Ret;` inside an `extern "C"` block.
+  prv fn extern_fn(self) -> Result<ExternFn, ()> {
+    const start = self.span();
+    const visibility = self.visibility();
+
+    self.expect_keyword("fn")?;
+
+    const name = self.ident("a function name")?;
+
+    self.expect("(")?;
+
+    const params = self.params()?;
+
+    if self.at("..") || self.at("..=") {
+      return Err(self.not_implemented(self.span(), "variadic C functions"));
+    }
+
+    self.expect(")")?;
+
+    const return_type: Option<TypeExpr> = if self.eat("->") { Some(self.type_expr()?) } else { None };
+
+    if self.at("{") {
+      self.diagnostics.push(
+        Diagnostic::error(codes::UNEXPECTED_TOKEN, self.span(), "functions in an `extern` block have no body")
+          .with_help("end the declaration with `;`; to write a function C can call, use `extern \"C\" fn` outside the block"),
+      );
+
+      return Err(());
+    }
+
+    const end = self.expect(";")?.span;
+
+    Ok(ExternFn { visibility: visibility, name: name, params: params, return_type: return_type, span: start.to(end) })
+  }
+
+  /// The parameters `name: Type, ...` up to the closing `)`, which is not consumed.
+  prv fn params(self) -> Result<List<Param>, ()> {
+    const params: List<Param> = new List();
+
+    while !self.at(")") && !self.at("..") && !self.at("..=") {
+      const param_name = self.ident("a parameter name")?;
+
+      self.expect(":")?;
+
+      const ty = self.type_expr()?;
+
+      params.push(Param { span: param_name.span.to(ty.span), name: param_name, ty: ty });
+
+      if !self.eat(",") {
+        break;
+      }
+    }
+
+    Ok(params)
+  }
+
+  prv fn visibility(self) -> Visibility {
+    if !self.eat_keyword("pub") {
+      return Visibility::Module;
+    }
+
+    // `pub(pkg)` and other restricted forms do not exist (ADR-0025); recover as `pub`.
+    const restricted = self.at("(") && is_punct(self.nth_kind(2), ")") && !is_punct(self.nth_kind(1), ")");
+
+    if restricted {
+      const start = self.advance().span;
+
+      self.advance();
+
+      const end = self.advance().span;
+
+      self.diagnostics.push(
+        Diagnostic::error(codes::UNEXPECTED_TOKEN, start.to(end), "visibility has no restricted forms such as `pub(pkg)`")
+          .with_help("write `pub` to make the item visible outside its module"),
+      );
+    }
+
+    Visibility::Public
+  }
+
+  prv fn struct_decl(self, visibility: Visibility, start: Span) -> Result<StructDecl, ()> {
+    self.expect_keyword("struct")?;
+
+    const name = self.ident("a struct name")?;
+    const generics = self.generic_params()?;
+    const impls = self.impls()?;
+
+    self.where_clause(generics)?;
+    self.expect("{")?;
+
+    const fields: List<FieldDecl> = new List();
+    const functions: List<FnDecl> = new List();
+
+    while !self.at("}") && !self.at_eof() {
+      const before = self.pos;
+
+      match self.member() {
+        Ok(Member::Field(field)) => {
+          if field.mutable.is_some() {
+            self.diagnostics.push(
+              Diagnostic::error(codes::UNEXPECTED_TOKEN, field.span, "struct fields are not declared `const` or `var`")
+                .with_help("a struct's mutability comes from the binding that holds it; remove `const` or `var`"),
+            );
+          }
+
+          fields.push(field);
+        }
+        Ok(Member::Fn(function)) => {
+          self.class_only_modifiers(function);
+          functions.push(function);
+        }
+        Err(_) => self.skip_member(),
+      }
+
+      if self.pos == before {
+        self.advance();
+      }
+    }
+
+    const end = self.expect("}")?.span;
+
+    Ok(StructDecl {
+      repr_c: false,
+      visibility: visibility,
+      name: name,
+      generics: generics,
+      impls: impls,
+      fields: fields,
+      functions: functions,
+      span: start.to(end),
+    })
+  }
+
+  /// `impl A, B<T>` after a type's name (and its `extends`).
+  prv fn impls(self) -> Result<List<TypeExpr>, ()> {
+    const impls: List<TypeExpr> = new List();
+
+    if self.eat_keyword("impl") {
+      loop {
+        impls.push(self.type_expr()?);
+
+        if !self.eat(",") {
+          break;
+        }
+      }
+    }
+
+    Ok(impls)
+  }
+
+  /// `interface Name extends A, B { members }`: fields `const`/`var` and methods, all public.
+  prv fn interface_decl(self, visibility: Visibility, start: Span) -> Result<InterfaceDecl, ()> {
+    self.expect_keyword("interface")?;
+
+    const name = self.ident("an interface name")?;
+    const generics = self.generic_params()?;
+    const parents: List<TypeExpr> = new List();
+
+    if self.eat_keyword("extends") {
+      loop {
+        parents.push(self.type_expr()?);
+
+        if !self.eat(",") {
+          break;
+        }
+      }
+    }
+
+    self.where_clause(generics)?;
+    self.expect("{")?;
+
+    const fields: List<FieldDecl> = new List();
+    const functions: List<FnDecl> = new List();
+
+    while !self.at("}") && !self.at_eof() {
+      const before = self.pos;
+
+      match self.interface_member() {
+        Ok(Member::Field(field)) => {
+          if field.mutable.is_none() {
+            self.diagnostics.push(
+              Diagnostic::error(codes::UNEXPECTED_TOKEN, field.name.span, "the interface field `" + field.name.name + "` must be declared `const` or `var`")
+                .with_help("`const` fields can only be read through the interface, `var` fields also assigned"),
+            );
+          }
+
+          fields.push(field);
+        }
+        Ok(Member::Fn(function)) => functions.push(function),
+        Err(_) => self.skip_member(),
+      }
+
+      if self.pos == before {
+        self.advance();
+      }
+    }
+
+    const end = self.expect("}")?.span;
+
+    Ok(InterfaceDecl { visibility: visibility, name: name, generics: generics, parents: parents, fields: fields, functions: functions, span: start.to(end) })
+  }
+
+  /// A member of an interface: always public, so without `pub`/`prv`. A method without body is
+  /// required.
+  prv fn interface_member(self) -> Result<Member, ()> {
+    const start = self.span();
+
+    if self.at_keyword("pub") || self.at_keyword("prv") {
+      const span = self.advance().span;
+
+      self.diagnostics.push(
+        Diagnostic::error(codes::UNEXPECTED_TOKEN, span, "interface members take no visibility: they are always public").with_help("remove `pub` or `prv`"),
+      );
+    }
+
+    if !self.at_keyword("fn") {
+      return self.field_member(Visibility::Public, start);
+    }
+
+    Ok(Member::Fn(self.signature_then(Visibility::Public, start, true, Body::Interface)?))
+  }
+
+  /// `abstract class Name extends Parent impl I { fields and functions }`.
+  prv fn class_decl(self, visibility: Visibility, start: Span) -> Result<ClassDecl, ()> {
+    const is_abstract = self.eat_keyword("abstract");
+
+    self.expect_keyword("class")?;
+
+    const name = self.ident("a class name")?;
+    const generics = self.generic_params()?;
+    const parent: Option<TypeExpr> = if self.eat_keyword("extends") { Some(self.type_expr()?) } else { None };
+    const impls = self.impls()?;
+
+    self.where_clause(generics)?;
+    self.expect("{")?;
+
+    const fields: List<FieldDecl> = new List();
+    const functions: List<FnDecl> = new List();
+
+    while !self.at("}") && !self.at_eof() {
+      const before = self.pos;
+
+      match self.member() {
+        Ok(Member::Field(field)) => {
+          if field.mutable.is_none() {
+            const field_name = field.name.name;
+
+            self.diagnostics.push(
+              Diagnostic::error(codes::UNEXPECTED_TOKEN, field.name.span, "the class field `" + field_name + "` must be declared `const` or `var`")
+                .with_help("write `const " + field_name + "` if it never changes after `new`, or `var " + field_name + "` to allow changing it"),
+            );
+          }
+
+          fields.push(field);
+        }
+        Ok(Member::Fn(function)) => functions.push(function),
+        Err(_) => self.skip_member(),
+      }
+
+      if self.pos == before {
+        self.advance();
+      }
+    }
+
+    const end = self.expect("}")?.span;
+
+    Ok(ClassDecl {
+      is_abstract: is_abstract,
+      visibility: visibility,
+      name: name,
+      generics: generics,
+      parent: parent,
+      impls: impls,
+      fields: fields,
+      functions: functions,
+      span: start.to(end),
+    })
+  }
+
+  prv fn enum_decl(self, visibility: Visibility, start: Span) -> Result<EnumDecl, ()> {
+    self.expect_keyword("enum")?;
+
+    const name = self.ident("an enum name")?;
+    const generics = self.generic_params()?;
+    const impls = self.impls()?;
+
+    self.where_clause(generics)?;
+    self.expect("{")?;
+
+    const variants: List<VariantDecl> = new List();
+
+    // Variants come first, separated by commas.
+    while is_ident(self.kind()) {
+      match self.variant() {
+        Ok(variant) => variants.push(variant),
+        Err(_) => self.skip_variant(),
+      }
+
+      if !self.eat(",") {
+        break;
+      }
+    }
+
+    if variants.is_empty() {
+      self.diagnostics.push(
+        Diagnostic::error(codes::EMPTY_DECLARATION, name.span, "the enum `" + name.name + "` has no variants")
+          .with_help("declare at least one variant: `enum Name { First, Second }`"),
+      );
+    }
+
+    const functions: List<FnDecl> = new List();
+
+    while !self.at("}") && !self.at_eof() {
+      const before = self.pos;
+
+      match self.member() {
+        Ok(Member::Fn(function)) => {
+          self.class_only_modifiers(function);
+          functions.push(function);
+        }
+        Ok(Member::Field(field)) => {
+          self.diagnostics.push(
+            Diagnostic::error(codes::UNEXPECTED_TOKEN, field.span, "enums cannot have fields")
+              .with_help("store data in the variants: `Variant(Type)` or `Variant { name: Type }`"),
+          );
+        }
+        Err(_) => self.skip_member(),
+      }
+
+      if self.pos == before {
+        self.advance();
+      }
+    }
+
+    const end = self.expect("}")?.span;
+
+    Ok(EnumDecl { visibility: visibility, name: name, generics: generics, impls: impls, variants: variants, functions: functions, span: start.to(end) })
+  }
+
+  prv fn empty_variant(self, span: Span, name: Ident) {
+    self.diagnostics.push(
+      Diagnostic::error(codes::EMPTY_DECLARATION, span, "the variant `" + name.name + "` declares no data")
+        .with_help("write a variant without data as `" + name.name + "`"),
+    );
+  }
+
+  /// `Name`, `Name(T1, T2)` or `Name { a: T1, b: T2 }`.
+  prv fn variant(self) -> Result<VariantDecl, ()> {
+    const name = self.ident("a variant name")?;
+
+    if self.eat("(") {
+      const types: List<TypeExpr> = new List();
+
+      while !self.at(")") {
+        types.push(self.type_expr()?);
+
+        if !self.eat(",") {
+          break;
+        }
+      }
+
+      const end = self.expect(")")?.span;
+
+      if types.is_empty() {
+        self.empty_variant(name.span.to(end), name);
+      }
+
+      return Ok(VariantDecl { span: name.span.to(end), name: name, fields: VariantFields::Tuple(types) });
+    }
+
+    if self.eat("{") {
+      const fields: List<VariantFieldDecl> = new List();
+
+      while !self.at("}") {
+        const field_name = self.ident("a field name")?;
+
+        self.expect(":")?;
+
+        const ty = self.type_expr()?;
+
+        fields.push(VariantFieldDecl { span: field_name.span.to(ty.span), name: field_name, ty: ty });
+
+        if !self.eat(",") {
+          break;
+        }
+      }
+
+      const end = self.expect("}")?.span;
+
+      if fields.is_empty() {
+        self.empty_variant(name.span.to(end), name);
+      }
+
+      return Ok(VariantDecl { span: name.span.to(end), name: name, fields: VariantFields::Named(fields) });
+    }
+
+    Ok(VariantDecl { span: name.span, name: name, fields: VariantFields::Unit })
+  }
+
+  /// Skips a malformed variant: to the next `,` or the `}` closing the enum, at depth zero.
+  prv fn skip_variant(self) {
+    var depth = 0usize;
+
+    loop {
+      const kind = self.kind();
+
+      if is_eof(kind) {
+        return;
+      }
+
+      if is_punct(kind, "{") || is_punct(kind, "(") {
+        depth += 1;
+      } else if is_punct(kind, ")") {
+        if depth > 0 {
+          depth -= 1;
+        }
+      } else if is_punct(kind, "}") {
+        if depth == 0 {
+          return;
+        }
+
+        depth -= 1;
+      } else if is_punct(kind, ",") && depth == 0 {
+        return;
+      }
+
+      self.advance();
+    }
+  }
+
+  /// A field `pub name: Type;` or a function, both with a mandatory `pub` or `prv`.
+  prv fn member(self) -> Result<Member, ()> {
+    const start = self.span();
+
+    if self.at("@") {
+      const attributes = self.attributes()?;
+
+      self.apply_attributes(attributes, AttributeTarget::Member);
+    }
+
+    var visibility = Visibility::Public;
+
+    if self.at_keyword("pub") {
+      self.advance();
+    } else if self.at_keyword("prv") {
+      self.advance();
+      visibility = Visibility::Private;
+    } else {
+      self.diagnostics.push(
+        Diagnostic::error(codes::MISSING_VISIBILITY, start, "members must be declared `pub` or `prv`")
+          .with_help("add `pub` to make it visible outside the type, or `prv` to keep it private"),
+      );
+    }
+
+    const is_abstract = self.eat_keyword("abstract");
+    const is_override = self.eat_keyword("override");
+
+    if is_abstract || is_override || self.at_keyword("fn") {
+      var decl = self.method_decl(visibility, start, is_abstract)?;
+
+      decl.is_override = is_override;
+
+      return Ok(Member::Fn(decl));
+    }
+
+    self.field_member(visibility, start)
+  }
+
+  /// A field `weak var name: Type;` after its visibility.
+  prv fn field_member(self, visibility: Visibility, start: Span) -> Result<Member, ()> {
+    // The type checker decides where `weak` is allowed.
+    const is_weak = self.eat_keyword("weak");
+    var mutable: Option<bool> = None;
+
+    if self.at_keyword("const") {
+      mutable = Some(false);
+    } else if self.at_keyword("var") {
+      mutable = Some(true);
+    }
+
+    if mutable.is_some() {
+      self.advance();
+    }
+
+    const name = self.ident("a field name or `fn`")?;
+
+    self.expect(":")?;
+
+    const ty = self.type_expr()?;
+    const end = self.expect(";")?.span;
+
+    Ok(Member::Field(FieldDecl { visibility: visibility, mutable: mutable, is_weak: is_weak, name: name, ty: ty, span: start.to(end) }))
+  }
+
+  /// Skips a malformed member: to just after a `;` or a `{ ... }` body at depth zero, or to the
+  /// `}` closing the type.
+  prv fn skip_member(self) {
+    var depth = 0usize;
+
+    loop {
+      const kind = self.kind();
+
+      if is_eof(kind) {
+        return;
+      }
+
+      if is_punct(kind, "{") {
+        depth += 1;
+      } else if is_punct(kind, "}") {
+        if depth == 0 {
+          return;
+        }
+
+        depth -= 1;
+
+        if depth == 0 {
+          self.advance();
+
+          return;
+        }
+      } else if is_punct(kind, ";") && depth == 0 {
+        self.advance();
+
+        return;
+      }
+
+      self.advance();
+    }
+  }
+
+  /// `abstract` and `override` only apply to the methods of classes.
+  prv fn class_only_modifiers(self, function: FnDecl) {
+    if function.is_abstract {
+      self.class_only_modifier(function, "abstract");
+    }
+
+    if function.is_override {
+      self.class_only_modifier(function, "override");
+    }
+  }
+
+  prv fn class_only_modifier(self, function: FnDecl, modifier: String) {
+    self.diagnostics.push(
+      Diagnostic::error(codes::UNEXPECTED_TOKEN, function.name.span, "only class methods can be `" + modifier + "`")
+        .with_help("remove `" + modifier + "`; structs and enums have no inheritance"),
+    );
+  }
+
+  /// A function of a struct, enum or class; an abstract one ends with `;` instead of a body.
+  prv fn method_decl(self, visibility: Visibility, start: Span, is_abstract: bool) -> Result<FnDecl, ()> {
+    if !is_abstract {
+      return self.fn_decl(visibility, start, true);
+    }
+
+    self.signature_then(visibility, start, true, Body::Abstract)
+  }
+
+  /// A function; `in_type` for the functions of a struct, enum or class, which can be methods.
+  prv fn fn_decl(self, visibility: Visibility, start: Span, in_type: bool) -> Result<FnDecl, ()> {
+    self.signature_then(visibility, start, in_type, Body::Block)
+  }
+
+  /// A function's signature followed by the body `body` describes.
+  prv fn signature_then(self, visibility: Visibility, start: Span, in_type: bool, body: Body) -> Result<FnDecl, ()> {
+    const id = self.next_id();
+
+    self.expect_keyword("fn")?;
+
+    const name = if in_type { self.member_name("a function name")? } else { self.ident("a function name")? };
+    const generics = self.generic_params()?;
+
+    self.expect("(")?;
+
+    var self_param: Option<Span> = None;
+    const at_self = self.at_keyword("self") || (self.at_keyword("var") && is_keyword(self.nth_kind(1), "self"));
+
+    if at_self {
+      const self_start = self.span();
+
+      // `var self` does not exist (ADR-0028): `self` can be modified in every method.
+      if self.eat_keyword("var") {
+        self.diagnostics.push(
+          Diagnostic::error(codes::UNEXPECTED_TOKEN, self_start, "`self` is not declared with `var`")
+            .with_help("write `self`: every method may modify `self`, and the compiler detects the ones that do"),
+        );
+      }
+
+      const span = self.advance().span;
+
+      if in_type {
+        self_param = Some(span);
+      } else {
+        self.diagnostics.push(
+          Diagnostic::error(codes::UNEXPECTED_TOKEN, span, "a `self` parameter is only allowed in methods")
+            .with_help("declare the function inside a `struct`, `enum` or `class` to make it a method"),
+        );
+      }
+
+      if !self.at(")") {
+        self.expect(",")?;
+      }
+    }
+
+    const params = self.params()?;
+
+    self.expect(")")?;
+
+    const return_type: Option<TypeExpr> = if self.eat("->") { Some(self.type_expr()?) } else { None };
+
+    self.where_clause(generics)?;
+
+    var is_abstract = false;
+    var block_body: Block = Block { stmts: new List(), tail: None, span: start };
+
+    match body {
+      Body::Block => {
+        block_body = self.block()?;
+      }
+      Body::Interface => {
+        if self.at("{") {
+          block_body = self.block()?;
+        } else {
+          is_abstract = true;
+          block_body = Block { stmts: new List(), tail: None, span: self.expect(";")?.span };
+        }
+      }
+      Body::Abstract => {
+        is_abstract = true;
+
+        if self.at("{") {
+          self.diagnostics.push(
+            Diagnostic::error(codes::UNEXPECTED_TOKEN, self.span(), "abstract methods have no body")
+              .with_help("end the declaration with `;`, or remove `abstract` to give it a body"),
+          );
+
+          const parsed = self.block()?;
+
+          block_body = Block { stmts: new List(), tail: None, span: parsed.span };
+        } else {
+          block_body = Block { stmts: new List(), tail: None, span: self.expect(";")?.span };
+        }
+      }
+    }
+
+    Ok(FnDecl {
+      id: id,
+      extern_c: false,
+      export: None,
+      visibility: visibility,
+      is_abstract: is_abstract,
+      is_override: false,
+      name: name,
+      generics: generics,
+      self_param: self_param,
+      params: params,
+      return_type: return_type,
+      span: start.to(block_body.span),
+      body: block_body,
+    })
+  }
+
+  prv fn ident(self, expected: String) -> Result<Ident, ()> {
+    match self.kind() {
+      TokenKind::Ident(name) => {
+        const span = self.advance().span;
+
+        Ok(Ident { name: name, span: span })
+      }
+      TokenKind::Keyword(keyword) if is_reserved(keyword) => Err(self.reserved_keyword(keyword)),
+      _ => Err(self.unexpected(expected)),
+    }
+  }
+
+  /// The name of a struct member, which may be `new` (the conventional constructor name).
+  prv fn member_name(self, expected: String) -> Result<Ident, ()> {
+    if self.at_keyword("new") {
+      const span = self.advance().span;
+
+      return Ok(Ident { name: "new", span: span });
+    }
+
+    self.ident(expected)
+  }
+
+  prv fn type_expr(self) -> Result<TypeExpr, ()> {
+    const start = self.span();
+    const kind = self.kind();
+
+    if is_punct(kind, "(") && is_punct(self.nth_kind(1), ")") {
+      self.advance();
+
+      const end = self.advance().span;
+
+      return Ok(new TypeExpr(TypeExprKind::Unit, start.to(end)));
+    }
+
+    if is_ident(kind) || is_keyword(kind, "pkg") || is_keyword(kind, "super") || is_keyword(kind, "self") {
+      const path = self.path()?;
+
+      if self.eat("<") {
+        const args: List<TypeExpr> = new List();
+
+        loop {
+          args.push(self.type_expr()?);
+
+          if !self.eat(",") {
+            break;
+          }
+        }
+
+        const end = self.expect(">")?.span;
+
+        return Ok(new TypeExpr(TypeExprKind::Generic { path: path, args: args }, path.span.to(end)));
+      }
+
+      return Ok(new TypeExpr(TypeExprKind::Path(path), path.span));
+    }
+
+    if is_punct(kind, "[") {
+      self.advance();
+
+      const elem = self.type_expr()?;
+
+      self.expect(";")?;
+
+      const len = self.array_len()?;
+      const end = self.expect("]")?.span;
+
+      return Ok(new TypeExpr(TypeExprKind::Array { elem: elem, len: len }, start.to(end)));
+    }
+
+    if is_keyword(kind, "Self") {
+      const path = self.path()?;
+
+      return Ok(new TypeExpr(TypeExprKind::Path(path), path.span));
+    }
+
+    if is_keyword(kind, "fn") {
+      self.advance();
+      self.expect("(")?;
+
+      const params: List<TypeExpr> = new List();
+
+      while !self.at(")") {
+        params.push(self.type_expr()?);
+
+        if !self.eat(",") {
+          break;
+        }
+      }
+
+      var end = self.expect(")")?.span;
+      var ret: Option<TypeExpr> = None;
+
+      if self.eat("->") {
+        const parsed = self.type_expr()?;
+
+        end = parsed.span;
+        ret = Some(parsed);
+      }
+
+      return Ok(new TypeExpr(TypeExprKind::Fn { params: params, ret: ret }, start.to(end)));
+    }
+
+    if is_punct(kind, "*") {
+      self.advance();
+
+      var mutable = false;
+
+      if self.at_keyword("const") {
+        mutable = false;
+      } else if is_mut(self.kind()) {
+        mutable = true;
+      } else {
+        return Err(self.unexpected("`const` or `mut` after `*`"));
+      }
+
+      self.advance();
+
+      const pointee = self.type_expr()?;
+
+      return Ok(new TypeExpr(TypeExprKind::Ptr { mutable: mutable, pointee: pointee }, start.to(pointee.span)));
+    }
+
+    Err(self.unexpected("a type"))
+  }
+
+  /// The `N` of `[T; N]` and `[value; N]`: an integer literal.
+  prv fn array_len(self) -> Result<ArrayLen, ()> {
+    const span = self.span();
+
+    match self.kind() {
+      TokenKind::Int { value, suffix } => {
+        self.advance();
+
+        Ok(ArrayLen { value: value, suffix: suffix, span: span })
+      }
+      _ => Err(self.not_implemented(span, "array lengths other than integer literals")),
+    }
+  }
+
+  /// Whether `::` here continues a path: it is followed by a name, `new` or `super`.
+  prv fn path_continues(self) -> bool {
+    const next = self.nth_kind(1);
+
+    self.at("::") && (is_ident(next) || is_keyword(next, "new") || is_keyword(next, "super"))
+  }
+
+  /// A path; its first segment may be `pkg`, `self`, `super` or `Self`, and `super` may repeat.
+  prv fn path(self) -> Result<Path, ()> {
+    const first = self.path_segment()?;
+    var span = first.span;
+    const segments = List::from([first]);
+
+    while self.path_continues() {
+      self.advance();
+
+      const segment = if self.at_keyword("super") { self.path_segment()? } else { self.member_name("a name")? };
+
+      span = span.to(segment.span);
+      segments.push(segment);
+    }
+
+    Ok(Path { id: self.next_id(), segments: segments, type_args: None, span: span })
+  }
+
+  /// A path in an expression, whose segments may be followed by type arguments:
+  /// `max<i32>(...)`, `Pair<i32>::new(...)`, `Box<i32> { ... }`.
+  prv fn expr_path(self) -> Result<Path, ()> {
+    const first = self.path_segment()?;
+    var span = first.span;
+    const segments = List::from([first]);
+    var type_args: Option<TypeArgs> = None;
+
+    loop {
+      if type_args.is_none() && self.at("<") {
+        if let Some(args) = self.try_type_args(segments.len() - 1) {
+          span = span.to(args.span);
+          type_args = Some(args);
+        }
+      }
+
+      if !self.path_continues() {
+        break;
+      }
+
+      self.advance();
+
+      const segment = if self.at_keyword("super") { self.path_segment()? } else { self.member_name("a name")? };
+
+      span = span.to(segment.span);
+      segments.push(segment);
+    }
+
+    Ok(Path { id: self.next_id(), segments: segments, type_args: type_args, span: span })
+  }
+
+  /// `<T, U>` if it parses and is followed by `(`, `::` or `{`; otherwise nothing is consumed and
+  /// no diagnostic remains.
+  prv fn try_type_args(self, segment: usize) -> Option<TypeArgs> {
+    const pos = self.pos;
+    const reported = self.diagnostics.len();
+    const parsed = self.type_args(segment);
+    const follows = self.at("(") || self.at("::") || (self.at("{") && !self.no_struct_literal);
+
+    match parsed {
+      Ok(args) if follows => Some(args),
+      _ => {
+        self.pos = pos;
+        self.diagnostics.truncate(reported);
+
+        None
+      }
+    }
+  }
+
+  /// `<T, U>` for the segment at `segment`.
+  prv fn type_args(self, segment: usize) -> Result<TypeArgs, ()> {
+    const start = self.expect("<")?.span;
+    const args: List<TypeExpr> = new List();
+
+    loop {
+      args.push(self.type_expr()?);
+
+      if !self.eat(",") {
+        break;
+      }
+    }
+
+    const end = self.expect(">")?.span;
+
+    Ok(TypeArgs { segment: segment, args: args, span: start.to(end) })
+  }
+
+  /// `<T, U: Bound + Other>` after the name of an item, if present.
+  prv fn generic_params(self) -> Result<List<GenericParam>, ()> {
+    const params: List<GenericParam> = new List();
+
+    if !self.eat("<") {
+      return Ok(params);
+    }
+
+    loop {
+      const name = self.ident("a type parameter name")?;
+      const bounds: List<TypeExpr> = if self.eat(":") { self.bounds()? } else { new List() };
+
+      params.push(GenericParam { name: name, bounds: bounds });
+
+      if !self.eat(",") || self.at(">") {
+        break;
+      }
+    }
+
+    self.expect(">")?;
+
+    Ok(params)
+  }
+
+  /// `A + B<T> + C`
+  prv fn bounds(self) -> Result<List<TypeExpr>, ()> {
+    const bounds = List::from([self.type_expr()?]);
+
+    while self.eat("+") {
+      bounds.push(self.type_expr()?);
+    }
+
+    Ok(bounds)
+  }
+
+  /// `where T: A + B, U: C`, whose bounds join those of the parameters it names.
+  prv fn where_clause(self, params: List<GenericParam>) -> Result<(), ()> {
+    if !self.eat_keyword("where") {
+      return Ok(());
+    }
+
+    loop {
+      const name = self.ident("a type parameter name")?;
+
+      self.expect(":")?;
+
+      const bounds = self.bounds()?;
+      var found = false;
+
+      for param in params {
+        if !found && param.name.name == name.name {
+          for bound in bounds {
+            param.bounds.push(bound);
+          }
+
+          found = true;
+        }
+      }
+
+      if !found {
+        self.diagnostics.push(
+          Diagnostic::error(codes::UNRESOLVED_NAME, name.span, "`where` names `" + name.name + "`, which is not a type parameter of this declaration"),
+        );
+      }
+
+      if !self.eat(",") || self.at("{") {
+        break;
+      }
+    }
+
+    Ok(())
+  }
+
+  prv fn block(self) -> Result<Block, ()> {
+    const saved = self.no_struct_literal;
+
+    self.no_struct_literal = false;
+
+    const block = self.block_inner();
+
+    self.no_struct_literal = saved;
+    block
+  }
+
+  prv fn block_inner(self) -> Result<Block, ()> {
+    const start = self.expect("{")?.span;
+    const stmts: List<Stmt> = new List();
+    var tail: Option<Expr> = None;
+
+    loop {
+      if self.at("}") {
+        break;
+      }
+
+      if self.at_eof() {
+        return Err(self.unexpected("`}`"));
+      }
+
+      // A block-like expression followed by more code is a statement, not the tail.
+      if let Some(expr) = tail {
+        stmts.push(Stmt::Expr(expr));
+        tail = None;
+      }
+
+      match self.stmt() {
+        Ok(StmtOrTail::Stmt(stmt)) => stmts.push(stmt),
+        Ok(StmtOrTail::Tail(expr)) => {
+          tail = Some(expr);
+        }
+        Err(_) => self.skip_stmt(),
+      }
+    }
+
+    const end = self.advance().span;
+
+    Ok(Block { stmts: stmts, tail: tail, span: start.to(end) })
+  }
+
+  prv fn stmt(self) -> Result<StmtOrTail, ()> {
+    if self.at_keyword("const") || self.at_keyword("var") {
+      return Ok(StmtOrTail::Stmt(self.let_stmt()?));
+    }
+
+    // An empty statement is harmless but almost always a typo.
+    if self.at(";") {
+      return Err(self.unexpected("a statement"));
+    }
+
+    const expr = self.expr()?;
+
+    if let Some(assignment) = assignment_op(self.kind()) {
+      self.advance();
+
+      const value = self.expr()?;
+      const end = self.expect(";")?.span;
+
+      return Ok(StmtOrTail::Stmt(Stmt::Assign { span: expr.span.to(end), target: expr, op: assignment.op, value: value }));
+    }
+
+    if self.eat(";") {
+      return Ok(StmtOrTail::Stmt(Stmt::Expr(expr)));
+    }
+
+    if self.at("}") || expr.is_block_like() {
+      return Ok(StmtOrTail::Tail(expr));
+    }
+
+    Err(self.unexpected("`;` or `}`"))
+  }
+
+  prv fn let_stmt(self) -> Result<Stmt, ()> {
+    const start = self.span();
+    const mutable = is_keyword(self.advance().kind, "var");
+    const id = self.next_id();
+    const name = self.ident("a binding name")?;
+    const ty: Option<TypeExpr> = if self.eat(":") { Some(self.type_expr()?) } else { None };
+    const init: Option<Expr> = if self.eat("=") { Some(self.expr()?) } else { None };
+    const end = self.expect(";")?.span;
+
+    Ok(Stmt::Let(LetStmt { id: id, mutable: mutable, name: name, ty: ty, init: init, span: start.to(end) }))
+  }
+
+  /// Skips to just after the next `;`, or to the `}` closing the current block, at depth zero.
+  prv fn skip_stmt(self) {
+    const start = self.pos;
+    var depth = 0usize;
+
+    loop {
+      const kind = self.kind();
+
+      if is_eof(kind) {
+        return;
+      }
+
+      if is_punct(kind, "{") || is_punct(kind, "(") || is_punct(kind, "[") {
+        depth += 1;
+      } else if is_punct(kind, ")") || is_punct(kind, "]") {
+        if depth > 0 {
+          depth -= 1;
+        }
+      } else if is_punct(kind, "}") {
+        if depth == 0 {
+          // A stray `}` right where the statement started would stop progress; skip it.
+          if self.pos == start {
+            self.advance();
+          }
+
+          return;
+        }
+
+        depth -= 1;
+      } else if is_punct(kind, ";") && depth == 0 {
+        self.advance();
+
+        return;
+      }
+
+      self.advance();
+    }
+  }
+
+  prv fn expr(self) -> Result<Expr, ()> {
+    self.binary_expr(PREC_RANGE)
+  }
+
+  /// Parses an expression with struct literals allowed or not.
+  prv fn expr_with_struct_literals(self, allowed: bool) -> Result<Expr, ()> {
+    const saved = self.no_struct_literal;
+
+    self.no_struct_literal = !allowed;
+
+    const expr = self.expr();
+
+    self.no_struct_literal = saved;
+    expr
+  }
+
+  /// `(a, b, c)` after a callee or method name, and the span of `)`.
+  prv fn call_args(self) -> Result<CallArgs, ()> {
+    self.expect("(")?;
+
+    const args: List<Expr> = new List();
+
+    while !self.at(")") {
+      args.push(self.expr_with_struct_literals(true)?);
+
+      if !self.eat(",") {
+        break;
+      }
+    }
+
+    const end = self.expect(")")?.span;
+
+    Ok(CallArgs { args: args, end: end })
+  }
+
+  prv fn binary_expr(self, min_prec: u8) -> Result<Expr, ()> {
+    var lhs = self.unary_expr()?;
+
+    while let Some(operator) = infix(self.kind()) {
+      const prec = operator.prec;
+
+      if prec < min_prec {
+        break;
+      }
+
+      const op_span = self.advance().span;
+
+      match operator.kind {
+        InfixKind::As => {
+          const ty = self.type_expr()?;
+          const span = lhs.span.to(ty.span);
+
+          lhs = self.expr_node(ExprKind::Cast { expr: lhs, ty: ty }, span);
+        }
+        InfixKind::Binary(op) => {
+          const rhs = self.binary_expr(prec + 1)?;
+          const span = lhs.span.to(rhs.span);
+
+          lhs = self.expr_node(ExprKind::Binary { op: op, lhs: lhs, rhs: rhs }, span);
+        }
+        InfixKind::Range(inclusive) => {
+          if ends_expression(self.kind()) || self.at("{") {
+            return Err(self.not_implemented(op_span, "open ranges"));
+          }
+
+          const end = self.binary_expr(prec + 1)?;
+          const span = lhs.span.to(end.span);
+
+          lhs = self.expr_node(ExprKind::Range { start: lhs, end: end, inclusive: inclusive }, span);
+        }
+      }
+
+      // Comparisons and ranges are not associative: `a < b < c` is an error.
+      if prec == PREC_COMPARE || prec == PREC_RANGE {
+        if let Some(next) = infix(self.kind()) {
+          if next.prec == prec {
+            self.diagnostics.push(
+              Diagnostic::error(codes::CHAINED_OPERATORS, self.span(), "comparison and range operators cannot be chained; use parentheses or `&&`"),
+            );
+
+            return Err(());
+          }
+        }
+      }
+    }
+
+    Ok(lhs)
+  }
+
+  prv fn unary_expr(self) -> Result<Expr, ()> {
+    var op = UnaryOp::Neg;
+
+    if self.at("-") {
+      op = UnaryOp::Neg;
+    } else if self.at("!") {
+      op = UnaryOp::Not;
+    } else if self.at("*") {
+      op = UnaryOp::Deref;
+    } else {
+      return self.postfix_expr();
+    }
+
+    const start = self.advance().span;
+    const operand = self.unary_expr()?;
+    const span = start.to(operand.span);
+
+    Ok(self.expr_node(ExprKind::Unary { op: op, operand: operand }, span))
+  }
+
+  prv fn postfix_expr(self) -> Result<Expr, ()> {
+    var expr = self.primary_expr()?;
+
+    loop {
+      if self.at("(") {
+        const call = self.call_args()?;
+        const span = expr.span.to(call.end);
+
+        expr = self.expr_node(ExprKind::Call { callee: expr, args: call.args }, span);
+      } else if self.at(".") {
+        self.advance();
+
+        const name = self.member_name("a field or method name")?;
+
+        if self.at("(") {
+          const call = self.call_args()?;
+          const span = expr.span.to(call.end);
+
+          expr = self.expr_node(ExprKind::MethodCall { receiver: expr, method: name, args: call.args }, span);
+        } else {
+          const span = expr.span.to(name.span);
+
+          expr = self.expr_node(ExprKind::Field { base: expr, name: name }, span);
+        }
+      } else if self.at("[") {
+        self.advance();
+
+        const index = self.expr_with_struct_literals(true)?;
+        const end = self.expect("]")?.span;
+        const span = expr.span.to(end);
+
+        expr = self.expr_node(ExprKind::Index { base: expr, index: index }, span);
+      } else if self.at("?") {
+        const end = self.advance().span;
+        const span = expr.span.to(end);
+
+        expr = self.expr_node(ExprKind::Try(expr), span);
+      } else {
+        return Ok(expr);
+      }
+    }
+  }
+
+  prv fn primary_expr(self) -> Result<Expr, ()> {
+    const span = self.span();
+    const kind = self.kind();
+
+    match kind {
+      TokenKind::Int { value, suffix } => {
+        self.advance();
+
+        return Ok(self.expr_node(ExprKind::Int { value: value, suffix: suffix }, span));
+      }
+      TokenKind::Float { text, suffix } => {
+        self.advance();
+
+        return Ok(self.expr_node(ExprKind::Float { text: text, suffix: suffix }, span));
+      }
+      TokenKind::Str(value) => {
+        self.advance();
+
+        return Ok(self.expr_node(ExprKind::Str(value), span));
+      }
+      TokenKind::Char(value) => {
+        self.advance();
+
+        return Ok(self.expr_node(ExprKind::Char(value), span));
+      }
+      TokenKind::Template(parts) => {
+        self.advance();
+
+        const parsed = self.template_parts(parts)?;
+
+        return Ok(self.expr_node(ExprKind::Template(parsed), span));
+      }
+      _ => {}
+    }
+
+    if self.at_keyword("true") || self.at_keyword("false") {
+      const value = self.at_keyword("true");
+
+      self.advance();
+
+      return Ok(self.expr_node(ExprKind::Bool(value), span));
+    }
+
+    // `x => body`
+    if let TokenKind::Ident(name) = kind {
+      if is_punct(self.nth_kind(1), "=>") && !self.in_guard {
+        const param_name = Ident { name: name, span: self.advance().span };
+        const param = LambdaParam { span: param_name.span, name: param_name, ty: None };
+
+        return self.lambda_body(span, List::from([param]));
+      }
+    }
+
+    // `(a, b: T) => body`
+    if self.at("(") && !self.in_guard && self.lambda_ahead() {
+      self.advance();
+
+      const params: List<LambdaParam> = new List();
+
+      while !self.at(")") {
+        const name = self.ident("a parameter name")?;
+        const ty: Option<TypeExpr> = if self.eat(":") { Some(self.type_expr()?) } else { None };
+        const param_span = match ty {
+          Some(ty) => name.span.to(ty.span),
+          None => name.span,
+        };
+
+        params.push(LambdaParam { name: name, ty: ty, span: param_span });
+
+        if !self.eat(",") {
+          break;
+        }
+      }
+
+      self.expect(")")?;
+
+      return self.lambda_body(span, params);
+    }
+
+    if is_ident(kind) || is_keyword(kind, "self") || is_keyword(kind, "Self") || is_keyword(kind, "pkg") || is_keyword(kind, "super") {
+      const path = self.expr_path()?;
+
+      if self.at("{") && !self.no_struct_literal {
+        return self.struct_literal(path);
+      }
+
+      return Ok(self.expr_node(ExprKind::Path(path), path.span));
+    }
+
+    if self.at("[") {
+      return self.array_literal();
+    }
+
+    if self.at("(") && is_punct(self.nth_kind(1), ")") {
+      self.advance();
+
+      const end = self.advance().span;
+
+      return Ok(self.expr_node(ExprKind::Unit, span.to(end)));
+    }
+
+    if self.at("(") {
+      self.advance();
+
+      const inner = self.expr_with_struct_literals(true)?;
+
+      self.expect(")")?;
+
+      return Ok(inner);
+    }
+
+    if self.at("{") {
+      const block = self.block()?;
+
+      return Ok(self.expr_node(ExprKind::Block(block), block.span));
+    }
+
+    if self.at_keyword("if") {
+      return self.if_expr();
+    }
+
+    if self.at_keyword("while") {
+      self.advance();
+
+      if self.eat_keyword("let") {
+        return self.while_let(span);
+      }
+
+      const cond = self.expr_with_struct_literals(false)?;
+      const body = self.block()?;
+
+      return Ok(self.expr_node(ExprKind::While { cond: cond, body: body }, span.to(body.span)));
+    }
+
+    if self.at_keyword("loop") {
+      self.advance();
+
+      const body = self.block()?;
+
+      return Ok(self.expr_node(ExprKind::Loop(body), span.to(body.span)));
+    }
+
+    if self.at_keyword("unsafe") {
+      self.advance();
+
+      const body = self.block()?;
+
+      return Ok(self.expr_node(ExprKind::Unsafe(body), span.to(body.span)));
+    }
+
+    if self.at_keyword("for") {
+      self.advance();
+
+      const var_name = self.ident("a loop variable")?;
+
+      self.expect_keyword("in")?;
+
+      const iter = self.expr_with_struct_literals(false)?;
+      const body = self.block()?;
+
+      return Ok(self.expr_node(ExprKind::For { variable: var_name, iter: iter, body: body }, span.to(body.span)));
+    }
+
+    if self.at_keyword("break") {
+      self.advance();
+
+      const value = self.optional_value()?;
+      const break_span = match value {
+        Some(value) => span.to(value.span),
+        None => span,
+      };
+
+      return Ok(self.expr_node(ExprKind::Break(value), break_span));
+    }
+
+    if self.at_keyword("continue") {
+      self.advance();
+
+      return Ok(self.expr_node(ExprKind::Continue, span));
+    }
+
+    if self.at_keyword("return") {
+      self.advance();
+
+      const value = self.optional_value()?;
+      const return_span = match value {
+        Some(value) => span.to(value.span),
+        None => span,
+      };
+
+      return Ok(self.expr_node(ExprKind::Return(value), return_span));
+    }
+
+    if let TokenKind::Keyword(keyword) = kind {
+      if is_reserved(keyword) {
+        return Err(self.reserved_keyword(keyword));
+      }
+    }
+
+    if self.at_keyword("new") {
+      self.advance();
+
+      var path = self.path()?;
+
+      if self.at("<") {
+        const type_args = self.type_args(path.segments.len() - 1)?;
+
+        path.span = path.span.to(type_args.span);
+        path.type_args = Some(type_args);
+      }
+
+      const call = self.call_args()?;
+
+      return Ok(self.expr_node(ExprKind::New { path: path, args: call.args }, span.to(call.end)));
+    }
+
+    if self.at_keyword("zod") {
+      self.advance();
+
+      return Ok(self.expr_node(ExprKind::Zod, span));
+    }
+
+    if self.at_keyword("match") {
+      return self.match_expr();
+    }
+
+    Err(self.unexpected("an expression"))
+  }
+
+  /// Whether the `(` here starts the parameters of a lambda: its matching `)` is followed by `=>`.
+  prv fn lambda_ahead(self) -> bool {
+    var depth = 0usize;
+    var offset = 0usize;
+
+    loop {
+      const kind = self.nth_kind(offset);
+
+      if is_punct(kind, "(") {
+        depth += 1;
+      } else if is_punct(kind, ")") {
+        if depth > 0 {
+          depth -= 1;
+        }
+
+        if depth == 0 {
+          return is_punct(self.nth_kind(offset + 1), "=>");
+        }
+      } else if is_eof(kind) {
+        return false;
+      }
+
+      offset += 1;
+    }
+  }
+
+  /// `=> body` after the parameters of a lambda; the body is a block or an expression.
+  prv fn lambda_body(self, start: Span, params: List<LambdaParam>) -> Result<Expr, ()> {
+    self.expect("=>")?;
+
+    // A lambda's body is a new context, even inside a guard.
+    const saved = self.in_guard;
+
+    self.in_guard = false;
+
+    const body = self.lambda_expr();
+
+    self.in_guard = saved;
+
+    const parsed = body?;
+
+    Ok(self.expr_node(ExprKind::Lambda { params: params, body: parsed }, start.to(parsed.span)))
+  }
+
+  prv fn lambda_expr(self) -> Result<Expr, ()> {
+    if self.at("{") {
+      const block = self.block()?;
+
+      return Ok(self.expr_node(ExprKind::Block(block), block.span));
+    }
+
+    self.expr_with_struct_literals(true)
+  }
+
+  prv fn optional_value(self) -> Result<Option<Expr>, ()> {
+    if ends_expression(self.kind()) {
+      return Ok(None);
+    }
+
+    Ok(Some(self.expr()?))
+  }
+
+  prv fn if_expr(self) -> Result<Expr, ()> {
+    const start = self.expect_keyword("if")?.span;
+
+    if self.eat_keyword("let") {
+      return self.if_let(start);
+    }
+
+    const cond = self.expr_with_struct_literals(false)?;
+    const then_block = self.block()?;
+    var span = start.to(then_block.span);
+    const else_branch = self.else_branch()?;
+
+    if let Some(branch) = else_branch {
+      span = span.to(branch.span);
+    }
+
+    Ok(self.expr_node(ExprKind::If { cond: cond, then_block: then_block, else_branch: else_branch }, span))
+  }
+
+  /// `else { ... }` or `else if ...` after the block of an `if`.
+  prv fn else_branch(self) -> Result<Option<Expr>, ()> {
+    if !self.eat_keyword("else") {
+      return Ok(None);
+    }
+
+    if self.at_keyword("if") {
+      return Ok(Some(self.if_expr()?));
+    }
+
+    const block = self.block()?;
+
+    Ok(Some(self.expr_node(ExprKind::Block(block), block.span)))
+  }
+
+  prv fn wildcard(self, span: Span) -> Pattern {
+    new Pattern(self.next_id(), PatternKind::Wildcard, span)
+  }
+
+  /// `if let pattern = value { ... } else ...` is `match value { pattern => { ... }, _ => else }`.
+  prv fn if_let(self, start: Span) -> Result<Expr, ()> {
+    const pattern = self.pattern()?;
+
+    self.expect("=")?;
+
+    const scrutinee = self.expr_with_struct_literals(false)?;
+    const then_block = self.block()?;
+    const then_span = then_block.span;
+    const else_branch = match self.else_branch()? {
+      Some(branch) => branch,
+      None => self.expr_node(ExprKind::Unit, then_span),
+    };
+    const span = start.to(else_branch.span).to(then_span);
+    const wildcard = self.wildcard(pattern.span);
+    const body = self.expr_node(ExprKind::Block(then_block), then_span);
+    const arms = List::from([
+      MatchArm { span: pattern.span.to(then_span), pattern: pattern, guard: None, body: body },
+      MatchArm { span: else_branch.span, pattern: wildcard, guard: None, body: else_branch },
+    ]);
+
+    Ok(self.expr_node(ExprKind::Match { scrutinee: scrutinee, arms: arms }, span))
+  }
+
+  /// `while let pattern = value { ... }` is `loop { match value { pattern => { ... }, _ => break } }`.
+  prv fn while_let(self, start: Span) -> Result<Expr, ()> {
+    const pattern = self.pattern()?;
+
+    self.expect("=")?;
+
+    const scrutinee = self.expr_with_struct_literals(false)?;
+    const body = self.block()?;
+    const span = start.to(body.span);
+    const wildcard = self.wildcard(pattern.span);
+    const stop = self.expr_node(ExprKind::Break(None), pattern.span);
+    const then = self.expr_node(ExprKind::Block(body), body.span);
+    const arms = List::from([
+      MatchArm { span: pattern.span.to(body.span), pattern: pattern, guard: None, body: then },
+      MatchArm { span: stop.span, pattern: wildcard, guard: None, body: stop },
+    ]);
+    const matching = self.expr_node(ExprKind::Match { scrutinee: scrutinee, arms: arms }, span);
+
+    Ok(self.expr_node(ExprKind::Loop(Block { stmts: List::from([Stmt::Expr(matching)]), tail: None, span: span }), span))
+  }
+
+  /// `Name { a: 1, b }` after its path.
+  prv fn struct_literal(self, path: Path) -> Result<Expr, ()> {
+    self.expect("{")?;
+
+    const fields: List<FieldInit> = new List();
+
+    while !self.at("}") {
+      const name = self.ident("a field name")?;
+      var value: Option<Expr> = None;
+
+      if self.eat(":") {
+        value = Some(self.expr_with_struct_literals(true)?);
+      } else {
+        const shorthand = Path { id: self.next_id(), segments: List::from([name]), type_args: None, span: name.span };
+
+        value = Some(self.expr_node(ExprKind::Path(shorthand), name.span));
+      }
+
+      const init = value.unwrap();
+
+      fields.push(FieldInit { span: name.span.to(init.span), name: name, value: init });
+
+      if !self.eat(",") {
+        break;
+      }
+    }
+
+    const end = self.expect("}")?.span;
+
+    Ok(self.expr_node(ExprKind::StructLit { path: path, fields: fields }, path.span.to(end)))
+  }
+
+  /// `match scrutinee { pattern if guard => body, ... }`
+  prv fn match_expr(self) -> Result<Expr, ()> {
+    const start = self.expect_keyword("match")?.span;
+    const scrutinee = self.expr_with_struct_literals(false)?;
+
+    self.expect("{")?;
+
+    const saved = self.no_struct_literal;
+
+    self.no_struct_literal = false;
+
+    const arms: List<MatchArm> = new List();
+    const parsed = self.match_arms(arms);
+
+    self.no_struct_literal = saved;
+
+    // After a malformed arm (already reported), skip the rest of the `match`; the arms parsed so
+    // far keep the tree usable.
+    const end = match parsed {
+      Ok(_) => self.expect("}")?.span,
+      Err(_) => self.skip_past_close_brace(),
+    };
+
+    Ok(self.expr_node(ExprKind::Match { scrutinee: scrutinee, arms: arms }, start.to(end)))
+  }
+
+  /// Skips to just after the `}` closing the current braces.
+  prv fn skip_past_close_brace(self) -> Span {
+    var depth = 0usize;
+
+    loop {
+      const kind = self.kind();
+
+      if is_eof(kind) {
+        return self.span();
+      }
+
+      if is_punct(kind, "{") {
+        depth += 1;
+      } else if is_punct(kind, "}") {
+        if depth == 0 {
+          return self.advance().span;
+        }
+
+        depth -= 1;
+      }
+
+      self.advance();
+    }
+  }
+
+  prv fn match_arms(self, arms: List<MatchArm>) -> Result<(), ()> {
+    while !self.at("}") {
+      const pattern = self.pattern()?;
+      var guard: Option<Expr> = None;
+
+      if self.eat_keyword("if") {
+        const saved = self.in_guard;
+
+        self.in_guard = true;
+
+        const parsed = self.expr();
+
+        self.in_guard = saved;
+        guard = Some(parsed?);
+      }
+
+      self.expect("=>")?;
+
+      const body = self.expr()?;
+      const span = pattern.span.to(body.span);
+      // A comma separates arms; it is optional after a block-like body and before `}`.
+      const separated = self.eat(",") || self.at("}") || body.is_block_like();
+
+      arms.push(MatchArm { pattern: pattern, guard: guard, body: body, span: span });
+
+      if !separated {
+        return Err(self.unexpected("`,` or `}`"));
+      }
+    }
+
+    Ok(())
+  }
+
+  /// A pattern, with alternatives separated by `|`.
+  prv fn pattern(self) -> Result<Pattern, ()> {
+    const first = self.pattern_alternative()?;
+
+    if !self.at("|") {
+      return Ok(first);
+    }
+
+    var span = first.span;
+    const alternatives = List::from([first]);
+
+    while self.eat("|") {
+      const alternative = self.pattern_alternative()?;
+
+      span = span.to(alternative.span);
+      alternatives.push(alternative);
+    }
+
+    Ok(new Pattern(self.next_id(), PatternKind::Or(alternatives), span))
+  }
+
+  prv fn pattern_alternative(self) -> Result<Pattern, ()> {
+    const start = self.span();
+    const kind = self.kind();
+    const literal = match kind {
+      TokenKind::Int { .. } | TokenKind::Float { .. } | TokenKind::Str(_) | TokenKind::Char(_) => true,
+      TokenKind::Keyword(keyword) => keyword == "true" || keyword == "false",
+      TokenKind::Punct(text) if text == "-" => match self.nth_kind(1) {
+        TokenKind::Int { .. } | TokenKind::Float { .. } => true,
+        _ => false,
+      },
+      _ => false,
+    };
+
+    if literal {
+      const expr = self.unary_expr()?;
+
+      return Ok(new Pattern(self.next_id(), PatternKind::Literal(expr), expr.span));
+    }
+
+    const module_path = (is_keyword(kind, "pkg") || is_keyword(kind, "super") || is_keyword(kind, "self")) && is_punct(self.nth_kind(1), "::");
+
+    if !module_path && !is_ident(kind) && !is_keyword(kind, "Self") {
+      return Err(self.unexpected("a pattern"));
+    }
+
+    const path = self.path()?;
+
+    if self.eat("(") {
+      const elems: List<Pattern> = new List();
+
+      while !self.at(")") {
+        elems.push(self.pattern()?);
+
+        if !self.eat(",") {
+          break;
+        }
+      }
+
+      const end = self.expect(")")?.span;
+
+      return Ok(new Pattern(self.next_id(), PatternKind::Tuple { path: path, elems: elems }, start.to(end)));
+    }
+
+    if self.eat("{") {
+      const fields: List<FieldPattern> = new List();
+      var rest = false;
+
+      while !self.at("}") {
+        if self.eat("..") {
+          rest = true;
+          break;
+        }
+
+        const name = self.ident("a field name or `..`")?;
+        const pattern = if self.eat(":") { self.pattern()? } else { new Pattern(self.next_id(), PatternKind::Ident(name), name.span) };
+
+        fields.push(FieldPattern { span: name.span.to(pattern.span), name: name, pattern: pattern });
+
+        if !self.eat(",") {
+          break;
+        }
+      }
+
+      const end = self.expect("}")?.span;
+
+      return Ok(new Pattern(self.next_id(), PatternKind::Named { path: path, fields: fields, rest: rest }, start.to(end)));
+    }
+
+    var pattern_kind = PatternKind::Path(path);
+
+    if path.segments.len() == 1 {
+      const segment = path.segments[0];
+
+      if segment.name == "_" {
+        pattern_kind = PatternKind::Wildcard;
+      } else if segment.name != "Self" {
+        pattern_kind = PatternKind::Ident(segment);
+      }
+    }
+
+    Ok(new Pattern(self.next_id(), pattern_kind, path.span))
+  }
+
+  /// `[a, b, c]` or `[value; N]`.
+  prv fn array_literal(self) -> Result<Expr, ()> {
+    const start = self.expect("[")?.span;
+
+    if self.at("]") {
+      const end = self.advance().span;
+
+      return Ok(self.expr_node(ExprKind::ArrayLit(new List()), start.to(end)));
+    }
+
+    const first = self.expr_with_struct_literals(true)?;
+
+    if self.eat(";") {
+      const len = self.array_len()?;
+      const end = self.expect("]")?.span;
+
+      return Ok(self.expr_node(ExprKind::ArrayRepeat { value: first, len: len }, start.to(end)));
+    }
+
+    const elems = List::from([first]);
+
+    while self.eat(",") {
+      if self.at("]") {
+        break;
+      }
+
+      elems.push(self.expr_with_struct_literals(true)?);
+    }
+
+    const end = self.expect("]")?.span;
+
+    Ok(self.expr_node(ExprKind::ArrayLit(elems), start.to(end)))
+  }
+
+  /// Parses each `${...}` interpolation with a sub-parser that shares node ids and diagnostics.
+  prv fn template_parts(self, parts: List<lexer::TemplatePart>) -> Result<List<TemplatePart>, ()> {
+    const result: List<TemplatePart> = new List();
+
+    for part in parts {
+      match part {
+        lexer::TemplatePart::Text(text) => result.push(TemplatePart::Text(text)),
+        lexer::TemplatePart::Expr(tokens) => {
+          const sub = new Parser(self.eof.span.file, tokens, self.ids, self.diagnostics);
+
+          if sub.at_eof() {
+            return Err(sub.unexpected("an expression inside `${}`"));
+          }
+
+          const expr = sub.expr()?;
+
+          if !sub.at_eof() {
+            return Err(sub.unexpected("`}` closing the interpolation"));
+          }
+
+          result.push(TemplatePart::Expr(expr));
+        }
+      }
+    }
+
+    Ok(result)
+  }
+}
+
+/// The arguments of a call and the span of its `)`.
+struct CallArgs {
+  pub args: List<Expr>;
+  pub end: Span;
+}
+
+fn is_mut(kind: TokenKind) -> bool {
+  match kind {
+    TokenKind::Ident(name) => name == "mut",
+    _ => false,
+  }
+}
