@@ -1,0 +1,472 @@
+//! What the language server knows of a program: the documents open in the editor, the program a
+//! document belongs to, and the result of running the front end on it, as `sag check` does
+//! (docs/adr/0058-language-server.md).
+
+use pkg::ast::{Module, Package, TargetInfo};
+use pkg::diagnostics::{Diagnostic, Diagnostics, Severity};
+use pkg::loader::{Loader, path_key, push_path, windows};
+use pkg::lsp::json;
+use pkg::lsp::json::{Json, member};
+use pkg::lsp::positions::{LineIndex, Position};
+use pkg::resolve;
+use pkg::resolve::Resolution;
+use pkg::sir;
+use pkg::span::{SourceFile, SourceMap, Span};
+use pkg::types;
+use pkg::types::Stage;
+use pkg::types::typed::TypedModule;
+use std::fs;
+use std::path;
+
+// ---- URIs -------------------------------------------------------------------------------------
+
+const HEX: String = "0123456789ABCDEF";
+
+fn hex_value(c: char) -> Option<u32> {
+  c.to_digit(16)
+}
+
+/// Text from UTF-8 bytes; a sequence that is not UTF-8 becomes U+FFFD.
+fn decode_utf8(bytes: List<u8>) -> String {
+  const out = new StringBuilder();
+  var index = 0usize;
+
+  while index < bytes.len() {
+    const lead = bytes[index] as u32;
+    var size = 1usize;
+    var code = lead;
+
+    if lead >= 240 {
+      size = 4;
+      code = lead % 8;
+    } else if lead >= 224 {
+      size = 3;
+      code = lead % 16;
+    } else if lead >= 192 {
+      size = 2;
+      code = lead % 32;
+    }
+
+    var valid = lead < 128 || size > 1;
+
+    for offset in 1..size {
+      match bytes.get(index + offset) {
+        Some(next) => {
+          if next < 128 || next >= 192 {
+            valid = false;
+          } else {
+            code = code * 64 + (next as u32 % 64);
+          }
+        }
+        None => {
+          valid = false;
+        }
+      }
+    }
+
+    if valid {
+      out.append_char(char::from_u32(code).unwrap_or('\u{FFFD}'));
+      index += size;
+    } else {
+      out.append_char('\u{FFFD}');
+      index += 1;
+    }
+  }
+
+  out.to_string()
+}
+
+/// The path of a `file:` URI, in the form of this system: `C:\dir\main.sag` on Windows.
+pub fn uri_to_path(uri: String) -> Option<String> {
+  if !uri.starts_with("file://") {
+    return None;
+  }
+
+  const encoded: List<char> = uri.substring(7, uri.len()).chars().collect();
+  const bytes: List<u8> = new List();
+  var index = 0usize;
+
+  while index < encoded.len() {
+    const c = encoded[index];
+
+    if c == '%' && index + 2 < encoded.len() {
+      const high = hex_value(encoded[index + 1]);
+      const low = hex_value(encoded[index + 2]);
+
+      if let Some(found_high) = high {
+        if let Some(found_low) = low {
+          bytes.push((found_high * 16 + found_low) as u8);
+          index += 3;
+          continue;
+        }
+      }
+    }
+
+    for byte in `${c}`.bytes() {
+      bytes.push(byte);
+    }
+
+    index += 1;
+  }
+
+  var decoded = decode_utf8(bytes);
+
+  if !windows() {
+    return Some(decoded);
+  }
+
+  // `/c:/dir/main.sag`: the drive in uppercase, as Windows writes it.
+  if decoded.starts_with("/") && decoded.len() > 2 && decoded.substring(2, 3) == ":" {
+    decoded = decoded.substring(1, 2).to_ascii_uppercase() + decoded.substring(2, decoded.len());
+  }
+
+  Some(decoded.replace("/", "\\"))
+}
+
+/// The `file:` URI of a path, written as VS Code writes them (`file:///c%3A/dir/main.sag`).
+pub fn path_to_uri(file: String) -> String {
+  var text = file.replace("\\", "/");
+
+  if windows() && text.len() > 1 && text.substring(1, 2) == ":" {
+    text = "/" + text.substring(0, 1).to_ascii_lowercase() + text.substring(1, text.len());
+  }
+
+  const out = new StringBuilder();
+  const digits = HEX.split("");
+
+  out.append("file://");
+
+  for byte in text.bytes() {
+    const c = byte as char;
+
+    if c.is_ascii_alphanumeric() || c == '/' || c == '-' || c == '.' || c == '_' || c == '~' {
+      out.append_char(c);
+    } else {
+      out.append("%");
+      out.append(digits.get((byte / 16) as usize).unwrap_or("0"));
+      out.append(digits.get((byte % 16) as usize).unwrap_or("0"));
+    }
+  }
+
+  out.to_string()
+}
+
+// ---- Documents --------------------------------------------------------------------------------
+
+/// A document open in the editor.
+pub class Document {
+  pub const uri: String;
+  pub const path: String;
+  pub var text: String;
+
+  pub fn new(self, uri: String, path: String, text: String) {
+    self.uri = uri;
+    self.path = path;
+    self.text = text;
+  }
+}
+
+/// The root module of the program a file belongs to.
+pub struct Entry {
+  pub path: String;
+  /// The root of a library (`src/lib.sag`), which needs no `main`.
+  pub library: bool;
+}
+
+/// The program of a file: the package whose `Nova.toml` is in one of its directories, the
+/// `main.sag` next to it, or else the file alone.
+pub fn find_entry(file: String) -> Entry {
+  var dir = path::parent(file);
+
+  while let Some(current) = dir {
+    if current.is_empty() {
+      break;
+    }
+
+    if fs::is_file(push_path(current, "Nova.toml")) {
+      const src = push_path(current, "src");
+      const main = push_path(src, "main.sag");
+
+      if fs::is_file(main) {
+        return Entry { path: main, library: false };
+      }
+
+      const lib = push_path(src, "lib.sag");
+
+      if fs::is_file(lib) {
+        return Entry { path: lib, library: true };
+      }
+
+      break;
+    }
+
+    const parent = path::parent(current);
+
+    // The root is its own parent.
+    if let Some(found) = parent {
+      if found == current {
+        break;
+      }
+    }
+
+    dir = parent;
+  }
+
+  if let Some(parent) = path::parent(file) {
+    const main = push_path(parent, "main.sag");
+
+    if path::file_name(file).unwrap_or("") != "main.sag" && fs::is_file(main) {
+      return Entry { path: main, library: false };
+    }
+  }
+
+  Entry { path: file, library: false }
+}
+
+// ---- Analysis ---------------------------------------------------------------------------------
+
+/// The result of running the front end on a program.
+pub class Analysis {
+  pub const entry: Entry;
+  pub const sources: SourceMap;
+  /// `None` when lexical or syntax errors stopped the front end before resolving.
+  pub var package: Option<Package>;
+  pub var resolution: Option<Resolution>;
+  pub var typed: Option<TypedModule>;
+  pub var diagnostics: List<Diagnostic>;
+  /// The line index of each source file, by file id, built when needed.
+  prv const lines: Map<u32, LineIndex>;
+  /// The id of each function in the resolution, by the node id of its declaration.
+  prv var functions: Option<Map<u32, u32>>;
+
+  pub fn new(self, entry: Entry, sources: SourceMap) {
+    self.entry = entry;
+    self.sources = sources;
+    self.package = None;
+    self.resolution = None;
+    self.typed = None;
+    self.diagnostics = new List();
+    self.lines = new Map<u32, LineIndex>();
+    self.functions = None;
+  }
+
+  /// The function declared by the `FnDecl` with node id `decl`.
+  pub fn function_of(self, decl: u32) -> Option<u32> {
+    if let Some(found) = self.functions {
+      return found.get(decl);
+    }
+
+    const package = self.package?;
+    const resolution = self.resolution?;
+    const ids = new Map<u32, u32>();
+
+    for index in 0..resolution.functions.len() {
+      if let Some(found) = resolution.fn_decl(package, index as u32) {
+        ids.insert(found.id, index as u32);
+      }
+    }
+
+    self.functions = Some(ids);
+    ids.get(decl)
+  }
+
+  /// The file on disk of a source, or `None` for the embedded modules (`<prelude>`, `<std::fs>`).
+  pub fn file_path(self, file: u32) -> Option<String> {
+    const source = self.sources.get(file)?;
+
+    if source.path.starts_with("<") { None } else { Some(source.path) }
+  }
+
+  pub fn line_index(self, file: u32) -> Option<LineIndex> {
+    if let Some(found) = self.lines.get(file) {
+      return Some(found);
+    }
+
+    const source = self.sources.get(file)?;
+    const index = new LineIndex(source.text);
+
+    self.lines.insert(file, index);
+    Some(index)
+  }
+
+  /// The LSP range of a span.
+  pub fn range(self, span: Span) -> Json {
+    const index = match self.line_index(span.file) {
+      Some(found) => found,
+      None => return range_json(Position { line: 0, character: 0 }, Position { line: 0, character: 0 }),
+    };
+
+    range_json(index.position(span.start), index.position(span.end))
+  }
+
+  /// The LSP location of a span, if it is in a file on disk.
+  pub fn location(self, span: Span) -> Option<Json> {
+    const file = self.file_path(span.file)?;
+
+    Some(json::object(List::from([member("uri", json::str(path_to_uri(file))), member("range", self.range(span))])))
+  }
+
+  /// The module of the program read from `file`, by `path_key`.
+  pub fn module_of(self, file: String) -> Option<usize> {
+    const package = self.package?;
+    const key = path_key(file);
+
+    for index in 0..package.modules.len() {
+      if let Some(location) = package.modules[index].location {
+        if path_key(location) == key {
+          return Some(index);
+        }
+      }
+    }
+
+    None
+  }
+
+  /// The source file id of `file`, also when the front end stopped before having modules.
+  pub fn file_id(self, file: String) -> Option<u32> {
+    const key = path_key(file);
+
+    for index in 0..self.sources.len() {
+      if let Some(source) = self.sources.get(index as u32) {
+        if path_key(source.path) == key {
+          return Some(index as u32);
+        }
+      }
+    }
+
+    None
+  }
+
+  /// Whether the program reads `file`.
+  pub fn contains(self, file: String) -> bool {
+    self.file_id(file).is_some()
+  }
+}
+
+pub fn position_json(position: Position) -> Json {
+  json::object(List::from([member("line", json::uint(position.line)), member("character", json::uint(position.character))]))
+}
+
+pub fn range_json(start: Position, end: Position) -> Json {
+  json::object(List::from([member("start", position_json(start)), member("end", position_json(end))]))
+}
+
+/// Runs the front end on the program of `entry`, with the open documents in place of their
+/// files, and keeps every result it reaches. Internal compiler errors of the lowering go to
+/// `internal`.
+pub fn analyze(entry: Entry, documents: Map<String, Document>, internal: List<String>) -> Analysis {
+  const sources = new SourceMap();
+  const diagnostics = new Diagnostics();
+  const loader = new Loader(entry.path);
+  const result = new Analysis(entry, sources);
+
+  for document in documents.values() {
+    loader.overrides.insert(path_key(document.path), document.text);
+  }
+
+  if !loader.load(entry.path, new List(), sources, diagnostics) || !loader.load_references(sources, diagnostics) {
+    result.diagnostics = diagnostics.take();
+    return result;
+  }
+
+  // As in a build, lexical and syntax errors stop before resolving.
+  if diagnostics.has_errors() {
+    result.diagnostics = diagnostics.take();
+    return result;
+  }
+
+  const prelude = loader.load_prelude(sources, diagnostics);
+
+  if diagnostics.has_errors() {
+    result.diagnostics = diagnostics.take();
+    return result;
+  }
+
+  var package = loader.package(prelude, TargetInfo::host());
+
+  package.library = entry.library;
+
+  const resolution = resolve::resolve(package, diagnostics);
+  const typed = types::check_until(package, resolution, diagnostics, Stage::Bodies);
+
+  result.package = Some(package);
+  result.resolution = Some(resolution);
+  result.typed = Some(typed);
+
+  // `sag check` also lowers, which finds generic code instantiating itself endlessly.
+  if !diagnostics.has_errors() {
+    if let Err(message) = sir::lower(package, resolution, typed, sources, diagnostics) {
+      internal.push(message);
+    }
+  }
+
+  result.diagnostics = diagnostics.take();
+  result
+}
+
+/// A diagnostic in LSP's terms, with its notes and help after the message.
+pub fn diagnostic_json(analysis: Analysis, diagnostic: Diagnostic) -> Json {
+  const message = new StringBuilder();
+
+  message.append(diagnostic.message);
+
+  for note in diagnostic.notes {
+    message.append("\nnote: " + note);
+  }
+
+  for help in diagnostic.help {
+    message.append("\nhelp: " + help);
+  }
+
+  const related: List<Json> = new List();
+
+  for label in diagnostic.labels {
+    if let Some(location) = analysis.location(label.span) {
+      related.push(json::object(List::from([member("location", location), member("message", json::str(label.message))])));
+    }
+  }
+
+  const severity: i64 = match diagnostic.severity {
+    Severity::Error => 1,
+    Severity::Warning => 2,
+  };
+  const members = List::from([
+    member("range", analysis.range(diagnostic.span)),
+    member("severity", json::int(severity)),
+    member("code", json::str(diagnostic.code)),
+    member("source", json::str("sagitario")),
+    member("message", json::str(message.to_string())),
+  ]);
+
+  if !related.is_empty() {
+    members.push(member("relatedInformation", Json::Array(related)));
+  }
+
+  json::object(members)
+}
+
+/// The diagnostics of an analysis by file, for the files on disk it read.
+pub fn diagnostics_by_file(analysis: Analysis) -> Map<String, List<Json>> {
+  const files = new Map<String, List<Json>>();
+
+  for index in 0..analysis.sources.len() {
+    if let Some(file) = analysis.file_path(index as u32) {
+      files.insert(file, new List());
+    }
+  }
+
+  for diagnostic in analysis.diagnostics {
+    if let Some(file) = analysis.file_path(diagnostic.span.file) {
+      if let Some(list) = files.get(file) {
+        list.push(diagnostic_json(analysis, diagnostic));
+      }
+    }
+  }
+
+  files
+}
+
+/// The text of a module's source.
+pub fn source_of(analysis: Analysis, module: Module) -> Option<SourceFile> {
+  analysis.sources.get(module.file)
+}

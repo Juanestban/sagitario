@@ -1,14 +1,16 @@
 //! The self-hosted compiler in `compiler/` (docs/adr/0050-lexer-port-and-token-dumps.md): its
 //! modules generated from the Rust compiler are up to date, `sagc`, built by `sag`, gives the
-//! same results as `sag` on every Sagitario file of the repository, and the bootstrap reaches its
-//! fixed point (docs/adr/0056-bootstrap-and-acceptance.md).
+//! same results as `sag` on every Sagitario file of the repository, the bootstrap reaches its
+//! fixed point (docs/adr/0056-bootstrap-and-acceptance.md), and `sagc lsp` answers the sessions of
+//! `tests/lsp/` as they expect (docs/adr/0058-language-server.md).
 //!
 //! `SAG_BLESS=1 cargo test --test selfhost` rewrites the generated modules.
 
 use std::fs;
 use std::io;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::sync::{Mutex, MutexGuard};
 
 fn root() -> PathBuf {
@@ -296,6 +298,140 @@ fn bootstrap_reaches_the_fixed_point() -> io::Result<()> {
     from_stage2.2,
     first_difference(&from_stage1.1, &from_stage2.1)
   );
+
+  Ok(())
+}
+
+/// The repository's root without `..`, for the paths `sagc lsp` reports.
+fn repository() -> PathBuf {
+  let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+
+  manifest.parent().and_then(Path::parent).map(Path::to_path_buf).unwrap_or_else(root)
+}
+
+/// The URI of a file as `sagc lsp` writes them: `/` as the separator, a Windows drive in lowercase
+/// with its colon encoded, and every byte but letters, digits and `/-._~` encoded.
+fn file_uri(path: &Path) -> String {
+  let mut text = path.display().to_string().replace('\\', "/");
+
+  if cfg!(windows) && text.as_bytes().get(1) == Some(&b':') {
+    text = format!("/{}{}", text.get(..1).unwrap_or_default().to_ascii_lowercase(), text.get(1..).unwrap_or_default());
+  }
+
+  let mut uri = String::from("file://");
+
+  for byte in text.bytes() {
+    if byte.is_ascii_alphanumeric() || b"/-._~".contains(&byte) {
+      uri.push(char::from(byte));
+    } else {
+      uri.push_str(&format!("%{byte:02X}"));
+    }
+  }
+
+  uri
+}
+
+/// A JSON string holding `text`.
+fn json_string(text: &str) -> String {
+  let mut out = String::from("\"");
+
+  for c in text.chars() {
+    match c {
+      '"' => out.push_str("\\\""),
+      '\\' => out.push_str("\\\\"),
+      '\n' => out.push_str("\\n"),
+      '\r' => out.push_str("\\r"),
+      '\t' => out.push_str("\\t"),
+      c if u32::from(c) < 32 => out.push_str(&format!("\\u{:04x}", u32::from(c))),
+      c => out.push(c),
+    }
+  }
+
+  out.push('"');
+  out
+}
+
+/// A message of a session with its placeholders replaced: `{uri}` by the document's URI, and
+/// `{text:name}` by the text of `tests/lsp/name` as a JSON string.
+fn expand(line: &str, uri: &str, dir: &Path) -> io::Result<String> {
+  let mut out = line.replace("{uri}", uri);
+
+  while let Some(start) = out.find("{text:") {
+    let end = out.get(start..).and_then(|rest| rest.find('}')).map_or(out.len(), |end| start + end);
+    let name = out.get(start + 6..end).unwrap_or_default().to_string();
+    let text = fs::read_to_string(dir.join(&name))?;
+
+    out.replace_range(start..=end.min(out.len() - 1), &json_string(&text));
+  }
+
+  Ok(out)
+}
+
+/// The bodies of the messages of an LSP output.
+fn messages(mut output: &[u8]) -> Vec<String> {
+  let mut bodies = Vec::new();
+
+  while let Some(split) = output.windows(4).position(|window| window == b"\r\n\r\n") {
+    let header = String::from_utf8_lossy(output.get(..split).unwrap_or_default()).to_string();
+    let length: usize = header.split(':').nth(1).and_then(|value| value.trim().parse().ok()).unwrap_or(0);
+    let body = output.get(split + 4..split + 4 + length).unwrap_or_default();
+
+    bodies.push(String::from_utf8_lossy(body).to_string());
+    output = output.get(split + 4 + length..).unwrap_or_default();
+  }
+
+  bodies
+}
+
+/// Each `tests/lsp/<case>.session` sends its messages (one per line, `raw ` for a body sent as
+/// written) to `sagc lsp` about `<case>.sag`, and `<case>.expected` holds what the server
+/// answers, one message per line; `SAG_BLESS=1` rewrites it.
+#[test]
+fn language_server_answers_the_sessions() -> io::Result<()> {
+  let _turn = building();
+  let sag = PathBuf::from(env!("CARGO_BIN_EXE_sag"));
+  let built = BuiltSagc { base: root().join("compiler/src/main") };
+  let (code, _, stderr) = run(&sag, &["build", "compiler/src/main.sag"])?;
+  let sagc = built.base.with_extension(std::env::consts::EXE_EXTENSION);
+
+  assert!(code == Some(0), "building `sagc` failed:\n{stderr}");
+
+  let dir = repository().join("tests").join("lsp");
+  let mut sessions: Vec<PathBuf> =
+    fs::read_dir(&dir)?.flatten().map(|entry| entry.path()).filter(|path| path.extension().is_some_and(|ext| ext == "session")).collect();
+
+  sessions.sort();
+  assert!(!sessions.is_empty(), "no sessions in `tests/lsp`");
+
+  for session in sessions {
+    let name = session.file_stem().unwrap_or_default().to_string_lossy().to_string();
+    let uri = file_uri(&session.with_extension("sag"));
+    let mut input = Vec::new();
+
+    for line in fs::read_to_string(&session)?.lines().map(str::trim).filter(|line| !line.is_empty() && !line.starts_with("//")) {
+      let body = match line.strip_prefix("raw ") {
+        Some(raw) => raw.to_string(),
+        None => expand(line, &uri, &dir)?,
+      };
+
+      input.extend(format!("Content-Length: {}\r\n\r\n{body}", body.len()).bytes());
+    }
+
+    let mut child = Command::new(&sagc).arg("lsp").current_dir(root()).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    // Written by another thread, so a server answering while it reads never blocks on a full pipe.
+    let writer = child.stdin.take().map(|mut stdin| std::thread::spawn(move || stdin.write_all(&input)));
+    let output = child.wait_with_output()?;
+
+    if let Some(handle) = writer {
+      let _ = handle.join();
+    }
+
+    assert!(output.status.code() == Some(0), "`sagc lsp` on {name}: exit {:?}\n{}", output.status.code(), String::from_utf8_lossy(&output.stderr));
+
+    let actual: String = messages(&output.stdout).iter().map(|body| body.replace(&uri, "{uri}") + "\n").collect();
+
+    check_generated(&format!("tests/lsp/{name}.expected"), &actual)?;
+  }
 
   Ok(())
 }

@@ -1,0 +1,453 @@
+//! JSON (RFC 8259) for the language server: a parser and a writer
+//! (docs/adr/0058-language-server.md). Numbers keep their text, so request ids and positions are
+//! written back exactly as they came.
+
+/// A JSON value. Objects keep their members in order.
+pub enum Json {
+  Null,
+  Bool(bool),
+  Number(String),
+  Str(String),
+  Array(List<Json>),
+  Object(List<Member>),
+}
+
+pub struct Member {
+  pub key: String;
+  pub value: Json;
+}
+
+pub fn int(value: i64) -> Json {
+  Json::Number(`${value}`)
+}
+
+pub fn uint(value: u32) -> Json {
+  Json::Number(`${value}`)
+}
+
+pub fn str(value: String) -> Json {
+  Json::Str(value)
+}
+
+pub fn member(key: String, value: Json) -> Member {
+  Member { key: key, value: value }
+}
+
+pub fn object(members: List<Member>) -> Json {
+  Json::Object(members)
+}
+
+/// The member `key` of an object.
+pub fn get(value: Json, key: String) -> Option<Json> {
+  if let Json::Object(members) = value {
+    for found in members {
+      if found.key == key {
+        return Some(found.value);
+      }
+    }
+  }
+
+  None
+}
+
+/// The value at a path of member names.
+pub fn at(value: Json, keys: List<String>) -> Option<Json> {
+  var current = value;
+
+  for key in keys {
+    current = get(current, key)?;
+  }
+
+  Some(current)
+}
+
+pub fn as_str(value: Option<Json>) -> Option<String> {
+  match value {
+    Some(Json::Str(text)) => Some(text),
+    _ => None,
+  }
+}
+
+/// A number that is a non-negative integer that fits `u32`, as positions are.
+pub fn as_u32(value: Option<Json>) -> Option<u32> {
+  match value {
+    Some(Json::Number(text)) => match text.parse_u32() {
+      Ok(found) => Some(found),
+      Err(_) => None,
+    },
+    _ => None,
+  }
+}
+
+pub fn as_array(value: Option<Json>) -> List<Json> {
+  match value {
+    Some(Json::Array(items)) => items,
+    _ => new List(),
+  }
+}
+
+// ---- Writing ----------------------------------------------------------------------------------
+
+const HEX: String = "0123456789abcdef";
+
+fn escape_into(out: StringBuilder, text: String) {
+  out.append_char('"');
+
+  for c in text.chars() {
+    if c == '"' {
+      out.append("\\\"");
+    } else if c == '\\' {
+      out.append("\\\\");
+    } else if c == '\n' {
+      out.append("\\n");
+    } else if c == '\r' {
+      out.append("\\r");
+    } else if c == '\t' {
+      out.append("\\t");
+    } else if (c as u32) < 32 {
+      const code = c as u32;
+      const digits = HEX.split("");
+
+      out.append("\\u00");
+      out.append(digits.get((code / 16) as usize).unwrap_or("0"));
+      out.append(digits.get((code % 16) as usize).unwrap_or("0"));
+    } else {
+      out.append_char(c);
+    }
+  }
+
+  out.append_char('"');
+}
+
+fn write_into(out: StringBuilder, value: Json) {
+  match value {
+    Json::Null => out.append("null"),
+    Json::Bool(found) => out.append(if found { "true" } else { "false" }),
+    Json::Number(text) => out.append(text),
+    Json::Str(text) => escape_into(out, text),
+    Json::Array(items) => {
+      out.append_char('[');
+
+      for index in 0..items.len() {
+        if index > 0 {
+          out.append_char(',');
+        }
+
+        write_into(out, items[index]);
+      }
+
+      out.append_char(']');
+    }
+    Json::Object(members) => {
+      out.append_char('{');
+
+      for index in 0..members.len() {
+        if index > 0 {
+          out.append_char(',');
+        }
+
+        escape_into(out, members[index].key);
+        out.append_char(':');
+        write_into(out, members[index].value);
+      }
+
+      out.append_char('}');
+    }
+  }
+}
+
+/// The text of a value, without spaces.
+pub fn write(value: Json) -> String {
+  const out = new StringBuilder();
+
+  write_into(out, value);
+  out.to_string()
+}
+
+// ---- Parsing ----------------------------------------------------------------------------------
+
+/// Reads a JSON text by its characters.
+class Parser {
+  prv const chars: List<char>;
+  prv var position: usize;
+
+  pub fn new(self, text: String) {
+    self.chars = text.chars().collect();
+    self.position = 0;
+  }
+
+  prv fn peek(self) -> Option<char> {
+    self.chars.get(self.position)
+  }
+
+  /// Whether the next character is `c`.
+  prv fn next_is(self, c: char) -> bool {
+    match self.peek() {
+      Some(found) => found == c,
+      None => false,
+    }
+  }
+
+  prv fn skip_spaces(self) {
+    while let Some(c) = self.peek() {
+      if c != ' ' && c != '\t' && c != '\n' && c != '\r' {
+        return;
+      }
+
+      self.position += 1;
+    }
+  }
+
+  prv fn error(self, message: String) -> String {
+    `${message} at character ${self.position}`
+  }
+
+  prv fn expect(self, c: char) -> Result<(), String> {
+    self.skip_spaces();
+
+    match self.peek() {
+      Some(found) if found == c => {
+        self.position += 1;
+        Ok(())
+      }
+      _ => Err(self.error(`expected \`${c}\``)),
+    }
+  }
+
+  prv fn literal(self, word: String, value: Json) -> Result<Json, String> {
+    for c in word.chars() {
+      match self.peek() {
+        Some(found) if found == c => {
+          self.position += 1;
+        }
+        _ => return Err(self.error(`expected \`${word}\``)),
+      }
+    }
+
+    Ok(value)
+  }
+
+  pub fn value(self) -> Result<Json, String> {
+    self.skip_spaces();
+
+    const c = match self.peek() {
+      Some(found) => found,
+      None => return Err(self.error("unexpected end of input")),
+    };
+
+    if c == '{' {
+      self.object()
+    } else if c == '[' {
+      self.array()
+    } else if c == '"' {
+      Ok(Json::Str(self.string()?))
+    } else if c == 't' {
+      self.literal("true", Json::Bool(true))
+    } else if c == 'f' {
+      self.literal("false", Json::Bool(false))
+    } else if c == 'n' {
+      self.literal("null", Json::Null)
+    } else if c == '-' || c.is_ascii_digit() {
+      self.number()
+    } else {
+      Err(self.error(`unexpected \`${c}\``))
+    }
+  }
+
+  prv fn object(self) -> Result<Json, String> {
+    const members: List<Member> = new List();
+
+    self.expect('{')?;
+    self.skip_spaces();
+
+    if self.next_is('}') {
+      self.position += 1;
+      return Ok(Json::Object(members));
+    }
+
+    while true {
+      self.skip_spaces();
+
+      if !self.next_is('"') {
+        return Err(self.error("expected a member name"));
+      }
+
+      const key = self.string()?;
+
+      self.expect(':')?;
+      members.push(Member { key: key, value: self.value()? });
+      self.skip_spaces();
+
+      match self.peek() {
+        Some(',') => {
+          self.position += 1;
+        }
+        Some('}') => {
+          self.position += 1;
+          return Ok(Json::Object(members));
+        }
+        _ => return Err(self.error("expected `,` or `}`")),
+      }
+    }
+
+    Ok(Json::Object(members))
+  }
+
+  prv fn array(self) -> Result<Json, String> {
+    const items: List<Json> = new List();
+
+    self.expect('[')?;
+    self.skip_spaces();
+
+    if self.next_is(']') {
+      self.position += 1;
+      return Ok(Json::Array(items));
+    }
+
+    while true {
+      items.push(self.value()?);
+      self.skip_spaces();
+
+      match self.peek() {
+        Some(',') => {
+          self.position += 1;
+        }
+        Some(']') => {
+          self.position += 1;
+          return Ok(Json::Array(items));
+        }
+        _ => return Err(self.error("expected `,` or `]`")),
+      }
+    }
+
+    Ok(Json::Array(items))
+  }
+
+  prv fn number(self) -> Result<Json, String> {
+    const text = new StringBuilder();
+
+    while let Some(c) = self.peek() {
+      if !(c.is_ascii_digit() || c == '-' || c == '+' || c == '.' || c == 'e' || c == 'E') {
+        break;
+      }
+
+      text.append_char(c);
+      self.position += 1;
+    }
+
+    const number = text.to_string();
+
+    match number.parse_f64() {
+      Ok(_) => Ok(Json::Number(number)),
+      Err(_) => Err(self.error(`invalid number \`${number}\``)),
+    }
+  }
+
+  /// Four hexadecimal digits of a `\u` escape.
+  prv fn hex4(self) -> Result<u32, String> {
+    var code = 0u32;
+
+    for _ in 0..4 {
+      const digit = match self.peek() {
+        Some(c) => c.to_digit(16),
+        None => None,
+      };
+
+      match digit {
+        Some(found) => {
+          code = code * 16 + found;
+          self.position += 1;
+        }
+        None => return Err(self.error("expected four hexadecimal digits")),
+      }
+    }
+
+    Ok(code)
+  }
+
+  prv fn string(self) -> Result<String, String> {
+    const out = new StringBuilder();
+
+    self.position += 1;
+
+    while true {
+      const c = match self.peek() {
+        Some(found) => found,
+        None => return Err(self.error("unterminated string")),
+      };
+
+      self.position += 1;
+
+      if c == '"' {
+        return Ok(out.to_string());
+      }
+
+      if c != '\\' {
+        out.append_char(c);
+        continue;
+      }
+
+      const escape = match self.peek() {
+        Some(found) => found,
+        None => return Err(self.error("unterminated string")),
+      };
+
+      self.position += 1;
+
+      if escape == 'n' {
+        out.append_char('\n');
+      } else if escape == 't' {
+        out.append_char('\t');
+      } else if escape == 'r' {
+        out.append_char('\r');
+      } else if escape == 'b' {
+        out.append_char(8u8 as char);
+      } else if escape == 'f' {
+        out.append_char(12u8 as char);
+      } else if escape == '"' || escape == '\\' || escape == '/' {
+        out.append_char(escape);
+      } else if escape == 'u' {
+        var code = self.hex4()?;
+
+        // A surrogate pair: the high half here, the low half in the next escape.
+        if code >= 55296 && code <= 56319 && self.next_is('\\') {
+          self.position += 1;
+
+          if !self.next_is('u') {
+            return Err(self.error("expected the low half of a surrogate pair"));
+          }
+
+          self.position += 1;
+
+          const low = self.hex4()?;
+
+          code = 65536 + (code - 55296) * 1024 + (low - 56320);
+        }
+
+        // A lone surrogate is not a character; it becomes U+FFFD, as lossy UTF-8 decoding does.
+        out.append_char(char::from_u32(code).unwrap_or('\u{FFFD}'));
+      } else {
+        return Err(self.error(`invalid escape \`\\${escape}\``));
+      }
+    }
+
+    Ok(out.to_string())
+  }
+
+  /// The whole text must be one value.
+  pub fn document(self) -> Result<Json, String> {
+    const value = self.value()?;
+
+    self.skip_spaces();
+
+    if self.position < self.chars.len() {
+      return Err(self.error("unexpected text after the value"));
+    }
+
+    Ok(value)
+  }
+}
+
+pub fn parse(text: String) -> Result<Json, String> {
+  new Parser(text).document()
+}

@@ -275,6 +275,17 @@ Anything expressible in Sagitario belongs in `std/` instead.
   checker needs (`TargetInfo` in `Package::target`: pointer width, size of C's `long`, sign of
   C's `char`). Without `--target` they are those of the machine running the compiler.
 
+## Language server
+
+`sagc lsp` (`compiler/src/lsp.sag`, [ADR-0058](adr/0058-language-server.md)) speaks LSP over
+stdin and stdout. After each change it runs the front end on the program of the document, as
+`sag check` does, with the open documents in place of their files (`Loader::overrides`), and
+keeps the last analysis that reached the type checker for hover, definitions and completion
+while the code being typed does not compile. `lsp/positions.sag` converts LSP's UTF-16 columns
+to byte offsets, `lsp/query.sag` finds the node under the cursor, `lsp/completion.sag` reads the
+text before the cursor, and `lsp/json.sag` parses and writes JSON. The VS Code extension starts
+it (`editors/vscode/extension.js`).
+
 ## CLI
 
 `sag build`, `sag run`, `sag check` (front end only, no C compilation), with `--emit-c` and

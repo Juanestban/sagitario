@@ -6,6 +6,7 @@ extern "C" {
   fn sag_io_flush() -> i32;
   fn sag_io_read_line(status: *mut i32) -> String;
   fn sag_io_read_all(status: *mut i32) -> String;
+  fn sag_io_read_exact(count: usize, status: *mut i32) -> String;
 }
 
 /// What kind of failure an I/O error is.
@@ -88,6 +89,16 @@ pub fn read_line() -> Result<Option<String>, Error> {
   } else {
     Err(error_from(status[0]))
   }
+}
+
+/// Exactly `count` bytes of stdin, such as a message whose length is known. An input that ends
+/// before is an error of kind `UnexpectedEof`, and bytes that are not UTF-8 one of kind
+/// `InvalidData`; the bytes read are lost either way.
+pub fn read_exact(count: usize) -> Result<String, Error> {
+  var status = [0i32; 1];
+  const text = unsafe { sag_io_read_exact(count, status.as_mut_ptr()) };
+
+  if status[0] == 0 { Ok(text) } else { Err(error_from(status[0])) }
 }
 
 /// The rest of stdin. Input that is not UTF-8 is an error of kind `InvalidData`.

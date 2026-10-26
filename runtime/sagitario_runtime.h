@@ -528,6 +528,8 @@ SAG_FROM_UINTMAX(usize, size_t)
 /* Codes of I/O errors: `errno` values are positive, the runtime's own are negative. */
 #define SAG_IO_INVALID_DATA (-2)
 #define SAG_IO_UNKNOWN (-3)
+/* The input ended before the bytes `read_exact` asked for. */
+#define SAG_IO_UNEXPECTED_EOF (-4)
 /* The status of a read at the end of the input. */
 #define SAG_IO_END (-1)
 /* Indices of the variants of `std::io::ErrorKind`. */
@@ -536,6 +538,7 @@ SAG_FROM_UINTMAX(usize, size_t)
 #define SAG_IO_KIND_ALREADY_EXISTS 2
 #define SAG_IO_KIND_INVALID_INPUT 3
 #define SAG_IO_KIND_INVALID_DATA 4
+#define SAG_IO_KIND_UNEXPECTED_EOF 5
 #define SAG_IO_KIND_OTHER 6
 
 size_t sag_env_arg_count(void);
@@ -548,6 +551,7 @@ int32_t sag_io_flush(void);
 /* `*status` becomes 0, SAG_IO_END or an error code. */
 sag_string sag_io_read_line(int32_t *status);
 sag_string sag_io_read_all(int32_t *status);
+sag_string sag_io_read_exact(size_t count, int32_t *status);
 int32_t sag_io_error_kind(int32_t code);
 sag_string sag_io_error_message(int32_t code);
 /* Flushes output and ends the program without running pending releases. */

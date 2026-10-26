@@ -1,0 +1,49 @@
+// Hover, go to definition and the symbols of a document.
+
+const LIMIT: i64 = 10;
+
+struct Point {
+  pub x: i32;
+  pub y: i32;
+
+  pub fn sum(self) -> i32 {
+    self.x + self.y
+  }
+}
+
+enum Shape {
+  Circle(f64),
+  Empty,
+}
+
+class Counter {
+  pub var count: i64;
+
+  pub fn new(self) {
+    self.count = 0;
+  }
+
+  pub fn bump(self) -> i64 {
+    self.count += 1;
+    self.count
+  }
+}
+
+fn twice(value: i32) -> i32 {
+  value * 2
+}
+
+pub fn main() {
+  const point = Point { x: 1, y: 2 };
+  const counter = new Counter();
+  const total = twice(point.sum()) as i64 + counter.bump() + LIMIT;
+  const shape = Shape::Circle(1.5);
+  const café = "ñandú";
+
+  println(`${total} ${counter.count} ${café}`);
+
+  match shape {
+    Shape::Circle(radius) => println(`${radius}`),
+    Shape::Empty => println("empty"),
+  }
+}

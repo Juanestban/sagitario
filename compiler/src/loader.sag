@@ -153,6 +153,14 @@ pub fn push_path(dir: String, name: String) -> String {
   dir + separator + name
 }
 
+/// A path in a form that names one file however it is written: `/` as the separator and, on
+/// Windows, whose file names ignore case, in lowercase.
+pub fn path_key(file: String) -> String {
+  const slashes = file.replace("\\", "/");
+
+  if windows() { slashes.to_ascii_lowercase() } else { slashes }
+}
+
 /// Whether `dir` has an entry with exactly this name that is a directory (or a file), also on
 /// case-insensitive file systems.
 fn has_entry(dir: String, name: String, directory: bool) -> bool {
@@ -175,6 +183,8 @@ pub class Loader {
   pub const modules: List<Module>;
   /// Indices in `modules` of the standard library modules.
   pub const std: List<usize>;
+  /// Texts that replace files on disk, by `path_key`: the documents open in an editor.
+  pub var overrides: Map<String, String>;
 
   pub fn new(self, entry: String) {
     self.entry = entry;
@@ -182,17 +192,21 @@ pub class Loader {
     self.ids = new Ids(0);
     self.modules = new List();
     self.std = new List();
+    self.overrides = new Map<String, String>();
   }
 
   /// Adds a module unless it has lexical errors, which are reported later with the others.
   /// Returns `false`, after printing why, if the file cannot be read.
   pub fn load(self, file: String, module_path: List<String>, sources: SourceMap, diagnostics: Diagnostics) -> bool {
-    const text = match fs::read_to_string(file) {
-      Ok(text) => text,
-      Err(error) => {
-        eprintln(`error: cannot read \`${file}\`: ${error.message()}`);
-        return false;
-      }
+    const text = match self.overrides.get(path_key(file)) {
+      Some(found) => found,
+      None => match fs::read_to_string(file) {
+        Ok(found) => found,
+        Err(error) => {
+          eprintln(`error: cannot read \`${file}\`: ${error.message()}`);
+          return false;
+        }
+      },
     };
     const id = sources.add(file, text);
     const errors = diagnostics.error_count();

@@ -2,6 +2,9 @@
 
 Support for the [Sagitario](https://github.com/Juanestban/sagitario) programming language:
 
+- The language server (`sagc lsp`): the errors and warnings of `sag check` while typing, the type
+  of what is under the cursor, go to definition (`F12`), completion of members after `.`, of
+  items after `::` and of names, and the outline of a document (`Ctrl+Shift+O`).
 - Syntax highlighting of `.sag` files: keywords, types, numbers with their suffixes, characters,
   strings and template strings with their `${...}` interpolations, nested block comments,
   documentation comments and attributes.
@@ -10,8 +13,18 @@ Support for the [Sagitario](https://github.com/Juanestban/sagitario) programming
 - Snippets: `main`, `mainr`, `fn`, `pfn`, `struct`, `class`, `enum`, `interface`, `match`,
   `iflet`, `whilelet`, `for`, `forin`, `if`, `ifelse`, `println` and `use`.
 
-Diagnostics, completion, hover and go to definition come with the language server
-(docs/adr/0057-editor-tooling-and-independence-from-rust.md).
+## The language server
+
+The extension starts `sagc lsp`, the compiler written in Sagitario. Build it from the
+repository, in release mode, which analyses large programs about three times faster:
+
+```sh
+sag build --release compiler/src/main.sag   # writes compiler/src/main(.exe)
+```
+
+Copy that executable to a directory on `PATH` as `sagc`, or set `sagitario.server.path` to it.
+`Sagitario: Restart the language server` restarts it. Without the server, highlighting,
+snippets and the icon keep working (docs/adr/0058-language-server.md).
 
 The file icon is shown by file icon themes that leave unknown files to the languages, such as
 the default Seti theme. Themes with their own icon for every file keep theirs. Material Icon
@@ -20,11 +33,11 @@ installed version of this one:
 
 ```json
 "material-icon-theme.files.associations": {
-  "*.sag": "../../sagitario.sagitario-0.1.0/icons/sag-file"
+  "*.sag": "../../sagitario.sagitario-0.2.0/icons/sag-file"
 }
 ```
 
-Without the language server, highlighting tells names apart by their form, as most grammars do:
+Highlighting tells names apart by their form, as most grammars do:
 `snake_case` names are bindings, parameters and fields, `PascalCase` names are types and
 variants, `SCREAMING_SNAKE_CASE` names are constants, and a name before `(` is a function.
 

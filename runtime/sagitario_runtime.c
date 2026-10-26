@@ -1425,9 +1425,36 @@ sag_string sag_io_read_all(int32_t *status) {
   return sag_io_finish_read(&sb, status);
 }
 
+/* Exactly `count` bytes of stdin; the bytes read are lost when the input ends first. */
+sag_string sag_io_read_exact(size_t count, int32_t *status) {
+  sag_sb sb;
+  sag_sb_init(&sb);
+  char chunk[4096];
+  size_t left = count;
+  errno = 0;
+  while (left > 0) {
+    size_t read = fread(chunk, 1, left < sizeof chunk ? left : sizeof chunk, stdin);
+    if (read == 0) {
+      break;
+    }
+    sag_sb_push_bytes(&sb, chunk, read);
+    left -= read;
+  }
+  if (left > 0) {
+    *status = ferror(stdin) ? sag_io_errno() : SAG_IO_UNEXPECTED_EOF;
+    clearerr(stdin);
+    free(sb.data);
+    return sag_string_empty();
+  }
+  return sag_io_finish_read(&sb, status);
+}
+
 int32_t sag_io_error_kind(int32_t code) {
   if (code == SAG_IO_INVALID_DATA) {
     return SAG_IO_KIND_INVALID_DATA;
+  }
+  if (code == SAG_IO_UNEXPECTED_EOF) {
+    return SAG_IO_KIND_UNEXPECTED_EOF;
   }
   /* Only EDOM, EILSEQ and ERANGE are standard C; the others exist on every supported system. */
 #ifdef ENOENT
@@ -1457,6 +1484,8 @@ sag_string sag_io_error_message(int32_t code) {
   const char *message = "input/output error";
   if (code == SAG_IO_INVALID_DATA) {
     message = "stream did not contain valid UTF-8";
+  } else if (code == SAG_IO_UNEXPECTED_EOF) {
+    message = "failed to fill whole buffer";
   } else if (code > 0) {
     message = strerror((int)code);
   }
@@ -2979,10 +3008,20 @@ bool sag_sync_atomic_compare_exchange(sag_fnval cell, uint64_t expected, uint64_
 
 /* ---- Program lifecycle ----------------------------------------------------------------- */
 
+#ifdef _WIN32
+/* The CRT's, from <io.h>: the standard streams are read and written byte for byte, as on the other
+ * systems, instead of translating `\r\n` (docs/spec/11-standard-library.md#stdio). */
+extern int _setmode(int fd, int mode);
+#define SAG_O_BINARY 0x8000
+#endif
+
 void sag_rt_init(int argc, char **argv) {
 #ifdef _WIN32
   (void)argc;
   (void)argv;
+  _setmode(0, SAG_O_BINARY);
+  _setmode(1, SAG_O_BINARY);
+  _setmode(2, SAG_O_BINARY);
 #else
   sag_argc = argc;
   sag_argv = argv;

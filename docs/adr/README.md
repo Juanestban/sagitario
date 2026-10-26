@@ -65,7 +65,8 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0054](0054-lowering-and-c-generation-port.md) | The lowering and C generation port | Accepted (refined by 0055) |
 | [0055](0055-driver-and-cli-port.md) | The driver and CLI port | Accepted (refined by 0056) |
 | [0056](0056-bootstrap-and-acceptance.md) | The bootstrap and the acceptance of F5 | Accepted |
-| [0057](0057-editor-tooling-and-independence-from-rust.md) | Editor tooling and independence from Rust (phase F6) | Accepted |
+| [0057](0057-editor-tooling-and-independence-from-rust.md) | Editor tooling and independence from Rust (phase F6) | Accepted (refined by 0058) |
+| [0058](0058-language-server.md) | The language server | Accepted |
 
 ## Template
 

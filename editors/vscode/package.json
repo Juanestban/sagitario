@@ -1,17 +1,21 @@
 {
   "name": "sagitario",
   "displayName": "Sagitario",
-  "description": "Syntax highlighting, snippets and file icons for the Sagitario programming language.",
-  "version": "0.1.0",
+  "description": "Syntax highlighting, snippets, file icons and the language server (diagnostics, hover, go to definition, completion and symbols) for the Sagitario programming language.",
+  "version": "0.2.0",
   "publisher": "sagitario",
   "license": "(MIT OR Apache-2.0)",
   "icon": "icons/sagitario.png",
   "engines": {
-    "vscode": "^1.75.0"
+    "vscode": "^1.91.0"
   },
   "categories": [
     "Programming Languages",
     "Snippets"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onLanguage:sagitario"
   ],
   "keywords": [
     "sagitario",
@@ -51,12 +55,32 @@
         "language": "sagitario",
         "path": "./snippets/sagitario.json"
       }
-    ]
+    ],
+    "commands": [
+      {
+        "command": "sagitario.restartServer",
+        "title": "Restart the language server",
+        "category": "Sagitario"
+      }
+    ],
+    "configuration": {
+      "title": "Sagitario",
+      "properties": {
+        "sagitario.server.path": {
+          "type": "string",
+          "default": "sagc",
+          "markdownDescription": "The `sagc` executable that runs the language server (`sagc lsp`). Build it with `sag build --release compiler/src/main.sag`."
+        }
+      }
+    }
   },
   "scripts": {
     "package": "vsce package --out sagitario.vsix"
   },
   "devDependencies": {
     "@vscode/vsce": "^3.9.2"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^11.0.0"
   }
 }

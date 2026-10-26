@@ -104,8 +104,11 @@ passes as they are ported
 `SAG_COMPILER=<path to sagc>`, the harness of the suites runs that compiler instead of `sag`
 ([ADR-0055](adr/0055-driver-and-cli-port.md)). `bootstrap_reaches_the_fixed_point` builds stage 2
 with `sagc` and checks that both generate the same C for the compiler
-([ADR-0056](adr/0056-bootstrap-and-acceptance.md)). The test also checks the modules of `compiler/` generated from the Rust compiler;
-`SAG_BLESS=1 cargo test --test selfhost` rewrites them.
+([ADR-0056](adr/0056-bootstrap-and-acceptance.md)). `language_server_answers_the_sessions` sends
+each `tests/lsp/<case>.session` to `sagc lsp` about `<case>.sag` and compares the answers with
+`<case>.expected`, one message per line ([ADR-0058](adr/0058-language-server.md)). The test also
+checks the modules of `compiler/` generated from the Rust compiler; `SAG_BLESS=1 cargo test
+--test selfhost` rewrites them and the expected answers of the language server.
 
 ## The editor
 

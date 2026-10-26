@@ -5,6 +5,7 @@ use pkg::diagnostics::DiagnosticFormat;
 use pkg::driver;
 use pkg::driver::CompileOptions;
 use pkg::driver::targets;
+use pkg::lsp;
 use std::env;
 use std::process;
 
@@ -18,6 +19,7 @@ fn usage() -> String {
     "  run      Compile and run a program (arguments after `--` go to the program)",
     "  check    Check a program without generating code",
     "  targets  List the targets `--target` accepts",
+    "  lsp      Serve the language server protocol on stdin and stdout",
     "  help     Show this message",
     "  version  Show the compiler version",
     "",
@@ -50,6 +52,7 @@ enum Mode {
 enum Command {
   Compile(Mode, CompileOptions),
   Targets,
+  Lsp,
   Help,
   Version,
 }
@@ -78,6 +81,8 @@ fn parse_args(args: List<String>) -> Result<Command, String> {
     Ok(Command::Compile(Mode::Check, parse_compile_options(args, Mode::Check)?))
   } else if command == "targets" {
     Ok(Command::Targets)
+  } else if command == "lsp" {
+    Ok(Command::Lsp)
   } else if command == "help" || command == "--help" || command == "-h" {
     Ok(Command::Help)
   } else if command == "version" || command == "--version" || command == "-v" {
@@ -233,6 +238,7 @@ fn execute(command: Command) -> i32 {
 
       0
     }
+    Command::Lsp => lsp::run(),
     Command::Compile(mode, options) => match mode {
       Mode::Build => driver::build(options),
       Mode::Run => driver::run(options),

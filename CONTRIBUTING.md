@@ -40,6 +40,7 @@ nova run -- a b                 # build target/debug/demo and run it
 nova check                      # front end only
 
 cd editors/vscode && npm ci && npm run package   # the VS Code extension: sagitario.vsix
+sag build --release compiler/src/main.sag        # sagc, whose `sagc lsp` the extension starts
 code --install-extension editors/vscode/sagitario.vsix
 ```
 

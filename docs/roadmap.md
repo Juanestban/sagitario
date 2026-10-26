@@ -168,8 +168,9 @@ Increments:
 
 1. The VS Code extension (`editors/vscode/`): highlighting, the file icon, the language
    configuration and snippets.
-2. A language server written in Sagitario (`sag lsp`), with the VS Code client: diagnostics,
-   hover, go to definition, completion and symbols.
+2. A language server written in Sagitario (`sagc lsp`), with the VS Code client: diagnostics,
+   hover, go to definition, completion and symbols; `io::read_exact`, and standard streams byte
+   for byte on every system ([ADR-0058](adr/0058-language-server.md)).
 3. The pivot without Rust: the generated C of the compiler as a seed, Nova and the test harness
    in Sagitario, `cargo` out of CI, and `sagc` renamed to `sag` with `crates/` retired.
 
