@@ -112,9 +112,6 @@ jobs:
       SAG_CC: ${{ matrix.cc }}
       # MSVC has no UndefinedBehaviorSanitizer (docs/adr/0044-c-toolchains.md).
       SAG_TEST_SANITIZE: ${{ matrix.cc == 'cl' && '0' || '1' }}
-    defaults:
-      run:
-        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -133,17 +130,22 @@ jobs:
       - name: Allow ThreadSanitizer's memory layout
         if: runner.os == 'Linux'
         run: sudo sysctl vm.mmap_rnd_bits=28
+      # The default shells: Git Bash on Windows would put its own `link.exe` (coreutils) before
+      # MSVC's on PATH.
       - name: Show the C compiler
-        if: matrix.cc != 'cl'
+        if: matrix.cc != 'cl' && runner.os == 'Windows'
+        run: '& $env:SAG_CC --version'
+      - name: Show the C compiler
+        if: runner.os != 'Windows'
         run: '"$SAG_CC" --version'
       - run: cargo build -p sagitario_cli
-      # Stage 1 goes outside `compiler/src/`, where the fixed point test writes.
       - name: Build stage 1
-        run: |
-          target/debug/sag build compiler/src/main.sag
-          cp "compiler/src/main${{ runner.os == 'Windows' && '.exe' || '' }}" "$RUNNER_TEMP/sagc${{ runner.os == 'Windows' && '.exe' || '' }}"
+        run: ./target/debug/sag build compiler/src/main.sag
+      # Before the fixed point test, which writes to `compiler/src/` too.
       - name: Run the suites with stage 1
-        run: SAG_COMPILER="$RUNNER_TEMP/sagc${{ runner.os == 'Windows' && '.exe' || '' }}" cargo test -p sagitario_cli --test suites
+        env:
+          SAG_COMPILER: ${{ github.workspace }}/compiler/src/main${{ runner.os == 'Windows' && '.exe' || '' }}
+        run: cargo test -p sagitario_cli --test suites
       - name: Reach the fixed point
         run: cargo test -p sagitario_cli --test selfhost bootstrap_reaches_the_fixed_point
 
