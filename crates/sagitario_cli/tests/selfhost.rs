@@ -385,7 +385,8 @@ fn messages(mut output: &[u8]) -> Vec<String> {
 
 /// Each `tests/lsp/<case>.session` sends its messages (one per line, `raw ` for a body sent as
 /// written) to `sagc lsp` about `<case>.sag`, and `<case>.expected` holds what the server
-/// answers, one message per line; `SAG_BLESS=1` rewrites it.
+/// answers, one message per line, with `{uri}` for the document and `{dir}` for its directory;
+/// `SAG_BLESS=1` rewrites it.
 #[test]
 fn language_server_answers_the_sessions() -> io::Result<()> {
   let _turn = building();
@@ -428,7 +429,9 @@ fn language_server_answers_the_sessions() -> io::Result<()> {
 
     assert!(output.status.code() == Some(0), "`sagc lsp` on {name}: exit {:?}\n{}", output.status.code(), String::from_utf8_lossy(&output.stderr));
 
-    let actual: String = messages(&output.stdout).iter().map(|body| body.replace(&uri, "{uri}") + "\n").collect();
+    // Other files of the directory, such as the modules a session goes to.
+    let dir_uri = file_uri(&dir) + "/";
+    let actual: String = messages(&output.stdout).iter().map(|body| body.replace(&uri, "{uri}").replace(&dir_uri, "{dir}/") + "\n").collect();
 
     check_generated(&format!("tests/lsp/{name}.expected"), &actual)?;
   }

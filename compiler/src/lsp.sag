@@ -1,7 +1,7 @@
 //! `sagc lsp`: the language server (docs/adr/0058-language-server.md). It speaks LSP over stdin
 //! and stdout, and runs the front end of the compiler on the program of each open document:
-//! diagnostics as `sag check` reports them, hover, go to definition, completion and the symbols
-//! of a document. One thread analyses after every change.
+//! diagnostics as `sag check` reports them, hover, go to definition, completion, the symbols of a
+//! document and semantic tokens. One thread analyses after every change.
 
 use pkg::ast::{Item, Module};
 use pkg::lsp::analysis;
@@ -12,6 +12,7 @@ use pkg::lsp::json::{Json, member};
 use pkg::lsp::positions::{LineIndex, Position};
 use pkg::lsp::protocol;
 use pkg::lsp::query;
+use pkg::lsp::tokens;
 use pkg::loader::path_key;
 use pkg::span::Span;
 
@@ -102,6 +103,12 @@ class Server {
       protocol::respond(id, self.completion(params));
     } else if method == "textDocument/documentSymbol" {
       protocol::respond(id, self.symbols(params));
+    } else if method == "textDocument/semanticTokens/full" {
+      match self.semantic_tokens(params) {
+        Some(found) => protocol::respond(id, found),
+        // The editor asks again after the next analysis.
+        None => protocol::respond_error(id, protocol::CONTENT_MODIFIED, "the document changed since its last analysis"),
+      }
     } else {
       protocol::respond_error(id, protocol::METHOD_NOT_FOUND, `unknown method \`${method}\``);
     }
@@ -292,6 +299,26 @@ class Server {
     json::object(List::from([member("isIncomplete", Json::Bool(false)), member("items", items)]))
   }
 
+  /// The semantic tokens of a document, from an analysis that read its current text: tokens of
+  /// an older text would color the wrong names.
+  prv fn semantic_tokens(self, params: Json) -> Option<Json> {
+    const document = self.document(params)?;
+
+    for typed in List::from([false, true]) {
+      if let Some(found) = self.analysis_of(document, typed) {
+        if let Some(index) = found.module_of(document.path) {
+          const module = found.package?.modules.get(index)?;
+
+          if found.sources.get(module.file)?.text == document.text && found.resolution.is_some() {
+            return tokens::semantic_tokens(found, module, index);
+          }
+        }
+      }
+    }
+
+    None
+  }
+
   prv fn symbols(self, params: Json) -> Json {
     const document = match self.document(params) {
       Some(found) => found,
@@ -338,6 +365,7 @@ fn initialize_result() -> Json {
     member("definitionProvider", Json::Bool(true)),
     member("completionProvider", completion_options),
     member("documentSymbolProvider", Json::Bool(true)),
+    member("semanticTokensProvider", json::object(List::from([member("legend", tokens::legend()), member("full", Json::Bool(true))]))),
   ]));
   const info = json::object(List::from([member("name", json::str("sagc")), member("version", json::str(VERSION))]));
 

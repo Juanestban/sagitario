@@ -30,6 +30,9 @@ const KEYWORDS: String = "abstract as break class const continue else enum exten
 
 const BUILTINS: String = "print println eprintln panic include_str";
 
+/// The types the language provides (docs/spec/02-types.md).
+const BUILTIN_TYPES: String = "i8 i16 i32 i64 isize u8 u16 u32 u64 usize f32 f64 bool char String StringBuilder List Option Result";
+
 const STD_MODULES: String = "env ffi fs io path process sync thread time";
 
 /// The methods of the types the compiler provides (docs/spec/02-types.md).
@@ -206,6 +209,7 @@ pub fn complete(analysis: Option<Analysis>, module: Option<Module>, module_index
     names(items, found, module, module_index, offset);
   }
 
+  items.add_words(BUILTIN_TYPES, STRUCT);
   items.add_words(KEYWORDS, KEYWORD);
   items.add_words(BUILTINS, FUNCTION);
   Json::Array(items.list)
@@ -347,7 +351,7 @@ fn path_members(items: Items, analysis: Analysis, module_index: Option<usize>, c
     current = resolution.std_root;
   } else {
     const here = match module_index {
-      Some(index) => module_id(resolution, index),
+      Some(index) => query::module_id(resolution, index),
       None => None,
     };
 
@@ -374,13 +378,13 @@ fn path_members(items: Items, analysis: Analysis, module_index: Option<usize>, c
 
   for index in rest..chain.len() {
     target = match target {
-      Some(ItemRef::Module(id)) => lookup(resolution, id, chain[index]),
+      Some(ItemRef::Module(id)) => query::lookup(resolution, id, chain[index]),
       _ => None,
     };
   }
 
   const here = match module_index {
-    Some(index) => module_id(resolution, index),
+    Some(index) => query::module_id(resolution, index),
     None => None,
   };
 
@@ -398,37 +402,6 @@ fn path_members(items: Items, analysis: Analysis, module_index: Option<usize>, c
     }
     Some(ItemRef::Type(item)) => type_functions(items, analysis, item),
     _ => {}
-  }
-}
-
-/// The id of the module of the program read from module `index` of the package.
-fn module_id(resolution: Resolution, index: usize) -> Option<u32> {
-  for id in 0..resolution.modules.len() {
-    if let Some(source) = resolution.modules[id].source {
-      if source == index {
-        return Some(id as u32);
-      }
-    }
-  }
-
-  None
-}
-
-/// A name in a module: an item, an import or a child module.
-fn lookup(resolution: Resolution, module: u32, name: String) -> Option<ItemRef> {
-  const info = resolution.modules.get(module as usize)?;
-
-  if let Some(found) = info.items.get(name) {
-    return Some(found.item);
-  }
-
-  if let Some(found) = info.imports.get(name) {
-    return Some(found.item);
-  }
-
-  match info.children.get(name) {
-    Some(child) => Some(ItemRef::Module(child)),
-    None => None,
   }
 }
 

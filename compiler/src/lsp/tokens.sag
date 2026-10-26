@@ -1,0 +1,506 @@
+//! Semantic tokens (docs/adr/0058-language-server.md): what the names of paths are, which the
+//! grammar cannot tell from their form, as rust-analyzer does: the modules, functions and types
+//! of `use pkg::loader::push_path` and of `diagnostics::render(...)`.
+
+use pkg::ast::{Block, Expr, ExprKind, FnDecl, Ident, Item, Module, Path, Pattern, PatternKind, Stmt, TemplatePart, TypeExpr, TypeExprKind, UseTree, UseTreeKind};
+use pkg::lsp::analysis::Analysis;
+use pkg::lsp::json;
+use pkg::lsp::json::{Json, member};
+use pkg::lsp::query;
+use pkg::resolve::{ItemRef, Res, Resolution, StdItem, TypeItem, TypeRes};
+use pkg::span::Span;
+
+/// The token types, in the order of the legend `initialize` sends.
+const NAMESPACE: u32 = 0;
+const TYPE: u32 = 1;
+const CLASS: u32 = 2;
+const ENUM: u32 = 3;
+const INTERFACE: u32 = 4;
+const STRUCT: u32 = 5;
+const FUNCTION: u32 = 6;
+const ENUM_MEMBER: u32 = 7;
+
+pub fn legend() -> Json {
+  const names = List::from(["namespace", "type", "class", "enum", "interface", "struct", "function", "enumMember"]);
+  const types: List<Json> = new List();
+
+  for name in names {
+    types.push(json::str(name));
+  }
+
+  json::object(List::from([member("tokenTypes", Json::Array(types)), member("tokenModifiers", Json::Array(new List()))]))
+}
+
+/// A name and what it is.
+struct Token {
+  pub span: Span;
+  pub kind: u32;
+}
+
+fn type_item_kind(item: TypeItem) -> u32 {
+  match item {
+    TypeItem::Struct(_) => STRUCT,
+    TypeItem::Enum(_) => ENUM,
+    TypeItem::Class(_) => CLASS,
+    TypeItem::Interface(_) => INTERFACE,
+  }
+}
+
+fn item_kind(item: ItemRef) -> Option<u32> {
+  match item {
+    ItemRef::Module(_) => Some(NAMESPACE),
+    ItemRef::Fn(_) => Some(FUNCTION),
+    ItemRef::Extern(_) => Some(FUNCTION),
+    ItemRef::Type(found) => Some(type_item_kind(found)),
+    ItemRef::Std(StdItem::Root) => Some(NAMESPACE),
+    ItemRef::Std(StdItem::Ffi) => Some(NAMESPACE),
+    ItemRef::Std(StdItem::CType(_)) => Some(TYPE),
+    ItemRef::Std(StdItem::CString) => Some(CLASS),
+    ItemRef::Std(_) => Some(FUNCTION),
+    // Constants keep the color of their SCREAMING_SNAKE_CASE names.
+    ItemRef::Const(_) => None,
+  }
+}
+
+/// Walks a module and keeps the names of its paths with what they are.
+class Collector {
+  prv const analysis: Analysis;
+  prv const resolution: Resolution;
+  prv const module_index: usize;
+  pub const tokens: List<Token>;
+
+  pub fn new(self, analysis: Analysis, resolution: Resolution, module_index: usize) {
+    self.analysis = analysis;
+    self.resolution = resolution;
+    self.module_index = module_index;
+    self.tokens = new List();
+  }
+
+  prv fn add(self, ident: Ident, kind: Option<u32>) {
+    if let Some(found) = kind {
+      self.tokens.push(Token { span: ident.span, kind: found });
+    }
+  }
+
+  /// The segments of a path before its last.
+  prv fn prefix(self, path: Path) {
+    const names: List<String> = new List();
+
+    for index in 0..path.segments.len() {
+      names.push(path.segments[index].name);
+
+      if index + 1 < path.segments.len() {
+        const found = query::resolve_path(self.analysis, self.module_index, names);
+
+        self.add(path.segments[index], match found {
+          Some(item) => item_kind(item),
+          None => None,
+        });
+      }
+    }
+  }
+
+  /// A path of an expression or pattern: its last segment by what it resolved to, when the path
+  /// has several (a single name keeps the color of its form).
+  prv fn value_path(self, path: Path, id: u32) {
+    if path.segments.len() < 2 {
+      return;
+    }
+
+    self.prefix(path);
+
+    const kind = match self.resolution.paths.get(id) {
+      Some(Res::Fn(_)) => Some(FUNCTION),
+      Some(Res::Extern(_)) => Some(FUNCTION),
+      Some(Res::Variant(_)) => Some(ENUM_MEMBER),
+      Some(Res::Struct(_)) => Some(STRUCT),
+      _ => None,
+    };
+
+    if let Some(last) = path.segments.last() {
+      self.add(last, kind);
+    }
+  }
+
+  prv fn type_path(self, path: Path) {
+    if path.segments.len() < 2 {
+      return;
+    }
+
+    self.prefix(path);
+
+    const kind = match self.resolution.type_paths.get(path.id) {
+      Some(TypeRes::Item(item)) => Some(type_item_kind(item)),
+      _ => None,
+    };
+
+    if let Some(last) = path.segments.last() {
+      self.add(last, kind);
+    }
+  }
+
+  prv fn use_tree(self, tree: UseTree, base: List<String>) {
+    const names: List<String> = new List();
+
+    for name in base {
+      names.push(name);
+    }
+
+    for segment in tree.prefix {
+      names.push(segment.name);
+
+      const found = query::resolve_path(self.analysis, self.module_index, names);
+
+      self.add(segment, match found {
+        Some(item) => item_kind(item),
+        None => None,
+      });
+    }
+
+    match tree.kind {
+      UseTreeKind::Simple(alias) => {
+        if let Some(found) = alias {
+          const item = query::resolve_path(self.analysis, self.module_index, names);
+
+          self.add(found, match item {
+            Some(resolved) => item_kind(resolved),
+            None => None,
+          });
+        }
+      }
+      UseTreeKind::Group(trees) => {
+        for inner in trees {
+          self.use_tree(inner, names);
+        }
+      }
+    }
+  }
+
+  prv fn type_expr(self, ty: TypeExpr) {
+    match ty.kind {
+      TypeExprKind::Path(path) => self.type_path(path),
+      TypeExprKind::Generic { path, args } => {
+        self.type_path(path);
+
+        for arg in args {
+          self.type_expr(arg);
+        }
+      }
+      TypeExprKind::Array { elem, .. } => self.type_expr(elem),
+      TypeExprKind::Ptr { pointee, .. } => self.type_expr(pointee),
+      TypeExprKind::Fn { params, ret } => {
+        for param in params {
+          self.type_expr(param);
+        }
+
+        if let Some(found) = ret {
+          self.type_expr(found);
+        }
+      }
+      TypeExprKind::Unit => {}
+    }
+  }
+
+  pub fn module(self, module: Module) {
+    for found in module.uses {
+      self.use_tree(found.tree, new List());
+    }
+
+    for item in module.items {
+      match item {
+        Item::Fn(decl) => self.function(decl),
+        Item::Struct(decl) => {
+          for ty in decl.impls {
+            self.type_expr(ty);
+          }
+
+          for field in decl.fields {
+            self.type_expr(field.ty);
+          }
+
+          for function in decl.functions {
+            self.function(function);
+          }
+        }
+        Item::Enum(decl) => {
+          for ty in decl.impls {
+            self.type_expr(ty);
+          }
+
+          for function in decl.functions {
+            self.function(function);
+          }
+        }
+        Item::Class(decl) => {
+          if let Some(parent) = decl.parent {
+            self.type_expr(parent);
+          }
+
+          for ty in decl.impls {
+            self.type_expr(ty);
+          }
+
+          for field in decl.fields {
+            self.type_expr(field.ty);
+          }
+
+          for function in decl.functions {
+            self.function(function);
+          }
+        }
+        Item::Interface(decl) => {
+          for ty in decl.parents {
+            self.type_expr(ty);
+          }
+
+          for field in decl.fields {
+            self.type_expr(field.ty);
+          }
+
+          for function in decl.functions {
+            self.function(function);
+          }
+        }
+        Item::Extern(block) => {
+          for function in block.functions {
+            for param in function.params {
+              self.type_expr(param.ty);
+            }
+
+            if let Some(ret) = function.return_type {
+              self.type_expr(ret);
+            }
+          }
+        }
+        Item::Const(decl) => {
+          self.type_expr(decl.ty);
+          self.expr(decl.value);
+        }
+      }
+    }
+  }
+
+  prv fn function(self, decl: FnDecl) {
+    for param in decl.params {
+      self.type_expr(param.ty);
+    }
+
+    if let Some(ret) = decl.return_type {
+      self.type_expr(ret);
+    }
+
+    self.block(decl.body);
+  }
+
+  prv fn block(self, block: Block) {
+    for stmt in block.stmts {
+      match stmt {
+        Stmt::Let(decl) => {
+          if let Some(ty) = decl.ty {
+            self.type_expr(ty);
+          }
+
+          if let Some(init) = decl.init {
+            self.expr(init);
+          }
+        }
+        Stmt::Assign { target, value, .. } => {
+          self.expr(target);
+          self.expr(value);
+        }
+        Stmt::Expr(expr) => self.expr(expr),
+      }
+    }
+
+    if let Some(tail) = block.tail {
+      self.expr(tail);
+    }
+  }
+
+  prv fn pattern(self, pattern: Pattern) {
+    match pattern.kind {
+      PatternKind::Path(path) => self.value_path(path, pattern.id),
+      PatternKind::Tuple { path, elems } => {
+        self.value_path(path, pattern.id);
+
+        for elem in elems {
+          self.pattern(elem);
+        }
+      }
+      PatternKind::Named { path, fields, .. } => {
+        self.value_path(path, pattern.id);
+
+        for field in fields {
+          self.pattern(field.pattern);
+        }
+      }
+      PatternKind::Or(alternatives) => {
+        for alternative in alternatives {
+          self.pattern(alternative);
+        }
+      }
+      _ => {}
+    }
+  }
+
+  prv fn exprs(self, exprs: List<Expr>) {
+    for expr in exprs {
+      self.expr(expr);
+    }
+  }
+
+  prv fn expr(self, expr: Expr) {
+    match expr.kind {
+      ExprKind::Path(path) => self.value_path(path, expr.id),
+      ExprKind::Template(parts) => {
+        for part in parts {
+          if let TemplatePart::Expr(inner) = part {
+            self.expr(inner);
+          }
+        }
+      }
+      ExprKind::Call { callee, args } => {
+        self.expr(callee);
+        self.exprs(args);
+      }
+      ExprKind::MethodCall { receiver, args, .. } => {
+        self.expr(receiver);
+        self.exprs(args);
+      }
+      ExprKind::Field { base, .. } => self.expr(base),
+      ExprKind::Index { base, index } => {
+        self.expr(base);
+        self.expr(index);
+      }
+      ExprKind::StructLit { path, fields } => {
+        self.value_path(path, expr.id);
+
+        for field in fields {
+          self.expr(field.value);
+        }
+      }
+      ExprKind::ArrayLit(elems) => self.exprs(elems),
+      ExprKind::ArrayRepeat { value, .. } => self.expr(value),
+      ExprKind::Unary { operand, .. } => self.expr(operand),
+      ExprKind::Binary { lhs, rhs, .. } => {
+        self.expr(lhs);
+        self.expr(rhs);
+      }
+      ExprKind::Cast { expr: inner, ty } => {
+        self.expr(inner);
+        self.type_expr(ty);
+      }
+      ExprKind::Range { start, end, .. } => {
+        self.expr(start);
+        self.expr(end);
+      }
+      ExprKind::Try(inner) => self.expr(inner),
+      ExprKind::Lambda { params, body } => {
+        for param in params {
+          if let Some(ty) = param.ty {
+            self.type_expr(ty);
+          }
+        }
+
+        self.expr(body);
+      }
+      ExprKind::New { path, args } => {
+        self.type_path(path);
+        self.exprs(args);
+      }
+      ExprKind::Match { scrutinee, arms } => {
+        self.expr(scrutinee);
+
+        for arm in arms {
+          self.pattern(arm.pattern);
+
+          if let Some(guard) = arm.guard {
+            self.expr(guard);
+          }
+
+          self.expr(arm.body);
+        }
+      }
+      ExprKind::Block(block) => self.block(block),
+      ExprKind::Unsafe(block) => self.block(block),
+      ExprKind::If { cond, then_block, else_branch } => {
+        self.expr(cond);
+        self.block(then_block);
+
+        if let Some(branch) = else_branch {
+          self.expr(branch);
+        }
+      }
+      ExprKind::While { cond, body } => {
+        self.expr(cond);
+        self.block(body);
+      }
+      ExprKind::Loop(body) => self.block(body),
+      ExprKind::For { iter, body, .. } => {
+        self.expr(iter);
+        self.block(body);
+      }
+      ExprKind::Break(value) => {
+        if let Some(found) = value {
+          self.expr(found);
+        }
+      }
+      ExprKind::Return(value) => {
+        if let Some(found) = value {
+          self.expr(found);
+        }
+      }
+      _ => {}
+    }
+  }
+}
+
+/// The semantic tokens of a module, encoded as LSP asks: five numbers per token, relative to the
+/// one before.
+pub fn semantic_tokens(analysis: Analysis, module: Module, module_index: usize) -> Option<Json> {
+  const resolution = analysis.resolution?;
+  const index = analysis.line_index(module.file)?;
+  const collector = new Collector(analysis, resolution, module_index);
+
+  collector.module(module);
+
+  const tokens = collector.tokens;
+
+  // In source order; the walk visits nodes out of it.
+  tokens.sort_by((a, b) => a.span.start.compare(b.span.start));
+
+  const data: List<Json> = new List();
+  var line = 0u32;
+  var character = 0u32;
+  var previous_end = 0u32;
+  var first = true;
+
+  for token in tokens {
+    if !first && token.span.start < previous_end {
+      continue;
+    }
+
+    const start = index.position(token.span.start);
+    const end = index.position(token.span.end);
+
+    // Names never span lines.
+    if end.line != start.line {
+      continue;
+    }
+
+    const delta_line = start.line - line;
+    const delta_start = if delta_line == 0 { start.character - character } else { start.character };
+
+    data.push(json::uint(delta_line));
+    data.push(json::uint(delta_start));
+    data.push(json::uint(end.character - start.character));
+    data.push(json::uint(token.kind));
+    data.push(json::uint(0));
+    line = start.line;
+    character = start.character;
+    previous_end = token.span.end;
+    first = false;
+  }
+
+  Some(json::object(List::from([member("data", Json::Array(data))])))
+}

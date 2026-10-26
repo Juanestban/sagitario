@@ -3,8 +3,10 @@
 Support for the [Sagitario](https://github.com/Juanestban/sagitario) programming language:
 
 - The language server (`sagc lsp`): the errors and warnings of `sag check` while typing, the type
-  of what is under the cursor, go to definition (`F12`), completion of members after `.`, of
-  items after `::` and of names, and the outline of a document (`Ctrl+Shift+O`).
+  of what is under the cursor, go to definition (`F12` or `Ctrl+Click`, also on the modules of
+  `use` and of paths), completion of members after `.`, of items after `::`, of names and of
+  types, the outline of a document (`Ctrl+Shift+O`), and the colors of modules, functions and
+  types in paths (semantic tokens).
 - Syntax highlighting of `.sag` files: keywords, types, numbers with their suffixes, characters,
   strings and template strings with their `${...}` interpolations, nested block comments,
   documentation comments and attributes.
