@@ -80,6 +80,73 @@ jobs:
       - run: cl
       - run: cargo test --workspace
 
+  # The self-hosted compiler (docs/adr/0056-bootstrap-and-acceptance.md): `sagc` built by `sag`
+  # (stage 1) passes the suites, and builds a stage 2 that generates the same C for the compiler.
+  bootstrap:
+    name: bootstrap (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows, clang
+            os: windows-latest
+            cc: C:\Program Files\LLVM\bin\clang.exe
+          - name: windows, cl
+            os: windows-latest
+            cc: cl
+          # MinGW, supported best-effort and without sanitizers (docs/adr/0018-windows-c-toolchain.md).
+          - name: windows, MinGW gcc
+            os: windows-latest
+            cc: C:\mingw64\bin\gcc.exe
+          - name: ubuntu, clang
+            os: ubuntu-latest
+            cc: clang
+          - name: ubuntu, gcc
+            os: ubuntu-latest
+            cc: gcc
+          - name: macos, clang
+            os: macos-latest
+            cc: clang
+    runs-on: ${{ matrix.os }}
+    env:
+      SAG_CC: ${{ matrix.cc }}
+      # MSVC has no UndefinedBehaviorSanitizer (docs/adr/0044-c-toolchains.md).
+      SAG_TEST_SANITIZE: ${{ matrix.cc == 'cl' && '0' || '1' }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The environment of a Developer Command Prompt, for the following steps.
+      - name: Set up the MSVC environment
+        if: matrix.cc == 'cl'
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul && set" | ForEach-Object {
+            if ($_ -match '^([^=]+)=(.*)$') { "$($Matches[1])=$($Matches[2])" >> $env:GITHUB_ENV }
+          }
+      # ThreadSanitizer cannot map its shadow memory with the address randomization of recent
+      # Ubuntu kernels (docs/adr/0045-threads-and-send.md).
+      - name: Allow ThreadSanitizer's memory layout
+        if: runner.os == 'Linux'
+        run: sudo sysctl vm.mmap_rnd_bits=28
+      - name: Show the C compiler
+        if: matrix.cc != 'cl'
+        run: '"$SAG_CC" --version'
+      - run: cargo build -p sagitario_cli
+      # Stage 1 goes outside `compiler/src/`, where the fixed point test writes.
+      - name: Build stage 1
+        run: |
+          target/debug/sag build compiler/src/main.sag
+          cp "compiler/src/main${{ runner.os == 'Windows' && '.exe' || '' }}" "$RUNNER_TEMP/sagc${{ runner.os == 'Windows' && '.exe' || '' }}"
+      - name: Run the suites with stage 1
+        run: SAG_COMPILER="$RUNNER_TEMP/sagc${{ runner.os == 'Windows' && '.exe' || '' }}" cargo test -p sagitario_cli --test suites
+      - name: Reach the fixed point
+        run: cargo test -p sagitario_cli --test selfhost bootstrap_reaches_the_fixed_point
+
   msrv:
     name: minimum supported Rust version
     runs-on: ubuntu-latest

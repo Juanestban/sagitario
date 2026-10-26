@@ -1,6 +1,7 @@
 //! The self-hosted compiler in `compiler/` (docs/adr/0050-lexer-port-and-token-dumps.md): its
-//! modules generated from the Rust compiler are up to date, and `sagc`, built by `sag`, gives
-//! the same results as `sag` on every Sagitario file of the repository.
+//! modules generated from the Rust compiler are up to date, `sagc`, built by `sag`, gives the
+//! same results as `sag` on every Sagitario file of the repository, and the bootstrap reaches its
+//! fixed point (docs/adr/0056-bootstrap-and-acceptance.md).
 //!
 //! `SAG_BLESS=1 cargo test --test selfhost` rewrites the generated modules.
 
@@ -8,6 +9,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::{Mutex, MutexGuard};
 
 fn root() -> PathBuf {
   Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
@@ -169,6 +171,14 @@ fn run(program: &Path, args: &[&str]) -> io::Result<(Option<i32>, String, String
   Ok((output.status.code(), text(&output.stdout), text(&output.stderr)))
 }
 
+/// Both tests that build `sagc` write it to `compiler/src/`, so they take turns.
+static BUILDING: Mutex<()> = Mutex::new(());
+
+/// The turn to build `sagc`, also after a test that held it failed.
+fn building() -> MutexGuard<'static, ()> {
+  BUILDING.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// What `sag build compiler/src/main.sag` writes next to the source: the executable, and with
 /// the MSVC linker its incremental-link and debug files. Removed on drop, also when the test
 /// fails.
@@ -187,6 +197,7 @@ impl Drop for BuiltSagc {
 
 #[test]
 fn sagc_dumps_the_same_results() -> io::Result<()> {
+  let _turn = building();
   let sag = PathBuf::from(env!("CARGO_BIN_EXE_sag"));
   let built = BuiltSagc { base: root().join("compiler/src/main") };
   let (code, _, stderr) = run(&sag, &["build", "compiler/src/main.sag"])?;
@@ -231,6 +242,59 @@ fn sagc_dumps_the_same_results() -> io::Result<()> {
     differences.len(),
     files.len() * dumps.len() * 2,
     differences.iter().take(5).cloned().collect::<Vec<_>>().join("\n\n")
+  );
+
+  Ok(())
+}
+
+/// A copy of stage 1 outside `compiler/src/`, where stage 1 writes stage 2: Windows cannot
+/// replace a running executable. Removed on drop.
+struct Stage1 {
+  dir: PathBuf,
+}
+
+impl Drop for Stage1 {
+  fn drop(&mut self) {
+    let _ = fs::remove_dir_all(&self.dir);
+  }
+}
+
+/// Stage 0 (`sag`) builds stage 1 (`sagc`), stage 1 builds stage 2, and both generate the same C
+/// for the compiler (docs/adr/0049-self-hosting-plan-and-language-prerequisites.md, Q213).
+#[test]
+fn bootstrap_reaches_the_fixed_point() -> io::Result<()> {
+  let _turn = building();
+  let sag = PathBuf::from(env!("CARGO_BIN_EXE_sag"));
+  let built = BuiltSagc { base: root().join("compiler/src/main") };
+  let executable = built.base.with_extension(std::env::consts::EXE_EXTENSION);
+  let (code, _, stderr) = run(&sag, &["build", "compiler/src/main.sag"])?;
+
+  assert!(code == Some(0), "building stage 1 failed:\n{stderr}");
+
+  let stage1 = Stage1 { dir: std::env::temp_dir().join(format!("sag-stage1-{}", std::process::id())) };
+
+  fs::create_dir_all(&stage1.dir)?;
+
+  let stage1_exe = stage1.dir.join("sagc").with_extension(std::env::consts::EXE_EXTENSION);
+
+  fs::copy(&executable, &stage1_exe)?;
+
+  let (code, _, stderr) = run(&stage1_exe, &["build", "compiler/src/main.sag"])?;
+
+  assert!(code == Some(0), "stage 1 failed to build stage 2:\n{stderr}");
+
+  let args = ["check", "--dump=c", "compiler/src/main.sag"];
+  let from_stage1 = run(&stage1_exe, &args)?;
+  let from_stage2 = run(&executable, &args)?;
+
+  assert!(from_stage1.0 == Some(0), "stage 1 failed to generate the C of the compiler:\n{}", from_stage1.2);
+  assert!(
+    from_stage1 == from_stage2,
+    "stages 1 and 2 generate different C for the compiler (exit {:?} vs {:?}):\n{}\n{}",
+    from_stage1.0,
+    from_stage2.0,
+    from_stage2.2,
+    first_difference(&from_stage1.1, &from_stage2.1)
   );
 
   Ok(())

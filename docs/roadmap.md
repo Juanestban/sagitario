@@ -148,11 +148,15 @@ Increments:
    ([ADR-0054](adr/0054-lowering-and-c-generation-port.md)).
 7. The driver and the CLI: `sagc` passes every suite (`SAG_COMPILER`), and executables reserve
    an 8 MiB stack on Windows ([ADR-0055](adr/0055-driver-and-cli-port.md)).
-8. The bootstrap to the fixed point, its CI job and the acceptance.
+8. The bootstrap to the fixed point, its CI job (`bootstrap`) and the acceptance
+   ([ADR-0056](adr/0056-bootstrap-and-acceptance.md)).
 
 **Acceptance:** `sagc` built by the Rust compiler (stage 1) passes every suite on Windows, Linux
 and macOS with clang, gcc and MinGW, and `sagc` built by stage 1 (stage 2) generates the same C
 for the compiler as stage 1.
+
+**Status:** done once the `bootstrap` CI job passes on the three systems; the fixed point holds
+on Windows with official clang, gcc (MinGW) and `cl`.
 
 ## Later phases (post-MVP)
 
@@ -160,6 +164,9 @@ for the compiler as stage 1.
   as designed in [ADR-0048](adr/0048-async-await.md).
 
 ## Deferred decisions
+
+Revisit after F5: whether the Rust compiler retires, for example by bootstrapping from
+committed generated C, and with it the rename of `sagc` to `sag` (ADR-0049, Q212 and Q214).
 
 Revisit after the MVP: shared mutable collections between threads (ADR-0045), bounded
 channels, `try_receive` and timeouts (ADR-0047), `protected` visibility, `weak` captures in closures, operator

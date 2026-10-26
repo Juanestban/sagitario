@@ -63,7 +63,8 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0052](0052-resolver-port-and-resolution-dumps.md) | The resolver port and resolution dumps | Accepted (refined by 0053) |
 | [0053](0053-type-checker-port-and-type-dumps.md) | The type checker port and type dumps | Accepted (refined by 0054) |
 | [0054](0054-lowering-and-c-generation-port.md) | The lowering and C generation port | Accepted (refined by 0055) |
-| [0055](0055-driver-and-cli-port.md) | The driver and CLI port | Accepted |
+| [0055](0055-driver-and-cli-port.md) | The driver and CLI port | Accepted (refined by 0056) |
+| [0056](0056-bootstrap-and-acceptance.md) | The bootstrap and the acceptance of F5 | Accepted |
 
 ## Template
 
