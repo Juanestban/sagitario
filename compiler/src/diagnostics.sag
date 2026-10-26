@@ -1,0 +1,427 @@
+//! Compiler diagnostics: collection and rendering, the port of `sagitario_diagnostics`. The codes
+//! are in `diagnostics::codes`, generated from the Rust registry.
+
+use pkg::span::{SourceFile, SourceMap, Span};
+
+pub enum Severity {
+  Error,
+  Warning,
+}
+
+fn severity_label(severity: Severity) -> String {
+  match severity {
+    Severity::Error => "error",
+    Severity::Warning => "warning",
+  }
+}
+
+/// A secondary location shown with the main one, such as "previous definition here".
+pub struct Label {
+  pub span: Span;
+  pub message: String;
+}
+
+pub struct Diagnostic {
+  pub severity: Severity;
+  /// A registered code, such as `E0001`.
+  pub code: String;
+  pub message: String;
+  pub span: Span;
+  pub labels: List<Label>;
+  pub notes: List<String>;
+  /// Suggestions on how to fix the problem.
+  pub help: List<String>;
+
+  pub fn error(code: String, span: Span, message: String) -> Diagnostic {
+    Diagnostic::with_severity(Severity::Error, code, span, message)
+  }
+
+  pub fn warning(code: String, span: Span, message: String) -> Diagnostic {
+    Diagnostic::with_severity(Severity::Warning, code, span, message)
+  }
+
+  prv fn with_severity(severity: Severity, code: String, span: Span, message: String) -> Diagnostic {
+    Diagnostic { severity: severity, code: code, message: message, span: span, labels: new List(), notes: new List(), help: new List() }
+  }
+
+  pub fn with_label(self, span: Span, message: String) -> Diagnostic {
+    self.labels.push(Label { span: span, message: message });
+    self
+  }
+
+  pub fn with_note(self, note: String) -> Diagnostic {
+    self.notes.push(note);
+    self
+  }
+
+  pub fn with_help(self, help: String) -> Diagnostic {
+    self.help.push(help);
+    self
+  }
+
+  pub fn is_error(self) -> bool {
+    match self.severity {
+      Severity::Error => true,
+      Severity::Warning => false,
+    }
+  }
+}
+
+pub class Diagnostics {
+  prv var items: List<Diagnostic>;
+
+  pub fn new(self) {
+    self.items = new List<Diagnostic>();
+  }
+
+  pub fn push(self, diagnostic: Diagnostic) {
+    self.items.push(diagnostic);
+  }
+
+  /// The number of diagnostics, errors and warnings.
+  pub fn len(self) -> usize {
+    self.items.len()
+  }
+
+  /// Drops the diagnostics after the first `len`: those of an attempt the parser abandons.
+  pub fn truncate(self, len: usize) {
+    while self.items.len() > len {
+      self.items.pop();
+    }
+  }
+
+  pub fn error_count(self) -> usize {
+    var count = 0usize;
+
+    for diagnostic in self.items {
+      if diagnostic.is_error() {
+        count += 1;
+      }
+    }
+
+    count
+  }
+
+  pub fn warning_count(self) -> usize {
+    self.items.len() - self.error_count()
+  }
+
+  pub fn has_errors(self) -> bool {
+    self.error_count() > 0
+  }
+
+  /// Removes and returns every collected diagnostic, ordered by position in the source. The sort
+  /// is stable, so diagnostics at the same position keep the order of the phases.
+  pub fn take(self) -> List<Diagnostic> {
+    const items = self.items;
+
+    self.items = new List<Diagnostic>();
+    items.sort_by((a, b) => if a.span.file != b.span.file { a.span.file.compare(b.span.file) } else { a.span.start.compare(b.span.start) });
+    items
+  }
+}
+
+/// The closest of `candidates` to `name` by edit distance, if it is close enough to be a likely
+/// typo (at most a third of the name's length, and at least one edit). Among equally close
+/// candidates, the first one.
+pub fn closest_match(name: String, candidates: List<String>) -> Option<String> {
+  const third = char_count(name) / 3;
+  const limit = if third < 1 { 1usize } else { third };
+  var best: Option<String> = None;
+  var best_distance = 0usize;
+
+  for candidate in candidates {
+    if candidate == name {
+      continue;
+    }
+
+    const distance = edit_distance(name, candidate);
+
+    if distance <= limit && (best.is_none() || distance < best_distance) {
+      best = Some(candidate);
+      best_distance = distance;
+    }
+  }
+
+  best
+}
+
+/// Levenshtein distance over Unicode scalar values.
+fn edit_distance(a: String, b: String) -> usize {
+  const b_chars: List<char> = b.chars().collect();
+  var previous: List<usize> = new List();
+
+  for index in 0..b_chars.len() + 1 {
+    previous.push(index);
+  }
+
+  var i = 0usize;
+
+  for ca in a.chars() {
+    const current = List::from([i + 1]);
+
+    for j in 0..b_chars.len() {
+      const substitution = previous[j] + (if ca != b_chars[j] { 1usize } else { 0usize });
+      const deletion = previous[j + 1] + 1;
+      const insertion = current[j] + 1;
+      var smallest = substitution;
+
+      if deletion < smallest {
+        smallest = deletion;
+      }
+
+      if insertion < smallest {
+        smallest = insertion;
+      }
+
+      current.push(smallest);
+    }
+
+    previous = current;
+    i += 1;
+  }
+
+  previous.last().unwrap_or(0)
+}
+
+/// How diagnostics are printed: multi-line with source excerpts, or one line each.
+pub enum DiagnosticFormat {
+  Human,
+  Short,
+}
+
+/// Renders a diagnostic; `color` adds ANSI colors to the human format.
+pub fn render(diagnostic: Diagnostic, sources: SourceMap, format: DiagnosticFormat, color: bool) -> String {
+  match format {
+    DiagnosticFormat::Human => render_human(diagnostic, sources, color),
+    DiagnosticFormat::Short => render_short(diagnostic, sources),
+  }
+}
+
+/// `path:line:column: error[E0001]: message`, without a trailing newline.
+pub fn render_short(diagnostic: Diagnostic, sources: SourceMap) -> String {
+  const location = match sources.get(diagnostic.span.file) {
+    Some(file) => {
+      const position = file.line_col(diagnostic.span.start);
+
+      `${file.path}:${position.line}:${position.column}`
+    }
+    None => "<unknown>:0:0",
+  };
+
+  `${location}: ${severity_label(diagnostic.severity)}[${diagnostic.code}]: ${diagnostic.message}`
+}
+
+/// ANSI styles; all empty when color is off.
+struct Style {
+  pub severity: String;
+  pub primary: String;
+  pub secondary: String;
+  pub help: String;
+  pub bold: String;
+  pub reset: String;
+}
+
+fn make_style(severity: Severity, color: bool) -> Style {
+  if !color {
+    return Style { severity: "", primary: "", secondary: "", help: "", bold: "", reset: "" };
+  }
+
+  const red = match severity {
+    Severity::Error => "\u{1b}[1;31m",
+    Severity::Warning => "\u{1b}[1;33m",
+  };
+
+  Style { severity: red, primary: red, secondary: "\u{1b}[1;34m", help: "\u{1b}[1;32m", bold: "\u{1b}[1m", reset: "\u{1b}[0m" }
+}
+
+/// One underline on a source line: `^^^` for the main span, `---` for labels.
+struct Marker {
+  pub line: u32;
+  pub column: u32;
+  pub width: usize;
+  pub primary: bool;
+  pub message: Option<String>;
+}
+
+fn marker(file: SourceFile, span: Span, primary: bool, message: Option<String>) -> Marker {
+  const position = file.line_col(span.start);
+  const underlined = first_line(file.slice(span));
+  const width = char_count(underlined);
+
+  Marker { line: position.line, column: position.column, width: if width == 0 { 1 } else { width }, primary: primary, message: message }
+}
+
+/// The text before the first line break.
+fn first_line(text: String) -> String {
+  match text.find("\n") {
+    Some(end) => text.substring(0, end),
+    None => text,
+  }
+}
+
+fn char_count(text: String) -> usize {
+  var count = 0usize;
+
+  for _ in text.chars() {
+    count += 1;
+  }
+
+  count
+}
+
+/// The markers of one source file of a diagnostic.
+class Group {
+  pub const file: u32;
+  pub const source: SourceFile;
+  pub const markers: List<Marker>;
+
+  pub fn new(self, file: u32, source: SourceFile, first: Marker) {
+    self.file = file;
+    self.source = source;
+    self.markers = List::from([first]);
+  }
+}
+
+/// `text` right-aligned in `width` columns.
+fn right(text: String, width: usize) -> String {
+  const length = char_count(text);
+
+  if length >= width { text } else { " ".repeat(width - length) + text }
+}
+
+/// A rustc-style multi-line rendering with source excerpts, ending with a newline.
+pub fn render_human(diagnostic: Diagnostic, sources: SourceMap, color: bool) -> String {
+  const style = make_style(diagnostic.severity, color);
+  const out = new StringBuilder();
+
+  out.append(`${style.severity}${severity_label(diagnostic.severity)}[${diagnostic.code}]${style.reset}${style.bold}: ${diagnostic.message}${style.reset}\n`);
+
+  const file = match sources.get(diagnostic.span.file) {
+    Some(file) => file,
+    None => return out.to_string(),
+  };
+  // Source excerpts, one per file: the primary span's file first, then the files of labels
+  // pointing elsewhere (such as a declaration in another module).
+  const groups = List::from([new Group(diagnostic.span.file, file, marker(file, diagnostic.span, true, None))]);
+  const unplaced: List<String> = new List();
+
+  for label in diagnostic.labels {
+    const label_file = match sources.get(label.span.file) {
+      Some(label_file) => label_file,
+      None => {
+        unplaced.push(label.message);
+        continue;
+      }
+    };
+    const label_marker = marker(label_file, label.span, false, Some(label.message));
+    var placed = false;
+
+    for group in groups {
+      if !placed && group.file == label.span.file {
+        group.markers.push(label_marker);
+        placed = true;
+      }
+    }
+
+    if !placed {
+      groups.push(new Group(label.span.file, label_file, label_marker));
+    }
+  }
+
+  const main = file.line_col(diagnostic.span.start);
+  var widest = main.line;
+  var any = false;
+
+  for group in groups {
+    for current in group.markers {
+      if !any || current.line > widest {
+        widest = current.line;
+        any = true;
+      }
+    }
+  }
+
+  const width = `${widest}`.len();
+  const pad = " ".repeat(width);
+  var index = 0usize;
+
+  for group in groups {
+    group.markers.sort_by((a, b) => if a.line != b.line { a.line.compare(b.line) } else { a.column.compare(b.column) });
+
+    var arrow = "-->";
+    var line = main.line;
+    var column = main.column;
+
+    if index > 0 {
+      if let Some(first) = group.markers.first() {
+        arrow = ":::";
+        line = first.line;
+        column = first.column;
+      }
+    }
+
+    out.append(`${pad}${style.secondary}${arrow}${style.reset} ${group.source.path}:${line}:${column}\n`);
+    out.append(`${pad} ${style.secondary}|${style.reset}\n`);
+
+    var previous: Option<u32> = None;
+
+    for current in group.markers {
+      const same_line = match previous {
+        Some(line) => line == current.line,
+        None => false,
+      };
+
+      if !same_line {
+        if let Some(line) = previous {
+          if current.line > line + 1 {
+            out.append(`${style.secondary}...${style.reset}\n`);
+          }
+        }
+
+        const number = right(`${current.line}`, width);
+
+        out.append(`${style.secondary}${number} |${style.reset} ${group.source.line_text(current.line)}\n`);
+        previous = Some(current.line);
+      }
+
+      // Keep tabs so the underline lines up with the source line.
+      const prefix = new StringBuilder();
+      var taken = 0u32;
+
+      for c in group.source.line_text(current.line).chars() {
+        if taken + 1 >= current.column {
+          break;
+        }
+
+        prefix.append_char(if c == '\t' { '\t' } else { ' ' });
+        taken += 1;
+      }
+
+      const symbol = if current.primary { "^" } else { "-" };
+      const tint = if current.primary { style.primary } else { style.secondary };
+      const message = match current.message {
+        Some(message) => ` ${message}`,
+        None => "",
+      };
+
+      out.append(`${pad} ${style.secondary}|${style.reset} ${prefix.to_string()}${tint}${symbol.repeat(current.width)}${message}${style.reset}\n`);
+    }
+
+    index += 1;
+  }
+
+  for note in diagnostic.notes {
+    out.append(`${pad} ${style.secondary}=${style.reset} ${style.bold}note${style.reset}: ${note}\n`);
+  }
+
+  for note in unplaced {
+    out.append(`${pad} ${style.secondary}=${style.reset} ${style.bold}note${style.reset}: ${note}\n`);
+  }
+
+  for help in diagnostic.help {
+    out.append(`${pad} ${style.secondary}=${style.reset} ${style.help}help${style.reset}: ${help}\n`);
+  }
+
+  out.to_string()
+}

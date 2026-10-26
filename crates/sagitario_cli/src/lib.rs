@@ -31,7 +31,7 @@ Options:
 pub const EXIT_USAGE: u8 = 2;
 
 pub use sagitario_diagnostics::DiagnosticFormat;
-pub use sagitario_driver::CompileOptions;
+pub use sagitario_driver::{CompileOptions, Dump};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -116,6 +116,22 @@ fn parse_compile_options<I: Iterator<Item = String>>(mut args: I, mode: Mode) ->
         options.cc = Some(flag_value(&flag, inline_value, &mut args)?);
       }
       "--target" => options.target = Some(flag_value(&flag, inline_value, &mut args)?),
+      // Hidden: for the differential tests of the self-hosted compiler.
+      "--dump" => {
+        if mode != Mode::Check {
+          return Err(usage_error("`--dump` is only accepted by `sag check`"));
+        }
+
+        options.dump = match flag_value(&flag, inline_value, &mut args)?.as_str() {
+          "tokens" => Some(Dump::Tokens),
+          "ast" => Some(Dump::Ast),
+          "resolve" => Some(Dump::Resolve),
+          "declarations" => Some(Dump::Declarations),
+          "types" => Some(Dump::Types),
+          "c" => Some(Dump::C),
+          other => return Err(usage_error(format!("unknown dump `{other}`; expected `tokens`, `ast`, `resolve`, `declarations`, `types` or `c`"))),
+        };
+      }
       "--diagnostic-format" => {
         options.diagnostic_format = match flag_value(&flag, inline_value, &mut args)?.as_str() {
           "human" => DiagnosticFormat::Human,
@@ -248,6 +264,20 @@ mod tests {
 
     assert_eq!(parse(&["check", "--target", "aarch64-linux-android", "main.sag"]), Ok(Command::Check(expected)));
     assert_eq!(parse(&["targets"]), Ok(Command::Targets));
+  }
+
+  #[test]
+  fn parses_the_hidden_dump() {
+    let expected = CompileOptions { dump: Some(Dump::Tokens), ..options("main.sag") };
+
+    let types = CompileOptions { dump: Some(Dump::Types), ..options("main.sag") };
+    let c = CompileOptions { dump: Some(Dump::C), ..options("main.sag") };
+
+    assert_eq!(parse(&["check", "--dump=tokens", "main.sag"]), Ok(Command::Check(expected)));
+    assert_eq!(parse(&["check", "--dump=types", "main.sag"]), Ok(Command::Check(types)));
+    assert_eq!(parse(&["check", "--dump=c", "main.sag"]), Ok(Command::Check(c)));
+    assert!(parse(&["check", "--dump=sir", "main.sag"]).is_err());
+    assert!(parse(&["build", "--dump=tokens", "main.sag"]).is_err());
   }
 
   #[test]

@@ -128,21 +128,52 @@ Increments:
 `Atomic` tracks progress, and a producer feeds consumers through a `Channel`; it passes with
 ThreadSanitizer on Linux and macOS, and with the leak check.
 
+## F5: Self-hosting (post-MVP)
+
+Rewrite the compiler in Sagitario until it compiles itself
+([ADR-0049](adr/0049-self-hosting-plan-and-language-prerequisites.md)). Each pass is checked
+against the Rust compiler's on every program under `tests/`.
+
+Increments:
+
+1. Language prerequisites: module-level constants, `include_str`, `if let` and `while let`.
+2. Dumps for differential tests (`--dump=tokens`), and `span`, `diagnostics` and `lexer`;
+   `char::from_u32` ([ADR-0050](adr/0050-lexer-port-and-token-dumps.md)).
+3. `parser`, with AST dumps (`--dump=ast`) ([ADR-0051](adr/0051-parser-port-and-ast-dumps.md)).
+4. `resolve` and the module loader, with resolution dumps (`--dump=resolve`)
+   ([ADR-0052](adr/0052-resolver-port-and-resolution-dumps.md)).
+5. `types`, in two halves with their dumps: 5a the declarations (`--dump=declarations`), 5b the
+   bodies of functions (`--dump=types`) ([ADR-0053](adr/0053-type-checker-port-and-type-dumps.md)).
+6. `sir` and `codegen_c`, compared through the generated C (`--dump=c`)
+   ([ADR-0054](adr/0054-lowering-and-c-generation-port.md)).
+7. The driver and the CLI: `sagc` passes every suite (`SAG_COMPILER`), and executables reserve
+   an 8 MiB stack on Windows ([ADR-0055](adr/0055-driver-and-cli-port.md)).
+8. The bootstrap to the fixed point, its CI job (`bootstrap`) and the acceptance
+   ([ADR-0056](adr/0056-bootstrap-and-acceptance.md)).
+
+**Acceptance:** `sagc` built by the Rust compiler (stage 1) passes every suite on Windows, Linux
+and macOS with clang, gcc and MinGW, and `sagc` built by stage 1 (stage 2) generates the same C
+for the compiler as stage 1.
+
+**Status:** done once the `bootstrap` CI job passes on the three systems; the fixed point holds
+on Windows with official clang, gcc (MinGW) and `cl`.
+
 ## Later phases (post-MVP)
 
-- **F5 Self-hosting:** rewrite the compiler in Sagitario until it compiles itself.
 - **F6 `async`/`await`:** stackless tasks (`Task<T>`) on a single-threaded executor per thread,
   as designed in [ADR-0048](adr/0048-async-await.md).
 
 ## Deferred decisions
+
+Revisit after F5: whether the Rust compiler retires, for example by bootstrapping from
+committed generated C, and with it the rename of `sagc` to `sag` (ADR-0049, Q212 and Q214).
 
 Revisit after the MVP: shared mutable collections between threads (ADR-0045), bounded
 channels, `try_receive` and timeouts (ADR-0047), `protected` visibility, `weak` captures in closures, operator
 overloading and derived `Eq`, binding generation, internationalized diagnostics, automatic
 error conversion with `From<T>` (and implementing one generic interface several times),
 `Error::source()` and backtraces, a `Display` interface, slices, open ranges, general tuples,
-raw strings, `@test` / `@deprecated`, static fields and mutable globals, `sag doc`, `if let` /
-`while let`, inference of `None`/`Ok`/`Err` from later uses, re-exports (`pub use`), glob
+raw strings, `@test` / `@deprecated`, static fields and mutable globals, `sag doc`, inference of `None`/`Ok`/`Err` from later uses, re-exports (`pub use`), glob
 imports, importing enum variants or a type's functions, `use` inside blocks.
 Undecided points needed during the MVP are tracked as open questions in the
 [spec index](spec/README.md#open-questions).

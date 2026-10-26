@@ -6,13 +6,14 @@
 //! interfaces and imports share one namespace per module; the members of a struct or class (fields
 //! and functions) or of an enum (variants and functions) share another one per type.
 
+pub mod dump;
 mod modules;
 
 use std::collections::{HashMap, HashSet};
 
 use sagitario_ast::{
-  Block, ClassDecl, EnumDecl, Expr, ExprKind, ExternFn, FnDecl, GenericParam, Ident, InterfaceDecl, Item, Module, NodeId, Package, Path, Pattern,
-  PatternKind, Stmt, StructDecl, TemplatePart, TypeExpr, TypeExprKind, VariantFields, Visibility,
+  Block, ClassDecl, ConstDecl, EnumDecl, Expr, ExprKind, ExternFn, FnDecl, GenericParam, Ident, InterfaceDecl, Item, Module, NodeId, Package, Path,
+  Pattern, PatternKind, Stmt, StructDecl, TemplatePart, TypeExpr, TypeExprKind, VariantFields, Visibility,
 };
 use sagitario_diagnostics::{Diagnostic, Diagnostics, codes};
 use sagitario_span::Span;
@@ -36,10 +37,14 @@ pub enum Builtin {
   ListFrom,
   /// `std::process::exit(code)`, which ends the program and never returns.
   Exit,
+  /// `include_str(path)`: the text of a file, as the value of a module-level constant.
+  IncludeStr,
+  /// `char::from_u32(code)`: the character with that code point, or `None`.
+  CharFromU32,
 }
 
 impl Builtin {
-  const ALL: [Builtin; 4] = [Builtin::Print, Builtin::Println, Builtin::Eprintln, Builtin::Panic];
+  const ALL: [Builtin; 5] = [Builtin::Print, Builtin::Println, Builtin::Eprintln, Builtin::Panic, Builtin::IncludeStr];
 
   pub fn name(self) -> &'static str {
     match self {
@@ -52,6 +57,8 @@ impl Builtin {
       Builtin::ErrorNew => "Error",
       Builtin::ListFrom => "List::from",
       Builtin::Exit => "exit",
+      Builtin::IncludeStr => "include_str",
+      Builtin::CharFromU32 => "char::from_u32",
     }
   }
 
@@ -79,6 +86,10 @@ pub struct ClassId(pub u32);
 /// Index of an interface in `Resolution::interfaces`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct InterfaceId(pub u32);
+
+/// Index of a module-level constant in `Resolution::consts`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ConstId(pub u32);
 
 /// Index of a C function declared in an `extern` block, in `Resolution::externs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -258,6 +269,8 @@ pub enum Res {
   Local(LocalId),
   Struct(StructId),
   Variant(VariantRef),
+  /// A module-level constant.
+  Const(ConstId),
 }
 
 /// The declaration a type parameter belongs to.
@@ -288,6 +301,7 @@ pub enum TypeRes {
 pub enum ItemRef {
   Fn(FnId),
   Extern(ExternId),
+  Const(ConstId),
   Type(TypeItem),
   Module(ModId),
   Std(StdItem),
@@ -354,6 +368,14 @@ pub struct FnInfo {
 
 /// Where a C function of an `extern` block is declared.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConstInfo {
+  /// Index in `Package::modules`.
+  pub module: usize,
+  /// Index in `Module::items`.
+  pub item: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExternInfo {
   /// Index in `Package::modules`.
   pub module: usize,
@@ -385,6 +407,8 @@ pub struct Resolution {
   pub classes: Vec<TypeInfo>,
   /// Indexed by `InterfaceId`.
   pub interfaces: Vec<TypeInfo>,
+  /// Indexed by `ConstId`.
+  pub consts: Vec<ConstInfo>,
   /// The prelude module, whose public items every module sees.
   pub prelude: Option<ModId>,
   /// `std`, the parent of the standard library modules written in Sagitario.
@@ -429,6 +453,15 @@ impl Resolution {
 
     match package.modules.get(info.module)?.items.get(info.item)? {
       Item::Extern(block) => block.functions.get(info.member),
+      _ => None,
+    }
+  }
+
+  pub fn const_decl<'p>(&self, package: &'p Package, id: ConstId) -> Option<&'p ConstDecl> {
+    let info = self.consts.get(id.0 as usize)?;
+
+    match package.modules.get(info.module)?.items.get(info.item)? {
+      Item::Const(decl) => Some(decl),
       _ => None,
     }
   }
@@ -794,6 +827,22 @@ pub fn resolve(package: &Package, diagnostics: &mut Diagnostics) -> Resolution {
     resolution.type_paths.extend(output.type_paths);
   }
 
+  // The type and value of each module-level constant, which other constants may name.
+  for index in 0..resolution.consts.len() {
+    let id = ConstId(index as u32);
+    let (Some(decl), Some(info)) = (resolution.const_decl(package, id), resolution.consts.get(index).copied()) else { continue };
+    let mut resolver = Resolver::new(package, &resolution, module_of(&module_ids, info.module), None, diagnostics);
+
+    resolver.type_expr(&decl.ty);
+    resolver.expr(&decl.value);
+
+    let output = resolver.finish();
+
+    resolution.paths.extend(output.paths);
+    resolution.type_paths.extend(output.type_paths);
+    used.extend(output.used);
+  }
+
   for (id, decl) in resolution.fn_decls(package) {
     let Some(info) = resolution.functions.get(id.0 as usize).copied() else { continue };
     let mut resolver = Resolver::new(package, &resolution, module_of(&module_ids, info.module), info.owner, diagnostics);
@@ -934,6 +983,13 @@ fn declare_items(resolution: &mut Resolution, source: usize, node: ModId, module
 
         vec![(&decl.name, ItemRef::Type(owner), decl.visibility)]
       }
+      Item::Const(decl) => {
+        let id = ConstId(resolution.consts.len() as u32);
+
+        resolution.consts.push(ConstInfo { module: source, item: index });
+
+        vec![(&decl.name, ItemRef::Const(id), decl.visibility)]
+      }
     };
 
     for (name, item_ref, visibility) in names {
@@ -1014,6 +1070,8 @@ enum Named {
   Prelude(EnumKind),
   /// The prelude's `List`, a built-in type with the static function `from`.
   List,
+  /// The primitive `char`, with the static function `from_u32`.
+  Char,
 }
 
 /// A name bound by a pattern, for checking the alternatives of `|`.
@@ -1204,11 +1262,15 @@ impl<'a> Resolver<'a> {
     prelude.items.get(name).filter(|declared| declared.visibility == Visibility::Public).map(|declared| declared.item)
   }
 
-  /// Names of the current module's items and imports, for "similar name" suggestions.
+  /// Names of the current module's items and imports, for "similar name" suggestions. They are
+  /// sorted: among equally close names, the suggestion must not depend on the order of a hash
+  /// map.
   fn item_names(&self) -> Vec<String> {
     let Some(info) = self.resolution.module(self.module) else { return Vec::new() };
+    let mut names: Vec<String> = info.items.keys().chain(info.imports.keys()).cloned().collect();
 
-    info.items.keys().chain(info.imports.keys()).cloned().collect()
+    names.sort();
+    names
   }
 
   fn block(&mut self, block: &Block) {
@@ -1557,6 +1619,7 @@ impl<'a> Resolver<'a> {
     match (named, rest) {
       (Named::Item(ItemRef::Fn(id)), []) => Some(Res::Fn(id)),
       (Named::Item(ItemRef::Extern(id)), []) => Some(Res::Extern(id)),
+      (Named::Item(ItemRef::Const(id)), []) => Some(Res::Const(id)),
       (Named::Item(ItemRef::Std(StdItem::StringFromC)), []) => Some(Res::Builtin(Builtin::StringFromC)),
       (Named::Item(ItemRef::Std(StdItem::Exit)), []) => Some(Res::Builtin(Builtin::Exit)),
       (Named::Item(ItemRef::Std(StdItem::CString)), [member]) => {
@@ -1599,6 +1662,12 @@ impl<'a> Resolver<'a> {
         }
 
         self.error(member.span, format!("no function `{}` in `List`", member.name));
+
+        None
+      }
+      (Named::Char, [member]) if member.name == "from_u32" => Some(Res::Builtin(Builtin::CharFromU32)),
+      (Named::Char, _) => {
+        self.error(last.span, "`char` has one static function, `char::from_u32`");
 
         None
       }
@@ -1673,6 +1742,7 @@ impl<'a> Resolver<'a> {
     match self.lookup_item(name) {
       Some(ItemRef::Fn(id)) => return Some(Res::Fn(id)),
       Some(ItemRef::Extern(id)) => return Some(Res::Extern(id)),
+      Some(ItemRef::Const(id)) => return Some(Res::Const(id)),
       Some(ItemRef::Std(StdItem::StringFromC)) => return Some(Res::Builtin(Builtin::StringFromC)),
       Some(ItemRef::Std(StdItem::Exit)) => return Some(Res::Builtin(Builtin::Exit)),
       Some(ItemRef::Std(StdItem::CType(_) | StdItem::CString)) => {
@@ -1741,6 +1811,7 @@ impl<'a> Resolver<'a> {
         None if name == "Option" => Named::Prelude(EnumKind::Option),
         None if name == "Result" => Named::Prelude(EnumKind::Result),
         None if name == "List" => Named::List,
+        None if name == "char" => Named::Char,
         None if name == "std" => Named::Item(ItemRef::Std(StdItem::Root)),
         // A dependency of the package, unless a name of the module hides it.
         None if self.resolution.dependency_root(self.package, self.module, name).is_some() => {
@@ -1880,7 +1951,9 @@ impl<'a> Resolver<'a> {
 
     let mut diagnostic =
       Diagnostic::error(codes::UNRESOLVED_NAME, segment.span, format!("cannot find `{name}` in the module `{}`", info.display_path()));
-    let candidates: Vec<&str> = info.items.keys().chain(info.children.keys()).map(String::as_str).collect();
+    let mut candidates: Vec<&str> = info.items.keys().chain(info.children.keys()).map(String::as_str).collect();
+
+    candidates.sort_unstable();
 
     if let Some(similar) = sagitario_diagnostics::closest_match(name, candidates) {
       diagnostic = diagnostic.with_help(format!("a name with a similar spelling exists: `{similar}`"));
@@ -2084,6 +2157,7 @@ impl<'a> Resolver<'a> {
       ItemRef::Fn(_) | ItemRef::Extern(_) | ItemRef::Std(StdItem::StringFromC | StdItem::Exit) => "a function",
       ItemRef::Module(_) | ItemRef::Std(StdItem::Root | StdItem::Ffi) => "a module",
       ItemRef::Type(_) | ItemRef::Std(StdItem::CType(_) | StdItem::CString) => "a type",
+      ItemRef::Const(_) => "a constant",
     };
 
     self.error(span, format!("`{name}` is {what}, not a type"));

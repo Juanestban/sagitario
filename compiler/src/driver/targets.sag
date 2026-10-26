@@ -1,0 +1,277 @@
+//! Cross-compilation targets (docs/nova.md#targets): Android through the NDK, and iOS through
+//! Xcode on macOS. The port of `sagitario_driver::targets`.
+
+use pkg::ast::TargetInfo;
+use pkg::diagnostics;
+use pkg::driver::{CCompiler, EXIT_FAILURE, exe_extension, macos};
+use pkg::loader::push_path;
+use std::env;
+use std::fs;
+use std::process::Command;
+
+pub enum Platform {
+  Android,
+  Ios,
+}
+
+/// A machine programs can be compiled for, besides the one running the compiler.
+pub struct Target {
+  /// The name `--target` takes, as in Rust.
+  pub name: String;
+  /// What `sag targets` says about it.
+  pub description: String;
+  pub platform: Platform;
+  /// The start of clang's triple.
+  pub arch: String;
+  /// An iOS simulator rather than a device.
+  pub simulator: bool;
+  pub info: TargetInfo;
+}
+
+/// The minimum Android API level: Android 7.0.
+const ANDROID_API: u32 = 24;
+
+/// The minimum iOS version.
+const IOS_VERSION: String = "13.0";
+
+fn lp64() -> TargetInfo {
+  TargetInfo { pointer_width: 64, long_is_32: false, char_is_unsigned: false }
+}
+
+fn target(name: String, description: String, platform: Platform, arch: String, simulator: bool, info: TargetInfo) -> Target {
+  Target { name: name, description: description, platform: platform, arch: arch, simulator: simulator, info: info }
+}
+
+pub fn targets() -> List<Target> {
+  List::from([
+    target("aarch64-linux-android", "Android on 64-bit ARM", Platform::Android, "aarch64-linux-android", false, TargetInfo { pointer_width: 64, long_is_32: false, char_is_unsigned: true }),
+    target("armv7-linux-androideabi", "Android on 32-bit ARM", Platform::Android, "armv7a-linux-androideabi", false, TargetInfo { pointer_width: 32, long_is_32: true, char_is_unsigned: true }),
+    target("x86_64-linux-android", "Android on x86-64 (the emulator)", Platform::Android, "x86_64-linux-android", false, lp64()),
+    target("aarch64-apple-ios", "iOS devices", Platform::Ios, "arm64-apple-ios", false, lp64()),
+    target("aarch64-apple-ios-sim", "the iOS simulator on Apple silicon", Platform::Ios, "arm64-apple-ios", true, lp64()),
+    target("x86_64-apple-ios", "the iOS simulator on Intel Macs", Platform::Ios, "x86_64-apple-ios", true, lp64()),
+  ])
+}
+
+/// The target called `name`, or an error listing the supported ones.
+pub fn find(name: String) -> Result<Target, i32> {
+  const names: List<String> = new List();
+
+  for candidate in targets() {
+    if candidate.name == name {
+      return Ok(candidate);
+    }
+
+    names.push(candidate.name);
+  }
+
+  eprintln(`error: unknown target \`${name}\``);
+
+  match diagnostics::closest_match(name, names) {
+    Some(similar) => eprintln(`help: a target with a similar name exists: \`${similar}\``),
+    None => eprintln(`note: the supported targets are ${names.join(", ")}; \`sag targets\` describes them`),
+  }
+
+  Err(EXIT_FAILURE)
+}
+
+/// The triple clang compiles for.
+pub fn clang_triple(target: Target) -> String {
+  match target.platform {
+    Platform::Android => `${target.arch}${ANDROID_API}`,
+    Platform::Ios => if target.simulator { `${target.arch}${IOS_VERSION}-simulator` } else { `${target.arch}${IOS_VERSION}` },
+  }
+}
+
+/// The C compiler for `target`, with the arguments every invocation needs.
+pub fn compiler(target: Target) -> Result<CCompiler, i32> {
+  var command = "";
+  const args: List<String> = new List();
+
+  match target.platform {
+    Platform::Android => {
+      command = android_clang()?;
+    }
+    Platform::Ios => {
+      const sysroot = ios_sysroot(target.simulator)?;
+
+      command = sysroot.clang;
+      args.push("-isysroot");
+      args.push(sysroot.path);
+    }
+  }
+
+  args.insert(0, `--target=${clang_triple(target)}`);
+
+  const ran = new Command(command).args(args).arg("-dumpmachine").input("").output();
+
+  if let Ok(output) = ran {
+    if output.status.success() {
+      return Ok(new CCompiler(command, args, output.stdout.trim(), false));
+    }
+  }
+
+  eprintln(`error: cannot run the C compiler \`${command}\` for the target \`${target.name}\``);
+  Err(EXIT_FAILURE)
+}
+
+/// The value of an environment variable naming a directory, if it is set and not empty.
+fn dir_from_env(name: String) -> Option<String> {
+  match env::variable(name) {
+    Some(value) => if value.is_empty() { None } else { Some(value) },
+    None => None,
+  }
+}
+
+fn is_ndk(dir: String) -> bool {
+  fs::is_dir(push_path(push_path(push_path(dir, "toolchains"), "llvm"), "prebuilt"))
+}
+
+/// The numbers of a version such as `26.1.10909125`; parts that are not numbers count as 0.
+fn version_of(name: String) -> List<u64> {
+  const parts: List<u64> = new List();
+
+  for part in name.split(".") {
+    parts.push(part.parse_u64().unwrap_or(0));
+  }
+
+  parts
+}
+
+/// Whether version `a` is before `b`, comparing their numbers in order as Rust compares vectors.
+fn version_before(a: List<u64>, b: List<u64>) -> bool {
+  var index = 0usize;
+
+  while index < a.len() && index < b.len() {
+    if a[index] != b[index] {
+      return a[index] < b[index];
+    }
+
+    index += 1;
+  }
+
+  a.len() < b.len()
+}
+
+/// The NDK's directory: `ANDROID_NDK_HOME`, `ANDROID_NDK_ROOT`, then the newest NDK in the `ndk`
+/// directory of `ANDROID_HOME` or `ANDROID_SDK_ROOT`.
+fn find_ndk() -> Option<String> {
+  for name in List::from(["ANDROID_NDK_HOME", "ANDROID_NDK_ROOT"]) {
+    if let Some(dir) = dir_from_env(name) {
+      if is_ndk(dir) {
+        return Some(dir);
+      }
+    }
+  }
+
+  for name in List::from(["ANDROID_HOME", "ANDROID_SDK_ROOT"]) {
+    const sdk = match dir_from_env(name) {
+      Some(found) => found,
+      None => continue,
+    };
+    const ndk = push_path(sdk, "ndk");
+    const entries = match fs::read_dir(ndk) {
+      Ok(found) => found,
+      Err(_) => continue,
+    };
+    var newest: Option<String> = None;
+    var newest_version: List<u64> = new List();
+
+    // Entries come sorted, so among equal versions the last one wins, as in Rust.
+    for entry in entries {
+      const dir = push_path(ndk, entry);
+
+      if !is_ndk(dir) {
+        continue;
+      }
+
+      const version = version_of(entry);
+
+      if newest.is_none() || !version_before(version, newest_version) {
+        newest = Some(dir);
+        newest_version = version;
+      }
+    }
+
+    if newest.is_some() {
+      return newest;
+    }
+  }
+
+  None
+}
+
+/// The NDK's clang, in the one host directory of `toolchains/llvm/prebuilt`.
+fn android_clang() -> Result<String, i32> {
+  const ndk = match find_ndk() {
+    Some(found) => found,
+    None => {
+      eprintln("error: cannot find the Android NDK");
+      eprintln("help: install it with Android Studio's SDK Manager, then set ANDROID_NDK_HOME to its directory (such as `.../Android/Sdk/ndk/26.1.10909125`)");
+      return Err(EXIT_FAILURE);
+    }
+  };
+  const prebuilt = push_path(push_path(push_path(ndk, "toolchains"), "llvm"), "prebuilt");
+  var clang: Option<String> = None;
+
+  if let Ok(entries) = fs::read_dir(prebuilt) {
+    for entry in entries {
+      const host = push_path(prebuilt, entry);
+
+      if clang.is_none() && fs::is_dir(host) {
+        const extension = exe_extension();
+        const name = if extension.is_empty() { "clang" } else { "clang." + extension };
+
+        clang = Some(push_path(push_path(host, "bin"), name));
+      }
+    }
+  }
+
+  if let Some(found) = clang {
+    if fs::is_file(found) {
+      return Ok(found);
+    }
+  }
+
+  eprintln(`error: the Android NDK at \`${ndk}\` has no clang in \`toolchains/llvm/prebuilt/*/bin\``);
+  Err(EXIT_FAILURE)
+}
+
+/// Xcode's clang and the path of an iOS SDK.
+struct Sysroot {
+  pub clang: String;
+  pub path: String;
+}
+
+/// What `xcrun --sdk <sdk> <query>` prints, if it succeeds and prints something.
+fn xcrun(sdk: String, query: List<String>) -> Option<String> {
+  const output = match new Command("xcrun").arg("--sdk").arg(sdk).args(query).input("").output() {
+    Ok(found) => found,
+    Err(_) => return None,
+  };
+  const text = output.stdout.trim();
+
+  if output.status.success() && !text.is_empty() { Some(text) } else { None }
+}
+
+/// Xcode's clang and the iOS SDK, through `xcrun`.
+fn ios_sysroot(simulator: bool) -> Result<Sysroot, i32> {
+  if !macos() {
+    eprintln("error: code for iOS can only be built on macOS, with Xcode");
+    return Err(EXIT_FAILURE);
+  }
+
+  const sdk = if simulator { "iphonesimulator" } else { "iphoneos" };
+  const clang = xcrun(sdk, List::from(["--find", "clang"]));
+  const sysroot = xcrun(sdk, List::from(["--show-sdk-path"]));
+
+  if let Some(found_clang) = clang {
+    if let Some(found_sysroot) = sysroot {
+      return Ok(Sysroot { clang: found_clang, path: found_sysroot });
+    }
+  }
+
+  eprintln(`error: cannot find the iOS SDK (\`${sdk}\`) with \`xcrun\``);
+  eprintln("help: install Xcode, then run `xcode-select --install` and open Xcode once");
+  Err(EXIT_FAILURE)
+}

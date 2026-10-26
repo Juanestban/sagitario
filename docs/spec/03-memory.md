@@ -35,8 +35,10 @@ var total = 0;   // can be reassigned
 total += x;
 ```
 
-- `const` at module level declares a compile-time constant: `const PI: f64 = 3.14159;`.
-- There is no `let` and no `mut`.
+- `const` at module level declares a constant the compiler computes
+  ([below](#module-level-constants)).
+- There is no `mut`, and `let` only appears in `if let` and `while let`
+  ([control flow](06-control-flow.md#if-let-and-while-let)).
 - The type annotation is optional: `const x: i64 = 5;` or `const x = 5;`.
 - A binding may be declared without a value (`var x: i32;`) if the compiler can prove it is
   assigned before every use (*definite assignment*); a `const` declared this way must be
@@ -47,6 +49,29 @@ total += x;
 - Parameters behave like `const`. Assigning to a `const` or a parameter is an error.
 - Warnings: a `var` that is never reassigned (suggests `const`), and an unused binding unless
   its name starts with `_`.
+
+## Module-level constants
+
+Rationale: [ADR-0049](../adr/0049-self-hosting-plan-and-language-prerequisites.md).
+
+```sag
+pub const MAX_USERS: i32 = 100;
+const TIMEOUT_MS: u64 = 60 * 1_000;
+const LIMIT: i64 = MAX_USERS as i64 * 2;
+const GREETING: String = "hello, " + "world";
+const RUNTIME: String = include_str("../runtime/runtime.c");
+```
+
+- A constant is an item: `pub` exports it, `use` imports it, and `limits::MAX_USERS` names it
+  in full. Its type is always written, and is an integer, a float, `bool`, `char` or `String`.
+- The compiler computes its value from literals, other constants, unary `-` and `!`, the
+  arithmetic operators (`+` also joins strings), comparisons, `&&`, `||`, `as` between primitive
+  types and `include_str`. A constant cannot need its own value.
+- A value outside its type, a division by zero, a float that is not finite, or any other
+  expression (a call, a lambda, `new`) is an error.
+- `include_str("path")` is the text of a file, as a `String`. It is only valid in the value of
+  a module-level constant; the path is a string literal relative to the directory of the
+  source file, and the file must be UTF-8. The file is read when the program is compiled.
 
 ## Struct mutability (F1)
 

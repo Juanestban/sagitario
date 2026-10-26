@@ -291,8 +291,11 @@ fn sag(args: &[&str], file: &Path) -> Result<Output, String> {
   sag_command(args).arg(file).output().map_err(|error| format!("cannot run `sag`: {error}"))
 }
 
+/// The compiler under test: `SAG_COMPILER`, such as the self-hosted `sagc`
+/// (docs/adr/0055-driver-and-cli-port.md), or else the `sag` built by Cargo.
 fn sag_command(args: &[&str]) -> Command {
-  let mut command = Command::new(env!("CARGO_BIN_EXE_sag"));
+  let compiler = std::env::var_os("SAG_COMPILER").filter(|path| !path.is_empty()).unwrap_or_else(|| env!("CARGO_BIN_EXE_sag").into());
+  let mut command = Command::new(compiler);
 
   // Programs fail with exit code 102 if ARC objects leak (docs/testing.md#memory-checks).
   command.args(args).env("SAG_LEAK_CHECK", "1");

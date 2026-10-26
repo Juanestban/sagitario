@@ -1,0 +1,231 @@
+//! The resolution as text, the port of `sagitario_resolve::dump` (`check --dump=resolve`,
+//! docs/adr/0052-resolver-port-and-resolution-dumps.md). Sections in a fixed order, one entry
+//! per line; names in a module and the maps by node id are sorted.
+
+use pkg::ast::Visibility;
+use pkg::resolve::{EnumKind, ItemRef, LocalKind, ParamOwner, Res, Resolution, StdItem, TypeInfo, TypeItem, TypeRes};
+use pkg::span::Span;
+
+pub fn dump(resolution: Resolution) -> String {
+  const out = new StringBuilder();
+
+  for index in 0..resolution.modules.len() {
+    const module = resolution.modules[index];
+    const path = if module.path.is_empty() { "-" } else { module.path.join("::") };
+    const root = if module.root.is_empty() { "-" } else { module.root };
+
+    out.append(`module ${index} path=${path} std=${module.in_std} package=${module.package} root=${root} source=${optional_usize(module.source)} parent=${optional_u32(module.parent)}\n`);
+
+    for name in sorted_keys(module.children.keys().collect()) {
+      out.append(`  child ${name} -> ${module.children.get(name).unwrap_or(0)}\n`);
+    }
+
+    for name in sorted_keys(module.items.keys().collect()) {
+      if let Some(declared) = module.items.get(name) {
+        const visibility = match declared.visibility {
+          Visibility::Module => "module",
+          Visibility::Public => "pub",
+          Visibility::Private => "prv",
+        };
+
+        out.append(`  item ${name} -> ${item_ref(declared.item)} ${visibility} ${span(declared.span)}\n`);
+      }
+    }
+
+    for name in sorted_keys(module.imports.keys().collect()) {
+      if let Some(imported) = module.imports.get(name) {
+        out.append(`  import ${name} -> ${item_ref(imported.item)} ${span(imported.span)}\n`);
+      }
+    }
+  }
+
+  for index in 0..resolution.functions.len() {
+    const info = resolution.functions[index];
+    const owner = match info.owner {
+      Some(item) => type_item(item),
+      None => "-",
+    };
+
+    out.append(`fn ${index} module=${info.module} item=${info.item} member=${optional_usize(info.member)} owner=${owner}\n`);
+  }
+
+  type_infos(out, "struct", resolution.structs);
+  type_infos(out, "enum", resolution.enums);
+  type_infos(out, "class", resolution.classes);
+  type_infos(out, "interface", resolution.interfaces);
+
+  for index in 0..resolution.consts.len() {
+    const info = resolution.consts[index];
+
+    out.append(`const ${index} module=${info.module} item=${info.item}\n`);
+  }
+
+  for index in 0..resolution.externs.len() {
+    const info = resolution.externs[index];
+
+    out.append(`extern ${index} module=${info.module} item=${info.item} member=${info.member}\n`);
+  }
+
+  out.append(`prelude ${optional_u32(resolution.prelude)}\n`);
+  out.append(`std_root ${optional_u32(resolution.std_root)}\n`);
+  out.append(`package_roots ${list(resolution.package_roots)}\n`);
+  out.append(`error_interface ${optional_u32(resolution.error_interface)}\n`);
+  out.append(`main ${optional_u32(resolution.main)}\n`);
+
+  for function in 0..resolution.locals.len() {
+    const locals = resolution.locals[function];
+
+    out.append(`locals ${function}\n`);
+
+    for index in 0..locals.len() {
+      const local = locals[index];
+      const kind = match local.kind {
+        LocalKind::Param => "param",
+        LocalKind::SelfParam => "self",
+        LocalKind::Const => "const",
+        LocalKind::Var => "var",
+        LocalKind::ForVar => "for",
+        LocalKind::Pattern => "pattern",
+      };
+
+      out.append(`  local ${index} ${local.name} ${kind} ${span(local.span)}\n`);
+    }
+  }
+
+  for id in sorted_ids(resolution.paths.keys().collect()) {
+    if let Some(res) = resolution.paths.get(id) {
+      out.append(`path #${id} -> ${resolved(res)}\n`);
+    }
+  }
+
+  for id in sorted_ids(resolution.type_paths.keys().collect()) {
+    if let Some(res) = resolution.type_paths.get(id) {
+      out.append(`type_path #${id} -> ${type_res(res)}\n`);
+    }
+  }
+
+  for id in sorted_ids(resolution.bindings.keys().collect()) {
+    if let Some(local) = resolution.bindings.get(id) {
+      out.append(`binding #${id} -> local ${local}\n`);
+    }
+  }
+
+  for id in sorted_ids(resolution.lambdas.keys().collect()) {
+    if let Some(info) = resolution.lambdas.get(id) {
+      out.append(`lambda #${id} params=${list(info.params)} first=${info.first_local} end=${info.end_local} captures=${list(info.captures)}\n`);
+    }
+  }
+
+  out.to_string()
+}
+
+fn sorted_keys(keys: List<String>) -> List<String> {
+  keys.sort();
+  keys
+}
+
+fn sorted_ids(ids: List<u32>) -> List<u32> {
+  ids.sort();
+  ids
+}
+
+fn optional_usize(value: Option<usize>) -> String {
+  match value {
+    Some(value) => `${value}`,
+    None => "-",
+  }
+}
+
+fn optional_u32(value: Option<u32>) -> String {
+  match value {
+    Some(value) => `${value}`,
+    None => "-",
+  }
+}
+
+fn list(values: List<u32>) -> String {
+  if values.is_empty() {
+    return "-";
+  }
+
+  const parts: List<String> = new List();
+
+  for value in values {
+    parts.push(`${value}`);
+  }
+
+  parts.join(",")
+}
+
+fn span(span: Span) -> String {
+  `${span.file}:${span.start}..${span.end}`
+}
+
+fn type_infos(out: StringBuilder, kind: String, types: List<TypeInfo>) {
+  for index in 0..types.len() {
+    const info = types[index];
+
+    out.append(`${kind} ${index} module=${info.module} item=${info.item} functions=${list(info.functions)}\n`);
+  }
+}
+
+fn type_item(item: TypeItem) -> String {
+  match item {
+    TypeItem::Struct(id) => `struct ${id}`,
+    TypeItem::Enum(id) => `enum ${id}`,
+    TypeItem::Class(id) => `class ${id}`,
+    TypeItem::Interface(id) => `interface ${id}`,
+  }
+}
+
+fn item_ref(item: ItemRef) -> String {
+  match item {
+    ItemRef::Fn(id) => `fn ${id}`,
+    ItemRef::Extern(id) => `extern ${id}`,
+    ItemRef::Const(id) => `const ${id}`,
+    ItemRef::Type(found) => type_item(found),
+    ItemRef::Module(id) => `module ${id}`,
+    ItemRef::Std(std_item) => match std_item {
+      StdItem::Root => "std root",
+      StdItem::Ffi => "std ffi",
+      StdItem::CType(name) => "std " + name,
+      StdItem::CString => "std CString",
+      StdItem::StringFromC => "std string_from_c",
+      StdItem::Exit => "std exit",
+    },
+  }
+}
+
+fn resolved(res: Res) -> String {
+  match res {
+    Res::Fn(id) => `fn ${id}`,
+    Res::Extern(id) => `extern ${id}`,
+    Res::Builtin(name) => "builtin " + name,
+    Res::Local(id) => `local ${id}`,
+    Res::Struct(id) => `struct ${id}`,
+    Res::Variant(variant) => {
+      const owner = match variant.owner {
+        EnumKind::User(id) => `enum ${id}`,
+        EnumKind::Option => "Option",
+        EnumKind::Result => "Result",
+      };
+
+      `variant ${owner} ${variant.index}`
+    }
+    Res::Const(id) => `const ${id}`,
+  }
+}
+
+fn type_res(res: TypeRes) -> String {
+  match res {
+    TypeRes::Item(item) => type_item(item),
+    TypeRes::Param { owner, index } => match owner {
+      ParamOwner::Item(item) => `param ${type_item(item)} ${index}`,
+      ParamOwner::Fn(id) => `param fn ${id} ${index}`,
+    },
+    TypeRes::Builtin => "builtin",
+    TypeRes::CType(name) => "ctype " + name,
+    TypeRes::CString => "CString",
+    TypeRes::Error => "error",
+  }
+}

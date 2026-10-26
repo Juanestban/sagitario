@@ -1,0 +1,101 @@
+// Syntax errors of every kind, with the parser recovering after each one at item, member and
+// statement boundaries.
+use pkg::a::{b, c as d, e::{f, self}};
+use broken::;
+
+fn chained(a: i32) -> bool {
+  a < 1 < 2
+}
+
+fn ranges() {
+  const r = 0..1..2;
+  const open = 0..;
+  ;
+  const x = ;
+  const ok = 1;
+}
+
+fn reserved() {
+  const async = 1;
+  await;
+}
+
+struct Missing {
+  name: String;
+  pub const other: i32;
+  pub fn method(self) {}
+  prv abstract fn nope(self);
+  pub override fn also(self) {}
+}
+
+enum Empty {}
+
+enum NoData {
+  A(),
+  B {},
+  C(i32,),
+  @repr(C) pub fn f() {}
+}
+
+class Fields {
+  pub name: String;
+  pub weak var parent: Option<Fields>;
+
+  pub fn new(self) {}
+  pub abstract fn body(self) {}
+}
+
+interface Shape {
+  pub fn area(self) -> f64;
+  area: f64;
+  const sides: i32;
+}
+
+@unknown
+@repr(C)
+@repr(C)
+@export
+@test
+fn attributes() {}
+
+@repr(Rust)
+struct Repr {}
+
+@repr(C)
+enum Tagged { A }
+
+@export("x")
+fn not_extern() {}
+
+extern "C" {
+  fn takes(a: i32, ..);
+  fn body() {}
+  fn fine(a: *const u8, b: *mut i32) -> i32;
+}
+
+pub extern "C" {
+  fn nothing();
+}
+
+extern "Rust" fn other() {}
+
+pub(pkg) fn restricted() {}
+
+fn bad_self(self) {}
+
+fn var_self(var self) {}
+
+fn where_clause<T>(x: T) where U: Eq {}
+
+fn types(a: [i32; n], b: *i32, c: fn(i32, String) -> bool, d: Map<String, List<i32>>) {}
+
+fn trailing( {}
+
+pub use pkg::a;
+
+fn last() {
+  match x {
+    1 => a
+    2 => b,
+  }
+}

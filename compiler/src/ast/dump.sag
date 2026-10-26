@@ -1,0 +1,692 @@
+//! The AST as text (`sagc check --dump=ast`, docs/adr/0051-parser-port-and-ast-dumps.md), the
+//! port of `sagitario_ast::dump`. One node per line, indented two spaces per level:
+//! `<field>: <Node> <start>..<end> [#<id>] [values]`. A list repeats its field, an absent option
+//! is left out, and names are written `name@start..end`.
+
+use pkg::ast::{
+  ArrayLen, Block, Expr, ExprKind, FieldDecl, FnDecl, GenericParam, Ident, Item, MatchArm, Module, Param, Path, Pattern, PatternKind, Stmt,
+  TemplatePart, TypeExpr, TypeExprKind, UnaryOp, UseTree, UseTreeKind, VariantFields, Visibility,
+};
+use pkg::ast;
+use pkg::lexer;
+use pkg::span::Span;
+
+pub fn dump(module: Module) -> String {
+  const dumper = new Dumper();
+
+  dumper.line("module", "Module", None, None, "");
+  dumper.depth += 1;
+
+  for decl in module.uses {
+    dumper.line("use", "Use", Some(decl.span), None, "");
+    dumper.depth += 1;
+    dumper.use_tree("tree", decl.tree);
+    dumper.depth -= 1;
+  }
+
+  for item in module.items {
+    dumper.item(item);
+  }
+
+  dumper.out.to_string()
+}
+
+fn span_text(span: Span) -> String {
+  `${span.start}..${span.end}`
+}
+
+fn ident(name: Ident) -> String {
+  name.name + "@" + span_text(name.span)
+}
+
+fn idents(names: List<Ident>, separator: String) -> String {
+  const parts: List<String> = new List();
+
+  for name in names {
+    parts.push(ident(name));
+  }
+
+  parts.join(separator)
+}
+
+fn visibility(visibility: Visibility) -> String {
+  match visibility {
+    Visibility::Module => "module",
+    Visibility::Public => "pub",
+    Visibility::Private => "prv",
+  }
+}
+
+fn suffixed(value: String, suffix: Option<String>) -> String {
+  match suffix {
+    Some(suffix) => value + " " + suffix,
+    None => value,
+  }
+}
+
+class Dumper {
+  pub const out: StringBuilder;
+  pub var depth: usize;
+
+  pub fn new(self) {
+    self.out = new StringBuilder();
+    self.depth = 0;
+  }
+
+  /// One node: its field in the parent, its kind, span, id and other values.
+  pub fn line(self, label: String, kind: String, span: Option<Span>, id: Option<u32>, values: String) {
+    self.out.append("  ".repeat(self.depth));
+    self.out.append(label + ": " + kind);
+
+    if let Some(span) = span {
+      self.out.append(" " + span_text(span));
+    }
+
+    if let Some(id) = id {
+      self.out.append(` #${id}`);
+    }
+
+    if !values.is_empty() {
+      self.out.append(" " + values);
+    }
+
+    self.out.append("\n");
+  }
+
+  pub fn use_tree(self, label: String, tree: UseTree) {
+    const prefix = idents(tree.prefix, "::");
+
+    match tree.kind {
+      UseTreeKind::Simple(alias) => {
+        const suffix = match alias {
+          Some(alias) => " as " + ident(alias),
+          None => "",
+        };
+
+        self.line(label, "UseTree", Some(tree.span), None, prefix + suffix);
+      }
+      UseTreeKind::Group(trees) => {
+        self.line(label, "UseGroup", Some(tree.span), None, prefix);
+        self.depth += 1;
+
+        for inner in trees {
+          self.use_tree("tree", inner);
+        }
+
+        self.depth -= 1;
+      }
+    }
+  }
+
+  pub fn item(self, item: Item) {
+    match item {
+      Item::Fn(decl) => self.function("item", decl),
+      Item::Struct(decl) => {
+        self.line("item", "Struct", Some(decl.span), None, `${ident(decl.name)} ${visibility(decl.visibility)} repr_c=${decl.repr_c}`);
+        self.depth += 1;
+        self.generics(decl.generics);
+        self.types("impl", decl.impls);
+        self.fields(decl.fields);
+        self.functions(decl.functions);
+        self.depth -= 1;
+      }
+      Item::Enum(decl) => {
+        self.line("item", "Enum", Some(decl.span), None, ident(decl.name) + " " + visibility(decl.visibility));
+        self.depth += 1;
+        self.generics(decl.generics);
+        self.types("impl", decl.impls);
+
+        for variant in decl.variants {
+          const shape = match variant.fields {
+            VariantFields::Unit => "unit",
+            VariantFields::Tuple(_) => "tuple",
+            VariantFields::Named(_) => "named",
+          };
+
+          self.line("variant", "Variant", Some(variant.span), None, ident(variant.name) + " " + shape);
+          self.depth += 1;
+
+          match variant.fields {
+            VariantFields::Unit => {}
+            VariantFields::Tuple(types) => self.types("ty", types),
+            VariantFields::Named(fields) => {
+              for field in fields {
+                self.line("field", "VariantField", Some(field.span), None, ident(field.name));
+                self.depth += 1;
+                self.type_expr("ty", field.ty);
+                self.depth -= 1;
+              }
+            }
+          }
+
+          self.depth -= 1;
+        }
+
+        self.functions(decl.functions);
+        self.depth -= 1;
+      }
+      Item::Class(decl) => {
+        self.line("item", "Class", Some(decl.span), None, `${ident(decl.name)} ${visibility(decl.visibility)} abstract=${decl.is_abstract}`);
+        self.depth += 1;
+        self.generics(decl.generics);
+
+        if let Some(parent) = decl.parent {
+          self.type_expr("parent", parent);
+        }
+
+        self.types("impl", decl.impls);
+        self.fields(decl.fields);
+        self.functions(decl.functions);
+        self.depth -= 1;
+      }
+      Item::Interface(decl) => {
+        self.line("item", "Interface", Some(decl.span), None, ident(decl.name) + " " + visibility(decl.visibility));
+        self.depth += 1;
+        self.generics(decl.generics);
+        self.types("parent", decl.parents);
+        self.fields(decl.fields);
+        self.functions(decl.functions);
+        self.depth -= 1;
+      }
+      Item::Extern(block) => {
+        self.line("item", "Extern", Some(block.span), None, "");
+        self.depth += 1;
+
+        for function in block.functions {
+          self.line("function", "ExternFn", Some(function.span), None, ident(function.name) + " " + visibility(function.visibility));
+          self.depth += 1;
+          self.params(function.params);
+
+          if let Some(ty) = function.return_type {
+            self.type_expr("return", ty);
+          }
+
+          self.depth -= 1;
+        }
+
+        self.depth -= 1;
+      }
+      Item::Const(decl) => {
+        self.line("item", "Const", Some(decl.span), None, ident(decl.name) + " " + visibility(decl.visibility));
+        self.depth += 1;
+        self.type_expr("ty", decl.ty);
+        self.expr("value", decl.value);
+        self.depth -= 1;
+      }
+    }
+  }
+
+  pub fn generics(self, generics: List<GenericParam>) {
+    for param in generics {
+      self.line("generic", "GenericParam", None, None, ident(param.name));
+      self.depth += 1;
+      self.types("bound", param.bounds);
+      self.depth -= 1;
+    }
+  }
+
+  pub fn types(self, label: String, types: List<TypeExpr>) {
+    for ty in types {
+      self.type_expr(label, ty);
+    }
+  }
+
+  pub fn fields(self, fields: List<FieldDecl>) {
+    for field in fields {
+      const mutable = match field.mutable {
+        None => "none",
+        Some(value) => if value { "var" } else { "const" },
+      };
+
+      self.line("field", "Field", Some(field.span), None, `${ident(field.name)} ${visibility(field.visibility)} mutable=${mutable} weak=${field.is_weak}`);
+      self.depth += 1;
+      self.type_expr("ty", field.ty);
+      self.depth -= 1;
+    }
+  }
+
+  pub fn functions(self, functions: List<FnDecl>) {
+    for function in functions {
+      self.function("function", function);
+    }
+  }
+
+  pub fn params(self, params: List<Param>) {
+    for param in params {
+      self.line("param", "Param", Some(param.span), None, ident(param.name));
+      self.depth += 1;
+      self.type_expr("ty", param.ty);
+      self.depth -= 1;
+    }
+  }
+
+  pub fn function(self, label: String, decl: FnDecl) {
+    var values = `${ident(decl.name)} ${visibility(decl.visibility)} extern_c=${decl.extern_c} abstract=${decl.is_abstract} override=${decl.is_override}`;
+
+    if let Some(export) = decl.export {
+      values = values + " export=" + lexer::quote(export.symbol) + "@" + span_text(export.span);
+    }
+
+    if let Some(span) = decl.self_param {
+      values = values + " self@" + span_text(span);
+    }
+
+    self.line(label, "Fn", Some(decl.span), Some(decl.id), values);
+    self.depth += 1;
+    self.generics(decl.generics);
+    self.params(decl.params);
+
+    if let Some(ty) = decl.return_type {
+      self.type_expr("return", ty);
+    }
+
+    self.block("body", decl.body);
+    self.depth -= 1;
+  }
+
+  pub fn path(self, label: String, path: Path) {
+    self.line(label, "Path", Some(path.span), Some(path.id), idents(path.segments, "::"));
+
+    if let Some(args) = path.type_args {
+      self.depth += 1;
+      self.line("type_args", "TypeArgs", Some(args.span), None, `segment=${args.segment}`);
+      self.depth += 1;
+      self.types("arg", args.args);
+      self.depth -= 2;
+    }
+  }
+
+  pub fn array_len(self, len: ArrayLen) {
+    self.line("len", "ArrayLen", Some(len.span), None, suffixed(len.value, len.suffix));
+  }
+
+  pub fn type_expr(self, label: String, ty: TypeExpr) {
+    match ty.kind {
+      TypeExprKind::Unit => self.line(label, "UnitType", Some(ty.span), None, ""),
+      TypeExprKind::Path(path) => {
+        self.line(label, "PathType", Some(ty.span), None, "");
+        self.depth += 1;
+        self.path("path", path);
+        self.depth -= 1;
+      }
+      TypeExprKind::Generic { path, args } => {
+        self.line(label, "GenericType", Some(ty.span), None, "");
+        self.depth += 1;
+        self.path("path", path);
+        self.types("arg", args);
+        self.depth -= 1;
+      }
+      TypeExprKind::Array { elem, len } => {
+        self.line(label, "ArrayType", Some(ty.span), None, "");
+        self.depth += 1;
+        self.type_expr("elem", elem);
+        self.array_len(len);
+        self.depth -= 1;
+      }
+      TypeExprKind::Ptr { mutable, pointee } => {
+        self.line(label, "PtrType", Some(ty.span), None, `mutable=${mutable}`);
+        self.depth += 1;
+        self.type_expr("pointee", pointee);
+        self.depth -= 1;
+      }
+      TypeExprKind::Fn { params, ret } => {
+        self.line(label, "FnType", Some(ty.span), None, "");
+        self.depth += 1;
+        self.types("param", params);
+
+        if let Some(ret) = ret {
+          self.type_expr("ret", ret);
+        }
+
+        self.depth -= 1;
+      }
+    }
+  }
+
+  pub fn block(self, label: String, block: Block) {
+    self.line(label, "Block", Some(block.span), None, "");
+    self.depth += 1;
+
+    for stmt in block.stmts {
+      self.stmt(stmt);
+    }
+
+    if let Some(tail) = block.tail {
+      self.expr("tail", tail);
+    }
+
+    self.depth -= 1;
+  }
+
+  pub fn stmt(self, stmt: Stmt) {
+    match stmt {
+      Stmt::Let(decl) => {
+        self.line("stmt", "Let", Some(decl.span), Some(decl.id), `${ident(decl.name)} mutable=${decl.mutable}`);
+        self.depth += 1;
+
+        if let Some(ty) = decl.ty {
+          self.type_expr("ty", ty);
+        }
+
+        if let Some(init) = decl.init {
+          self.expr("init", init);
+        }
+
+        self.depth -= 1;
+      }
+      Stmt::Assign { target, op, value, span } => {
+        const symbol = match op {
+          Some(op) => ast::binary_symbol(op),
+          None => "=",
+        };
+
+        self.line("stmt", "Assign", Some(span), None, "op=" + symbol);
+        self.depth += 1;
+        self.expr("target", target);
+        self.expr("value", value);
+        self.depth -= 1;
+      }
+      Stmt::Expr(expr) => self.expr("stmt", expr),
+    }
+  }
+
+  pub fn exprs(self, label: String, exprs: List<Expr>) {
+    for expr in exprs {
+      self.expr(label, expr);
+    }
+  }
+
+  /// A node of `expr` and, below it, the nodes `children` writes.
+  prv fn node(self, label: String, expr: Expr, kind: String, values: String) {
+    self.line(label, kind, Some(expr.span), Some(expr.id), values);
+  }
+
+  pub fn expr(self, label: String, expr: Expr) {
+    match expr.kind {
+      ExprKind::Int { value, suffix } => self.node(label, expr, "Int", suffixed(value, suffix)),
+      ExprKind::Float { text, suffix } => self.node(label, expr, "Float", suffixed(text, suffix)),
+      ExprKind::Bool(value) => self.node(label, expr, "Bool", `${value}`),
+      ExprKind::Char(value) => self.node(label, expr, "Char", lexer::quote(`${value}`)),
+      ExprKind::Str(value) => self.node(label, expr, "Str", lexer::quote(value)),
+      ExprKind::Template(parts) => {
+        self.node(label, expr, "Template", "");
+        self.depth += 1;
+
+        for part in parts {
+          match part {
+            TemplatePart::Text(text) => self.line("part", "Text", None, None, lexer::quote(text)),
+            TemplatePart::Expr(inner) => self.expr("part", inner),
+          }
+        }
+
+        self.depth -= 1;
+      }
+      ExprKind::Unit => self.node(label, expr, "Unit", ""),
+      ExprKind::Path(path) => {
+        self.node(label, expr, "PathExpr", "");
+        self.depth += 1;
+        self.path("path", path);
+        self.depth -= 1;
+      }
+      ExprKind::Call { callee, args } => {
+        self.node(label, expr, "Call", "");
+        self.depth += 1;
+        self.expr("callee", callee);
+        self.exprs("arg", args);
+        self.depth -= 1;
+      }
+      ExprKind::MethodCall { receiver, method, args } => {
+        self.node(label, expr, "MethodCall", ident(method));
+        self.depth += 1;
+        self.expr("receiver", receiver);
+        self.exprs("arg", args);
+        self.depth -= 1;
+      }
+      ExprKind::Field { base, name } => {
+        self.node(label, expr, "Field", ident(name));
+        self.depth += 1;
+        self.expr("base", base);
+        self.depth -= 1;
+      }
+      ExprKind::Index { base, index } => {
+        self.node(label, expr, "Index", "");
+        self.depth += 1;
+        self.expr("base", base);
+        self.expr("index", index);
+        self.depth -= 1;
+      }
+      ExprKind::StructLit { path, fields } => {
+        self.node(label, expr, "StructLit", "");
+        self.depth += 1;
+        self.path("path", path);
+
+        for field in fields {
+          self.line("field", "FieldInit", Some(field.span), None, ident(field.name));
+          self.depth += 1;
+          self.expr("value", field.value);
+          self.depth -= 1;
+        }
+
+        self.depth -= 1;
+      }
+      ExprKind::ArrayLit(elems) => {
+        self.node(label, expr, "ArrayLit", "");
+        self.depth += 1;
+        self.exprs("elem", elems);
+        self.depth -= 1;
+      }
+      ExprKind::ArrayRepeat { value, len } => {
+        self.node(label, expr, "ArrayRepeat", "");
+        self.depth += 1;
+        self.expr("value", value);
+        self.array_len(len);
+        self.depth -= 1;
+      }
+      ExprKind::Unary { op, operand } => {
+        const symbol = match op {
+          UnaryOp::Neg => "-",
+          UnaryOp::Not => "!",
+          UnaryOp::Deref => "*",
+        };
+
+        self.node(label, expr, "Unary", "op=" + symbol);
+        self.depth += 1;
+        self.expr("operand", operand);
+        self.depth -= 1;
+      }
+      ExprKind::Binary { op, lhs, rhs } => {
+        self.node(label, expr, "Binary", "op=" + ast::binary_symbol(op));
+        self.depth += 1;
+        self.expr("lhs", lhs);
+        self.expr("rhs", rhs);
+        self.depth -= 1;
+      }
+      ExprKind::Cast { expr: inner, ty } => {
+        self.node(label, expr, "Cast", "");
+        self.depth += 1;
+        self.expr("expr", inner);
+        self.type_expr("ty", ty);
+        self.depth -= 1;
+      }
+      ExprKind::Range { start, end, inclusive } => {
+        self.node(label, expr, "Range", `inclusive=${inclusive}`);
+        self.depth += 1;
+        self.expr("start", start);
+        self.expr("end", end);
+        self.depth -= 1;
+      }
+      ExprKind::Try(inner) => {
+        self.node(label, expr, "Try", "");
+        self.depth += 1;
+        self.expr("expr", inner);
+        self.depth -= 1;
+      }
+      ExprKind::Zod => self.node(label, expr, "Zod", ""),
+      ExprKind::Lambda { params, body } => {
+        self.node(label, expr, "Lambda", "");
+        self.depth += 1;
+
+        for param in params {
+          self.line("param", "LambdaParam", Some(param.span), None, ident(param.name));
+
+          if let Some(ty) = param.ty {
+            self.depth += 1;
+            self.type_expr("ty", ty);
+            self.depth -= 1;
+          }
+        }
+
+        self.expr("body", body);
+        self.depth -= 1;
+      }
+      ExprKind::New { path, args } => {
+        self.node(label, expr, "New", "");
+        self.depth += 1;
+        self.path("path", path);
+        self.exprs("arg", args);
+        self.depth -= 1;
+      }
+      ExprKind::Match { scrutinee, arms } => {
+        self.node(label, expr, "Match", "");
+        self.depth += 1;
+        self.expr("scrutinee", scrutinee);
+
+        for arm in arms {
+          self.arm(arm);
+        }
+
+        self.depth -= 1;
+      }
+      ExprKind::Block(block) => {
+        self.node(label, expr, "BlockExpr", "");
+        self.depth += 1;
+        self.block("block", block);
+        self.depth -= 1;
+      }
+      ExprKind::Unsafe(block) => {
+        self.node(label, expr, "Unsafe", "");
+        self.depth += 1;
+        self.block("block", block);
+        self.depth -= 1;
+      }
+      ExprKind::If { cond, then_block, else_branch } => {
+        self.node(label, expr, "If", "");
+        self.depth += 1;
+        self.expr("cond", cond);
+        self.block("then", then_block);
+
+        if let Some(branch) = else_branch {
+          self.expr("else", branch);
+        }
+
+        self.depth -= 1;
+      }
+      ExprKind::While { cond, body } => {
+        self.node(label, expr, "While", "");
+        self.depth += 1;
+        self.expr("cond", cond);
+        self.block("body", body);
+        self.depth -= 1;
+      }
+      ExprKind::Loop(body) => {
+        self.node(label, expr, "Loop", "");
+        self.depth += 1;
+        self.block("body", body);
+        self.depth -= 1;
+      }
+      ExprKind::For { variable, iter, body } => {
+        self.node(label, expr, "For", ident(variable));
+        self.depth += 1;
+        self.expr("iter", iter);
+        self.block("body", body);
+        self.depth -= 1;
+      }
+      ExprKind::Break(value) => {
+        self.node(label, expr, "Break", "");
+
+        if let Some(value) = value {
+          self.depth += 1;
+          self.expr("value", value);
+          self.depth -= 1;
+        }
+      }
+      ExprKind::Continue => self.node(label, expr, "Continue", ""),
+      ExprKind::Return(value) => {
+        self.node(label, expr, "Return", "");
+
+        if let Some(value) = value {
+          self.depth += 1;
+          self.expr("value", value);
+          self.depth -= 1;
+        }
+      }
+    }
+  }
+
+  pub fn arm(self, arm: MatchArm) {
+    self.line("arm", "MatchArm", Some(arm.span), None, "");
+    self.depth += 1;
+    self.pattern("pattern", arm.pattern);
+
+    if let Some(guard) = arm.guard {
+      self.expr("guard", guard);
+    }
+
+    self.expr("body", arm.body);
+    self.depth -= 1;
+  }
+
+  pub fn pattern(self, label: String, pattern: Pattern) {
+    match pattern.kind {
+      PatternKind::Wildcard => self.line(label, "Wildcard", Some(pattern.span), Some(pattern.id), ""),
+      PatternKind::Ident(name) => self.line(label, "Binding", Some(pattern.span), Some(pattern.id), ident(name)),
+      PatternKind::Literal(expr) => {
+        self.line(label, "LiteralPattern", Some(pattern.span), Some(pattern.id), "");
+        self.depth += 1;
+        self.expr("expr", expr);
+        self.depth -= 1;
+      }
+      PatternKind::Path(path) => {
+        self.line(label, "PathPattern", Some(pattern.span), Some(pattern.id), "");
+        self.depth += 1;
+        self.path("path", path);
+        self.depth -= 1;
+      }
+      PatternKind::Tuple { path, elems } => {
+        self.line(label, "TuplePattern", Some(pattern.span), Some(pattern.id), "");
+        self.depth += 1;
+        self.path("path", path);
+
+        for elem in elems {
+          self.pattern("elem", elem);
+        }
+
+        self.depth -= 1;
+      }
+      PatternKind::Named { path, fields, rest } => {
+        self.line(label, "NamedPattern", Some(pattern.span), Some(pattern.id), `rest=${rest}`);
+        self.depth += 1;
+        self.path("path", path);
+
+        for field in fields {
+          self.line("field", "FieldPattern", Some(field.span), None, ident(field.name));
+          self.depth += 1;
+          self.pattern("pattern", field.pattern);
+          self.depth -= 1;
+        }
+
+        self.depth -= 1;
+      }
+      PatternKind::Or(alternatives) => {
+        self.line(label, "OrPattern", Some(pattern.span), Some(pattern.id), "");
+        self.depth += 1;
+
+        for alternative in alternatives {
+          self.pattern("alt", alternative);
+        }
+
+        self.depth -= 1;
+      }
+    }
+  }
+}

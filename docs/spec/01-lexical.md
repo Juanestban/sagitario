@@ -23,10 +23,13 @@ treated as comments. A documentation tool (`sag doc`) is post-MVP.
 ```
 abstract  as        break     class     const     continue  else      enum
 extends   extern    false     fn        for       if        impl      in
-interface loop      match     new       override  pkg       prv       pub
-return    self      Self      struct    super     true      unsafe    use
-var       weak      where     while     zod
+interface let       loop      match     new       override  pkg       prv
+pub       return    self      Self      struct    super     true      unsafe
+use       var       weak      where     while     zod
 ```
+
+`let` only appears in `if let` and `while let` (F5,
+[control flow](06-control-flow.md#if-let-and-while-let)); bindings are `const` and `var`.
 
 `zod` refers to the parent class (the role `super` has in other languages); `super` refers to
 the parent module (see [modules](09-modules.md#paths)), and `pkg` to the package root. `Self`

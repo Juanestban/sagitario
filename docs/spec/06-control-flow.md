@@ -23,6 +23,29 @@ const sign = if x < 0 { -1 } else { 1 };
 - `if` without `else` has type `()`. `if` used as a value of another type must have an `else`
   branch, and both branches must have the same type.
 
+## `if let` and `while let`
+
+Rationale: [ADR-0049](../adr/0049-self-hosting-plan-and-language-prerequisites.md).
+
+```sag
+if let Some(user) = find(id) {
+  println(user.name);
+} else {
+  println("not found");
+}
+
+while let Some(token) = tokens.pop() {
+  handle(token);
+}
+```
+
+- `if let pattern = value { ... } else ...` runs the block when `value` matches the pattern,
+  with its bindings; otherwise the `else` branch, which may be another `if` or `if let`. It is
+  `match value { pattern => { ... }, _ => else }`, with the rules of `match` and of `if`.
+- `while let pattern = value { ... }` evaluates `value` before each iteration and stops when
+  it does not match. It is `loop { match value { pattern => { ... }, _ => break } }`; `break`
+  and `continue` work as in any loop.
+
 ## Loops
 
 ```sag

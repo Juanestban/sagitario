@@ -1,0 +1,264 @@
+//! `sagc`: the Sagitario compiler written in Sagitario (F5, docs/roadmap.md), with the command
+//! line of `sag` (docs/adr/0055-driver-and-cli-port.md). The port of `sagitario_cli`.
+
+use pkg::diagnostics::DiagnosticFormat;
+use pkg::driver;
+use pkg::driver::CompileOptions;
+use pkg::driver::targets;
+use std::env;
+use std::process;
+
+/// The help text, written line by line so it does not depend on the line endings of this file.
+fn usage() -> String {
+  List::from([
+    "Usage: sagc <command> [options] <file.sag>",
+    "",
+    "Commands:",
+    "  build    Compile a program to an executable",
+    "  run      Compile and run a program (arguments after `--` go to the program)",
+    "  check    Check a program without generating code",
+    "  targets  List the targets `--target` accepts",
+    "  help     Show this message",
+    "  version  Show the compiler version",
+    "",
+    "Options:",
+    "  --release                   Optimize; integer overflow wraps instead of panicking (build, run)",
+    "  --sanitize                  Detect memory errors and undefined behavior with ASan and UBSan,",
+    "                              where the C compiler supports them (build, run)",
+    "  --sanitize=thread           Detect data races with TSan instead, where the C compiler supports",
+    "                              it; elsewhere, ASan and UBSan (build, run)",
+    "  --emit-c                    Also write the generated C (build, run)",
+    "  --cc <compiler>             C compiler to use; overrides SAG_CC (build, run)",
+    "  --target <target>           Compile for another machine, such as `aarch64-linux-android`",
+    "                              (build, check)",
+    "  --diagnostic-format <fmt>   `human` (default) or `short`: one line per diagnostic",
+  ]).join("\n")
+}
+
+/// The version of the language and of `sag`, which `sagc` implements.
+const VERSION: String = "0.4.0";
+
+/// Exit code for invalid command-line usage.
+const EXIT_USAGE: i32 = 2;
+
+enum Mode {
+  Build,
+  Run,
+  Check,
+}
+
+enum Command {
+  Compile(Mode, CompileOptions),
+  Targets,
+  Help,
+  Version,
+}
+
+/// The position of the argument being read.
+class Position {
+  pub var value: usize;
+
+  pub fn new(self, value: usize) {
+    self.value = value;
+  }
+}
+
+/// Parses the arguments that follow the program name.
+fn parse_args(args: List<String>) -> Result<Command, String> {
+  const command = match args.first() {
+    Some(found) => found,
+    None => return Err("missing command"),
+  };
+
+  if command == "build" {
+    Ok(Command::Compile(Mode::Build, parse_compile_options(args, Mode::Build)?))
+  } else if command == "run" {
+    Ok(Command::Compile(Mode::Run, parse_compile_options(args, Mode::Run)?))
+  } else if command == "check" {
+    Ok(Command::Compile(Mode::Check, parse_compile_options(args, Mode::Check)?))
+  } else if command == "targets" {
+    Ok(Command::Targets)
+  } else if command == "help" || command == "--help" || command == "-h" {
+    Ok(Command::Help)
+  } else if command == "version" || command == "--version" || command == "-v" {
+    Ok(Command::Version)
+  } else {
+    Err(`unknown command \`${command}\``)
+  }
+}
+
+/// The options after the command, `args[0]`.
+fn parse_compile_options(args: List<String>, mode: Mode) -> Result<CompileOptions, String> {
+  const options = new CompileOptions();
+  var input: Option<String> = None;
+  const index = new Position(1);
+
+  while index.value < args.len() {
+    const arg = args[index.value];
+    var flag = arg;
+    var inline: Option<String> = None;
+
+    if let Some(equals) = arg.find("=") {
+      if arg.substring(0, equals).starts_with("--") {
+        flag = arg.substring(0, equals);
+        inline = Some(arg.substring(equals + 1, arg.len()));
+      }
+    }
+
+    if flag == "--emit-c" {
+      require_codegen(mode, flag)?;
+      options.emit_c = true;
+    } else if flag == "--release" {
+      require_codegen(mode, flag)?;
+      options.release = true;
+    } else if flag == "--sanitize" {
+      require_codegen(mode, flag)?;
+      options.sanitize = true;
+      options.thread_sanitizer = match inline {
+        None => false,
+        Some(value) if value == "thread" => true,
+        Some(other) => return Err(`unknown sanitizer \`${other}\`; \`--sanitize=thread\` is the only one to choose`),
+      };
+    } else if flag == "--cc" {
+      require_codegen(mode, flag)?;
+      options.cc = Some(flag_value(flag, inline, args, index)?);
+    } else if flag == "--target" {
+      options.target = Some(flag_value(flag, inline, args, index)?);
+    } else if flag == "--dump" {
+      // Hidden: for the differential tests of the self-hosted compiler.
+      if mode != Mode::Check {
+        return Err("`--dump` is only accepted by `sag check`");
+      }
+
+      const value = flag_value(flag, inline, args, index)?;
+
+      if value == "tokens" || value == "ast" || value == "resolve" || value == "declarations" || value == "types" || value == "c" {
+        options.dump = Some(value);
+      } else {
+        return Err(`unknown dump \`${value}\`; expected \`tokens\`, \`ast\`, \`resolve\`, \`declarations\`, \`types\` or \`c\``);
+      }
+    } else if flag == "--diagnostic-format" {
+      const value = flag_value(flag, inline, args, index)?;
+
+      if value == "human" {
+        options.format = DiagnosticFormat::Human;
+      } else if value == "short" {
+        options.format = DiagnosticFormat::Short;
+      } else {
+        return Err(`unknown diagnostic format \`${value}\`; expected \`human\` or \`short\``);
+      }
+    } else if flag == "--" {
+      if mode != Mode::Run {
+        return Err("program arguments after `--` are only accepted by `sag run`");
+      }
+
+      for rest in (index.value + 1)..args.len() {
+        options.program_args.push(args[rest]);
+      }
+
+      index.value = args.len();
+    } else if flag.starts_with("-") {
+      return Err(`unknown option \`${flag}\``);
+    } else {
+      if input.is_some() {
+        return Err(`unexpected argument \`${arg}\`; only one input file is accepted`);
+      }
+
+      input = Some(arg);
+    }
+
+    index.value += 1;
+  }
+
+  options.input = match input {
+    Some(found) => found,
+    None => return Err("missing input file"),
+  };
+
+  Ok(options)
+}
+
+fn require_codegen(mode: Mode, flag: String) -> Result<(), String> {
+  if mode == Mode::Check {
+    return Err(`\`${flag}\` is not accepted by \`sag check\`, which generates no code`);
+  }
+
+  Ok(())
+}
+
+/// `--flag=value` or `--flag value`: the value, taken from the next argument if needed.
+fn flag_value(flag: String, inline: Option<String>, args: List<String>, index: Position) -> Result<String, String> {
+  if let Some(value) = inline {
+    return Ok(value);
+  }
+
+  index.value += 1;
+
+  match args.get(index.value) {
+    Some(value) => Ok(value),
+    None => Err(`\`${flag}\` requires a value`),
+  }
+}
+
+/// Pads `text` with spaces to `width` characters.
+fn pad(text: String, width: usize) -> String {
+  const out = new StringBuilder();
+
+  out.append(text);
+
+  for _ in text.chars().count()..width {
+    out.append(" ");
+  }
+
+  out.to_string()
+}
+
+/// Runs a parsed command and returns the process exit code.
+fn execute(command: Command) -> i32 {
+  match command {
+    Command::Help => {
+      println(usage());
+      0
+    }
+    Command::Version => {
+      println(`sagc ${VERSION}`);
+      0
+    }
+    Command::Targets => {
+      println("Targets for `--target`, besides this machine:");
+
+      for target in targets::targets() {
+        println("  " + pad(target.name, 26) + target.description);
+      }
+
+      0
+    }
+    Command::Compile(mode, options) => match mode {
+      Mode::Build => driver::build(options),
+      Mode::Run => driver::run(options),
+      Mode::Check => driver::check(options),
+    },
+  }
+}
+
+pub fn main() {
+  const args = env::args();
+  const rest: List<String> = new List();
+
+  for index in 1..args.len() {
+    rest.push(args[index]);
+  }
+
+  const code = match parse_args(rest) {
+    Ok(command) => execute(command),
+    Err(message) => {
+      eprintln(`error: ${message}\n\n${usage()}`);
+      EXIT_USAGE
+    }
+  };
+
+  // Always through `exit`, which skips the releases still pending: the leak check that a
+  // program compiled with `SAG_LEAK_CHECK` set runs at its end is for that program, which
+  // inherits the variable, and not for the compiler.
+  process::exit(code);
+}

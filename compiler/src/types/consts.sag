@@ -1,0 +1,735 @@
+//! Module-level constants (docs/spec/03-memory.md#module-level-constants, ADR-0049): the compiler
+//! computes each value from literals, other constants, arithmetic, comparisons, casts and
+//! `include_str`, and reports anything it cannot compute. The port of `sagitario_types::consts`.
+//!
+//! Rust computes integers in `i128`. Every value that fits an integer type lies between
+//! `i64::MIN` and `u64::MAX`, so `sagc` keeps a sign and a `u64` magnitude (`Wide`), and treats a
+//! result beyond that as one that fits no type, as Rust's range check does.
+
+use pkg::ast::{BinaryOp, Expr, ExprKind, UnaryOp};
+use pkg::ast;
+use pkg::diagnostics::Diagnostic;
+use pkg::diagnostics::codes;
+use pkg::loader;
+use pkg::resolve::Res;
+use pkg::span::Span;
+use pkg::types::{Checker, FloatTy, IntTy, Type, TypeKind};
+use pkg::types;
+use std::fs;
+use std::io::ErrorKind;
+use std::path;
+
+const U64_MAX: u64 = 18446744073709551615;
+
+/// An integer constant: a sign and a magnitude, never `-0`.
+pub struct Wide {
+  pub negative: bool;
+  pub magnitude: u64;
+
+  pub fn of(negative: bool, magnitude: u64) -> Wide {
+    Wide { negative: negative && magnitude != 0, magnitude: magnitude }
+  }
+
+  pub fn text(self) -> String {
+    if self.negative { `-${self.magnitude}` } else { `${self.magnitude}` }
+  }
+
+  pub fn compare(self, other: Wide) -> Ordering {
+    if self.negative != other.negative {
+      return if self.negative { Ordering::Less } else { Ordering::Greater };
+    }
+
+    if self.negative { other.magnitude.compare(self.magnitude) } else { self.magnitude.compare(other.magnitude) }
+  }
+
+  pub fn neg(self) -> Wide {
+    Wide::of(!self.negative, self.magnitude)
+  }
+
+  /// The sum, or `None` beyond a `u64` magnitude.
+  pub fn add(self, other: Wide) -> Option<Wide> {
+    if self.negative == other.negative {
+      if self.magnitude > U64_MAX - other.magnitude {
+        return None;
+      }
+
+      return Some(Wide::of(self.negative, self.magnitude + other.magnitude));
+    }
+
+    if self.magnitude >= other.magnitude {
+      Some(Wide::of(self.negative, self.magnitude - other.magnitude))
+    } else {
+      Some(Wide::of(other.negative, other.magnitude - self.magnitude))
+    }
+  }
+
+  pub fn sub(self, other: Wide) -> Option<Wide> {
+    self.add(other.neg())
+  }
+
+  pub fn mul(self, other: Wide) -> Option<Wide> {
+    if self.magnitude != 0 && other.magnitude > U64_MAX / self.magnitude {
+      return None;
+    }
+
+    Some(Wide::of(self.negative != other.negative, self.magnitude * other.magnitude))
+  }
+
+  /// Truncating division, as Rust's; `other` is not zero.
+  pub fn div(self, other: Wide) -> Wide {
+    Wide::of(self.negative != other.negative, self.magnitude / other.magnitude)
+  }
+
+  /// The remainder, with the sign of the dividend, as Rust's; `other` is not zero.
+  pub fn rem(self, other: Wide) -> Wide {
+    Wide::of(self.negative, self.magnitude % other.magnitude)
+  }
+
+  pub fn to_f64(self) -> f64 {
+    const value = self.magnitude as f64;
+
+    if self.negative { -value } else { value }
+  }
+}
+
+/// The value of an integer literal: decimal digits, or `None` beyond `u64`.
+fn literal(value: String) -> Option<Wide> {
+  match value.parse_u64() {
+    Ok(magnitude) => Some(Wide::of(false, magnitude)),
+    Err(_) => None,
+  }
+}
+
+/// The value of a module-level constant.
+pub enum ConstValue {
+  Bool(bool),
+  Char(char),
+  /// Within the range of the constant's integer type.
+  Int(Wide),
+  Float(f64),
+  Str(String),
+}
+
+/// Where the computation of each constant stands, to find constants that need themselves.
+pub enum ConstState {
+  Pending,
+  Computing,
+  Done,
+}
+
+/// A computed constant: its type and value.
+pub struct Typed {
+  pub ty: Type;
+  pub value: ConstValue;
+}
+
+/// The type and value of every module-level constant.
+pub fn const_defs(cx: Checker) {
+  const count = cx.resolution.consts.len();
+  const states: List<ConstState> = new List();
+
+  for _ in 0..count {
+    states.push(ConstState::Pending);
+    cx.typed.const_types.push(types::error());
+    cx.typed.const_values.push(None);
+  }
+
+  cx.const_states = states;
+
+  for index in 0..count {
+    const_value(cx, index as u32, None);
+  }
+}
+
+/// Computes a constant once; `use_span` is where another constant names it.
+fn const_value(cx: Checker, id: u32, use_span: Option<Span>) -> Option<Typed> {
+  const index = id as usize;
+  const decl = cx.resolution.const_decl(cx.package, id)?;
+  const state = cx.const_states.get(index)?;
+
+  if state == ConstState::Done {
+    const ty = cx.typed.const_types.get(index)?;
+
+    return match cx.typed.const_values.get(index)? {
+      Some(value) => Some(Typed { ty: ty, value: value }),
+      None => None,
+    };
+  }
+
+  if state == ConstState::Computing {
+    cx.diagnostics.push(
+      Diagnostic::error(codes::NOT_CONSTANT, use_span.unwrap_or(decl.name.span), "the constant `" + decl.name.name + "` needs its own value")
+        .with_label(decl.name.span, "declared here"),
+    );
+
+    return None;
+  }
+
+  cx.const_states[index] = ConstState::Computing;
+
+  const module = match cx.resolution.consts.get(index) {
+    Some(info) => info.module,
+    None => 0,
+  };
+  const owner = cx.owner;
+
+  cx.owner = None;
+
+  const ty = cx.type_expr(decl.ty);
+
+  cx.owner = owner;
+
+  const valid = match ty.kind {
+    TypeKind::Int(_) | TypeKind::Float(_) | TypeKind::Bool | TypeKind::Char | TypeKind::String | TypeKind::Error => true,
+    _ => false,
+  };
+
+  if !valid {
+    cx.diagnostics.push(
+      Diagnostic::error(codes::NOT_CONSTANT, decl.ty.span, "a module-level constant cannot have the type `" + types::text(ty) + "`")
+        .with_note("constants are integers, floats, `bool`, `char` or `String`"),
+    );
+  }
+
+  const value = if valid && !types::is_error(ty) { const_expr(cx, decl.value, ty, module) } else { None };
+
+  cx.typed.const_types[index] = ty;
+  cx.typed.const_values[index] = value;
+  cx.const_states[index] = ConstState::Done;
+
+  match value {
+    Some(found) => Some(Typed { ty: ty, value: found }),
+    None => None,
+  }
+}
+
+/// Computes `expr` as a value of type `expected`, reporting a mismatch.
+fn const_expr(cx: Checker, expr: Expr, expected: Type, module: usize) -> Option<ConstValue> {
+  const found = const_eval(cx, expr, Some(expected), module)?;
+
+  if !types::same_type(found.ty, expected) {
+    cx.error(codes::MISMATCHED_TYPES, expr.span, "expected `" + types::text(expected) + "`, found `" + types::text(found.ty) + "`");
+
+    return None;
+  }
+
+  Some(found.value)
+}
+
+/// The integer type of a literal: its suffix, else the hint, else `i32`.
+fn literal_type(suffix: Option<String>, hint: Option<Type>) -> IntTy {
+  if let Some(name) = suffix {
+    if let Some(int_ty) = types::int_from_name(name) {
+      return int_ty;
+    }
+  }
+
+  if let Some(ty) = hint {
+    if let TypeKind::Int(int_ty) = ty.kind {
+      return int_ty;
+    }
+  }
+
+  IntTy::I32
+}
+
+/// The type and value of `expr`; `hint` types integer and float literals without a suffix.
+fn const_eval(cx: Checker, expr: Expr, hint: Option<Type>, module: usize) -> Option<Typed> {
+  match expr.kind {
+    ExprKind::Bool(value) => Some(Typed { ty: types::of(TypeKind::Bool), value: ConstValue::Bool(value) }),
+    ExprKind::Char(value) => Some(Typed { ty: types::of(TypeKind::Char), value: ConstValue::Char(value) }),
+    ExprKind::Str(value) => Some(Typed { ty: types::string(), value: ConstValue::Str(value) }),
+    ExprKind::Int { value, suffix } => const_int(cx, literal(value), literal_type(suffix, hint), expr.span),
+    ExprKind::Float { text, suffix } => {
+      var float_ty = FloatTy::F64;
+
+      match suffix {
+        Some(name) => {
+          if name == "f32" {
+            float_ty = FloatTy::F32;
+          }
+        }
+        None => {
+          if let Some(ty) = hint {
+            if let TypeKind::Float(FloatTy::F32) = ty.kind {
+              float_ty = FloatTy::F32;
+            }
+          }
+        }
+      }
+
+      const parsed = match text.replace("_", "").parse_f64() {
+        Ok(parsed) => parsed,
+        Err(_) => return None,
+      };
+
+      const_float(cx, parsed, float_ty, expr.span)
+    }
+    ExprKind::Path(_) => match cx.resolution.paths.get(expr.id) {
+      Some(Res::Const(other)) => const_value(cx, other, Some(expr.span)),
+      _ => not_constant(cx, expr.span),
+    },
+    ExprKind::Unary { op, operand } => {
+      // A negative literal: its magnitude may only fit once negated (`-128` in `i8`).
+      if op == UnaryOp::Neg {
+        if let ExprKind::Int { value, suffix } = operand.kind {
+          const magnitude = match literal(value) {
+            Some(found) => Some(found.neg()),
+            None => None,
+          };
+
+          return const_int(cx, magnitude, literal_type(suffix, hint), expr.span);
+        }
+      }
+
+      const found = const_eval(cx, operand, hint, module)?;
+
+      match found.value {
+        ConstValue::Int(value) => {
+          if op == UnaryOp::Neg {
+            if let TypeKind::Int(int_ty) = found.ty.kind {
+              return const_int(cx, Some(value.neg()), int_ty, expr.span);
+            }
+          }
+        }
+        ConstValue::Float(value) => {
+          if op == UnaryOp::Neg {
+            if let TypeKind::Float(float_ty) = found.ty.kind {
+              return const_float(cx, -value, float_ty, expr.span);
+            }
+          }
+        }
+        ConstValue::Bool(value) => {
+          if op == UnaryOp::Not {
+            if let TypeKind::Bool = found.ty.kind {
+              return Some(Typed { ty: found.ty, value: ConstValue::Bool(!value) });
+            }
+          }
+        }
+        _ => {}
+      }
+
+      const_operand_error(cx, expr.span, "`" + unary_symbol(op) + "`", found.ty)
+    }
+    ExprKind::Binary { op, lhs, rhs } => {
+      const operand_hint: Option<Type> = if is_comparison(op) || op == BinaryOp::And || op == BinaryOp::Or { None } else { hint };
+      const left = const_eval(cx, lhs, operand_hint, module)?;
+      const right = const_eval(cx, rhs, Some(left.ty), module)?;
+
+      if !types::same_type(left.ty, right.ty) {
+        cx.error(codes::MISMATCHED_TYPES, rhs.span, "expected `" + types::text(left.ty) + "`, found `" + types::text(right.ty) + "`");
+
+        return None;
+      }
+
+      const_binary(cx, op, left.ty, left.value, right.value, expr.span)
+    }
+    ExprKind::Cast { expr: inner, ty } => {
+      const found = const_eval(cx, inner, None, module)?;
+      const owner = cx.owner;
+
+      cx.owner = None;
+
+      const to = cx.type_expr(ty);
+
+      cx.owner = owner;
+      const_cast(cx, found.ty, found.value, to, expr.span)
+    }
+    ExprKind::Call { callee, args } => {
+      if let Some(Res::Builtin(name)) = cx.resolution.paths.get(callee.id) {
+        if name == "include_str" {
+          return include_str(cx, expr.span, args, module);
+        }
+      }
+
+      not_constant(cx, expr.span)
+    }
+    _ => not_constant(cx, expr.span),
+  }
+}
+
+fn not_constant(cx: Checker, span: Span) -> Option<Typed> {
+  cx.diagnostics.push(
+    Diagnostic::error(codes::NOT_CONSTANT, span, "the compiler cannot compute this expression")
+      .with_note("a constant is made of literals, other constants, arithmetic, comparisons, `as` and `include_str`"),
+  );
+
+  None
+}
+
+fn const_operand_error(cx: Checker, span: Span, operator: String, ty: Type) -> Option<Typed> {
+  cx.error(codes::INVALID_OPERAND, span, operator + " cannot be applied to `" + types::text(ty) + "`");
+
+  None
+}
+
+/// The smallest value of an integer type, as text.
+fn min_text(int_ty: IntTy, max: u64) -> String {
+  if types::is_signed(int_ty) { `-${max + 1}` } else { "0" }
+}
+
+/// An integer of type `int_ty`, or an error if it does not fit (`None` is an overflow).
+fn const_int(cx: Checker, value: Option<Wide>, int_ty: IntTy, span: Span) -> Option<Typed> {
+  const max = types::int_max(int_ty, cx.target.pointer_width);
+  var fits = false;
+
+  if let Some(found) = value {
+    fits = if found.negative { types::is_signed(int_ty) && found.magnitude <= max + 1 } else { found.magnitude <= max };
+  }
+
+  match value {
+    Some(found) => {
+      if fits {
+        return Some(Typed { ty: types::int(int_ty), value: ConstValue::Int(found) });
+      }
+    }
+    None => {}
+  }
+
+  const name = types::int_name(int_ty);
+
+  cx.diagnostics.push(
+    Diagnostic::error(codes::NOT_CONSTANT, span, "this constant does not fit in `" + name + "`")
+      .with_note("`" + name + "` holds " + min_text(int_ty, max) + " to " + `${max}`),
+  );
+
+  None
+}
+
+/// Whether a float is a finite number: neither infinite nor NaN.
+fn is_finite(value: f64) -> bool {
+  value - value == 0.0
+}
+
+fn const_float(cx: Checker, value: f64, float_ty: FloatTy, span: Span) -> Option<Typed> {
+  const rounded = if float_ty == FloatTy::F32 { (value as f32) as f64 } else { value };
+
+  if !is_finite(rounded) {
+    cx.error(codes::NOT_CONSTANT, span, "a float constant must be a finite number");
+
+    return None;
+  }
+
+  Some(Typed { ty: types::of(TypeKind::Float(float_ty)), value: ConstValue::Float(rounded) })
+}
+
+fn compare_values(lhs: ConstValue, rhs: ConstValue) -> Option<Ordering> {
+  match lhs {
+    ConstValue::Int(a) => match rhs {
+      ConstValue::Int(b) => Some(a.compare(b)),
+      _ => None,
+    },
+    ConstValue::Float(a) => match rhs {
+      ConstValue::Float(b) => Some(if a < b { Ordering::Less } else if a > b { Ordering::Greater } else { Ordering::Equal }),
+      _ => None,
+    },
+    ConstValue::Bool(a) => match rhs {
+      ConstValue::Bool(b) => Some(a.compare(b)),
+      _ => None,
+    },
+    ConstValue::Char(a) => match rhs {
+      ConstValue::Char(b) => Some(a.compare(b)),
+      _ => None,
+    },
+    ConstValue::Str(a) => match rhs {
+      ConstValue::Str(b) => Some(a.compare(b)),
+      _ => None,
+    },
+  }
+}
+
+fn const_binary(cx: Checker, op: BinaryOp, ty: Type, lhs: ConstValue, rhs: ConstValue, span: Span) -> Option<Typed> {
+  if is_comparison(op) {
+    const ordering = compare_values(lhs, rhs)?;
+    var result = false;
+
+    match ordering {
+      Ordering::Less => {
+        result = op == BinaryOp::Ne || op == BinaryOp::Lt || op == BinaryOp::Le;
+      }
+      Ordering::Equal => {
+        result = op == BinaryOp::Eq || op == BinaryOp::Le || op == BinaryOp::Ge;
+      }
+      Ordering::Greater => {
+        result = op == BinaryOp::Ne || op == BinaryOp::Gt || op == BinaryOp::Ge;
+      }
+    }
+
+    return Some(Typed { ty: types::of(TypeKind::Bool), value: ConstValue::Bool(result) });
+  }
+
+  const symbol = "`" + ast::binary_symbol(op) + "`";
+
+  match lhs {
+    ConstValue::Bool(a) => {
+      if let ConstValue::Bool(b) = rhs {
+        if let TypeKind::Bool = ty.kind {
+          if op == BinaryOp::And {
+            return Some(Typed { ty: ty, value: ConstValue::Bool(a && b) });
+          }
+
+          if op == BinaryOp::Or {
+            return Some(Typed { ty: ty, value: ConstValue::Bool(a || b) });
+          }
+        }
+      }
+    }
+    ConstValue::Str(a) => {
+      if let ConstValue::Str(b) = rhs {
+        if op == BinaryOp::Add && types::is_string(ty) {
+          return Some(Typed { ty: ty, value: ConstValue::Str(a + b) });
+        }
+      }
+    }
+    ConstValue::Int(a) => {
+      if let ConstValue::Int(b) = rhs {
+        if let TypeKind::Int(int_ty) = ty.kind {
+          if (op == BinaryOp::Div || op == BinaryOp::Rem) && b.magnitude == 0 {
+            cx.error(codes::NOT_CONSTANT, span, "this constant divides by zero");
+
+            return None;
+          }
+
+          if op == BinaryOp::Add {
+            return const_int(cx, a.add(b), int_ty, span);
+          }
+
+          if op == BinaryOp::Sub {
+            return const_int(cx, a.sub(b), int_ty, span);
+          }
+
+          if op == BinaryOp::Mul {
+            return const_int(cx, a.mul(b), int_ty, span);
+          }
+
+          if op == BinaryOp::Div {
+            return const_int(cx, Some(a.div(b)), int_ty, span);
+          }
+
+          if op == BinaryOp::Rem {
+            return const_int(cx, Some(a.rem(b)), int_ty, span);
+          }
+
+          return const_operand_error(cx, span, symbol, ty);
+        }
+      }
+    }
+    ConstValue::Float(a) => {
+      if let ConstValue::Float(b) = rhs {
+        if let TypeKind::Float(float_ty) = ty.kind {
+          if op == BinaryOp::Add {
+            return const_float(cx, a + b, float_ty, span);
+          }
+
+          if op == BinaryOp::Sub {
+            return const_float(cx, a - b, float_ty, span);
+          }
+
+          if op == BinaryOp::Mul {
+            return const_float(cx, a * b, float_ty, span);
+          }
+
+          if op == BinaryOp::Div {
+            return const_float(cx, a / b, float_ty, span);
+          }
+
+          if op == BinaryOp::Rem {
+            return const_float(cx, a % b, float_ty, span);
+          }
+
+          return const_operand_error(cx, span, symbol, ty);
+        }
+      }
+    }
+    _ => {}
+  }
+
+  const_operand_error(cx, span, symbol, ty)
+}
+
+/// The width in bits of an integer type.
+fn bits(int_ty: IntTy, pointer_width: u32) -> u32 {
+  match int_ty {
+    IntTy::I8 | IntTy::U8 => 8,
+    IntTy::I16 | IntTy::U16 => 16,
+    IntTy::I32 | IntTy::U32 => 32,
+    IntTy::I64 | IntTy::U64 => 64,
+    IntTy::Isize | IntTy::Usize => pointer_width,
+  }
+}
+
+/// `value` reduced to the width of `int_ty`, keeping the low bits (two's complement).
+fn wrap(value: Wide, int_ty: IntTy, pointer_width: u32) -> Wide {
+  const width = bits(int_ty, pointer_width);
+
+  if width == 64 {
+    const low = if value.negative { (U64_MAX - value.magnitude) + 1 } else { value.magnitude };
+
+    if types::is_signed(int_ty) && low >= 9223372036854775808 {
+      return Wide::of(true, (U64_MAX - low) + 1);
+    }
+
+    return Wide::of(false, low);
+  }
+
+  const modulus = if width == 8 { 256u64 } else if width == 16 { 65536u64 } else { 4294967296u64 };
+  var low = value.magnitude % modulus;
+
+  if value.negative && low != 0 {
+    low = modulus - low;
+  }
+
+  if types::is_signed(int_ty) && low >= modulus / 2 {
+    return Wide::of(true, modulus - low);
+  }
+
+  Wide::of(false, low)
+}
+
+/// A float converted to an integer type: truncated and saturated, with NaN as 0.
+fn saturate(value: f64, int_ty: IntTy, pointer_width: u32) -> Wide {
+  const max = types::int_max(int_ty, pointer_width);
+
+  if value != value {
+    return Wide::of(false, 0);
+  }
+
+  if types::is_signed(int_ty) {
+    if value >= max as f64 {
+      return Wide::of(false, max);
+    }
+
+    const min = -(max as f64) - 1.0;
+
+    if value <= min {
+      return Wide::of(true, max + 1);
+    }
+
+    const truncated = value as i64;
+
+    if truncated < 0 {
+      return Wide::of(true, ((-(truncated + 1)) as u64) + 1);
+    }
+
+    return Wide::of(false, truncated as u64);
+  }
+
+  if value <= 0.0 {
+    return Wide::of(false, 0);
+  }
+
+  if value >= max as f64 {
+    return Wide::of(false, max);
+  }
+
+  Wide::of(false, value as u64)
+}
+
+/// `as` between primitive types, with the rules of docs/spec/02-types.md#conversions.
+fn const_cast(cx: Checker, from: Type, value: ConstValue, to: Type, span: Span) -> Option<Typed> {
+  const width = cx.target.pointer_width;
+
+  if types::same_type(from, to) {
+    return Some(Typed { ty: to, value: value });
+  }
+
+  match to.kind {
+    TypeKind::Int(int_ty) => match value {
+      ConstValue::Int(found) => return Some(Typed { ty: to, value: ConstValue::Int(wrap(found, int_ty, width)) }),
+      ConstValue::Bool(found) => return Some(Typed { ty: to, value: ConstValue::Int(Wide::of(false, if found { 1 } else { 0 })) }),
+      ConstValue::Char(found) => return Some(Typed { ty: to, value: ConstValue::Int(wrap(Wide::of(false, (found as u32) as u64), int_ty, width)) }),
+      ConstValue::Float(found) => return Some(Typed { ty: to, value: ConstValue::Int(saturate(found, int_ty, width)) }),
+      _ => {}
+    },
+    TypeKind::Float(float_ty) => match value {
+      ConstValue::Int(found) => return const_float(cx, found.to_f64(), float_ty, span),
+      ConstValue::Float(found) => return const_float(cx, found, float_ty, span),
+      _ => {}
+    },
+    TypeKind::Char => {
+      if let ConstValue::Int(found) = value {
+        if let TypeKind::Int(IntTy::U8) = from.kind {
+          if found.negative || found.magnitude > 255 {
+            return None;
+          }
+
+          if let Some(c) = char::from_u32(found.magnitude as u32) {
+            return Some(Typed { ty: to, value: ConstValue::Char(c) });
+          }
+        }
+      }
+    }
+    _ => {}
+  }
+
+  cx.error(codes::INVALID_CAST, span, "cannot cast `" + types::text(from) + "` to `" + types::text(to) + "`");
+
+  None
+}
+
+/// `include_str("path")`: the text of a file, by a path relative to the constant's file.
+fn include_str(cx: Checker, span: Span, args: List<Expr>, module: usize) -> Option<Typed> {
+  if args.len() != 1 {
+    cx.error(codes::INVALID_INCLUDE, span, "`include_str` takes one argument: the path of a file");
+
+    return None;
+  }
+
+  const arg = args[0];
+  const relative = match arg.kind {
+    ExprKind::Str(text) => text,
+    _ => {
+      cx.error(codes::INVALID_INCLUDE, arg.span, "the path of `include_str` must be a string literal");
+
+      return None;
+    }
+  };
+  const location = match cx.package.modules.get(module) {
+    Some(found) => found.location,
+    None => None,
+  };
+  const file = match location {
+    Some(found) => found,
+    None => {
+      cx.error(codes::INVALID_INCLUDE, span, "`include_str` needs a source file on disk");
+
+      return None;
+    }
+  };
+  const full = match path::parent(file) {
+    Some(dir) => loader::push_path(dir, relative),
+    None => relative,
+  };
+
+  match fs::read_to_string(full) {
+    Ok(text) => Some(Typed { ty: types::string(), value: ConstValue::Str(text) }),
+    Err(problem) => {
+      // The reason by kind, not the system's message, which depends on the platform.
+      const reason = match problem.kind() {
+        ErrorKind::NotFound => "the file does not exist",
+        ErrorKind::PermissionDenied => "permission denied",
+        ErrorKind::InvalidData => "the file is not UTF-8",
+        _ => "the file cannot be read",
+      };
+
+      cx.diagnostics.push(
+        Diagnostic::error(codes::INVALID_INCLUDE, arg.span, "cannot read `" + full + "`: " + reason)
+          .with_note("the path is relative to the directory of this source file, and the file must be UTF-8"),
+      );
+
+      None
+    }
+  }
+}
+
+fn is_comparison(op: BinaryOp) -> bool {
+  op == BinaryOp::Eq || op == BinaryOp::Ne || op == BinaryOp::Lt || op == BinaryOp::Le || op == BinaryOp::Gt || op == BinaryOp::Ge
+}
+
+fn unary_symbol(op: UnaryOp) -> String {
+  match op {
+    UnaryOp::Neg => "-",
+    UnaryOp::Not => "!",
+    UnaryOp::Deref => "*",
+  }
+}

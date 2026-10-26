@@ -1,0 +1,500 @@
+//! Closures and function values (docs/spec/08-closures.md, ADR-0033): lambdas with parameter
+//! types from the expected function type, results inferred from the body, functions used as
+//! values, calls of function values, captures that cannot be assigned, and the methods of
+//! `Option` and `Result` that take closures. The port of `sagitario_types::closures`.
+
+use pkg::ast::{Expr, ExprKind, Ident, LambdaParam, Path};
+use pkg::diagnostics::Diagnostic;
+use pkg::diagnostics::codes;
+use pkg::resolve::ParamOwner;
+use pkg::span::Span;
+use pkg::types::{Checker, Receiver, Type, TypeKind};
+use pkg::types;
+use pkg::types::exprs;
+use pkg::types::generic;
+use pkg::types::generic::Unknowns;
+use pkg::types::send;
+use pkg::types::typed::BuiltinMethod;
+
+fn function_type(params: List<Type>, ret: Type) -> Type {
+  types::of(TypeKind::Function { params: params, ret: ret })
+}
+
+/// `(params) => body`. Parameter types come from the annotations or the expected function type;
+/// the result from the expected type or else from the body and its `return`s.
+pub fn lambda(cx: Checker, value: Expr, params: List<LambdaParam>, body: Expr, expected: Option<Type>) -> Type {
+  const info = match cx.resolution.lambdas.get(value.id) {
+    Some(info) => info,
+    None => return types::error(),
+  };
+  var hint_params: Option<List<Type>> = None;
+  var hint_ret: Option<Type> = None;
+
+  if let Some(ty) = expected {
+    if let TypeKind::Function { params: expected_params, ret } = ty.kind {
+      hint_params = Some(expected_params);
+
+      if !types::is_error(ret) {
+        hint_ret = Some(ret);
+      }
+    }
+  }
+
+  var wrong_arity = false;
+
+  if let Some(hint) = hint_params {
+    if hint.len() != params.len() {
+      wrong_arity = true;
+      cx.error(
+        codes::MISMATCHED_TYPES,
+        value.span,
+        `expected a function with ${hint.len()} parameter${types::plural(hint.len())}, found a lambda with ${params.len()}`,
+      );
+      hint_params = None;
+    }
+  }
+
+  const param_types: List<Type> = new List();
+  var index = 0usize;
+
+  while index < params.len() && index < info.params.len() {
+    const param = params[index];
+    const local = info.params[index];
+    const hint = match hint_params {
+      Some(hints) => hints.get(index),
+      None => None,
+    };
+    var ty = types::error();
+
+    match param.ty {
+      Some(written) => {
+        ty = cx.type_expr(written);
+
+        if let Some(expected_ty) = hint {
+          const ignored = match expected_ty.kind {
+            TypeKind::Error | TypeKind::Param(_) => true,
+            _ => false,
+          };
+
+          if !types::same_type(expected_ty, ty) && !ignored {
+            exprs::mismatch(cx, written.span, expected_ty, ty);
+          }
+        }
+      }
+      None => match hint {
+        Some(expected_ty) => {
+          ty = expected_ty;
+        }
+        None => {
+          // Already reported as a wrong number of parameters.
+          if !wrong_arity {
+            cx.diagnostics.push(
+              Diagnostic::error(codes::UNKNOWN_TYPE, param.name.span, "cannot infer the type of the parameter `" + param.name.name + "`")
+                .with_help("write its type: `(" + param.name.name + ": Type) => ...`"),
+            );
+          }
+        }
+      },
+    }
+
+    exprs::set_local(cx, local, ty);
+    param_types.push(ty);
+    index += 1;
+  }
+
+  // The body is a function of its own: `return` leaves the lambda, loops do not cross it.
+  const inferring = hint_ret.is_none();
+  const saved_ret = cx.ret;
+  const saved_span = cx.ret_span;
+  const saved_inferring = cx.inferring_ret;
+  const saved_loops = cx.loops;
+
+  cx.ret = hint_ret.unwrap_or(types::of(TypeKind::Never));
+  cx.ret_span = None;
+  cx.inferring_ret = inferring;
+  cx.loops = new List();
+  cx.lambda_stack.push(value.id);
+
+  const body_ty = exprs::expr(cx, body, hint_ret);
+  var ret = cx.ret;
+
+  if inferring && types::is_never(cx.ret) {
+    ret = if types::is_never(body_ty) { types::unit() } else { body_ty };
+  } else if !cx.fits(body_ty, ret) {
+    exprs::mismatch(cx, body.span, ret, body_ty);
+  }
+
+  cx.lambda_stack.pop();
+  cx.ret = saved_ret;
+  cx.ret_span = saved_span;
+  cx.inferring_ret = saved_inferring;
+  cx.loops = saved_loops;
+
+  if wrong_arity {
+    return types::error();
+  }
+
+  function_type(param_types, ret)
+}
+
+/// A module or static function used as a value; a generic one takes its type arguments from the
+/// path or the expected function type.
+pub fn fn_value(cx: Checker, value: Expr, path: Path, function: u32, expected: Option<Type>) -> Type {
+  const sig = match cx.typed.sig(function) {
+    Some(sig) => sig,
+    None => return types::error(),
+  };
+  const name = match cx.resolution.fn_decl(cx.package, function) {
+    Some(decl) => decl.name.name,
+    None => "",
+  };
+
+  // Its argument is checked where it is called.
+  if send::is_spawn(cx, function) {
+    cx.diagnostics.push(
+      Diagnostic::error(codes::INVALID_SPAWN, value.span, "`thread::spawn` cannot be used as a value")
+        .with_note("the compiler checks what a thread captures where `thread::spawn` is called"),
+    );
+
+    return types::error();
+  }
+
+  if let Some(receiver) = sig.receiver {
+    const what = if receiver == Receiver::Init { "an initializer" } else { "a method" };
+
+    cx.diagnostics.push(
+      Diagnostic::error(codes::WRONG_CALL_FORM, value.span, "`" + name + "` is " + what + ", which cannot be used as a value")
+        .with_help("wrap the call in a lambda: `(x) => value.method(x)`"),
+    );
+
+    return types::error();
+  }
+
+  const function_value = function_type(sig.params, sig.ret);
+  const owner = cx.resolution.owner(function);
+  const owner_count = match owner {
+    Some(item) => cx.generic_count(ParamOwner::Item(item)),
+    None => 0,
+  };
+  const own_count = cx.generic_count(ParamOwner::Fn(function));
+
+  if owner_count == 0 && own_count == 0 {
+    return function_value;
+  }
+
+  const explicit = generic::explicit_args(cx, path);
+  const last = if path.segments.is_empty() { 0usize } else { path.segments.len() - 1 };
+  const unknowns = new Unknowns();
+
+  if let Some(item) = owner {
+    if owner_count > 0 {
+      var given: Option<List<Type>> = None;
+
+      if let Some(written) = explicit {
+        if written.segment != last {
+          given = Some(written.args);
+        }
+      }
+
+      unknowns.add(ParamOwner::Item(item), owner_count, given);
+    }
+  }
+
+  var own_given: Option<List<Type>> = None;
+
+  if let Some(written) = explicit {
+    if written.segment == last {
+      own_given = Some(written.args);
+    }
+  }
+
+  unknowns.add(ParamOwner::Fn(function), own_count, own_given);
+
+  if let Some(ty) = expected {
+    unknowns.unify(function_value, ty);
+  }
+
+  const subst = generic::finish_inference(cx, value.span, "`" + name + "`", unknowns);
+  const own = subst.args_of(ParamOwner::Fn(function)).unwrap_or(new List());
+
+  generic::record_call_args(cx, value.id, subst, function, own);
+
+  types::substitute(function_value, subst)
+}
+
+/// `callee(args)` where the callee is a value of a function type.
+pub fn call_value(cx: Checker, value: Expr, callee: Expr, args: List<Expr>) -> Type {
+  const ty = exprs::expr(cx, callee, None);
+
+  match ty.kind {
+    TypeKind::Function { params, ret } => {
+      exprs::check_args(cx, value.span, "function", params, args);
+
+      ret
+    }
+    TypeKind::Error | TypeKind::Never => {
+      exprs::unchecked_args(cx, args);
+
+      types::error()
+    }
+    _ => {
+      cx.error(codes::WRONG_CALL_FORM, callee.span, "cannot call a value of type `" + types::text(ty) + "`");
+      exprs::unchecked_args(cx, args);
+
+      types::error()
+    }
+  }
+}
+
+/// `value.name(args)` where `name` is a field of a function type and the type has no method with
+/// that name.
+pub fn field_call(cx: Checker, value: Expr, field_ty: Type, args: List<Expr>) -> Type {
+  match field_ty.kind {
+    TypeKind::Function { params, ret } => {
+      exprs::check_args(cx, value.span, "function", params, args);
+      cx.typed.field_calls.insert(value.id, true);
+
+      ret
+    }
+    _ => types::error(),
+  }
+}
+
+/// A closure argument taking `params`, whose result is `ret` when known: returns its result type.
+fn closure_arg(cx: Checker, arg: Expr, params: List<Type>, ret: Option<Type>) -> Type {
+  const expected = function_type(params, ret.unwrap_or(types::error()));
+  const actual = exprs::expr(cx, arg, Some(expected));
+
+  match actual.kind {
+    TypeKind::Function { params: actual_params, ret: actual_ret } => {
+      if types::same_types(actual_params, params) {
+        if let Some(wanted) = ret {
+          if !cx.fits(actual_ret, wanted) {
+            exprs::mismatch(cx, arg.span, function_type(params, wanted), function_type(actual_params, actual_ret));
+          }
+        }
+
+        return actual_ret;
+      }
+
+      exprs::mismatch(cx, arg.span, expected, actual);
+
+      types::error()
+    }
+    TypeKind::Error | TypeKind::Never => types::error(),
+    _ => {
+      exprs::mismatch(cx, arg.span, expected, actual);
+
+      types::error()
+    }
+  }
+}
+
+/// The methods of `Option` and `Result` that take a closure.
+pub fn closure_method(cx: Checker, value: Expr, receiver_ty: Type, method: Ident, args: List<Expr>) -> Option<Type> {
+  const name = method.name;
+  var option_value: Option<Type> = None;
+  var result_value: Option<Type> = None;
+  var result_error: Option<Type> = None;
+
+  match receiver_ty.kind {
+    TypeKind::Option(inner) => {
+      option_value = Some(inner);
+    }
+    TypeKind::Result { value: inner, error } => {
+      result_value = Some(inner);
+      result_error = Some(error);
+    }
+    _ => {}
+  }
+
+  const is_option = option_value.is_some();
+  const is_result = result_value.is_some();
+  var builtin: Option<BuiltinMethod> = None;
+
+  if (is_option || is_result) && name == "map" {
+    builtin = Some(BuiltinMethod::Map);
+  } else if is_result && name == "map_err" {
+    builtin = Some(BuiltinMethod::MapErr);
+  } else if (is_option || is_result) && name == "and_then" {
+    builtin = Some(BuiltinMethod::AndThen);
+  } else if (is_option || is_result) && name == "unwrap_or_else" {
+    builtin = Some(BuiltinMethod::UnwrapOrElse);
+  } else if is_option && name == "filter" {
+    builtin = Some(BuiltinMethod::Filter);
+  }
+
+  const chosen = builtin?;
+
+  if args.len() != 1 {
+    exprs::check_args(cx, value.span, "method", List::from([types::error()]), args);
+
+    return Some(types::error());
+  }
+
+  const arg = args[0];
+  var ty = types::error();
+
+  match chosen {
+    BuiltinMethod::Map => {
+      if let Some(inner) = option_value {
+        ty = types::option(closure_arg(cx, arg, List::from([inner]), None));
+      } else if let Some(inner) = result_value {
+        ty = types::of(TypeKind::Result { value: closure_arg(cx, arg, List::from([inner]), None), error: result_error.unwrap_or(types::error()) });
+      }
+    }
+    BuiltinMethod::MapErr => {
+      if let Some(error) = result_error {
+        ty = types::of(TypeKind::Result { value: result_value.unwrap_or(types::error()), error: closure_arg(cx, arg, List::from([error]), None) });
+      }
+    }
+    BuiltinMethod::AndThen => {
+      if let Some(inner) = option_value {
+        const next = closure_arg(cx, arg, List::from([inner]), None);
+
+        ty = match next.kind {
+          TypeKind::Option(_) | TypeKind::Error => next,
+          _ => {
+            cx.error(codes::MISMATCHED_TYPES, arg.span, "the closure of `and_then` must return an `Option`, not `" + types::text(next) + "`");
+
+            types::error()
+          }
+        };
+      } else if let Some(inner) = result_value {
+        const error = result_error.unwrap_or(types::error());
+        const next = closure_arg(cx, arg, List::from([inner]), None);
+        var matched = false;
+
+        if let TypeKind::Result { error: next_error, .. } = next.kind {
+          if types::same_type(next_error, error) {
+            ty = next;
+            matched = true;
+          }
+        }
+
+        if !matched {
+          if !types::is_error(next) {
+            cx.error(
+              codes::MISMATCHED_TYPES,
+              arg.span,
+              "the closure of `and_then` must return a `Result` with the error type `" + types::text(error) + "`, not `" + types::text(next) + "`",
+            );
+          }
+
+          ty = types::error();
+        }
+      }
+    }
+    BuiltinMethod::UnwrapOrElse => {
+      if let Some(inner) = option_value {
+        closure_arg(cx, arg, new List(), Some(inner));
+        ty = inner;
+      } else if let Some(inner) = result_value {
+        closure_arg(cx, arg, List::from([result_error.unwrap_or(types::error())]), Some(inner));
+        ty = inner;
+      }
+    }
+    BuiltinMethod::Filter => {
+      if let Some(inner) = option_value {
+        closure_arg(cx, arg, List::from([inner]), Some(types::of(TypeKind::Bool)));
+        ty = receiver_ty;
+      }
+    }
+    _ => {}
+  }
+
+  cx.typed.builtin_methods.insert(value.id, chosen);
+
+  Some(ty)
+}
+
+/// The type of a field of a function type of a struct or class type (inherited fields included).
+pub fn function_field(cx: Checker, receiver_ty: Type, name: String) -> Option<Type> {
+  var ty = types::error();
+
+  match receiver_ty.kind {
+    TypeKind::Struct(named) => {
+      const position = cx.typed.field_index(named.id, name)?;
+
+      ty = cx.typed.struct_field_types(named).get(position)?;
+    }
+    TypeKind::Class(named) => {
+      ty = cx.typed.class_field_type(named, name)?.ty;
+    }
+    _ => return None,
+  }
+
+  match ty.kind {
+    TypeKind::Function { .. } => Some(ty),
+    _ => None,
+  }
+}
+
+/// Whether a binding is captured by the lambda being checked (declared outside it).
+pub fn is_captured(cx: Checker, local: u32) -> bool {
+  const lambda_id = match cx.lambda_stack.last() {
+    Some(found) => found,
+    None => return false,
+  };
+
+  match cx.resolution.lambdas.get(lambda_id) {
+    Some(info) => !info.owns(local),
+    None => false,
+  }
+}
+
+/// The error for modifying a captured binding.
+pub fn captured_error(span: Span, name: String) -> Diagnostic {
+  Diagnostic::error(codes::CAPTURED_ASSIGNMENT, span, "cannot modify `" + name + "`: closures capture bindings as read-only copies")
+    .with_help("compute the value with `fold`/`reduce`, or keep it in a `var` field of a class instance")
+}
+
+/// Warns when a closure capturing a binding is stored in a field of the object that binding
+/// refers to: the object and the closure keep each other alive.
+pub fn check_closure_cycle(cx: Checker, target: Expr, value: Expr) {
+  const base = match target.kind {
+    ExprKind::Field { base, .. } => base,
+    _ => return,
+  };
+
+  match value.kind {
+    ExprKind::Lambda { .. } => {}
+    _ => return,
+  }
+
+  const local = match exprs::local(cx, base) {
+    Some(local) => local,
+    None => return,
+  };
+  const is_class = match cx.typed.expr_types.get(base.id) {
+    Some(ty) => match ty.kind {
+      TypeKind::Class(_) => true,
+      _ => false,
+    },
+    None => false,
+  };
+
+  if !is_class {
+    return;
+  }
+
+  const info = match cx.resolution.lambdas.get(value.id) {
+    Some(info) => info,
+    None => return,
+  };
+
+  if !info.captures.contains(local) {
+    return;
+  }
+
+  const name = match cx.resolution.function_locals(cx.function).get(local as usize) {
+    Some(found) => found.name,
+    None => "",
+  };
+
+  cx.diagnostics.push(
+    Diagnostic::warning(codes::CLOSURE_CYCLE, value.span, "this closure captures `" + name + "` and is stored in it, so neither is ever freed")
+      .with_note("the object keeps the closure alive, and the closure keeps the object alive")
+      .with_help("pass what the closure needs as parameters instead of capturing the object"),
+  );
+}

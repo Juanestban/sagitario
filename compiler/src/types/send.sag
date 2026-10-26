@@ -1,0 +1,178 @@
+//! `Send` (docs/spec/05-interfaces-generics.md#send, ADR-0045): the classes of `std::sync`, the
+//! prelude's `Send` interface, and the check of `thread::spawn`, whose lambda may only capture
+//! `Send` values. The port of `sagitario_types::send`; which types are `Send` is in
+//! `types::typed`.
+
+use pkg::ast::{Expr, ExprKind};
+use pkg::diagnostics::Diagnostic;
+use pkg::diagnostics::codes;
+use pkg::resolve::{ItemRef, Res, TypeItem};
+use pkg::span::Span;
+use pkg::types::{Checker, SpanInterface};
+use pkg::types;
+use pkg::types::exprs;
+
+/// Finds the classes of `std::sync`, if the program uses it, in declaration order.
+pub fn sync_classes(cx: Checker) {
+  for module in cx.resolution.modules {
+    if module.in_std && module.path.len() == 2 && module.path[0] == "std" && module.path[1] == "sync" {
+      const classes: List<u32> = new List();
+
+      for declared in module.items.values() {
+        if let ItemRef::Type(TypeItem::Class(id)) = declared.item {
+          classes.push(id);
+        }
+      }
+
+      classes.sort();
+      cx.typed.sync_classes = classes;
+
+      return;
+    }
+  }
+}
+
+/// The prelude's `Send` interface.
+pub fn is_send_interface(cx: Checker, id: u32) -> bool {
+  match cx.resolution.prelude_type("Send") {
+    Some(TypeItem::Interface(send)) => send == id,
+    _ => false,
+  }
+}
+
+pub fn send_used_as_type(cx: Checker, span: Span) {
+  cx.diagnostics.push(
+    Diagnostic::error(codes::INVALID_IMPL, span, "`Send` cannot be used as a type").with_help("use it as the bound of a type parameter: `T: Send`"),
+  );
+}
+
+/// `Send` written as a type inside function bodies, which are checked after the interfaces.
+pub fn check_send_types(cx: Checker) {
+  const used = cx.interface_types;
+
+  cx.interface_types = new List<SpanInterface>();
+
+  for entry in used {
+    if is_send_interface(cx, entry.id) {
+      send_used_as_type(cx, entry.span);
+    }
+  }
+}
+
+/// The module `std::name`, if the program uses it.
+fn std_module(cx: Checker, name: String) -> Option<pkg::resolve::ModuleInfo> {
+  for module in cx.resolution.modules {
+    if module.in_std && module.path.len() == 2 && module.path[0] == "std" && module.path[1] == name {
+      return Some(module);
+    }
+  }
+
+  None
+}
+
+/// Whether `id` starts a thread: `std::thread::spawn`, or `JoinHandle::spawn`, which it calls.
+/// Both are checked where code outside the standard library calls them.
+pub fn is_spawn(cx: Checker, id: u32) -> bool {
+  const module = match std_module(cx, "thread") {
+    Some(module) => module,
+    None => return false,
+  };
+  var spawn: Option<u32> = None;
+
+  if let Some(declared) = module.items.get("spawn") {
+    if let ItemRef::Fn(found) = declared.item {
+      spawn = Some(found);
+    }
+  }
+
+  var handle_spawn: Option<u32> = None;
+
+  if let Some(declared) = module.items.get("JoinHandle") {
+    if let ItemRef::Type(TypeItem::Class(class_id)) = declared.item {
+      if let Some(info) = cx.resolution.classes.get(class_id as usize) {
+        for function in info.functions {
+          if handle_spawn.is_none() {
+            if let Some(decl) = cx.resolution.fn_decl(cx.package, function) {
+              if decl.name.name == "spawn" {
+                handle_spawn = Some(function);
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  const matches = match spawn {
+    Some(found) => found == id,
+    None => false,
+  } || match handle_spawn {
+    Some(found) => found == id,
+    None => false,
+  };
+
+  matches && !in_std(cx)
+}
+
+/// Whether the function being checked belongs to the standard library.
+fn in_std(cx: Checker) -> bool {
+  match cx.resolution.functions.get(cx.function as usize) {
+    Some(info) => cx.resolution.is_std_source(info.module),
+    None => false,
+  }
+}
+
+/// The argument of `thread::spawn` is a lambda whose captures are all `Send`, or a function named
+/// by its path, which captures nothing.
+pub fn check_spawn_argument(cx: Checker, args: List<Expr>) {
+  const arg = match args.first() {
+    Some(arg) => arg,
+    None => return,
+  };
+
+  match arg.kind {
+    ExprKind::Lambda { .. } => {
+      const captures = match cx.resolution.lambdas.get(arg.id) {
+        Some(info) => info.captures,
+        None => new List(),
+      };
+
+      for local in captures {
+        const ty = match exprs::local_type(cx, local) {
+          Some(ty) => ty,
+          None => continue,
+        };
+        const reason = match cx.typed.not_send_reason(ty) {
+          Some(reason) => reason,
+          None => continue,
+        };
+        const name = match cx.resolution.function_locals(cx.function).get(local as usize) {
+          Some(info) => info.name,
+          None => "",
+        };
+
+        cx.diagnostics.push(
+          Diagnostic::error(codes::NOT_SEND, arg.span, "this lambda captures `" + name + "`, of type `" + types::text(ty) + "`, which is not `Send`")
+            .with_note(reason)
+            .with_note("a thread may only capture values that no other thread can change: `Send` values")
+            .with_help("pass the thread a `Send` copy of what it needs, or build the value inside the thread"),
+        );
+      }
+    }
+    ExprKind::Path(_) => {
+      if let Some(Res::Fn(_)) = cx.resolution.paths.get(arg.id) {
+        return;
+      }
+
+      spawn_argument_error(cx, arg);
+    }
+    _ => spawn_argument_error(cx, arg),
+  }
+}
+
+fn spawn_argument_error(cx: Checker, arg: Expr) {
+  cx.diagnostics.push(
+    Diagnostic::error(codes::INVALID_SPAWN, arg.span, "`thread::spawn` takes a lambda or the name of a function")
+      .with_note("the compiler checks that what the thread captures is `Send`, which it cannot do for other function values"),
+  );
+}

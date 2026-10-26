@@ -49,8 +49,12 @@ MVP; they may be added later.
 | `f64` ↔ `f32` | rounds to nearest (values beyond `f32` range become infinity) |
 | `bool` → integer | `true` is `1`, `false` is `0` |
 | `char` → integer | the Unicode scalar value (`'A' as u32` is `65`) |
-| `u8` → `char` | allowed (always a valid character); no other integer converts to `char` |
+| `u8` → `char` | allowed (always a valid character); no other integer converts to `char` with `as` |
 | anything else | compile error (e.g. `i32 as bool`; write `x != 0`) |
+
+- `char::from_u32(code: u32) -> Option<char>` is the character with that code point, or `None`
+  for a surrogate (`0xD800`–`0xDFFF`) or a value above `0x10FFFF`
+  ([ADR-0050](../adr/0050-lexer-port-and-token-dumps.md)).
 
 ## Build modes
 

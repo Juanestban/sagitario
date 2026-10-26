@@ -59,6 +59,26 @@ pub struct CompileOptions {
   /// The name of the target to compile for (docs/nova.md#targets); the machine running the
   /// compiler when `None`.
   pub target: Option<String>,
+  /// `sag check --dump=...`: print an intermediate result instead of checking.
+  pub dump: Option<Dump>,
+}
+
+/// What `--dump` prints, for the differential tests of the self-hosted compiler
+/// (docs/adr/0050-lexer-port-and-token-dumps.md). It is not part of the documented interface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dump {
+  /// The tokens of the input file.
+  Tokens,
+  /// The syntax tree of the input file.
+  Ast,
+  /// The names of the program, as the resolver binds them.
+  Resolve,
+  /// The declarations of the program, as the type checker defines them.
+  Declarations,
+  /// The types of the program: its declarations and the bodies of its functions.
+  Types,
+  /// The C that `build` generates for the program.
+  C,
 }
 
 /// What `[link]` adds to a build: C libraries, where to find them, and C sources to compile.
@@ -105,8 +125,39 @@ const SANITIZE_FLAGS: [&str; 2] = ["-fsanitize=address,undefined", "-fno-sanitiz
 /// The C compiler flags of `--sanitize=thread`: a program with a data race exits with an error.
 const THREAD_SANITIZE_FLAGS: [&str; 1] = ["-fsanitize=thread"];
 
+/// The stack every executable reserves on Windows, in bytes: the default of Linux and macOS, so
+/// programs, among them the self-hosted compiler, recurse as deeply on every system
+/// (docs/adr/0055-driver-and-cli-port.md).
+const STACK_RESERVE: &str = "8388608";
+
+/// The stack of the thread running the compiler. The passes recurse over the syntax tree, and
+/// deeply nested code needs more than the main thread's stack (1 MiB on Windows), above all in
+/// debug builds.
+const STACK_SIZE: usize = 64 << 20;
+
+/// Runs `work` (the whole command) on a thread with a large stack. A panic in it, which is an
+/// internal compiler error already printed, gives the exit code 101.
+pub fn on_large_stack(work: fn() -> std::process::ExitCode) -> std::process::ExitCode {
+  match std::thread::Builder::new().stack_size(STACK_SIZE).spawn(work).map(std::thread::JoinHandle::join) {
+    Ok(Ok(code)) => code,
+    _ => std::process::ExitCode::from(EXIT_ICE),
+  }
+}
+
 /// `sag check`: runs the front end only.
 pub fn check(options: &CompileOptions) -> u8 {
+  if let Some(dump @ (Dump::Resolve | Dump::Declarations | Dump::Types)) = options.dump {
+    return dump_program(options, dump);
+  }
+
+  if options.dump == Some(Dump::C) {
+    return dump_c(options);
+  }
+
+  if let Some(dump) = options.dump {
+    return dump_file(options, dump);
+  }
+
   match front_end(options, false) {
     Ok(_) => 0,
     Err(code) => code,
@@ -169,6 +220,92 @@ pub fn run(options: &CompileOptions) -> u8 {
   }
 }
 
+/// `sag check --dump=...`: the tokens or the syntax tree of the input file alone, and its
+/// diagnostics (docs/adr/0050-lexer-port-and-token-dumps.md,
+/// docs/adr/0051-parser-port-and-ast-dumps.md). A file with lexical errors is not parsed, as in
+/// a build.
+fn dump_file(options: &CompileOptions, dump: Dump) -> u8 {
+  let input = &options.input;
+  let text = match fs::read_to_string(input) {
+    Ok(text) => text,
+    Err(error) => {
+      eprintln!("error: cannot read `{}`: {error}", input.display());
+      return EXIT_FAILURE;
+    }
+  };
+  let mut sources = SourceMap::new();
+  let mut diagnostics = Diagnostics::new();
+  let id = sources.add(input.clone(), text);
+  let Some(source) = sources.get(id) else {
+    eprintln!("internal compiler error: source file was not registered");
+    return EXIT_ICE;
+  };
+  let tokens = sagitario_lexer::lex(id, source.text(), &mut diagnostics);
+
+  match dump {
+    Dump::Tokens => print!("{}", sagitario_lexer::dump(&tokens)),
+    Dump::Ast if !diagnostics.has_errors() => {
+      let module = sagitario_parser::parse_module(id, tokens, &mut diagnostics);
+
+      print!("{}", sagitario_ast::dump::dump(&module));
+    }
+    Dump::Ast | Dump::Resolve | Dump::Declarations | Dump::Types | Dump::C => {}
+  }
+
+  match report(&mut diagnostics, &sources, options) {
+    Ok(()) => 0,
+    Err(code) => code,
+  }
+}
+
+/// `sag check --dump=resolve|declarations|types`: loads the program as `check` does, resolves it
+/// and prints the resolution, or type checks its declarations or all of it and prints the result
+/// (docs/adr/0052-resolver-port-and-resolution-dumps.md,
+/// docs/adr/0053-type-checker-port-and-type-dumps.md).
+fn dump_program(options: &CompileOptions, dump: Dump) -> u8 {
+  let (package, sources, mut diagnostics) = match load_package(options) {
+    Ok(loaded) => loaded,
+    Err(code) => return code,
+  };
+  let resolution = sagitario_resolve::resolve(&package, &mut diagnostics);
+
+  if dump == Dump::Resolve {
+    print!("{}", sagitario_resolve::dump::dump(&resolution));
+  } else {
+    let stage = if dump == Dump::Types { sagitario_types::Stage::Bodies } else { sagitario_types::Stage::Declarations };
+    let typed = sagitario_types::check_until(&package, &resolution, &mut diagnostics, stage);
+
+    print!("{}", sagitario_types::dump::dump(&typed));
+  }
+
+  match report(&mut diagnostics, &sources, options) {
+    Ok(()) => 0,
+    Err(code) => code,
+  }
+}
+
+/// `sag check --dump=c`: the C that `build` generates, without compiling it: `program.c`, then
+/// `sag_ffi.c` after a marker line when the program calls C or exports functions
+/// (docs/adr/0054-lowering-and-c-generation-port.md).
+fn dump_c(options: &CompileOptions) -> u8 {
+  match front_end(options, true) {
+    Ok(FrontEnd { c_source: Some(generated), .. }) => {
+      print!("{}", generated.program);
+
+      if let Some(ffi) = &generated.ffi {
+        print!("{C_DUMP_FFI_MARKER}{ffi}");
+      }
+
+      0
+    }
+    Ok(_) => 0,
+    Err(code) => code,
+  }
+}
+
+/// The line separating the two translation units in `--dump=c`.
+const C_DUMP_FFI_MARKER: &str = "/* ---- sag_ffi.c ---- */\n";
+
 struct FrontEnd {
   c_source: Option<sagitario_codegen_c::GeneratedC>,
   /// A library's C header.
@@ -179,6 +316,38 @@ struct FrontEnd {
 
 /// Lexes, parses, resolves and type checks; with `generate`, also lowers to SIR and emits C.
 fn front_end(options: &CompileOptions, generate: bool) -> Result<FrontEnd, u8> {
+  let (package, sources, mut diagnostics) = load_package(options)?;
+  let resolution = sagitario_resolve::resolve(&package, &mut diagnostics);
+  let typed = sagitario_types::check(&package, &resolution, &mut diagnostics);
+
+  report(&mut diagnostics, &sources, options)?;
+
+  let (header, exports) = if options.library && generate {
+    let exports = header::exports(&package, &resolution, &typed).into_iter().map(|export| export.symbol).collect();
+
+    (Some(header::generate(&options.name, &package, &resolution, &typed, &sources)), exports)
+  } else {
+    (None, Vec::new())
+  };
+
+  let program = sagitario_sir::lower(&package, &resolution, &typed, &sources, &mut diagnostics).map_err(|error| {
+    eprintln!("internal compiler error: {}", error.0);
+    EXIT_ICE
+  })?;
+
+  // Generic code may instantiate itself endlessly, found while lowering.
+  report(&mut diagnostics, &sources, options)?;
+
+  if !generate {
+    return Ok(FrontEnd { c_source: None, header, exports });
+  }
+  Ok(FrontEnd { c_source: Some(sagitario_codegen_c::generate(&program)), header, exports })
+}
+
+/// Reads, lexes and parses the input's modules, those of its dependencies, the standard
+/// library modules they name and the prelude. Lexical and syntax errors are reported, and stop
+/// the pipeline.
+fn load_package(options: &CompileOptions) -> Result<(Package, SourceMap, Diagnostics), u8> {
   let input = &options.input;
   if input.extension().and_then(|extension| extension.to_str()) != Some("sag") {
     eprintln!("error: `{}` is not a `.sag` file", input.display());
@@ -254,31 +423,8 @@ fn front_end(options: &CompileOptions, generate: bool) -> Result<FrontEnd, u8> {
     None => TargetInfo::host(),
   };
   let package = Package { modules: loader.modules, prelude: Some(prelude), std: loader.std, library: options.library, packages: infos, target };
-  let resolution = sagitario_resolve::resolve(&package, &mut diagnostics);
-  let typed = sagitario_types::check(&package, &resolution, &mut diagnostics);
 
-  report(&mut diagnostics, &sources, options)?;
-
-  let (header, exports) = if options.library && generate {
-    let exports = header::exports(&package, &resolution, &typed).into_iter().map(|export| export.symbol).collect();
-
-    (Some(header::generate(&options.name, &package, &resolution, &typed, &sources)), exports)
-  } else {
-    (None, Vec::new())
-  };
-
-  let program = sagitario_sir::lower(&package, &resolution, &typed, &sources, &mut diagnostics).map_err(|error| {
-    eprintln!("internal compiler error: {}", error.0);
-    EXIT_ICE
-  })?;
-
-  // Generic code may instantiate itself endlessly, found while lowering.
-  report(&mut diagnostics, &sources, options)?;
-
-  if !generate {
-    return Ok(FrontEnd { c_source: None, header, exports });
-  }
-  Ok(FrontEnd { c_source: Some(sagitario_codegen_c::generate(&program)), header, exports })
+  Ok((package, sources, diagnostics))
 }
 
 /// The part of the prelude written in Sagitario.
@@ -428,6 +574,7 @@ impl Loader {
 
       module.path = path;
       module.package = package;
+      module.location = Some(file.display().to_string());
       self.modules.push(module);
     }
 
@@ -724,8 +871,15 @@ impl Toolchain<'_> {
 
     if self.compiler.cl {
       command.arg("/nologo").args(self.mode).args(objects).arg(format!("/Fe{}", executable.display())).arg("/link").args(self.link_args(link));
+      command.arg(format!("/STACK:{STACK_RESERVE}"));
     } else {
       command.args(self.mode).args(self.sanitize).args(objects).arg("-o").arg(executable).args(self.link_args(link));
+
+      if self.compiler.mingw() {
+        command.arg(format!("-Wl,--stack,{STACK_RESERVE}"));
+      } else if self.compiler.windows() {
+        command.arg(format!("-Wl,/STACK:{STACK_RESERVE}"));
+      }
     }
 
     self.link(&mut command)

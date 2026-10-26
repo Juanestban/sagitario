@@ -1,0 +1,58 @@
+// Valid expressions where the grammar has to choose: generics against comparisons, struct
+// literals in conditions, lambdas against parentheses, templates and patterns.
+fn choices() {
+  const a = max<i32>(1, 2);
+  const b = x < y;
+  const c = a < b > (c);
+  const d = Pair<i32>::new(1);
+  const e = Box<i32> { value: 1 };
+  const f = new Box<List<String>>(new List());
+  const g = (x) => x + 1;
+  const h = x => { x };
+  const i = (a: i32, b: String) => a;
+  const j = (1 + 2) * 3;
+  const k = -x as u8 + !y as i32;
+  const l = *pointer;
+  const m = list[0].field.method(1, 2)?.other;
+  const n = [1, 2, 3,];
+  const o = [0u8; 16];
+  const p = `a ${b + c} d ${`e ${f}`}`;
+  const q = 1..=10;
+  const r = if x { 1 } else if y { 2 } else { 3 };
+  const s = match v { Some(1) | None => 0, Shape::Rect { w, h: 0.5, .. } => 1, -2 => 2, _ if guard => 3, x => x };
+  const t = loop { break 5; };
+  const u = unsafe { *p };
+
+  if a == Point { return; }
+
+  while let Some(x) = it.next() {
+    continue;
+  }
+
+  if let Shape::Circle(r) = shape {} else {}
+
+  for item in items.iter() {
+    total += item;
+  }
+
+  value = 1;
+  value -= 2;
+  self.x *= 3;
+  zod.new(1);
+  pkg::module::function();
+  super::super::helper();
+  Self::create();
+  match value {
+    Variant => {}
+    pkg::Thing::A => {}
+  }
+}
+
+const NEGATIVE: i64 = -9_223_372_036_854_775_808;
+
+abstract class Base<T: Ord + Hash> extends Parent<T> impl Show, Eq<T> where T: Clone {
+  pub const value: T;
+
+  pub abstract fn area(self) -> f64;
+  pub override fn name(self) -> String { "base" }
+}

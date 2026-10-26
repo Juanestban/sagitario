@@ -118,11 +118,11 @@ impl TypedModule {
 }
 
 impl Checker<'_> {
-  /// Finds the classes of `std::sync`, if the program uses it.
+  /// Finds the classes of `std::sync`, if the program uses it, in declaration order rather than
+  /// the order of a hash map.
   pub(crate) fn sync_classes(&mut self) {
     let Some(module) = self.resolution.modules.iter().find(|module| module.in_std && module.path == ["std", "sync"]) else { return };
-
-    self.typed.sync_classes = module
+    let mut classes: Vec<ClassId> = module
       .items
       .values()
       .filter_map(|declared| match declared.item {
@@ -130,6 +130,9 @@ impl Checker<'_> {
         _ => None,
       })
       .collect();
+
+    classes.sort();
+    self.typed.sync_classes = classes;
   }
 
   /// The prelude's `Send` interface.

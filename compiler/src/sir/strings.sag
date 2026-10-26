@@ -1,0 +1,181 @@
+//! Lowering of `String` operators, the methods of `String`, `char` and `StringBuilder`,
+//! `new StringBuilder()` and `for` over `chars()`/`bytes()`, which call runtime functions. The
+//! port of `sagitario_sir::text`.
+
+use pkg::ast::{Block, BinaryOp, Expr, ExprKind};
+use pkg::sir::{Callee, Lowering, Operand, Rvalue, Stmt, int_operand, local_place};
+use pkg::types::{FloatTy, IntTy, Type, TypeKind};
+use pkg::types;
+use pkg::types::typed::BuiltinMethod;
+
+fn runtime(function: String) -> Callee {
+  Callee::Runtime { function: function, located: false }
+}
+
+fn is_arithmetic(op: BinaryOp) -> bool {
+  op == BinaryOp::Add || op == BinaryOp::Sub || op == BinaryOp::Mul || op == BinaryOp::Div || op == BinaryOp::Rem
+}
+
+/// `lhs op rhs` where both operands have type `operand_ty`.
+pub fn binary(lw: Lowering, op: BinaryOp, operand_ty: Type, lhs: Operand, rhs: Operand) -> Operand {
+  if !types::is_string(operand_ty) {
+    const result_ty = if is_arithmetic(op) { operand_ty } else { types::of(TypeKind::Bool) };
+
+    return lw.new_value(result_ty, Rvalue::Binary { op: op, ty: operand_ty, lhs: lhs, rhs: rhs });
+  }
+
+  if op == BinaryOp::Add {
+    return lw.new_value(types::string(), Rvalue::Call { callee: runtime("sag_string_concat"), args: List::from([lhs, rhs]) });
+  }
+
+  // Comparisons: the byte-wise order from `sag_string_cmp` against zero.
+  const order = lw.new_value(types::int(IntTy::I32), Rvalue::Call { callee: runtime("sag_string_cmp"), args: List::from([lhs, rhs]) });
+
+  lw.new_value(types::of(TypeKind::Bool), Rvalue::Binary { op: op, ty: types::int(IntTy::I32), lhs: order, rhs: int_operand(0, false, IntTy::I32) })
+}
+
+pub fn text_method(lw: Lowering, method: BuiltinMethod, ty: Type, receiver: Expr, args: List<Expr>) -> Result<Operand, String> {
+  const operands = List::from([lw.expr(receiver)?]);
+
+  for arg in args {
+    operands.push(lw.expr(arg)?);
+  }
+
+  match method {
+    BuiltinMethod::Runtime { function, located } => Ok(lw.call(Callee::Runtime { function: function, located: located }, operands, ty)),
+    BuiltinMethod::Find => {
+      const index = lw.new_value(types::int(IntTy::Usize), Rvalue::Call { callee: runtime("sag_string_find"), args: operands });
+
+      Ok(sentinel_option(lw, ty, index, IntTy::Usize, 18446744073709551615))
+    }
+    BuiltinMethod::ToDigit => {
+      const callee = Callee::Runtime { function: "sag_char_to_digit_at", located: true };
+      const digit = lw.new_value(types::int(IntTy::U32), Rvalue::Call { callee: callee, args: operands });
+
+      Ok(sentinel_option(lw, ty, digit, IntTy::U32, 4294967295))
+    }
+    BuiltinMethod::Parse(target) => parse(lw, ty, target, operands),
+    _ => Err("unexpected text method"),
+  }
+}
+
+/// `char::from_u32(code)`: the runtime returns the code, or `UINT32_MAX` if it is not a
+/// character.
+pub fn char_from_u32(lw: Lowering, ty: Type, code: Operand) -> Operand {
+  const checked = lw.new_value(types::int(IntTy::U32), Rvalue::Call { callee: runtime("sag_char_from_u32"), args: List::from([code]) });
+  const character = lw.new_value(types::of(TypeKind::Char), Rvalue::Cast { from: types::int(IntTy::U32), to: types::of(TypeKind::Char), operand: checked });
+
+  sentinel_option(lw, ty, character, IntTy::U32, 4294967295)
+}
+
+/// `Some(value)` unless `value` is `sentinel`, then `None`.
+fn sentinel_option(lw: Lowering, ty: Type, value: Operand, int_ty: IntTy, sentinel: u64) -> Operand {
+  const present = lw.new_value(types::of(TypeKind::Bool), Rvalue::Binary { op: BinaryOp::Ne, ty: types::int(int_ty), lhs: value, rhs: int_operand(sentinel, false, int_ty) });
+  const dest = lw.temp(ty);
+
+  lw.emit(Stmt::If {
+    cond: present,
+    then_body: List::from([Stmt::Assign { dest: dest, value: Rvalue::Variant { index: 1, fields: List::from([value]) } }]),
+    else_body: List::from([Stmt::Assign { dest: dest, value: Rvalue::Variant { index: 0, fields: new List() } }]),
+  });
+
+  Operand::Local(dest)
+}
+
+/// `text.parse_<target>()`: the runtime parses into a 64-bit value within the target's range and
+/// reports failures with a message.
+fn parse(lw: Lowering, ty: Type, target: Type, operands: List<Operand>) -> Result<Operand, String> {
+  var raw_ty = types::error();
+  var function = "";
+
+  match target.kind {
+    TypeKind::Int(int_ty) => {
+      const max = types::int_max(int_ty, lw.package.target.pointer_width);
+
+      if types::is_signed(int_ty) {
+        operands.push(int_operand(max + 1, true, IntTy::I64));
+        operands.push(int_operand(max, false, IntTy::I64));
+        raw_ty = types::int(IntTy::I64);
+        function = "sag_parse_signed";
+      } else {
+        operands.push(int_operand(max, false, IntTy::U64));
+        raw_ty = types::int(IntTy::U64);
+        function = "sag_parse_unsigned";
+      }
+    }
+    TypeKind::Float(_) => {
+      raw_ty = types::of(TypeKind::Float(FloatTy::F64));
+      function = "sag_parse_float";
+    }
+    _ => return Err("cannot parse " + types::text(target)),
+  }
+
+  const raw = lw.temp(raw_ty);
+  // Always written by the runtime: the message, or the empty string on success.
+  const message = lw.temp(types::string());
+
+  lw.pending.push(message);
+  operands.push(Operand::Ref(local_place(raw, raw_ty)));
+  operands.push(Operand::Ref(local_place(message, types::string())));
+
+  const parsed = lw.new_value(types::of(TypeKind::Bool), Rvalue::Call { callee: runtime(function), args: operands });
+  const dest = lw.temp(ty);
+  const then_mark = lw.open_buffer();
+  const value = lw.new_value(target, Rvalue::Cast { from: raw_ty, to: target, operand: Operand::Local(raw) });
+
+  lw.emit(Stmt::Assign { dest: dest, value: Rvalue::Variant { index: 0, fields: List::from([value]) } });
+
+  const then_body = lw.close_buffer(then_mark);
+  const else_body = List::from([Stmt::Retain(Operand::Local(message)), Stmt::Assign { dest: dest, value: Rvalue::Variant { index: 1, fields: List::from([Operand::Local(message)]) } }]);
+
+  lw.emit(Stmt::If { cond: parsed, then_body: then_body, else_body: else_body });
+
+  Ok(lw.owned_result(Some(dest)))
+}
+
+/// `for var in text.chars()` or `text.bytes()`, over the string as it was before the loop.
+pub fn for_text(lw: Lowering, variable: u32, iter: Expr, bytes: bool, body: Block) -> Result<(), String> {
+  const receiver = match iter.kind {
+    ExprKind::MethodCall { receiver, .. } => receiver,
+    _ => return Err("`chars`/`bytes` without a receiver"),
+  };
+  const value = lw.expr(receiver)?;
+  const text = lw.temp(types::string());
+
+  lw.store(text, value);
+  lw.pending.push(text);
+
+  const mark = lw.open_loop(None);
+
+  lw.block_into(body, None)?;
+
+  const loop_body = lw.close_loop(mark);
+
+  lw.emit(Stmt::ForText { variable: variable, text: text, bytes: bytes, body: loop_body });
+
+  Ok(())
+}
+
+/// `CString::new(text)`: `Err` with Rust's message when the text contains a NUL byte.
+pub fn cstring_new(lw: Lowering, ty: Type, text: Operand) -> Operand {
+  // Both are always written by the runtime: the C string or null, the message or "".
+  const cstring = types::of(TypeKind::CString);
+  const raw = lw.temp(cstring);
+  const message = lw.temp(types::string());
+
+  lw.pending.push(raw);
+  lw.pending.push(message);
+
+  const args = List::from([text, Operand::Ref(local_place(raw, cstring)), Operand::Ref(local_place(message, types::string()))]);
+  const created = lw.new_value(types::of(TypeKind::Bool), Rvalue::Call { callee: runtime("sag_cstring_new"), args: args });
+  const dest = lw.temp(ty);
+  const then_body = List::from([Stmt::Retain(Operand::Local(raw)), Stmt::Assign { dest: dest, value: Rvalue::Variant { index: 0, fields: List::from([Operand::Local(raw)]) } }]);
+  const else_body = List::from([Stmt::Retain(Operand::Local(message)), Stmt::Assign { dest: dest, value: Rvalue::Variant { index: 1, fields: List::from([Operand::Local(message)]) } }]);
+
+  lw.emit(Stmt::If { cond: created, then_body: then_body, else_body: else_body });
+  lw.owned_result(Some(dest))
+}
+
+pub fn new_string_builder(lw: Lowering) -> Operand {
+  lw.new_value(types::of(TypeKind::StringBuilder), Rvalue::Call { callee: runtime("sag_builder_new"), args: new List() })
+}

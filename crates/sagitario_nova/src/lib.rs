@@ -582,6 +582,7 @@ fn compile(options: &Options, mode: Mode) -> u8 {
     name: package.manifest.name.clone(),
     link,
     target: options.target.clone(),
+    dump: None,
   };
 
   for dependency in packages.iter().skip(1) {

@@ -1,0 +1,88 @@
+// `if let` and `while let` (docs/spec/06-control-flow.md#if-let-and-while-let): a pattern that
+// may not match, with `else` and `else if`, bindings only inside the block, `break` and
+// `continue` in `while let`, and enum variants with data.
+// expect-stdout: found 3
+// expect-stdout: nothing
+// expect-stdout: circle of 2
+// expect-stdout: popped 3 2 1
+// expect-stdout: odd 5 3 1
+// expect-stdout: ok 7, error bad
+
+enum Shape {
+  Circle(f64),
+  Square(f64),
+}
+
+fn describe(shape: Shape) -> String {
+  if let Shape::Circle(radius) = shape {
+    `circle of ${radius}`
+  } else if let Shape::Square(side) = shape {
+    `square of ${side}`
+  } else {
+    "unknown"
+  }
+}
+
+fn parse(text: String) -> Result<i32, String> {
+  if text == "7" { Ok(7) } else { Err("bad") }
+}
+
+pub fn main() {
+  const found: Option<i32> = Some(3);
+
+  if let Some(value) = found {
+    println(`found ${value}`);
+  }
+
+  const missing: Option<i32> = None;
+
+  if let Some(value) = missing {
+    println(`found ${value}`);
+  } else {
+    println("nothing");
+  }
+
+  println(describe(Shape::Circle(2.0)));
+
+  const stack = List::from([1, 2, 3]);
+  const popped: List<String> = new List();
+
+  while let Some(top) = stack.pop() {
+    popped.push(`${top}`);
+  }
+
+  println(`popped ${popped.join(" ")}`);
+
+  const numbers = List::from([1, 2, 3, 4, 5, 6, 7]);
+  const odd: List<String> = new List();
+
+  while let Some(number) = numbers.pop() {
+    if number == 7 {
+      continue;
+    }
+
+    if number % 2 == 0 {
+      continue;
+    }
+
+    odd.push(`${number}`);
+
+    if number == 1 {
+      break;
+    }
+  }
+
+  println(`odd ${odd.join(" ")}`);
+
+  var report = "";
+
+  if let Ok(value) = parse("7") {
+    report = `ok ${value}`;
+  }
+
+  if let Err(message) = parse("x") {
+    report = `${report}, error ${message}`;
+  }
+
+  println(report);
+}

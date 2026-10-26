@@ -15,14 +15,14 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0004](0004-class-model.md) | Class model: single inheritance, interfaces, no open/final | Accepted (refined by 0027, 0029, 0031) |
 | [0005](0005-result-error-handling.md) | Errors as values with `Result` and `?` | Accepted (refined by 0031, 0033) |
 | [0006](0006-no-null-option.md) | No null; `Option<T>` only | Accepted |
-| [0007](0007-mutability-const-var.md) | Mutability with `const` / `var` | Accepted (amended by 0028) |
+| [0007](0007-mutability-const-var.md) | Mutability with `const` / `var` | Accepted (amended by 0028; refined by 0049) |
 | [0008](0008-concurrency-deferred.md) | Single-threaded MVP; Rust-style concurrency later | Accepted (superseded in part by 0045) |
 | [0009](0009-ffi-and-unsafe.md) | Rust-style FFI and `unsafe` | Accepted (refined by 0026) |
 | [0010](0010-modules-and-packages.md) | File-as-module, logical imports, packages | Accepted (amended by 0024, 0025; manifest superseded by 0040) |
 | [0011](0011-surface-syntax.md) | Surface syntax | Accepted (refined by 0035) |
 | [0012](0012-closures.md) | Closures capture by value, read-only | Accepted (refined by 0033) |
-| [0013](0013-primitive-semantics.md) | Semantics of primitives and `String` | Accepted (refined by 0034) |
-| [0014](0014-mvp-scope.md) | MVP scope: F0 + F1 + F2, desktop only | Accepted |
+| [0013](0013-primitive-semantics.md) | Semantics of primitives and `String` | Accepted (refined by 0034, 0050) |
+| [0014](0014-mvp-scope.md) | MVP scope: F0 + F1 + F2, desktop only | Accepted (refined by 0049) |
 | [0015](0015-compiler-architecture-and-toolchain.md) | Compiler architecture and C toolchain | Accepted (refined by 0044) |
 | [0016](0016-engineering-process.md) | Testing, quality gates, conventions and license | Accepted (refined by 0036) |
 | [0017](0017-resolution-of-open-questions-q1-q11.md) | Resolution of open questions Q1–Q11 | Accepted (refined by 0034) |
@@ -57,6 +57,14 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0046](0046-mutex-and-atomics.md) | `std::sync`: `Mutex` and atomics | Accepted |
 | [0047](0047-channels-and-thread-utilities.md) | Channels and thread utilities | Accepted |
 | [0048](0048-async-await.md) | `async`/`await`, for phase F6 | Accepted (not implemented) |
+| [0049](0049-self-hosting-plan-and-language-prerequisites.md) | The self-hosting plan, module-level constants, `include_str`, `if let` and `while let` | Accepted (refined by 0050) |
+| [0050](0050-lexer-port-and-token-dumps.md) | The lexer port, token dumps and `char::from_u32` | Accepted (refined by 0051) |
+| [0051](0051-parser-port-and-ast-dumps.md) | The parser port and AST dumps | Accepted (refined by 0052) |
+| [0052](0052-resolver-port-and-resolution-dumps.md) | The resolver port and resolution dumps | Accepted (refined by 0053) |
+| [0053](0053-type-checker-port-and-type-dumps.md) | The type checker port and type dumps | Accepted (refined by 0054) |
+| [0054](0054-lowering-and-c-generation-port.md) | The lowering and C generation port | Accepted (refined by 0055) |
+| [0055](0055-driver-and-cli-port.md) | The driver and CLI port | Accepted (refined by 0056) |
+| [0056](0056-bootstrap-and-acceptance.md) | The bootstrap and the acceptance of F5 | Accepted |
 
 ## Template
 

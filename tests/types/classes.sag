@@ -1,0 +1,134 @@
+// Classes, inheritance, overrides, abstract methods and vtables, and their errors.
+
+abstract class Shape {
+  pub fn new(self) {}
+
+  pub abstract fn area(self) -> f64;
+
+  pub fn describe(self) -> String {
+    `area ${self.area()}`
+  }
+
+  pub fn name(self) -> String {
+    "shape"
+  }
+}
+
+class Circle extends Shape {
+  pub const radius: f64;
+
+  pub fn new(self, radius: f64) {
+    zod.new();
+    self.radius = radius;
+  }
+
+  pub override fn area(self) -> f64 {
+    3.14 * self.radius * self.radius
+  }
+
+  pub override fn name(self) -> String {
+    "circle"
+  }
+}
+
+class Ring extends Circle {
+  pub var inner: f64;
+
+  pub fn new(self, radius: f64, inner: f64) {
+    zod.new(radius);
+    self.inner = inner;
+  }
+
+  pub override fn area(self) -> f64 {
+    zod.area() - 3.14 * self.inner * self.inner
+  }
+}
+
+class Box<T> {
+  pub const value: T;
+  pub weak var owner: Option<Ring>;
+
+  pub fn new(self, value: T) {
+    self.value = value;
+    self.owner = None;
+  }
+}
+
+class Labeled<T> extends Box<T> {
+  pub fn new(self, value: T) {
+    zod.new(value);
+  }
+}
+
+class Square extends Shape {
+  pub fn new(self) {
+    zod.new();
+  }
+}
+
+class Loop extends Loop {}
+
+class Fields {
+  pub const x: i32;
+}
+
+class NeedsArgs extends Circle {}
+
+class Wrong extends Circle {
+  pub fn new(self, radius: f64) {
+    self.radius2 = radius;
+  }
+
+  pub fn area(self) -> f64 {
+    1.0
+  }
+
+  pub override fn missing(self) {}
+
+  pub override fn name(self) -> i32 {
+    1
+  }
+
+  pub fn radius() -> f64 {
+    1.0
+  }
+}
+
+class Initializers {
+  pub fn new() {}
+}
+
+class Returns {
+  pub fn new(self) -> i32 {
+    1
+  }
+}
+
+class Concrete {
+  pub abstract fn missing(self);
+
+  prv abstract fn hidden(self);
+
+  pub abstract fn generic<T>(self, value: T);
+
+  pub abstract fn no_self();
+}
+
+struct Weak {
+  pub weak link: Option<Ring>;
+}
+
+class WeakErrors {
+  pub weak const a: Option<Ring>;
+  pub weak var b: Ring;
+
+  pub fn new(self) {}
+}
+
+class ExtendsStruct extends Weak {}
+
+fn main() {
+  const shape: Shape = new Ring(2.0, 1.0);
+
+  println(shape.describe());
+}

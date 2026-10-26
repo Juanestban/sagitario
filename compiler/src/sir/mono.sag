@@ -1,0 +1,239 @@
+//! Monomorphization (docs/spec/05-interfaces-generics.md#generics, ADR-0032): every generic
+//! function, method of a generic type and default method of an interface is a template, lowered
+//! once per combination of type arguments it is used with. The port of `sagitario_sir::mono`.
+
+use pkg::diagnostics::Diagnostic;
+use pkg::diagnostics::codes;
+use pkg::resolve::{ParamOwner, Resolution, TypeItem};
+use pkg::sir::{ClassInstance, Instance, Lowering, subst_key, type_key};
+use pkg::types::{NamedRef, Subst, Type, TypeKind};
+use pkg::types;
+use pkg::types::typed::{TypedModule, owner_key};
+
+/// How deeply type arguments may nest before instances are considered endless.
+const MAX_DEPTH: usize = 64;
+
+/// Whether a function is lowered only through instances: it has type parameters, belongs to a
+/// generic type, or belongs to an interface. Functions of the prelude and the standard library
+/// are also lowered on demand.
+pub fn is_template(resolution: Resolution, typed: TypedModule, function: u32) -> bool {
+  if resolution.in_library(function) {
+    return true;
+  }
+
+  match resolution.owner(function) {
+    Some(TypeItem::Interface(_)) => true,
+    Some(owner) => {
+      if typed.generics.contains_key(owner_key(ParamOwner::Item(owner))) {
+        return true;
+      }
+
+      typed.generics.contains_key(owner_key(ParamOwner::Fn(function)))
+    }
+    None => typed.generics.contains_key(owner_key(ParamOwner::Fn(function))),
+  }
+}
+
+/// The function to call for `function` with the type arguments in `subst`: itself, or the
+/// instance of a template, created if needed.
+pub fn instance(lw: Lowering, function: u32, subst: Subst) -> u32 {
+  if !is_template(lw.resolution, lw.typed, function) {
+    return function;
+  }
+
+  const key = `${function}:` + subst_key(subst);
+
+  if let Some(index) = lw.registry.instance_index.get(key) {
+    return lw.registry.first_instance + index as u32;
+  }
+
+  var deepest = 0usize;
+
+  for entry in subst.params {
+    for arg in entry.args {
+      const found = types::depth(arg);
+
+      if found > deepest {
+        deepest = found;
+      }
+    }
+  }
+
+  if let Some(self_ty) = subst.self_ty {
+    const found = types::depth(self_ty);
+
+    if found > deepest {
+      deepest = found;
+    }
+  }
+
+  if deepest > MAX_DEPTH {
+    if !lw.registry.endless {
+      lw.registry.endless = true;
+      lw.registry.diagnostics.push(
+        Diagnostic::error(codes::UNSATISFIED_BOUND, lw.span, "this generic code creates an endless series of instances")
+          .with_note(`type arguments nest more than ${MAX_DEPTH} levels deep, each instance requiring a larger one`),
+      );
+    }
+
+    return function;
+  }
+
+  const index = lw.registry.instances.len();
+
+  lw.registry.instances.push(Instance { template: function, subst: subst, lambda: false });
+  lw.registry.instance_index.insert(key, index);
+  lw.registry.pending.push(index);
+
+  lw.registry.first_instance + index as u32
+}
+
+/// The type arguments a call recorded by the type checker gives `function`, in the function
+/// being lowered; `receiver` is the type of a method's receiver, the `Self` of interface methods.
+pub fn call_subst(lw: Lowering, id: u32, function: u32, receiver: Option<Type>) -> Subst {
+  const args: List<Type> = new List();
+
+  if let Some(recorded) = lw.typed.call_args.get(id) {
+    for arg in recorded {
+      args.push(types::substitute(arg, lw.subst));
+    }
+  }
+
+  var subst = Subst::empty();
+  var rest = 0usize;
+
+  if let Some(owner) = lw.resolution.owner(function) {
+    var count = match lw.typed.generic_params(ParamOwner::Item(owner)) {
+      Some(params) => params.len(),
+      None => 0,
+    };
+
+    if count > args.len() {
+      count = args.len();
+    }
+
+    if count > 0 {
+      const head: List<Type> = new List();
+
+      for index in 0..count {
+        head.push(args[index]);
+      }
+
+      subst = subst.with(ParamOwner::Item(owner), head);
+    }
+
+    rest = count;
+
+    if let TypeItem::Interface(_) = owner {
+      if let Some(receiver_ty) = receiver {
+        subst = subst.with_self(receiver_ty);
+      }
+    }
+  }
+
+  if lw.typed.generics.contains_key(owner_key(ParamOwner::Fn(function))) {
+    const tail: List<Type> = new List();
+
+    for index in rest..args.len() {
+      tail.push(args[index]);
+    }
+
+    subst = subst.with(ParamOwner::Fn(function), tail);
+  }
+
+  subst
+}
+
+/// The index of the class instance of a class type, created with its parent, fields and vtable
+/// if needed.
+pub fn class_instance(lw: Lowering, class_ref: NamedRef) -> usize {
+  const key = type_key(types::of(TypeKind::Class(class_ref)));
+
+  if let Some(index) = lw.registry.class_index.get(key) {
+    return index;
+  }
+
+  const index = lw.registry.classes.len();
+  const def = lw.typed.class_def(class_ref.id);
+  const fields = lw.typed.class_field_types(class_ref);
+  const weak_fields: List<bool> = new List();
+
+  if let Some(found) = def {
+    for field in found.fields {
+      weak_fields.push(field.is_weak);
+    }
+  }
+
+  // Reserved first: a class may refer to itself through its fields.
+  const created = new ClassInstance(class_ref, fields, weak_fields);
+
+  lw.registry.classes.push(created);
+  lw.registry.class_index.insert(key, index);
+
+  const parent = match lw.typed.class_parent(class_ref) {
+    Some(parent_ref) => Some(class_instance(lw, parent_ref)),
+    None => None,
+  };
+  const vtable: List<u32> = new List();
+
+  if let Some(found) = def {
+    for method in found.vtable {
+      var subst = Subst::empty();
+
+      if let Some(TypeItem::Class(owner)) = lw.resolution.owner(method) {
+        const ancestor_args = match lw.typed.class_ancestor(class_ref, owner) {
+          Some(ancestor) => ancestor.args,
+          None => new List(),
+        };
+
+        subst = Subst::of(ParamOwner::Item(TypeItem::Class(owner)), ancestor_args);
+      }
+
+      vtable.push(instance(lw, method, subst));
+    }
+  }
+
+  created.parent = parent;
+  created.vtable = vtable;
+
+  for field in fields {
+    register_types(lw, field);
+  }
+
+  index
+}
+
+/// Registers the class instances a type needs, inside structs, enums, arrays and the like.
+pub fn register_types(lw: Lowering, ty: Type) {
+  const key = type_key(ty);
+
+  if lw.registry.seen.contains_key(key) {
+    return;
+  }
+
+  lw.registry.seen.insert(key, true);
+
+  match ty.kind {
+    TypeKind::Class(class_ref) => {
+      class_instance(lw, class_ref);
+    }
+    TypeKind::Struct(named) => {
+      for field in lw.typed.struct_field_types(named) {
+        register_types(lw, field);
+      }
+    }
+    TypeKind::Enum(_) | TypeKind::Option(_) | TypeKind::Result { .. } => {
+      if let Some(variants) = lw.typed.variants(ty) {
+        for variant in variants {
+          for field in variant.field_types() {
+            register_types(lw, field);
+          }
+        }
+      }
+    }
+    TypeKind::Array { elem, .. } => register_types(lw, elem),
+    TypeKind::List(elem) => register_types(lw, elem),
+    TypeKind::Ptr { pointee, .. } => register_types(lw, pointee),
+    _ => {}
+  }
+}

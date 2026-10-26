@@ -88,9 +88,30 @@ fn main() { ... }
 - Benchmarks (fibonacci, n-body, binary-trees versus equivalent C) are informational and do
   not gate the MVP.
 
+## The self-hosted compiler
+
+`crates/sagitario_cli/tests/selfhost.rs` builds `compiler/` (`sagc`) with `sag` and checks that,
+for every `.sag` file of the repository, both compilers give the same exit code, stdout and
+stderr: today for `check --dump=tokens`, `--dump=ast`, `--dump=resolve`, `--dump=types` (which
+includes everything `--dump=declarations` shows) and `--dump=c` (the generated C), and for more
+passes as they are ported
+([ADR-0050](adr/0050-lexer-port-and-token-dumps.md),
+[ADR-0051](adr/0051-parser-port-and-ast-dumps.md),
+[ADR-0052](adr/0052-resolver-port-and-resolution-dumps.md),
+[ADR-0053](adr/0053-type-checker-port-and-type-dumps.md),
+[ADR-0054](adr/0054-lowering-and-c-generation-port.md)). `tests/lexer/`, `tests/parser/`,
+`tests/resolve/`, `tests/types/` and `tests/codegen/` hold edge cases of each pass. With
+`SAG_COMPILER=<path to sagc>`, the harness of the suites runs that compiler instead of `sag`
+([ADR-0055](adr/0055-driver-and-cli-port.md)). `bootstrap_reaches_the_fixed_point` builds stage 2
+with `sagc` and checks that both generate the same C for the compiler
+([ADR-0056](adr/0056-bootstrap-and-acceptance.md)). The test also checks the modules of `compiler/` generated from the Rust compiler;
+`SAG_BLESS=1 cargo test --test selfhost` rewrites them.
+
 ## CI
 
 GitHub Actions matrix on Windows, Linux and macOS running `cargo fmt --check`,
 `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` with
 clang, plus a Linux job with `SAG_CC=gcc` and a Windows job with `SAG_CC=cl` (without
-sanitizers). The Ubuntu job requires the Android NDK (`SAG_REQUIRE_NDK=1`).
+sanitizers). The Ubuntu job requires the Android NDK (`SAG_REQUIRE_NDK=1`). The `bootstrap` job
+builds `sagc` (stage 1), runs the suites with it and checks the fixed point, on Windows with
+official clang, `cl` and MinGW gcc, on Ubuntu with clang and gcc, and on macOS with clang.

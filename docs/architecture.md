@@ -41,6 +41,7 @@ crates/
   sagitario_nova/         the `nova` binary: package manager, `Nova.toml` parser (docs/nova.md)
 runtime/            minimal C runtime (ARC, panic, String, allocation, I/O and the OS calls of std)
 tests/              end-to-end suites (see testing.md)
+compiler/           the compiler written in Sagitario (F5, `sagc`), ported pass by pass
 ```
 
 ## Crate dependency rule
@@ -262,6 +263,9 @@ Anything expressible in Sagitario belongs in `std/` instead.
   through a module-definition file (Windows), a version script (Linux) or an exported symbols
   list (macOS). `header.rs` writes a library's C header from the typed program, spelling
   `c_char` as `char` from the type written in the source.
+- Executables reserve an 8 MiB stack on Windows (`/STACK` through the linker), the default of
+  Linux and macOS, so programs recurse as deeply on every system
+  ([ADR-0055](adr/0055-driver-and-cli-port.md)).
 - Threads: the generated C of a program using `std::thread` or `std::sync` (`GeneratedC::threads`) and its
   runtime start with `#define SAG_THREADS 1`; they compile with `-pthread` outside Windows and
   with `/experimental:c11atomics` under `cl`. `--sanitize=thread` uses `-fsanitize=thread` where

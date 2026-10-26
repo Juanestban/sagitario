@@ -124,6 +124,13 @@ pub const CAPTURED_ASSIGNMENT: Code = Code("E0331");
 pub const NOT_SEND: Code = Code("E0332");
 /// `thread::spawn` given something other than a lambda or a function name, or used as a value.
 pub const INVALID_SPAWN: Code = Code("E0333");
+/// A module-level constant the compiler cannot compute: an expression that is not constant, a
+/// value out of range, a division by zero, a type that constants cannot have, or a constant
+/// that needs itself.
+pub const NOT_CONSTANT: Code = Code("E0334");
+/// `include_str` outside a constant, with a path that is not a string literal, or naming a file
+/// that cannot be read.
+pub const INVALID_INCLUDE: Code = Code("E0335");
 
 /// A language feature that is specified but not implemented yet.
 pub const NOT_IMPLEMENTED: Code = Code("E0900");
@@ -201,6 +208,8 @@ pub const ALL: &[Code] = &[
   CAPTURED_ASSIGNMENT,
   NOT_SEND,
   INVALID_SPAWN,
+  NOT_CONSTANT,
+  INVALID_INCLUDE,
   NOT_IMPLEMENTED,
   UNUSED_BINDING,
   UNNEEDED_VAR,

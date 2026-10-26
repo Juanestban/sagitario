@@ -1,0 +1,389 @@
+//! Interface values (docs/spec/05-interfaces-generics.md#interfaces-as-types, ADR-0031): a
+//! reference to an object paired with the itable of the interface for the object's type. Calls of
+//! interface methods on values of a known type go straight to the type's method (ADR-0032). The
+//! port of `sagitario_sir::interfaces`.
+
+use pkg::resolve::{ParamOwner, TypeItem};
+use pkg::sir::{Callee, FieldAt, Itable, ItableEntry, Lowering, Operand, Rvalue, Stmt, type_key};
+use pkg::sir::mono;
+use pkg::types::{NamedRef, Receiver, Subst, Type, TypeKind};
+use pkg::types;
+use pkg::types::typed::{TypedModule, owner_key};
+
+/// The slot of the getter of a field, after the interface's methods; the setter follows it.
+pub fn field_slot(typed: TypedModule, interface_id: u32, index: usize) -> usize {
+  const methods = match typed.interface_def(interface_id) {
+    Some(def) => def.methods.len(),
+    None => 0,
+  };
+
+  methods + 2 * index
+}
+
+/// The substitution of an interface's parameters and `Self` for one implementing type.
+fn interface_subst(interface_ref: NamedRef, concrete: Type) -> Subst {
+  Subst::of(ParamOwner::Item(TypeItem::Interface(interface_ref.id)), interface_ref.args).with_self(concrete)
+}
+
+fn is_value_type(ty: Type) -> bool {
+  match ty.kind {
+    TypeKind::Struct(_) | TypeKind::Enum(_) => true,
+    _ => false,
+  }
+}
+
+/// The index of the itable of `interface_ref` for values of `concrete`, built if needed.
+pub fn itable(lw: Lowering, interface_ref: NamedRef, concrete: Type) -> usize {
+  const key = type_key(types::interface_type(interface_ref)) + "|" + type_key(concrete);
+
+  if let Some(index) = lw.registry.itable_index.get(key) {
+    return index;
+  }
+
+  if is_value_type(concrete) && !types::contains_type(lw.registry.boxes, concrete) {
+    lw.registry.boxes.push(concrete);
+  }
+
+  mono::register_types(lw, concrete);
+
+  const index = lw.registry.itables.len();
+  const def = lw.typed.interface_def(interface_ref.id);
+  // Reserved first, so cycles through parents cannot recurse forever.
+  const created = new Itable(interface_ref, concrete);
+
+  lw.registry.itables.push(created);
+  lw.registry.itable_index.insert(key, index);
+
+  const found_def = match def {
+    Some(found_def) => found_def,
+    None => return index,
+  };
+  const subst = interface_subst(interface_ref, concrete);
+  const entries: List<ItableEntry> = new List();
+
+  for method in found_def.methods {
+    const sig = match lw.typed.sig(method) {
+      Some(found) => types::substitute_sig(found, subst),
+      None => continue,
+    };
+    const target = method_for(lw, method, concrete, subst, new List());
+
+    entries.push(ItableEntry::Method { function: target.function, slot: target.slot, params: sig.params, ret: sig.ret });
+  }
+
+  for field in found_def.fields {
+    var at: Option<FieldAt> = None;
+
+    match concrete.kind {
+      TypeKind::Class(class_ref) => {
+        if let Some(found) = lw.typed.class_field_type(class_ref, field.name) {
+          at = Some(FieldAt::Class { class_id: mono::class_instance(lw, found.ancestor), index: found.index });
+        }
+      }
+      TypeKind::Struct(owner) => {
+        if let Some(position) = lw.typed.field_index(owner.id, field.name) {
+          at = Some(FieldAt::Struct(position));
+        }
+      }
+      _ => {}
+    }
+
+    const ty = types::substitute(field.ty, subst);
+
+    if let Some(location) = at {
+      entries.push(ItableEntry::Field { field: location, ty: ty, set: false });
+      entries.push(ItableEntry::Field { field: location, ty: ty, set: true });
+    }
+  }
+
+  const ancestors = lw.typed.interface_ancestor_refs(interface_ref);
+  const parents: List<usize> = new List();
+
+  for parent in found_def.parents {
+    var chosen: Option<NamedRef> = None;
+
+    for ancestor in ancestors {
+      if chosen.is_none() && ancestor.id == parent.id {
+        chosen = Some(ancestor);
+      }
+    }
+
+    if let Some(ancestor) = chosen {
+      parents.push(itable(lw, ancestor, concrete));
+    }
+  }
+
+  created.parents = parents;
+  created.entries = entries;
+
+  index
+}
+
+/// The function implementing an interface method for a type, with its vtable slot.
+pub struct MethodTarget {
+  pub function: u32;
+  pub slot: Option<usize>;
+}
+
+fn has_own_params(lw: Lowering, function: u32) -> bool {
+  lw.typed.generics.contains_key(owner_key(ParamOwner::Fn(function)))
+}
+
+/// The function implementing the interface method `method` for values of `concrete`: the type's
+/// own (or inherited) method, or else the default method instantiated for the type.
+pub fn method_for(lw: Lowering, method: u32, concrete: Type, subst: Subst, own: List<Type>) -> MethodTarget {
+  const name = match lw.resolution.fn_decl(lw.package, method) {
+    Some(decl) => decl.name.name,
+    None => "",
+  };
+
+  match implementation(lw, concrete, name) {
+    Some(function) => {
+      const owner = owner_subst(lw, concrete, function);
+      const chosen = if has_own_params(lw, function) { owner.with(ParamOwner::Fn(function), own) } else { owner };
+      var slot: Option<usize> = None;
+
+      if let TypeKind::Class(_) = concrete.kind {
+        slot = lw.typed.slots.get(function);
+      }
+
+      MethodTarget { function: mono::instance(lw, function, chosen), slot: slot }
+    }
+    None => {
+      const chosen = if has_own_params(lw, method) { subst.with(ParamOwner::Fn(method), own) } else { subst };
+
+      MethodTarget { function: mono::instance(lw, method, chosen), slot: None }
+    }
+  }
+}
+
+/// The type arguments that the type declaring `function` receives in `concrete`.
+fn owner_subst(lw: Lowering, concrete: Type, function: u32) -> Subst {
+  const owner = match lw.resolution.owner(function) {
+    Some(found) => found,
+    None => return Subst::empty(),
+  };
+
+  match concrete.kind {
+    TypeKind::Class(class_ref) => {
+      if let TypeItem::Class(owner_id) = owner {
+        const args = match lw.typed.class_ancestor(class_ref, owner_id) {
+          Some(ancestor) => ancestor.args,
+          None => new List(),
+        };
+
+        return Subst::of(ParamOwner::Item(TypeItem::Class(owner_id)), args);
+      }
+
+      Subst::empty()
+    }
+    TypeKind::Struct(named) => Subst::of(ParamOwner::Item(owner), named.args),
+    TypeKind::Enum(named) => Subst::of(ParamOwner::Item(owner), named.args),
+    _ => Subst::empty(),
+  }
+}
+
+/// The method of a concrete type with this name, inherited ones included.
+fn implementation(lw: Lowering, concrete: Type, name: String) -> Option<u32> {
+  const owners: List<TypeItem> = new List();
+
+  match concrete.kind {
+    TypeKind::Class(class_ref) => {
+      for class_id in lw.typed.class_chain(class_ref.id) {
+        owners.push(TypeItem::Class(class_id));
+      }
+    }
+    _ => {
+      if let Some(item) = types::type_item_of(concrete) {
+        owners.push(item);
+      }
+    }
+  }
+
+  for owner in owners {
+    if let Some(function) = lw.resolution.type_function(lw.package, owner, name) {
+      if let Some(decl) = lw.resolution.fn_decl(lw.package, function) {
+        if decl.self_param.is_some() {
+          return Some(function);
+        }
+      }
+    }
+  }
+
+  None
+}
+
+/// A callee, and whether it receives a struct by reference.
+pub struct ConcreteCall {
+  pub callee: Callee;
+  pub by_ref: bool;
+}
+
+/// The call of the interface method `function` on a value of a concrete type.
+pub fn concrete_interface_call(lw: Lowering, id: u32, function: u32, concrete: Type) -> ConcreteCall {
+  const subst = mono::call_subst(lw, id, function, Some(concrete));
+  const own = subst.args_of(ParamOwner::Fn(function)).unwrap_or(new List());
+  const target = method_for(lw, function, concrete, subst, own);
+  const by_ref = match lw.typed.sig(template_of(lw, target.function)) {
+    Some(sig) => match sig.receiver {
+      Some(receiver) => receiver == Receiver::Var,
+      None => false,
+    },
+    None => false,
+  };
+
+  match target.slot {
+    Some(slot) => ConcreteCall { callee: Callee::Virtual { slot: slot, function: target.function }, by_ref: false },
+    None => ConcreteCall { callee: Callee::Fn(target.function), by_ref: by_ref },
+  }
+}
+
+/// The template an instance comes from, or the function itself.
+pub fn template_of(lw: Lowering, function: u32) -> u32 {
+  if function < lw.registry.first_instance {
+    return function;
+  }
+
+  match lw.registry.instances.get((function - lw.registry.first_instance) as usize) {
+    Some(found) => found.template,
+    None => function,
+  }
+}
+
+/// `value` of type `from` as a value of type `to`: converted when `to` is an interface and `from`
+/// is a type implementing it or a descendant interface.
+pub fn convert(lw: Lowering, value: Operand, from: Type, to: Type) -> Operand {
+  const target = match to.kind {
+    TypeKind::Interface(found) => found,
+    _ => return value,
+  };
+
+  match from.kind {
+    TypeKind::Interface(source) => {
+      if source.id == target.id {
+        return value;
+      }
+
+      match lw.typed.interface_path(source.id, target.id) {
+        Some(path) => lw.new_value(to, Rvalue::DynUpcast { value: value, path: path }),
+        None => value,
+      }
+    }
+    TypeKind::Class(_) | TypeKind::Struct(_) | TypeKind::Enum(_) => {
+      const index = itable(lw, target, from);
+
+      lw.new_value(to, Rvalue::ToDyn { value: value, itable: index })
+    }
+    _ => value,
+  }
+}
+
+/// The call of the interface method `function` on a value of interface type `receiver`.
+pub fn dyn_method(lw: Lowering, receiver: NamedRef, function: u32) -> Result<Callee, String> {
+  const owner = match lw.resolution.owner(function) {
+    Some(TypeItem::Interface(found)) => found,
+    _ => return Err("dynamic call of a method outside an interface"),
+  };
+  const path = lw.typed.interface_path(receiver.id, owner).unwrap_or(new List());
+  var slot: Option<usize> = None;
+
+  if let Some(def) = lw.typed.interface_def(owner) {
+    slot = def.methods.index_of(function);
+  }
+
+  const receiver_ty = types::interface_type(receiver);
+  const declaring = lw.typed.implemented_ref(receiver_ty, owner).unwrap_or(receiver);
+  const subst = interface_subst(declaring, receiver_ty);
+  const sig = match lw.typed.sig(function) {
+    Some(found) => Some(types::substitute_sig(found, subst)),
+    None => None,
+  };
+
+  match slot {
+    Some(found_slot) => match sig {
+      Some(found_sig) => Ok(Callee::Dyn { path: path, slot: found_slot, params: found_sig.params, ret: found_sig.ret }),
+      None => Err("interface method without a slot"),
+    },
+    None => Err("interface method without a slot"),
+  }
+}
+
+/// The getter (`set: false`) or setter of a field reached through interface `receiver`.
+pub fn dyn_field(lw: Lowering, receiver: NamedRef, name: String, set: bool) -> Result<Callee, String> {
+  const found = match lw.typed.interface_field(receiver.id, name) {
+    Some(found) => found,
+    None => return Err("unknown interface field `" + name + "`"),
+  };
+  const path = lw.typed.interface_path(receiver.id, found.interface_id).unwrap_or(new List());
+  const slot = field_slot(lw.typed, found.interface_id, found.index) + (if set { 1 } else { 0 });
+  const receiver_ty = types::interface_type(receiver);
+  const declaring = lw.typed.implemented_ref(receiver_ty, found.interface_id).unwrap_or(receiver);
+  const ty = types::substitute(found.field.ty, interface_subst(declaring, receiver_ty));
+
+  if set {
+    return Ok(Callee::Dyn { path: path, slot: slot, params: List::from([ty]), ret: types::unit() });
+  }
+
+  Ok(Callee::Dyn { path: path, slot: slot, params: new List(), ret: ty })
+}
+
+/// `Error(text)`: a `MessageError` holding `text`, as an `Error`.
+pub fn message_error(lw: Lowering, text: Operand) -> Result<Operand, String> {
+  const error_types = match lw.typed.error_types {
+    Some(found) => found,
+    None => return Err("`Error(...)` without the prelude"),
+  };
+  const name = match lw.typed.class_def(error_types.class_id) {
+    Some(def) => def.name,
+    None => "",
+  };
+  const class_ref = NamedRef { id: error_types.class_id, name: name, args: new List() };
+  const class_ty = types::of(TypeKind::Class(class_ref));
+  const instance_index = mono::class_instance(lw, class_ref);
+  const instance = lw.new_value(class_ty, Rvalue::Alloc(instance_index));
+
+  if let Some(def) = lw.typed.class_def(error_types.class_id) {
+    if let Some(initializer) = def.initializer {
+      const target = mono::instance(lw, initializer, Subst::empty());
+
+      lw.call(Callee::Fn(target), List::from([instance, text]), types::unit());
+    }
+  }
+
+  const interface_name = match lw.typed.interface_def(error_types.interface_id) {
+    Some(def) => def.name,
+    None => "",
+  };
+  const to = types::interface_type(NamedRef { id: error_types.interface_id, name: interface_name, args: new List() });
+
+  Ok(convert(lw, instance, class_ty, to))
+}
+
+/// An error value of type `from` for a function returning errors of type `to`: converted to an
+/// interface, or, from a `String`, made an `Error`.
+pub fn convert_error(lw: Lowering, value: Operand, from: Type, to: Type) -> Result<Operand, String> {
+  var into_error = false;
+
+  if types::is_string(from) {
+    if let TypeKind::Interface(target) = to.kind {
+      if let Some(error_types) = lw.typed.error_types {
+        into_error = error_types.interface_id == target.id;
+      }
+    }
+  }
+
+  if into_error {
+    return message_error(lw, value);
+  }
+
+  Ok(convert(lw, value, from, to))
+}
+
+/// `value.name = new` where `value` has an interface type: calls the field's setter.
+pub fn set_dyn_field(lw: Lowering, receiver: Operand, interface_ref: NamedRef, name: String, value: Operand) -> Result<(), String> {
+  const callee = dyn_field(lw, interface_ref, name, true)?;
+
+  lw.emit(Stmt::Eval(Rvalue::Call { callee: callee, args: List::from([receiver, value]) }));
+
+  Ok(())
+}

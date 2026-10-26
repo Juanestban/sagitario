@@ -1,0 +1,107 @@
+// Interfaces with parents, fields, defaults and `Self`, generics with bounds, `Send`, FFI
+// signatures and C symbols.
+
+use std::ffi::{c_int, c_long, c_void};
+
+interface Named {
+  const name: String;
+
+  fn label(self) -> String {
+    self.name
+  }
+}
+
+interface Comparable<T> extends Named {
+  fn compare_to(self, other: T) -> i32;
+}
+
+interface Same {
+  fn same(self, other: Self) -> bool;
+}
+
+interface Mapper {
+  fn map<U>(self, value: U) -> U;
+}
+
+interface Loop1 extends Loop2 {}
+
+interface Loop2 extends Loop1 {}
+
+struct Point impl Comparable<Point>, Same {
+  pub name: String;
+  pub x: i32;
+
+  pub fn compare_to(self, other: Point) -> i32 {
+    self.x - other.x
+  }
+
+  pub fn same(self, other: Point) -> bool {
+    self.x == other.x
+  }
+}
+
+enum Tree<T: Same> {
+  Leaf(T),
+  Node(List<Tree<T>>),
+}
+
+struct Missing impl Comparable<i32> {
+  prv name: i32;
+
+  prv fn compare_to(self, other: String) -> i32 {
+    0
+  }
+}
+
+struct WrongSignature impl Comparable<i32> {
+  pub name: String;
+
+  pub fn compare_to(self, other: String) -> i32 {
+    0
+  }
+}
+
+class Holder<T: Send> {
+  pub const value: T;
+
+  pub fn new(self, value: T) {
+    self.value = value;
+  }
+}
+
+struct NotAnInterface impl Point {}
+
+struct ImplementsSend impl Send {}
+
+@repr(C)
+struct Pair {
+  pub a: c_int;
+  pub b: c_long;
+  pub text: String;
+}
+
+extern "C" {
+  fn abs(value: c_int) -> c_int;
+  fn abs(value: c_int) -> c_int;
+  fn labs(value: c_long) -> c_long;
+  fn labs(value: c_int) -> c_int;
+  fn int(value: c_int) -> c_int;
+  fn take(text: String, p: *mut c_void) -> Pair;
+}
+
+extern "C" fn exported(value: i32) -> i32 {
+  value
+}
+
+@export("exported")
+extern "C" fn again(value: char) -> String {
+  "x"
+}
+
+fn uses(value: Same, holder: Holder<List<i32>>, bound: Tree<i32>, wrong: Holder<Send>) -> c_void {
+  value
+}
+
+fn main() -> Result<(), Point> {
+  Ok(())
+}

@@ -1,0 +1,1573 @@
+//! Type checking with local inference (docs/spec/02-types.md, 06-control-flow.md), the port of
+//! `sagitario_types`. This file holds the types, the definitions the checker builds and the
+//! checker itself with its core; `types::typed` holds the `TypedModule` it produces, and the other
+//! modules of `types` the checks of one area each, as functions taking the checker
+//! (docs/adr/0053-type-checker-port-and-type-dumps.md).
+
+use pkg::ast::{ArrayLen, FieldDecl, FnDecl, Package, TargetInfo, TypeExpr, TypeExprKind, VariantFields, Visibility};
+use pkg::diagnostics;
+use pkg::diagnostics::{Diagnostic, Diagnostics};
+use pkg::diagnostics::codes;
+use pkg::resolve::{ParamOwner, Resolution, TypeItem, TypeRes};
+use pkg::resolve;
+use pkg::span::Span;
+use pkg::types::classes;
+use pkg::types::collections;
+use pkg::types::consts;
+use pkg::types::consts::ConstState;
+use pkg::types::exprs;
+use pkg::types::ffi;
+use pkg::types::flow;
+use pkg::types::flow::FlowOwner;
+use pkg::types::generic;
+use pkg::types::interfaces;
+use pkg::types::send;
+use pkg::types::typed::TypedModule;
+
+pub enum IntTy {
+  I8,
+  I16,
+  I32,
+  I64,
+  Isize,
+  U8,
+  U16,
+  U32,
+  U64,
+  Usize,
+}
+
+const INT_NAMES: String = "i8 i16 i32 i64 isize u8 u16 u32 u64 usize";
+
+pub fn int_types() -> List<IntTy> {
+  List::from([IntTy::I8, IntTy::I16, IntTy::I32, IntTy::I64, IntTy::Isize, IntTy::U8, IntTy::U16, IntTy::U32, IntTy::U64, IntTy::Usize])
+}
+
+pub fn int_name(ty: IntTy) -> String {
+  match ty {
+    IntTy::I8 => "i8",
+    IntTy::I16 => "i16",
+    IntTy::I32 => "i32",
+    IntTy::I64 => "i64",
+    IntTy::Isize => "isize",
+    IntTy::U8 => "u8",
+    IntTy::U16 => "u16",
+    IntTy::U32 => "u32",
+    IntTy::U64 => "u64",
+    IntTy::Usize => "usize",
+  }
+}
+
+pub fn int_from_name(name: String) -> Option<IntTy> {
+  for ty in int_types() {
+    if int_name(ty) == name {
+      return Some(ty);
+    }
+  }
+
+  None
+}
+
+pub fn is_signed(ty: IntTy) -> bool {
+  ty == IntTy::I8 || ty == IntTy::I16 || ty == IntTy::I32 || ty == IntTy::I64 || ty == IntTy::Isize
+}
+
+/// The largest value of the type on a target whose pointers have `pointer_width` bits.
+pub fn int_max(ty: IntTy, pointer_width: u32) -> u64 {
+  const narrow = pointer_width == 32;
+
+  match ty {
+    IntTy::I8 => 127,
+    IntTy::I16 => 32767,
+    IntTy::I32 => 2147483647,
+    IntTy::Isize => if narrow { 2147483647 } else { 9223372036854775807 },
+    IntTy::I64 => 9223372036854775807,
+    IntTy::U8 => 255,
+    IntTy::U16 => 65535,
+    IntTy::U32 => 4294967295,
+    IntTy::Usize => if narrow { 4294967295 } else { 18446744073709551615 },
+    IntTy::U64 => 18446744073709551615,
+  }
+}
+
+pub enum FloatTy {
+  F32,
+  F64,
+}
+
+pub fn float_name(ty: FloatTy) -> String {
+  match ty {
+    FloatTy::F32 => "f32",
+    FloatTy::F64 => "f64",
+  }
+}
+
+pub fn float_from_name(name: String) -> Option<FloatTy> {
+  if name == "f32" {
+    Some(FloatTy::F32)
+  } else if name == "f64" {
+    Some(FloatTy::F64)
+  } else {
+    None
+  }
+}
+
+/// A struct, enum, class or interface type with its type arguments. The name is kept for
+/// messages and is not part of the type's identity.
+pub struct NamedRef {
+  pub id: u32;
+  pub name: String;
+  pub args: List<Type>;
+}
+
+/// The position of `Self` among the parameters of an interface.
+pub const SELF_PARAM: u32 = 4294967295;
+
+/// A type parameter: the declaration it belongs to and its position there (`SELF_PARAM` for the
+/// `Self` of an interface). The name is kept for messages.
+pub struct ParamRef {
+  pub owner: ParamOwner;
+  pub index: u32;
+  pub name: String;
+}
+
+pub enum TypeKind {
+  Unit,
+  Bool,
+  Char,
+  Int(IntTy),
+  Float(FloatTy),
+  String,
+  StringBuilder,
+  Struct(NamedRef),
+  Enum(NamedRef),
+  Class(NamedRef),
+  Interface(NamedRef),
+  Param(ParamRef),
+  Function { params: List<Type>, ret: Type },
+  Array { elem: Type, len: u64 },
+  List(Type),
+  Option(Type),
+  Result { value: Type, error: Type },
+  Ptr { mutable: bool, pointee: Type },
+  CVoid,
+  CString,
+  /// The type of expressions that never produce a value.
+  Never,
+  /// The type of an expression that already produced an error.
+  Error,
+}
+
+/// A type. A class, since types contain types (`Box<Type>` in Rust).
+pub class Type {
+  pub const kind: TypeKind;
+
+  pub fn new(self, kind: TypeKind) {
+    self.kind = kind;
+  }
+}
+
+pub fn of(kind: TypeKind) -> Type {
+  new Type(kind)
+}
+
+pub fn unit() -> Type {
+  new Type(TypeKind::Unit)
+}
+
+pub fn error() -> Type {
+  new Type(TypeKind::Error)
+}
+
+pub fn int(ty: IntTy) -> Type {
+  new Type(TypeKind::Int(ty))
+}
+
+pub fn string() -> Type {
+  new Type(TypeKind::String)
+}
+
+pub fn option(value: Type) -> Type {
+  new Type(TypeKind::Option(value))
+}
+
+pub fn class_type(id: u32, name: String, args: List<Type>) -> Type {
+  new Type(TypeKind::Class(NamedRef { id: id, name: name, args: args }))
+}
+
+pub fn interface_type(interface_ref: NamedRef) -> Type {
+  new Type(TypeKind::Interface(interface_ref))
+}
+
+/// A tag for the variants without data, to compare them.
+fn tag(ty: Type) -> u32 {
+  match ty.kind {
+    TypeKind::Unit => 0,
+    TypeKind::Bool => 1,
+    TypeKind::Char => 2,
+    TypeKind::String => 3,
+    TypeKind::StringBuilder => 4,
+    TypeKind::CVoid => 5,
+    TypeKind::CString => 6,
+    TypeKind::Never => 7,
+    TypeKind::Error => 8,
+    _ => 100,
+  }
+}
+
+pub fn is_unit(ty: Type) -> bool {
+  tag(ty) == 0
+}
+
+pub fn is_error(ty: Type) -> bool {
+  tag(ty) == 8
+}
+
+pub fn is_never(ty: Type) -> bool {
+  tag(ty) == 7
+}
+
+pub fn is_string(ty: Type) -> bool {
+  tag(ty) == 3
+}
+
+pub fn same_owner(a: ParamOwner, b: ParamOwner) -> bool {
+  match a {
+    ParamOwner::Item(x) => match b {
+      ParamOwner::Item(y) => resolve::same_type_item(x, y),
+      _ => false,
+    },
+    ParamOwner::Fn(x) => match b {
+      ParamOwner::Fn(y) => x == y,
+      _ => false,
+    },
+  }
+}
+
+pub fn same_ref(a: NamedRef, b: NamedRef) -> bool {
+  a.id == b.id && same_types(a.args, b.args)
+}
+
+pub fn same_types(a: List<Type>, b: List<Type>) -> bool {
+  if a.len() != b.len() {
+    return false;
+  }
+
+  for index in 0..a.len() {
+    if !same_type(a[index], b[index]) {
+      return false;
+    }
+  }
+
+  true
+}
+
+/// Structural equality, ignoring the names kept for messages (Rust's `PartialEq` for `Type`).
+pub fn same_type(a: Type, b: Type) -> bool {
+  match a.kind {
+    TypeKind::Int(x) => match b.kind {
+      TypeKind::Int(y) => x == y,
+      _ => false,
+    },
+    TypeKind::Float(x) => match b.kind {
+      TypeKind::Float(y) => x == y,
+      _ => false,
+    },
+    TypeKind::Struct(x) => match b.kind {
+      TypeKind::Struct(y) => same_ref(x, y),
+      _ => false,
+    },
+    TypeKind::Enum(x) => match b.kind {
+      TypeKind::Enum(y) => same_ref(x, y),
+      _ => false,
+    },
+    TypeKind::Class(x) => match b.kind {
+      TypeKind::Class(y) => same_ref(x, y),
+      _ => false,
+    },
+    TypeKind::Interface(x) => match b.kind {
+      TypeKind::Interface(y) => same_ref(x, y),
+      _ => false,
+    },
+    TypeKind::Param(x) => match b.kind {
+      TypeKind::Param(y) => x.index == y.index && same_owner(x.owner, y.owner),
+      _ => false,
+    },
+    TypeKind::Function { params, ret } => match b.kind {
+      TypeKind::Function { params: other_params, ret: other_ret } => same_types(params, other_params) && same_type(ret, other_ret),
+      _ => false,
+    },
+    TypeKind::Array { elem, len } => match b.kind {
+      TypeKind::Array { elem: other_elem, len: other_len } => len == other_len && same_type(elem, other_elem),
+      _ => false,
+    },
+    TypeKind::List(x) => match b.kind {
+      TypeKind::List(y) => same_type(x, y),
+      _ => false,
+    },
+    TypeKind::Option(x) => match b.kind {
+      TypeKind::Option(y) => same_type(x, y),
+      _ => false,
+    },
+    TypeKind::Result { value, error } => match b.kind {
+      TypeKind::Result { value: other_value, error: other_error } => same_type(value, other_value) && same_type(error, other_error),
+      _ => false,
+    },
+    TypeKind::Ptr { mutable, pointee } => match b.kind {
+      TypeKind::Ptr { mutable: other_mutable, pointee: other_pointee } => mutable == other_mutable && same_type(pointee, other_pointee),
+      _ => false,
+    },
+    _ => tag(a) == tag(b),
+  }
+}
+
+pub fn contains_type(list: List<Type>, ty: Type) -> bool {
+  for other in list {
+    if same_type(other, ty) {
+      return true;
+    }
+  }
+
+  false
+}
+
+pub fn contains_ref(list: List<NamedRef>, named: NamedRef) -> bool {
+  for other in list {
+    if same_ref(other, named) {
+      return true;
+    }
+  }
+
+  false
+}
+
+/// Whether a value of type `actual` can be used where `expected` is required, without
+/// conversions (Rust's `Type::fits`).
+pub fn plain_fits(actual: Type, expected: Type) -> bool {
+  // A `*mut T` can be used as a `*const T`.
+  var const_pointer = false;
+
+  if let TypeKind::Ptr { mutable, pointee } = actual.kind {
+    if let TypeKind::Ptr { mutable: expected_mutable, pointee: expected_pointee } = expected.kind {
+      const_pointer = mutable && !expected_mutable && same_type(pointee, expected_pointee);
+    }
+  }
+
+  same_type(actual, expected) || const_pointer || is_never(actual) || is_error(actual) || is_error(expected)
+}
+
+fn generic_text(name: String, args: List<Type>) -> String {
+  if args.is_empty() {
+    return name;
+  }
+
+  name + "<" + texts(args).join(", ") + ">"
+}
+
+pub fn texts(types: List<Type>) -> List<String> {
+  const parts: List<String> = new List();
+
+  for ty in types {
+    parts.push(text(ty));
+  }
+
+  parts
+}
+
+/// The type as messages write it (Rust's `Display` for `Type`).
+pub fn text(ty: Type) -> String {
+  match ty.kind {
+    TypeKind::Unit => "()",
+    TypeKind::Bool => "bool",
+    TypeKind::Char => "char",
+    TypeKind::Int(int) => int_name(int),
+    TypeKind::Float(float) => float_name(float),
+    TypeKind::String => "String",
+    TypeKind::Struct(named) => generic_text(named.name, named.args),
+    TypeKind::Enum(named) => generic_text(named.name, named.args),
+    TypeKind::Class(named) => generic_text(named.name, named.args),
+    TypeKind::Interface(named) => generic_text(named.name, named.args),
+    TypeKind::Param(param) => param.name,
+    TypeKind::Function { params, ret } => {
+      const head = "fn(" + texts(params).join(", ") + ")";
+
+      if is_unit(ret) { head } else { head + " -> " + text(ret) }
+    }
+    TypeKind::Array { elem, len } => `[${text(elem)}; ${len}]`,
+    TypeKind::List(elem) => "List<" + text(elem) + ">",
+    TypeKind::Option(value) => "Option<" + text(value) + ">",
+    TypeKind::Result { value, error } => "Result<" + text(value) + ", " + text(error) + ">",
+    TypeKind::StringBuilder => "StringBuilder",
+    TypeKind::Ptr { mutable, pointee } => (if mutable { "*mut " } else { "*const " }) + text(pointee),
+    TypeKind::CVoid => "c_void",
+    TypeKind::CString => "CString",
+    TypeKind::Never => "never",
+    TypeKind::Error => "{error}",
+  }
+}
+
+/// The type item of a struct, enum, class or interface type.
+pub fn type_item_of(ty: Type) -> Option<TypeItem> {
+  match ty.kind {
+    TypeKind::Struct(named) => Some(TypeItem::Struct(named.id)),
+    TypeKind::Enum(named) => Some(TypeItem::Enum(named.id)),
+    TypeKind::Class(named) => Some(TypeItem::Class(named.id)),
+    TypeKind::Interface(named) => Some(TypeItem::Interface(named.id)),
+    _ => None,
+  }
+}
+
+/// Type arguments for the parameters of one generic declaration.
+pub struct SubstEntry {
+  pub owner: ParamOwner;
+  pub args: List<Type>;
+}
+
+/// Type arguments for the parameters of generic declarations, and what `Self` stands for.
+pub struct Subst {
+  pub params: List<SubstEntry>;
+  pub self_ty: Option<Type>;
+
+  pub fn empty() -> Subst {
+    Subst { params: new List(), self_ty: None }
+  }
+
+  /// The arguments `args` for the parameters of `owner`.
+  pub fn of(owner: ParamOwner, args: List<Type>) -> Subst {
+    Subst { params: List::from([SubstEntry { owner: owner, args: args }]), self_ty: None }
+  }
+
+  pub fn with(self, owner: ParamOwner, args: List<Type>) -> Subst {
+    const params: List<SubstEntry> = new List();
+
+    for entry in self.params {
+      params.push(entry);
+    }
+
+    params.push(SubstEntry { owner: owner, args: args });
+
+    Subst { params: params, self_ty: self.self_ty }
+  }
+
+  pub fn with_self(self, self_ty: Type) -> Subst {
+    Subst { params: self.params, self_ty: Some(self_ty) }
+  }
+
+  pub fn is_empty(self) -> bool {
+    self.params.is_empty() && self.self_ty.is_none()
+  }
+
+  /// This substitution applied after `inner`: maps each parameter as `inner` does, then
+  /// substitutes the result with `self`.
+  pub fn after(self, inner: Subst) -> Subst {
+    const params: List<SubstEntry> = new List();
+
+    for entry in inner.params {
+      params.push(SubstEntry { owner: entry.owner, args: substitute_all(entry.args, self) });
+    }
+
+    for entry in self.params {
+      var present = false;
+
+      for existing in params {
+        if same_owner(existing.owner, entry.owner) {
+          present = true;
+        }
+      }
+
+      if !present {
+        params.push(entry);
+      }
+    }
+
+    const self_ty = match inner.self_ty {
+      Some(ty) => Some(substitute(ty, self)),
+      None => self.self_ty,
+    };
+
+    Subst { params: params, self_ty: self_ty }
+  }
+
+  /// The arguments for the parameters of `owner`, if it has some.
+  pub fn args_of(self, owner: ParamOwner) -> Option<List<Type>> {
+    for entry in self.params {
+      if same_owner(entry.owner, owner) {
+        return Some(entry.args);
+      }
+    }
+
+    None
+  }
+
+  pub fn get(self, param: ParamRef) -> Option<Type> {
+    if param.index == SELF_PARAM {
+      return self.self_ty;
+    }
+
+    var index = self.params.len();
+
+    while index > 0 {
+      index -= 1;
+
+      const entry = self.params[index];
+
+      if same_owner(entry.owner, param.owner) {
+        return entry.args.get(param.index as usize);
+      }
+    }
+
+    None
+  }
+}
+
+fn substitute_all(types: List<Type>, subst: Subst) -> List<Type> {
+  const result: List<Type> = new List();
+
+  for ty in types {
+    result.push(substitute(ty, subst));
+  }
+
+  result
+}
+
+pub fn substitute_ref(named: NamedRef, subst: Subst) -> NamedRef {
+  NamedRef { id: named.id, name: named.name, args: substitute_all(named.args, subst) }
+}
+
+/// The type with each parameter replaced by its argument in `subst`, if it has one.
+pub fn substitute(ty: Type, subst: Subst) -> Type {
+  if subst.is_empty() {
+    return ty;
+  }
+
+  match ty.kind {
+    TypeKind::Param(param) => subst.get(param).unwrap_or(ty),
+    TypeKind::Struct(named) => of(TypeKind::Struct(substitute_ref(named, subst))),
+    TypeKind::Enum(named) => of(TypeKind::Enum(substitute_ref(named, subst))),
+    TypeKind::Class(named) => of(TypeKind::Class(substitute_ref(named, subst))),
+    TypeKind::Interface(named) => of(TypeKind::Interface(substitute_ref(named, subst))),
+    TypeKind::Array { elem, len } => of(TypeKind::Array { elem: substitute(elem, subst), len: len }),
+    TypeKind::List(elem) => of(TypeKind::List(substitute(elem, subst))),
+    TypeKind::Option(value) => of(TypeKind::Option(substitute(value, subst))),
+    TypeKind::Result { value, error } => of(TypeKind::Result { value: substitute(value, subst), error: substitute(error, subst) }),
+    TypeKind::Ptr { mutable, pointee } => of(TypeKind::Ptr { mutable: mutable, pointee: substitute(pointee, subst) }),
+    TypeKind::Function { params, ret } => of(TypeKind::Function { params: substitute_all(params, subst), ret: substitute(ret, subst) }),
+    _ => ty,
+  }
+}
+
+pub fn substitute_sig(sig: FnSig, subst: Subst) -> FnSig {
+  FnSig { receiver: sig.receiver, params: substitute_all(sig.params, subst), ret: substitute(sig.ret, subst) }
+}
+
+/// How deeply generic types nest in the type, to stop instantiations that never end.
+pub fn depth(ty: Type) -> usize {
+  match ty.kind {
+    TypeKind::Struct(named) => 1 + max_depth(named.args),
+    TypeKind::Enum(named) => 1 + max_depth(named.args),
+    TypeKind::Class(named) => 1 + max_depth(named.args),
+    TypeKind::Interface(named) => 1 + max_depth(named.args),
+    TypeKind::Array { elem, .. } => 1 + depth(elem),
+    TypeKind::List(elem) => 1 + depth(elem),
+    TypeKind::Option(elem) => 1 + depth(elem),
+    TypeKind::Ptr { pointee, .. } => 1 + depth(pointee),
+    TypeKind::Result { value, error } => {
+      const a = depth(value);
+      const b = depth(error);
+
+      1 + (if a > b { a } else { b })
+    }
+    TypeKind::Function { params, ret } => {
+      const a = max_depth(params);
+      const b = depth(ret);
+
+      1 + (if a > b { a } else { b })
+    }
+    _ => 0,
+  }
+}
+
+fn max_depth(list: List<Type>) -> usize {
+  var deepest = 0usize;
+
+  for ty in list {
+    const found = depth(ty);
+
+    if found > deepest {
+      deepest = found;
+    }
+  }
+
+  deepest
+}
+
+/// Whether the type mentions the `Self` of an interface.
+pub fn has_self(ty: Type) -> bool {
+  match ty.kind {
+    TypeKind::Param(param) => param.index == SELF_PARAM,
+    TypeKind::Struct(named) => any_has_self(named.args),
+    TypeKind::Enum(named) => any_has_self(named.args),
+    TypeKind::Class(named) => any_has_self(named.args),
+    TypeKind::Interface(named) => any_has_self(named.args),
+    TypeKind::Array { elem, .. } => has_self(elem),
+    TypeKind::List(elem) => has_self(elem),
+    TypeKind::Option(elem) => has_self(elem),
+    TypeKind::Ptr { pointee, .. } => has_self(pointee),
+    TypeKind::Result { value, error } => has_self(value) || has_self(error),
+    TypeKind::Function { params, ret } => any_has_self(params) || has_self(ret),
+    _ => false,
+  }
+}
+
+fn any_has_self(types: List<Type>) -> bool {
+  for ty in types {
+    if has_self(ty) {
+      return true;
+    }
+  }
+
+  false
+}
+
+/// How a method receives `self`.
+pub enum Receiver {
+  Value,
+  Var,
+  Init,
+}
+
+pub struct FnSig {
+  /// `None` for functions without `self`.
+  pub receiver: Option<Receiver>;
+  /// Without `self`.
+  pub params: List<Type>;
+  pub ret: Type;
+}
+
+pub fn same_sig(a: FnSig, b: FnSig) -> bool {
+  const same_receiver = match a.receiver {
+    None => b.receiver.is_none(),
+    Some(x) => match b.receiver {
+      Some(y) => x == y,
+      None => false,
+    },
+  };
+
+  same_receiver && same_types(a.params, b.params) && same_type(a.ret, b.ret)
+}
+
+pub struct FieldDef {
+  pub name: String;
+  pub ty: Type;
+  pub public: bool;
+  /// Whether the field can change after construction: struct fields and `var` class fields.
+  pub mutable: bool;
+  /// A `weak` class field.
+  pub is_weak: bool;
+  pub span: Span;
+}
+
+pub struct StructDef {
+  pub name: String;
+  pub fields: List<FieldDef>;
+}
+
+pub class ClassDef {
+  pub var name: String;
+  /// The class after `extends`, with type arguments in terms of this class's parameters.
+  pub var parent: Option<NamedRef>;
+  pub var is_abstract: bool;
+  /// The class's own fields in declaration order.
+  pub var fields: List<FieldDef>;
+  /// The class's own function `new` that initializes instances, if it declares one.
+  pub var initializer: Option<u32>;
+  /// The methods called through the vtable of instances of this class, by slot.
+  pub var vtable: List<u32>;
+
+  pub fn new(self, name: String, parent: Option<NamedRef>, is_abstract: bool, fields: List<FieldDef>, initializer: Option<u32>) {
+    self.name = name;
+    self.parent = parent;
+    self.is_abstract = is_abstract;
+    self.fields = fields;
+    self.initializer = initializer;
+    self.vtable = new List();
+  }
+}
+
+pub class InterfaceDef {
+  pub var name: String;
+  /// The interfaces after `extends`, with type arguments in terms of this interface's
+  /// parameters.
+  pub var parents: List<NamedRef>;
+  /// The fields an implementing type must have.
+  pub var fields: List<FieldDef>;
+  /// The interface's own methods, required and default, in declaration order.
+  pub var methods: List<u32>;
+  /// Whether the interface or an ancestor mentions `Self`, so it cannot be a type.
+  pub var uses_self: bool;
+
+  pub fn new(self, name: String, parents: List<NamedRef>, fields: List<FieldDef>, methods: List<u32>) {
+    self.name = name;
+    self.parents = parents;
+    self.fields = fields;
+    self.methods = methods;
+    self.uses_self = false;
+  }
+}
+
+/// A type parameter of a generic declaration.
+pub struct GenericDef {
+  pub name: String;
+  /// The interfaces after `:` and in the `where` clause.
+  pub bounds: List<NamedRef>;
+}
+
+pub struct EnumDef {
+  pub name: String;
+  pub variants: List<VariantDef>;
+}
+
+/// A field of a variant: named fields have a name.
+pub struct VariantField {
+  pub name: Option<String>;
+  pub ty: Type;
+}
+
+pub struct VariantDef {
+  pub name: String;
+  /// Whether the fields are named (`Rect { w, h }`) rather than positional (`Circle(r)`).
+  pub named: bool;
+  pub fields: List<VariantField>;
+
+  pub fn positional(name: String, types: List<Type>) -> VariantDef {
+    const fields: List<VariantField> = new List();
+
+    for ty in types {
+      fields.push(VariantField { name: None, ty: ty });
+    }
+
+    VariantDef { name: name, named: false, fields: fields }
+  }
+
+  pub fn field_types(self) -> List<Type> {
+    const types: List<Type> = new List();
+
+    for field in self.fields {
+      types.push(field.ty);
+    }
+
+    types
+  }
+}
+
+/// How far `check_until` goes.
+pub enum Stage {
+  /// The definitions of types, the signatures, the constants, inheritance, interfaces and `main`.
+  Declarations,
+  /// Also the bodies of functions and the flow analysis: the whole check.
+  Bodies,
+}
+
+/// A type written in the program with where it was written, checked later.
+pub struct SpanType {
+  pub span: Span;
+  pub ty: Type;
+}
+
+/// An interface used as a type, with where.
+pub struct SpanInterface {
+  pub span: Span;
+  pub id: u32;
+}
+
+/// Type checks up to and including `stage`.
+pub fn check_until(package: Package, resolution: Resolution, diagnostics: Diagnostics, stage: Stage) -> TypedModule {
+  const checker = new Checker(package, resolution, diagnostics);
+
+  collections::prelude_items(checker);
+  send::sync_classes(checker);
+  checker.struct_defs();
+  checker.enum_defs();
+  classes::class_defs(checker);
+  interfaces::interface_defs(checker);
+  generic::generic_defs(checker);
+  checker.check_recursive_types();
+  ffi::check_repr_c_structs(checker);
+  ffi::extern_sigs(checker);
+  consts::const_defs(checker);
+
+  for index in 0..resolution.functions.len() {
+    const id = index as u32;
+    const decl = match resolution.fn_decl(package, id) {
+      Some(decl) => decl,
+      None => continue,
+    };
+
+    checker.owner = resolution.owner(id);
+
+    const sig = checker.signature(id, decl);
+
+    if decl.extern_c {
+      ffi::check_exported(checker, decl, sig);
+    }
+
+    checker.typed.sigs.push(sig);
+  }
+
+  ffi::check_symbols(checker);
+  classes::check_classes(checker);
+  interfaces::check_interfaces(checker);
+
+  if let Some(main) = resolution.main {
+    if let Some(decl) = resolution.fn_decl(package, main) {
+      checker.check_main(main, decl);
+    }
+  }
+
+  if stage == Stage::Declarations {
+    return checker.typed;
+  }
+
+  for index in 0..resolution.functions.len() {
+    if let Some(decl) = resolution.fn_decl(package, index as u32) {
+      exprs::function(checker, index as u32, decl);
+    }
+  }
+
+  ffi::check_pointees(checker);
+  classes::infer_mutating_methods(checker);
+  // The bounds of the types written inside function bodies.
+  generic::check_type_bounds(checker);
+  send::check_send_types(checker);
+
+  const typed = checker.typed;
+
+  for index in 0..resolution.functions.len() {
+    const id = index as u32;
+    const decl = match resolution.fn_decl(package, id) {
+      Some(decl) => decl,
+      None => continue,
+    };
+
+    if decl.is_abstract {
+      continue;
+    }
+
+    var owner = FlowOwner::of_value();
+
+    match resolution.owner(id) {
+      Some(TypeItem::Class(class_id)) => {
+        owner = FlowOwner::of_class(None);
+
+        if let Some(def) = typed.class_def(class_id) {
+          if let Some(initializer) = def.initializer {
+            if initializer == id {
+              owner = FlowOwner::of_class(Some(def));
+            }
+          }
+        }
+      }
+      // In a default method, `self` is a reference to the implementing value.
+      Some(TypeItem::Interface(_)) => {
+        owner = FlowOwner::of_class(None);
+      }
+      _ => {}
+    }
+
+    flow::check_function(decl, resolution.function_locals(id), owner, resolution, typed, diagnostics);
+  }
+
+  typed
+}
+
+/// The kind of loop being checked.
+pub enum LoopKind {
+  Loop,
+  While,
+  For,
+}
+
+/// A loop being checked: the expected type of a `loop` expression, used to type `break` values.
+pub class LoopCx {
+  pub var kind: LoopKind;
+  pub var expected: Option<Type>;
+  pub var break_ty: Option<Type>;
+  pub var has_break: bool;
+
+  pub fn new(self, kind: LoopKind, expected: Option<Type>) {
+    self.kind = kind;
+    self.expected = expected;
+    self.break_ty = None;
+    self.has_break = false;
+  }
+}
+
+/// A method called on `self` (or a part of it) inside a method: the caller modifies `self` if
+/// the callee does.
+pub struct SelfCall {
+  pub caller: u32;
+  pub callee: u32;
+}
+
+/// A method called on a value that cannot be modified, with the error to report if the method
+/// turns out to modify `self`.
+pub struct ReceiverCheck {
+  pub callee: u32;
+  pub diagnostic: Diagnostic;
+}
+
+pub class Checker {
+  pub const package: Package;
+  pub const resolution: Resolution;
+  pub const diagnostics: Diagnostics;
+  pub const typed: TypedModule;
+  pub const target: TargetInfo;
+  /// The type whose function is being checked, for `Self` and `prv` members.
+  pub var owner: Option<TypeItem>;
+  /// Pointee types, checked once every type is known.
+  pub var pointees: List<SpanType>;
+  /// Interfaces used as types, checked once it is known whether they mention `Self`.
+  pub var interface_types: List<SpanInterface>;
+  /// Generic types written with arguments, whose bounds are checked once every bound is known.
+  pub var type_bounds: List<SpanType>;
+  /// How far the computation of each module-level constant got.
+  pub var const_states: List<ConstState>;
+  /// The `zod.new(...)` calls that start an initializer, the only place they are allowed.
+  pub const zod_new_calls: List<u32>;
+  /// Types of the current function's locals; `None` until a declaration without type or value
+  /// is first assigned.
+  pub var locals: List<Option<Type>>;
+  pub var ret: Type;
+  /// The current function's return type annotation, for "expected because of" labels.
+  pub var ret_span: Option<Span>;
+  pub var function: u32;
+  pub var loops: List<LoopCx>;
+  /// The enclosing `unsafe` blocks, innermost last, with whether each one was needed.
+  pub var unsafe_blocks: List<bool>;
+  /// Whether each struct or enum method modifies `self` directly, by function id.
+  pub var mutates_self: List<bool>;
+  /// The lambdas being checked, innermost last.
+  pub var lambda_stack: List<u32>;
+  /// Whether the result of the lambda being checked comes from its body.
+  pub var inferring_ret: bool;
+  pub var self_calls: List<SelfCall>;
+  pub var receiver_checks: List<ReceiverCheck>;
+
+  pub fn new(self, package: Package, resolution: Resolution, diagnostics: Diagnostics) {
+    self.package = package;
+    self.resolution = resolution;
+    self.diagnostics = diagnostics;
+    self.typed = new TypedModule();
+    self.target = package.target;
+    self.owner = None;
+    self.pointees = new List();
+    self.interface_types = new List();
+    self.type_bounds = new List();
+    self.const_states = new List();
+    self.zod_new_calls = new List();
+    self.locals = new List();
+    self.ret = unit();
+    self.ret_span = None;
+    self.function = 0;
+    self.loops = new List();
+    self.unsafe_blocks = new List();
+    self.mutates_self = new List();
+
+    for _ in 0..resolution.functions.len() {
+      self.mutates_self.push(false);
+    }
+
+    self.lambda_stack = new List();
+    self.inferring_ret = false;
+    self.self_calls = new List();
+    self.receiver_checks = new List();
+  }
+
+  pub fn error(self, code: String, span: Span, message: String) {
+    self.diagnostics.push(Diagnostic::error(code, span, message));
+  }
+
+  /// Whether a value of type `actual` can be used where `expected` is required.
+  pub fn fits(self, actual: Type, expected: Type) -> bool {
+    self.typed.fits(actual, expected)
+  }
+
+  /// A program type used inside its own declaration: generic types take their own parameters
+  /// as arguments.
+  pub fn type_ref(self, item: TypeItem) -> Type {
+    self.named_type(item, self.identity_args(ParamOwner::Item(item)))
+  }
+
+  /// The parameters of a declaration as types.
+  pub fn identity_args(self, owner: ParamOwner) -> List<Type> {
+    const generics = self.resolution.generics(self.package, owner);
+    const args: List<Type> = new List();
+
+    for index in 0..generics.len() {
+      args.push(of(TypeKind::Param(ParamRef { owner: owner, index: index as u32, name: generics[index].name.name })));
+    }
+
+    args
+  }
+
+  /// A program type with type arguments.
+  pub fn named_type(self, item: TypeItem, args: List<Type>) -> Type {
+    const name = self.resolution.type_name(self.package, item);
+
+    match item {
+      TypeItem::Struct(id) => of(TypeKind::Struct(NamedRef { id: id, name: name, args: args })),
+      TypeItem::Enum(id) => of(TypeKind::Enum(NamedRef { id: id, name: name, args: args })),
+      TypeItem::Class(id) => of(TypeKind::Class(NamedRef { id: id, name: name, args: args })),
+      TypeItem::Interface(id) => of(TypeKind::Interface(NamedRef { id: id, name: name, args: args })),
+    }
+  }
+
+  /// The number of type parameters of a declaration.
+  pub fn generic_count(self, owner: ParamOwner) -> usize {
+    self.resolution.generics(self.package, owner).len()
+  }
+
+  /// Resolves the field types of every enum variant.
+  pub fn enum_defs(self) {
+    for index in 0..self.resolution.enums.len() {
+      const id = index as u32;
+      const decl = match self.resolution.enum_decl(self.package, id) {
+        Some(decl) => decl,
+        None => continue,
+      };
+
+      self.owner = Some(TypeItem::Enum(id));
+
+      const variants: List<VariantDef> = new List();
+
+      for variant in decl.variants {
+        var named = false;
+        const fields: List<VariantField> = new List();
+
+        match variant.fields {
+          VariantFields::Unit => {}
+          VariantFields::Tuple(types) => {
+            for ty in types {
+              fields.push(VariantField { name: None, ty: self.type_expr(ty) });
+            }
+          }
+          VariantFields::Named(named_fields) => {
+            named = true;
+
+            for field in named_fields {
+              fields.push(VariantField { name: Some(field.name.name), ty: self.type_expr(field.ty) });
+            }
+          }
+        }
+
+        variants.push(VariantDef { name: variant.name.name, named: named, fields: fields });
+      }
+
+      self.typed.enums.push(EnumDef { name: decl.name.name, variants: variants });
+    }
+
+    self.owner = None;
+  }
+
+  /// Resolves the field types of every struct.
+  pub fn struct_defs(self) {
+    for index in 0..self.resolution.structs.len() {
+      const id = index as u32;
+      const decl = match self.resolution.struct_decl(self.package, id) {
+        Some(decl) => decl,
+        None => continue,
+      };
+
+      self.owner = Some(TypeItem::Struct(id));
+
+      const fields: List<FieldDef> = new List();
+
+      for field in decl.fields {
+        if field.is_weak {
+          self.diagnostics.push(
+            Diagnostic::error(codes::INVALID_WEAK, field.name.span, "only class fields can be `weak`")
+              .with_note("a struct is a value; keep the weak reference in a class field"),
+          );
+        }
+
+        fields.push(FieldDef { name: field.name.name, ty: self.type_expr(field.ty), public: !is_private(field.visibility), mutable: true, is_weak: false, span: field.span });
+      }
+
+      self.typed.structs.push(StructDef { name: decl.name.name, fields: fields });
+    }
+
+    self.owner = None;
+  }
+
+  /// A struct or enum cannot contain itself by value, directly or through other structs, enums,
+  /// arrays, `Option` or `Result`.
+  pub fn check_recursive_types(self) {
+    for index in 0..self.typed.structs.len() {
+      const id = index as u32;
+      const fields = self.typed.structs[index].fields;
+      var recursive: Option<FieldDef> = None;
+
+      for field in fields {
+        if recursive.is_none() && self.contains_item(field.ty, TypeItem::Struct(id), new List()) {
+          recursive = Some(field);
+        }
+      }
+
+      if let Some(field) = recursive {
+        if let Some(decl) = self.resolution.struct_decl(self.package, id) {
+          self.recursive_type_error("struct", decl.name.name, decl.name.span, field.span);
+        }
+      }
+    }
+
+    for index in 0..self.typed.enums.len() {
+      const id = index as u32;
+      const decl = match self.resolution.enum_decl(self.package, id) {
+        Some(decl) => decl,
+        None => continue,
+      };
+      const variants = self.typed.enums[index].variants;
+      var recursive: Option<usize> = None;
+
+      for position in 0..variants.len() {
+        if recursive.is_none() {
+          for ty in variants[position].field_types() {
+            if recursive.is_none() && self.contains_item(ty, TypeItem::Enum(id), new List()) {
+              recursive = Some(position);
+            }
+          }
+        }
+      }
+
+      if let Some(position) = recursive {
+        if let Some(variant) = decl.variants.get(position) {
+          self.recursive_type_error("enum", decl.name.name, decl.name.span, variant.span);
+        }
+      }
+    }
+  }
+
+  prv fn recursive_type_error(self, kind: String, name: String, span: Span, part: Span) {
+    self.diagnostics.push(
+      Diagnostic::error(codes::RECURSIVE_TYPE, span, "the " + kind + " `" + name + "` contains itself, so its size would be infinite")
+        .with_label(part, "this contains a `" + name + "`")
+        .with_help(kind + "s are stored inline; keep the recursive value in a `class` (F2), which is a reference"),
+    );
+  }
+
+  prv fn contains_item(self, ty: Type, target: TypeItem, visited: List<TypeItem>) -> bool {
+    var item = TypeItem::Struct(0);
+
+    match ty.kind {
+      TypeKind::Array { elem, .. } => return self.contains_item(elem, target, visited),
+      TypeKind::Option(elem) => return self.contains_item(elem, target, visited),
+      TypeKind::Result { value, error } => return self.contains_item(value, target, visited) || self.contains_item(error, target, visited),
+      TypeKind::Struct(named) => {
+        item = TypeItem::Struct(named.id);
+      }
+      TypeKind::Enum(named) => {
+        item = TypeItem::Enum(named.id);
+      }
+      _ => return false,
+    }
+
+    if resolve::same_type_item(item, target) {
+      return true;
+    }
+
+    for seen in visited {
+      if resolve::same_type_item(seen, item) {
+        return false;
+      }
+    }
+
+    visited.push(item);
+
+    const parts: List<Type> = new List();
+
+    match item {
+      TypeItem::Struct(id) => {
+        if let Some(def) = self.typed.structs.get(id as usize) {
+          for field in def.fields {
+            parts.push(field.ty);
+          }
+        }
+      }
+      TypeItem::Enum(_) => {
+        if let Some(variants) = self.typed.variants(ty) {
+          for variant in variants {
+            for part in variant.field_types() {
+              parts.push(part);
+            }
+          }
+        }
+      }
+      _ => {}
+    }
+
+    for part in parts {
+      if self.contains_item(part, target, visited) {
+        return true;
+      }
+    }
+
+    false
+  }
+
+  pub fn signature(self, id: u32, decl: FnDecl) -> FnSig {
+    // Methods that modify `self` become `Receiver::Var` once every body is checked.
+    var receiver: Option<Receiver> = None;
+
+    if self.resolution.is_initializer(self.package, id) {
+      receiver = Some(Receiver::Init);
+    } else if decl.self_param.is_some() {
+      receiver = Some(Receiver::Value);
+    }
+
+    const params: List<Type> = new List();
+
+    for param in decl.params {
+      params.push(self.type_expr(param.ty));
+    }
+
+    const is_init = match receiver {
+      Some(value) => value == Receiver::Init,
+      None => false,
+    };
+    // An initializer's return type is an error reported by `check_classes`.
+    var ret = unit();
+
+    if let Some(ty) = decl.return_type {
+      if !is_init {
+        ret = self.type_expr(ty);
+      }
+    }
+
+    FnSig { receiver: receiver, params: params, ret: ret }
+  }
+
+  /// `fn main()` or `fn main() -> Result<(), String>`, with any visibility.
+  pub fn check_main(self, id: u32, main: FnDecl) {
+    const ret = match self.typed.sigs.get(id as usize) {
+      Some(sig) => sig.ret,
+      None => unit(),
+    };
+    var is_result = false;
+    // The error is a `String` or implements `Error`.
+    var valid_ret = false;
+
+    match ret.kind {
+      TypeKind::Unit | TypeKind::Error => {
+        valid_ret = true;
+      }
+      TypeKind::Result { value, error } => {
+        is_result = true;
+        valid_ret = is_unit(value) && (is_string(error) || interfaces::implements_error(self, error));
+      }
+      _ => {}
+    }
+
+    if !main.params.is_empty() || !valid_ret {
+      var diagnostic = Diagnostic::error(codes::INVALID_MAIN, main.name.span, "`main` must be declared as `fn main()` or `fn main() -> Result<(), E>`");
+
+      if is_result {
+        diagnostic = diagnostic.with_note("the error type of `main` must be `String` or implement `Error`");
+      }
+
+      self.diagnostics.push(diagnostic);
+    }
+  }
+
+  pub fn type_expr(self, ty: TypeExpr) -> Type {
+    self.type_expr_at(ty, false)
+  }
+
+  /// A type, possibly behind a pointer, the only place `c_void` can appear.
+  pub fn type_expr_at(self, ty: TypeExpr, behind_pointer: bool) -> Type {
+    match ty.kind {
+      TypeExprKind::Ptr { mutable, pointee } => ffi::pointer_type(self, mutable, pointee),
+      TypeExprKind::Fn { params, ret } => {
+        const types: List<Type> = new List();
+
+        for param in params {
+          types.push(self.type_expr(param));
+        }
+
+        const result = match ret {
+          Some(ret) => self.type_expr(ret),
+          None => unit(),
+        };
+
+        of(TypeKind::Function { params: types, ret: result })
+      }
+      TypeExprKind::Unit => unit(),
+      TypeExprKind::Array { elem, len } => {
+        const elem_ty = self.type_expr(elem);
+
+        match self.array_len(len) {
+          Some(value) => of(TypeKind::Array { elem: elem_ty, len: value }),
+          None => error(),
+        }
+      }
+      TypeExprKind::Generic { path, args } => {
+        if let Some(TypeRes::Item(item)) = self.resolution.type_paths.get(path.id) {
+          const name = match path.segments.last() {
+            Some(segment) => segment.name,
+            None => "",
+          };
+          const types: List<Type> = new List();
+
+          for arg in args {
+            types.push(self.type_expr(arg));
+          }
+
+          const expected = self.generic_count(ParamOwner::Item(item));
+
+          if !self.check_arg_count(ty.span, "`" + name + "`", expected, types.len()) {
+            return error();
+          }
+
+          const result = self.named_type(item, types);
+
+          if let TypeItem::Interface(id) = item {
+            self.interface_types.push(SpanInterface { span: path.span, id: id });
+          }
+
+          self.type_bounds.push(SpanType { span: ty.span, ty: result });
+
+          return result;
+        }
+
+        const name = match path.segments.last() {
+          Some(segment) => segment.name,
+          None => "",
+        };
+        const res = self.resolution.type_paths.get(path.id);
+        const is_error_res = match res {
+          Some(TypeRes::Error) => true,
+          _ => false,
+        };
+
+        if is_error_res {
+          return error();
+        }
+
+        const builtin_or_none = match res {
+          Some(TypeRes::Builtin) => true,
+          None => true,
+          _ => false,
+        };
+        var arity = 0usize;
+
+        if path.segments.len() == 1 && builtin_or_none {
+          if name == "Option" || name == "List" {
+            arity = 1;
+          } else if name == "Result" {
+            arity = 2;
+          }
+        }
+
+        if arity == 0 {
+          self.error(codes::WRONG_TYPE_ARGUMENTS, ty.span, "`" + name + "` takes no type arguments");
+
+          return error();
+        }
+
+        if args.len() != arity {
+          self.error(codes::WRONG_TYPE_ARGUMENTS, ty.span, `\`${name}\` takes ${arity} type argument${plural(arity)} but ${args.len()} were supplied`);
+
+          return error();
+        }
+
+        const types: List<Type> = new List();
+
+        for arg in args {
+          types.push(self.type_expr(arg));
+        }
+
+        const first = if types.is_empty() { error() } else { types.remove(0) };
+
+        if name == "List" {
+          return of(TypeKind::List(first));
+        }
+
+        match types.pop() {
+          Some(error_ty) => of(TypeKind::Result { value: first, error: error_ty }),
+          None => of(TypeKind::Option(first)),
+        }
+      }
+      TypeExprKind::Path(path) => {
+        // The resolver reports unknown types and resolves program types and module paths.
+        match self.resolution.type_paths.get(path.id) {
+          Some(TypeRes::Item(item)) => {
+            if self.generic_count(ParamOwner::Item(item)) > 0 {
+              const name = self.resolution.type_name(self.package, item);
+              const params: List<String> = new List();
+
+              for param in self.resolution.generics(self.package, ParamOwner::Item(item)) {
+                params.push(param.name.name);
+              }
+
+              self.error(codes::WRONG_TYPE_ARGUMENTS, path.span, "`" + name + "` needs type arguments: `" + name + "<" + params.join(", ") + ">`");
+
+              return error();
+            }
+
+            if let TypeItem::Interface(id) = item {
+              self.interface_types.push(SpanInterface { span: path.span, id: id });
+            }
+
+            return self.type_ref(item);
+          }
+          Some(TypeRes::Param { owner, index }) => {
+            const name = match self.resolution.generics(self.package, owner).get(index as usize) {
+              Some(param) => param.name.name,
+              None => "",
+            };
+
+            return of(TypeKind::Param(ParamRef { owner: owner, index: index, name: name }));
+          }
+          Some(TypeRes::CType(c)) => {
+            if c == "c_void" && !behind_pointer {
+              return ffi::bare_c_void(self, path.span);
+            }
+
+            return ffi::c_type(c, self.target);
+          }
+          Some(TypeRes::CString) => return of(TypeKind::CString),
+          Some(TypeRes::Error) => return error(),
+          _ => {}
+        }
+
+        if path.segments.len() != 1 {
+          self.error(codes::UNRESOLVED_NAME, path.span, "cannot find this type");
+
+          return error();
+        }
+
+        const segment = path.segments[0];
+        const name = segment.name;
+
+        if let Some(int_ty) = int_from_name(name) {
+          return int(int_ty);
+        }
+
+        if let Some(float_ty) = float_from_name(name) {
+          return of(TypeKind::Float(float_ty));
+        }
+
+        if name == "Self" {
+          return match self.owner {
+            // Inside an interface, `Self` is the type implementing it.
+            Some(TypeItem::Interface(id)) => of(TypeKind::Param(ParamRef { owner: ParamOwner::Item(TypeItem::Interface(id)), index: SELF_PARAM, name: "Self" })),
+            Some(owner) => self.type_ref(owner),
+            None => {
+              self.error(codes::UNRESOLVED_NAME, segment.span, "`Self` is only available inside a struct, enum or class");
+
+              error()
+            }
+          };
+        }
+
+        if name == "bool" {
+          return of(TypeKind::Bool);
+        }
+
+        if name == "char" {
+          return of(TypeKind::Char);
+        }
+
+        if name == "String" {
+          return string();
+        }
+
+        if name == "StringBuilder" {
+          return of(TypeKind::StringBuilder);
+        }
+
+        if name == "Option" || name == "Result" || name == "List" {
+          const usage = if name == "Option" { "Option<T>" } else if name == "List" { "List<T>" } else { "Result<T, E>" };
+
+          self.error(codes::WRONG_TYPE_ARGUMENTS, segment.span, "`" + name + "` needs type arguments: `" + usage + "`");
+
+          return error();
+        }
+
+        const primitives = INT_NAMES.split(" ");
+
+        for other in List::from(["f32", "f64", "bool", "char", "String", "StringBuilder", "Option", "Result", "List"]) {
+          primitives.push(other);
+        }
+
+        var diagnostic = Diagnostic::error(codes::UNRESOLVED_NAME, segment.span, "cannot find type `" + name + "`");
+
+        if let Some(similar) = diagnostics::closest_match(name, primitives) {
+          diagnostic = diagnostic.with_help("a type with a similar name exists: `" + similar + "`");
+        }
+
+        self.diagnostics.push(diagnostic);
+
+        error()
+      }
+    }
+  }
+
+  /// The length of an array type or repeat expression: a `usize` literal.
+  pub fn array_len(self, len: ArrayLen) -> Option<u64> {
+    if let Some(suffix) = len.suffix {
+      if suffix != "usize" {
+        self.error(codes::MISMATCHED_TYPES, len.span, "expected `usize`, found `" + suffix + "`: array lengths are `usize`");
+
+        return None;
+      }
+    }
+
+    match len.value.parse_u64() {
+      Ok(value) => Some(value),
+      Err(_) => {
+        self.error(codes::INTEGER_OUT_OF_RANGE, len.span, "the array length `" + len.value + "` does not fit in `usize`");
+
+        None
+      }
+    }
+  }
+
+  /// Reports a wrong number of explicit type arguments, and returns whether it was right.
+  pub fn check_arg_count(self, span: Span, what: String, expected: usize, found: usize) -> bool {
+    if expected == found {
+      return true;
+    }
+
+    const message = if expected == 0 { what + " takes no type arguments" } else { `${what} takes ${expected} type argument${plural(expected)} but ${found} were supplied` };
+
+    self.error(codes::WRONG_TYPE_ARGUMENTS, span, message);
+
+    false
+  }
+}
+
+pub fn is_private(visibility: Visibility) -> bool {
+  match visibility {
+    Visibility::Private => true,
+    _ => false,
+  }
+}
+
+pub fn plural(count: usize) -> String {
+  if count == 1 { "" } else { "s" }
+}
+
+/// Whether a field is `var` (`Some(true)`), `const` (`Some(false)`) or neither.
+pub fn is_var(field: FieldDecl) -> bool {
+  match field.mutable {
+    Some(value) => value,
+    None => false,
+  }
+}
+
+pub fn is_const(field: FieldDecl) -> bool {
+  match field.mutable {
+    Some(value) => !value,
+    None => false,
+  }
+}

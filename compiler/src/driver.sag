@@ -1,0 +1,920 @@
+//! Compilation driver: runs the pipeline (docs/architecture.md#pipeline), prints diagnostics,
+//! writes the generated C with the embedded runtime, and invokes the C compiler. The port of
+//! `sagitario_driver` without what only Nova uses: libraries, dependencies and `[link]`
+//! (docs/adr/0055-driver-and-cli-port.md).
+
+use pkg::ast::{Package, TargetInfo};
+use pkg::ast::dump;
+use pkg::codegen_c;
+use pkg::codegen_c::GeneratedC;
+use pkg::diagnostics;
+use pkg::diagnostics::{DiagnosticFormat, Diagnostics};
+use pkg::driver::targets;
+use pkg::driver::targets::Platform;
+use pkg::lexer;
+use pkg::loader::{Loader, push_path, windows};
+use pkg::parser;
+use pkg::resolve;
+use pkg::sir;
+use pkg::span::SourceMap;
+use pkg::types;
+use pkg::types::Stage;
+use std::env;
+use std::fs;
+use std::io;
+use std::path;
+use std::process::Command;
+use std::time::SystemTime;
+
+/// Exit code when compilation fails or the input cannot be read.
+pub const EXIT_FAILURE: i32 = 1;
+/// Exit code for an internal compiler error.
+pub const EXIT_ICE: i32 = 101;
+
+const RUNTIME_HEADER: String = include_str("../../runtime/sagitario_runtime.h");
+const RUNTIME_SOURCE: String = include_str("../../runtime/sagitario_runtime.c");
+
+/// The line separating the two translation units in `--dump=c`.
+const C_DUMP_FFI_MARKER: String = "/* ---- sag_ffi.c ---- */\n";
+
+/// The stack every executable reserves on Windows, the default of Linux and macOS: programs, and
+/// the compiler itself, recurse as deeply on every system (docs/adr/0055-driver-and-cli-port.md).
+const STACK_RESERVE: String = "8388608";
+
+/// What the command line asks for.
+pub class CompileOptions {
+  pub var input: String;
+  pub var emit_c: bool;
+  pub var cc: Option<String>;
+  pub var format: DiagnosticFormat;
+  /// Arguments forwarded to the compiled program (`sag run file.sag -- args`).
+  pub var program_args: List<String>;
+  /// Release mode: integer overflow wraps and C is optimized (docs/spec/02-types.md#build-modes).
+  pub var release: bool;
+  /// Compile with AddressSanitizer and UndefinedBehaviorSanitizer where the C compiler supports
+  /// them (docs/testing.md#memory-checks).
+  pub var sanitize: bool;
+  /// With `sanitize`: ThreadSanitizer instead, where the C compiler supports it.
+  pub var thread_sanitizer: bool;
+  /// The name of the target to compile for (docs/nova.md#targets); the machine running the
+  /// compiler when `None`.
+  pub var target: Option<String>;
+  /// `check --dump=...`: print an intermediate result instead of checking.
+  pub var dump: Option<String>;
+
+  pub fn new(self) {
+    self.input = "";
+    self.emit_c = false;
+    self.cc = None;
+    self.format = DiagnosticFormat::Human;
+    self.program_args = new List();
+    self.release = false;
+    self.sanitize = false;
+    self.thread_sanitizer = false;
+    self.target = None;
+    self.dump = None;
+  }
+}
+
+/// Whether the compiler runs on macOS, which has this file and no other system has.
+pub fn macos() -> bool {
+  fs::is_file("/System/Library/CoreServices/SystemVersion.plist")
+}
+
+/// The extension of executables of this machine: `exe` on Windows, none elsewhere.
+pub fn exe_extension() -> String {
+  if windows() { "exe" } else { "" }
+}
+
+/// The extension of executables for `target`: none on Android, `exe` on Windows.
+pub fn executable_extension(target: Option<String>) -> String {
+  if target.is_some() { "" } else { exe_extension() }
+}
+
+/// `file` with its extension replaced by `extension`, or removed when it is empty, as Rust's
+/// `Path::with_extension` does.
+pub fn with_extension(file: String, extension: String) -> String {
+  var base = file;
+
+  if let Some(name) = path::file_name(file) {
+    if let Some(old) = path::extension(file) {
+      if file.ends_with(name) {
+        base = file.substring(0, file.len() - old.len() - 1);
+      }
+    }
+  }
+
+  if extension.is_empty() { base } else { base + "." + extension }
+}
+
+/// `sag check`: runs the front end only.
+pub fn check(options: CompileOptions) -> i32 {
+  if let Some(kind) = options.dump {
+    if kind == "tokens" || kind == "ast" {
+      return dump_file(options, kind);
+    }
+
+    if kind == "c" {
+      return dump_c(options);
+    }
+
+    return dump_program(options, kind);
+  }
+
+  match front_end(options, false) {
+    Ok(_) => 0,
+    Err(code) => code,
+  }
+}
+
+/// `sag build`: writes an executable next to the source file.
+pub fn build(options: CompileOptions) -> i32 {
+  const executable = with_extension(options.input, executable_extension(options.target));
+
+  match compile_to(options, executable) {
+    Ok(compiler) => {
+      if let Some(dir) = compiler.sanitizer_runtime_dir() {
+        eprintln(`note: the program needs the sanitizer runtime: add \`${dir}\` to PATH to run it`);
+      }
+
+      0
+    }
+    Err(code) => code,
+  }
+}
+
+/// `sag run`: builds into a temporary directory, runs the program and returns its exit code.
+pub fn run(options: CompileOptions) -> i32 {
+  if let Some(target) = options.target {
+    eprintln(`error: a program built for \`${target}\` cannot run on this machine`);
+    eprintln("note: build it with `build`, then copy it to the device (for Android: `adb push` and `adb shell`)");
+    return EXIT_FAILURE;
+  }
+
+  const dir = match TempDir::create() {
+    Ok(found) => found,
+    Err(error) => {
+      eprintln(`error: cannot create a temporary directory: ${error.message()}`);
+      return EXIT_FAILURE;
+    }
+  };
+  const code = run_in(options, dir.path);
+
+  dir.remove();
+  code
+}
+
+fn run_in(options: CompileOptions, dir: String) -> i32 {
+  const stem = path::stem(options.input).unwrap_or("");
+  const executable = with_extension(push_path(dir, stem), exe_extension());
+  const compiler = match compile_to(options, executable) {
+    Ok(found) => found,
+    Err(code) => return code,
+  };
+  const command = new Command(executable).args(options.program_args);
+
+  // On Windows the sanitizer runtime is a DLL next to the compiler (docs/adr/0018-windows-c-toolchain.md).
+  if let Some(runtime_dir) = compiler.sanitizer_runtime_dir() {
+    const value = match env::variable("PATH") {
+      Some(paths) => runtime_dir + (if windows() { ";" } else { ":" }) + paths,
+      None => runtime_dir,
+    };
+
+    command.env("PATH", value);
+  }
+
+  match command.status() {
+    // Exit codes that do not fit in a byte (e.g. Windows exception codes) and signals become 1.
+    Ok(status) => match status.code {
+      Some(code) => if code >= 0 && code <= 255 { code } else { EXIT_FAILURE },
+      None => EXIT_FAILURE,
+    },
+    Err(error) => {
+      eprintln(`error: cannot run \`${executable}\`: ${error.message()}`);
+      EXIT_FAILURE
+    }
+  }
+}
+
+/// `check --dump=tokens|ast`: the tokens or the syntax tree of the input file alone, and its
+/// diagnostics. A file with lexical errors is not parsed, as in a build.
+fn dump_file(options: CompileOptions, kind: String) -> i32 {
+  const input = options.input;
+  const text = match fs::read_to_string(input) {
+    Ok(found) => found,
+    Err(error) => {
+      eprintln(`error: cannot read \`${input}\`: ${error.message()}`);
+      return EXIT_FAILURE;
+    }
+  };
+  const sources = new SourceMap();
+  const diagnostics = new Diagnostics();
+  const file = sources.add(input, text);
+  const tokens = lexer::lex(file, text, diagnostics);
+
+  if kind == "tokens" {
+    print(lexer::dump(tokens));
+  } else if !diagnostics.has_errors() {
+    print(dump::dump(parser::parse_module(file, tokens, diagnostics)));
+  }
+
+  match report(diagnostics, sources, options) {
+    Ok(_) => 0,
+    Err(code) => code,
+  }
+}
+
+/// `check --dump=resolve|declarations|types`: loads the program as `check` does, resolves it and
+/// prints the resolution, or type checks its declarations or all of it and prints the result.
+fn dump_program(options: CompileOptions, kind: String) -> i32 {
+  const loaded = match load_package(options) {
+    Ok(found) => found,
+    Err(code) => return code,
+  };
+  const resolution = resolve::resolve(loaded.package, loaded.diagnostics);
+
+  if kind == "resolve" {
+    print(resolve::dump::dump(resolution));
+  } else {
+    const stage = if kind == "types" { Stage::Bodies } else { Stage::Declarations };
+
+    print(types::dump::dump(types::check_until(loaded.package, resolution, loaded.diagnostics, stage)));
+  }
+
+  match report(loaded.diagnostics, loaded.sources, options) {
+    Ok(_) => 0,
+    Err(code) => code,
+  }
+}
+
+/// `check --dump=c`: the C that `build` generates, with the FFI unit after a marker line.
+fn dump_c(options: CompileOptions) -> i32 {
+  match front_end(options, true) {
+    Ok(Some(generated)) => {
+      print(generated.program);
+
+      if let Some(ffi) = generated.ffi {
+        print(C_DUMP_FFI_MARKER + ffi);
+      }
+
+      0
+    }
+    Ok(None) => 0,
+    Err(code) => code,
+  }
+}
+
+/// Lexes, parses, resolves and type checks; with `generate`, also lowers to SIR and emits C.
+fn front_end(options: CompileOptions, generate: bool) -> Result<Option<GeneratedC>, i32> {
+  const loaded = load_package(options)?;
+  const diagnostics = loaded.diagnostics;
+  const resolution = resolve::resolve(loaded.package, diagnostics);
+  const typed = types::check_until(loaded.package, resolution, diagnostics, Stage::Bodies);
+
+  report(diagnostics, loaded.sources, options)?;
+
+  const program = match sir::lower(loaded.package, resolution, typed, loaded.sources, diagnostics) {
+    Ok(found) => found,
+    Err(message) => {
+      eprintln(`internal compiler error: ${message}`);
+      return Err(EXIT_ICE);
+    }
+  };
+
+  // Generic code may instantiate itself endlessly, found while lowering.
+  report(diagnostics, loaded.sources, options)?;
+
+  if !generate {
+    return Ok(None);
+  }
+
+  Ok(Some(codegen_c::generate(program)))
+}
+
+/// A program read, lexed and parsed, with its sources and its diagnostics so far.
+struct Loaded {
+  pub package: Package;
+  pub sources: SourceMap;
+  pub diagnostics: Diagnostics;
+}
+
+/// Reads, lexes and parses the input's modules, the standard library modules they name and the
+/// prelude. Lexical and syntax errors are reported, and stop the pipeline.
+fn load_package(options: CompileOptions) -> Result<Loaded, i32> {
+  const input = options.input;
+  const is_sag = match path::extension(input) {
+    Some(extension) => extension == "sag",
+    None => false,
+  };
+
+  if !is_sag {
+    eprintln(`error: \`${input}\` is not a \`.sag\` file`);
+    return Err(EXIT_FAILURE);
+  }
+
+  if !fs::is_file(input) {
+    eprintln(`error: cannot find \`${input}\``);
+    return Err(EXIT_FAILURE);
+  }
+
+  const sources = new SourceMap();
+  const diagnostics = new Diagnostics();
+  const loader = new Loader(input);
+
+  if !loader.load(input, new List(), sources, diagnostics) || !loader.load_references(sources, diagnostics) {
+    return Err(EXIT_FAILURE);
+  }
+
+  // Malformed tokens or an incomplete syntax tree would only cause confusing follow-up errors,
+  // so lexical and syntax errors stop here. Name, type and flow errors are reported together.
+  report(diagnostics, sources, options)?;
+
+  const prelude = loader.load_prelude(sources, diagnostics);
+
+  report(diagnostics, sources, options)?;
+
+  const target = match options.target {
+    Some(name) => targets::find(name)?.info,
+    None => TargetInfo::host(),
+  };
+
+  Ok(Loaded { package: loader.package(prelude, target), sources: sources, diagnostics: diagnostics })
+}
+
+fn plural(count: usize) -> String {
+  if count == 1 { "" } else { "s" }
+}
+
+/// Colors only the human format, honoring `NO_COLOR`, when `CLICOLOR_FORCE` asks for them:
+/// Sagitario cannot tell yet whether stderr is a terminal.
+fn use_color(format: DiagnosticFormat) -> bool {
+  if format == DiagnosticFormat::Short {
+    return false;
+  }
+
+  if let Some(value) = env::variable("NO_COLOR") {
+    if !value.is_empty() {
+      return false;
+    }
+  }
+
+  match env::variable("CLICOLOR_FORCE") {
+    Some(value) => value != "0",
+    None => false,
+  }
+}
+
+/// Prints the collected diagnostics in source order and stops the pipeline if any of them is
+/// an error.
+fn report(diagnostics: Diagnostics, sources: SourceMap, options: CompileOptions) -> Result<(), i32> {
+  const errors = diagnostics.error_count();
+  const warnings = diagnostics.warning_count();
+  const color = use_color(options.format);
+
+  for diagnostic in diagnostics.take() {
+    eprintln(diagnostics::render(diagnostic, sources, options.format, color));
+  }
+
+  if options.format == DiagnosticFormat::Human {
+    const input = options.input;
+    const warnings_text = `${warnings} warning${plural(warnings)}`;
+
+    if errors > 0 {
+      const also = if warnings > 0 { `; ${warnings_text} emitted` } else { "" };
+
+      eprintln(`error: could not compile \`${input}\` due to ${errors} previous error${plural(errors)}${also}`);
+    } else if warnings > 0 {
+      eprintln(`warning: \`${input}\` generated ${warnings_text}`);
+    }
+  }
+
+  if errors > 0 { Err(EXIT_FAILURE) } else { Ok(()) }
+}
+
+/// What failed while building with the C toolchain.
+enum Failure {
+  /// The generated C, which is a compiler bug.
+  Generated(String),
+  /// Linking.
+  Link(String),
+  /// A tool that could not run.
+  Spawn(String, String),
+}
+
+/// Runs the C compiler on the files of a build.
+class Toolchain {
+  pub const compiler: CCompiler;
+  /// The temporary directory holding the generated C and the objects.
+  pub const dir: String;
+  pub const mode: List<String>;
+  pub const sanitize: List<String>;
+  /// Whether the program uses threads (`GeneratedC::threads`).
+  pub const threads: bool;
+
+  pub fn new(self, compiler: CCompiler, dir: String, mode: List<String>, sanitize: List<String>, threads: bool) {
+    self.compiler = compiler;
+    self.dir = dir;
+    self.mode = mode;
+    self.sanitize = sanitize;
+    self.threads = threads;
+  }
+
+  /// What a failed tool printed: `cl` prints its errors to stdout.
+  prv fn failure_text(self, stdout: String, stderr: String) -> String {
+    if self.compiler.cl { stdout + stderr } else { stderr }
+  }
+
+  /// Compiles one generated C file to an object; it must be strict C11.
+  pub fn compile(self, source: String, object: String) -> Result<(), Failure> {
+    const command = self.compiler.command();
+
+    if self.compiler.cl {
+      // MSVC has no option rejecting extensions in C; `/W3` keeps its warnings to likely bugs.
+      command.args(List::from(["/nologo", "/std:c11", "/W3", "/utf-8"])).args(self.mode);
+
+      // MSVC provides `<stdatomic.h>` only behind this option (docs/adr/0045-threads-and-send.md).
+      if self.threads {
+        command.arg("/experimental:c11atomics");
+      }
+
+      command.arg("/I").arg(self.dir).arg("/c").arg(source).arg(`/Fo${object}`);
+    } else {
+      command.arg("-std=c11").arg("-pedantic-errors").args(self.mode).args(self.sanitize).args(self.pthread());
+      command.arg("-I").arg(self.dir).arg("-c").arg(source).arg("-o").arg(object);
+    }
+
+    const output = match command.output() {
+      Ok(found) => found,
+      Err(error) => return Err(Failure::Spawn(self.compiler.command_name, error.message())),
+    };
+
+    if output.status.success() { Ok(()) } else { Err(Failure::Generated(self.failure_text(output.stdout, output.stderr))) }
+  }
+
+  /// The objects of the generated C files.
+  pub fn objects(self, generated: List<String>) -> Result<List<String>, Failure> {
+    const objects: List<String> = new List();
+    const extension = if self.compiler.cl { "obj" } else { "o" };
+
+    for index in 0..generated.len() {
+      const object = push_path(self.dir, `object${index}.${extension}`);
+
+      self.compile(generated[index], object)?;
+      objects.push(object);
+    }
+
+    Ok(objects)
+  }
+
+  /// libm outside Windows (`fmod` and friends), and the stack of Windows executables.
+  prv fn link_args(self) -> List<String> {
+    const args: List<String> = new List();
+
+    if self.compiler.cl {
+      args.push("/STACK:" + STACK_RESERVE);
+
+      return args;
+    }
+
+    if self.compiler.mingw() {
+      args.push("-Wl,--stack," + STACK_RESERVE);
+    } else if self.compiler.windows() {
+      args.push("-Wl,/STACK:" + STACK_RESERVE);
+    } else {
+      args.push("-lm");
+    }
+
+    for arg in self.pthread() {
+      args.push(arg);
+    }
+
+    args
+  }
+
+  /// POSIX threads, for programs using threads outside Windows (which uses its own API).
+  prv fn pthread(self) -> List<String> {
+    if self.threads && !self.compiler.windows() { List::from(["-pthread"]) } else { new List() }
+  }
+
+  pub fn executable(self, objects: List<String>, executable: String) -> Result<(), Failure> {
+    const command = self.compiler.command();
+
+    if self.compiler.cl {
+      command.arg("/nologo").args(self.mode).args(objects).arg(`/Fe${executable}`).arg("/link").args(self.link_args());
+    } else {
+      command.args(self.mode).args(self.sanitize).args(objects).arg("-o").arg(executable).args(self.link_args());
+    }
+
+    const output = match command.output() {
+      Ok(found) => found,
+      Err(error) => return Err(Failure::Spawn(self.compiler.command_name, error.message())),
+    };
+
+    if output.status.success() { Ok(()) } else { Err(Failure::Link(self.failure_text(output.stdout, output.stderr))) }
+  }
+}
+
+/// Writes the generated C, with the runtime, into `dir`, and returns the files to compile.
+fn write_generated(generated: GeneratedC, dir: String) -> Result<List<String>, i32> {
+  const program_c = push_path(dir, "program.c");
+  const runtime_c = push_path(dir, "sagitario_runtime.c");
+  const ffi_c = push_path(dir, "sag_ffi.c");
+  const runtime = if generated.threads { "#define SAG_THREADS 1\n" + RUNTIME_SOURCE } else { RUNTIME_SOURCE };
+  var written = fs::write(program_c, generated.program);
+
+  if written.is_ok() {
+    written = fs::write(push_path(dir, codegen_c::RUNTIME_HEADER), RUNTIME_HEADER);
+  }
+
+  if written.is_ok() {
+    written = fs::write(runtime_c, runtime);
+  }
+
+  if written.is_ok() {
+    if let Some(ffi) = generated.ffi {
+      written = fs::write(ffi_c, ffi);
+    }
+  }
+
+  if let Err(error) = written {
+    eprintln(`error: cannot write generated C to \`${dir}\`: ${error.message()}`);
+    return Err(EXIT_FAILURE);
+  }
+
+  const files = List::from([program_c, runtime_c]);
+
+  if generated.ffi.is_some() {
+    files.push(ffi_c);
+  }
+
+  Ok(files)
+}
+
+/// Writes the generated C next to `base` for `--emit-c`.
+fn emit_c(generated: GeneratedC, base: String) -> Result<(), i32> {
+  const c_path = with_extension(base, "c");
+  const stem = path::stem(base).unwrap_or("");
+  const ffi_path = match path::parent(c_path) {
+    Some(parent) => push_path(parent, stem + "_ffi.c"),
+    None => stem + "_ffi.c",
+  };
+  var written = fs::write(c_path, generated.program);
+
+  if written.is_ok() {
+    if let Some(ffi) = generated.ffi {
+      written = fs::write(ffi_path, ffi);
+    }
+  }
+
+  if let Err(error) = written {
+    eprintln(`error: cannot write the generated C next to \`${base}\`: ${error.message()}`);
+    return Err(EXIT_FAILURE);
+  }
+
+  Ok(())
+}
+
+/// Reports a failed build: failures of the generated C are internal compiler errors.
+fn report_failure(failure: Failure, compiler: CCompiler) -> i32 {
+  match failure {
+    Failure::Generated(stderr) => {
+      eprintln(`internal compiler error: the generated C failed to compile with \`${compiler.command_name}\``);
+      eprintln(stderr);
+      EXIT_ICE
+    }
+    Failure::Link(stderr) => {
+      eprintln(`internal compiler error: the generated C failed to link with \`${compiler.command_name}\``);
+      eprintln(stderr);
+      EXIT_ICE
+    }
+    Failure::Spawn(tool, message) => {
+      eprintln(`error: cannot run \`${tool}\`: ${message}`);
+      EXIT_FAILURE
+    }
+  }
+}
+
+const SANITIZE_FLAGS: String = "-fsanitize=address,undefined -fno-sanitize-recover=undefined";
+const THREAD_SANITIZE_FLAGS: String = "-fsanitize=thread";
+
+/// Compiles the program into `executable` and returns the C compiler used.
+fn compile_to(options: CompileOptions, executable: String) -> Result<CCompiler, i32> {
+  const generated = match front_end(options, true)? {
+    Some(found) => found,
+    None => {
+      eprintln("internal compiler error: no C was generated");
+      return Err(EXIT_ICE);
+    }
+  };
+
+  if options.emit_c {
+    emit_c(generated, options.input)?;
+  }
+
+  const compiler = compiler_for(options)?;
+
+  if options.target.is_some() && options.sanitize {
+    eprintln("error: `--sanitize` only works when compiling for this machine");
+    return Err(EXIT_FAILURE);
+  }
+
+  if let Some(name) = options.target {
+    const target = targets::find(name)?;
+
+    if target.platform == Platform::Ios {
+      eprintln(`error: iOS runs no standalone programs; build a library for \`${target.name}\` with Nova and add it to an Xcode project`);
+      return Err(EXIT_FAILURE);
+    }
+  }
+
+  compiler.sanitized = options.sanitize && compiler.supports_sanitizers();
+
+  if options.sanitize && compiler.cl {
+    eprintln("warning: `cl` builds without sanitizers: MSVC has no UndefinedBehaviorSanitizer (docs/adr/0044-c-toolchains.md)");
+  }
+
+  const thread_sanitizer = compiler.sanitized && options.thread_sanitizer && compiler.supports_thread_sanitizer();
+
+  if compiler.sanitized && options.thread_sanitizer && !thread_sanitizer {
+    eprintln(`warning: \`${compiler.command_name}\` has no ThreadSanitizer for \`${compiler.target}\`; building with ASan and UBSan instead`);
+  }
+
+  const sanitize_flags = (if thread_sanitizer { THREAD_SANITIZE_FLAGS } else { SANITIZE_FLAGS }).split(" ");
+  const dir = match TempDir::create() {
+    Ok(found) => found,
+    Err(error) => {
+      eprintln(`error: cannot create a temporary directory: ${error.message()}`);
+      return Err(EXIT_FAILURE);
+    }
+  };
+  const result = build_in(compiler, generated, dir.path, options.release, sanitize_flags, executable);
+
+  dir.remove();
+  result
+}
+
+/// Builds the generated C in `dir`: with sanitizers when the compiler was asked for them, and
+/// once more without them to tell a toolchain lacking their libraries from a compiler bug.
+fn build_in(compiler: CCompiler, generated: GeneratedC, dir: String, release: bool, sanitize_flags: List<String>, executable: String) -> Result<CCompiler, i32> {
+  const files = write_generated(generated, dir)?;
+  const mode = compiler.mode(release);
+  const first = build_with(compiler, generated, dir, mode, if compiler.sanitized { sanitize_flags } else { new List() }, files, executable);
+  const failure = match first {
+    Ok(_) => return Ok(compiler),
+    Err(found) => found,
+  };
+
+  if compiler.sanitized {
+    const output = match failure {
+      Failure::Generated(text) => Some(text),
+      Failure::Link(text) => Some(text),
+      Failure::Spawn(_, _) => None,
+    };
+
+    if let Some(stderr) = output {
+      // It builds without sanitizers: the toolchain lacks their libraries.
+      if build_with(compiler, generated, dir, mode, new List(), files, executable).is_ok() {
+        eprintln(`error: the C compiler \`${compiler.command_name}\` cannot build with sanitizers (\`${sanitize_flags.join(" ")}\`)`);
+        eprintln(stderr);
+        eprintln("note: install its sanitizer libraries, or build without `--sanitize`");
+        return Err(EXIT_FAILURE);
+      }
+    }
+  }
+
+  Err(report_failure(failure, compiler))
+}
+
+fn build_with(compiler: CCompiler, generated: GeneratedC, dir: String, mode: List<String>, sanitize: List<String>, files: List<String>, executable: String) -> Result<(), Failure> {
+  const toolchain = new Toolchain(compiler, dir, mode, sanitize, generated.threads);
+  const objects = toolchain.objects(files)?;
+
+  toolchain.executable(objects, executable)
+}
+
+/// The C compiler of the target of `options`, or of this machine.
+fn compiler_for(options: CompileOptions) -> Result<CCompiler, i32> {
+  match options.target {
+    Some(name) => targets::compiler(targets::find(name)?),
+    None => find_c_compiler(options.cc),
+  }
+}
+
+pub class CCompiler {
+  pub const command_name: String;
+  /// Arguments every invocation needs, such as `--target=` when cross-compiling.
+  pub const args: List<String>;
+  /// Target triple reported by `-dumpmachine`.
+  pub const target: String;
+  /// Whether the program was compiled with sanitizers.
+  pub var sanitized: bool;
+  /// MSVC's `cl`, whose options differ from clang's and gcc's (docs/adr/0044-c-toolchains.md).
+  pub const cl: bool;
+
+  pub fn new(self, command_name: String, args: List<String>, target: String, cl: bool) {
+    self.command_name = command_name;
+    self.args = args;
+    self.target = target;
+    self.sanitized = false;
+    self.cl = cl;
+  }
+
+  /// A command running the compiler, with the arguments that select the target.
+  pub fn command(self) -> Command {
+    new Command(self.command_name).args(self.args)
+  }
+
+  /// Windows, with the MSVC or the MinGW toolchain (`x86_64-w64-mingw32`).
+  pub fn windows(self) -> bool {
+    self.target.contains("windows") || self.mingw()
+  }
+
+  pub fn mingw(self) -> bool {
+    self.target.contains("windows-gnu") || self.target.contains("mingw")
+  }
+
+  /// MinGW toolchains ship no sanitizer runtime (docs/adr/0018-windows-c-toolchain.md), and MSVC
+  /// has no UndefinedBehaviorSanitizer.
+  pub fn supports_sanitizers(self) -> bool {
+    !self.mingw() && !self.cl
+  }
+
+  /// ThreadSanitizer exists for Linux and macOS, not for Windows.
+  pub fn supports_thread_sanitizer(self) -> bool {
+    self.supports_sanitizers() && !self.windows()
+  }
+
+  /// The options of a debug or release build.
+  pub fn mode(self, release: bool) -> List<String> {
+    if self.cl {
+      if release { List::from(["/O2", "/DSAG_RELEASE"]) } else { List::from(["/Od", "/Z7"]) }
+    } else {
+      if release { List::from(["-O2", "-DSAG_RELEASE"]) } else { List::from(["-O0", "-g"]) }
+    }
+  }
+
+  /// The directory of the sanitizer runtime DLLs, which a sanitized program needs on `PATH` on
+  /// Windows; `None` elsewhere or when the program is not sanitized.
+  pub fn sanitizer_runtime_dir(self) -> Option<String> {
+    if !self.sanitized || !self.windows() {
+      return None;
+    }
+
+    const output = match new Command(self.command_name).arg("-print-resource-dir").input("").output() {
+      Ok(found) => found,
+      Err(_) => return None,
+    };
+    const resource_dir = output.stdout.trim();
+
+    if output.status.success() && !resource_dir.is_empty() { Some(push_path(push_path(resource_dir, "lib"), "windows")) } else { None }
+  }
+}
+
+/// Finds the C compiler: `--cc`, then `SAG_CC`, then `clang`, then `gcc` (docs/architecture.md).
+fn find_c_compiler(explicit: Option<String>) -> Result<CCompiler, i32> {
+  var configured = explicit;
+
+  if configured.is_none() {
+    if let Some(value) = env::variable("SAG_CC") {
+      if !value.trim().is_empty() {
+        configured = Some(value);
+      }
+    }
+  }
+
+  const candidates = match configured {
+    Some(command) => List::from([command]),
+    None => List::from(["clang", "gcc"]),
+  };
+
+  for command in candidates {
+    if is_cl(command) {
+      return msvc_compiler(command);
+    }
+
+    const output = match new Command(command).arg("-dumpmachine").input("").output() {
+      Ok(found) => found,
+      Err(_) => continue,
+    };
+
+    if !output.status.success() {
+      continue;
+    }
+
+    const target = output.stdout.trim();
+
+    if windows() && target.contains("windows-gnu") {
+      eprintln(
+        `warning: \`${command}\` targets \`${target}\` (MinGW), which is supported best-effort and without sanitizers; set SAG_CC to an LLVM clang targeting \`x86_64-pc-windows-msvc\` (docs/adr/0018-windows-c-toolchain.md)`,
+      );
+    }
+
+    return Ok(new CCompiler(command, new List(), target, false));
+  }
+
+  match configured {
+    Some(command) => eprintln(`error: cannot run the C compiler \`${command}\` (from --cc or SAG_CC)`),
+    None => eprintln("error: no C compiler found; Sagitario needs `clang` (or `gcc`) on PATH\n" + install_hint()),
+  }
+
+  Err(EXIT_FAILURE)
+}
+
+/// Whether `command` is MSVC's `cl`, which has no `-dumpmachine` and is recognized by its name.
+fn is_cl(command: String) -> bool {
+  match path::stem(command) {
+    // Compared ignoring ASCII case.
+    Some(stem) => stem == "cl" || stem == "CL" || stem == "Cl" || stem == "cL",
+    None => false,
+  }
+}
+
+/// MSVC's `cl`, which finds its headers and libraries through the variables a Developer Command
+/// Prompt sets (`INCLUDE`, `LIB`).
+fn msvc_compiler(command: String) -> Result<CCompiler, i32> {
+  const include = env::variable("INCLUDE").unwrap_or("");
+
+  if include.is_empty() {
+    eprintln(`error: \`${command}\` needs the environment of a Developer Command Prompt for Visual Studio (\`INCLUDE\` is not set)`);
+    eprintln("note: run `vcvars64.bat` from the Visual Studio installation first, or open a Developer Command Prompt");
+    return Err(EXIT_FAILURE);
+  }
+
+  if new Command(command).input("").output().is_err() {
+    eprintln(`error: cannot run the C compiler \`${command}\` (from --cc or SAG_CC)`);
+    return Err(EXIT_FAILURE);
+  }
+
+  // `sagc` runs on 64-bit hosts (`TargetInfo::host`).
+  Ok(new CCompiler(command, new List(), "x86_64-pc-windows-msvc", true))
+}
+
+fn install_hint() -> String {
+  if windows() {
+    "  install LLVM (https://github.com/llvm/llvm-project/releases) and Visual Studio Build Tools, or set SAG_CC"
+  } else if macos() {
+    "  install the Xcode command line tools: `xcode-select --install`, or set SAG_CC"
+  } else {
+    "  install clang with your package manager (e.g. `sudo apt install clang`), or set SAG_CC"
+  }
+}
+
+/// The directory for temporary files, as Rust's `env::temp_dir` finds it.
+fn temp_root() -> String {
+  const names = if windows() { List::from(["TMP", "TEMP", "USERPROFILE"]) } else { List::from(["TMPDIR"]) };
+
+  for name in names {
+    if let Some(value) = env::variable(name) {
+      if !value.is_empty() {
+        return value;
+      }
+    }
+  }
+
+  if windows() { "C:\\Windows" } else { "/tmp" }
+}
+
+/// A uniquely named temporary directory, which its creator removes.
+class TempDir {
+  pub const path: String;
+
+  pub fn new(self, path: String) {
+    self.path = path;
+  }
+
+  /// A new directory named by the time; creating it fails if another process took the name, and
+  /// the next suffix is tried.
+  pub fn create() -> Result<TempDir, io::Error> {
+    const root = temp_root();
+    const nanos = SystemTime::now().since_unix_epoch().as_nanos();
+    var attempt = 0u32;
+
+    while true {
+      const candidate = push_path(root, `sag-${nanos}-${attempt}`);
+
+      match fs::create_dir(candidate) {
+        Ok(_) => return Ok(new TempDir(candidate)),
+        Err(error) => {
+          if error.kind() != io::ErrorKind::AlreadyExists || attempt >= 1000 {
+            return Err(error);
+          }
+        }
+      }
+
+      attempt += 1;
+    }
+
+    Err(new io::Error(io::ErrorKind::Other, "no free name"))
+  }
+
+  /// Best effort: a leftover temporary directory is harmless. It holds files only.
+  pub fn remove(self) {
+    if let Ok(entries) = fs::read_dir(self.path) {
+      for entry in entries {
+        fs::remove_file(push_path(self.path, entry));
+      }
+    }
+
+    fs::remove_dir(self.path);
+  }
+}

@@ -1,0 +1,135 @@
+//! Source files and positions: the port of `sagitario_span`. Every token, syntax node and
+//! diagnostic points back to the source through a `Span`.
+
+/// A byte range `[start, end)` inside one source file.
+pub struct Span {
+  pub file: u32;
+  pub start: u32;
+  pub end: u32;
+
+  pub fn new(file: u32, start: u32, end: u32) -> Span {
+    Span { file: file, start: start, end: end }
+  }
+
+  /// The smallest span covering `self` and `other`, which must be in the same file.
+  pub fn to(self, other: Span) -> Span {
+    const start = if other.start < self.start { other.start } else { self.start };
+    const end = if other.end > self.end { other.end } else { self.end };
+
+    Span { file: self.file, start: start, end: end }
+  }
+}
+
+/// A 1-based position. Columns count Unicode scalar values, not bytes.
+pub struct LineCol {
+  pub line: u32;
+  pub column: u32;
+}
+
+pub class SourceFile {
+  pub const path: String;
+  pub const text: String;
+  prv const bytes: List<u8>;
+  /// Byte offset where each line starts.
+  prv const line_starts: List<u32>;
+
+  pub fn new(self, path: String, text: String) {
+    self.path = path;
+    self.text = text;
+    self.bytes = text.bytes().collect();
+    self.line_starts = List::from([0u32]);
+
+    var offset = 0u32;
+
+    for byte in self.bytes {
+      offset += 1;
+
+      if byte == 10 {
+        self.line_starts.push(offset);
+      }
+    }
+  }
+
+  pub fn line_col(self, offset: u32) -> LineCol {
+    // The last line starting at or before `offset`.
+    var low = 0usize;
+    var high = self.line_starts.len();
+
+    while high - low > 1 {
+      const middle = low + (high - low) / 2;
+
+      if self.line_starts[middle] <= offset {
+        low = middle;
+      } else {
+        high = middle;
+      }
+    }
+
+    const line_start = self.line_starts[low];
+
+    LineCol { line: low as u32 + 1, column: self.chars_between(line_start, offset) + 1 }
+  }
+
+  /// The number of characters in the bytes `[start, end)`: those that do not continue one.
+  prv fn chars_between(self, start: u32, end: u32) -> u32 {
+    var count = 0u32;
+    var index = start as usize;
+    const stop = if end as usize > self.bytes.len() { self.bytes.len() } else { end as usize };
+
+    while index < stop {
+      if self.bytes[index] < 128 || self.bytes[index] >= 192 {
+        count += 1;
+      }
+
+      index += 1;
+    }
+
+    count
+  }
+
+  /// The text of a 1-based line, without its line terminator.
+  pub fn line_text(self, line: u32) -> String {
+    const index = if line == 0 { 0usize } else { line as usize - 1 };
+
+    if index >= self.line_starts.len() {
+      return "";
+    }
+
+    const start = self.line_starts[index] as usize;
+    var end = if index + 1 < self.line_starts.len() { self.line_starts[index + 1] as usize } else { self.bytes.len() };
+
+    while end > start && (self.bytes[end - 1] == 10 || self.bytes[end - 1] == 13) {
+      end -= 1;
+    }
+
+    self.text.substring(start, end)
+  }
+
+  /// The text of `span`, or `""` if it is not inside the file.
+  pub fn slice(self, span: Span) -> String {
+    if span.end as usize > self.bytes.len() || span.start > span.end { "" } else { self.text.substring(span.start as usize, span.end as usize) }
+  }
+}
+
+pub class SourceMap {
+  prv const files: List<SourceFile>;
+
+  pub fn new(self) {
+    self.files = new List<SourceFile>();
+  }
+
+  /// Adds a file and returns its id.
+  pub fn add(self, path: String, text: String) -> u32 {
+    self.files.push(new SourceFile(path, text));
+    self.files.len() as u32 - 1
+  }
+
+  pub fn get(self, id: u32) -> Option<SourceFile> {
+    self.files.get(id as usize)
+  }
+
+  /// The number of files.
+  pub fn len(self) -> usize {
+    self.files.len()
+  }
+}

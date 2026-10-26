@@ -1,0 +1,2361 @@
+//! SIR (Sagitario Intermediate Representation) and lowering from the type-checked AST
+//! (docs/architecture.md#sir), the port of `sagitario_sir`. SIR is structured (`If`/`Loop`)
+//! because it is emitted as C; every intermediate value lives in a numbered local; ARC is
+//! explicit. The areas of lowering are in `sir::*`, as functions taking the `Lowering`.
+//!
+//! Places are values: a place derived from another copies its projections, since lists are
+//! references in Sagitario and SIR already emitted must not change.
+
+use pkg::ast::{BinaryOp, Block, Expr, ExprKind, FieldInit, FnDecl, Ident, Package, Stmt as AstStmt, TemplatePart, UnaryOp};
+use pkg::diagnostics::{Diagnostic, Diagnostics};
+use pkg::resolve::{ParamOwner, Res, Resolution, TypeItem};
+use pkg::span::{SourceMap, Span};
+use pkg::sir::closures;
+use pkg::sir::collections;
+use pkg::sir::interfaces;
+use pkg::sir::matching;
+use pkg::sir::mono;
+use pkg::sir::strings;
+use pkg::types::{FloatTy, IntTy, NamedRef, Receiver, Subst, Type, TypeKind};
+use pkg::types;
+use pkg::types::consts::ConstValue;
+use pkg::types::typed::{BuiltinMethod, TypedModule};
+
+pub struct Program {
+  /// Indexed by function id: the program's functions (templates are placeholders), then the
+  /// instances of templates.
+  pub functions: List<Function>;
+  pub layouts: Layouts;
+  /// The class types the program uses, with their type arguments.
+  pub classes: List<ClassInstance>;
+  /// The types captured by each closure environment `sag_envN`.
+  pub envs: List<List<Type>>;
+  /// The named functions used as values, which get a wrapper taking an environment.
+  pub wrapped: List<u32>;
+  /// `main`; a library has none.
+  pub entry: Option<u32>;
+  /// Path of each source file, by file index, for `#line` directives.
+  pub source_paths: List<String>;
+  /// The C functions of the `extern` blocks.
+  pub externs: List<ExternDecl>;
+  /// The itables of the interface values the program creates.
+  pub itables: List<Itable>;
+  /// The struct and enum types boxed to become interface values.
+  pub boxes: List<Type>;
+  /// How to get the message of an `Err` returned by `main`, when its error is not a `String`.
+  pub main_error: Option<MainError>;
+}
+
+/// The message of `main`'s error: converted to `Error` with `itable` if its type is concrete,
+/// then `message()` is the method `slot` of the itable reached through `path`.
+pub struct MainError {
+  pub itable: Option<usize>;
+  pub path: List<usize>;
+  pub slot: usize;
+}
+
+/// A C function the program calls.
+pub struct ExternDecl {
+  pub symbol: String;
+  pub params: List<Type>;
+  pub ret: Type;
+  /// A function of the runtime, declared by its header and called directly.
+  pub runtime: bool;
+}
+
+/// The fields of the program's structs and enums, with type parameters in generic ones.
+pub struct Layouts {
+  pub structs: List<StructLayout>;
+  pub enums: List<EnumLayout>;
+
+  /// Whether values of `ty` hold references, so copies must be retained and released.
+  pub fn is_managed(self, ty: Type) -> bool {
+    match ty.kind {
+      TypeKind::String | TypeKind::StringBuilder | TypeKind::CString | TypeKind::Class(_) | TypeKind::Interface(_) | TypeKind::Function { .. }
+        | TypeKind::List(_) => true,
+      TypeKind::Array { elem, .. } => self.is_managed(elem),
+      TypeKind::Struct(named) => {
+        for field in self.struct_fields(named) {
+          if self.is_managed(field) {
+            return true;
+          }
+        }
+
+        false
+      }
+      TypeKind::Enum(_) | TypeKind::Option(_) | TypeKind::Result { .. } => {
+        if let Some(variants) = self.variants(ty) {
+          for fields in variants {
+            for field in fields {
+              if self.is_managed(field) {
+                return true;
+              }
+            }
+          }
+        }
+
+        false
+      }
+      _ => false,
+    }
+  }
+
+  /// The field types of each variant of an enum, `Option` or `Result` type.
+  pub fn variants(self, ty: Type) -> Option<List<List<Type>>> {
+    match ty.kind {
+      TypeKind::Enum(named) => {
+        const subst = Subst::of(ParamOwner::Item(TypeItem::Enum(named.id)), named.args);
+        const layout = self.enums.get(named.id as usize)?;
+        const result: List<List<Type>> = new List();
+
+        for fields in layout.variants {
+          const substituted: List<Type> = new List();
+
+          for field in fields {
+            substituted.push(types::substitute(field, subst));
+          }
+
+          result.push(substituted);
+        }
+
+        Some(result)
+      }
+      TypeKind::Option(value) => Some(List::from([new List<Type>(), List::from([value])])),
+      TypeKind::Result { value, error } => Some(List::from([List::from([value]), List::from([error])])),
+      _ => None,
+    }
+  }
+
+  /// The field types of a struct type, with its type arguments.
+  pub fn struct_fields(self, named: NamedRef) -> List<Type> {
+    const subst = Subst::of(ParamOwner::Item(TypeItem::Struct(named.id)), named.args);
+    const result: List<Type> = new List();
+
+    if let Some(layout) = self.structs.get(named.id as usize) {
+      for field in layout.fields {
+        result.push(types::substitute(field, subst));
+      }
+    }
+
+    result
+  }
+}
+
+pub struct EnumLayout {
+  pub name: String;
+  /// The field types of each variant.
+  pub variants: List<List<Type>>;
+}
+
+pub struct StructLayout {
+  pub name: String;
+  pub fields: List<Type>;
+}
+
+pub struct Function {
+  pub name: String;
+  /// A generic template, only used through its instances: it has no code.
+  pub template: bool;
+  /// A lambda: its first parameter (local 0) is the environment.
+  pub closure: bool;
+  /// The first locals are the parameters, starting with `self` in methods.
+  pub param_count: usize;
+  /// A method that modifies a struct's or enum's `self`: local 0 refers to the caller's value.
+  pub self_by_ref: bool;
+  /// The C symbol of an `extern "C" fn`.
+  pub export: Option<String>;
+  pub ret: Type;
+  /// Type of every local: source bindings first, then temporaries.
+  pub locals: List<Type>;
+  pub body: List<Stmt>;
+}
+
+/// A local, or a field or element inside it.
+pub struct Place {
+  pub local: u32;
+  pub projections: List<Projection>;
+  /// The type of the value the place holds.
+  pub ty: Type;
+}
+
+/// `place` with one more projection, as a new place of type `ty`.
+pub fn project(place: Place, projection: Projection, ty: Type) -> Place {
+  const projections: List<Projection> = new List();
+
+  for existing in place.projections {
+    projections.push(existing);
+  }
+
+  projections.push(projection);
+
+  Place { local: place.local, projections: projections, ty: ty }
+}
+
+/// A local as a place.
+pub fn local_place(local: u32, ty: Type) -> Place {
+  Place { local: local, projections: new List(), ty: ty }
+}
+
+pub enum Projection {
+  /// The field at this position of a struct.
+  Field(usize),
+  /// The field at position `index` among those of class instance `class_id`.
+  ClassField { class_id: usize, index: usize },
+  /// The capture at `index` of closure environment `env`.
+  EnvField { env: usize, index: usize },
+  /// A bounds-checked element of an array of length `len`.
+  Index { index: Operand, len: u64 },
+  /// A bounds-checked element, of type `elem`, of the list a reference points to.
+  ListElem { index: Operand, elem: Type },
+  /// The tag of an enum value, as `u32`.
+  Tag,
+  /// A field of the given variant of an enum value.
+  VariantField { variant: u32, field: usize },
+  /// The value a pointer points to; a null pointer panics.
+  Deref,
+}
+
+pub enum Stmt {
+  /// The following statements come from this 1-based source line.
+  Line { file: u32, line: u32 },
+  Assign { dest: u32, value: Rvalue },
+  /// Stores into a field or element; like `Assign`, it does not release the previous value.
+  AssignPlace { dest: Place, value: Rvalue },
+  /// Makes the `weak` field `dest` refer weakly to the instance in the `Option` `value`.
+  WeakStore { dest: Place, value: Operand },
+  /// Evaluates for side effects.
+  Eval(Rvalue),
+  /// Adds a reference to every `String` inside a managed value.
+  Retain(Operand),
+  /// Drops the references held by a managed local.
+  Release(u32),
+  /// Drops the references held by a managed field or element.
+  ReleasePlace(Place),
+  /// Makes a managed local hold an empty value without releasing its previous contents.
+  Reset(u32),
+  If { cond: Operand, then_body: List<Stmt>, else_body: List<Stmt> },
+  Loop(List<Stmt>),
+  /// `for var in start..end` (or `..=`), counting down with `reverse` or by `step`.
+  ForRange { variable: u32, ty: IntTy, start: Operand, end: Operand, inclusive: bool, reverse: bool, step: Option<Operand>, body: List<Stmt> },
+  ListPush { list: Operand, value: Operand },
+  ListInsert { list: Operand, index: Operand, value: Operand },
+  ListClear(Operand),
+  ListReverse(Operand),
+  /// `for var in array`: `var` borrows each element of `array`.
+  ForArray { variable: u32, array: u32, len: u64, body: List<Stmt> },
+  /// `for var in text.chars()` or `text.bytes()`.
+  ForText { variable: u32, text: u32, bytes: bool, body: List<Stmt> },
+  /// Makes the instance in `object` dispatch through the vtable of class instance `class_id`.
+  SetVtable { object: u32, class_id: usize },
+  Break,
+  Continue,
+  Return(Option<Operand>),
+  /// Aborts the program with a message.
+  Panic(PanicMessage),
+}
+
+pub enum PanicMessage {
+  Static(String),
+  /// A `String` value.
+  Value(Operand),
+}
+
+pub enum Rvalue {
+  Use(Operand),
+  /// `ty` is the operand type.
+  Unary { op: UnaryOp, ty: Type, operand: Operand },
+  /// `ty` is the operand type; `&&` and `||` are lowered to `If`.
+  Binary { op: BinaryOp, ty: Type, lhs: Operand, rhs: Operand },
+  Cast { from: Type, to: Type, operand: Operand },
+  Call { callee: Callee, args: List<Operand> },
+  /// Builds a new `String`.
+  Template(List<TemplatePiece>),
+  /// A struct or an array of the destination's type.
+  Aggregate(List<Operand>),
+  /// An array with every element equal to the operand.
+  Repeat(Operand),
+  /// An enum value of the destination's type with the given variant.
+  Variant { index: u32, fields: List<Operand> },
+  /// A new object of class instance `N`.
+  Alloc(usize),
+  /// The `Option` in a `weak` field.
+  WeakLoad(Place),
+  /// A closure of the lambda `function`, with a new environment `env` holding the captures.
+  Closure { function: u32, env: Option<usize>, captures: List<Operand> },
+  /// A named function as a value: its wrapper.
+  FnValue(u32),
+  ListNew,
+  ListLen(Operand),
+  ListPop(Operand),
+  ListRemove { list: Operand, index: Operand },
+  /// A new list with the elements of an array of type `array_ty`.
+  ListFromArray { array: Operand, array_ty: Type },
+  /// A value as an interface value with the given itable.
+  ToDyn { value: Operand, itable: usize },
+  /// An interface value as a value of an ancestor interface reached through `path`.
+  DynUpcast { value: Operand, path: List<usize> },
+}
+
+pub enum TemplatePiece {
+  Text(String),
+  Value { ty: Type, value: Operand },
+}
+
+pub enum Callee {
+  Fn(u32),
+  /// The method in `slot` of the vtable of the first argument; `function` gives the signature.
+  Virtual { slot: usize, function: u32 },
+  /// The function value given as the first argument.
+  Closure { params: List<Type>, ret: Type },
+  /// The entry `slot` of the itable reached through `path` from the first argument.
+  Dyn { path: List<usize>, slot: usize, params: List<Type>, ret: Type },
+  /// A C function of an `extern` block.
+  Extern(u32),
+  /// A builtin, by name.
+  Builtin(String),
+  /// A runtime function; `located` ones also receive the source location.
+  Runtime { function: String, located: bool },
+}
+
+pub enum Operand {
+  Local(u32),
+  /// Reads a field or element.
+  Place(Place),
+  /// The address of a place: the receiver of a method that modifies `self`.
+  Ref(Place),
+  Const(Const),
+}
+
+pub enum Const {
+  Unit,
+  Bool(bool),
+  Char(char),
+  /// An integer: its magnitude and sign.
+  Int { magnitude: u64, negative: bool, ty: IntTy },
+  /// Decimal text as written in the source, possibly with a leading `-`.
+  Float { text: String, ty: FloatTy },
+  Str(String),
+}
+
+pub fn unit_operand() -> Operand {
+  Operand::Const(Const::Unit)
+}
+
+pub fn bool_operand(value: bool) -> Operand {
+  Operand::Const(Const::Bool(value))
+}
+
+pub fn int_operand(magnitude: u64, negative: bool, ty: IntTy) -> Operand {
+  Operand::Const(Const::Int { magnitude: magnitude, negative: negative, ty: ty })
+}
+
+/// The type of enum tags.
+pub fn tag_type() -> Type {
+  types::int(IntTy::U32)
+}
+
+/// Types without a runtime value: nothing needs to be stored.
+pub fn is_valueless(ty: Type) -> bool {
+  match ty.kind {
+    TypeKind::Unit | TypeKind::Never => true,
+    _ => false,
+  }
+}
+
+/// A text that identifies a type the way Rust's equality does: ids and arguments, not names.
+pub fn type_key(ty: Type) -> String {
+  match ty.kind {
+    TypeKind::Struct(named) => `s${named.id}` + args_key(named.args),
+    TypeKind::Enum(named) => `e${named.id}` + args_key(named.args),
+    TypeKind::Class(named) => `c${named.id}` + args_key(named.args),
+    TypeKind::Interface(named) => `i${named.id}` + args_key(named.args),
+    TypeKind::Param(param) => "p" + pkg::types::typed::owner_key(param.owner) + `.${param.index}`,
+    TypeKind::Function { params, ret } => "fn" + args_key(params) + ">" + type_key(ret),
+    TypeKind::Array { elem, len } => "[" + type_key(elem) + `;${len}]`,
+    TypeKind::List(elem) => "L(" + type_key(elem) + ")",
+    TypeKind::Option(value) => "O(" + type_key(value) + ")",
+    TypeKind::Result { value, error } => "R(" + type_key(value) + "," + type_key(error) + ")",
+    TypeKind::Ptr { mutable, pointee } => (if mutable { "*m" } else { "*c" }) + "(" + type_key(pointee) + ")",
+    _ => types::text(ty),
+  }
+}
+
+pub fn args_key(args: List<Type>) -> String {
+  const parts: List<String> = new List();
+
+  for arg in args {
+    parts.push(type_key(arg));
+  }
+
+  "<" + parts.join(",") + ">"
+}
+
+/// A text that identifies a substitution the way Rust's equality does.
+pub fn subst_key(subst: Subst) -> String {
+  const parts: List<String> = new List();
+
+  for entry in subst.params {
+    parts.push(pkg::types::typed::owner_key(entry.owner) + args_key(entry.args));
+  }
+
+  const self_part = match subst.self_ty {
+    Some(ty) => type_key(ty),
+    None => "-",
+  };
+
+  parts.join(";") + "|" + self_part
+}
+
+/// A class type with its type arguments, as the program uses it.
+pub class ClassInstance {
+  pub var class_ref: NamedRef;
+  /// The class instance of its parent.
+  pub var parent: Option<usize>;
+  /// The types of the class's own fields.
+  pub var fields: List<Type>;
+  /// Which of those fields are `weak`.
+  pub var weak_fields: List<bool>;
+  /// The methods called through the vtable, by slot.
+  pub var vtable: List<u32>;
+
+  pub fn new(self, class_ref: NamedRef, fields: List<Type>, weak_fields: List<bool>) {
+    self.class_ref = class_ref;
+    self.parent = None;
+    self.fields = fields;
+    self.weak_fields = weak_fields;
+    self.vtable = new List();
+  }
+}
+
+/// A template with the type arguments of one instance.
+pub struct Instance {
+  pub template: u32;
+  pub subst: Subst;
+  /// A lambda lifted out of `template` instead of an instance of it.
+  pub lambda: bool;
+}
+
+/// The methods and fields of one interface for one type.
+pub class Itable {
+  pub var interface_ref: NamedRef;
+  /// The class, struct or enum whose values the itable describes.
+  pub var concrete: Type;
+  /// The itables of the interface's parents for the same type, in `extends` order.
+  pub var parents: List<usize>;
+  /// The interface's own methods, then a getter and a setter for each of its own fields.
+  pub var entries: List<ItableEntry>;
+
+  pub fn new(self, interface_ref: NamedRef, concrete: Type) {
+    self.interface_ref = interface_ref;
+    self.concrete = concrete;
+    self.parents = new List();
+    self.entries = new List();
+  }
+}
+
+pub enum ItableEntry {
+  /// Calls `function` on the value, through the vtable when `slot` is set.
+  Method { function: u32, slot: Option<usize>, params: List<Type>, ret: Type },
+  /// Reads (`set: false`) or writes a field of the value.
+  Field { field: FieldAt, ty: Type, set: bool },
+}
+
+/// Where a field lives in a value implementing an interface.
+pub enum FieldAt {
+  Class { class_id: usize, index: usize },
+  /// The field at `index` of a boxed struct.
+  Struct(usize),
+}
+
+/// The function of a lambda, by its position among the instances.
+pub struct LambdaFunction {
+  pub slot: usize;
+  pub function: Function;
+}
+
+/// What lowering builds for the whole program: itables, boxes, instances of templates and class
+/// instances.
+pub class Registry {
+  pub var itables: List<Itable>;
+  /// By `type_key` of the interface and of the concrete type.
+  pub var itable_index: Map<String, usize>;
+  pub var boxes: List<Type>;
+  /// The number of the program's functions; instance `N` is the function `first_instance + N`.
+  pub var first_instance: u32;
+  pub var instances: List<Instance>;
+  /// By template and `subst_key`, for instances that are not lambdas.
+  pub var instance_index: Map<String, usize>;
+  /// Instances not lowered yet.
+  pub var pending: List<usize>;
+  pub var classes: List<ClassInstance>;
+  /// By `type_key` of the class type.
+  pub var class_index: Map<String, usize>;
+  /// Types whose class instances are registered, by `type_key`.
+  pub var seen: Map<String, bool>;
+  pub var diagnostics: List<Diagnostic>;
+  /// Whether an endless series of instances was reported.
+  pub var endless: bool;
+  pub var lambdas: List<LambdaFunction>;
+  pub var envs: List<List<Type>>;
+  pub var wrapped: List<u32>;
+
+  pub fn new(self, first_instance: u32) {
+    self.itables = new List();
+    self.itable_index = new Map<String, usize>();
+    self.boxes = new List();
+    self.first_instance = first_instance;
+    self.instances = new List();
+    self.instance_index = new Map<String, usize>();
+    self.pending = new List();
+    self.classes = new List();
+    self.class_index = new Map<String, usize>();
+    self.seen = new Map<String, bool>();
+    self.diagnostics = new List();
+    self.endless = false;
+    self.lambdas = new List();
+    self.envs = new List();
+    self.wrapped = new List();
+  }
+}
+
+/// What lowering a function needs from the whole program.
+pub struct Context {
+  pub package: Package;
+  pub resolution: Resolution;
+  pub typed: TypedModule;
+  pub layouts: Layouts;
+  pub sources: SourceMap;
+  pub registry: Registry;
+}
+
+/// Lowers the program; errors found while instantiating generic code are added to
+/// `diagnostics`. An inconsistency is an internal compiler error, the `Err` message.
+pub fn lower(package: Package, resolution: Resolution, typed: TypedModule, sources: SourceMap, diagnostics: Diagnostics) -> Result<Program, String> {
+  const entry = resolution.main;
+
+  if entry.is_none() && !package.library {
+    return Err("program without `main`");
+  }
+
+  const structs: List<StructLayout> = new List();
+
+  for def in typed.structs {
+    const fields: List<Type> = new List();
+
+    for field in def.fields {
+      fields.push(field.ty);
+    }
+
+    structs.push(StructLayout { name: def.name, fields: fields });
+  }
+
+  const enums: List<EnumLayout> = new List();
+
+  for def in typed.enums {
+    const variants: List<List<Type>> = new List();
+
+    for variant in def.variants {
+      variants.push(variant.field_types());
+    }
+
+    enums.push(EnumLayout { name: def.name, variants: variants });
+  }
+
+  const layouts = Layouts { structs: structs, enums: enums };
+  const functions: List<Function> = new List();
+  const registry = new Registry(resolution.functions.len() as u32);
+  const cx = Context { package: package, resolution: resolution, typed: typed, layouts: layouts, sources: sources, registry: registry };
+
+  for index in 0..resolution.functions.len() {
+    const id = index as u32;
+    const decl = match resolution.fn_decl(package, id) {
+      Some(decl) => decl,
+      None => continue,
+    };
+
+    if mono::is_template(resolution, typed, id) {
+      functions.push(Function {
+        name: decl.name.name,
+        template: true,
+        closure: false,
+        param_count: 0,
+        self_by_ref: false,
+        export: None,
+        ret: types::unit(),
+        locals: new List(),
+        body: new List(),
+      });
+      continue;
+    }
+
+    functions.push(lower_function(id, decl, Subst::empty(), cx)?);
+  }
+
+  const main_error = match entry {
+    Some(main) => main_error_of(main, cx),
+    None => None,
+  };
+  const instances: List<Option<Function>> = new List();
+
+  // Lowering an instance may need more instances.
+  while let Some(index) = registry.pending.pop() {
+    const instance = match registry.instances.get(index) {
+      Some(instance) => instance,
+      None => continue,
+    };
+    const decl = match resolution.fn_decl(package, instance.template) {
+      Some(decl) => decl,
+      None => continue,
+    };
+    const function = lower_function(instance.template, decl, instance.subst, cx)?;
+
+    while instances.len() <= index {
+      instances.push(None);
+    }
+
+    instances[index] = Some(function);
+  }
+
+  const lambdas = registry.lambdas;
+
+  registry.lambdas = new List();
+
+  for lambda in lambdas {
+    while instances.len() <= lambda.slot {
+      instances.push(None);
+    }
+
+    instances[lambda.slot] = Some(lambda.function);
+  }
+
+  while instances.len() < registry.instances.len() {
+    instances.push(None);
+  }
+
+  for function in instances {
+    match function {
+      Some(found) => functions.push(found),
+      None => return Err("an instance was not lowered"),
+    }
+  }
+
+  for diagnostic in registry.diagnostics {
+    diagnostics.push(diagnostic);
+  }
+
+  registry.diagnostics = new List();
+
+  const source_paths: List<String> = new List();
+
+  for file in 0..sources.len() {
+    if let Some(source) = sources.get(file as u32) {
+      source_paths.push(source.path);
+    }
+  }
+
+  const externs: List<ExternDecl> = new List();
+
+  for index in 0..resolution.externs.len() {
+    const id = index as u32;
+    const decl = match resolution.extern_decl(package, id) {
+      Some(decl) => decl,
+      None => continue,
+    };
+    const sig = match typed.extern_sig(id) {
+      Some(sig) => sig,
+      None => return Err("no signature for the C function `" + decl.name.name + "`"),
+    };
+
+    externs.push(ExternDecl { symbol: decl.name.name, params: sig.params, ret: sig.ret, runtime: resolution.is_runtime_extern(package, id) });
+  }
+
+  Ok(Program {
+    functions: functions,
+    layouts: layouts,
+    classes: registry.classes,
+    envs: registry.envs,
+    wrapped: registry.wrapped,
+    entry: entry,
+    source_paths: source_paths,
+    externs: externs,
+    itables: registry.itables,
+    boxes: registry.boxes,
+    main_error: main_error,
+  })
+}
+
+/// How the C `main` gets the message of an error that `main` returns, when it is not a `String`.
+fn main_error_of(entry: u32, cx: Context) -> Option<MainError> {
+  const sig = cx.typed.sig(entry)?;
+  const error_ty = match sig.ret.kind {
+    TypeKind::Result { error, .. } => error,
+    _ => return None,
+  };
+  const error_types = cx.typed.error_types?;
+  const error_id = error_types.interface_id;
+
+  cx.typed.interface_def(error_id)?.methods.first()?;
+
+  const slot = 0usize;
+
+  match error_ty.kind {
+    TypeKind::String => None,
+    TypeKind::Interface(interface_ref) => Some(MainError { itable: None, path: cx.typed.interface_path(interface_ref.id, error_id)?, slot: slot }),
+    _ => {
+      const span = cx.resolution.fn_decl(cx.package, entry)?.name.span;
+      const lowering = new Lowering(cx, types::unit(), new List(), Subst::empty(), span);
+      const interface_ref = cx.typed.implemented_ref(error_ty, error_id)?;
+
+      Some(MainError { itable: Some(interfaces::itable(lowering, interface_ref, error_ty)), path: new List(), slot: slot })
+    }
+  }
+}
+
+fn typed_class_name(typed: TypedModule, owner: TypeItem) -> String {
+  match owner {
+    TypeItem::Class(id) => match typed.class_def(id) {
+      Some(def) => def.name,
+      None => "",
+    },
+    _ => "",
+  }
+}
+
+/// The `zod.new(...)` call that starts an initializer.
+fn first_zod_new(decl: FnDecl, typed: TypedModule) -> Option<u32> {
+  const first = match decl.body.stmts.first() {
+    Some(AstStmt::Expr(value)) => value,
+    Some(_) => return None,
+    None => decl.body.tail?,
+  };
+
+  if let ExprKind::MethodCall { receiver, .. } = first.kind {
+    if let ExprKind::Zod = receiver.kind {
+      if typed.zod_calls.contains_key(first.id) {
+        return Some(first.id);
+      }
+    }
+  }
+
+  None
+}
+
+/// Lowers a function, or the instance of a template with the type arguments in `subst`.
+fn lower_function(id: u32, decl: FnDecl, subst: Subst, cx: Context) -> Result<Function, String> {
+  const resolution = cx.resolution;
+  const typed = cx.typed;
+  const sig = match typed.sig(id) {
+    Some(found) => types::substitute_sig(found, subst),
+    None => return Err("no signature for `" + decl.name.name + "`"),
+  };
+  const source_locals = match typed.local_types.get(id as usize) {
+    Some(found) => found,
+    None => return Err("missing local types"),
+  };
+  const locals: List<Type> = new List();
+
+  for ty in source_locals {
+    locals.push(types::substitute(ty, subst));
+  }
+
+  const lowering = new Lowering(cx, sig.ret, copy_types(locals), subst, decl.name.span);
+
+  lowering.source_fn = id;
+
+  for ty in locals {
+    mono::register_types(lowering, ty);
+  }
+
+  const is_init = match sig.receiver {
+    Some(receiver) => receiver == Receiver::Init,
+    None => false,
+  };
+
+  if decl.is_abstract {
+    // Only reachable while the class's own initializer runs (ADR-0029).
+    const owner = match resolution.owner(id) {
+      Some(item) => typed_class_name(typed, item),
+      None => "",
+    };
+
+    lowering.emit(Stmt::Panic(PanicMessage::Static("called the abstract method `" + decl.name.name + "` of `" + owner + "` while initializing it")));
+  } else if is_init {
+    if let Some(TypeItem::Class(class_id)) = resolution.owner(id) {
+      // The instance dispatches as this class once its parent part is initialized.
+      const instance = lowering.own_class(class_id);
+
+      match first_zod_new(decl, typed) {
+        Some(call) => {
+          lowering.vtable_after = Some(VtableAfter { call: call, class_id: instance });
+        }
+        None => lowering.emit(Stmt::SetVtable { object: 0, class_id: instance }),
+      }
+    }
+  }
+
+  if !decl.is_abstract {
+    if types::is_unit(sig.ret) {
+      lowering.block_into(decl.body, None)?;
+    } else {
+      // The result is owned by the caller, so it is not released here.
+      const result = lowering.temp(sig.ret);
+
+      lowering.block_into(decl.body, Some(result))?;
+      lowering.emit(Stmt::Return(Some(Operand::Local(result))));
+    }
+  }
+
+  const body = lowering.buffers.pop().unwrap_or(new List());
+  const export: Option<String> = if decl.extern_c {
+    match decl.export {
+      Some(found) => Some(found.symbol),
+      None => Some(decl.name.name),
+    }
+  } else {
+    None
+  };
+  const by_var = match sig.receiver {
+    Some(receiver) => receiver == Receiver::Var,
+    None => false,
+  };
+
+  Ok(Function {
+    name: decl.name.name,
+    template: false,
+    closure: false,
+    param_count: decl.params.len() + (if sig.receiver.is_some() { 1 } else { 0 }),
+    self_by_ref: by_var,
+    export: export,
+    ret: sig.ret,
+    locals: lowering.locals,
+    body: body,
+  })
+}
+
+pub fn copy_types(list: List<Type>) -> List<Type> {
+  const result: List<Type> = new List();
+
+  for ty in list {
+    result.push(ty);
+  }
+
+  result
+}
+
+/// A loop being lowered.
+pub struct LoopCx {
+  /// Number of open scopes when the loop started; deeper scopes are released on exit.
+  pub scope_depth: usize;
+  /// Number of pending temporaries when the loop started.
+  pub pending_mark: usize;
+  /// Where `break value` stores its value.
+  pub result: Option<u32>;
+}
+
+/// In an initializer, the `zod.new(...)` after which the instance takes its class's vtable.
+pub struct VtableAfter {
+  pub call: u32;
+  pub class_id: usize;
+}
+
+/// Where an assignment's value comes from after `+=` on strings.
+struct Combined {
+  pub op: Option<BinaryOp>;
+  pub value: Operand;
+}
+
+pub class Lowering {
+  pub const package: Package;
+  pub const registry: Registry;
+  pub const resolution: Resolution;
+  pub const typed: TypedModule;
+  pub const layouts: Layouts;
+  pub const sources: SourceMap;
+  /// The function's return type, for `?`.
+  pub var ret: Type;
+  pub var locals: List<Type>;
+  /// Statement lists being built, innermost last.
+  pub var buffers: List<List<Stmt>>;
+  /// Managed bindings declared in each open block, released when it closes.
+  pub var scopes: List<List<u32>>;
+  /// Managed temporaries created on the current path and not yet released.
+  pub var pending: List<u32>;
+  pub var loops: List<LoopCx>;
+  pub var vtable_after: Option<VtableAfter>;
+  /// The type arguments of the instance being lowered; empty outside generic code.
+  pub var subst: Subst;
+  /// Where the code being lowered is, for errors found while instantiating.
+  pub var span: Span;
+  /// The source function whose bindings are lowered (the enclosing one for a lambda).
+  pub var source_fn: u32;
+  /// Inside a lambda, the SIR local of each binding of the source function it uses.
+  pub var local_map: Option<Map<u32, u32>>;
+
+  pub fn new(self, cx: Context, ret: Type, locals: List<Type>, subst: Subst, span: Span) {
+    self.package = cx.package;
+    self.registry = cx.registry;
+    self.resolution = cx.resolution;
+    self.typed = cx.typed;
+    self.layouts = cx.layouts;
+    self.sources = cx.sources;
+    self.ret = ret;
+    self.locals = locals;
+    self.buffers = List::from([new List<Stmt>()]);
+    self.scopes = new List();
+    self.pending = new List();
+    self.loops = new List();
+    self.vtable_after = None;
+    self.subst = subst;
+    self.span = span;
+    self.source_fn = 0;
+    self.local_map = None;
+  }
+
+  pub fn context(self) -> Context {
+    Context { package: self.package, resolution: self.resolution, typed: self.typed, layouts: self.layouts, sources: self.sources, registry: self.registry }
+  }
+
+  /// The class instance of a class used inside its own declaration.
+  pub fn own_class(self, id: u32) -> usize {
+    const name = match self.typed.class_def(id) {
+      Some(def) => def.name,
+      None => "",
+    };
+    const args = self.subst.args_of(ParamOwner::Item(TypeItem::Class(id))).unwrap_or(new List());
+
+    mono::class_instance(self, NamedRef { id: id, name: name, args: args })
+  }
+
+  pub fn managed(self, ty: Type) -> bool {
+    self.layouts.is_managed(ty)
+  }
+
+  pub fn emit(self, statement: Stmt) {
+    if let Some(buffer) = self.buffers.last() {
+      buffer.push(statement);
+    }
+  }
+
+  pub fn temp(self, ty: Type) -> u32 {
+    mono::register_types(self, ty);
+    self.locals.push(ty);
+
+    (self.locals.len() - 1) as u32
+  }
+
+  pub fn local_type(self, local: u32) -> Type {
+    self.locals.get(local as usize).unwrap_or(types::error())
+  }
+
+  pub fn type_of(self, value: Expr) -> Result<Type, String> {
+    match self.typed.expr_types.get(value.id) {
+      Some(ty) => Ok(types::substitute(ty, self.subst)),
+      None => Err(`expression without a type at byte ${value.span.start}`),
+    }
+  }
+
+  pub fn binding(self, id: u32) -> Result<u32, String> {
+    match self.resolution.bindings.get(id) {
+      Some(local) => Ok(closures::local_id(self, local)),
+      None => Err("unresolved binding"),
+    }
+  }
+
+  pub fn line(self, span: Span) -> Stmt {
+    const line = match self.sources.get(span.file) {
+      Some(source) => source.line_col(span.start).line,
+      None => 1,
+    };
+
+    Stmt::Line { file: span.file, line: line }
+  }
+
+  /// Starts a new statement buffer; `close_buffer` with the returned mark ends it.
+  pub fn open_buffer(self) -> usize {
+    self.buffers.push(new List());
+
+    self.pending.len()
+  }
+
+  /// Releases the temporaries created since `mark` and returns the buffer's statements.
+  pub fn close_buffer(self, mark: usize) -> List<Stmt> {
+    self.release_pending_from(mark);
+
+    self.buffers.pop().unwrap_or(new List())
+  }
+
+  pub fn release_pending_from(self, mark: usize) {
+    const released: List<u32> = new List();
+
+    while self.pending.len() > mark {
+      released.push(self.pending.pop().unwrap_or(0));
+    }
+
+    // `released` holds the newest first: they are released in reverse order of creation.
+    for local in released {
+      self.emit(Stmt::Release(local));
+    }
+  }
+
+  /// Emits releases for scopes from `depth` and temporaries from `mark`, without forgetting them:
+  /// used before `break`, `continue` and `return`.
+  pub fn release_for_exit(self, depth: usize, mark: usize) {
+    var index = self.pending.len();
+
+    while index > mark {
+      index -= 1;
+      self.emit(Stmt::Release(self.pending[index]));
+    }
+
+    var scope_index = self.scopes.len();
+
+    while scope_index > depth {
+      scope_index -= 1;
+
+      const scope = self.scopes[scope_index];
+      var local_index = scope.len();
+
+      while local_index > 0 {
+        local_index -= 1;
+        self.emit(Stmt::Release(scope[local_index]));
+      }
+    }
+  }
+
+  /// Like `store`, converting `value` from type `from` to the type of `dest`.
+  pub fn store_from(self, dest: u32, value: Operand, from: Type) {
+    const to = self.local_type(dest);
+    const converted = interfaces::convert(self, value, from, to);
+
+    self.store(dest, converted);
+  }
+
+  /// Stores an owned copy of `value` in `dest`, which holds nothing that needs releasing.
+  pub fn store(self, dest: u32, value: Operand) {
+    if self.managed(self.local_type(dest)) {
+      self.emit(Stmt::Retain(value));
+    }
+
+    self.emit(Stmt::Assign { dest: dest, value: Rvalue::Use(value) });
+  }
+
+  /// A copy of a borrowed managed value that lives until the end of the statement.
+  pub fn owned_copy(self, ty: Type, value: Operand) -> Operand {
+    const borrowed = match value {
+      Operand::Local(local) => !self.pending.contains(local),
+      Operand::Place(_) => true,
+      _ => false,
+    };
+
+    if !borrowed || !self.managed(ty) {
+      return value;
+    }
+
+    const copy = self.temp(ty);
+
+    self.store(copy, value);
+    self.pending.push(copy);
+
+    Operand::Local(copy)
+  }
+
+  /// Lowers a block in a new scope. With `dest`, the tail's value is stored there.
+  pub fn block_into(self, body: Block, dest: Option<u32>) -> Result<(), String> {
+    self.scopes.push(new List());
+
+    for statement in body.stmts {
+      self.stmt(statement)?;
+    }
+
+    if let Some(tail) = body.tail {
+      self.emit(self.line(tail.span));
+      self.span = tail.span;
+
+      const mark = self.pending.len();
+      const value = self.expr(tail)?;
+
+      self.after_expr(tail.id);
+
+      const tail_ty = self.type_of(tail)?;
+
+      if let Some(target) = dest {
+        if !is_valueless(tail_ty) {
+          self.store_from(target, value, tail_ty);
+        }
+      }
+
+      self.release_pending_from(mark);
+    }
+
+    const scope = self.scopes.pop().unwrap_or(new List());
+    var index = scope.len();
+
+    while index > 0 {
+      index -= 1;
+      self.emit(Stmt::Release(scope[index]));
+    }
+
+    Ok(())
+  }
+
+  prv fn stmt(self, statement: AstStmt) -> Result<(), String> {
+    const span = match statement {
+      AstStmt::Let(decl) => decl.span,
+      AstStmt::Assign { span, .. } => span,
+      AstStmt::Expr(value) => value.span,
+    };
+
+    self.emit(self.line(span));
+    self.span = span;
+
+    const mark = self.pending.len();
+
+    match statement {
+      AstStmt::Let(decl) => {
+        const local = self.binding(decl.id)?;
+        const ty = self.local_type(local);
+        const managed = self.managed(ty);
+
+        match decl.init {
+          Some(init) => {
+            const value = self.expr(init)?;
+            const init_ty = self.type_of(init)?;
+
+            if !is_valueless(init_ty) {
+              self.store_from(local, value, init_ty);
+            }
+          }
+          None => {
+            if managed {
+              self.emit(Stmt::Reset(local));
+            }
+          }
+        }
+
+        if managed {
+          if let Some(scope) = self.scopes.last() {
+            scope.push(local);
+          }
+        }
+      }
+      AstStmt::Assign { target, op, value, .. } => self.assign(target, op, value)?,
+      AstStmt::Expr(value) => {
+        self.expr(value)?;
+        self.after_expr(value.id);
+      }
+    }
+
+    self.release_pending_from(mark);
+
+    Ok(())
+  }
+
+  prv fn assign(self, target: Expr, op: Option<BinaryOp>, value: Expr) -> Result<(), String> {
+    if self.is_interface_field(target) {
+      const base = match target.kind {
+        ExprKind::Field { base, .. } => base,
+        _ => return Err("interface field without a base"),
+      };
+      const name = match target.kind {
+        ExprKind::Field { name, .. } => name.name,
+        _ => "",
+      };
+      const base_ty = self.type_of(base)?;
+      const interface_ref = match base_ty.kind {
+        TypeKind::Interface(found) => found,
+        _ => return Err("interface field of another type"),
+      };
+      const ty = self.type_of(target)?;
+      const receiver_value = self.expr(base)?;
+      const receiver = self.owned_copy(types::interface_type(interface_ref), receiver_value);
+      var new_value = self.operand_as(value, ty)?;
+
+      if let Some(compound) = op {
+        const getter = interfaces::dyn_field(self, interface_ref, name, false)?;
+        const current = self.call(getter, List::from([receiver]), ty);
+
+        new_value = strings::binary(self, compound, ty, current, new_value);
+      }
+
+      return interfaces::set_dyn_field(self, receiver, interface_ref, name, new_value);
+    }
+
+    if self.is_weak_field(target) {
+      const stored = self.expr(value)?;
+      const dest = self.field_place(target)?;
+
+      self.emit(Stmt::WeakStore { dest: dest, value: stored });
+
+      return Ok(());
+    }
+
+    const is_place = match target.kind {
+      ExprKind::Field { .. } | ExprKind::Index { .. } => true,
+      ExprKind::Unary { op: unary_op, .. } => unary_op == UnaryOp::Deref,
+      _ => false,
+    };
+
+    if is_place {
+      const value_ty = self.type_of(value)?;
+      const stored = self.expr(value)?;
+      const place = self.place(target)?;
+      const ty = place.ty;
+      const converted = interfaces::convert(self, stored, value_ty, ty);
+      // `text += more` is `text = text + more`.
+      const combined = self.combine(op, ty, Operand::Place(place), converted);
+
+      match combined.op {
+        None => {
+          if self.managed(ty) {
+            // Retain first: the new value may share strings with the old one (`p.a = p.a;`).
+            self.emit(Stmt::Retain(combined.value));
+            self.emit(Stmt::ReleasePlace(place));
+          }
+
+          self.emit(Stmt::AssignPlace { dest: place, value: Rvalue::Use(combined.value) });
+        }
+        Some(compound) => {
+          self.emit(Stmt::AssignPlace { dest: place, value: Rvalue::Binary { op: compound, ty: ty, lhs: Operand::Place(place), rhs: combined.value } });
+        }
+      }
+
+      return Ok(());
+    }
+
+    const id = match self.resolution.paths.get(target.id) {
+      Some(Res::Local(id)) => id,
+      _ => return Err("assignment to something other than a binding"),
+    };
+    const local = closures::local_id(self, id);
+    const ty = self.local_type(local);
+    const stored = self.operand_as(value, ty)?;
+    const combined = self.combine(op, ty, Operand::Local(local), stored);
+
+    match combined.op {
+      None => {
+        if self.managed(ty) {
+          // Retain first: the new value may be the old one (`s = s;`).
+          self.emit(Stmt::Retain(combined.value));
+          self.emit(Stmt::Release(local));
+        }
+
+        self.emit(Stmt::Assign { dest: local, value: Rvalue::Use(combined.value) });
+      }
+      Some(compound) => {
+        self.emit(Stmt::Assign { dest: local, value: Rvalue::Binary { op: compound, ty: ty, lhs: Operand::Local(local), rhs: combined.value } });
+      }
+    }
+
+    Ok(())
+  }
+
+  /// `text += more` becomes `text = text + more`; other operators stay.
+  prv fn combine(self, op: Option<BinaryOp>, ty: Type, current: Operand, value: Operand) -> Combined {
+    if let Some(compound) = op {
+      if compound == BinaryOp::Add && types::is_string(ty) {
+        return Combined { op: None, value: strings::binary(self, BinaryOp::Add, types::string(), current, value) };
+      }
+    }
+
+    Combined { op: op, value: value }
+  }
+
+  /// Points the instance at its class's vtable right after the initializer's `zod.new(...)`.
+  pub fn after_expr(self, id: u32) {
+    if let Some(after) = self.vtable_after {
+      if after.call == id {
+        self.emit(Stmt::SetVtable { object: 0, class_id: after.class_id });
+        self.vtable_after = None;
+      }
+    }
+  }
+
+  /// The place a binding, field or element expression designates.
+  pub fn place(self, value: Expr) -> Result<Place, String> {
+    const ty = self.type_of(value)?;
+
+    match value.kind {
+      ExprKind::Path(_) => match self.resolution.paths.get(value.id) {
+        Some(Res::Local(id)) => Ok(local_place(closures::local_id(self, id), ty)),
+        _ => Err("place of unsupported path"),
+      },
+      ExprKind::Field { base, name } => {
+        if self.is_interface_field(value) {
+          const base_ty = self.type_of(base)?;
+          const interface_ref = match base_ty.kind {
+            TypeKind::Interface(found) => found,
+            _ => return Err("interface field of another type"),
+          };
+          const receiver = self.expr(base)?;
+          const getter = interfaces::dyn_field(self, interface_ref, name.name, false)?;
+          // The getter returns a new reference.
+          const read = self.call(getter, List::from([receiver]), ty);
+
+          return self.operand_place(read, ty);
+        }
+
+        const place = self.field_place(value)?;
+
+        if self.is_weak_field(value) {
+          // The field holds no reference: reading it takes one, if the instance is alive.
+          const loaded = self.new_value(ty, Rvalue::WeakLoad(place));
+
+          return self.operand_place(loaded, ty);
+        }
+
+        Ok(place)
+      }
+      ExprKind::Index { base, index } => {
+        const base_ty = self.type_of(base)?;
+
+        if let TypeKind::List(_) = base_ty.kind {
+          return collections::list_elem_place(self, base, index, ty);
+        }
+
+        const len = match base_ty.kind {
+          TypeKind::Array { len, .. } => len,
+          _ => return Err("index into a value that is not an array"),
+        };
+        const place = self.base_place(base)?;
+        const position = self.expr(index)?;
+
+        Ok(project(place, Projection::Index { index: position, len: len }, ty))
+      }
+      ExprKind::Unary { op, operand } => {
+        if op != UnaryOp::Deref {
+          const computed = self.expr(value)?;
+
+          return self.operand_place(computed, ty);
+        }
+
+        const pointer_ty = self.type_of(operand)?;
+        const pointer = self.expr(operand)?;
+        const place = self.operand_place(pointer, pointer_ty)?;
+
+        Ok(project(place, Projection::Deref, ty))
+      }
+      _ => {
+        const computed = self.expr(value)?;
+
+        self.operand_place(computed, ty)
+      }
+    }
+  }
+
+  /// Whether an expression is a field reached through an interface value.
+  pub fn is_interface_field(self, value: Expr) -> bool {
+    if let ExprKind::Field { base, .. } = value.kind {
+      if let Some(ty) = self.typed.expr_types.get(base.id) {
+        if let TypeKind::Interface(_) = ty.kind {
+          return true;
+        }
+      }
+    }
+
+    false
+  }
+
+  /// Whether an expression is a `weak` field of a class instance.
+  pub fn is_weak_field(self, value: Expr) -> bool {
+    if let ExprKind::Field { base, name } = value.kind {
+      if let Some(ty) = self.typed.expr_types.get(base.id) {
+        if let TypeKind::Class(owner) = ty.kind {
+          return match self.typed.class_field(owner.id, name.name) {
+            Some(found) => found.field.is_weak,
+            None => false,
+          };
+        }
+      }
+    }
+
+    false
+  }
+
+  /// The place of a field as stored, without loading a `weak` one.
+  pub fn field_place(self, value: Expr) -> Result<Place, String> {
+    const ty = self.type_of(value)?;
+    const base = match value.kind {
+      ExprKind::Field { base, .. } => base,
+      _ => return Err("field place of an expression that is not a field"),
+    };
+    const name = match value.kind {
+      ExprKind::Field { name, .. } => name.name,
+      _ => "",
+    };
+    const base_ty = self.type_of(base)?;
+    var projection: Option<Projection> = None;
+    var is_class_field = false;
+
+    match base_ty.kind {
+      TypeKind::Struct(owner) => {
+        if let Some(index) = self.typed.field_index(owner.id, name) {
+          projection = Some(Projection::Field(index));
+        }
+      }
+      TypeKind::Class(owner) => {
+        if let Some(found) = self.typed.class_field_type(owner, name) {
+          projection = Some(Projection::ClassField { class_id: mono::class_instance(self, found.ancestor), index: found.index });
+          is_class_field = true;
+        }
+      }
+      _ => return Err("field of a value that is not a struct or a class instance"),
+    }
+
+    const chosen = match projection {
+      Some(chosen) => chosen,
+      None => return Err("unknown field `" + name + "`"),
+    };
+    var place = self.base_place(base)?;
+
+    // An instance reached through another place stays alive for the statement, even if a call
+    // in it replaces that place.
+    if is_class_field && !place.projections.is_empty() {
+      const base_place_ty = place.ty;
+
+      place = match self.owned_copy(base_place_ty, Operand::Place(place)) {
+        Operand::Local(local) => local_place(local, base_place_ty),
+        _ => return Err("instance reference without a local"),
+      };
+    }
+
+    Ok(project(place, chosen, ty))
+  }
+
+  pub fn base_place(self, base: Expr) -> Result<Place, String> {
+    const is_place = match base.kind {
+      ExprKind::Path(_) | ExprKind::Field { .. } | ExprKind::Index { .. } => true,
+      ExprKind::Unary { op, .. } => op == UnaryOp::Deref,
+      _ => false,
+    };
+
+    if is_place {
+      return self.place(base);
+    }
+
+    const ty = self.type_of(base)?;
+    const value = self.expr(base)?;
+
+    self.operand_place(value, ty)
+  }
+
+  pub fn operand_place(self, value: Operand, ty: Type) -> Result<Place, String> {
+    match value {
+      Operand::Local(local) => Ok(local_place(local, ty)),
+      Operand::Place(place) => Ok(place),
+      Operand::Const(_) => match self.new_value(ty, Rvalue::Use(value)) {
+        Operand::Local(local) => Ok(local_place(local, ty)),
+        _ => Err("constant without a local"),
+      },
+      Operand::Ref(_) => Err("place of a reference"),
+    }
+  }
+
+  /// The value of a module-level constant, which the type checker computed.
+  prv fn const_operand(self, id: u32, ty: Type) -> Result<Operand, String> {
+    const value = match self.typed.const_values.get(id as usize) {
+      Some(Some(found)) => found,
+      _ => return Err(`constant ${id} without a value`),
+    };
+
+    match value {
+      ConstValue::Bool(found) => Ok(Operand::Const(Const::Bool(found))),
+      ConstValue::Char(found) => Ok(Operand::Const(Const::Char(found))),
+      ConstValue::Str(found) => Ok(Operand::Const(Const::Str(found))),
+      ConstValue::Int(found) => match ty.kind {
+        TypeKind::Int(int_ty) => Ok(int_operand(found.magnitude, found.negative, int_ty)),
+        _ => Err("integer constant typed as " + types::text(ty)),
+      },
+      // `Display` writes the shortest text that reads back as the same value (ADR-0054).
+      ConstValue::Float(found) => match ty.kind {
+        TypeKind::Float(float_ty) => Ok(Operand::Const(Const::Float { text: `${found}`, ty: float_ty })),
+        _ => Err("float constant typed as " + types::text(ty)),
+      },
+    }
+  }
+
+  /// Lowers an expression to an operand. Values of managed types that are newly created are
+  /// pending temporaries; reading a binding, field or element of a managed type borrows it.
+  pub fn expr(self, value: Expr) -> Result<Operand, String> {
+    const ty = self.type_of(value)?;
+
+    match value.kind {
+      ExprKind::Int { value: digits, .. } => match ty.kind {
+        TypeKind::Int(int_ty) => match digits.parse_u64() {
+          Ok(magnitude) => Ok(int_operand(magnitude, false, int_ty)),
+          Err(_) => Err("integer literal out of range"),
+        },
+        _ => Err("integer literal typed as " + types::text(ty)),
+      },
+      ExprKind::Float { text, .. } => match ty.kind {
+        TypeKind::Float(float_ty) => Ok(Operand::Const(Const::Float { text: text, ty: float_ty })),
+        _ => Err("float literal typed as " + types::text(ty)),
+      },
+      ExprKind::Bool(found) => Ok(bool_operand(found)),
+      ExprKind::Char(found) => Ok(Operand::Const(Const::Char(found))),
+      ExprKind::Str(found) => Ok(Operand::Const(Const::Str(found))),
+      ExprKind::Unit => Ok(unit_operand()),
+      ExprKind::Lambda { body, .. } => closures::lambda(self, value, body, ty),
+      ExprKind::Path(_) | ExprKind::Zod => match self.resolution.paths.get(value.id) {
+        Some(Res::Local(id)) => Ok(Operand::Local(closures::local_id(self, id))),
+        Some(Res::Fn(id)) => Ok(closures::fn_value(self, value, id, ty)),
+        Some(Res::Variant(variant)) => Ok(matching::variant(self, ty, variant.index, new List())),
+        Some(Res::Const(id)) => self.const_operand(id, ty),
+        _ => Err("unsupported path operand"),
+      },
+      ExprKind::Try(inner) => matching::try_expr(self, inner),
+      ExprKind::New { args, .. } => self.new_expr(ty, args),
+      ExprKind::Match { scrutinee, arms } => matching::match_expr(self, ty, scrutinee, arms),
+      ExprKind::Field { .. } | ExprKind::Index { .. } => self.read_place(value, ty),
+      ExprKind::Template(parts) => self.template(ty, parts),
+      ExprKind::Call { callee, args } => {
+        if collections::is_list_from(self, callee) {
+          return collections::list_from(self, ty, args);
+        }
+
+        self.call_expr(value, callee, args, ty)
+      }
+      ExprKind::MethodCall { receiver, method, args } => self.method_call_expr(value, ty, receiver, method, args),
+      ExprKind::StructLit { fields, .. } => self.struct_lit(value, ty, fields),
+      ExprKind::ArrayLit(elems) => self.array_lit(ty, elems),
+      ExprKind::ArrayRepeat { value: repeated, .. } => self.array_repeat(ty, repeated),
+      ExprKind::Unary { op, operand } => self.unary(value, ty, op, operand),
+      ExprKind::Binary { op, lhs, rhs } => self.binary(ty, op, lhs, rhs),
+      ExprKind::Cast { expr: inner, .. } => {
+        const from = self.type_of(inner)?;
+        const operand_value = self.expr(inner)?;
+
+        Ok(self.new_value(ty, Rvalue::Cast { from: from, to: ty, operand: operand_value }))
+      }
+      ExprKind::Block(body) => self.block_value(body, ty),
+      ExprKind::Unsafe(body) => self.block_value(body, ty),
+      ExprKind::If { cond, then_block, else_branch } => self.if_expr(ty, cond, then_block, else_branch),
+      ExprKind::While { cond, body } => self.while_expr(cond, body),
+      ExprKind::Loop(body) => self.loop_expr(ty, body),
+      ExprKind::For { iter, body, .. } => self.for_expr(value, iter, body),
+      ExprKind::Break(result) => self.break_expr(result),
+      ExprKind::Continue => {
+        const current = match self.loops.last() {
+          Some(found) => found,
+          None => return Err("`continue` outside of a loop"),
+        };
+
+        self.release_for_exit(current.scope_depth, current.pending_mark);
+        self.emit(Stmt::Continue);
+
+        Ok(unit_operand())
+      }
+      ExprKind::Return(result) => self.return_expr(result),
+      ExprKind::Range { .. } => collections::range_iter(self, value, false, ty),
+    }
+  }
+
+  prv fn new_expr(self, ty: Type, args: List<Expr>) -> Result<Operand, String> {
+    match ty.kind {
+      TypeKind::StringBuilder => return Ok(strings::new_string_builder(self)),
+      TypeKind::List(_) => return Ok(self.new_value(ty, Rvalue::ListNew)),
+      _ => {}
+    }
+
+    self.new_instance(ty, args)
+  }
+
+  prv fn read_place(self, value: Expr, ty: Type) -> Result<Operand, String> {
+    const place = self.place(value)?;
+
+    if self.managed(ty) {
+      // A field of an instance or an element of a list can change during the statement
+      // through another reference.
+      for projection in place.projections {
+        match projection {
+          Projection::ClassField { .. } | Projection::ListElem { .. } => return Ok(self.owned_copy(ty, Operand::Place(place))),
+          _ => {}
+        }
+      }
+
+      return Ok(Operand::Place(place));
+    }
+
+    // Copied when read, so a later change to the place in the same expression is not seen.
+    Ok(self.new_value(ty, Rvalue::Use(Operand::Place(place))))
+  }
+
+  prv fn template(self, ty: Type, parts: List<TemplatePart>) -> Result<Operand, String> {
+    const pieces: List<TemplatePiece> = new List();
+
+    for part in parts {
+      match part {
+        TemplatePart::Text(text) => pieces.push(TemplatePiece::Text(text)),
+        TemplatePart::Expr(inner) => {
+          const part_ty = self.type_of(inner)?;
+          const part_value = self.expr(inner)?;
+
+          pieces.push(TemplatePiece::Value { ty: part_ty, value: part_value });
+        }
+      }
+    }
+
+    Ok(self.new_value(ty, Rvalue::Template(pieces)))
+  }
+
+  prv fn method_call_expr(self, value: Expr, ty: Type, receiver: Expr, method: Ident, args: List<Expr>) -> Result<Operand, String> {
+    if self.typed.field_calls.contains_key(value.id) {
+      return closures::field_call(self, receiver, method.name, args);
+    }
+
+    if let Some(builtin) = self.typed.builtin_methods.get(value.id) {
+      return match builtin {
+        BuiltinMethod::Map | BuiltinMethod::MapErr | BuiltinMethod::AndThen | BuiltinMethod::UnwrapOrElse | BuiltinMethod::Filter => {
+          closures::closure_method(self, builtin, ty, receiver, args)
+        }
+        BuiltinMethod::List(op) => collections::list_method(self, op, ty, receiver, args),
+        BuiltinMethod::Prelude(function) => collections::prelude_method(self, value, function, ty, receiver, args),
+        BuiltinMethod::TotalCompare => collections::total_compare(self, ty, receiver, args),
+        BuiltinMethod::RangeRev => collections::range_iter(self, receiver, true, ty),
+        BuiltinMethod::Runtime { .. } | BuiltinMethod::Find | BuiltinMethod::ToDigit | BuiltinMethod::Parse(_) => {
+          strings::text_method(self, builtin, ty, receiver, args)
+        }
+        _ => matching::builtin_method(self, builtin, ty, receiver, args),
+      };
+    }
+
+    self.method_call(value, receiver, args, ty)
+  }
+
+  prv fn struct_lit(self, value: Expr, ty: Type, fields: List<FieldInit>) -> Result<Operand, String> {
+    if let TypeKind::Enum(_) = ty.kind {
+      const variant = match self.resolution.paths.get(value.id) {
+        Some(Res::Variant(found)) => found,
+        _ => return Err("variant literal without a variant"),
+      };
+      var def: Option<pkg::types::VariantDef> = None;
+
+      if let Some(variants) = self.typed.variants(ty) {
+        def = variants.get(variant.index as usize);
+      }
+
+      const found = match def {
+        Some(found) => found,
+        None => return Err("unknown variant"),
+      };
+      const operands: List<Option<Operand>> = new List();
+
+      for _ in found.fields {
+        operands.push(None);
+      }
+
+      // Field values run in source order and are stored in declaration order.
+      for init in fields {
+        var position: Option<usize> = None;
+
+        for index in 0..found.fields.len() {
+          if let Some(field_name) = found.fields[index].name {
+            if position.is_none() && field_name == init.name.name {
+              position = Some(index);
+            }
+          }
+        }
+
+        const index = match position {
+          Some(index) => index,
+          None => return Err("unknown variant field"),
+        };
+        const stored = self.operand_as(init.value, found.fields[index].ty)?;
+
+        operands[index] = Some(stored);
+      }
+
+      const complete: List<Operand> = new List();
+
+      for operand in operands {
+        match operand {
+          Some(found_operand) => complete.push(found_operand),
+          None => return Err("variant literal with missing fields"),
+        }
+      }
+
+      return Ok(matching::variant(self, ty, variant.index, complete));
+    }
+
+    const owner = match ty.kind {
+      TypeKind::Struct(named) => named,
+      _ => return Err("struct literal without a struct type"),
+    };
+    const field_types = self.layouts.struct_fields(owner);
+    const operands: List<Option<Operand>> = new List();
+
+    for _ in field_types {
+      operands.push(None);
+    }
+
+    // Field values run in source order and are stored in declaration order.
+    for init in fields {
+      const index = match self.typed.field_index(owner.id, init.name.name) {
+        Some(index) => index,
+        None => return Err("unknown field in literal"),
+      };
+      const stored = self.operand_as(init.value, field_types.get(index).unwrap_or(types::error()))?;
+
+      operands[index] = Some(stored);
+    }
+
+    const complete: List<Operand> = new List();
+
+    for operand in operands {
+      match operand {
+        Some(found_operand) => complete.push(found_operand),
+        None => return Err("struct literal with missing fields"),
+      }
+    }
+
+    Ok(self.aggregate(ty, complete, field_types))
+  }
+
+  prv fn array_lit(self, ty: Type, elems: List<Expr>) -> Result<Operand, String> {
+    const elem_ty = match ty.kind {
+      TypeKind::Array { elem, .. } => elem,
+      _ => return Err("array literal without an array type"),
+    };
+    const operands: List<Operand> = new List();
+    const part_types: List<Type> = new List();
+
+    for elem in elems {
+      operands.push(self.operand_as(elem, elem_ty)?);
+      part_types.push(elem_ty);
+    }
+
+    Ok(self.aggregate(ty, operands, part_types))
+  }
+
+  prv fn array_repeat(self, ty: Type, repeated: Expr) -> Result<Operand, String> {
+    const elem_ty = match ty.kind {
+      TypeKind::Array { elem, .. } => elem,
+      _ => return Err("array repeat without an array type"),
+    };
+    const element = self.operand_as(repeated, elem_ty)?;
+
+    Ok(self.new_value(ty, Rvalue::Repeat(element)))
+  }
+
+  prv fn unary(self, value: Expr, ty: Type, op: UnaryOp, operand: Expr) -> Result<Operand, String> {
+    if op == UnaryOp::Deref {
+      // The pointee is never managed: its value is copied now.
+      const place = self.place(value)?;
+
+      return Ok(self.new_value(ty, Rvalue::Use(Operand::Place(place))));
+    }
+
+    // A negated literal is a single constant, so `-128i8` never overflows.
+    if op == UnaryOp::Neg {
+      match operand.kind {
+        ExprKind::Int { value: digits, .. } => {
+          if let TypeKind::Int(int_ty) = ty.kind {
+            return match digits.parse_u64() {
+              Ok(magnitude) => Ok(int_operand(magnitude, true, int_ty)),
+              Err(_) => Err("integer literal out of range"),
+            };
+          }
+        }
+        ExprKind::Float { text, .. } => {
+          if let TypeKind::Float(float_ty) = ty.kind {
+            return Ok(Operand::Const(Const::Float { text: "-" + text, ty: float_ty }));
+          }
+        }
+        _ => {}
+      }
+    }
+
+    const operand_ty = self.type_of(operand)?;
+    const operand_value = self.expr(operand)?;
+
+    Ok(self.new_value(ty, Rvalue::Unary { op: op, ty: operand_ty, operand: operand_value }))
+  }
+
+  prv fn binary(self, ty: Type, op: BinaryOp, lhs: Expr, rhs: Expr) -> Result<Operand, String> {
+    if op == BinaryOp::And || op == BinaryOp::Or {
+      const result = self.temp(types::of(TypeKind::Bool));
+      const left = self.expr(lhs)?;
+      var then_body: List<Stmt> = new List();
+      var else_body: List<Stmt> = new List();
+
+      if op == BinaryOp::And {
+        then_body = self.evaluate_into(rhs, result)?;
+        else_body = self.constant_into(false, result);
+      } else {
+        then_body = self.constant_into(true, result);
+        else_body = self.evaluate_into(rhs, result)?;
+      }
+
+      self.emit(Stmt::If { cond: left, then_body: then_body, else_body: else_body });
+
+      return Ok(Operand::Local(result));
+    }
+
+    const operand_ty = self.type_of(lhs)?;
+    const left = self.expr(lhs)?;
+    const right = self.expr(rhs)?;
+
+    if let TypeKind::Enum(_) = operand_ty.kind {
+      // Enums without data are equal when their variants are.
+      const left_tag = matching::tag(self, left, operand_ty)?;
+      const right_tag = matching::tag(self, right, operand_ty)?;
+
+      return Ok(self.new_value(ty, Rvalue::Binary { op: op, ty: tag_type(), lhs: left_tag, rhs: right_tag }));
+    }
+
+    Ok(strings::binary(self, op, operand_ty, left, right))
+  }
+
+  prv fn if_expr(self, ty: Type, cond: Expr, then_block: Block, else_branch: Option<Expr>) -> Result<Operand, String> {
+    const condition = self.expr(cond)?;
+    const dest: Option<u32> = if is_valueless(ty) { None } else { Some(self.temp(ty)) };
+    const then_mark = self.open_buffer();
+
+    self.block_into(then_block, dest)?;
+
+    const then_body = self.close_buffer(then_mark);
+    var else_body: List<Stmt> = new List();
+
+    if let Some(branch) = else_branch {
+      const else_mark = self.open_buffer();
+      const branch_value = self.expr(branch)?;
+
+      if let Some(target) = dest {
+        if !is_valueless(self.type_of(branch)?) {
+          self.store(target, branch_value);
+        }
+      }
+
+      else_body = self.close_buffer(else_mark);
+    }
+
+    self.emit(Stmt::If { cond: condition, then_body: then_body, else_body: else_body });
+
+    Ok(self.owned_result(dest))
+  }
+
+  prv fn while_expr(self, cond: Expr, body: Block) -> Result<Operand, String> {
+    const mark = self.open_loop(None);
+    const condition_mark = self.pending.len();
+    const condition = self.expr(cond)?;
+
+    self.release_pending_from(condition_mark);
+    self.emit(Stmt::If { cond: condition, then_body: new List(), else_body: List::from([Stmt::Break]) });
+    self.block_into(body, None)?;
+
+    const loop_body = self.close_loop(mark);
+
+    self.emit(Stmt::Loop(loop_body));
+
+    Ok(unit_operand())
+  }
+
+  prv fn loop_expr(self, ty: Type, body: Block) -> Result<Operand, String> {
+    const dest: Option<u32> = if is_valueless(ty) { None } else { Some(self.temp(ty)) };
+    const mark = self.open_loop(dest);
+
+    self.block_into(body, None)?;
+
+    const loop_body = self.close_loop(mark);
+
+    self.emit(Stmt::Loop(loop_body));
+
+    Ok(self.owned_result(dest))
+  }
+
+  prv fn break_expr(self, result: Option<Expr>) -> Result<Operand, String> {
+    const current = match self.loops.last() {
+      Some(found) => found,
+      None => return Err("`break` outside of a loop"),
+    };
+
+    if let Some(found) = result {
+      const value_ty = self.type_of(found)?;
+      const operand = self.expr(found)?;
+
+      if let Some(target) = current.result {
+        if !is_valueless(value_ty) {
+          self.store_from(target, operand, value_ty);
+        }
+      }
+    }
+
+    self.release_for_exit(current.scope_depth, current.pending_mark);
+    self.emit(Stmt::Break);
+
+    Ok(unit_operand())
+  }
+
+  prv fn return_expr(self, result: Option<Expr>) -> Result<Operand, String> {
+    var operand: Option<Operand> = None;
+
+    if let Some(found) = result {
+      if !is_valueless(self.type_of(found)?) {
+        const ret = self.ret;
+        const returned = self.operand_as(found, ret)?;
+
+        if self.managed(ret) {
+          self.emit(Stmt::Retain(returned));
+        }
+
+        operand = Some(returned);
+      } else {
+        self.expr(found)?;
+      }
+    }
+
+    self.release_for_exit(0, 0);
+    self.emit(Stmt::Return(operand));
+
+    Ok(unit_operand())
+  }
+
+  /// The right operand of `&&` or `||` stored in `result`, as a buffer.
+  prv fn evaluate_into(self, rhs: Expr, result: u32) -> Result<List<Stmt>, String> {
+    const mark = self.open_buffer();
+    const right = self.expr(rhs)?;
+
+    self.emit(Stmt::Assign { dest: result, value: Rvalue::Use(right) });
+
+    Ok(self.close_buffer(mark))
+  }
+
+  /// A short circuit of `&&` or `||`, as a buffer.
+  prv fn constant_into(self, found: bool, result: u32) -> List<Stmt> {
+    const mark = self.open_buffer();
+
+    self.emit(Stmt::Assign { dest: result, value: Rvalue::Use(bool_operand(found)) });
+
+    self.close_buffer(mark)
+  }
+
+  prv fn block_value(self, body: Block, ty: Type) -> Result<Operand, String> {
+    const dest: Option<u32> = if is_valueless(ty) { None } else { Some(self.temp(ty)) };
+
+    self.block_into(body, dest)?;
+
+    Ok(self.owned_result(dest))
+  }
+
+  prv fn for_expr(self, value: Expr, iter: Expr, body: Block) -> Result<Operand, String> {
+    const variable = self.binding(value.id)?;
+
+    match self.typed.builtin_methods.get(iter.id) {
+      Some(BuiltinMethod::Chars) => {
+        strings::for_text(self, variable, iter, false, body)?;
+
+        return Ok(unit_operand());
+      }
+      Some(BuiltinMethod::Bytes) => {
+        strings::for_text(self, variable, iter, true, body)?;
+
+        return Ok(unit_operand());
+      }
+      _ => {}
+    }
+
+    if collections::for_range_method(self, variable, iter, body)? || collections::for_collection(self, variable, iter, body)? {
+      return Ok(unit_operand());
+    }
+
+    const iter_ty = self.type_of(iter)?;
+
+    if let TypeKind::Array { len, .. } = iter_ty.kind {
+      // The loop runs over a copy, so changing the array inside the body does not change the
+      // iteration (arrays are values).
+      const array_value = self.expr(iter)?;
+      const array = self.temp(iter_ty);
+
+      self.store(array, array_value);
+
+      if self.managed(iter_ty) {
+        self.pending.push(array);
+      }
+
+      const mark = self.open_loop(None);
+
+      self.block_into(body, None)?;
+
+      const loop_body = self.close_loop(mark);
+
+      self.emit(Stmt::ForArray { variable: variable, array: array, len: len, body: loop_body });
+
+      return Ok(unit_operand());
+    }
+
+    const range = match iter.kind {
+      ExprKind::Range { start, end, inclusive } => RangeParts { start: start, end: end, inclusive: inclusive },
+      _ => return Err("`for` over something other than a range or an array"),
+    };
+    const int_ty = match iter_ty.kind {
+      TypeKind::Int(found) => found,
+      _ => return Err("range without an integer type"),
+    };
+    // Bounds are evaluated once, before the loop, into their own locals.
+    const start_value = self.expr(range.start)?;
+    const start = self.new_value(types::int(int_ty), Rvalue::Use(start_value));
+    const end_value = self.expr(range.end)?;
+    const end = self.new_value(types::int(int_ty), Rvalue::Use(end_value));
+    const mark = self.open_loop(None);
+
+    self.block_into(body, None)?;
+
+    const loop_body = self.close_loop(mark);
+
+    self.emit(Stmt::ForRange { variable: variable, ty: int_ty, start: start, end: end, inclusive: range.inclusive, reverse: false, step: None, body: loop_body });
+
+    Ok(unit_operand())
+  }
+
+  prv fn call_expr(self, value: Expr, callee: Expr, args: List<Expr>, ty: Type) -> Result<Operand, String> {
+    var target: Option<Callee> = None;
+
+    match self.resolution.paths.get(callee.id) {
+      Some(Res::Fn(id)) => {
+        const subst = mono::call_subst(self, value.id, id, None);
+        const params = match self.typed.sig(id) {
+          Some(sig) => types::substitute_sig(sig, subst).params,
+          None => new List(),
+        };
+        const function = mono::instance(self, id, subst);
+        const operands: List<Operand> = new List();
+        var index = 0usize;
+
+        while index < args.len() && index < params.len() {
+          operands.push(self.operand_as(args[index], params[index])?);
+          index += 1;
+        }
+
+        return Ok(self.call(Callee::Fn(function), operands, ty));
+      }
+      Some(Res::Extern(id)) => {
+        target = Some(Callee::Extern(id));
+      }
+      Some(Res::Builtin(name)) => {
+        if name == "Error" {
+          if args.len() != 1 {
+            return Err("`Error` without one argument");
+          }
+
+          const text = self.operand_as(args[0], types::string())?;
+
+          return interfaces::message_error(self, text);
+        }
+
+        if name == "char::from_u32" {
+          if args.len() != 1 {
+            return Err("`char::from_u32` without one argument");
+          }
+
+          const code = self.operand_as(args[0], types::int(IntTy::U32))?;
+
+          return Ok(strings::char_from_u32(self, ty, code));
+        }
+
+        if name == "CString::new" {
+          if args.len() != 1 {
+            return Err("`CString::new` without one argument");
+          }
+
+          const text = self.operand_as(args[0], types::string())?;
+
+          return Ok(strings::cstring_new(self, ty, text));
+        }
+
+        target = Some(Callee::Builtin(name));
+      }
+      Some(Res::Variant(variant)) => {
+        const field_types = matching::variant_fields(self, ty, variant.index);
+        const operands: List<Operand> = new List();
+        var index = 0usize;
+
+        while index < args.len() && index < field_types.len() {
+          operands.push(self.operand_as(args[index], field_types[index])?);
+          index += 1;
+        }
+
+        return Ok(matching::variant(self, ty, variant.index, operands));
+      }
+      // A binding, field, call result or lambda of a function type.
+      _ => return closures::call_value(self, callee, args),
+    }
+
+    const chosen = match target {
+      Some(chosen) => chosen,
+      None => return Err("call without a callee"),
+    };
+    const params = match chosen {
+      Callee::Extern(id) => match self.typed.extern_sig(id) {
+        Some(sig) => sig.params,
+        None => new List(),
+      },
+      Callee::Builtin(name) => pkg::types::exprs::builtin_sig(name, self.package.target).params,
+      _ => new List(),
+    };
+    const operands: List<Operand> = new List();
+    var index = 0usize;
+
+    while index < args.len() && index < params.len() {
+      operands.push(self.operand_as(args[index], params[index])?);
+      index += 1;
+    }
+
+    Ok(self.call(chosen, operands, ty))
+  }
+
+  prv fn method_call(self, value: Expr, receiver: Expr, args: List<Expr>, ty: Type) -> Result<Operand, String> {
+    const function = match self.typed.method_calls.get(value.id) {
+      Some(function) => function,
+      None => {
+        // The built-in `len()` of arrays: the length is part of the type.
+        const receiver_ty = self.type_of(receiver)?;
+        const len = match receiver_ty.kind {
+          TypeKind::Array { len, .. } => len,
+          _ => return Err("method call without a target"),
+        };
+
+        self.expr(receiver)?;
+
+        return Ok(int_operand(len, false, IntTy::Usize));
+      }
+    };
+    // A list or array calling a method of `Iter` becomes an iterator first.
+    var converted: Option<Operand> = None;
+
+    if let Some(entry) = self.typed.to_iter.get(receiver.id) {
+      converted = Some(collections::iter_of(self, receiver, entry.function, entry.args)?);
+    }
+
+    var receiver_ty = types::error();
+
+    match converted {
+      Some(Operand::Local(local)) => {
+        receiver_ty = self.local_type(local);
+      }
+      _ => {
+        receiver_ty = self.type_of(receiver)?;
+      }
+    }
+
+    if converted.is_none() && collections::is_primitive_method(self, function, receiver_ty) {
+      return collections::primitive_method(self, function, ty, receiver, args);
+    }
+
+    const subst = mono::call_subst(self, value.id, function, Some(receiver_ty));
+    const sig = match self.typed.sig(function) {
+      Some(found) => types::substitute_sig(found, subst),
+      None => return Err("method without a signature"),
+    };
+    // Methods of interface values go through the itable; interface methods on values of a known
+    // type call that type's method or the default instantiated for it; `zod` calls name their
+    // implementation; others go through the vtable when it varies.
+    var callee = Callee::Fn(function);
+    var by_ref = false;
+    const from_interface = match self.resolution.owner(function) {
+      Some(TypeItem::Interface(_)) => true,
+      _ => false,
+    };
+
+    match receiver_ty.kind {
+      TypeKind::Interface(interface_ref) => {
+        callee = interfaces::dyn_method(self, interface_ref, function)?;
+      }
+      _ => {
+        if from_interface {
+          const found = interfaces::concrete_interface_call(self, value.id, function, receiver_ty);
+
+          callee = found.callee;
+          by_ref = found.by_ref;
+        } else {
+          const by_var = match sig.receiver {
+            Some(kind) => kind == Receiver::Var,
+            None => false,
+          };
+          const target = mono::instance(self, function, subst);
+
+          match self.typed.slots.get(function) {
+            Some(slot) => {
+              if self.typed.zod_calls.contains_key(value.id) {
+                callee = Callee::Fn(target);
+                by_ref = by_var;
+              } else {
+                callee = Callee::Virtual { slot: slot, function: target };
+              }
+            }
+            None => {
+              callee = Callee::Fn(target);
+              by_ref = by_var;
+            }
+          }
+        }
+      }
+    }
+
+    const receiver_value = match converted {
+      Some(found) => found,
+      None => if by_ref { Operand::Ref(self.base_place(receiver)?) } else { self.expr(receiver)? },
+    };
+    const operands = List::from([receiver_value]);
+    var index = 0usize;
+
+    while index < args.len() && index < sig.params.len() {
+      const param = sig.params[index];
+      const operand = self.operand_as(args[index], param)?;
+
+      // The method may modify the receiver, so arguments must not borrow from it.
+      operands.push(if by_ref { self.owned_copy(param, operand) } else { operand });
+      index += 1;
+    }
+
+    Ok(self.call(callee, operands, ty))
+  }
+
+  /// Lowers an expression used where a value of type `ty` is stored. A diverging expression has
+  /// no value; the unreachable use gets a zero-initialized local of the right C type.
+  pub fn operand_as(self, value: Expr, ty: Type) -> Result<Operand, String> {
+    const operand = self.expr(value)?;
+    const from = self.type_of(value)?;
+
+    if types::is_never(from) && !is_valueless(ty) {
+      return Ok(Operand::Local(self.temp(ty)));
+    }
+
+    Ok(interfaces::convert(self, operand, from, ty))
+  }
+
+  /// `new C(args)`: allocates the instance and runs the initializer on it.
+  prv fn new_instance(self, ty: Type, args: List<Expr>) -> Result<Operand, String> {
+    const class_ref = match ty.kind {
+      TypeKind::Class(found) => found,
+      _ => return Err("`new` of a type other than a class or `StringBuilder`"),
+    };
+    const class_index = mono::class_instance(self, class_ref);
+    const instance = self.new_value(ty, Rvalue::Alloc(class_index));
+    const own_initializer = match self.typed.class_def(class_ref.id) {
+      Some(def) => def.initializer,
+      None => None,
+    };
+    const has_def = self.typed.class_def(class_ref.id).is_some();
+
+    if has_def && own_initializer.is_none() {
+      if let Some(initializer) = self.typed.inherited_initializer(class_ref.id) {
+        if let Operand::Local(object) = instance {
+          var subst = Subst::empty();
+
+          if let Some(TypeItem::Class(owner)) = self.resolution.owner(initializer) {
+            const ancestor_args = match self.typed.class_ancestor(class_ref, owner) {
+              Some(ancestor) => ancestor.args,
+              None => new List(),
+            };
+
+            subst = Subst::of(ParamOwner::Item(TypeItem::Class(owner)), ancestor_args);
+          }
+
+          const target = mono::instance(self, initializer, subst);
+
+          self.call(Callee::Fn(target), List::from([instance]), types::unit());
+          self.emit(Stmt::SetVtable { object: object, class_id: class_index });
+        }
+      }
+
+      return Ok(instance);
+    }
+
+    const initializer = match own_initializer {
+      Some(found) => found,
+      None => return Ok(instance),
+    };
+    const subst = Subst::of(ParamOwner::Item(TypeItem::Class(class_ref.id)), class_ref.args);
+    const params = match self.typed.sig(initializer) {
+      Some(sig) => types::substitute_sig(sig, subst).params,
+      None => new List(),
+    };
+    const target = mono::instance(self, initializer, subst);
+    const operands = List::from([instance]);
+    var index = 0usize;
+
+    while index < args.len() && index < params.len() {
+      operands.push(self.operand_as(args[index], params[index])?);
+      index += 1;
+    }
+
+    self.call(Callee::Fn(target), operands, types::unit());
+
+    Ok(instance)
+  }
+
+  pub fn call(self, callee: Callee, args: List<Operand>, ty: Type) -> Operand {
+    const value = Rvalue::Call { callee: callee, args: args };
+
+    if is_valueless(ty) {
+      self.emit(Stmt::Eval(value));
+
+      return unit_operand();
+    }
+
+    self.new_value(ty, value)
+  }
+
+  /// A new struct or array whose parts (of the given types) are retained for it.
+  pub fn aggregate(self, ty: Type, operands: List<Operand>, part_types: List<Type>) -> Operand {
+    var index = 0usize;
+
+    while index < operands.len() && index < part_types.len() {
+      if self.managed(part_types[index]) {
+        self.emit(Stmt::Retain(operands[index]));
+      }
+
+      index += 1;
+    }
+
+    self.new_value(ty, Rvalue::Aggregate(operands))
+  }
+
+  /// Stores a computed value in a new local; managed values become pending temporaries.
+  pub fn new_value(self, ty: Type, value: Rvalue) -> Operand {
+    const local = self.temp(ty);
+
+    self.emit(Stmt::Assign { dest: local, value: value });
+
+    if self.managed(ty) {
+      self.pending.push(local);
+    }
+
+    Operand::Local(local)
+  }
+
+  /// The operand for a value already stored (owned) in `dest` by branches or `break`s.
+  pub fn owned_result(self, dest: Option<u32>) -> Operand {
+    const target = match dest {
+      Some(target) => target,
+      None => return unit_operand(),
+    };
+
+    if self.managed(self.local_type(target)) {
+      self.pending.push(target);
+    }
+
+    Operand::Local(target)
+  }
+
+  /// Starts a loop body; `close_loop` with the returned mark ends it.
+  pub fn open_loop(self, result: Option<u32>) -> usize {
+    self.loops.push(LoopCx { scope_depth: self.scopes.len(), pending_mark: self.pending.len(), result: result });
+
+    self.open_buffer()
+  }
+
+  pub fn close_loop(self, mark: usize) -> List<Stmt> {
+    const body = self.close_buffer(mark);
+
+    self.loops.pop();
+
+    body
+  }
+}
+
+/// The parts of a range expression.
+struct RangeParts {
+  pub start: Expr;
+  pub end: Expr;
+  pub inclusive: bool;
+}
