@@ -1,7 +1,8 @@
 //! Compilation driver: runs the pipeline (docs/architecture.md#pipeline), prints diagnostics,
 //! writes the generated C with the embedded runtime, and invokes the C compiler. The port of
-//! `sagitario_driver` without what only Nova uses: libraries, dependencies and `[link]`
-//! (docs/adr/0055-driver-and-cli-port.md).
+//! `sagitario_driver` (docs/adr/0055-driver-and-cli-port.md); what only Nova uses, libraries,
+//! dependencies and `[link]`, it takes through options of the command line
+//! (docs/adr/0060-driver-parity-for-nova.md).
 
 use pkg::ast::{Package, TargetInfo};
 use pkg::ast::dump;
@@ -9,6 +10,7 @@ use pkg::codegen_c;
 use pkg::codegen_c::GeneratedC;
 use pkg::diagnostics;
 use pkg::diagnostics::{DiagnosticFormat, Diagnostics};
+use pkg::driver::header;
 use pkg::driver::targets;
 use pkg::driver::targets::Platform;
 use pkg::lexer;
@@ -61,6 +63,26 @@ pub class CompileOptions {
   pub var target: Option<String>;
   /// `check --dump=...`: print an intermediate result instead of checking.
   pub var dump: Option<String>;
+  /// Where `build` and `run` write the executable (and `--emit-c` the C); by default next to
+  /// the input for `build`, and in a temporary directory for `run`.
+  pub var output: Option<String>;
+  /// The input is the root of a library: it needs no `main`, and `build` makes the library.
+  pub var library: bool;
+  /// The package's name, which names a library's files and its header.
+  pub var name: String;
+  /// Every package the input depends on, directly or not (docs/nova.md#dependencies).
+  pub var dependencies: List<DependencySpec>;
+  /// Indices in `dependencies` of the input's own dependencies.
+  pub var direct_dependencies: List<usize>;
+  /// C libraries and sources to link (docs/nova.md#linking-c).
+  pub var link: Link;
+  /// Where `build` writes a library's files.
+  pub var out_dir: Option<String>;
+  /// Which libraries `build` makes: static (`libname.a`, `name.lib`) and dynamic.
+  pub var static_lib: bool;
+  pub var dynamic_lib: bool;
+  /// Whether `--static` or `--dynamic` chose the libraries.
+  pub var picked_outputs: bool;
 
   pub fn new(self) {
     self.input = "";
@@ -73,6 +95,46 @@ pub class CompileOptions {
     self.thread_sanitizer = false;
     self.target = None;
     self.dump = None;
+    self.output = None;
+    self.library = false;
+    self.name = "";
+    self.dependencies = new List();
+    self.direct_dependencies = new List();
+    self.link = new Link();
+    self.out_dir = None;
+    self.static_lib = true;
+    self.dynamic_lib = true;
+    self.picked_outputs = false;
+  }
+}
+
+/// A library package the program depends on, compiled together with it.
+pub struct DependencySpec {
+  /// The name its dependents use as a path root.
+  pub name: String;
+  /// Its root module, `src/lib.sag`.
+  pub entry: String;
+  /// Indices in `CompileOptions::dependencies` of its own dependencies.
+  pub dependencies: List<usize>;
+}
+
+/// What `[link]` adds to a build: C libraries, where to find them, and C sources to compile.
+pub class Link {
+  /// Names passed as `-lname`.
+  pub const libraries: List<String>;
+  /// Directories passed as `-Ldir`.
+  pub const search_paths: List<String>;
+  /// C files compiled as C11 and linked with the program or library.
+  pub const sources: List<String>;
+
+  pub fn new(self) {
+    self.libraries = new List();
+    self.search_paths = new List();
+    self.sources = new List();
+  }
+
+  pub fn is_empty(self) -> bool {
+    self.libraries.is_empty() && self.search_paths.is_empty() && self.sources.is_empty()
   }
 }
 
@@ -127,9 +189,26 @@ pub fn check(options: CompileOptions) -> i32 {
   }
 }
 
-/// `sag build`: writes an executable next to the source file.
+/// `sag build`: writes an executable next to the source file, or with `--library` the files of
+/// a library, whose paths it prints one per line for Nova.
 pub fn build(options: CompileOptions) -> i32 {
-  const executable = with_extension(options.input, executable_extension(options.target));
+  if options.library {
+    return match build_library(options) {
+      Ok(files) => {
+        for file in files {
+          println(file);
+        }
+
+        0
+      }
+      Err(code) => code,
+    };
+  }
+
+  const executable = match options.output {
+    Some(found) => found,
+    None => with_extension(options.input, executable_extension(options.target)),
+  };
 
   match compile_to(options, executable) {
     Ok(compiler) => {
@@ -166,7 +245,10 @@ pub fn run(options: CompileOptions) -> i32 {
 
 fn run_in(options: CompileOptions, dir: String) -> i32 {
   const stem = path::stem(options.input).unwrap_or("");
-  const executable = with_extension(push_path(dir, stem), exe_extension());
+  const executable = match options.output {
+    Some(found) => found,
+    None => with_extension(push_path(dir, stem), exe_extension()),
+  };
   const compiler = match compile_to(options, executable) {
     Ok(found) => found,
     Err(code) => return code,
@@ -250,28 +332,49 @@ fn dump_program(options: CompileOptions, kind: String) -> i32 {
 /// `check --dump=c`: the C that `build` generates, with the FFI unit after a marker line.
 fn dump_c(options: CompileOptions) -> i32 {
   match front_end(options, true) {
-    Ok(Some(generated)) => {
-      print(generated.program);
+    Ok(found) => {
+      if let Some(generated) = found.c_source {
+        print(generated.program);
 
-      if let Some(ffi) = generated.ffi {
-        print(C_DUMP_FFI_MARKER + ffi);
+        if let Some(ffi) = generated.ffi {
+          print(C_DUMP_FFI_MARKER + ffi);
+        }
       }
 
       0
     }
-    Ok(None) => 0,
     Err(code) => code,
   }
 }
 
+/// What the front end makes of a program.
+struct FrontEnd {
+  pub c_source: Option<GeneratedC>;
+  /// A library's C header.
+  pub header: Option<String>;
+  /// The symbols of a library's exported functions.
+  pub exports: List<String>;
+}
+
 /// Lexes, parses, resolves and type checks; with `generate`, also lowers to SIR and emits C.
-fn front_end(options: CompileOptions, generate: bool) -> Result<Option<GeneratedC>, i32> {
+fn front_end(options: CompileOptions, generate: bool) -> Result<FrontEnd, i32> {
   const loaded = load_package(options)?;
   const diagnostics = loaded.diagnostics;
   const resolution = resolve::resolve(loaded.package, diagnostics);
   const typed = types::check_until(loaded.package, resolution, diagnostics, Stage::Bodies);
 
   report(diagnostics, loaded.sources, options)?;
+
+  var library_header: Option<String> = None;
+  const exports: List<String> = new List();
+
+  if options.library && generate {
+    for export in header::exports(loaded.package, resolution, typed) {
+      exports.push(export.symbol);
+    }
+
+    library_header = Some(header::generate(options.name, loaded.package, resolution, typed, loaded.sources));
+  }
 
   const program = match sir::lower(loaded.package, resolution, typed, loaded.sources, diagnostics) {
     Ok(found) => found,
@@ -285,10 +388,10 @@ fn front_end(options: CompileOptions, generate: bool) -> Result<Option<Generated
   report(diagnostics, loaded.sources, options)?;
 
   if !generate {
-    return Ok(None);
+    return Ok(FrontEnd { c_source: None, header: library_header, exports: exports });
   }
 
-  Ok(Some(codegen_c::generate(program)))
+  Ok(FrontEnd { c_source: Some(codegen_c::generate(program)), header: library_header, exports: exports })
 }
 
 /// A program read, lexed and parsed, with its sources and its diagnostics so far.
@@ -321,7 +424,14 @@ fn load_package(options: CompileOptions) -> Result<Loaded, i32> {
   const diagnostics = new Diagnostics();
   const loader = new Loader(input);
 
-  if !loader.load(input, new List(), sources, diagnostics) || !loader.load_references(sources, diagnostics) {
+  // The input's package comes first; dependency `i` is package `i + 1`.
+  for dependency in options.dependencies {
+    loader.add_dependency(dependency.name, dependency.entry, dependency.dependencies);
+  }
+
+  loader.set_direct_dependencies(options.direct_dependencies);
+
+  if !loader.load_entries(sources, diagnostics) || !loader.load_references(sources, diagnostics) {
     return Err(EXIT_FAILURE);
   }
 
@@ -338,7 +448,11 @@ fn load_package(options: CompileOptions) -> Result<Loaded, i32> {
     None => TargetInfo::host(),
   };
 
-  Ok(Loaded { package: loader.package(prelude, target), sources: sources, diagnostics: diagnostics })
+  var package = loader.package(prelude, target);
+
+  package.library = options.library;
+
+  Ok(Loaded { package: package, sources: sources, diagnostics: diagnostics })
 }
 
 fn plural(count: usize) -> String {
@@ -395,7 +509,9 @@ fn report(diagnostics: Diagnostics, sources: SourceMap, options: CompileOptions)
 enum Failure {
   /// The generated C, which is a compiler bug.
   Generated(String),
-  /// Linking.
+  /// A C source file of the package.
+  Source(String, String),
+  /// Linking, or archiving a static library.
   Link(String),
   /// A tool that could not run.
   Spawn(String, String),
@@ -410,13 +526,24 @@ class Toolchain {
   pub const sanitize: List<String>;
   /// Whether the program uses threads (`GeneratedC::threads`).
   pub const threads: bool;
+  /// Position-independent code, for dynamic libraries outside Windows.
+  pub const pic: bool;
 
-  pub fn new(self, compiler: CCompiler, dir: String, mode: List<String>, sanitize: List<String>, threads: bool) {
+  pub fn new(self, compiler: CCompiler, dir: String, mode: List<String>, sanitize: List<String>, threads: bool, pic: bool) {
     self.compiler = compiler;
     self.dir = dir;
     self.mode = mode;
     self.sanitize = sanitize;
     self.threads = threads;
+    self.pic = pic;
+  }
+
+  /// Runs a tool and returns its output, or why it could not run.
+  pub fn output(self, command: Command, tool: String) -> Result<ToolOutput, Failure> {
+    match command.output() {
+      Ok(found) => Ok(ToolOutput { success: found.status.success(), text: self.failure_text(found.stdout, found.stderr) }),
+      Err(error) => Err(Failure::Spawn(tool, error.message())),
+    }
   }
 
   /// What a failed tool printed: `cl` prints its errors to stdout.
@@ -424,8 +551,8 @@ class Toolchain {
     if self.compiler.cl { stdout + stderr } else { stderr }
   }
 
-  /// Compiles one generated C file to an object; it must be strict C11.
-  pub fn compile(self, source: String, object: String) -> Result<(), Failure> {
+  /// Compiles one C file to an object; the generated C must be strict C11.
+  pub fn compile(self, source: String, object: String, generated: bool) -> Result<(), Failure> {
     const command = self.compiler.command();
 
     if self.compiler.cl {
@@ -439,48 +566,81 @@ class Toolchain {
 
       command.arg("/I").arg(self.dir).arg("/c").arg(source).arg(`/Fo${object}`);
     } else {
-      command.arg("-std=c11").arg("-pedantic-errors").args(self.mode).args(self.sanitize).args(self.pthread());
+      command.arg("-std=c11");
+
+      if generated {
+        command.arg("-pedantic-errors");
+      }
+
+      command.args(self.mode).args(self.sanitize);
+
+      if self.pic {
+        command.arg("-fPIC");
+      }
+
+      command.args(self.pthread());
       command.arg("-I").arg(self.dir).arg("-c").arg(source).arg("-o").arg(object);
     }
 
-    const output = match command.output() {
-      Ok(found) => found,
-      Err(error) => return Err(Failure::Spawn(self.compiler.command_name, error.message())),
-    };
+    const output = self.output(command, self.compiler.command_name)?;
 
-    if output.status.success() { Ok(()) } else { Err(Failure::Generated(self.failure_text(output.stdout, output.stderr))) }
+    if output.success {
+      return Ok(());
+    }
+
+    Err(if generated { Failure::Generated(output.text) } else { Failure::Source(source, output.text) })
   }
 
-  /// The objects of the generated C files.
-  pub fn objects(self, generated: List<String>) -> Result<List<String>, Failure> {
+  /// The objects of the generated C files and of the package's own C sources.
+  pub fn objects(self, generated: List<String>, sources: List<String>) -> Result<List<String>, Failure> {
     const objects: List<String> = new List();
     const extension = if self.compiler.cl { "obj" } else { "o" };
+    const files: List<String> = new List();
 
-    for index in 0..generated.len() {
+    for file in generated {
+      files.push(file);
+    }
+
+    for file in sources {
+      files.push(file);
+    }
+
+    for index in 0..files.len() {
       const object = push_path(self.dir, `object${index}.${extension}`);
 
-      self.compile(generated[index], object)?;
+      self.compile(files[index], object, index < generated.len())?;
       objects.push(object);
     }
 
     Ok(objects)
   }
 
-  /// libm outside Windows (`fmod` and friends), and the stack of Windows executables.
-  prv fn link_args(self) -> List<String> {
+  /// The libraries to link: the package's, then libm outside Windows (`fmod` and friends). For
+  /// `cl` they are options of the linker, after `/link`.
+  pub fn link_args(self, link: Link) -> List<String> {
     const args: List<String> = new List();
 
     if self.compiler.cl {
-      args.push("/STACK:" + STACK_RESERVE);
+      for found in link.search_paths {
+        args.push("/LIBPATH:" + found);
+      }
+
+      for library in link.libraries {
+        args.push(library + ".lib");
+      }
 
       return args;
     }
 
-    if self.compiler.mingw() {
-      args.push("-Wl,--stack," + STACK_RESERVE);
-    } else if self.compiler.windows() {
-      args.push("-Wl,/STACK:" + STACK_RESERVE);
-    } else {
+    for found in link.search_paths {
+      args.push("-L" + found);
+    }
+
+    for library in link.libraries {
+      args.push("-l" + library);
+    }
+
+    if !self.compiler.windows() {
       args.push("-lm");
     }
 
@@ -491,27 +651,49 @@ class Toolchain {
     args
   }
 
+  /// The stack of Windows executables (docs/adr/0055-driver-and-cli-port.md).
+  prv fn stack_args(self) -> List<String> {
+    if self.compiler.cl {
+      List::from(["/STACK:" + STACK_RESERVE])
+    } else if self.compiler.mingw() {
+      List::from(["-Wl,--stack," + STACK_RESERVE])
+    } else if self.compiler.windows() {
+      List::from(["-Wl,/STACK:" + STACK_RESERVE])
+    } else {
+      new List()
+    }
+  }
+
+  pub fn link(self, command: Command) -> Result<(), Failure> {
+    const output = self.output(command, self.compiler.command_name)?;
+
+    if output.success { Ok(()) } else { Err(Failure::Link(output.text)) }
+  }
+
   /// POSIX threads, for programs using threads outside Windows (which uses its own API).
   prv fn pthread(self) -> List<String> {
     if self.threads && !self.compiler.windows() { List::from(["-pthread"]) } else { new List() }
   }
 
-  pub fn executable(self, objects: List<String>, executable: String) -> Result<(), Failure> {
+  pub fn executable(self, objects: List<String>, link: Link, executable: String) -> Result<(), Failure> {
     const command = self.compiler.command();
 
     if self.compiler.cl {
-      command.arg("/nologo").args(self.mode).args(objects).arg(`/Fe${executable}`).arg("/link").args(self.link_args());
+      command.arg("/nologo").args(self.mode).args(objects).arg(`/Fe${executable}`).arg("/link").args(self.link_args(link));
     } else {
-      command.args(self.mode).args(self.sanitize).args(objects).arg("-o").arg(executable).args(self.link_args());
+      command.args(self.mode).args(self.sanitize).args(objects).arg("-o").arg(executable).args(self.link_args(link));
     }
 
-    const output = match command.output() {
-      Ok(found) => found,
-      Err(error) => return Err(Failure::Spawn(self.compiler.command_name, error.message())),
-    };
-
-    if output.status.success() { Ok(()) } else { Err(Failure::Link(self.failure_text(output.stdout, output.stderr))) }
+    command.args(self.stack_args());
+    self.link(command)
   }
+}
+
+/// What a tool printed when it ran, and whether it succeeded.
+pub struct ToolOutput {
+  pub success: bool;
+  /// What it reported: stderr, and stdout too for `cl` and `lib`, which print their errors there.
+  pub text: String;
 }
 
 /// Writes the generated C, with the runtime, into `dir`, and returns the files to compile.
@@ -574,18 +756,29 @@ fn emit_c(generated: GeneratedC, base: String) -> Result<(), i32> {
   Ok(())
 }
 
-/// Reports a failed build: failures of the generated C are internal compiler errors.
-fn report_failure(failure: Failure, compiler: CCompiler) -> i32 {
+/// Reports a failed build. Failures with the package's own C sources or libraries are errors in
+/// the package; failures with the generated C alone are internal compiler errors.
+fn report_failure(failure: Failure, compiler: CCompiler, link: Link) -> i32 {
   match failure {
     Failure::Generated(stderr) => {
       eprintln(`internal compiler error: the generated C failed to compile with \`${compiler.command_name}\``);
       eprintln(stderr);
       EXIT_ICE
     }
-    Failure::Link(stderr) => {
-      eprintln(`internal compiler error: the generated C failed to link with \`${compiler.command_name}\``);
+    Failure::Source(file, stderr) => {
+      eprintln(`error: cannot compile the C source \`${file}\``);
       eprintln(stderr);
-      EXIT_ICE
+      EXIT_FAILURE
+    }
+    Failure::Link(stderr) => {
+      if link.is_empty() {
+        eprintln(`internal compiler error: the generated C failed to link with \`${compiler.command_name}\``);
+      } else {
+        eprintln("error: linking failed; check the C libraries and sources of `[link]`");
+      }
+
+      eprintln(stderr);
+      if link.is_empty() { EXIT_ICE } else { EXIT_FAILURE }
     }
     Failure::Spawn(tool, message) => {
       eprintln(`error: cannot run \`${tool}\`: ${message}`);
@@ -599,7 +792,12 @@ const THREAD_SANITIZE_FLAGS: String = "-fsanitize=thread";
 
 /// Compiles the program into `executable` and returns the C compiler used.
 fn compile_to(options: CompileOptions, executable: String) -> Result<CCompiler, i32> {
-  const generated = match front_end(options, true)? {
+  if options.library {
+    eprintln(`error: \`${options.input}\` is the root of a library, which has no executable`);
+    return Err(EXIT_FAILURE);
+  }
+
+  const generated = match front_end(options, true)?.c_source {
     Some(found) => found,
     None => {
       eprintln("internal compiler error: no C was generated");
@@ -608,7 +806,7 @@ fn compile_to(options: CompileOptions, executable: String) -> Result<CCompiler, 
   };
 
   if options.emit_c {
-    emit_c(generated, options.input)?;
+    emit_c(generated, options.output.unwrap_or(options.input))?;
   }
 
   const compiler = compiler_for(options)?;
@@ -647,7 +845,7 @@ fn compile_to(options: CompileOptions, executable: String) -> Result<CCompiler, 
       return Err(EXIT_FAILURE);
     }
   };
-  const result = build_in(compiler, generated, dir.path, options.release, sanitize_flags, executable);
+  const result = build_in(compiler, generated, dir.path, options, sanitize_flags, executable);
 
   dir.remove();
   result
@@ -655,10 +853,10 @@ fn compile_to(options: CompileOptions, executable: String) -> Result<CCompiler, 
 
 /// Builds the generated C in `dir`: with sanitizers when the compiler was asked for them, and
 /// once more without them to tell a toolchain lacking their libraries from a compiler bug.
-fn build_in(compiler: CCompiler, generated: GeneratedC, dir: String, release: bool, sanitize_flags: List<String>, executable: String) -> Result<CCompiler, i32> {
+fn build_in(compiler: CCompiler, generated: GeneratedC, dir: String, options: CompileOptions, sanitize_flags: List<String>, executable: String) -> Result<CCompiler, i32> {
   const files = write_generated(generated, dir)?;
-  const mode = compiler.mode(release);
-  const first = build_with(compiler, generated, dir, mode, if compiler.sanitized { sanitize_flags } else { new List() }, files, executable);
+  const mode = compiler.mode(options.release);
+  const first = build_with(compiler, generated, dir, mode, if compiler.sanitized { sanitize_flags } else { new List() }, files, options.link, executable);
   const failure = match first {
     Ok(_) => return Ok(compiler),
     Err(found) => found,
@@ -668,12 +866,12 @@ fn build_in(compiler: CCompiler, generated: GeneratedC, dir: String, release: bo
     const output = match failure {
       Failure::Generated(text) => Some(text),
       Failure::Link(text) => Some(text),
-      Failure::Spawn(_, _) => None,
+      _ => None,
     };
 
     if let Some(stderr) = output {
       // It builds without sanitizers: the toolchain lacks their libraries.
-      if build_with(compiler, generated, dir, mode, new List(), files, executable).is_ok() {
+      if build_with(compiler, generated, dir, mode, new List(), files, options.link, executable).is_ok() {
         eprintln(`error: the C compiler \`${compiler.command_name}\` cannot build with sanitizers (\`${sanitize_flags.join(" ")}\`)`);
         eprintln(stderr);
         eprintln("note: install its sanitizer libraries, or build without `--sanitize`");
@@ -682,14 +880,305 @@ fn build_in(compiler: CCompiler, generated: GeneratedC, dir: String, release: bo
     }
   }
 
-  Err(report_failure(failure, compiler))
+  Err(report_failure(failure, compiler, options.link))
 }
 
-fn build_with(compiler: CCompiler, generated: GeneratedC, dir: String, mode: List<String>, sanitize: List<String>, files: List<String>, executable: String) -> Result<(), Failure> {
-  const toolchain = new Toolchain(compiler, dir, mode, sanitize, generated.threads);
-  const objects = toolchain.objects(files)?;
+fn build_with(compiler: CCompiler, generated: GeneratedC, dir: String, mode: List<String>, sanitize: List<String>, files: List<String>, link: Link, executable: String) -> Result<(), Failure> {
+  const toolchain = new Toolchain(compiler, dir, mode, sanitize, generated.threads, false);
+  const objects = toolchain.objects(files, link.sources)?;
 
-  toolchain.executable(objects, executable)
+  toolchain.executable(objects, link, executable)
+}
+
+// ---- Libraries --------------------------------------------------------------------------------
+
+/// The static library and the dynamic library (with its import library on Windows) a build of
+/// the library `name` writes, as asked.
+struct LibraryFiles {
+  pub static_lib: Option<String>;
+  pub dynamic_lib: Option<String>;
+  pub import_lib: Option<String>;
+}
+
+fn library_files(compiler: CCompiler, options: CompileOptions, dir: String) -> LibraryFiles {
+  const name = options.name;
+  const windows_target = compiler.windows();
+  const mingw = compiler.mingw();
+  const apple = compiler.apple();
+  const static_name = if windows_target && !mingw { name + ".lib" } else { "lib" + name + ".a" };
+  var dynamic = push_path(dir, "lib" + name + ".so");
+  var import: Option<String> = None;
+
+  if windows_target {
+    dynamic = push_path(dir, name + ".dll");
+    import = Some(push_path(dir, if mingw { "lib" + name + ".dll.a" } else { name + ".dll.lib" }));
+  } else if apple {
+    dynamic = push_path(dir, "lib" + name + ".dylib");
+  }
+
+  LibraryFiles {
+    static_lib: if options.static_lib { Some(push_path(dir, static_name)) } else { None },
+    dynamic_lib: if options.dynamic_lib { Some(dynamic) } else { None },
+    import_lib: if options.dynamic_lib { import } else { None },
+  }
+}
+
+/// Whether a tool starts: the `ar` of macOS has no `--version` and exits with an error.
+fn starts(command: String) -> bool {
+  new Command(command).arg("--version").input("").output().is_ok()
+}
+
+/// The archiver for static libraries: `SAG_AR`, then `llvm-ar` next to the C compiler, then
+/// `llvm-ar` and `ar` on `PATH`.
+fn find_archiver(compiler: CCompiler) -> Result<String, i32> {
+  // MSVC's own librarian, next to `cl` (`lib.exe`).
+  if compiler.cl {
+    return Ok(match path::parent(compiler.command_name) {
+      Some(dir) => if dir.is_empty() { "lib" } else { push_path(dir, "lib") },
+      None => "lib",
+    });
+  }
+
+  if let Some(archiver) = env::variable("SAG_AR") {
+    if !archiver.trim().is_empty() {
+      return Ok(archiver);
+    }
+  }
+
+  const candidates: List<String> = new List();
+
+  if let Some(dir) = path::parent(compiler.command_name) {
+    if !dir.is_empty() {
+      candidates.push(with_extension(push_path(dir, "llvm-ar"), exe_extension()));
+    }
+  }
+
+  candidates.push("llvm-ar");
+  candidates.push("ar");
+
+  for candidate in candidates {
+    if starts(candidate) {
+      return Ok(candidate);
+    }
+  }
+
+  eprintln("error: no archiver found to build a static library; Sagitario needs `llvm-ar` or `ar`");
+  eprintln("note: install one next to the C compiler or on PATH, or set SAG_AR");
+  Err(EXIT_FAILURE)
+}
+
+/// Makes a dynamic library export only `exports`, with the linker's own means so that the C
+/// stays strict C11: a module-definition file on Windows, a version script on Linux and an
+/// exported symbols list on macOS.
+fn export_list(command: Command, compiler: CCompiler, dir: String, library: String, import: Option<String>, exports: List<String>) -> Result<(), i32> {
+  const windows_target = compiler.windows();
+  const mingw = compiler.mingw();
+  const apple = compiler.apple();
+  const text = new StringBuilder();
+  var file = "";
+
+  if windows_target {
+    file = push_path(dir, "exports.def");
+    text.append("LIBRARY " + path::stem(library).unwrap_or("") + "\nEXPORTS\n");
+
+    for symbol in exports {
+      text.append("  " + symbol + "\n");
+    }
+  } else if apple {
+    file = push_path(dir, "exports.txt");
+
+    for symbol in exports {
+      text.append("_" + symbol + "\n");
+    }
+  } else {
+    file = push_path(dir, "exports.map");
+
+    const symbols = new StringBuilder();
+
+    for symbol in exports {
+      symbols.append(" " + symbol + ";");
+    }
+
+    const global = if symbols.is_empty() { "" } else { "global:" + symbols.to_string() + " " };
+
+    text.append("{ " + global + "local: *; };\n");
+  }
+
+  if let Err(error) = fs::write(file, text.to_string()) {
+    eprintln(`error: cannot write \`${file}\`: ${error.message()}`);
+    return Err(EXIT_FAILURE);
+  }
+
+  if compiler.cl {
+    command.arg("/DEF:" + file);
+
+    if let Some(found) = import {
+      command.arg("/IMPLIB:" + found);
+    }
+
+    return Ok(());
+  }
+
+  command.arg("-shared");
+
+  const name = path::file_name(library).unwrap_or("");
+
+  if mingw {
+    command.arg(file);
+
+    if let Some(found) = import {
+      command.arg("-Wl,--out-implib," + found);
+    }
+  } else if windows_target {
+    command.arg("-Wl,/DEF:" + file);
+
+    if let Some(found) = import {
+      command.arg("-Wl,/IMPLIB:" + found);
+    }
+  } else if apple {
+    command.arg("-dynamiclib").arg("-Wl,-exported_symbols_list," + file).arg("-Wl,-install_name,@rpath/" + name);
+  } else {
+    command.arg("-fPIC").arg("-Wl,--version-script=" + file).arg("-Wl,-soname," + name);
+  }
+
+  Ok(())
+}
+
+/// A library's static and dynamic libraries and its header in `--out-dir`. Returns the files
+/// written.
+pub fn build_library(options: CompileOptions) -> Result<List<String>, i32> {
+  if options.sanitize {
+    eprintln("error: libraries cannot be built with `--sanitize`: the programs using them would need the sanitizer runtime");
+    return Err(EXIT_FAILURE);
+  }
+
+  const front = front_end(options, true)?;
+  const generated = match front.c_source {
+    Some(found) => found,
+    None => {
+      eprintln("internal compiler error: no C was generated for the library");
+      return Err(EXIT_ICE);
+    }
+  };
+  const library_header = match front.header {
+    Some(found) => found,
+    None => {
+      eprintln("internal compiler error: no C was generated for the library");
+      return Err(EXIT_ICE);
+    }
+  };
+  const name = options.name;
+
+  if front.exports.is_empty() {
+    eprintln(`warning: the library \`${name}\` exports no functions; C can call only the functions declared \`extern "C" fn\``);
+  }
+
+  const compiler = compiler_for(options)?;
+  const out_dir = match options.out_dir {
+    Some(found) => found,
+    None => path::parent(options.input).unwrap_or(""),
+  };
+  const files = library_files(compiler, options, out_dir);
+  const header_path = push_path(out_dir, name + ".h");
+  const written: List<String> = new List();
+
+  if options.emit_c {
+    emit_c(generated, push_path(out_dir, name))?;
+  }
+
+  const dir = match TempDir::create() {
+    Ok(found) => found,
+    Err(error) => {
+      eprintln(`error: cannot create a temporary directory: ${error.message()}`);
+      return Err(EXIT_FAILURE);
+    }
+  };
+  const result = build_library_in(options, compiler, generated, front.exports, files, dir.path, written);
+
+  dir.remove();
+  result?;
+
+  if let Err(error) = fs::write(header_path, library_header) {
+    eprintln(`error: cannot write \`${header_path}\`: ${error.message()}`);
+    return Err(EXIT_FAILURE);
+  }
+
+  written.push(header_path);
+  Ok(written)
+}
+
+fn build_library_in(options: CompileOptions, compiler: CCompiler, generated: GeneratedC, exports: List<String>, files: LibraryFiles, dir: String, written: List<String>) -> Result<(), i32> {
+  const sources = write_generated(generated, dir)?;
+  const mode = compiler.mode(options.release);
+  const windows_target = compiler.windows();
+
+  if let Some(found) = files.static_lib {
+    const archiver = find_archiver(compiler)?;
+    const toolchain = new Toolchain(compiler, dir, mode, new List(), generated.threads, false);
+    const objects = match toolchain.objects(sources, options.link.sources) {
+      Ok(list) => list,
+      Err(failure) => return Err(report_failure(failure, compiler, options.link)),
+    };
+
+    // `ar` adds to an existing archive, which could keep stale objects.
+    fs::remove_file(found);
+
+    const command = new Command(archiver);
+
+    if compiler.cl {
+      command.arg("/NOLOGO").arg("/OUT:" + found).args(objects);
+    } else {
+      command.arg("rcs").arg(found).args(objects);
+    }
+
+    const output = match toolchain.output(command, archiver) {
+      Ok(result) => result,
+      Err(failure) => return Err(report_failure(failure, compiler, options.link)),
+    };
+
+    if !output.success {
+      return Err(report_failure(Failure::Link(output.text), compiler, options.link));
+    }
+
+    written.push(found);
+  }
+
+  if let Some(found) = files.dynamic_lib {
+    const toolchain = new Toolchain(compiler, dir, mode, new List(), generated.threads, !windows_target);
+    const objects = match toolchain.objects(sources, options.link.sources) {
+      Ok(list) => list,
+      Err(failure) => return Err(report_failure(failure, compiler, options.link)),
+    };
+    const command = compiler.command();
+
+    if compiler.cl {
+      command.arg("/nologo").args(mode).arg("/LD").args(objects).arg("/Fe" + found).arg("/link");
+    } else {
+      command.args(mode).args(objects).arg("-o").arg(found);
+    }
+
+    export_list(command, compiler, dir, found, files.import_lib, exports)?;
+    command.args(toolchain.link_args(options.link));
+
+    if let Err(failure) = toolchain.link(command) {
+      return Err(report_failure(failure, compiler, options.link));
+    }
+
+    // The MSVC linker also writes an exports file next to the import library.
+    if let Some(import) = files.import_lib {
+      if compiler.cl {
+        fs::remove_file(with_extension(import, "exp"));
+      }
+    }
+
+    written.push(found);
+
+    if let Some(import) = files.import_lib {
+      written.push(import);
+    }
+  }
+
+  Ok(())
 }
 
 /// The C compiler of the target of `options`, or of this machine.
@@ -731,6 +1220,10 @@ pub class CCompiler {
 
   pub fn mingw(self) -> bool {
     self.target.contains("windows-gnu") || self.target.contains("mingw")
+  }
+
+  pub fn apple(self) -> bool {
+    self.target.contains("apple") || self.target.contains("darwin")
   }
 
   /// MinGW toolchains ship no sanitizer runtime (docs/adr/0018-windows-c-toolchain.md), and MSVC

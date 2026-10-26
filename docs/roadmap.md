@@ -171,8 +171,13 @@ Increments:
 2. A language server written in Sagitario (`sagc lsp`), with the VS Code client: diagnostics,
    hover, go to definition, completion and symbols; `io::read_exact`, and standard streams byte
    for byte on every system ([ADR-0058](adr/0058-language-server.md)).
-3. The pivot without Rust: the generated C of the compiler as a seed, Nova and the test harness
-   in Sagitario, `cargo` out of CI, and `sagc` renamed to `sag` with `crates/` retired.
+3. The pivot without Rust ([ADR-0060](adr/0060-driver-parity-for-nova.md)):
+   - 3a. `sagc` builds libraries with their C header, and takes dependencies and `[link]` through
+     options that Nova passes.
+   - 3b. Nova in Sagitario.
+   - 3c. The test harness in Sagitario, with expected dumps for the corpus of each pass.
+   - 3d. The generated C of the compiler as a seed, CI without `cargo`, and `sagc` renamed to
+     `sag` with `crates/` retired.
 
 ## Later phases (post-MVP)
 

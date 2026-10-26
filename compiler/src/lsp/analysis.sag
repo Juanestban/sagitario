@@ -364,7 +364,7 @@ pub fn analyze(entry: Entry, documents: Map<String, Document>, internal: List<St
     loader.overrides.insert(path_key(document.path), document.text);
   }
 
-  if !loader.load(entry.path, new List(), sources, diagnostics) || !loader.load_references(sources, diagnostics) {
+  if !loader.load_entries(sources, diagnostics) || !loader.load_references(sources, diagnostics) {
     result.diagnostics = diagnostics.take();
     return result;
   }

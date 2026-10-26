@@ -1,8 +1,9 @@
 //! Reads, lexes and parses the modules of a program (docs/spec/09-modules.md), the port of the
 //! loader of `sagitario_driver`: the entry file is the root module `pkg`, and `pkg::net::http` is
 //! the file `net/http.sag` next to it. The standard library modules a program names and the
-//! prelude are embedded. Nova dependencies are not loaded yet
-//! (docs/adr/0052-resolver-port-and-resolution-dumps.md).
+//! prelude are embedded. Each dependency of a Nova package is a package of its own, with its root
+//! module and its files (docs/adr/0052-resolver-port-and-resolution-dumps.md,
+//! docs/adr/0060-driver-parity-for-nova.md).
 
 use pkg::ast::{Module, Package, PackageInfo, TargetInfo};
 use pkg::diagnostics::Diagnostics;
@@ -173,11 +174,27 @@ fn has_entry(dir: String, name: String, directory: bool) -> bool {
   entries.contains(name) && fs::is_dir(push_path(base, name)) == directory
 }
 
+/// A package whose modules are loaded: the input's, or a dependency.
+pub class LoadedPackage {
+  /// The name its dependents use as a path root; empty for the input's.
+  pub const name: String;
+  /// The directory of its root module, which holds its other modules.
+  pub const root: String;
+  pub const entry: String;
+  /// Indices in `Loader::packages` of its dependencies.
+  pub const dependencies: List<usize>;
+
+  pub fn new(self, name: String, entry: String, dependencies: List<usize>) {
+    self.name = name;
+    self.root = path::parent(entry).unwrap_or("");
+    self.entry = entry;
+    self.dependencies = dependencies;
+  }
+}
+
 pub class Loader {
-  /// The input file, the root module of the program's package.
-  prv const entry: String;
-  /// The directory of the root module, which holds the other modules.
-  prv const root: String;
+  /// The input's package first, then its dependencies.
+  pub const packages: List<LoadedPackage>;
   /// Keeps node ids unique across modules.
   prv const ids: Ids;
   pub const modules: List<Module>;
@@ -186,18 +203,53 @@ pub class Loader {
   /// Texts that replace files on disk, by `path_key`: the documents open in an editor.
   pub var overrides: Map<String, String>;
 
+  /// A loader for the program whose root module is `entry`, without dependencies until
+  /// `add_dependency`.
   pub fn new(self, entry: String) {
-    self.entry = entry;
-    self.root = path::parent(entry).unwrap_or("");
+    self.packages = List::from([new LoadedPackage("", entry, new List())]);
     self.ids = new Ids(0);
     self.modules = new List();
     self.std = new List();
     self.overrides = new Map<String, String>();
   }
 
-  /// Adds a module unless it has lexical errors, which are reported later with the others.
-  /// Returns `false`, after printing why, if the file cannot be read.
-  pub fn load(self, file: String, module_path: List<String>, sources: SourceMap, diagnostics: Diagnostics) -> bool {
+  /// Adds a package the input depends on, directly or not: package `index + 1` for dependency
+  /// `index`. `dependencies` are the indices of its own dependencies among them.
+  pub fn add_dependency(self, name: String, entry: String, dependencies: List<usize>) {
+    const packages: List<usize> = new List();
+
+    for index in dependencies {
+      packages.push(index + 1);
+    }
+
+    self.packages.push(new LoadedPackage(name, entry, packages));
+  }
+
+  /// Sets the direct dependencies of the input's package, by their index among the dependencies.
+  pub fn set_direct_dependencies(self, dependencies: List<usize>) {
+    if let Some(input) = self.packages.first() {
+      input.dependencies.clear();
+
+      for index in dependencies {
+        input.dependencies.push(index + 1);
+      }
+    }
+  }
+
+  /// Loads the root module of every package: the input's first.
+  pub fn load_entries(self, sources: SourceMap, diagnostics: Diagnostics) -> bool {
+    for package in 0..self.packages.len() {
+      if !self.load(self.packages[package].entry, new List(), package, sources, diagnostics) {
+        return false;
+      }
+    }
+
+    true
+  }
+
+  /// Adds a module of `package` unless it has lexical errors, which are reported later with the
+  /// others. Returns `false`, after printing why, if the file cannot be read.
+  pub fn load(self, file: String, module_path: List<String>, package: usize, sources: SourceMap, diagnostics: Diagnostics) -> bool {
     const text = match self.overrides.get(path_key(file)) {
       Some(found) => found,
       None => match fs::read_to_string(file) {
@@ -216,7 +268,7 @@ pub class Loader {
       var module = parser::parse_module_from(id, tokens, self.ids, diagnostics);
 
       module.path = module_path;
-      module.package = 0;
+      module.package = package;
       module.location = Some(file);
       self.modules.push(module);
     }
@@ -233,15 +285,19 @@ pub class Loader {
 
     while index < self.modules.len() {
       const module = self.modules[index];
-      const targets = if self.std.contains(index) { new List<ModuleRef>() } else { modules::module_references(module, new List()) };
+      const package = module.package;
+      const targets = if self.std.contains(index) { new List<ModuleRef>() } else { modules::module_references(module, self.dependency_names(package)) };
 
       for target in targets {
-        // Paths into dependencies cannot name a file: there are none yet.
-        if target.dependency.is_some() {
-          continue;
-        }
-
-        const key = target.path.join("::");
+        const target_package = match target.dependency {
+          None => Some(package),
+          Some(name) => self.dependency(package, name),
+        };
+        const found = match target_package {
+          Some(found) => found,
+          None => continue,
+        };
+        const key = `${found}:` + target.path.join("::");
 
         if attempted.contains_key(key) {
           continue;
@@ -249,8 +305,8 @@ pub class Loader {
 
         attempted.insert(key, true);
 
-        if let Some(file) = self.module_file(target.path) {
-          if !self.load(file, target.path, sources, diagnostics) {
+        if let Some(file) = self.module_file(found, target.path) {
+          if !self.load(file, target.path, found, sources, diagnostics) {
             return false;
           }
         }
@@ -301,12 +357,41 @@ pub class Loader {
     self.modules.len() - 1
   }
 
-  /// The file of the module at `module_path`, if it exists with exactly these names and is not
-  /// the entry file. Unlike the driver, which compares canonical paths, the entry file is
-  /// recognized by its name: a module of the root directory with the entry's name.
-  prv fn module_file(self, module_path: List<String>) -> Option<String> {
+  /// The names of the dependencies of `package`.
+  prv fn dependency_names(self, package: usize) -> List<String> {
+    const names: List<String> = new List();
+
+    if let Some(loaded) = self.packages.get(package) {
+      for index in loaded.dependencies {
+        if let Some(dependency) = self.packages.get(index) {
+          names.push(dependency.name);
+        }
+      }
+    }
+
+    names
+  }
+
+  /// The package that `package` depends on under `name`.
+  prv fn dependency(self, package: usize, name: String) -> Option<usize> {
+    for index in self.packages.get(package)?.dependencies {
+      if let Some(dependency) = self.packages.get(index) {
+        if dependency.name == name {
+          return Some(index);
+        }
+      }
+    }
+
+    None
+  }
+
+  /// The file of the module at `module_path` in `package`, if it exists with exactly these names
+  /// and is not the package's entry file. Unlike the driver, which compares canonical paths, the
+  /// entry file is recognized by its name: a module of the root directory with the entry's name.
+  prv fn module_file(self, package: usize, module_path: List<String>) -> Option<String> {
+    const loaded = self.packages.get(package)?;
     const last = module_path.last()?;
-    var dir = self.root;
+    var dir = loaded.root;
 
     for index in 0..module_path.len() - 1 {
       const name = module_path[index];
@@ -324,7 +409,7 @@ pub class Loader {
       return None;
     }
 
-    const same = module_path.len() == 1 && match path::file_name(self.entry) {
+    const same = module_path.len() == 1 && match path::file_name(loaded.entry) {
       Some(entry_name) => entry_name == name,
       None => false,
     };
@@ -335,8 +420,12 @@ pub class Loader {
   /// The package of the program, compiled for `target`: its modules, the prelude and the
   /// standard library modules.
   pub fn package(self, prelude: usize, target: TargetInfo) -> Package {
-    const info = PackageInfo { name: "", dependencies: new List() };
+    const infos: List<PackageInfo> = new List();
 
-    Package { modules: self.modules, prelude: Some(prelude), std: self.std, library: false, packages: List::from([info]), target: target }
+    for loaded in self.packages {
+      infos.push(PackageInfo { name: loaded.name, dependencies: loaded.dependencies });
+    }
+
+    Package { modules: self.modules, prelude: Some(prelude), std: self.std, library: false, packages: infos, target: target }
   }
 }

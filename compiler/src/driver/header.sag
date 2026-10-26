@@ -1,0 +1,340 @@
+//! The C header of a library (docs/nova.md#library-outputs): the prototypes of its exported
+//! functions and the `@repr(C)` structs they use, with the `///` comments of the source. The port
+//! of `sagitario_driver::header`.
+
+use pkg::ast::{FnDecl, Package, TypeExpr, TypeExprKind};
+use pkg::resolve::{Resolution, TypeRes};
+use pkg::span::SourceMap;
+use pkg::types::{FloatTy, IntTy, Type, TypeKind};
+use pkg::types::typed::TypedModule;
+
+/// A function C can call: its symbol, and its declaration.
+pub struct Export {
+  pub symbol: String;
+  pub decl: FnDecl;
+  pub params: List<Type>;
+  pub ret: Type;
+}
+
+/// The exported functions of the program (`extern "C" fn`), in declaration order.
+pub fn exports(package: Package, resolution: Resolution, typed: TypedModule) -> List<Export> {
+  const found: List<Export> = new List();
+
+  for id in 0..resolution.functions.len() {
+    const decl = match resolution.fn_decl(package, id as u32) {
+      Some(decl) => decl,
+      None => continue,
+    };
+
+    if !decl.extern_c {
+      continue;
+    }
+
+    const sig = match typed.sigs.get(id) {
+      Some(sig) => sig,
+      None => continue,
+    };
+    const symbol = match decl.export {
+      Some(export) => export.symbol,
+      None => decl.name.name,
+    };
+
+    found.push(Export { symbol: symbol, decl: decl, params: sig.params, ret: sig.ret });
+  }
+
+  found
+}
+
+/// Words that cannot name a parameter or a field in C.
+const C_KEYWORDS: String = "auto break case char const continue default do double else enum extern float for goto if inline int long register restrict return short signed sizeof static struct switch typedef union unsigned void volatile while bool true false NULL";
+
+/// A Sagitario name usable in C: keywords get a trailing `_`.
+fn c_name(name: String) -> String {
+  if C_KEYWORDS.split(" ").contains(name) { name + "_" } else { name }
+}
+
+class Header {
+  prv const package: Package;
+  prv const resolution: Resolution;
+  prv const typed: TypedModule;
+  /// The C name of each struct mentioned, unique in the header, by struct id.
+  pub const ids: List<u32>;
+  pub const names: List<String>;
+  /// `@repr(C)` structs in the order they must be defined: a struct after those it holds.
+  pub const defined: List<u32>;
+
+  pub fn new(self, package: Package, resolution: Resolution, typed: TypedModule) {
+    self.package = package;
+    self.resolution = resolution;
+    self.typed = typed;
+    self.ids = new List();
+    self.names = new List();
+    self.defined = new List();
+  }
+
+  pub fn struct_name(self, id: u32) -> String {
+    if let Some(index) = self.ids.index_of(id) {
+      return self.names.get(index).unwrap_or("");
+    }
+
+    const base = match self.resolution.struct_decl(self.package, id) {
+      Some(decl) => c_name(decl.name.name),
+      None => `sag_struct_${id}`,
+    };
+    var name = base;
+    var suffix = 2;
+
+    while self.names.contains(name) {
+      name = `${base}_${suffix}`;
+      suffix += 1;
+    }
+
+    self.ids.push(id);
+    self.names.push(name);
+
+    name
+  }
+
+  /// Visits the structs `ty` needs, defining the `@repr(C)` ones held by value or pointed to.
+  pub fn visit(self, ty: Type) {
+    match ty.kind {
+      TypeKind::Ptr { pointee, .. } => self.visit(pointee),
+      TypeKind::Struct(named) => {
+        const id = named.id;
+
+        self.struct_name(id);
+
+        const repr_c = match self.resolution.struct_decl(self.package, id) {
+          Some(decl) => decl.repr_c,
+          None => false,
+        };
+
+        if !repr_c || self.defined.contains(id) {
+          return;
+        }
+
+        if let Some(def) = self.typed.structs.get(id as usize) {
+          for field in def.fields {
+            self.visit(field.ty);
+          }
+        }
+
+        if !self.defined.contains(id) {
+          self.defined.push(id);
+        }
+      }
+      _ => {}
+    }
+  }
+
+  /// Whether a type written in the source is `c_char`.
+  prv fn is_c_char(self, written: Option<TypeExpr>) -> bool {
+    if let Some(found) = written {
+      if let TypeExprKind::Path(path) = found.kind {
+        if let Some(TypeRes::CType(name)) = self.resolution.type_paths.get(path.id) {
+          return name == "c_char";
+        }
+      }
+    }
+
+    false
+  }
+
+  /// The C spelling of `ty`, written `written` in the source, followed by `name` (a declarator)
+  /// when given. `c_char` is spelled `char`, which C does not take as `int8_t` or `uint8_t`.
+  pub fn declare(self, ty: Type, written: Option<TypeExpr>, name: String) -> String {
+    var base = "void";
+
+    match ty.kind {
+      TypeKind::Int(int_ty) => {
+        base = if self.is_c_char(written) {
+          "char"
+        } else {
+          match int_ty {
+            IntTy::I8 => "int8_t",
+            IntTy::I16 => "int16_t",
+            IntTy::I32 => "int32_t",
+            IntTy::I64 => "int64_t",
+            IntTy::Isize => "intptr_t",
+            IntTy::U8 => "uint8_t",
+            IntTy::U16 => "uint16_t",
+            IntTy::U32 => "uint32_t",
+            IntTy::U64 => "uint64_t",
+            IntTy::Usize => "size_t",
+          }
+        };
+      }
+      TypeKind::Float(FloatTy::F32) => {
+        base = "float";
+      }
+      TypeKind::Float(FloatTy::F64) => {
+        base = "double";
+      }
+      TypeKind::Bool => {
+        base = "bool";
+      }
+      TypeKind::Struct(named) => {
+        base = self.struct_name(named.id);
+      }
+      TypeKind::Ptr { mutable, pointee } => {
+        const inner_written: Option<TypeExpr> = match written {
+          Some(found) => match found.kind {
+            TypeExprKind::Ptr { pointee: inner, .. } => Some(inner),
+            _ => None,
+          },
+          None => None,
+        };
+        const inner = match pointee.kind {
+          TypeKind::CVoid => "void",
+          _ => self.declare(pointee, inner_written, ""),
+        };
+        const pointer = if mutable { inner + " *" } else { "const " + inner + " *" };
+
+        return if name.is_empty() { pointer } else { pointer + name };
+      }
+      _ => {}
+    }
+
+    if name.is_empty() { base } else { base + " " + name }
+  }
+}
+
+/// The `///` comments right above the declaration starting at byte `start` of `text`, skipping
+/// attributes such as `@export`.
+fn doc_comment(text: String, start: usize) -> List<String> {
+  const before = text.substring(0, if start > text.len() { text.len() } else { start });
+  const lines = before.lines();
+  const docs: List<String> = new List();
+
+  // The declaration's own line, up to its start.
+  if !before.ends_with("\n") {
+    lines.pop();
+  }
+
+  while let Some(line) = lines.pop() {
+    const trimmed = line.trim();
+
+    if trimmed.starts_with("@") {
+      continue;
+    }
+
+    if !trimmed.starts_with("///") {
+      break;
+    }
+
+    var doc = trimmed.substring(3, trimmed.len());
+
+    if doc.starts_with(" ") {
+      doc = doc.substring(1, doc.len());
+    }
+
+    docs.push(doc.replace("*/", "* /"));
+  }
+
+  docs.reverse();
+  docs
+}
+
+fn is_valueless(ty: Type) -> bool {
+  match ty.kind {
+    TypeKind::Unit => true,
+    TypeKind::Never => true,
+    _ => false,
+  }
+}
+
+/// The header of the library `name`.
+pub fn generate(name: String, package: Package, resolution: Resolution, typed: TypedModule, sources: SourceMap) -> String {
+  const found = exports(package, resolution, typed);
+  const header = new Header(package, resolution, typed);
+
+  for export in found {
+    for ty in export.params {
+      header.visit(ty);
+    }
+
+    header.visit(export.ret);
+  }
+
+  const guard = new StringBuilder();
+
+  for c in name.to_ascii_uppercase().chars() {
+    guard.append_char(if c.is_ascii_alphanumeric() { c } else { '_' });
+  }
+
+  const out = new StringBuilder();
+
+  out.append(`/* Generated by nova for the library \`${name}\`. Do not edit. */\n#ifndef ${guard.to_string()}_H\n#define ${guard.to_string()}_H\n\n`);
+  out.append("#include <stdbool.h>\n#include <stddef.h>\n#include <stdint.h>\n\n");
+  out.append("#ifdef __cplusplus\nextern \"C\" {\n#endif\n");
+
+  if !header.names.is_empty() {
+    out.append("\n");
+  }
+
+  for struct_name in header.names {
+    out.append(`typedef struct ${struct_name} ${struct_name};\n`);
+  }
+
+  for id in header.defined {
+    const struct_name = header.struct_name(id);
+    const written = resolution.struct_decl(package, id);
+
+    out.append(`\nstruct ${struct_name} {\n`);
+
+    if let Some(def) = typed.structs.get(id as usize) {
+      for index in 0..def.fields.len() {
+        const field = def.fields[index];
+        const field_type: Option<TypeExpr> = match written {
+          Some(decl) => match decl.fields.get(index) {
+            Some(found_field) => Some(found_field.ty),
+            None => None,
+          },
+          None => None,
+        };
+
+        out.append("  " + header.declare(field.ty, field_type, c_name(field.name)) + ";\n");
+      }
+    }
+
+    out.append("};\n");
+  }
+
+  for export in found {
+    const text = match sources.get(export.decl.span.file) {
+      Some(source) => source.text,
+      None => "",
+    };
+    const docs = doc_comment(text, export.decl.span.start as usize);
+    const params: List<String> = new List();
+
+    for index in 0..export.params.len() {
+      const written: Option<TypeExpr> = match export.decl.params.get(index) {
+        Some(param) => Some(param.ty),
+        None => None,
+      };
+      const param_name = match export.decl.params.get(index) {
+        Some(param) => c_name(param.name.name),
+        None => "",
+      };
+
+      params.push(header.declare(export.params[index], written, param_name));
+    }
+
+    const param_text = if params.is_empty() { "void" } else { params.join(", ") };
+    const ret = if is_valueless(export.ret) { "void" } else { header.declare(export.ret, export.decl.return_type, "") };
+
+    out.append("\n");
+
+    if !docs.is_empty() {
+      out.append("/* " + docs.join("\n * ") + " */\n");
+    }
+
+    const separator = if ret.ends_with("*") { "" } else { " " };
+
+    out.append(ret + separator + export.symbol + "(" + param_text + ");\n");
+  }
+
+  out.append(`\n#ifdef __cplusplus\n}\n#endif\n\n#endif /* ${guard.to_string()}_H */\n`);
+  out.to_string()
+}

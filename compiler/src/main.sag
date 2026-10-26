@@ -3,7 +3,7 @@
 
 use pkg::diagnostics::DiagnosticFormat;
 use pkg::driver;
-use pkg::driver::CompileOptions;
+use pkg::driver::{CompileOptions, DependencySpec};
 use pkg::driver::targets;
 use pkg::lsp;
 use std::env;
@@ -129,6 +129,9 @@ fn parse_compile_options(args: List<String>, mode: Mode) -> Result<CompileOption
       options.cc = Some(flag_value(flag, inline, args, index)?);
     } else if flag == "--target" {
       options.target = Some(flag_value(flag, inline, args, index)?);
+    } else if flag == "--output" || flag == "--out-dir" || flag == "--library" || flag == "--name" || flag.starts_with("--link-") || flag.starts_with("--dependency") || flag == "--uses" || flag == "--static" || flag == "--dynamic" {
+      // Hidden: how Nova passes a package to the compiler (docs/adr/0060-driver-parity-for-nova.md).
+      package_option(options, mode, flag, inline, args, index)?;
     } else if flag == "--dump" {
       // Hidden: for the differential tests of the self-hosted compiler.
       if mode != Mode::Check {
@@ -180,7 +183,130 @@ fn parse_compile_options(args: List<String>, mode: Mode) -> Result<CompileOption
     None => return Err("missing input file"),
   };
 
+  // Indices of dependencies must name one that `--dependency` gave.
+  const count = options.dependencies.len();
+  const used: List<usize> = new List();
+
+  for found in options.direct_dependencies {
+    used.push(found);
+  }
+
+  for dependency in options.dependencies {
+    for found in dependency.dependencies {
+      used.push(found);
+    }
+  }
+
+  for found in used {
+    if found >= count {
+      return Err(`the dependency ${found} is used, but \`--dependency\` gave ${count}`);
+    }
+  }
+
   Ok(options)
+}
+
+/// A list of indices: `0,2`, or nothing.
+fn indices(text: String, flag: String) -> Result<List<usize>, String> {
+  const found: List<usize> = new List();
+
+  if text.is_empty() {
+    return Ok(found);
+  }
+
+  for part in text.split(",") {
+    match part.trim().parse_usize() {
+      Ok(index) => found.push(index),
+      Err(_) => return Err(`\`${flag}\` takes indices of dependencies, such as \`0,2\`; found \`${part}\``),
+    }
+  }
+
+  Ok(found)
+}
+
+/// `name=value`, split at the first `=`.
+fn assignment(text: String, flag: String) -> Result<List<String>, String> {
+  match text.find("=") {
+    Some(equals) => Ok(List::from([text.substring(0, equals), text.substring(equals + 1, text.len())])),
+    None => Err(`\`${flag}\` takes \`name=value\`; found \`${text}\``),
+  }
+}
+
+/// The options Nova passes:
+/// - `--library`, `--name <name>`: the input is the root of the library `name`;
+/// - `--output <file>`: where `build` and `run` write the executable;
+/// - `--out-dir <dir>`, `--static`, `--dynamic`: where `build --library` writes which libraries
+///   (both without `--static` or `--dynamic`);
+/// - `--dependency <name>=<entry>`: the next dependency, numbered from 0;
+/// - `--dependency-uses <index>=<indices>`: the dependencies of a dependency;
+/// - `--uses <indices>`: the input's own dependencies;
+/// - `--link-lib <name>`, `--link-search <dir>`, `--link-source <file>`: what `[link]` adds.
+fn package_option(options: CompileOptions, mode: Mode, flag: String, inline: Option<String>, args: List<String>, index: Position) -> Result<(), String> {
+  if flag == "--library" {
+    options.library = true;
+    return Ok(());
+  }
+
+  if flag == "--static" || flag == "--dynamic" {
+    require_codegen(mode, flag)?;
+
+    // The first of them chooses; the next adds.
+    if !options.picked_outputs {
+      options.static_lib = false;
+      options.dynamic_lib = false;
+      options.picked_outputs = true;
+    }
+
+    if flag == "--static" {
+      options.static_lib = true;
+    } else {
+      options.dynamic_lib = true;
+    }
+
+    return Ok(());
+  }
+
+  const value = flag_value(flag, inline, args, index)?;
+
+  if flag == "--output" {
+    require_codegen(mode, flag)?;
+    options.output = Some(value);
+  } else if flag == "--out-dir" {
+    require_codegen(mode, flag)?;
+    options.out_dir = Some(value);
+  } else if flag == "--name" {
+    options.name = value;
+  } else if flag == "--dependency" {
+    const parts = assignment(value, flag)?;
+
+    options.dependencies.push(DependencySpec { name: parts[0], entry: parts[1], dependencies: new List() });
+  } else if flag == "--dependency-uses" {
+    const parts = assignment(value, flag)?;
+    const target = match parts[0].parse_usize() {
+      Ok(found) => found,
+      Err(_) => return Err(`\`${flag}\` takes the index of a dependency before \`=\`; found \`${parts[0]}\``),
+    };
+    const uses = indices(parts[1], flag)?;
+
+    match options.dependencies.get(target) {
+      Some(found) => {
+        options.dependencies[target] = DependencySpec { name: found.name, entry: found.entry, dependencies: uses };
+      }
+      None => return Err(`\`${flag}\` names the dependency ${target}, which \`--dependency\` has not given`),
+    }
+  } else if flag == "--uses" {
+    options.direct_dependencies = indices(value, flag)?;
+  } else if flag == "--link-lib" {
+    options.link.libraries.push(value);
+  } else if flag == "--link-search" {
+    options.link.search_paths.push(value);
+  } else if flag == "--link-source" {
+    options.link.sources.push(value);
+  } else {
+    return Err(`unknown option \`${flag}\``);
+  }
+
+  Ok(())
 }
 
 fn require_codegen(mode: Mode, flag: String) -> Result<(), String> {
