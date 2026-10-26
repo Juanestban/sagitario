@@ -5,7 +5,7 @@
 
 use pkg::ast::{Item, Module};
 use pkg::lsp::analysis;
-use pkg::lsp::analysis::{Analysis, Document, Entry};
+use pkg::lsp::analysis::{Analysis, Document};
 use pkg::lsp::completion;
 use pkg::lsp::json;
 use pkg::lsp::json::{Json, member};
@@ -167,7 +167,7 @@ class Server {
 
     // A file the program of its directory does not reach is analysed alone.
     if !result.contains(document.path) && path_key(entry.path) != path_key(document.path) {
-      entry = Entry { path: document.path, library: false };
+      entry = analysis::alone(document.path);
       result = analysis::analyze(entry, self.documents, internal);
     }
 

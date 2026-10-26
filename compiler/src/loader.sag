@@ -118,12 +118,13 @@ fn range_template() -> String {
   lines.join("\n")
 }
 
-/// The prelude's source: `prelude.sag` followed by the range functions.
-fn prelude_source() -> String {
+/// The prelude's source: `prelude.sag` (or the text given in its place) followed by the range
+/// functions.
+fn prelude_source(prelude: String) -> String {
   const source = new StringBuilder();
   const template = range_template();
 
-  source.append(PRELUDE);
+  source.append(prelude);
 
   for ty in INT_TYPES.split(" ") {
     source.append(template.replace("TYPE", ty));
@@ -202,6 +203,9 @@ pub class Loader {
   pub const std: List<usize>;
   /// Texts that replace files on disk, by `path_key`: the documents open in an editor.
   pub var overrides: Map<String, String>;
+  /// Texts that replace the embedded standard library, by module: `prelude`, `std` (the file of
+  /// `std` itself) or the name of a module of `std`, for its sources open in an editor.
+  pub var std_overrides: Map<String, String>;
 
   /// A loader for the program whose root module is `entry`, without dependencies until
   /// `add_dependency`.
@@ -211,6 +215,7 @@ pub class Loader {
     self.modules = new List();
     self.std = new List();
     self.overrides = new Map<String, String>();
+    self.std_overrides = new Map<String, String>();
   }
 
   /// Adds a package the input depends on, directly or not: package `index + 1` for dependency
@@ -320,7 +325,7 @@ pub class Loader {
         attempted_std.insert(name, true);
 
         if let Some(text) = std_source(name) {
-          self.load_std(name, text, sources, diagnostics);
+          self.load_std(name, self.std_overrides.get(name).unwrap_or(text), sources, diagnostics);
         }
       }
 
@@ -332,14 +337,14 @@ pub class Loader {
 
   /// Adds the prelude module, which every program sees, and returns its index.
   pub fn load_prelude(self, sources: SourceMap, diagnostics: Diagnostics) -> usize {
-    self.load_embedded("<prelude>", prelude_source(), List::from(["std", "prelude"]), sources, diagnostics)
+    self.load_embedded("<prelude>", prelude_source(self.std_overrides.get("prelude").unwrap_or(PRELUDE)), List::from(["std", "prelude"]), sources, diagnostics)
   }
 
   /// Adds the standard library module `std::name`. The first one comes with the file of `std`
   /// itself.
   prv fn load_std(self, name: String, text: String, sources: SourceMap, diagnostics: Diagnostics) {
     if self.std.is_empty() {
-      self.std.push(self.load_embedded("<std>", STD_ROOT, List::from(["std"]), sources, diagnostics));
+      self.std.push(self.load_embedded("<std>", self.std_overrides.get("std").unwrap_or(STD_ROOT), List::from(["std"]), sources, diagnostics));
     }
 
     self.std.push(self.load_embedded(`<std::${name}>`, text, List::from(["std", name]), sources, diagnostics));

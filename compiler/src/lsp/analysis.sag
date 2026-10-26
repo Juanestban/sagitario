@@ -171,11 +171,62 @@ pub struct Entry {
   pub path: String;
   /// The root of a library (`src/lib.sag`), which needs no `main`.
   pub library: bool;
+  /// For a source of the standard library, the module it is (`prelude`, `std` or the name of a
+  /// module of `std`); the entry is then a program written by the server that uses it.
+  pub std_module: Option<String>;
 }
 
-/// The program of a file: the package whose `Nova.toml` is in one of its directories, the
-/// `main.sag` next to it, or else the file alone.
+/// The program of a file alone: a library, since a file without `main` may be a module, and
+/// `sag run` reports a missing `main` where it matters.
+pub fn alone(file: String) -> Entry {
+  Entry { path: file, library: true, std_module: None }
+}
+
+/// The module of the standard library a file is, if it is one of its sources: `prelude.sag`
+/// next to a directory `std`, or `std/<name>.sag` next to a `prelude.sag`.
+pub fn std_module_of(file: String) -> Option<String> {
+  const name = path::file_name(file)?;
+  const dir = path::parent(file)?;
+
+  if name == "prelude.sag" {
+    return if fs::is_dir(push_path(dir, "std")) { Some("prelude") } else { None };
+  }
+
+  if path::file_name(dir)? != "std" || !fs::is_file(push_path(path::parent(dir)?, "prelude.sag")) {
+    return None;
+  }
+
+  const stem = path::stem(file)?;
+
+  if stem == "std" || std_module_names().contains(stem) { Some(stem) } else { None }
+}
+
+/// The modules of the standard library written in Sagitario.
+fn std_module_names() -> List<String> {
+  List::from(["env", "fs", "io", "path", "process", "sync", "thread", "time"])
+}
+
+/// The program the server writes to check a source of the standard library: one that uses it.
+fn std_check_program(module: String) -> String {
+  if module == "prelude" {
+    "pub fn main() {}\n"
+  } else if module == "std" {
+    "use std::env;\n\npub fn main() {}\n"
+  } else {
+    `use std::${module};\n\npub fn main() {}\n`
+  }
+}
+
+/// The program of a file: the standard library for one of its sources, the package whose
+/// `Nova.toml` is in one of its directories, the `main.sag` next to it, or else the file alone.
 pub fn find_entry(file: String) -> Entry {
+  if let Some(module) = std_module_of(file) {
+    // Not a file on disk: the loader reads it from its overrides.
+    const dir = path::parent(file).unwrap_or("");
+
+    return Entry { path: push_path(dir, "<std check>.sag"), library: false, std_module: Some(module) };
+  }
+
   var dir = path::parent(file);
 
   while let Some(current) = dir {
@@ -188,13 +239,13 @@ pub fn find_entry(file: String) -> Entry {
       const main = push_path(src, "main.sag");
 
       if fs::is_file(main) {
-        return Entry { path: main, library: false };
+        return Entry { path: main, library: false, std_module: None };
       }
 
       const lib = push_path(src, "lib.sag");
 
       if fs::is_file(lib) {
-        return Entry { path: lib, library: true };
+        return Entry { path: lib, library: true, std_module: None };
       }
 
       break;
@@ -216,11 +267,11 @@ pub fn find_entry(file: String) -> Entry {
     const main = push_path(parent, "main.sag");
 
     if path::file_name(file).unwrap_or("") != "main.sag" && fs::is_file(main) {
-      return Entry { path: main, library: false };
+      return Entry { path: main, library: false, std_module: None };
     }
   }
 
-  Entry { path: file, library: false }
+  alone(file)
 }
 
 // ---- Analysis ---------------------------------------------------------------------------------
@@ -238,6 +289,9 @@ pub class Analysis {
   prv const lines: Map<u32, LineIndex>;
   /// The id of each function in the resolution, by the node id of its declaration.
   prv var functions: Option<Map<u32, u32>>;
+  /// The open documents that are sources of the standard library, by the name the compiler
+  /// gives the embedded source they replace (`<prelude>`, `<std>`, `<std::io>`).
+  pub const embedded: Map<String, String>;
 
   pub fn new(self, entry: Entry, sources: SourceMap) {
     self.entry = entry;
@@ -248,6 +302,7 @@ pub class Analysis {
     self.diagnostics = new List();
     self.lines = new Map<u32, LineIndex>();
     self.functions = None;
+    self.embedded = new Map<String, String>();
   }
 
   /// The function declared by the `FnDecl` with node id `decl`.
@@ -270,11 +325,16 @@ pub class Analysis {
     ids.get(decl)
   }
 
-  /// The file on disk of a source, or `None` for the embedded modules (`<prelude>`, `<std::fs>`).
+  /// The file on disk of a source, or `None` for the embedded modules (`<prelude>`, `<std::fs>`)
+  /// that no open document replaces, and for the program written to check one.
   pub fn file_path(self, file: u32) -> Option<String> {
     const source = self.sources.get(file)?;
 
-    if source.path.starts_with("<") { None } else { Some(source.path) }
+    if self.entry.std_module.is_some() && path_key(source.path) == path_key(self.entry.path) {
+      return None;
+    }
+
+    if source.path.starts_with("<") { self.embedded.get(source.path) } else { Some(source.path) }
   }
 
   pub fn line_index(self, file: u32) -> Option<LineIndex> {
@@ -312,7 +372,7 @@ pub class Analysis {
     const key = path_key(file);
 
     for index in 0..package.modules.len() {
-      if let Some(location) = package.modules[index].location {
+      if let Some(location) = self.file_path(package.modules[index].file) {
         if path_key(location) == key {
           return Some(index);
         }
@@ -327,8 +387,8 @@ pub class Analysis {
     const key = path_key(file);
 
     for index in 0..self.sources.len() {
-      if let Some(source) = self.sources.get(index as u32) {
-        if path_key(source.path) == key {
+      if let Some(location) = self.file_path(index as u32) {
+        if path_key(location) == key {
           return Some(index as u32);
         }
       }
@@ -362,6 +422,16 @@ pub fn analyze(entry: Entry, documents: Map<String, Document>, internal: List<St
 
   for document in documents.values() {
     loader.overrides.insert(path_key(document.path), document.text);
+
+    // Sources of the standard library replace the embedded ones.
+    if let Some(module) = std_module_of(document.path) {
+      loader.std_overrides.insert(module, document.text);
+      result.embedded.insert(embedded_name(module), document.path);
+    }
+  }
+
+  if let Some(module) = entry.std_module {
+    loader.overrides.insert(path_key(entry.path), std_check_program(module));
   }
 
   if !loader.load_entries(sources, diagnostics) || !loader.load_references(sources, diagnostics) {
@@ -402,6 +472,17 @@ pub fn analyze(entry: Entry, documents: Map<String, Document>, internal: List<St
 
   result.diagnostics = diagnostics.take();
   result
+}
+
+/// The name the compiler gives the embedded source of a module of the standard library.
+fn embedded_name(module: String) -> String {
+  if module == "prelude" {
+    "<prelude>"
+  } else if module == "std" {
+    "<std>"
+  } else {
+    `<std::${module}>`
+  }
 }
 
 /// A diagnostic in LSP's terms, with its notes and help after the message.
