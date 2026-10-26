@@ -56,7 +56,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0045](0045-threads-and-send.md) | Threads and `Send` | Accepted (refined by 0046, 0047, 0048) |
 | [0046](0046-mutex-and-atomics.md) | `std::sync`: `Mutex` and atomics | Accepted |
 | [0047](0047-channels-and-thread-utilities.md) | Channels and thread utilities | Accepted |
-| [0048](0048-async-await.md) | `async`/`await`, for phase F6 | Accepted (not implemented) |
+| [0048](0048-async-await.md) | `async`/`await`, for phase F6 | Accepted (not implemented; moved to F7 by 0057) |
 | [0049](0049-self-hosting-plan-and-language-prerequisites.md) | The self-hosting plan, module-level constants, `include_str`, `if let` and `while let` | Accepted (refined by 0050) |
 | [0050](0050-lexer-port-and-token-dumps.md) | The lexer port, token dumps and `char::from_u32` | Accepted (refined by 0051) |
 | [0051](0051-parser-port-and-ast-dumps.md) | The parser port and AST dumps | Accepted (refined by 0052) |
@@ -65,6 +65,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0054](0054-lowering-and-c-generation-port.md) | The lowering and C generation port | Accepted (refined by 0055) |
 | [0055](0055-driver-and-cli-port.md) | The driver and CLI port | Accepted (refined by 0056) |
 | [0056](0056-bootstrap-and-acceptance.md) | The bootstrap and the acceptance of F5 | Accepted |
+| [0057](0057-editor-tooling-and-independence-from-rust.md) | Editor tooling and independence from Rust (phase F6) | Accepted |
 
 ## Template
 

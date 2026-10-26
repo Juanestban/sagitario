@@ -107,6 +107,12 @@ with `sagc` and checks that both generate the same C for the compiler
 ([ADR-0056](adr/0056-bootstrap-and-acceptance.md)). The test also checks the modules of `compiler/` generated from the Rust compiler;
 `SAG_BLESS=1 cargo test --test selfhost` rewrites them.
 
+## The editor
+
+`crates/sagitario_cli/tests/editor.rs` checks that the grammar of the VS Code extension
+(`editors/vscode/`) has every keyword of `docs/spec/01-lexical.md`
+([ADR-0057](adr/0057-editor-tooling-and-independence-from-rust.md)).
+
 ## CI
 
 GitHub Actions matrix on Windows, Linux and macOS running `cargo fmt --check`,
@@ -114,4 +120,5 @@ GitHub Actions matrix on Windows, Linux and macOS running `cargo fmt --check`,
 clang, plus a Linux job with `SAG_CC=gcc` and a Windows job with `SAG_CC=cl` (without
 sanitizers). The Ubuntu job requires the Android NDK (`SAG_REQUIRE_NDK=1`). The `bootstrap` job
 builds `sagc` (stage 1), runs the suites with it and checks the fixed point, on Windows with
-official clang, `cl` and MinGW gcc, on Ubuntu with clang and gcc, and on macOS with clang.
+official clang, `cl` and MinGW gcc, on Ubuntu with clang and gcc, and on macOS with clang. The
+`vscode` job packages the VS Code extension.

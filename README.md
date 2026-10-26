@@ -44,6 +44,11 @@ nova new hello && cd hello
 nova run
 ```
 
+## Editor support
+
+The VS Code extension in [`editors/vscode/`](editors/vscode/README.md) highlights `.sag` files,
+gives them an icon and adds snippets.
+
 ## Documentation
 
 - [Language specification](docs/spec/README.md)

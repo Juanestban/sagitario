@@ -38,6 +38,9 @@ SAG_CC=cl SAG_TEST_SANITIZE=0 cargo test --workspace   # with MSVC, in a Develop
 nova new demo                   # a package (docs/nova.md); then, inside it:
 nova run -- a b                 # build target/debug/demo and run it
 nova check                      # front end only
+
+cd editors/vscode && npm ci && npm run package   # the VS Code extension: sagitario.vsix
+code --install-extension editors/vscode/sagitario.vsix
 ```
 
 Formatting is defined by `rustfmt.toml` and lint policy by `Cargo.toml` and `clippy.toml`.

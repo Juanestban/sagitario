@@ -155,18 +155,30 @@ Increments:
 and macOS with clang, gcc and MinGW, and `sagc` built by stage 1 (stage 2) generates the same C
 for the compiler as stage 1.
 
-**Status:** done once the `bootstrap` CI job passes on the three systems; the fixed point holds
-on Windows with official clang, gcc (MinGW) and `cl`.
+**Status:** done. The `bootstrap` CI job builds `sagc` (stage 1), runs the suites with it and
+reaches the fixed point on Windows, Linux and macOS
+([ADR-0056](adr/0056-bootstrap-and-acceptance.md)).
+
+## F6: Editor tooling and independence from Rust (post-MVP)
+
+Write Sagitario comfortably, and develop it in itself
+([ADR-0057](adr/0057-editor-tooling-and-independence-from-rust.md)).
+
+Increments:
+
+1. The VS Code extension (`editors/vscode/`): highlighting, the file icon, the language
+   configuration and snippets.
+2. A language server written in Sagitario (`sag lsp`), with the VS Code client: diagnostics,
+   hover, go to definition, completion and symbols.
+3. The pivot without Rust: the generated C of the compiler as a seed, Nova and the test harness
+   in Sagitario, `cargo` out of CI, and `sagc` renamed to `sag` with `crates/` retired.
 
 ## Later phases (post-MVP)
 
-- **F6 `async`/`await`:** stackless tasks (`Task<T>`) on a single-threaded executor per thread,
+- **F7 `async`/`await`:** stackless tasks (`Task<T>`) on a single-threaded executor per thread,
   as designed in [ADR-0048](adr/0048-async-await.md).
 
 ## Deferred decisions
-
-Revisit after F5: whether the Rust compiler retires, for example by bootstrapping from
-committed generated C, and with it the rename of `sagc` to `sag` (ADR-0049, Q212 and Q214).
 
 Revisit after the MVP: shared mutable collections between threads (ADR-0045), bounded
 channels, `try_receive` and timeouts (ADR-0047), `protected` visibility, `weak` captures in closures, operator

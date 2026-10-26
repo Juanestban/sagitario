@@ -149,6 +149,21 @@ jobs:
       - name: Reach the fixed point
         run: cargo test -p sagitario_cli --test selfhost bootstrap_reaches_the_fixed_point
 
+  # The VS Code extension packages (docs/adr/0057-editor-tooling-and-independence-from-rust.md).
+  vscode:
+    name: VS Code extension
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: editors/vscode
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm run package
+
   msrv:
     name: minimum supported Rust version
     runs-on: ubuntu-latest
