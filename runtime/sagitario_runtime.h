@@ -552,6 +552,8 @@ int32_t sag_io_flush(void);
 sag_string sag_io_read_line(int32_t *status);
 sag_string sag_io_read_all(int32_t *status);
 sag_string sag_io_read_exact(size_t count, int32_t *status);
+/* Whether stdin (0), stdout (1) or stderr (2) is a terminal. */
+bool sag_io_is_terminal(int32_t stream);
 int32_t sag_io_error_kind(int32_t code);
 sag_string sag_io_error_message(int32_t code);
 /* Flushes output and ends the program without running pending releases. */

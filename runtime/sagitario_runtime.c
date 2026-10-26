@@ -1425,6 +1425,29 @@ sag_string sag_io_read_all(int32_t *status) {
   return sag_io_finish_read(&sb, status);
 }
 
+/* A console on Windows, which has a console mode: the CRT's `_isatty` also says yes for `NUL` and
+ * other character devices. `isatty` is from <unistd.h> elsewhere, which is not strict C11. */
+#ifdef _WIN32
+extern void *SAG_WINAPI GetStdHandle(unsigned long std_handle);
+extern int SAG_WINAPI GetConsoleMode(void *console, unsigned long *mode);
+#else
+extern int isatty(int fd);
+#endif
+
+bool sag_io_is_terminal(int32_t stream) {
+  if (stream < 0 || stream > 2) {
+    return false;
+  }
+#ifdef _WIN32
+  /* STD_INPUT_HANDLE, STD_OUTPUT_HANDLE and STD_ERROR_HANDLE are -10, -11 and -12. */
+  unsigned long mode = 0;
+  void *handle = GetStdHandle((unsigned long)(-10 - stream));
+  return handle != NULL && handle != (void *)(intptr_t)-1 && GetConsoleMode(handle, &mode) != 0;
+#else
+  return isatty((int)stream) != 0;
+#endif
+}
+
 /* Exactly `count` bytes of stdin; the bytes read are lost when the input ends first. */
 sag_string sag_io_read_exact(size_t count, int32_t *status) {
   sag_sb sb;

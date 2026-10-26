@@ -7,6 +7,7 @@ extern "C" {
   fn sag_io_read_line(status: *mut i32) -> String;
   fn sag_io_read_all(status: *mut i32) -> String;
   fn sag_io_read_exact(count: usize, status: *mut i32) -> String;
+  fn sag_io_is_terminal(stream: i32) -> bool;
 }
 
 /// What kind of failure an I/O error is.
@@ -19,6 +20,25 @@ pub enum ErrorKind {
   InvalidData,
   UnexpectedEof,
   Other,
+}
+
+/// A standard stream of the program.
+pub enum Stream {
+  Stdin,
+  Stdout,
+  Stderr,
+}
+
+/// Whether `stream` is connected to a terminal rather than to a file or a pipe, such as to color
+/// what is written only for a person to read.
+pub fn is_terminal(stream: Stream) -> bool {
+  const fd = match stream {
+    Stream::Stdin => 0,
+    Stream::Stdout => 1,
+    Stream::Stderr => 2,
+  };
+
+  unsafe { sag_io_is_terminal(fd) }
 }
 
 /// The error of an input or output operation: its kind and the operating system's message.
