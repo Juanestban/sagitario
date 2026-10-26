@@ -1,0 +1,626 @@
+//! The subset of TOML that `Nova.toml` uses (docs/nova.md#novatoml): tables, `key = value` with
+//! strings, integers, booleans and arrays, and comments. Other TOML features are reported as
+//! unsupported, never guessed. The port of `sagitario_nova::toml`.
+
+use pkg::diagnostics::Diagnostic;
+use pkg::nova::codes;
+use pkg::span::Span;
+
+/// A parsed file: the keys before any table header form the table named `""`, which comes first.
+pub struct Document {
+  pub file: u32;
+  pub tables: List<Table>;
+}
+
+pub struct Table {
+  pub name: String;
+  /// The header `[name]`; empty for the keys before any header.
+  pub span: Span;
+  pub entries: List<Entry>;
+}
+
+pub struct Entry {
+  pub key: String;
+  pub span: Span;
+  pub value: Value;
+}
+
+pub class Value {
+  pub const kind: ValueKind;
+  pub const span: Span;
+
+  pub fn new(self, kind: ValueKind, span: Span) {
+    self.kind = kind;
+    self.span = span;
+  }
+}
+
+pub enum ValueKind {
+  Str(String),
+  Integer(i64),
+  Boolean(bool),
+  Array(List<Value>),
+  /// `{ key = value, ... }`, on one line.
+  Table(List<Entry>),
+}
+
+/// The kind of value, for messages: "a string".
+pub fn describe(kind: ValueKind) -> String {
+  match kind {
+    ValueKind::Str(_) => "a string",
+    ValueKind::Integer(_) => "an integer",
+    ValueKind::Boolean(_) => "a boolean",
+    ValueKind::Array(_) => "an array",
+    ValueKind::Table(_) => "an inline table",
+  }
+}
+
+/// The entry of `entries` with the key `key`.
+pub fn find(entries: List<Entry>, key: String) -> Option<Entry> {
+  for entry in entries {
+    if entry.key == key {
+      return Some(entry);
+    }
+  }
+
+  None
+}
+
+/// Parses `text`, stopping at the first error.
+pub fn parse(file: u32, text: String) -> Result<Document, Diagnostic> {
+  const parser = new Parser(file, text);
+  const tables = List::from([Table { name: "", span: Span::new(file, 0, 0), entries: new List() }]);
+
+  while true {
+    parser.skip_blank(true);
+
+    const c = match parser.peek() {
+      Some(found) => found,
+      None => break,
+    };
+
+    if c == '[' {
+      const table = parser.header()?;
+
+      for previous in tables {
+        if previous.name == table.name {
+          return Err(Diagnostic::error(codes::DUPLICATE, table.span, `the table \`[${table.name}]\` is defined twice`).with_label(previous.span, "first defined here"));
+        }
+      }
+
+      tables.push(table);
+    } else {
+      const entry = parser.entry()?;
+      const table = match tables.last() {
+        Some(found) => found,
+        None => break,
+      };
+
+      if let Some(previous) = find(table.entries, entry.key) {
+        return Err(Diagnostic::error(codes::DUPLICATE, entry.span, `the key \`${entry.key}\` is defined twice`).with_label(previous.span, "first defined here"));
+      }
+
+      table.entries.push(entry);
+    }
+  }
+
+  Ok(Document { file: file, tables: tables })
+}
+
+/// Reads a text by its characters, with the byte offset of each for spans.
+class Parser {
+  prv const file: u32;
+  prv const chars: List<char>;
+  /// The byte offset of each character, and the length of the text last.
+  prv const offsets: List<u32>;
+  prv var position: usize;
+
+  pub fn new(self, file: u32, text: String) {
+    self.file = file;
+    self.chars = text.chars().collect();
+    self.offsets = new List();
+    self.position = 0;
+
+    var offset = 0u32;
+
+    for c in self.chars {
+      self.offsets.push(offset);
+      offset += `${c}`.len() as u32;
+    }
+
+    self.offsets.push(offset);
+  }
+
+  pub fn peek(self) -> Option<char> {
+    self.chars.get(self.position)
+  }
+
+  prv fn peek_at(self, offset: usize) -> Option<char> {
+    self.chars.get(self.position + offset)
+  }
+
+  /// Whether the next character is `c`.
+  prv fn next_is(self, c: char) -> bool {
+    match self.peek() {
+      Some(found) => found == c,
+      None => false,
+    }
+  }
+
+  prv fn next_is_at(self, offset: usize, c: char) -> bool {
+    match self.peek_at(offset) {
+      Some(found) => found == c,
+      None => false,
+    }
+  }
+
+  prv fn bump(self) -> Option<char> {
+    const c = self.peek()?;
+
+    self.position += 1;
+    Some(c)
+  }
+
+  prv fn offset(self, position: usize) -> u32 {
+    self.offsets.get(position).unwrap_or(self.offsets.last().unwrap_or(0))
+  }
+
+  prv fn span(self, start: usize) -> Span {
+    Span::new(self.file, self.offset(start), self.offset(self.position))
+  }
+
+  /// A span of one character (or the end of the file) at the current position.
+  prv fn here(self) -> Span {
+    const end = if self.peek().is_some() { self.position + 1 } else { self.position };
+
+    Span::new(self.file, self.offset(self.position), self.offset(end))
+  }
+
+  /// The text between two positions.
+  prv fn text(self, start: usize, end: usize) -> String {
+    const out = new StringBuilder();
+
+    for index in start..end {
+      if let Some(c) = self.chars.get(index) {
+        out.append_char(c);
+      }
+    }
+
+    out.to_string()
+  }
+
+  prv fn error(self, span: Span, message: String) -> Diagnostic {
+    Diagnostic::error(codes::SYNTAX, span, message)
+  }
+
+  prv fn unsupported(self, span: Span, what: String) -> Diagnostic {
+    self.error(span, what + " are not supported in `Nova.toml`").with_note("`Nova.toml` uses a subset of TOML: tables, `key = value` with strings, integers, booleans and arrays, and comments")
+  }
+
+  /// Skips spaces, tabs and comments, and line breaks too with `newlines`.
+  pub fn skip_blank(self, newlines: bool) {
+    while let Some(c) = self.peek() {
+      if c == ' ' || c == '\t' || (newlines && (c == '\r' || c == '\n')) {
+        self.bump();
+      } else if c == '#' {
+        while self.peek().is_some() && !self.next_is('\n') {
+          self.bump();
+        }
+      } else {
+        return;
+      }
+    }
+  }
+
+  /// The end of a line after a header or an entry, with an optional comment.
+  prv fn line_end(self) -> Result<(), Diagnostic> {
+    self.skip_blank(false);
+
+    if self.peek().is_none() || self.next_is('\n') || (self.next_is('\r') && self.next_is_at(1, '\n')) {
+      return Ok(());
+    }
+
+    Err(self.error(self.here(), "expected the end of the line"))
+  }
+
+  /// `[name]`
+  pub fn header(self) -> Result<Table, Diagnostic> {
+    const start = self.position;
+
+    self.bump();
+
+    if self.next_is('[') {
+      self.bump();
+
+      return Err(self.unsupported(self.span(start), "arrays of tables (`[[name]]`)"));
+    }
+
+    self.skip_blank(false);
+
+    const name = self.key()?;
+
+    self.skip_blank(false);
+
+    if self.next_is('.') {
+      return Err(self.unsupported(self.here(), "dotted table names"));
+    }
+
+    if !self.next_is(']') {
+      return Err(self.error(self.here(), "expected `]` closing the table header"));
+    }
+
+    self.bump();
+
+    const span = self.span(start);
+
+    self.line_end()?;
+
+    Ok(Table { name: name, span: span, entries: new List() })
+  }
+
+  /// A bare key: ASCII letters, digits, `_` and `-`.
+  prv fn key(self) -> Result<String, Diagnostic> {
+    const start = self.position;
+
+    while let Some(c) = self.peek() {
+      if !(c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+        break;
+      }
+
+      self.bump();
+    }
+
+    if self.position > start {
+      return Ok(self.text(start, self.position));
+    }
+
+    if self.next_is('"') || self.next_is('\'') {
+      return Err(self.unsupported(self.here(), "quoted keys"));
+    }
+
+    Err(self.error(self.here(), "expected a key"))
+  }
+
+  /// `key = value`
+  pub fn entry(self) -> Result<Entry, Diagnostic> {
+    const start = self.position;
+    const key = self.key()?;
+    const span = self.span(start);
+
+    self.skip_blank(false);
+
+    if self.next_is('.') {
+      return Err(self.unsupported(self.here(), "dotted keys"));
+    }
+
+    if !self.next_is('=') {
+      return Err(self.error(self.here(), `expected \`=\` after the key \`${key}\``));
+    }
+
+    self.bump();
+    self.skip_blank(false);
+
+    const value = self.value()?;
+
+    self.line_end()?;
+
+    Ok(Entry { key: key, span: span, value: value })
+  }
+
+  prv fn value(self) -> Result<Value, Diagnostic> {
+    const start = self.position;
+    var kind = ValueKind::Boolean(false);
+
+    if self.next_is('"') {
+      kind = ValueKind::Str(self.basic_string()?);
+    } else if self.next_is('\'') {
+      kind = ValueKind::Str(self.literal_string()?);
+    } else if self.next_is('[') {
+      kind = ValueKind::Array(self.array()?);
+    } else if self.next_is('{') {
+      kind = ValueKind::Table(self.inline_table()?);
+    } else {
+      const word_start = match self.peek() {
+        Some(c) => c.is_ascii_alphanumeric() || c == '+' || c == '-',
+        None => false,
+      };
+
+      if !word_start {
+        return Err(self.error(self.here(), "expected a value: a string, an integer, `true`, `false` or an array"));
+      }
+
+      kind = self.word()?;
+    }
+
+    Ok(new Value(kind, self.span(start)))
+  }
+
+  /// `"text"`, with escapes.
+  prv fn basic_string(self) -> Result<String, Diagnostic> {
+    const start = self.position;
+
+    self.bump();
+
+    if self.next_is('"') && self.next_is_at(1, '"') {
+      self.bump();
+      self.bump();
+
+      return Err(self.unsupported(self.span(start), "multi-line strings"));
+    }
+
+    const text = new StringBuilder();
+
+    while true {
+      const c = match self.peek() {
+        Some(found) => found,
+        None => return Err(self.error(self.span(start), "unterminated string")),
+      };
+
+      if c == '\n' || c == '\r' {
+        return Err(self.error(self.span(start), "unterminated string"));
+      }
+
+      if c == '"' {
+        self.bump();
+
+        return Ok(text.to_string());
+      }
+
+      if c != '\\' {
+        self.bump();
+        text.append_char(c);
+        continue;
+      }
+
+      const escape = self.position;
+
+      self.bump();
+
+      // No escape letter is `\0`, so the end of the text is an invalid escape too.
+      const kind = self.bump().unwrap_or('\0');
+      var decoded = ' ';
+
+      if kind == '"' {
+        decoded = '"';
+      } else if kind == '\\' {
+        decoded = '\\';
+      } else if kind == 'n' {
+        decoded = '\n';
+      } else if kind == 't' {
+        decoded = '\t';
+      } else if kind == 'r' {
+        decoded = '\r';
+      } else if kind == 'b' {
+        decoded = 8u8 as char;
+      } else if kind == 'f' {
+        decoded = 12u8 as char;
+      } else if kind == 'u' {
+        decoded = self.unicode_escape(escape, 4)?;
+      } else if kind == 'U' {
+        decoded = self.unicode_escape(escape, 8)?;
+      } else {
+        return Err(self.error(self.span(escape), "invalid escape sequence"));
+      }
+
+      text.append_char(decoded);
+    }
+
+    Ok(text.to_string())
+  }
+
+  /// The `digits` hexadecimal digits of `\uXXXX` or `\UXXXXXXXX`.
+  prv fn unicode_escape(self, escape: usize, digits: usize) -> Result<char, Diagnostic> {
+    var value = 0u32;
+
+    for _ in 0..digits {
+      const digit = match self.peek() {
+        Some(c) => c.to_digit(16),
+        None => None,
+      };
+
+      match digit {
+        Some(found) => {
+          self.bump();
+          value = value * 16 + found;
+        }
+        None => return Err(self.error(self.span(escape), `expected ${digits} hexadecimal digits in the escape`)),
+      }
+    }
+
+    match char::from_u32(value) {
+      Some(c) => Ok(c),
+      None => Err(self.error(self.span(escape), "the escape is not a Unicode scalar value")),
+    }
+  }
+
+  /// `'text'`, without escapes.
+  prv fn literal_string(self) -> Result<String, Diagnostic> {
+    const start = self.position;
+
+    self.bump();
+
+    if self.next_is('\'') && self.next_is_at(1, '\'') {
+      self.bump();
+      self.bump();
+
+      return Err(self.unsupported(self.span(start), "multi-line strings"));
+    }
+
+    const text = new StringBuilder();
+
+    while true {
+      const c = match self.bump() {
+        Some(found) => found,
+        None => return Err(self.error(self.span(start), "unterminated string")),
+      };
+
+      if c == '\n' || c == '\r' {
+        return Err(self.error(self.span(start), "unterminated string"));
+      }
+
+      if c == '\'' {
+        return Ok(text.to_string());
+      }
+
+      text.append_char(c);
+    }
+
+    Ok(text.to_string())
+  }
+
+  /// `[value, ...]`, over several lines if needed, with an optional trailing comma.
+  prv fn array(self) -> Result<List<Value>, Diagnostic> {
+    const start = self.position;
+    const values: List<Value> = new List();
+
+    self.bump();
+
+    while true {
+      self.skip_blank(true);
+
+      if self.next_is(']') {
+        break;
+      }
+
+      if self.peek().is_none() {
+        return Err(self.error(self.span(start), "unterminated array"));
+      }
+
+      values.push(self.value()?);
+      self.skip_blank(true);
+
+      if self.next_is(',') {
+        self.bump();
+      } else if self.next_is(']') {
+        break;
+      } else if self.peek().is_none() {
+        return Err(self.error(self.span(start), "unterminated array"));
+      } else {
+        return Err(self.error(self.here(), "expected `,` or `]` in the array"));
+      }
+    }
+
+    self.bump();
+    Ok(values)
+  }
+
+  /// `{ key = value, ... }` on one line, without a trailing comma.
+  prv fn inline_table(self) -> Result<List<Entry>, Diagnostic> {
+    const start = self.position;
+    const entries: List<Entry> = new List();
+
+    self.bump();
+    self.skip_blank(false);
+
+    if self.next_is('}') {
+      self.bump();
+
+      return Ok(entries);
+    }
+
+    while true {
+      self.skip_blank(false);
+
+      const key_start = self.position;
+      const key = self.key()?;
+      const span = self.span(key_start);
+
+      self.skip_blank(false);
+
+      if !self.next_is('=') {
+        return Err(self.error(self.here(), `expected \`=\` after the key \`${key}\``));
+      }
+
+      self.bump();
+      self.skip_blank(false);
+
+      const value = self.value()?;
+
+      if let Some(previous) = find(entries, key) {
+        return Err(Diagnostic::error(codes::DUPLICATE, span, `the key \`${key}\` is defined twice`).with_label(previous.span, "first defined here"));
+      }
+
+      entries.push(Entry { key: key, span: span, value: value });
+      self.skip_blank(false);
+
+      if self.next_is(',') {
+        self.bump();
+        self.skip_blank(false);
+
+        if self.next_is('}') {
+          return Err(self.error(self.here(), "an inline table cannot end with a comma"));
+        }
+      } else if self.next_is('}') {
+        self.bump();
+
+        return Ok(entries);
+      } else if self.peek().is_none() || self.next_is('\n') || self.next_is('\r') {
+        return Err(self.error(self.span(start), "an inline table must close on the line it starts"));
+      } else {
+        return Err(self.error(self.here(), "expected `,` or `}` in the inline table"));
+      }
+    }
+
+    Ok(entries)
+  }
+
+  /// `true`, `false` or a decimal integer such as `-1_000`.
+  prv fn word(self) -> Result<ValueKind, Diagnostic> {
+    const start = self.position;
+
+    while let Some(c) = self.peek() {
+      if !(c.is_ascii_alphanumeric() || c == '_' || c == '+' || c == '-' || c == '.' || c == ':') {
+        break;
+      }
+
+      self.bump();
+    }
+
+    const span = self.span(start);
+    const word = self.text(start, self.position);
+
+    if word == "true" {
+      return Ok(ValueKind::Boolean(true));
+    }
+
+    if word == "false" {
+      return Ok(ValueKind::Boolean(false));
+    }
+
+    const digits = if word.starts_with("+") || word.starts_with("-") { word.substring(1, word.len()) } else { word };
+    const first_digit = match digits.chars().collect().first() {
+      Some(c) => c.is_ascii_digit(),
+      None => false,
+    };
+
+    if !first_digit {
+      return Err(self.error(span, `expected a value, found \`${word}\``).with_help("write text in quotes: `\"text\"`"));
+    }
+
+    if word.contains(".") || word.contains(":") || ((digits.contains("e") || digits.contains("E")) && !digits.starts_with("0x")) {
+      return Err(self.unsupported(span, "floats and dates"));
+    }
+
+    const underscores_valid = !digits.starts_with("_") && !digits.ends_with("_") && !digits.contains("__");
+    const plain = digits.replace("_", "");
+    const leading_zero = plain.len() > 1 && plain.starts_with("0");
+    var all_digits = true;
+
+    for c in plain.chars() {
+      if !c.is_ascii_digit() {
+        all_digits = false;
+      }
+    }
+
+    if !underscores_valid || leading_zero || !all_digits {
+      return Err(self.error(span, `invalid integer \`${word}\``).with_note("integers are decimal, without leading zeros"));
+    }
+
+    const text = if word.starts_with("-") { "-" + plain } else { plain };
+
+    match text.parse_i64() {
+      Ok(value) => Ok(ValueKind::Integer(value)),
+      Err(_) => Err(self.error(span, `the integer \`${word}\` does not fit in 64 bits`)),
+    }
+  }
+}

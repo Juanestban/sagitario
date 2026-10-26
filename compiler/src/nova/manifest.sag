@@ -1,0 +1,523 @@
+//! `Nova.toml`, the manifest of a package (docs/nova.md#novatoml). The port of
+//! `sagitario_nova::manifest`.
+
+use pkg::diagnostics;
+use pkg::diagnostics::Diagnostic;
+use pkg::lexer;
+use pkg::nova::codes;
+use pkg::nova::toml;
+use pkg::nova::toml::{Document, Entry, Table, ValueKind};
+use pkg::span::Span;
+
+/// The name of the manifest file.
+pub const FILE_NAME: String = "Nova.toml";
+
+pub class Manifest {
+  pub var name: String;
+  pub var version: String;
+  pub var description: Option<String>;
+  pub var authors: List<String>;
+  pub var license: Option<String>;
+  pub var dependencies: List<DependencySpec>;
+  /// `[library]`, which only libraries may have.
+  pub var library: Option<LibrarySpec>;
+  pub var link: LinkSpec;
+  /// The `[package]` header, which errors about the package as a whole point to.
+  pub var span: Span;
+
+  pub fn new(self, span: Span) {
+    self.name = "";
+    self.version = "";
+    self.description = None;
+    self.authors = new List();
+    self.license = None;
+    self.dependencies = new List();
+    self.library = None;
+    self.link = new LinkSpec();
+    self.span = span;
+  }
+}
+
+/// `[library] outputs = ["static", "dynamic"]`: the files a library builds.
+pub struct LibrarySpec {
+  pub static_lib: bool;
+  pub dynamic_lib: bool;
+  /// The `[library]` header.
+  pub span: Span;
+}
+
+/// A text of the manifest with its span.
+pub struct Spanned {
+  pub text: String;
+  pub span: Span;
+}
+
+/// `[link]`: C libraries and sources (docs/nova.md#linking-c).
+pub class LinkSpec {
+  pub var libraries: List<String>;
+  /// Relative to the directory of the manifest, or absolute, with their spans.
+  pub var search_paths: List<Spanned>;
+  pub var sources: List<Spanned>;
+
+  pub fn new(self) {
+    self.libraries = new List();
+    self.search_paths = new List();
+    self.sources = new List();
+  }
+}
+
+/// `name = { path = "..." }` in `[dependencies]`.
+pub struct DependencySpec {
+  pub name: String;
+  /// Relative to the directory of the manifest, or absolute.
+  pub path: String;
+  /// The key, which errors about the dependency point to.
+  pub span: Span;
+  pub path_span: Span;
+}
+
+/// Keys of other kinds of dependencies, which a later version of Nova provides.
+const FUTURE_DEPENDENCY_KEYS: String = "version git branch tag rev";
+
+const PACKAGE_KEYS: String = "name version description authors license";
+
+/// The tables of `Nova.toml`.
+const TABLES: String = "package dependencies library link";
+
+/// Path roots that cannot name a package, since packages become path roots too.
+const RESERVED_NAMES: String = "pkg self super std prelude";
+
+/// `` `a`, `b` `` for messages.
+fn quoted(words: String) -> String {
+  const parts: List<String> = new List();
+
+  for word in words.split(" ") {
+    parts.push("`" + word + "`");
+  }
+
+  parts.join(", ")
+}
+
+/// The manifest a parsed `Nova.toml` describes.
+pub fn read(document: Document) -> Result<Manifest, Diagnostic> {
+  var package: Option<Table> = None;
+  const dependencies: List<DependencySpec> = new List();
+  var library: Option<LibrarySpec> = None;
+  var link = new LinkSpec();
+
+  for table in document.tables {
+    const name = table.name;
+
+    if name.is_empty() {
+      if let Some(entry) = table.entries.first() {
+        return Err(Diagnostic::error(codes::UNKNOWN_KEY, entry.span, `the key \`${entry.key}\` is outside any table`).with_help("write the package's keys after a `[package]` header"));
+      }
+    } else if name == "package" {
+      package = Some(table);
+    } else if name == "dependencies" {
+      for entry in table.entries {
+        dependencies.push(dependency(entry)?);
+      }
+    } else if name == "library" {
+      library = Some(library_spec(table)?);
+    } else if name == "link" {
+      link = link_spec(table)?;
+    } else {
+      var diagnostic = Diagnostic::error(codes::UNKNOWN_KEY, table.span, `\`Nova.toml\` has no table \`[${name}]\``);
+
+      if let Some(similar) = diagnostics::closest_match(name, TABLES.split(" ")) {
+        diagnostic = diagnostic.with_help(`a table with a similar name exists: \`[${similar}]\``);
+      }
+
+      return Err(diagnostic);
+    }
+  }
+
+  const found = match package {
+    Some(table) => table,
+    None => {
+      return Err(Diagnostic::error(codes::MISSING_KEY, Span::new(document.file, 0, 0), "`Nova.toml` has no `[package]` table").with_help("start it with `[package]`, then `name = \"...\"` and `version = \"0.1.0\"`"));
+    }
+  };
+
+  for entry in found.entries {
+    if !PACKAGE_KEYS.split(" ").contains(entry.key) {
+      var diagnostic = Diagnostic::error(codes::UNKNOWN_KEY, entry.span, `\`[package]\` has no key \`${entry.key}\``);
+
+      diagnostic = match diagnostics::closest_match(entry.key, PACKAGE_KEYS.split(" ")) {
+        Some(similar) => diagnostic.with_help(`a key with a similar name exists: \`${similar}\``),
+        None => diagnostic.with_note("its keys are " + quoted(PACKAGE_KEYS)),
+      };
+
+      return Err(diagnostic);
+    }
+  }
+
+  const name = required_string(found, "name")?;
+  const version = required_string(found, "version")?;
+
+  check_name(name.text, name.span)?;
+  check_version(version.text, version.span)?;
+
+  const authors: List<String> = new List();
+
+  if let Some(entry) = toml::find(found.entries, "authors") {
+    match entry.value.kind {
+      ValueKind::Array(values) => {
+        for value in values {
+          match value.kind {
+            ValueKind::Str(text) => authors.push(text),
+            _ => return Err(wrong_type(value.span, "each author", "a string", value.kind)),
+          }
+        }
+      }
+      _ => return Err(wrong_type(entry.value.span, "`authors`", "an array of strings", entry.value.kind)),
+    }
+  }
+
+  const manifest = new Manifest(found.span);
+
+  manifest.name = name.text;
+  manifest.version = version.text;
+  manifest.description = optional_string(found, "description")?;
+  manifest.authors = authors;
+  manifest.license = optional_string(found, "license")?;
+  manifest.dependencies = dependencies;
+  manifest.library = library;
+  manifest.link = link;
+
+  Ok(manifest)
+}
+
+/// A dependency in `[dependencies]`: only packages by path for now.
+fn dependency(entry: Entry) -> Result<DependencySpec, Diagnostic> {
+  if let Some(problem) = name_problem(entry.key) {
+    return Err(Diagnostic::error(codes::INVALID_NAME, entry.span, problem));
+  }
+
+  const example = `${entry.key} = { path = "../${entry.key}" }`;
+  const fields = match entry.value.kind {
+    ValueKind::Table(found) => found,
+    _ => {
+      return Err(Diagnostic::error(codes::WRONG_TYPE, entry.value.span, `the dependency \`${entry.key}\` must be an inline table, not ${toml::describe(entry.value.kind)}`).with_help(`write \`${example}\``));
+    }
+  };
+  var path: Option<Spanned> = None;
+
+  for field in fields {
+    if field.key == "path" {
+      match field.value.kind {
+        ValueKind::Str(text) => {
+          path = Some(Spanned { text: text, span: field.value.span });
+        }
+        _ => return Err(wrong_type(field.value.span, "`path`", "a string", field.value.kind)),
+      }
+    } else if FUTURE_DEPENDENCY_KEYS.split(" ").contains(field.key) {
+      return Err(Diagnostic::error(codes::NOT_AVAILABLE, field.span, `dependencies by \`${field.key}\` are not available yet`).with_note("Nova finds dependencies by `path` for now"));
+    } else {
+      return Err(Diagnostic::error(codes::UNKNOWN_KEY, field.span, `a dependency has no key \`${field.key}\``).with_note("its only key is `path`"));
+    }
+  }
+
+  const found = match path {
+    Some(spanned) => spanned,
+    None => {
+      return Err(Diagnostic::error(codes::MISSING_KEY, entry.value.span, `the dependency \`${entry.key}\` has no \`path\``).with_help(`write \`${example}\``));
+    }
+  };
+
+  Ok(DependencySpec { name: entry.key, path: found.text, span: entry.span, path_span: found.span })
+}
+
+/// The strings of an array, with their spans.
+fn strings(entry: Entry, what: String) -> Result<List<Spanned>, Diagnostic> {
+  const values = match entry.value.kind {
+    ValueKind::Array(found) => found,
+    _ => return Err(wrong_type(entry.value.span, `\`${entry.key}\``, "an array of strings", entry.value.kind)),
+  };
+  const texts: List<Spanned> = new List();
+
+  for value in values {
+    match value.kind {
+      ValueKind::Str(text) => texts.push(Spanned { text: text, span: value.span }),
+      _ => return Err(wrong_type(value.span, what, "a string", value.kind)),
+    }
+  }
+
+  Ok(texts)
+}
+
+fn unknown_key(table: String, entry: Entry, keys: String) -> Diagnostic {
+  const diagnostic = Diagnostic::error(codes::UNKNOWN_KEY, entry.span, `\`[${table}]\` has no key \`${entry.key}\``);
+
+  match diagnostics::closest_match(entry.key, keys.split(" ")) {
+    Some(similar) => diagnostic.with_help(`a key with a similar name exists: \`${similar}\``),
+    None => diagnostic.with_note("its keys are " + quoted(keys)),
+  }
+}
+
+/// `[library]`
+fn library_spec(table: Table) -> Result<LibrarySpec, Diagnostic> {
+  var static_lib = true;
+  var dynamic_lib = true;
+
+  for entry in table.entries {
+    if entry.key != "outputs" {
+      return Err(unknown_key("library", entry, "outputs"));
+    }
+
+    const outputs = strings(entry, "each output")?;
+
+    static_lib = false;
+    dynamic_lib = false;
+
+    for output in outputs {
+      var seen = false;
+
+      if output.text == "static" {
+        seen = static_lib;
+        static_lib = true;
+      } else if output.text == "dynamic" {
+        seen = dynamic_lib;
+        dynamic_lib = true;
+      } else {
+        return Err(Diagnostic::error(codes::INVALID_VALUE, output.span, `\`${output.text}\` is not a library output`).with_note("the outputs are `static` and `dynamic`"));
+      }
+
+      if seen {
+        return Err(Diagnostic::error(codes::DUPLICATE, output.span, `the output \`${output.text}\` is listed twice`));
+      }
+    }
+
+    if outputs.is_empty() {
+      return Err(Diagnostic::error(codes::INVALID_VALUE, entry.value.span, "a library needs at least one output").with_help("write `outputs = [\"static\"]`"));
+    }
+  }
+
+  Ok(LibrarySpec { static_lib: static_lib, dynamic_lib: dynamic_lib, span: table.span })
+}
+
+/// Whether `text` is a library name the linker's `-l` takes.
+fn is_library_name(text: String) -> bool {
+  const chars: List<char> = text.chars().collect();
+  const first = match chars.first() {
+    Some(c) => c.is_ascii_alphanumeric() || c == '_',
+    None => false,
+  };
+
+  if !first {
+    return false;
+  }
+
+  for c in chars {
+    if !(c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' || c == '+') {
+      return false;
+    }
+  }
+
+  true
+}
+
+/// `[link]`
+fn link_spec(table: Table) -> Result<LinkSpec, Diagnostic> {
+  const spec = new LinkSpec();
+
+  for entry in table.entries {
+    if entry.key == "libraries" {
+      for library in strings(entry, "each library")? {
+        if !is_library_name(library.text) {
+          return Err(Diagnostic::error(codes::INVALID_VALUE, library.span, `\`${library.text}\` is not a library name`).with_note("write the name the linker's `-l` takes, such as `\"sqlite3\"` for `libsqlite3`"));
+        }
+
+        spec.libraries.push(library.text);
+      }
+    } else if entry.key == "search_paths" {
+      spec.search_paths = strings(entry, "each search path")?;
+    } else if entry.key == "sources" {
+      spec.sources = strings(entry, "each source")?;
+
+      for source in spec.sources {
+        if !source.text.ends_with(".c") {
+          return Err(Diagnostic::error(codes::INVALID_VALUE, source.span, `\`${source.text}\` is not a C source`).with_note("sources are C files ending in `.c`"));
+        }
+      }
+    } else {
+      return Err(unknown_key("link", entry, "libraries search_paths sources"));
+    }
+  }
+
+  Ok(spec)
+}
+
+fn wrong_type(span: Span, what: String, expected: String, found: ValueKind) -> Diagnostic {
+  Diagnostic::error(codes::WRONG_TYPE, span, `${what} must be ${expected}, not ${toml::describe(found)}`)
+}
+
+/// A string key that must be present, with the span of its value.
+fn required_string(table: Table, key: String) -> Result<Spanned, Diagnostic> {
+  const entry = match toml::find(table.entries, key) {
+    Some(found) => found,
+    None => {
+      const example = if key == "version" { "\"0.1.0\"" } else { "\"my_package\"" };
+
+      return Err(Diagnostic::error(codes::MISSING_KEY, table.span, `\`[package]\` has no \`${key}\``).with_help(`add \`${key} = ${example}\``));
+    }
+  };
+
+  match entry.value.kind {
+    ValueKind::Str(text) => Ok(Spanned { text: text, span: entry.value.span }),
+    _ => Err(wrong_type(entry.value.span, `\`${key}\``, "a string", entry.value.kind)),
+  }
+}
+
+fn optional_string(table: Table, key: String) -> Result<Option<String>, Diagnostic> {
+  match toml::find(table.entries, key) {
+    None => Ok(None),
+    Some(entry) => match entry.value.kind {
+      ValueKind::Str(text) => Ok(Some(text)),
+      _ => Err(wrong_type(entry.value.span, `\`${key}\``, "a string", entry.value.kind)),
+    },
+  }
+}
+
+/// Why `name` cannot name a package, or `None` if it can: it must be a lowercase identifier in
+/// snake_case that is neither a keyword nor a reserved path root.
+pub fn name_problem(name: String) -> Option<String> {
+  const chars: List<char> = name.chars().collect();
+  var valid = match chars.first() {
+    Some(first) => first.is_ascii_lowercase(),
+    None => false,
+  };
+
+  for c in chars {
+    if !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') {
+      valid = false;
+    }
+  }
+
+  if !valid {
+    return Some(`\`${name}\` is not a valid package name: it must start with a lowercase letter and have only lowercase letters, digits and \`_\``);
+  }
+
+  if lexer::is_keyword(name) || RESERVED_NAMES.split(" ").contains(name) {
+    return Some(`\`${name}\` is reserved and cannot name a package`);
+  }
+
+  None
+}
+
+fn check_name(name: String, span: Span) -> Result<(), Diagnostic> {
+  const problem = match name_problem(name) {
+    Some(found) => found,
+    None => return Ok(()),
+  };
+  const suggestion = new StringBuilder();
+
+  for c in name.to_ascii_lowercase().chars() {
+    suggestion.append_char(if c.is_ascii_alphanumeric() { c } else { '_' });
+  }
+
+  var diagnostic = Diagnostic::error(codes::INVALID_NAME, span, problem).with_note("the name of a package is the path root other packages import it with");
+
+  if name_problem(suggestion.to_string()).is_none() && suggestion.to_string() != name {
+    diagnostic = diagnostic.with_help(`use \`${suggestion.to_string()}\``);
+  }
+
+  Err(diagnostic)
+}
+
+fn is_numeric(part: String) -> bool {
+  if part.is_empty() {
+    return false;
+  }
+
+  for byte in part.bytes() {
+    if byte < 48 || byte > 57 {
+      return false;
+    }
+  }
+
+  part == "0" || !part.starts_with("0")
+}
+
+fn is_identifier(part: String) -> bool {
+  if part.is_empty() {
+    return false;
+  }
+
+  for c in part.chars() {
+    if !(c.is_ascii_alphanumeric() || c == '-') {
+      return false;
+    }
+  }
+
+  true
+}
+
+fn all_digits(part: String) -> bool {
+  for c in part.chars() {
+    if !c.is_ascii_digit() {
+      return false;
+    }
+  }
+
+  true
+}
+
+/// Whether `text` is a version as SemVer defines it: `MAJOR.MINOR.PATCH`, then optionally
+/// `-pre.release` and `+build` identifiers.
+pub fn is_valid_version(text: String) -> bool {
+  var rest = text;
+  var build: Option<String> = None;
+
+  if let Some(plus) = text.find("+") {
+    rest = text.substring(0, plus);
+    build = Some(text.substring(plus + 1, text.len()));
+  }
+
+  var core = rest;
+  var pre: Option<String> = None;
+
+  if let Some(minus) = rest.find("-") {
+    core = rest.substring(0, minus);
+    pre = Some(rest.substring(minus + 1, rest.len()));
+  }
+
+  const parts = core.split(".");
+
+  if parts.len() != 3 {
+    return false;
+  }
+
+  for part in parts {
+    if !is_numeric(part) {
+      return false;
+    }
+  }
+
+  if let Some(found) = pre {
+    for part in found.split(".") {
+      if !is_identifier(part) || (all_digits(part) && !is_numeric(part)) {
+        return false;
+      }
+    }
+  }
+
+  if let Some(found) = build {
+    for part in found.split(".") {
+      if !is_identifier(part) {
+        return false;
+      }
+    }
+  }
+
+  true
+}
+
+fn check_version(version: String, span: Span) -> Result<(), Diagnostic> {
+  if is_valid_version(version) {
+    return Ok(());
+  }
+
+  Err(Diagnostic::error(codes::INVALID_VERSION, span, `\`${version}\` is not a valid version`).with_note("versions follow Semantic Versioning: `MAJOR.MINOR.PATCH`, such as `1.4.0`, optionally followed by `-alpha.1`"))
+}

@@ -2,6 +2,9 @@
 //! are in `diagnostics::codes`, generated from the Rust registry.
 
 use pkg::span::{SourceFile, SourceMap, Span};
+use std::env;
+use std::io;
+use std::path;
 
 pub enum Severity {
   Error,
@@ -424,4 +427,38 @@ pub fn render_human(diagnostic: Diagnostic, sources: SourceMap, color: bool) -> 
   }
 
   out.to_string()
+}
+
+/// Whether this is Windows, the only system where `std::path` joins with `\` (as
+/// `loader::windows`).
+fn windows() -> bool {
+  path::join("x\\", "y") == "x\\y"
+}
+
+/// Whether an environment variable is set and not empty.
+fn set(name: String) -> bool {
+  match env::variable(name) {
+    Some(value) => !value.is_empty(),
+    None => false,
+  }
+}
+
+/// Colors only the human format on an interactive stderr, honoring `NO_COLOR` and
+/// `CLICOLOR_FORCE`. Classic Windows consoles do not interpret ANSI codes unless asked through the
+/// Windows API, so on Windows colors are used only in terminals known to support them
+/// (docs/adr/0061-terminals.md).
+pub fn use_color(format: DiagnosticFormat) -> bool {
+  if format == DiagnosticFormat::Short || set("NO_COLOR") {
+    return false;
+  }
+
+  if let Some(value) = env::variable("CLICOLOR_FORCE") {
+    if value != "0" {
+      return true;
+    }
+  }
+
+  const ansi_terminal = !windows() || set("WT_SESSION") || set("TERM") || set("TERM_PROGRAM") || set("ConEmuANSI");
+
+  ansi_terminal && io::is_terminal(io::Stream::Stderr)
 }

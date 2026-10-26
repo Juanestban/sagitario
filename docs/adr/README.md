@@ -68,10 +68,11 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0057](0057-editor-tooling-and-independence-from-rust.md) | Editor tooling and independence from Rust (phase F6) | Accepted (refined by 0058) |
 | [0058](0058-language-server.md) | The language server | Accepted (refined by 0059, 0062) |
 | [0059](0059-language-server-paths-and-semantic-tokens.md) | Paths and semantic tokens in the language server | Accepted |
-| [0060](0060-driver-parity-for-nova.md) | The pivot without Rust, and the driver for Nova | Accepted |
+| [0060](0060-driver-parity-for-nova.md) | The pivot without Rust, and the driver for Nova | Accepted (refined by 0064) |
 | [0061](0061-terminals.md) | Terminals: `io::is_terminal` and colored diagnostics in `sagc` | Accepted |
 | [0062](0062-language-server-std-sources-and-lone-files.md) | The language server on the standard library and on lone files | Accepted |
 | [0063](0063-distribution-phase-and-roadmap-v2.md) | Distribution as phase F7, and the roadmap v2 of a game engine | Accepted |
+| [0064](0064-nova-in-sagitario.md) | Nova in Sagitario | Accepted |
 
 ## Template
 

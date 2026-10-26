@@ -1,0 +1,1006 @@
+//! Nova, the package manager of Sagitario (docs/nova.md): creates packages, reads `Nova.toml`
+//! and builds, runs and checks packages by running `sag` with the options of
+//! docs/adr/0060-driver-parity-for-nova.md. The port of `sagitario_nova`, built with
+//! `sag build compiler/src/nova.sag`; it shares the compiler's spans and diagnostics
+//! (docs/adr/0064-nova-in-sagitario.md).
+
+use pkg::diagnostics;
+use pkg::diagnostics::{Diagnostic, DiagnosticFormat};
+use pkg::loader::{path_key, push_path, windows};
+use pkg::nova::codes;
+use pkg::nova::manifest;
+use pkg::nova::manifest::Manifest;
+use pkg::nova::toml;
+use pkg::span::SourceMap;
+use std::env;
+use std::fs;
+use std::io;
+use std::path;
+use std::process;
+use std::process::Command;
+
+/// The version of Nova, which is the version of Sagitario.
+const VERSION: String = "0.4.0";
+
+/// Exit code when building fails or a package is invalid.
+const EXIT_FAILURE: i32 = 1;
+/// Exit code for invalid command-line usage.
+const EXIT_USAGE: i32 = 2;
+
+/// The help text, written line by line so it does not depend on the line endings of this file.
+fn usage() -> String {
+  List::from([
+    "Usage: nova <command> [options]",
+    "",
+    "Commands:",
+    "  new <name>   Create a package in a new directory",
+    "  init         Create a package in the current directory",
+    "  build        Compile the package",
+    "  run          Compile and run the package (arguments after `--` go to the program)",
+    "  check        Check the package without generating code",
+    "  clean        Remove the `target` directory",
+    "  help         Show this message",
+    "  version      Show Nova's version",
+    "",
+    "Options:",
+    "  --lib                       Create a library instead of a program (new, init)",
+    "  --name <name>               The package's name instead of the directory's (init)",
+    "  --release                   Optimize; integer overflow wraps instead of panicking (build, run)",
+    "  --sanitize                  Detect memory errors and undefined behavior with ASan and UBSan,",
+    "                              where the C compiler supports them (build, run)",
+    "  --sanitize=thread           Detect data races with TSan instead, where the C compiler supports",
+    "                              it; elsewhere, ASan and UBSan (build, run)",
+    "  --emit-c                    Also write the generated C next to the executable (build, run)",
+    "  --cc <compiler>             C compiler to use; overrides SAG_CC (build, run)",
+    "  --target <target>           Compile for another machine, such as `aarch64-linux-android`",
+    "                              (build, check); `sag targets` lists them",
+    "  --diagnostic-format <fmt>   `human` (default) or `short`: one line per diagnostic",
+  ]).join("\n")
+}
+
+enum Mode {
+  Build,
+  Run,
+  Check,
+}
+
+/// The options of `build`, `run` and `check`.
+class Options {
+  pub var release: bool;
+  pub var sanitize: bool;
+  /// `--sanitize=thread`.
+  pub var thread_sanitizer: bool;
+  pub var emit_c: bool;
+  pub var cc: Option<String>;
+  pub var format: DiagnosticFormat;
+  /// Arguments forwarded to the program by `nova run -- args`.
+  pub var program_args: List<String>;
+  /// The target to compile for (docs/nova.md#targets).
+  pub var target: Option<String>;
+
+  pub fn new(self) {
+    self.release = false;
+    self.sanitize = false;
+    self.thread_sanitizer = false;
+    self.emit_c = false;
+    self.cc = None;
+    self.format = DiagnosticFormat::Human;
+    self.program_args = new List();
+    self.target = None;
+  }
+}
+
+enum Request {
+  New { name: String, lib: bool },
+  Init { name: Option<String>, lib: bool },
+  Compile(Mode, Options),
+  Clean,
+  Help,
+  Version,
+}
+
+/// The position of the argument being read.
+class Position {
+  pub var value: usize;
+
+  pub fn new(self, value: usize) {
+    self.value = value;
+  }
+}
+
+/// Parses the arguments that follow the program name.
+fn parse_args(args: List<String>) -> Result<Request, String> {
+  const command = match args.first() {
+    Some(found) => found,
+    None => return Err("missing command"),
+  };
+
+  if command == "new" || command == "init" {
+    parse_creation(command, args)
+  } else if command == "build" {
+    Ok(Request::Compile(Mode::Build, parse_options(args, command)?))
+  } else if command == "run" {
+    Ok(Request::Compile(Mode::Run, parse_options(args, command)?))
+  } else if command == "check" {
+    Ok(Request::Compile(Mode::Check, parse_options(args, command)?))
+  } else if command == "clean" {
+    match args.get(1) {
+      None => Ok(Request::Clean),
+      Some(arg) => Err(`unexpected argument \`${arg}\` for \`nova clean\``),
+    }
+  } else if command == "help" || command == "--help" || command == "-h" {
+    Ok(Request::Help)
+  } else if command == "version" || command == "--version" || command == "-v" {
+    Ok(Request::Version)
+  } else {
+    Err(`unknown command \`${command}\``)
+  }
+}
+
+/// `nova new <name> [--lib]` and `nova init [--name <name>] [--lib]`.
+fn parse_creation(command: String, args: List<String>) -> Result<Request, String> {
+  var lib = false;
+  var name: Option<String> = None;
+  var index = 1usize;
+
+  while index < args.len() {
+    const arg = args[index];
+
+    if arg == "--lib" {
+      lib = true;
+    } else if arg == "--name" && command == "init" {
+      index += 1;
+      name = match args.get(index) {
+        Some(found) => Some(found),
+        None => return Err("`--name` requires a value"),
+      };
+    } else if arg.starts_with("-") {
+      return Err(`unknown option \`${arg}\` for \`nova ${command}\``);
+    } else if command == "new" && name.is_none() {
+      name = Some(arg);
+    } else {
+      return Err(`unexpected argument \`${arg}\` for \`nova ${command}\``);
+    }
+
+    index += 1;
+  }
+
+  if command == "init" {
+    return Ok(Request::Init { name: name, lib: lib });
+  }
+
+  match name {
+    Some(found) => Ok(Request::New { name: found, lib: lib }),
+    None => Err("`nova new` needs the package's name: `nova new my_app`"),
+  }
+}
+
+/// `--flag=value` or `--flag value`.
+fn flag_value(flag: String, inline: Option<String>, args: List<String>, index: Position) -> Result<String, String> {
+  if let Some(value) = inline {
+    return Ok(value);
+  }
+
+  index.value += 1;
+
+  match args.get(index.value) {
+    Some(value) => Ok(value),
+    None => Err(`\`${flag}\` requires a value`),
+  }
+}
+
+fn parse_options(args: List<String>, command: String) -> Result<Options, String> {
+  const options = new Options();
+  const codegen = command != "check";
+  const index = new Position(1);
+
+  while index.value < args.len() {
+    const arg = args[index.value];
+    var flag = arg;
+    var inline: Option<String> = None;
+
+    if let Some(equals) = arg.find("=") {
+      if arg.substring(0, equals).starts_with("--") {
+        flag = arg.substring(0, equals);
+        inline = Some(arg.substring(equals + 1, arg.len()));
+      }
+    }
+
+    const needs_codegen = flag == "--release" || flag == "--sanitize" || flag == "--emit-c" || flag == "--cc";
+
+    if needs_codegen && !codegen {
+      return Err(`\`${flag}\` is not accepted by \`nova check\`, which generates no code`);
+    }
+
+    if flag == "--release" {
+      options.release = true;
+    } else if flag == "--sanitize" {
+      options.sanitize = true;
+      options.thread_sanitizer = match inline {
+        None => false,
+        Some(value) if value == "thread" => true,
+        Some(other) => return Err(`unknown sanitizer \`${other}\`; \`--sanitize=thread\` is the only one to choose`),
+      };
+    } else if flag == "--emit-c" {
+      options.emit_c = true;
+    } else if flag == "--cc" {
+      options.cc = Some(flag_value(flag, inline, args, index)?);
+    } else if flag == "--target" {
+      options.target = Some(flag_value(flag, inline, args, index)?);
+    } else if flag == "--diagnostic-format" {
+      const value = flag_value(flag, inline, args, index)?;
+
+      if value == "human" {
+        options.format = DiagnosticFormat::Human;
+      } else if value == "short" {
+        options.format = DiagnosticFormat::Short;
+      } else {
+        return Err(`unknown diagnostic format \`${value}\`; expected \`human\` or \`short\``);
+      }
+    } else if flag == "--" {
+      if command != "run" {
+        return Err("program arguments after `--` are only accepted by `nova run`");
+      }
+
+      for rest in (index.value + 1)..args.len() {
+        options.program_args.push(args[rest]);
+      }
+
+      index.value = args.len();
+    } else if flag.starts_with("-") {
+      return Err(`unknown option \`${flag}\``);
+    } else {
+      return Err(`unexpected argument \`${arg}\`; Nova builds the package of the current directory`);
+    }
+
+    index.value += 1;
+  }
+
+  Ok(options)
+}
+
+fn fail(message: String) -> i32 {
+  eprintln(`error: ${message}`);
+  EXIT_FAILURE
+}
+
+const MAIN_SOURCE: String = "fn main() {\n  println(\"Hello, world!\");\n}\n";
+
+const LIB_SOURCE: String = "/// Adds two numbers.\npub fn add(a: i32, b: i32) -> i32 {\n  a + b\n}\n";
+
+fn manifest_source(name: String) -> String {
+  `[package]\nname = "${name}"\nversion = "0.1.0"\n`
+}
+
+/// Writes `text` to `file` unless the file exists.
+fn write_new(file: String, text: String) -> Result<(), String> {
+  if fs::exists(file) {
+    return Ok(());
+  }
+
+  match fs::write(file, text) {
+    Ok(_) => Ok(()),
+    Err(error) => Err(error.message()),
+  }
+}
+
+/// The files of a new package, written in `dir` without replacing any that exists.
+fn write_package(dir: String, name: String, lib: bool) -> Result<(), String> {
+  const src = push_path(dir, "src");
+
+  if let Err(error) = fs::create_dir_all(src) {
+    return Err(error.message());
+  }
+
+  write_new(push_path(dir, manifest::FILE_NAME), manifest_source(name))?;
+  write_new(push_path(dir, ".gitignore"), "/target\n")?;
+
+  if !fs::exists(push_path(src, "main.sag")) && !fs::exists(push_path(src, "lib.sag")) {
+    if lib {
+      write_new(push_path(src, "lib.sag"), LIB_SOURCE)?;
+    } else {
+      write_new(push_path(src, "main.sag"), MAIN_SOURCE)?;
+    }
+  }
+
+  Ok(())
+}
+
+fn kind_name(lib: bool) -> String {
+  if lib { "library" } else { "program" }
+}
+
+/// `nova new <name>`
+fn new_package(name: String, lib: bool) -> i32 {
+  if let Some(problem) = manifest::name_problem(name) {
+    return fail(problem);
+  }
+
+  if fs::exists(name) {
+    return fail(`\`${name}\` already exists; choose another name, or run \`nova init\` inside it`);
+  }
+
+  if let Err(error) = write_package(name, name, lib) {
+    return fail(`cannot create the package \`${name}\`: ${error}`);
+  }
+
+  eprintln(`Created the ${kind_name(lib)} package \`${name}\``);
+  0
+}
+
+/// `nova init`
+fn init_package(name: Option<String>, lib: bool) -> i32 {
+  const dir = match fs::current_dir() {
+    Ok(found) => found,
+    Err(error) => return fail(`cannot read the current directory: ${error.message()}`),
+  };
+
+  if fs::exists(push_path(dir, manifest::FILE_NAME)) {
+    return fail(`\`${manifest::FILE_NAME}\` already exists in this directory`);
+  }
+
+  const chosen = name.unwrap_or(path::file_name(dir).unwrap_or(""));
+
+  if let Some(problem) = manifest::name_problem(chosen) {
+    return fail(problem + "\nhelp: choose a name with `nova init --name my_package`");
+  }
+
+  // An existing `src/main.sag` or `src/lib.sag` decides the kind of package.
+  const src = push_path(dir, "src");
+  const is_lib = if fs::exists(push_path(src, "main.sag")) { false } else { lib || fs::exists(push_path(src, "lib.sag")) };
+
+  if let Err(error) = write_package(dir, chosen, is_lib) {
+    return fail(`cannot create the package: ${error}`);
+  }
+
+  eprintln(`Created the ${kind_name(is_lib)} package \`${chosen}\``);
+  0
+}
+
+// ---- Packages ---------------------------------------------------------------------------------
+
+/// The separator of paths Nova writes, as Rust's `PathBuf` writes them.
+fn separator() -> String {
+  if windows() { "\\" } else { "/" }
+}
+
+/// `path` without `.` and with each `..` removing the directory before it, for messages:
+/// `../geo/../math` becomes `../math`. It never looks at the file system.
+fn tidy(file: String) -> String {
+  const slashes = file.replace("\\", "/");
+  var root = "";
+  var rest = slashes;
+
+  // A drive (`C:`) and a root (`/`) stay in front.
+  if windows() && rest.len() >= 2 && rest.substring(1, 2) == ":" {
+    root = rest.substring(0, 2);
+    rest = rest.substring(2, rest.len());
+  }
+
+  if rest.starts_with("/") {
+    root = root + separator();
+  }
+
+  const parts: List<String> = new List();
+
+  for part in rest.split("/") {
+    if part.is_empty() || part == "." {
+      continue;
+    }
+
+    if part == ".." {
+      if let Some(last) = parts.last() {
+        if last != ".." {
+          parts.pop();
+          continue;
+        }
+      }
+
+      // Above the root there is nothing to go up to.
+      if !root.is_empty() {
+        continue;
+      }
+    }
+
+    parts.push(part);
+  }
+
+  const joined = root + parts.join(separator());
+
+  if joined.is_empty() { "." } else { joined }
+}
+
+/// A path that names a directory however it is reached: absolute and tidied, in the form of
+/// `path_key`. Nova cannot resolve symbolic links, which Rust's `canonicalize` did.
+fn identity(dir: String) -> String {
+  const current = fs::current_dir().unwrap_or("");
+  const has_root = dir.starts_with("/") || dir.starts_with("\\") || (dir.len() >= 2 && dir.substring(1, 2) == ":");
+  const absolute = if has_root { dir } else { push_path(current, dir) };
+
+  path_key(tidy(absolute))
+}
+
+/// A package of the graph being built: the one of the current directory, or a dependency.
+class Package {
+  /// The directory of `Nova.toml`, as written in messages: empty when it is the current one.
+  pub const dir: String;
+  /// The same directory, to recognize a package reached by several paths.
+  pub const identity: String;
+  pub const manifest: Manifest;
+  /// `src/main.sag` or `src/lib.sag`.
+  pub const root: String;
+  pub const lib: bool;
+  /// Indices in the graph of its dependencies.
+  pub const dependencies: List<usize>;
+
+  pub fn new(self, dir: String, manifest: Manifest, root: String, lib: bool) {
+    self.dir = dir;
+    self.identity = identity(if dir.is_empty() { "." } else { dir });
+    self.manifest = manifest;
+    self.root = root;
+    self.lib = lib;
+    self.dependencies = new List();
+  }
+}
+
+/// The directory holding `Nova.toml`: the current one or the nearest above it.
+fn find_package_dir() -> Result<String, i32> {
+  const current = match fs::current_dir() {
+    Ok(found) => found,
+    Err(error) => return Err(fail(`cannot read the current directory: ${error.message()}`)),
+  };
+  var dir: Option<String> = Some(current);
+
+  while let Some(found) = dir {
+    if fs::is_file(push_path(found, manifest::FILE_NAME)) {
+      // Messages show paths relative to the current directory when the package is there.
+      return Ok(if found == current { "" } else { found });
+    }
+
+    const parent = path::parent(found);
+
+    dir = match parent {
+      Some(above) => if above == found || above.is_empty() { None } else { Some(above) },
+      None => None,
+    };
+  }
+
+  Err(fail(`cannot find \`${manifest::FILE_NAME}\` in \`${current}\` or any directory above it\nhelp: create a package with \`nova new my_app\`, or \`nova init\` in an existing directory`))
+}
+
+/// Reads the manifests of a package and its dependencies, reporting errors with their location.
+class PackageLoader {
+  prv const sources: SourceMap;
+  prv const format: DiagnosticFormat;
+  /// The package of the current directory first.
+  pub const packages: List<Package>;
+
+  pub fn new(self, format: DiagnosticFormat) {
+    self.sources = new SourceMap();
+    self.format = format;
+    self.packages = new List();
+  }
+
+  prv fn report(self, diagnostic: Diagnostic) -> i32 {
+    eprintln(diagnostics::render(diagnostic, self.sources, self.format, diagnostics::use_color(self.format)));
+    EXIT_FAILURE
+  }
+
+  /// Reads and checks the manifest and the layout of the package in `dir`.
+  pub fn read(self, dir: String) -> Result<Package, i32> {
+    const file = push_path(dir, manifest::FILE_NAME);
+    const text = match fs::read_to_string(file) {
+      Ok(found) => found,
+      Err(error) => return Err(fail(`cannot read \`${file}\`: ${error.message()}`)),
+    };
+    const id = self.sources.add(file, text);
+    const document = match toml::parse(id, text) {
+      Ok(found) => found,
+      Err(diagnostic) => return Err(self.report(diagnostic)),
+    };
+    const found = match manifest::read(document) {
+      Ok(manifest) => manifest,
+      Err(diagnostic) => return Err(self.report(diagnostic)),
+    };
+    const src = push_path(dir, "src");
+    const main = push_path(src, "main.sag");
+    const lib = push_path(src, "lib.sag");
+    const has_main = fs::is_file(main);
+    const has_lib = fs::is_file(lib);
+
+    if has_main == has_lib {
+      const message = if has_main { `the package \`${found.name}\` has both \`src/main.sag\` and \`src/lib.sag\`` } else { `the package \`${found.name}\` has neither \`src/main.sag\` nor \`src/lib.sag\`` };
+      const help = if has_main { "a package is a program or a library for now: remove one of them" } else { "create `src/main.sag` for a program, or `src/lib.sag` for a library" };
+
+      return Err(self.report(Diagnostic::error(codes::INVALID_LAYOUT, found.span, message).with_help(help)));
+    }
+
+    if let Some(library) = found.library {
+      if !has_lib {
+        return Err(self.report(Diagnostic::error(codes::NOT_APPLICABLE, library.span, `\`${found.name}\` is a program, which has no \`[library]\``).with_note("`[library]` chooses the files a library builds")));
+      }
+    }
+
+    const named: List<manifest::Spanned> = new List();
+
+    for item in found.link.search_paths {
+      named.push(item);
+    }
+
+    for item in found.link.sources {
+      named.push(item);
+    }
+
+    for item in named {
+      const target = push_path(dir, item.text);
+
+      if !fs::exists(target) {
+        return Err(self.report(Diagnostic::error(codes::FILE_NOT_FOUND, item.span, `\`${tidy(target)}\` does not exist`).with_note("paths in `[link]` are relative to the directory of `Nova.toml`")));
+      }
+    }
+
+    Ok(new Package(dir, found, if has_main { main } else { lib }, has_lib))
+  }
+
+  /// Loads the dependencies of the package at `index`, then theirs. `chain` holds the packages
+  /// being loaded, from the first one: reaching one of them again is a cycle.
+  pub fn load_dependencies(self, index: usize, chain: List<usize>) -> Result<(), i32> {
+    const package = match self.packages.get(index) {
+      Some(found) => found,
+      None => return Ok(()),
+    };
+
+    for spec in package.manifest.dependencies {
+      const dir = tidy(push_path(package.dir, spec.path));
+
+      if !fs::is_file(push_path(dir, manifest::FILE_NAME)) {
+        return Err(self.report(Diagnostic::error(codes::DEPENDENCY_NOT_FOUND, spec.path_span, `there is no package at \`${dir}\``).with_note(`the dependency \`${spec.name}\` must be a directory with a \`${manifest::FILE_NAME}\``)));
+      }
+
+      const key = identity(dir);
+      var existing: Option<usize> = None;
+
+      for other in 0..self.packages.len() {
+        if self.packages[other].identity == key {
+          existing = Some(other);
+        }
+      }
+
+      var dependency = 0usize;
+
+      match existing {
+        Some(found) => {
+          if chain.contains(found) {
+            const start = chain.index_of(found).unwrap_or(0);
+            const names: List<String> = new List();
+
+            for position in start..chain.len() {
+              names.push(self.packages[chain[position]].manifest.name);
+            }
+
+            names.push(self.packages[found].manifest.name);
+
+            return Err(self.report(Diagnostic::error(codes::DEPENDENCY_CYCLE, spec.span, "the packages depend on each other: " + names.join(" -> ")).with_note("packages cannot depend on each other in a cycle; move what they share into another package")));
+          }
+
+          dependency = found;
+        }
+        None => {
+          const added_package = self.read(dir)?;
+
+          self.packages.push(added_package);
+          dependency = self.packages.len() - 1;
+          chain.push(dependency);
+          self.load_dependencies(dependency, chain)?;
+          chain.pop();
+        }
+      }
+
+      const found = self.packages[dependency];
+
+      if found.manifest.name != spec.name {
+        return Err(self.report(Diagnostic::error(codes::DEPENDENCY_NAME, spec.span, `the package at \`${dir}\` is called \`${found.manifest.name}\`, not \`${spec.name}\``).with_help(`write \`${found.manifest.name} = { path = "${spec.path}" }\``)));
+      }
+
+      if !found.lib {
+        return Err(self.report(Diagnostic::error(codes::NOT_A_LIBRARY, spec.span, `\`${spec.name}\` is a program, not a library`).with_note("only libraries (with `src/lib.sag`) can be dependencies")));
+      }
+
+      package.dependencies.push(dependency);
+    }
+
+    Ok(())
+  }
+}
+
+/// Reads the package of the current directory and its dependencies.
+fn load_packages(format: DiagnosticFormat) -> Result<List<Package>, i32> {
+  const dir = find_package_dir()?;
+  const loader = new PackageLoader(format);
+  const package = loader.read(dir)?;
+
+  loader.packages.push(package);
+  loader.load_dependencies(0, List::from([0usize]))?;
+
+  Ok(loader.packages)
+}
+
+// ---- Compiling --------------------------------------------------------------------------------
+
+/// The compiler Nova runs: `SAG`, else `sag` (or, until the rename, `sagc`) next to Nova, else
+/// `sag` on PATH.
+fn compiler() -> String {
+  if let Some(configured) = env::variable("SAG") {
+    if !configured.trim().is_empty() {
+      return configured;
+    }
+  }
+
+  const extension = if windows() { ".exe" } else { "" };
+
+  if let Some(dir) = path::parent(env::args().first().unwrap_or("")) {
+    if !dir.is_empty() {
+      for name in List::from(["sag", "sagc"]) {
+        const candidate = push_path(dir, name + extension);
+
+        if fs::is_file(candidate) {
+          return candidate;
+        }
+      }
+    }
+  }
+
+  "sag"
+}
+
+/// The targets `sag targets` lists, by name.
+fn target_names(sag: String) -> Result<List<String>, i32> {
+  const output = match new Command(sag).arg("targets").input("").output() {
+    Ok(found) => found,
+    Err(error) => return Err(fail(`cannot run \`${sag}\`: ${error.message()}`)),
+  };
+  const names: List<String> = new List();
+
+  for line in output.stdout.lines() {
+    if line.starts_with("  ") {
+      if let Some(name) = line.trim().split(" ").first() {
+        names.push(name);
+      }
+    }
+  }
+
+  Ok(names)
+}
+
+/// The exit code of a program that ended, as `sag run` reports it.
+fn code_of(code: Option<i32>) -> i32 {
+  match code {
+    Some(found) => if found >= 0 && found <= 255 { found } else { EXIT_FAILURE },
+    None => EXIT_FAILURE,
+  }
+}
+
+/// `nova build`, `nova run` and `nova check`.
+fn compile(options: Options, mode: Mode) -> i32 {
+  const packages = match load_packages(options.format) {
+    Ok(found) => found,
+    Err(code) => return code,
+  };
+  const package = packages[0];
+  const sag = compiler();
+  const profile = if options.release { "release" } else { "debug" };
+  var target_dir = push_path(push_path(package.dir, "target"), profile);
+  var ios = false;
+
+  // Builds for another machine go to `target/<target>/`, apart from this machine's.
+  if let Some(name) = options.target {
+    const names = match target_names(sag) {
+      Ok(found) => found,
+      Err(code) => return code,
+    };
+
+    if !names.contains(name) {
+      return fail(`unknown target \`${name}\`\nnote: the supported targets are ${names.join(", ")}`);
+    }
+
+    target_dir = push_path(push_path(push_path(package.dir, "target"), name), profile);
+    ios = name.contains("-apple-ios");
+  }
+
+  if ios && !package.lib {
+    return fail(`iOS runs no standalone programs: make \`${package.manifest.name}\` a library, with \`src/lib.sag\`, and add it to an Xcode project`);
+  }
+
+  const extension = if options.target.is_some() || !windows() { "" } else { ".exe" };
+  const executable = push_path(target_dir, package.manifest.name + extension);
+  const args: List<String> = new List();
+
+  args.push(match mode {
+    Mode::Check => "check",
+    Mode::Run => "run",
+    Mode::Build => "build",
+  });
+  args.push(package.root);
+  args.push("--diagnostic-format");
+  args.push(if options.format == DiagnosticFormat::Short { "short" } else { "human" });
+  args.push("--name");
+  args.push(package.manifest.name);
+
+  if package.lib {
+    args.push("--library");
+  }
+
+  if let Some(name) = options.target {
+    args.push("--target");
+    args.push(name);
+  }
+
+  // The compiler numbers dependencies from 0: package `i` of the graph is dependency `i - 1`.
+  for index in 1..packages.len() {
+    const dependency = packages[index];
+    const uses: List<String> = new List();
+
+    args.push("--dependency");
+    args.push(dependency.manifest.name + "=" + dependency.root);
+
+    for used in dependency.dependencies {
+      uses.push(`${used - 1}`);
+    }
+
+    if !uses.is_empty() {
+      args.push("--dependency-uses");
+      args.push(`${index - 1}=` + uses.join(","));
+    }
+  }
+
+  const direct: List<String> = new List();
+
+  for used in package.dependencies {
+    direct.push(`${used - 1}`);
+  }
+
+  if !direct.is_empty() {
+    args.push("--uses");
+    args.push(direct.join(","));
+  }
+
+  // `[link]` of every package of the graph applies to the whole program.
+  const libraries: List<String> = new List();
+
+  for member in packages {
+    for library in member.manifest.link.libraries {
+      if !libraries.contains(library) {
+        libraries.push(library);
+        args.push("--link-lib");
+        args.push(library);
+      }
+    }
+  }
+
+  for member in packages {
+    for item in member.manifest.link.search_paths {
+      args.push("--link-search");
+      args.push(tidy(push_path(member.dir, item.text)));
+    }
+
+    for item in member.manifest.link.sources {
+      args.push("--link-source");
+      args.push(tidy(push_path(member.dir, item.text)));
+    }
+  }
+
+  for index in 1..packages.len() {
+    const dependency = packages[index];
+
+    eprintln(`Using ${dependency.manifest.name} v${dependency.manifest.version} (${dependency.dir})`);
+  }
+
+  const name = package.manifest.name;
+  const version = package.manifest.version;
+
+  if package.lib && mode == Mode::Run {
+    return fail(`\`${name}\` is a library, which cannot run; \`nova run\` runs packages with \`src/main.sag\``);
+  }
+
+  if mode == Mode::Check {
+    eprintln(`Checking ${name} v${version}`);
+
+    return run_compiler(sag, args);
+  }
+
+  if options.release {
+    args.push("--release");
+  }
+
+  if options.sanitize {
+    args.push(if options.thread_sanitizer { "--sanitize=thread" } else { "--sanitize" });
+  }
+
+  if options.emit_c {
+    args.push("--emit-c");
+  }
+
+  if let Some(cc) = options.cc {
+    args.push("--cc");
+    args.push(cc);
+  }
+
+  if let Err(error) = fs::create_dir_all(target_dir) {
+    return fail(`cannot create \`${target_dir}\`: ${error.message()}`);
+  }
+
+  eprintln(`Compiling ${name} v${version}`);
+
+  if package.lib {
+    args.push("--out-dir");
+    args.push(target_dir);
+
+    // Xcode links static libraries; dynamic ones for iOS must be asked for.
+    const static_lib = match package.manifest.library {
+      Some(spec) => spec.static_lib,
+      None => true,
+    };
+    const dynamic_lib = match package.manifest.library {
+      Some(spec) => spec.dynamic_lib,
+      None => !ios,
+    };
+
+    if static_lib {
+      args.push("--static");
+    }
+
+    if dynamic_lib {
+      args.push("--dynamic");
+    }
+
+    return build_library(sag, args, options.format, profile);
+  }
+
+  args.push("--output");
+  args.push(executable);
+
+  if mode == Mode::Run {
+    if !options.program_args.is_empty() {
+      args.push("--");
+
+      for arg in options.program_args {
+        args.push(arg);
+      }
+    }
+
+    return run_compiler(sag, args);
+  }
+
+  const code = run_compiler(sag, args);
+
+  if code == 0 {
+    eprintln(`Finished ${profile} build: ${executable}`);
+  }
+
+  code
+}
+
+/// Runs `sag` with Nova's streams and returns its exit code.
+fn run_compiler(sag: String, args: List<String>) -> i32 {
+  match new Command(sag).args(args).status() {
+    Ok(status) => code_of(status.code),
+    Err(error) => fail(`cannot run \`${sag}\`: ${error.message()}`),
+  }
+}
+
+/// `sag build --library`, which prints the files it writes: Nova reads them, and passes on what
+/// it reports, in color when Nova's own stderr would be.
+fn build_library(sag: String, args: List<String>, format: DiagnosticFormat, profile: String) -> i32 {
+  const command = new Command(sag).args(args);
+
+  if diagnostics::use_color(format) {
+    command.env("CLICOLOR_FORCE", "1");
+  }
+
+  const output = match command.output() {
+    Ok(found) => found,
+    Err(error) => return fail(`cannot run \`${sag}\`: ${error.message()}`),
+  };
+
+  // What the compiler reported; nothing to do if stderr is gone.
+  io::eprint(output.stderr);
+
+  const code = code_of(output.status.code);
+
+  if code != 0 {
+    return code;
+  }
+
+  const files: List<String> = new List();
+
+  for line in output.stdout.lines() {
+    if !line.trim().is_empty() {
+      files.push(line);
+    }
+  }
+
+  eprintln(`Finished ${profile} library: ${files.join(", ")}`);
+  0
+}
+
+/// Removes a directory and everything in it; `std::fs` removes empty directories only.
+fn remove_tree(dir: String) -> Result<(), String> {
+  const entries = match fs::read_dir(dir) {
+    Ok(found) => found,
+    Err(error) => return Err(error.message()),
+  };
+
+  for entry in entries {
+    const child = push_path(dir, entry);
+
+    if fs::is_dir(child) {
+      remove_tree(child)?;
+    } else if let Err(error) = fs::remove_file(child) {
+      return Err(error.message());
+    }
+  }
+
+  match fs::remove_dir(dir) {
+    Ok(_) => Ok(()),
+    Err(error) => Err(error.message()),
+  }
+}
+
+/// `nova clean`
+fn clean() -> i32 {
+  const dir = match find_package_dir() {
+    Ok(found) => found,
+    Err(code) => return code,
+  };
+  const target = push_path(dir, "target");
+
+  if !fs::exists(target) {
+    return 0;
+  }
+
+  match remove_tree(target) {
+    Ok(_) => {
+      eprintln(`Removed ${target}`);
+      0
+    }
+    Err(error) => fail(`cannot remove \`${target}\`: ${error}`),
+  }
+}
+
+/// Runs a parsed command and returns the process exit code.
+fn execute(command: Request) -> i32 {
+  match command {
+    Request::Help => {
+      println(usage());
+      0
+    }
+    Request::Version => {
+      println(`nova ${VERSION}`);
+      0
+    }
+    Request::New { name, lib } => new_package(name, lib),
+    Request::Init { name, lib } => init_package(name, lib),
+    Request::Compile(mode, options) => compile(options, mode),
+    Request::Clean => clean(),
+  }
+}
+
+pub fn main() {
+  const args = env::args();
+  const rest: List<String> = new List();
+
+  for index in 1..args.len() {
+    rest.push(args[index]);
+  }
+
+  const code = match parse_args(rest) {
+    Ok(command) => execute(command),
+    Err(message) => {
+      eprintln(`error: ${message}\n\n${usage()}`);
+      EXIT_USAGE
+    }
+  };
+
+  // Through `exit`, as `sag`: the leak check of `SAG_LEAK_CHECK` is for the programs Nova runs.
+  process::exit(code);
+}

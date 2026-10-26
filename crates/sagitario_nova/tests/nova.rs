@@ -31,8 +31,14 @@ impl Drop for TempDir {
   }
 }
 
+/// The Nova under test: `NOVA_BINARY`, such as Nova written in Sagitario
+/// (docs/adr/0064-nova-in-sagitario.md), or else the one built by Cargo.
+fn nova_binary() -> PathBuf {
+  std::env::var_os("NOVA_BINARY").filter(|path| !path.is_empty()).map_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_nova")), PathBuf::from)
+}
+
 fn nova(dir: &Path, args: &[&str]) -> io::Result<Output> {
-  Command::new(env!("CARGO_BIN_EXE_nova")).args(args).current_dir(dir).output()
+  Command::new(nova_binary()).args(args).current_dir(dir).output()
 }
 
 fn stdout(output: &Output) -> String {
@@ -843,7 +849,7 @@ fn f3_acceptance() -> io::Result<()> {
   assert_eq!(stdout(&files), "      2       3      13 a.txt\n      1       3      18 b.txt\n      3       6      31 total\n");
 
   // Stdin.
-  let mut child = Command::new(env!("CARGO_BIN_EXE_nova"))
+  let mut child = Command::new(nova_binary())
     .args(&args)
     .current_dir(&wc)
     .stdin(std::process::Stdio::piped())

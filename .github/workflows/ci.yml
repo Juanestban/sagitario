@@ -146,6 +146,14 @@ jobs:
         env:
           SAG_COMPILER: ${{ github.workspace }}/compiler/src/main${{ runner.os == 'Windows' && '.exe' || '' }}
         run: cargo test -p sagitario_cli --test suites
+      # Nova in Sagitario, built by stage 1, runs stage 1 (docs/adr/0064-nova-in-sagitario.md).
+      - name: Build Nova with stage 1
+        run: ./compiler/src/main build compiler/src/nova.sag
+      - name: Run the Nova tests with Nova in Sagitario
+        env:
+          NOVA_BINARY: ${{ github.workspace }}/compiler/src/nova${{ runner.os == 'Windows' && '.exe' || '' }}
+          SAG: ${{ github.workspace }}/compiler/src/main${{ runner.os == 'Windows' && '.exe' || '' }}
+        run: cargo test -p sagitario_nova --test nova
       - name: Reach the fixed point
         run: cargo test -p sagitario_cli --test selfhost bootstrap_reaches_the_fixed_point
 

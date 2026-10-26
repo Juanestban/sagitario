@@ -174,7 +174,8 @@ Increments:
 3. The pivot without Rust ([ADR-0060](adr/0060-driver-parity-for-nova.md)):
    - 3a. `sagc` builds libraries with their C header, and takes dependencies and `[link]` through
      options that Nova passes.
-   - 3b. Nova in Sagitario.
+   - 3b. Nova in Sagitario (`compiler/src/nova.sag`), which runs `sag`
+     ([ADR-0064](adr/0064-nova-in-sagitario.md)).
    - 3c. The test harness in Sagitario, with expected dumps for the corpus of each pass.
    - 3d. The generated C of the compiler as a seed, CI without `cargo`, and `sagc` renamed to
      `sag` with `crates/` retired.

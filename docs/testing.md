@@ -102,7 +102,9 @@ passes as they are ported
 [ADR-0054](adr/0054-lowering-and-c-generation-port.md)). `tests/lexer/`, `tests/parser/`,
 `tests/resolve/`, `tests/types/` and `tests/codegen/` hold edge cases of each pass. With
 `SAG_COMPILER=<path to sagc>`, the harness of the suites runs that compiler instead of `sag`
-([ADR-0055](adr/0055-driver-and-cli-port.md)). `bootstrap_reaches_the_fixed_point` builds stage 2
+([ADR-0055](adr/0055-driver-and-cli-port.md)), and with `NOVA_BINARY=<path to Nova>` the tests of Nova
+(`crates/sagitario_nova/tests/nova.rs`) run that Nova, such as Nova in Sagitario
+([ADR-0064](adr/0064-nova-in-sagitario.md)). `bootstrap_reaches_the_fixed_point` builds stage 2
 with `sagc` and checks that both generate the same C for the compiler
 ([ADR-0056](adr/0056-bootstrap-and-acceptance.md)). `language_server_answers_the_sessions` sends
 each `tests/lsp/<case>.session` to `sagc lsp` about `<case>.sag` and compares the answers with
