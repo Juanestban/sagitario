@@ -1,6 +1,6 @@
 # 0048. `async`/`await`, for phase F6
 
-- Status: Accepted (not implemented: planned for F7, which [ADR-0057](0057-editor-tooling-and-independence-from-rust.md) moved it to)
+- Status: Accepted (not implemented: planned for F8, which [ADR-0063](0063-distribution-phase-and-roadmap-v2.md) moved it to, after [ADR-0057](0057-editor-tooling-and-independence-from-rust.md) had moved it to F7)
 - Date: 2026-10-25
 - Refines: [ADR-0045](0045-threads-and-send.md) (Q183)
 

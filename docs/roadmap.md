@@ -179,10 +179,53 @@ Increments:
    - 3d. The generated C of the compiler as a seed, CI without `cargo`, and `sagc` renamed to
      `sag` with `crates/` retired.
 
+## F7: Distribution and updates (post-MVP)
+
+Install Sagitario on Windows, Linux and macOS with one command, as `rustup` installs Rust, and
+keep it up to date with `nova update self`
+([ADR-0063](adr/0063-distribution-phase-and-roadmap-v2.md)). It follows F6, since it ships `sag`
+and Nova written in Sagitario.
+
+Increments:
+
+1. **Releases.** One version for the whole toolchain (`sag`, `nova`, the standard library and the
+   runtime). A CI job, on a tag `vX.Y.Z`, bootstraps from the seed on each platform and publishes
+   a GitHub Release of the repository with an archive per platform (Windows x86-64, Linux
+   x86-64 and AArch64, macOS AArch64 and x86-64), their SHA-256 checksums and notes.
+2. **Installers.** `install.sh` (Linux, macOS) and `install.ps1` (Windows) download the latest
+   release, check its checksum, put `sag` and `nova` in `~/.sagitario/bin`, add it to `PATH`,
+   and check for a C compiler, saying how to install one if there is none. Native packages
+   (`.msi`, `.pkg`, `.deb`) may follow.
+3. **`nova update self`.** Asks the GitHub Releases of the repository for the latest version,
+   compares it with the installed one, and when it is newer downloads the archive of the
+   platform, checks its checksum, replaces `sag`, `nova` and the standard library (on Windows a
+   running executable is renamed, then replaced), and keeps the previous version to go back to.
+   `nova update self --check` only says whether there is one.
+4. **The editor.** The VS Code extension is published to the Marketplace with each release, and
+   finds `sag` in `~/.sagitario/bin` without settings.
+
+**Acceptance:** on a clean machine of each system, one command installs Sagitario; `nova new`,
+`nova run` and the VS Code extension work; and `nova update self` updates from one published
+release to the next.
+
+**Open questions**, settled when the phase starts:
+
+- Downloading over HTTPS: run the `curl` every supported system ships (Windows 10 and later,
+  macOS, Linux distributions), or a `std::net` with TLS, which is much larger. Recommended:
+  `curl` first.
+- SHA-256 and JSON: in the standard library (`std::hash`, `std::json`), or inside Nova. The
+  language server already has a JSON parser (`compiler/src/lsp/json.sag`).
+- The C compiler: require one, as today, or bundle one (clang is large, and its licence and the
+  Windows SDK need care). Recommended: require it, and guide the installation.
+- Signing: Windows SmartScreen and macOS Gatekeeper warn about unsigned executables; signing
+  needs certificates, and macOS notarization an Apple developer account.
+
 ## Later phases (post-MVP)
 
-- **F7 `async`/`await`:** stackless tasks (`Task<T>`) on a single-threaded executor per thread,
+- **F8 `async`/`await`:** stackless tasks (`Task<T>`) on a single-threaded executor per thread,
   as designed in [ADR-0048](adr/0048-async-await.md).
+- **Roadmap v2:** a game engine written in Sagitario, with the language and library features it
+  needs ([roadmap-v2.md](roadmap-v2.md)).
 
 ## Deferred decisions
 

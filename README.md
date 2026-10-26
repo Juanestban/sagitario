@@ -56,6 +56,7 @@ gives them an icon and adds snippets.
 - [Design decisions (ADRs)](docs/adr/README.md)
 - [Compiler architecture](docs/architecture.md)
 - [Roadmap](docs/roadmap.md)
+- [Roadmap v2: a game engine](docs/roadmap-v2.md)
 - [Contributing](CONTRIBUTING.md)
 
 ## License
