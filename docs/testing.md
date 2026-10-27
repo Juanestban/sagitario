@@ -141,6 +141,16 @@ A change to the compiler that changes a dump or an answer of the language server
 harness; once the change is intended, `SAG_BLESS=1` rewrites the expected files and their diff is
 reviewed with the change.
 
+## The bootstrap from the seed
+
+`bootstrap/build.sh` (Linux, macOS) and `bootstrap/build.ps1` (Windows) build the compiler from
+`bootstrap/sag.c` with a C compiler alone ([ADR-0067](adr/0067-bootstrap-from-the-seed.md)): the
+seed is stage 0, which builds stage 1, which builds stage 2. They check that stages 1 and 2
+generate the same C for the compiler, and that `sag check` reports nothing for the compiler, Nova
+and the harness, then build Nova; the result is `build/bin/sag` and `build/bin/nova`. `--debug`
+builds the stages in debug, `--update-seed` writes the C of stage 2 and the runtime to
+`bootstrap/`, and `--install` copies `sag` and `nova` to `~/.sagitario/bin` and adds it to `PATH`.
+
 ## The editor
 
 `crates/sagitario_cli/tests/editor.rs` checks that the grammar of the VS Code extension
@@ -153,6 +163,7 @@ GitHub Actions matrix on Windows, Linux and macOS running `cargo fmt --check`,
 `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` with
 clang, plus a Linux job with `SAG_CC=gcc` and a Windows job with `SAG_CC=cl` (without
 sanitizers). The Ubuntu job requires the Android NDK (`SAG_REQUIRE_NDK=1`). The `bootstrap` job
-builds `sagc` (stage 1), runs the harness in Sagitario with it and checks the fixed point, on
-Windows with official clang, `cl` and MinGW gcc, on Ubuntu with clang and gcc, and on macOS with
-clang. The `vscode` job packages the VS Code extension.
+builds the compiler from the seed with the script of its system in debug, and runs the harness in
+Sagitario with stage 2 and its Nova, on Windows with official clang, `cl` and MinGW gcc, on Ubuntu
+with clang and gcc, and on macOS with clang; the `same-c` job checks that the C stage 2 generates
+for the compiler is the same in all of them. The `vscode` job packages the VS Code extension.

@@ -42,6 +42,8 @@ crates/
 runtime/            minimal C runtime (ARC, panic, String, allocation, I/O and the OS calls of std)
 tests/              end-to-end suites, and their harness in Sagitario in tests/harness/ (see testing.md)
 compiler/           the compiler written in Sagitario (F5, `sagc`), ported pass by pass
+bootstrap/          the seed (the C of the compiler, with its runtime) and the scripts that build
+                    the compiler from it with a C compiler alone (see testing.md)
 ```
 
 ## Crate dependency rule
@@ -107,7 +109,8 @@ could be added.
   overflow (panic in debug, wrap in release); shifts, division and indexing are checked.
 - `#line` directives map C back to `.sag` sources (the file and line of each statement); one is
   repeated right before each runtime check that reports `__LINE__`, since a statement can span
-  several C lines.
+  several C lines. Their paths use `/` on every system, so that the C does not depend on the
+  machine that generates it.
 - `sag build --emit-c` writes the generated C for inspection.
 - Each struct becomes a C struct `sag_sN` (fields `fN`), each enum a `sag_eN`, and each array,
   `Option` and `Result` type a `sag_tN`. Arrays wrap a C array; enum-like types hold a `tag` and

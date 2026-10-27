@@ -196,8 +196,10 @@ class Generator {
     self.indent = 0;
     self.paths = new List();
 
+    // With `/` on every system, so that the C does not depend on the machine that generates it
+    // (docs/adr/0067-bootstrap-from-the-seed.md).
     for path in program.source_paths {
-      self.paths.push(c_string_literal(path));
+      self.paths.push(c_string_literal(path.replace("\\", "/")));
     }
 
     self.locals = new List();

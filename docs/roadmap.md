@@ -179,7 +179,9 @@ Increments:
    - 3c. The test harness in Sagitario (`tests/harness/`), with expected dumps for the corpus of
      each pass ([ADR-0066](adr/0066-test-harness-in-sagitario.md)).
    - 3d. The generated C of the compiler as a seed, CI without `cargo`, and `sagc` renamed to
-     `sag` with `crates/` retired.
+     `sag` with `crates/` retired ([ADR-0067](adr/0067-bootstrap-from-the-seed.md)): 3d-1 the
+     seed and the scripts of the bootstrap (`bootstrap/`), 3d-2 the rename and the standard
+     library in `compiler/std/`, 3d-3 Rust removed.
 
 ## F7: Distribution and updates (post-MVP)
 

@@ -35,6 +35,8 @@ sagc build compiler/src/nova_main.sag --output compiler/src/nova   # Nova in Sag
 NOVA_BINARY="$PWD/compiler/src/nova" SAG="$PWD/compiler/src/main" cargo test -p sagitario_nova --test nova
 compiler/src/main run tests/harness/main.sag -- --sag compiler/src/main   # the harness in Sagitario (docs/testing.md)
 SAG_BLESS=1 compiler/src/main run tests/harness/main.sag -- --sag compiler/src/main dumps lsp   # rewrite expected files
+sh bootstrap/build.sh           # build/bin/sag and build/bin/nova from the seed, with a C compiler alone
+bootstrap/build.ps1             # the same on Windows (PowerShell); --debug, --install, --update-seed
 ANDROID_NDK_HOME=/path/to/ndk cargo test --workspace   # also the Android cross-compilation tests
 SAG_CC=gcc sag build main.sag   # choose the C compiler (or --cc)
 SAG_CC=cl SAG_TEST_SANITIZE=0 cargo test --workspace   # with MSVC, in a Developer Command Prompt

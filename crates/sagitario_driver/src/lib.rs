@@ -1367,10 +1367,11 @@ impl CCompiler {
     self.supports_sanitizers() && !self.windows()
   }
 
-  /// The options of a debug or release build.
+  /// The options of a debug or release build. `cl` optimizes with `/O1`: its `/O2` miscompiles
+  /// the compiler (docs/adr/0067-bootstrap-from-the-seed.md).
   fn mode(&self, release: bool) -> &'static [&'static str] {
     match (self.cl, release) {
-      (true, true) => &["/O2", "/DSAG_RELEASE"],
+      (true, true) => &["/O1", "/DSAG_RELEASE"],
       (true, false) => &["/Od", "/Z7"],
       (false, true) => &["-O2", "-DSAG_RELEASE"],
       (false, false) => &["-O0", "-g"],

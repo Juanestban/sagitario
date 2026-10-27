@@ -57,7 +57,9 @@ pub fn generate(program: &Program) -> GeneratedC {
     instances: Vec::new(),
     out: String::new(),
     indent: 0,
-    paths: program.source_paths.iter().map(|path| c_string_literal(path.as_bytes())).collect(),
+    // With `/` on every system, so that the C does not depend on the machine that generates it
+    // (docs/adr/0067-bootstrap-from-the-seed.md).
+    paths: program.source_paths.iter().map(|path| c_string_literal(path.replace('\\', "/").as_bytes())).collect(),
     locals: &[],
     self_by_ref: false,
     source_line: None,

@@ -1238,10 +1238,11 @@ pub class CCompiler {
     self.supports_sanitizers() && !self.windows()
   }
 
-  /// The options of a debug or release build.
+  /// The options of a debug or release build. `cl` optimizes with `/O1`: its `/O2` miscompiles
+  /// the compiler (docs/adr/0067-bootstrap-from-the-seed.md).
   pub fn mode(self, release: bool) -> List<String> {
     if self.cl {
-      if release { List::from(["/O2", "/DSAG_RELEASE"]) } else { List::from(["/Od", "/Z7"]) }
+      if release { List::from(["/O1", "/DSAG_RELEASE"]) } else { List::from(["/Od", "/Z7"]) }
     } else {
       if release { List::from(["-O2", "-DSAG_RELEASE"]) } else { List::from(["-O0", "-g"]) }
     }

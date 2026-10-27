@@ -80,8 +80,9 @@ jobs:
       - run: cl
       - run: cargo test --workspace
 
-  # The self-hosted compiler (docs/adr/0056-bootstrap-and-acceptance.md): `sagc` built by `sag`
-  # (stage 1) passes the suites, and builds a stage 2 that generates the same C for the compiler.
+  # The bootstrap from the seed with a C compiler alone (docs/adr/0067-bootstrap-from-the-seed.md):
+  # stages 1 and 2 generate the same C, stage 2 passes the harness, and the C it generates for the
+  # compiler is the same on every system.
   bootstrap:
     name: bootstrap (${{ matrix.name }})
     strategy:
@@ -112,10 +113,11 @@ jobs:
       SAG_CC: ${{ matrix.cc }}
       # MSVC has no UndefinedBehaviorSanitizer (docs/adr/0044-c-toolchains.md).
       SAG_TEST_SANITIZE: ${{ matrix.cc == 'cl' && '0' || '1' }}
+      # The Ubuntu runners have the Android NDK: its cross-compilation tests must not be skipped
+      # there.
+      SAG_REQUIRE_NDK: ${{ matrix.os == 'ubuntu-latest' && '1' || '0' }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
       # The environment of a Developer Command Prompt, for the following steps.
       - name: Set up the MSVC environment
         if: matrix.cc == 'cl'
@@ -138,17 +140,40 @@ jobs:
       - name: Show the C compiler
         if: runner.os != 'Windows'
         run: '"$SAG_CC" --version'
-      - run: cargo build -p sagitario_cli
-      - name: Build stage 1
-        run: ./target/debug/sag build compiler/src/main.sag
-      # The harness in Sagitario with stage 1: the suites, the expected dumps, the language
-      # server, the editor, the command line, and Nova in Sagitario, which the harness builds with
-      # stage 1 (docs/adr/0066-test-harness-in-sagitario.md). Before the fixed point test, which
-      # writes to `compiler/src/` too.
-      - name: Run the harness with stage 1
-        run: ./compiler/src/main run tests/harness/main.sag -- --sag compiler/src/main${{ runner.os == 'Windows' && '.exe' || '' }}
-      - name: Reach the fixed point
-        run: cargo test -p sagitario_cli --test selfhost bootstrap_reaches_the_fixed_point
+      # In debug, so that an integer overflow in the compiler panics.
+      - name: Bootstrap from the seed
+        if: runner.os == 'Windows'
+        run: ./bootstrap/build.ps1 --debug
+      - name: Bootstrap from the seed
+        if: runner.os != 'Windows'
+        run: sh bootstrap/build.sh --debug
+      # The harness in Sagitario with stage 2 and its Nova: the suites, the expected dumps, the
+      # language server, the editor, the command line and Nova
+      # (docs/adr/0066-test-harness-in-sagitario.md).
+      - name: Run the harness with stage 2
+        run: ./build/bin/sag run tests/harness/main.sag -- --sag build/bin/sag${{ runner.os == 'Windows' && '.exe' || '' }} --nova build/bin/nova${{ runner.os == 'Windows' && '.exe' || '' }}
+      - name: Hash the C of the compiler
+        shell: bash
+        run: (sha256sum build/sag.c 2>/dev/null || shasum -a 256 build/sag.c) | cut -d ' ' -f 1 > build/sag.c.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: c-of-the-compiler-${{ strategy.job-index }}
+          path: build/sag.c.sha256
+
+  # The C that stage 2 generates for the compiler is the same on every system and C compiler, so
+  # that one seed serves them all.
+  same-c:
+    name: same C on every system
+    needs: bootstrap
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: c-of-the-compiler-*
+      - name: Compare the hashes
+        run: |
+          cat c-of-the-compiler-*/sag.c.sha256
+          test "$(cat c-of-the-compiler-*/sag.c.sha256 | sort -u | wc -l)" -eq 1
 
   # The VS Code extension packages (docs/adr/0057-editor-tooling-and-independence-from-rust.md).
   vscode:
