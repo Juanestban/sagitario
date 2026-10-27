@@ -769,7 +769,18 @@ fn report_failure(failure: Failure, compiler: CCompiler, link: Link) -> i32 {
   }
 }
 
-const SANITIZE_FLAGS: String = "-fsanitize=address,undefined -fno-sanitize-recover=undefined";
+/// Checks that the directory given with `flag` exists: the C compiler and the archiver do not
+/// create it, and their failure to write there is not an internal compiler error.
+fn require_dir(dir: String, flag: String) -> Result<(), i32> {
+  if dir.is_empty() || fs::is_dir(dir) {
+    return Ok(());
+  }
+
+  eprintln(`error: the directory \`${dir}\` of \`${flag}\` does not exist`);
+  Err(EXIT_FAILURE)
+}
+
+const SANITIZE_FLAGS: String ="-fsanitize=address,undefined -fno-sanitize-recover=undefined";
 const THREAD_SANITIZE_FLAGS: String = "-fsanitize=thread";
 
 /// Compiles the program into `executable` and returns the C compiler used.
@@ -777,6 +788,10 @@ fn compile_to(options: CompileOptions, executable: String) -> Result<CCompiler, 
   if options.library {
     eprintln(`error: \`${options.input}\` is the root of a library, which has no executable`);
     return Err(EXIT_FAILURE);
+  }
+
+  if let Some(output) = options.output {
+    require_dir(path::parent(output).unwrap_or(""), "--output")?;
   }
 
   const generated = match front_end(options, true)?.c_source {
@@ -1032,6 +1047,10 @@ pub fn build_library(options: CompileOptions) -> Result<List<String>, i32> {
   if options.sanitize {
     eprintln("error: libraries cannot be built with `--sanitize`: the programs using them would need the sanitizer runtime");
     return Err(EXIT_FAILURE);
+  }
+
+  if let Some(out_dir) = options.out_dir {
+    require_dir(out_dir, "--out-dir")?;
   }
 
   const front = front_end(options, true)?;

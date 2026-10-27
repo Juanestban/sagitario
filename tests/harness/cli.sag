@@ -14,6 +14,7 @@ pub fn tests() -> List<Test> {
     support::test("targets_lists_the_cross_compilation_targets", targets_lists_the_targets),
     support::test("cl_needs_a_developer_command_prompt", cl_needs_a_developer_command_prompt),
     support::test("checks_deeply_nested_code", checks_deeply_nested_code),
+    support::test("missing_output_directory_exits_with_1", missing_output_directory_exits_with_1),
   ])
 }
 
@@ -116,4 +117,23 @@ fn checks_deeply_nested_code(cx: Context) -> Result<(), String> {
   const ran = sag(cx, List::from(["check", file]))?;
 
   support::expect_success("sag check", ran)
+}
+
+fn missing_output_directory_exits_with_1(cx: Context) -> Result<(), String> {
+  // It was an internal compiler error: the C compiler or the archiver failed to write there.
+  const dir = cx.temp_dir("missing-output")?;
+  const missing = path::join(dir, "missing");
+  const library = path::join(dir, "geo.sag");
+
+  support::write_file(library, "pub extern \"C\" fn add(a: i32, b: i32) -> i32 {\n  a + b\n}\n")?;
+
+  const program = sag(cx, List::from(["build", cx.file("tests/run-pass/control_flow.sag"), "--output", path::join(missing, "program")]))?;
+
+  expect_exit("sag build --output", program, 1)?;
+  expect_contains("sag build --output", program.stderr, "of `--output` does not exist")?;
+
+  const built = sag(cx, List::from(["build", library, "--library", "--name", "geo", "--static", "--out-dir", missing]))?;
+
+  expect_exit("sag build --out-dir", built, 1)?;
+  expect_contains("sag build --out-dir", built.stderr, "of `--out-dir` does not exist")
 }
