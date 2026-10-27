@@ -1,0 +1,30 @@
+exit: 1
+--- stdout
+module: Module
+  item: Fn 68..164 #0 f@71..72 module extern_c=false abstract=false override=false
+    body: Block 75..164
+      stmt: Let 142..162 #7 d@148..149 mutable=false
+        init: Template 152..161 #10
+          part: Text "ok "
+          part: PathExpr 158..159 #9
+            path: Path 158..159 #8 x@158..159
+--- stderr
+error[E0100]: expected an expression inside `${}`, found end of file
+ --> tests/parser/templates.sag:3:17
+  |
+3 |   const a = `${}`;
+  |                 ^
+
+error[E0100]: expected `}` closing the interpolation, found identifier `y`
+ --> tests/parser/templates.sag:4:18
+  |
+4 |   const b = `${x y}`;
+  |                  ^
+
+error[E0100]: expected an expression, found end of file
+ --> tests/parser/templates.sag:5:20
+  |
+5 |   const c = `${1 +}`;
+  |                    ^
+
+error: could not compile `tests/parser/templates.sag` due to 3 previous errors

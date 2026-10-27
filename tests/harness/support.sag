@@ -1,0 +1,307 @@
+//! What the parts of the harness share: the programs under test, temporary directories, running
+//! programs and checking what they did.
+
+use std::env;
+use std::fs;
+use std::path;
+use std::process::Command;
+
+/// Whether the harness runs on Windows, where `std::path` joins with `\`.
+pub fn windows() -> bool {
+  path::join("x\\", "y") == "x\\y"
+}
+
+/// The extension of executables: `.exe` on Windows.
+pub fn exe_suffix() -> String {
+  if windows() { ".exe" } else { "" }
+}
+
+/// `text` with `/` as the separator of paths, as expected files write them.
+pub fn slashes(text: String) -> String {
+  text.replace("\\", "/")
+}
+
+/// `text` with `\r\n` as `\n`: C programs write text-mode streams on Windows.
+pub fn unix_lines(text: String) -> String {
+  text.replace("\r\n", "\n")
+}
+
+/// The text after `prefix`, if `text` starts with it.
+pub fn after(text: String, prefix: String) -> Option<String> {
+  if text.starts_with(prefix) { Some(text.substring(prefix.len(), text.len())) } else { None }
+}
+
+/// The words of `text`, separated by spaces, tabs and line breaks.
+pub fn words(text: String) -> List<String> {
+  const found: List<String> = new List();
+
+  for word in text.replace("\t", " ").replace("\r", " ").replace("\n", " ").split(" ") {
+    if !word.is_empty() {
+      found.push(word);
+    }
+  }
+
+  found
+}
+
+/// Pushes `items` at the end of `list`.
+pub fn push_all(list: List<String>, items: List<String>) {
+  for item in items {
+    list.push(item);
+  }
+}
+
+/// `first` followed by `second`, in a new list.
+pub fn concat(first: List<String>, second: List<String>) -> List<String> {
+  const both: List<String> = new List();
+
+  push_all(both, first);
+  push_all(both, second);
+  both
+}
+
+/// The index of the last `part` in `text`.
+pub fn last_index(text: String, part: String) -> Option<usize> {
+  var found: Option<usize> = None;
+  var start: usize = 0;
+
+  while start <= text.len() {
+    match text.substring(start, text.len()).find(part) {
+      Some(index) => {
+        found = Some(start + index);
+        start = start + index + 1;
+      }
+      None => break,
+    }
+  }
+
+  found
+}
+
+/// What the tests share: the programs under test and where they write.
+pub class Context {
+  /// The compiler under test.
+  pub const sag: String;
+  /// Nova under test, built by the harness when it is not given.
+  pub var nova: Option<String>;
+  /// The root of the repository, as an absolute path.
+  pub const root: String;
+  /// Whether programs run with sanitizers (`SAG_TEST_SANITIZE=0` turns them off).
+  pub const sanitize: bool;
+  /// Whether expected files are rewritten instead of compared (`SAG_BLESS=1`).
+  pub const bless: bool;
+  /// The directory holding the temporary directories of this run.
+  pub const temp: String;
+  prv var count: u32;
+
+  pub fn new(self, sag: String, nova: Option<String>, root: String, temp: String) {
+    self.sag = sag;
+    self.nova = nova;
+    self.root = root;
+    self.sanitize = env::variable("SAG_TEST_SANITIZE").unwrap_or("") != "0";
+    self.bless = env::variable("SAG_BLESS").unwrap_or("") == "1";
+    self.temp = temp;
+    self.count = 0;
+  }
+
+  /// A path under the root of the repository, written with `/`.
+  pub fn file(self, relative: String) -> String {
+    path::join(self.root, relative)
+  }
+
+  /// A new empty directory, removed with the others when the harness ends.
+  pub fn temp_dir(self, name: String) -> Result<String, String> {
+    self.count += 1;
+
+    const dir = path::join(self.temp, `${name}-${self.count}`);
+
+    match fs::create_dir_all(dir) {
+      Ok(_) => Ok(dir),
+      Err(error) => Err(error.message()),
+    }
+  }
+
+  /// A command running the compiler under test.
+  pub fn sag_command(self, args: List<String>) -> Command {
+    new Command(self.sag).args(args)
+  }
+}
+
+/// How a program ended and what it printed, with `\r\n` as `\n`.
+pub struct Ran {
+  /// Its exit code, or `None` if a signal ended it.
+  pub code: Option<i32>;
+  pub stdout: String;
+  pub stderr: String;
+
+  pub fn success(self) -> bool {
+    self.exited(0)
+  }
+
+  pub fn exited(self, expected: i32) -> bool {
+    match self.code {
+      Some(code) => code == expected,
+      None => false,
+    }
+  }
+
+  /// The exit code in messages.
+  pub fn code_text(self) -> String {
+    match self.code {
+      Some(code) => `${code}`,
+      None => "none (ended by a signal)",
+    }
+  }
+}
+
+/// Runs `command` to its end, capturing what it prints.
+pub fn run(command: Command) -> Result<Ran, String> {
+  match command.output() {
+    Ok(output) => Ok(Ran { code: output.status.code, stdout: unix_lines(output.stdout), stderr: unix_lines(output.stderr) }),
+    Err(error) => Err(error.message()),
+  }
+}
+
+/// Runs the compiler under test with `args`.
+pub fn sag(cx: Context, args: List<String>) -> Result<Ran, String> {
+  run(cx.sag_command(args))
+}
+
+/// An error with `message` unless `condition` holds.
+pub fn expect(condition: bool, message: String) -> Result<(), String> {
+  if condition { Ok(()) } else { Err(message) }
+}
+
+/// An error unless `ran` exited with 0.
+pub fn expect_success(what: String, ran: Ran) -> Result<(), String> {
+  expect(ran.success(), `${what} failed with exit code ${ran.code_text()}\nstdout:\n${ran.stdout}\nstderr:\n${ran.stderr}`)
+}
+
+/// An error unless `ran` exited with `code`.
+pub fn expect_exit(what: String, ran: Ran, code: i32) -> Result<(), String> {
+  expect(ran.exited(code), `${what}: expected exit code ${code}, got ${ran.code_text()}\nstdout:\n${ran.stdout}\nstderr:\n${ran.stderr}`)
+}
+
+/// An error unless `text` contains `part`.
+pub fn expect_contains(what: String, text: String, part: String) -> Result<(), String> {
+  expect(text.contains(part), `${what}: \`${part}\` not found in:\n${text}`)
+}
+
+/// An error unless `actual` is `expected`.
+pub fn expect_equal(what: String, actual: String, expected: String) -> Result<(), String> {
+  expect(actual == expected, `${what}:\nexpected:\n${expected}\nactual:\n${actual}`)
+}
+
+/// Writes `text` to `file`, creating the directories above it.
+pub fn write_file(file: String, text: String) -> Result<(), String> {
+  if let Some(parent) = path::parent(file) {
+    if !parent.is_empty() {
+      if let Err(error) = fs::create_dir_all(parent) {
+        return Err(error.message());
+      }
+    }
+  }
+
+  match fs::write(file, text) {
+    Ok(_) => Ok(()),
+    Err(error) => Err(error.message()),
+  }
+}
+
+/// The text of `file`.
+pub fn read_file(file: String) -> Result<String, String> {
+  match fs::read_to_string(file) {
+    Ok(text) => Ok(text),
+    Err(error) => Err(error.message()),
+  }
+}
+
+/// The names of the entries of `dir`, sorted by their bytes.
+pub fn entries(dir: String) -> Result<List<String>, String> {
+  match fs::read_dir(dir) {
+    Ok(names) => Ok(names),
+    Err(error) => Err(error.message()),
+  }
+}
+
+/// Removes a directory and everything in it; `std::fs` removes empty directories only.
+pub fn remove_tree(dir: String) -> Result<(), String> {
+  for entry in entries(dir)? {
+    const child = path::join(dir, entry);
+
+    if fs::is_dir(child) {
+      remove_tree(child)?;
+    } else if let Err(error) = fs::remove_file(child) {
+      return Err(error.message());
+    }
+  }
+
+  match fs::remove_dir(dir) {
+    Ok(_) => Ok(()),
+    Err(error) => Err(error.message()),
+  }
+}
+
+/// Copies the directory `from` into `to`, recursively.
+pub fn copy_tree(from: String, to: String) -> Result<(), String> {
+  if let Err(error) = fs::create_dir_all(to) {
+    return Err(error.message());
+  }
+
+  for entry in entries(from)? {
+    const source = path::join(from, entry);
+    const target = path::join(to, entry);
+
+    if fs::is_dir(source) {
+      copy_tree(source, target)?;
+    } else if let Err(error) = fs::copy(source, target) {
+      return Err(error.message());
+    }
+  }
+
+  Ok(())
+}
+
+/// The first line where `expected` and `actual` differ, for messages about long texts.
+pub fn first_difference(expected: String, actual: String) -> String {
+  const left = expected.lines();
+  const right = actual.lines();
+  var index: usize = 0;
+
+  while index < left.len() && index < right.len() {
+    if left[index] != right[index] {
+      return `line ${index + 1}:\nexpected: ${left[index]}\nactual:   ${right[index]}`;
+    }
+
+    index += 1;
+  }
+
+  `the expected text has ${left.len()} lines, the actual one ${right.len()}`
+}
+
+/// Compares `actual` with the expected file `relative` (a path under the root), or rewrites the
+/// file with `SAG_BLESS=1`.
+pub fn check_expected(cx: Context, relative: String, actual: String) -> Result<(), String> {
+  const file = cx.file(relative);
+
+  if cx.bless {
+    return write_file(file, actual);
+  }
+
+  const expected = match fs::read_to_string(file) {
+    Ok(text) => unix_lines(text),
+    Err(_) => return Err(`\`${relative}\` is missing: run the harness with SAG_BLESS=1`),
+  };
+
+  expect(expected == actual, `\`${relative}\` is out of date (run the harness with SAG_BLESS=1 if the change is intended): ${first_difference(expected, actual)}`)
+}
+
+/// A test: its name and what it runs.
+pub struct Test {
+  pub name: String;
+  pub body: fn(Context) -> Result<(), String>;
+}
+
+pub fn test(name: String, body: fn(Context) -> Result<(), String>) -> Test {
+  Test { name: name, body: body }
+}

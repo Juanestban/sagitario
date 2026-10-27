@@ -40,7 +40,7 @@ crates/
   sagitario_cli/          the `sag` binary
   sagitario_nova/         the `nova` binary: package manager, `Nova.toml` parser (docs/nova.md)
 runtime/            minimal C runtime (ARC, panic, String, allocation, I/O and the OS calls of std)
-tests/              end-to-end suites (see testing.md)
+tests/              end-to-end suites, and their harness in Sagitario in tests/harness/ (see testing.md)
 compiler/           the compiler written in Sagitario (F5, `sagc`), ported pass by pass
 ```
 

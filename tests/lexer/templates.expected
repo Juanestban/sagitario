@@ -1,0 +1,68 @@
+exit: 1
+--- stdout
+0..2 keyword fn
+3..4 ident f
+4..5 punct (
+5..6 punct )
+7..8 punct {
+11..18 template
+  text "plain"
+19..33 template
+  text "a "
+  expr
+    24..25 ident x
+    26..27 punct +
+    28..29 int 1
+    30..30 eof
+  text " b"
+34..48 template
+  text "${not} "
+  expr
+    45..46 ident y
+    47..47 eof
+49..61 template
+  expr
+    53..54 punct {
+    55..56 ident z
+    57..58 punct }
+    60..60 eof
+62..90 template
+  text "nested "
+  expr
+    72..84 template
+      text "inner "
+      expr
+        81..82 ident w
+        83..83 eof
+    85..85 eof
+  text " end"
+91..101 template
+  expr
+    94..95 ident a
+    96..96 eof
+  expr
+    98..99 ident b
+    100..100 eof
+104..126 template
+  text "escapes \n \u{e9} "
+129..141 template
+  text "open "
+  expr
+    137..138 ident x
+    140..140 eof
+  text "\n"
+141..141 eof
+--- stderr
+error[E0004]: invalid escape sequence `/q`
+ --> tests/lexer/templates.sag:3:22
+  |
+3 |   `escapes /n /u{e9} /q`
+  |                      ^^
+
+error[E0002]: unterminated template string
+ --> tests/lexer/templates.sag:4:3
+  |
+4 |   `open ${x
+  |   ^^^^^^^^^
+
+error: could not compile `tests/lexer/templates.sag` due to 2 previous errors

@@ -1,0 +1,31 @@
+exit: 1
+--- stdout
+0..2 keyword fn
+3..4 ident f
+4..5 punct (
+5..6 punct )
+7..8 punct {
+11..16 keyword const
+17..18 ident c
+19..20 punct =
+21..23 char "a"
+26..31 keyword const
+32..33 ident d
+34..35 punct =
+36..37 char "\u{0}"
+38..39 punct }
+40..40 eof
+--- stderr
+error[E0006]: unterminated character literal
+ --> tests/lexer/unterminated_char.sag:2:13
+  |
+2 |   const c = 'a
+  |             ^^
+
+error[E0006]: empty or unterminated character literal
+ --> tests/lexer/unterminated_char.sag:3:13
+  |
+3 |   const d = '
+  |             ^
+
+error: could not compile `tests/lexer/unterminated_char.sag` due to 2 previous errors

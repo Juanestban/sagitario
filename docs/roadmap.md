@@ -176,7 +176,8 @@ Increments:
      options that Nova passes.
    - 3b. Nova in Sagitario (`compiler/src/nova_main.sag`), which runs `sag`
      ([ADR-0064](adr/0064-nova-in-sagitario.md)).
-   - 3c. The test harness in Sagitario, with expected dumps for the corpus of each pass.
+   - 3c. The test harness in Sagitario (`tests/harness/`), with expected dumps for the corpus of
+     each pass ([ADR-0066](adr/0066-test-harness-in-sagitario.md)).
    - 3d. The generated C of the compiler as a seed, CI without `cargo`, and `sagc` renamed to
      `sag` with `crates/` retired.
 

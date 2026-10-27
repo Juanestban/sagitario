@@ -1,0 +1,89 @@
+exit: 1
+--- stdout
+37..39 keyword fn
+40..47 ident ñandú
+47..48 punct (
+48..52 ident año
+52..53 punct :
+54..57 ident i32
+57..58 punct ,
+59..66 ident café_2
+66..67 punct :
+68..74 ident String
+74..75 punct ,
+76..78 ident _x
+78..79 punct :
+80..84 ident bool
+84..85 punct ,
+86..92 ident Ωmega
+92..93 punct :
+94..98 ident char
+98..99 punct )
+100..101 punct {
+101..102 punct }
+103..108 keyword const
+109..115 ident let_it
+116..117 punct =
+118..122 keyword self
+123..127 keyword Self
+128..133 keyword super
+134..137 keyword zod
+138..143 keyword await
+144..149 keyword async
+150..153 keyword let
+154..161 ident selfish
+161..162 punct ;
+164..166 keyword fn
+167..171 ident tabs
+171..172 punct (
+172..173 punct )
+174..175 punct {
+178..179 punct }
+180..181 ident x
+182..183 punct @
+184..185 ident y
+186..187 punct ?
+188..189 ident z
+192..193 ident w
+196..197 ident v
+198..199 punct |
+200..201 ident u
+202..204 punct ||
+205..206 ident t
+207..209 punct &&
+210..211 ident s
+214..215 ident r
+218..219 ident q
+220..220 eof
+--- stderr
+error[E0001]: unexpected character `#`
+ --> tests/lexer/identifiers.sag:4:14
+  |
+4 | 	fn tabs()	{	#	}
+  | 	         	 	^
+
+error[E0001]: unexpected character `&`
+ --> tests/lexer/identifiers.sag:5:11
+  |
+5 | x @ y ? z & w ~ v | u || t && s ^ r $ q
+  |           ^
+
+error[E0001]: unexpected character `~`
+ --> tests/lexer/identifiers.sag:5:15
+  |
+5 | x @ y ? z & w ~ v | u || t && s ^ r $ q
+  |               ^
+
+error[E0001]: unexpected character `^`
+ --> tests/lexer/identifiers.sag:5:33
+  |
+5 | x @ y ? z & w ~ v | u || t && s ^ r $ q
+  |                                 ^
+
+error[E0001]: unexpected character `$`
+ --> tests/lexer/identifiers.sag:5:37
+  |
+5 | x @ y ? z & w ~ v | u || t && s ^ r $ q
+  |                                     ^
+
+error: could not compile `tests/lexer/identifiers.sag` due to 5 previous errors

@@ -1,0 +1,77 @@
+//! The corpus of each pass of the compiler (`tests/lexer`, `tests/parser`, `tests/resolve`,
+//! `tests/types` and `tests/codegen`): the dump of its pass for each case, with its exit code and
+//! diagnostics, compared with `<case>.expected` next to it. `SAG_BLESS=1` rewrites them.
+//!
+//! The dumps are made for `x86_64-linux-android`, whatever the host: the sizes of `usize` and of
+//! the C types, and the C generated, are then the same on every system.
+
+use pkg::support;
+use pkg::support::{Context, Test};
+use std::fs;
+
+pub fn tests() -> List<Test> {
+  List::from([
+    support::test("lexer", lexer),
+    support::test("parser", parser),
+    support::test("resolve", resolve),
+    support::test("types", types),
+    support::test("codegen", codegen),
+  ])
+}
+
+/// The target of the dumps.
+const TARGET: String = "x86_64-linux-android";
+
+fn lexer(cx: Context) -> Result<(), String> {
+  corpus(cx, "lexer", "tokens")
+}
+
+fn parser(cx: Context) -> Result<(), String> {
+  corpus(cx, "parser", "ast")
+}
+
+fn resolve(cx: Context) -> Result<(), String> {
+  corpus(cx, "resolve", "resolve")
+}
+
+fn types(cx: Context) -> Result<(), String> {
+  corpus(cx, "types", "types")
+}
+
+fn codegen(cx: Context) -> Result<(), String> {
+  corpus(cx, "codegen", "c")
+}
+
+/// Checks every case of `tests/<name>` with `--dump=<dump>`.
+fn corpus(cx: Context, name: String, dump: String) -> Result<(), String> {
+  const dir = `tests/${name}`;
+  const failures: List<String> = new List();
+  var count: usize = 0;
+
+  for entry in support::entries(cx.file(dir))? {
+    // A `.sag` file, or a directory holding a program whose entry is `main.sag`.
+    var stem = entry;
+    var file = `${dir}/${entry}/main.sag`;
+
+    if entry.ends_with(".sag") {
+      stem = entry.substring(0, entry.len() - 4);
+      file = `${dir}/${entry}`;
+    } else if !fs::is_file(cx.file(file)) {
+      continue;
+    }
+
+    const ran = support::run(
+      cx.sag_command(List::from(["check", `--dump=${dump}`, "--target", TARGET, file])).env("NO_COLOR", "1").current_dir(cx.root),
+    )?;
+    const actual = `exit: ${ran.code_text()}\n--- stdout\n${ran.stdout}--- stderr\n${support::slashes(ran.stderr)}`;
+
+    count += 1;
+
+    if let Err(error) = support::check_expected(cx, `${dir}/${stem}.expected`, actual) {
+      failures.push(error);
+    }
+  }
+
+  support::expect(count > 0, `no cases in \`${dir}\``)?;
+  support::expect(failures.is_empty(), failures.join("\n\n"))
+}

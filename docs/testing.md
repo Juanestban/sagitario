@@ -19,7 +19,8 @@ The end-to-end suites run through an own harness (in the style of rustc's `compi
 `crates/sagitario_cli/tests/suites.rs`, invoked by `cargo test --workspace`. It runs the built
 `sag` binary: `sag run <file>` for `run-pass` and `run-panic`, and
 `sag check --diagnostic-format short <file>` for `compile-fail` (expected exit code 1). They require a C compiler (see
-[architecture](architecture.md#c-toolchain)).
+[architecture](architecture.md#c-toolchain)). The harness in Sagitario (`tests/harness/`, below)
+runs the same suites with the same annotations, and replaces the Cargo tests when Rust is retired.
 
 ## Annotations
 
@@ -61,7 +62,8 @@ fn main() { ... }
   annotation must be reported. A file with only `WARN` annotations must compile (exit code 0);
   otherwise the exit code must be 1. Prefix incidental bindings with `_` to keep tests focused.
 - `every_diagnostic_code_has_a_compile_fail_test` fails if a code in
-  `crates/sagitario_diagnostics/src/codes.rs` has no `compile-fail` case.
+  `crates/sagitario_diagnostics/src/codes.rs` (in the harness in Sagitario,
+  `compiler/src/diagnostics/codes.sag`) has no `compile-fail` case.
 
 ## Memory checks
 
@@ -112,6 +114,33 @@ each `tests/lsp/<case>.session` to `sagc lsp` about `<case>.sag` and compares th
 checks the modules of `compiler/` generated from the Rust compiler; `SAG_BLESS=1 cargo test
 --test selfhost` rewrites them and the expected answers of the language server.
 
+## The harness in Sagitario
+
+`tests/harness/` is a program in Sagitario that runs every end-to-end test without Cargo
+([ADR-0066](adr/0066-test-harness-in-sagitario.md)). From the root of the repository:
+
+```sh
+sagc run tests/harness/main.sag -- --sag path/to/sagc            # every group
+sagc run tests/harness/main.sag -- --sag path/to/sagc suites lsp # some of them
+SAG_BLESS=1 sagc run tests/harness/main.sag -- --sag path/to/sagc dumps lsp   # rewrite expected files
+```
+
+`--sag` (or `SAG_COMPILER`) is the compiler under test; `--nova` (or `NOVA_BINARY`) is Nova, which
+the harness otherwise builds from `compiler/src/nova_main.sag` with that compiler. The groups:
+
+| Group | What it checks |
+|---|---|
+| `suites` | `run-pass`, `compile-fail` and `run-panic`, as above, and that every diagnostic code has a `compile-fail` case. |
+| `dumps` | Each case of `tests/lexer`, `tests/parser`, `tests/resolve`, `tests/types` and `tests/codegen` against `<case>.expected` next to it: the exit code, the dump of that pass (`--dump=tokens`, `ast`, `resolve`, `types`, `c`) and the diagnostics, made for `x86_64-linux-android` so that they are the same on every host. |
+| `lsp` | The sessions of `tests/lsp/` against their `.expected` answers. |
+| `editor` | The keywords of the VS Code grammar. |
+| `cli` | Exit codes and messages of the command line. |
+| `nova` | Nova end to end, in temporary packages, also building C programs with its libraries and, with the Android NDK, cross-compiling. |
+
+A change to the compiler that changes a dump or an answer of the language server fails the
+harness; once the change is intended, `SAG_BLESS=1` rewrites the expected files and their diff is
+reviewed with the change.
+
 ## The editor
 
 `crates/sagitario_cli/tests/editor.rs` checks that the grammar of the VS Code extension
@@ -124,6 +153,6 @@ GitHub Actions matrix on Windows, Linux and macOS running `cargo fmt --check`,
 `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` with
 clang, plus a Linux job with `SAG_CC=gcc` and a Windows job with `SAG_CC=cl` (without
 sanitizers). The Ubuntu job requires the Android NDK (`SAG_REQUIRE_NDK=1`). The `bootstrap` job
-builds `sagc` (stage 1), runs the suites with it and checks the fixed point, on Windows with
-official clang, `cl` and MinGW gcc, on Ubuntu with clang and gcc, and on macOS with clang. The
-`vscode` job packages the VS Code extension.
+builds `sagc` (stage 1), runs the harness in Sagitario with it and checks the fixed point, on
+Windows with official clang, `cl` and MinGW gcc, on Ubuntu with clang and gcc, and on macOS with
+clang. The `vscode` job packages the VS Code extension.

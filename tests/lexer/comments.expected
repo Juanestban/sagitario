@@ -1,0 +1,21 @@
+exit: 1
+--- stdout
+0..46 doc inner "Module documentation, with trailing spaces"
+47..69 doc outer "Item documentation"
+134..163 doc outer "no space after the slashes"
+164..167 doc inner ""
+168..170 keyword fn
+171..175 ident main
+175..176 punct (
+176..177 punct )
+178..179 punct {
+179..180 punct }
+222..222 eof
+--- stderr
+error[E0003]: unterminated block comment
+ --> tests/lexer/comments.sag:8:1
+  |
+8 | /* never closed /* nested */
+  | ^^
+
+error: could not compile `tests/lexer/comments.sag` due to 1 previous error

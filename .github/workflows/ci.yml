@@ -141,19 +141,12 @@ jobs:
       - run: cargo build -p sagitario_cli
       - name: Build stage 1
         run: ./target/debug/sag build compiler/src/main.sag
-      # Before the fixed point test, which writes to `compiler/src/` too.
-      - name: Run the suites with stage 1
-        env:
-          SAG_COMPILER: ${{ github.workspace }}/compiler/src/main${{ runner.os == 'Windows' && '.exe' || '' }}
-        run: cargo test -p sagitario_cli --test suites
-      # Nova in Sagitario, built by stage 1, runs stage 1 (docs/adr/0064-nova-in-sagitario.md).
-      - name: Build Nova with stage 1
-        run: ./compiler/src/main build compiler/src/nova_main.sag --output compiler/src/nova${{ runner.os == 'Windows' && '.exe' || '' }}
-      - name: Run the Nova tests with Nova in Sagitario
-        env:
-          NOVA_BINARY: ${{ github.workspace }}/compiler/src/nova${{ runner.os == 'Windows' && '.exe' || '' }}
-          SAG: ${{ github.workspace }}/compiler/src/main${{ runner.os == 'Windows' && '.exe' || '' }}
-        run: cargo test -p sagitario_nova --test nova
+      # The harness in Sagitario with stage 1: the suites, the expected dumps, the language
+      # server, the editor, the command line, and Nova in Sagitario, which the harness builds with
+      # stage 1 (docs/adr/0066-test-harness-in-sagitario.md). Before the fixed point test, which
+      # writes to `compiler/src/` too.
+      - name: Run the harness with stage 1
+        run: ./compiler/src/main run tests/harness/main.sag -- --sag compiler/src/main${{ runner.os == 'Windows' && '.exe' || '' }}
       - name: Reach the fixed point
         run: cargo test -p sagitario_cli --test selfhost bootstrap_reaches_the_fixed_point
 

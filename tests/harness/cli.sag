@@ -1,0 +1,119 @@
+//! The command line of the compiler: its exit codes and messages.
+
+use pkg::support;
+use pkg::support::{Context, Test, expect, expect_contains, expect_exit, sag};
+use std::path;
+
+pub fn tests() -> List<Test> {
+  List::from([
+    support::test("version_prints_the_version", version_prints_the_version),
+    support::test("help_succeeds", help_succeeds),
+    support::test("invalid_usage_exits_with_2", invalid_usage_exits_with_2),
+    support::test("missing_input_exits_with_1", missing_input_exits_with_1),
+    support::test("non_sag_input_exits_with_1", non_sag_input_exits_with_1),
+    support::test("targets_lists_the_cross_compilation_targets", targets_lists_the_targets),
+    support::test("cl_needs_a_developer_command_prompt", cl_needs_a_developer_command_prompt),
+    support::test("checks_deeply_nested_code", checks_deeply_nested_code),
+  ])
+}
+
+/// Whether `text` is a version `MAJOR.MINOR.PATCH`.
+fn is_version(text: String) -> bool {
+  const parts = text.split(".");
+
+  if parts.len() != 3 {
+    return false;
+  }
+
+  for part in parts {
+    if part.is_empty() || part.parse_u32().is_err() {
+      return false;
+    }
+  }
+
+  true
+}
+
+fn version_prints_the_version(cx: Context) -> Result<(), String> {
+  const ran = sag(cx, List::from(["--version"]))?;
+  const printed = ran.stdout.trim();
+
+  support::expect_success("sag --version", ran)?;
+  const space = printed.find(" ").unwrap_or(0);
+  // `sagc` until the compiler in Sagitario takes the name `sag`.
+  const name = printed.substring(0, space);
+
+  expect((name == "sag" || name == "sagc") && is_version(printed.substring(space + 1, printed.len())), `unexpected version: ${printed}`)
+}
+
+fn help_succeeds(cx: Context) -> Result<(), String> {
+  const ran = sag(cx, List::from(["help"]))?;
+
+  support::expect_success("sag help", ran)?;
+  expect_contains("sag help", ran.stdout, "Usage: sag")
+}
+
+fn invalid_usage_exits_with_2(cx: Context) -> Result<(), String> {
+  for args in [new List<String>(), List::from(["compile"]), List::from(["build"])] {
+    const what = `sag ${args.join(" ")}`;
+    const ran = sag(cx, args)?;
+
+    expect_exit(what, ran, 2)?;
+    expect_contains(what, ran.stderr, "Usage: sag")?;
+  }
+
+  Ok(())
+}
+
+fn missing_input_exits_with_1(cx: Context) -> Result<(), String> {
+  const ran = sag(cx, List::from(["check", "does-not-exist.sag"]))?;
+
+  expect_exit("sag check", ran, 1)?;
+  expect_contains("sag check", ran.stderr, "cannot find")
+}
+
+fn non_sag_input_exits_with_1(cx: Context) -> Result<(), String> {
+  const ran = sag(cx, List::from(["check", cx.file("README.md")]))?;
+
+  expect_exit("sag check", ran, 1)?;
+  expect_contains("sag check", ran.stderr, "is not a `.sag` file")
+}
+
+fn targets_lists_the_targets(cx: Context) -> Result<(), String> {
+  const ran = sag(cx, List::from(["targets"]))?;
+
+  support::expect_success("sag targets", ran)?;
+
+  for target in ["aarch64-linux-android", "armv7-linux-androideabi", "x86_64-linux-android", "aarch64-apple-ios", "aarch64-apple-ios-sim"] {
+    expect_contains("sag targets", ran.stdout, target)?;
+  }
+
+  Ok(())
+}
+
+fn cl_needs_a_developer_command_prompt(cx: Context) -> Result<(), String> {
+  const program = cx.file("tests/run-pass/control_flow.sag");
+  const ran = support::run(cx.sag_command(List::from(["run", "--cc", "cl", program])).env("INCLUDE", ""))?;
+
+  expect_exit("sag run --cc cl", ran, 1)?;
+  expect_contains("sag run --cc cl", ran.stderr, "Developer Command Prompt")
+}
+
+fn checks_deeply_nested_code(cx: Context) -> Result<(), String> {
+  // An `if` nested 200 levels deep, each with a chain of `||`: more recursion than the main
+  // thread's stack allows without care.
+  var body = "false";
+
+  for depth in 0..200 {
+    body = `if c < ${depth} { c == 1 || c == 2 || c == 3 } else { ${body} }`;
+  }
+
+  const dir = cx.temp_dir("deep")?;
+  const file = path::join(dir, "deep.sag");
+
+  support::write_file(file, `fn test(c: u32) -> bool {\n  ${body}\n}\n\npub fn main() {\n  println(\`\${test(5)}\`);\n}\n`)?;
+
+  const ran = sag(cx, List::from(["check", file]))?;
+
+  support::expect_success("sag check", ran)
+}
