@@ -1475,7 +1475,19 @@ pub class Lowering {
 
   /// Lowers an expression to an operand. Values of managed types that are newly created are
   /// pending temporaries; reading a binding, field or element of a managed type borrows it.
+  ///
+  /// Deeply nested code recurses through blocks, `if` and `match`: they skip `other_expr`, whose
+  /// frame is large without optimizations.
   pub fn expr(self, value: Expr) -> Result<Operand, String> {
+    match value.kind {
+      ExprKind::Block(body) => self.block_value(body, self.type_of(value)?),
+      ExprKind::If { cond, then_block, else_branch } => self.if_expr(self.type_of(value)?, cond, then_block, else_branch),
+      ExprKind::Match { scrutinee, arms } => matching::match_expr(self, self.type_of(value)?, scrutinee, arms),
+      _ => self.other_expr(value),
+    }
+  }
+
+  prv fn other_expr(self, value: Expr) -> Result<Operand, String> {
     const ty = self.type_of(value)?;
 
     match value.kind {
