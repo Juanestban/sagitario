@@ -16,8 +16,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use sagitario_ast::{Module, Package, PackageInfo, TargetInfo};
-use sagitario_diagnostics::{DiagnosticFormat, Diagnostics, render};
-use sagitario_span::SourceMap;
+use sagitario_diagnostics::{Diagnostic, DiagnosticFormat, Diagnostics, codes, render};
+use sagitario_span::{SourceMap, Span};
 
 /// Exit code when compilation fails or the input cannot be read.
 pub const EXIT_FAILURE: u8 = 1;
@@ -392,9 +392,14 @@ fn load_package(options: &CompileOptions) -> Result<(Package, SourceMap, Diagnos
 
       if let Some(target_package) = target_package
         && attempted.insert((target_package, target.path.clone()))
-        && let Some(file) = loader.module_file(target_package, &target.path)
       {
-        loader.load(&file, target.path, target_package, &mut sources, &mut diagnostics)?;
+        match loader.module_file(target_package, &target.path) {
+          ModuleFile::File(file) => loader.load(&file, target.path, target_package, &mut sources, &mut diagnostics)?,
+          ModuleFile::Conflict { file, merged } => {
+            loader.report_layout(target_package, &target.path, &file, merged, &mut sources, &mut diagnostics)?
+          }
+          ModuleFile::Missing => {}
+        }
       }
     }
 
@@ -433,7 +438,7 @@ const PRELUDE: &str = include_str!("prelude.sag");
 /// The modules of the standard library written in Sagitario (docs/spec/11-standard-library.md),
 /// loaded when a program names them.
 /// The file of `std` itself: helpers shared by its modules, which programs cannot name.
-const STD_ROOT: &str = include_str!("std/std.sag");
+const STD_ROOT: &str = include_str!("std/mod.sag");
 
 const STD_SOURCES: [(&str, &str); 8] = [
   ("env", include_str!("std/env.sag")),
@@ -640,32 +645,97 @@ impl Loader {
     Ok(self.modules.len() - 1)
   }
 
-  /// The file of the module at `path` in `package`, if it exists with exactly these names (also
-  /// on case-insensitive file systems) and is not the package's entry file.
-  fn module_file(&self, package: usize, path: &[String]) -> Option<PathBuf> {
-    let package = self.packages.get(package)?;
-    let (last, dirs) = path.split_last()?;
+  /// The file of the module at `path` in `package` (docs/spec/09-modules.md#files): `name.sag`, or
+  /// `name/mod.sag` for a module with submodules, with exactly these names (also on
+  /// case-insensitive file systems). The package's entry file is no module, and `mod` names none.
+  fn module_file(&self, package: usize, path: &[String]) -> ModuleFile {
+    let Some(package) = self.packages.get(package) else { return ModuleFile::Missing };
+    let Some((last, dirs)) = path.split_last() else { return ModuleFile::Missing };
     let mut dir = package.root.clone();
+
+    if path.iter().any(|segment| segment == "mod") {
+      return ModuleFile::Missing;
+    }
 
     for name in dirs {
       if !has_entry(&dir, name, true) {
-        return None;
+        return ModuleFile::Missing;
       }
 
       dir.push(name);
     }
 
     let name = format!("{last}.sag");
+    let same = |a: &Path, b: &Path| matches!((fs::canonicalize(a), fs::canonicalize(b)), (Ok(a), Ok(b)) if a == b);
+    let file = dir.join(&name);
+    let has_file = has_entry(&dir, &name, false) && !same(&file, &package.entry);
+    let has_dir = has_entry(&dir, last, true);
+    let merged = has_dir && has_entry(&dir.join(last), "mod.sag", false);
 
-    if !has_entry(&dir, &name, false) {
-      return None;
+    if has_file && has_dir {
+      return ModuleFile::Conflict { file, merged };
     }
 
-    let file = dir.join(name);
-    let same = |a: &Path, b: &Path| matches!((fs::canonicalize(a), fs::canonicalize(b)), (Ok(a), Ok(b)) if a == b);
+    if has_file {
+      return ModuleFile::File(file);
+    }
 
-    if same(&file, &package.entry) { None } else { Some(file) }
+    if merged { ModuleFile::File(dir.join(last).join("mod.sag")) } else { ModuleFile::Missing }
   }
+
+  /// Reports a module with two places for its file: `name.sag` next to a directory `name/`.
+  fn report_layout(
+    &mut self,
+    package: usize,
+    path: &[String],
+    file: &Path,
+    merged: bool,
+    sources: &mut SourceMap,
+    diagnostics: &mut Diagnostics,
+  ) -> Result<(), u8> {
+    let text = match fs::read_to_string(file) {
+      Ok(text) => text,
+      Err(error) => {
+        eprintln!("error: cannot read `{}`: {error}", file.display());
+        return Err(EXIT_FAILURE);
+      }
+    };
+    let root = match self.packages.get(package) {
+      Some(loaded) if !loaded.name.is_empty() => loaded.name.clone(),
+      _ => "pkg".to_string(),
+    };
+    let module = [root].into_iter().chain(path.iter().cloned()).collect::<Vec<_>>().join("::");
+    let name = path.last().cloned().unwrap_or_default();
+    let id = sources.add(file.to_path_buf(), text);
+    let help = if merged {
+      format!("keep one file for the module: merge `{name}.sag` into `{name}/mod.sag`")
+    } else {
+      format!("move `{name}.sag` to `{name}/mod.sag`, next to its submodules")
+    };
+
+    diagnostics.push(
+      Diagnostic::error(
+        codes::MODULE_LAYOUT,
+        Span::new(id, 0, 0),
+        format!("the module `{module}` has both the file `{name}.sag` and the directory `{name}/`"),
+      )
+      .with_note("a module with submodules is the file `mod.sag` of their directory")
+      .with_help(help),
+    );
+
+    Ok(())
+  }
+}
+
+/// Where the file of a module is.
+enum ModuleFile {
+  File(PathBuf),
+  /// `name.sag` next to a directory `name/`, which holds `mod.sag` when `merged`.
+  Conflict {
+    file: PathBuf,
+    merged: bool,
+  },
+  Missing,
 }
 
 /// Whether `dir` has an entry with exactly this name that is a directory (or a file).

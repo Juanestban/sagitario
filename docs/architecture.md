@@ -277,7 +277,7 @@ Anything expressible in Sagitario belongs in `std/` instead.
 
 ## Language server
 
-`sagc lsp` (`compiler/src/lsp.sag`, [ADR-0058](adr/0058-language-server.md)) speaks LSP over
+`sagc lsp` (`compiler/src/lsp/mod.sag`, [ADR-0058](adr/0058-language-server.md)) speaks LSP over
 stdin and stdout. After each change it runs the front end on the program of the document, as
 `sag check` does, with the open documents in place of their files (`Loader::overrides`), and
 keeps the last analysis that reached the type checker for hover, definitions and completion

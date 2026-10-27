@@ -6,13 +6,14 @@
 //! docs/adr/0060-driver-parity-for-nova.md).
 
 use pkg::ast::{Module, Package, PackageInfo, TargetInfo};
-use pkg::diagnostics::Diagnostics;
+use pkg::diagnostics::{Diagnostic, Diagnostics};
+use pkg::diagnostics::codes;
 use pkg::lexer;
 use pkg::parser;
 use pkg::parser::Ids;
 use pkg::resolve::modules;
 use pkg::resolve::modules::ModuleRef;
-use pkg::span::SourceMap;
+use pkg::span::{SourceMap, Span};
 use std::fs;
 use std::path;
 
@@ -20,7 +21,7 @@ use std::path;
 const PRELUDE: String = include_str("../../crates/sagitario_driver/src/prelude.sag");
 
 /// The file of `std` itself: helpers shared by its modules, which programs cannot name.
-const STD_ROOT: String = include_str("../../crates/sagitario_driver/src/std/std.sag");
+const STD_ROOT: String = include_str("../../crates/sagitario_driver/src/std/mod.sag");
 
 const STD_ENV: String = include_str("../../crates/sagitario_driver/src/std/env.sag");
 const STD_FS: String = include_str("../../crates/sagitario_driver/src/std/fs.sag");
@@ -193,6 +194,14 @@ pub class LoadedPackage {
   }
 }
 
+/// Where the file of a module is.
+enum ModuleFile {
+  File(String),
+  /// `name.sag` next to a directory `name/`, which holds `mod.sag` when `merged`.
+  Conflict { file: String, merged: bool },
+  Missing,
+}
+
 pub class Loader {
   /// The input's package first, then its dependencies.
   pub const packages: List<LoadedPackage>;
@@ -310,10 +319,18 @@ pub class Loader {
 
         attempted.insert(key, true);
 
-        if let Some(file) = self.module_file(found, target.path) {
-          if !self.load(file, target.path, found, sources, diagnostics) {
-            return false;
+        match self.module_file(found, target.path) {
+          ModuleFile::File(file) => {
+            if !self.load(file, target.path, found, sources, diagnostics) {
+              return false;
+            }
           }
+          ModuleFile::Conflict { file, merged } => {
+            if !self.report_layout(found, target.path, file, merged, sources, diagnostics) {
+              return false;
+            }
+          }
+          ModuleFile::Missing => {}
         }
       }
 
@@ -390,36 +407,88 @@ pub class Loader {
     None
   }
 
-  /// The file of the module at `module_path` in `package`, if it exists with exactly these names
-  /// and is not the package's entry file. Unlike the driver, which compares canonical paths, the
-  /// entry file is recognized by its name: a module of the root directory with the entry's name.
-  prv fn module_file(self, package: usize, module_path: List<String>) -> Option<String> {
-    const loaded = self.packages.get(package)?;
-    const last = module_path.last()?;
+  /// The file of the module at `module_path` in `package` (docs/spec/09-modules.md#files):
+  /// `name.sag`, or `name/mod.sag` for a module with submodules, with exactly these names. The
+  /// package's entry file is no module, and `mod` names none. Unlike the driver, which compares
+  /// canonical paths, the entry file is recognized by its name: a module of the root directory
+  /// with the entry's name.
+  prv fn module_file(self, package: usize, module_path: List<String>) -> ModuleFile {
+    const loaded = match self.packages.get(package) {
+      Some(found) => found,
+      None => return ModuleFile::Missing,
+    };
+    const last = match module_path.last() {
+      Some(found) => found,
+      None => return ModuleFile::Missing,
+    };
+
+    if module_path.contains("mod") {
+      return ModuleFile::Missing;
+    }
+
     var dir = loaded.root;
 
     for index in 0..module_path.len() - 1 {
       const name = module_path[index];
 
       if !has_entry(dir, name, true) {
-        return None;
+        return ModuleFile::Missing;
       }
 
       dir = push_path(dir, name);
     }
 
     const name = last + ".sag";
-
-    if !has_entry(dir, name, false) {
-      return None;
-    }
-
     const same = module_path.len() == 1 && match path::file_name(loaded.entry) {
       Some(entry_name) => entry_name == name,
       None => false,
     };
+    const has_file = has_entry(dir, name, false) && !same;
+    const has_dir = has_entry(dir, last, true);
+    const merged = has_dir && has_entry(push_path(dir, last), "mod.sag", false);
 
-    if same { None } else { Some(push_path(dir, name)) }
+    if has_file && has_dir {
+      return ModuleFile::Conflict { file: push_path(dir, name), merged: merged };
+    }
+
+    if has_file {
+      return ModuleFile::File(push_path(dir, name));
+    }
+
+    if merged { ModuleFile::File(push_path(push_path(dir, last), "mod.sag")) } else { ModuleFile::Missing }
+  }
+
+  /// Reports a module with two places for its file: `name.sag` next to a directory `name/`.
+  /// Returns `false`, after printing why, if the file cannot be read.
+  prv fn report_layout(self, package: usize, module_path: List<String>, file: String, merged: bool, sources: SourceMap, diagnostics: Diagnostics) -> bool {
+    const text = match fs::read_to_string(file) {
+      Ok(found) => found,
+      Err(error) => {
+        eprintln(`error: cannot read \`${file}\`: ${error.message()}`);
+        return false;
+      }
+    };
+    const root = match self.packages.get(package) {
+      Some(loaded) => if loaded.name.is_empty() { "pkg" } else { loaded.name },
+      None => "pkg",
+    };
+    const parts = List::from([root]);
+
+    for segment in module_path {
+      parts.push(segment);
+    }
+
+    const name = module_path.last().unwrap_or("");
+    const id = sources.add(file, text);
+    const help = if merged { `keep one file for the module: merge \`${name}.sag\` into \`${name}/mod.sag\`` } else { `move \`${name}.sag\` to \`${name}/mod.sag\`, next to its submodules` };
+
+    diagnostics.push(
+      Diagnostic::error(codes::MODULE_LAYOUT, Span::new(id, 0, 0), `the module \`${parts.join("::")}\` has both the file \`${name}.sag\` and the directory \`${name}/\``)
+        .with_note("a module with submodules is the file `mod.sag` of their directory")
+        .with_help(help),
+    );
+
+    true
   }
 
   /// The package of the program, compiled for `target`: its modules, the prelude and the

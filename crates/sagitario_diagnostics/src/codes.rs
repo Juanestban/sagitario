@@ -50,6 +50,8 @@ pub const INCONSISTENT_BINDINGS: Code = Code("E0206");
 pub const PRIVATE_ITEM: Code = Code("E0207");
 /// A C symbol that is not a valid C identifier, is reserved, or is declared incompatibly twice.
 pub const INVALID_SYMBOL: Code = Code("E0208");
+/// A module with two places for its file: `name.sag` next to a directory `name/`.
+pub const MODULE_LAYOUT: Code = Code("E0209");
 
 /// An expression whose type differs from the expected one.
 pub const MISMATCHED_TYPES: Code = Code("E0300");
@@ -174,6 +176,7 @@ pub const ALL: &[Code] = &[
   INCONSISTENT_BINDINGS,
   PRIVATE_ITEM,
   INVALID_SYMBOL,
+  MODULE_LAYOUT,
   MISMATCHED_TYPES,
   WRONG_ARGUMENT_COUNT,
   INTEGER_OUT_OF_RANGE,

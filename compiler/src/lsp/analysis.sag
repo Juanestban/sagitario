@@ -183,7 +183,8 @@ pub fn alone(file: String) -> Entry {
 }
 
 /// The module of the standard library a file is, if it is one of its sources: `prelude.sag`
-/// next to a directory `std`, or `std/<name>.sag` next to a `prelude.sag`.
+/// next to a directory `std`, or `std/<name>.sag` (`std/mod.sag` for `std` itself) next to a
+/// `prelude.sag`.
 pub fn std_module_of(file: String) -> Option<String> {
   const name = path::file_name(file)?;
   const dir = path::parent(file)?;
@@ -198,7 +199,11 @@ pub fn std_module_of(file: String) -> Option<String> {
 
   const stem = path::stem(file)?;
 
-  if stem == "std" || std_module_names().contains(stem) { Some(stem) } else { None }
+  if stem == "mod" {
+    return Some("std");
+  }
+
+  if std_module_names().contains(stem) { Some(stem) } else { None }
 }
 
 /// The modules of the standard library written in Sagitario.

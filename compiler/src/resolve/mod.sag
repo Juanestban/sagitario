@@ -2336,7 +2336,14 @@ pub class Resolver {
       }
 
       parts.push(segment.name);
-      diagnostic = diagnostic.with_note("a module `" + name + "` would be the file `" + parts.join("/") + ".sag` next to the program's entry file");
+
+      const file = parts.join("/");
+
+      diagnostic = if name == "mod" {
+        diagnostic.with_note("`mod` cannot name a module: `mod.sag` is the file of the module of its directory")
+      } else {
+        diagnostic.with_note("a module `" + name + "` would be the file `" + file + ".sag`, or `" + file + "/mod.sag` with its submodules, next to the program's entry file")
+      };
     }
 
     self.diagnostics.push(diagnostic);

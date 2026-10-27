@@ -31,7 +31,7 @@ SAG_TEST_SANITIZE=0 cargo test --workspace   # faster local runs without sanitiz
 SAG_BLESS=1 cargo test --test selfhost      # regenerate the modules of compiler/ made from Rust
 SAG_COMPILER="$PWD/compiler/src/main" cargo test --test suites   # the suites with sagc, once built
 cargo test --test selfhost bootstrap      # stage 1 builds stage 2: both generate the same C
-sag build compiler/src/nova.sag            # Nova in Sagitario: compiler/src/nova(.exe)
+sagc build compiler/src/nova_main.sag --output compiler/src/nova   # Nova in Sagitario (nova.exe on Windows)
 NOVA_BINARY="$PWD/compiler/src/nova" SAG="$PWD/compiler/src/main" cargo test -p sagitario_nova --test nova
 ANDROID_NDK_HOME=/path/to/ndk cargo test --workspace   # also the Android cross-compilation tests
 SAG_CC=gcc sag build main.sag   # choose the C compiler (or --cc)

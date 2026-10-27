@@ -1960,7 +1960,13 @@ impl<'a> Resolver<'a> {
     } else if info.source.is_some() || module == ModId(0) {
       let file = info.path.iter().chain([&segment.name]).cloned().collect::<Vec<_>>().join("/");
 
-      diagnostic = diagnostic.with_note(format!("a module `{name}` would be the file `{file}.sag` next to the program's entry file"));
+      diagnostic = if name == "mod" {
+        diagnostic.with_note("`mod` cannot name a module: `mod.sag` is the file of the module of its directory")
+      } else {
+        diagnostic.with_note(format!(
+          "a module `{name}` would be the file `{file}.sag`, or `{file}/mod.sag` with its submodules, next to the program's entry file"
+        ))
+      };
     }
 
     self.diagnostics.push(diagnostic);
