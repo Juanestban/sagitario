@@ -41,10 +41,9 @@ fn version_prints_the_version(cx: Context) -> Result<(), String> {
 
   support::expect_success("sag --version", ran)?;
   const space = printed.find(" ").unwrap_or(0);
-  // `sagc` until the compiler in Sagitario takes the name `sag`.
   const name = printed.substring(0, space);
 
-  expect((name == "sag" || name == "sagc") && is_version(printed.substring(space + 1, printed.len())), `unexpected version: ${printed}`)
+  expect(name == "sag" && is_version(printed.substring(space + 1, printed.len())), `unexpected version: ${printed}`)
 }
 
 fn help_succeeds(cx: Context) -> Result<(), String> {

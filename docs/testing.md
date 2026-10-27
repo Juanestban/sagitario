@@ -62,8 +62,8 @@ fn main() { ... }
   annotation must be reported. A file with only `WARN` annotations must compile (exit code 0);
   otherwise the exit code must be 1. Prefix incidental bindings with `_` to keep tests focused.
 - `every_diagnostic_code_has_a_compile_fail_test` fails if a code in
-  `crates/sagitario_diagnostics/src/codes.rs` (in the harness in Sagitario,
-  `compiler/src/diagnostics/codes.sag`) has no `compile-fail` case.
+  `compiler/src/diagnostics/codes.sag`, the registry of codes, has no `compile-fail` case.
+  `crates/sagitario_diagnostics/src/codes.rs` registers the same codes until Rust retires.
 
 ## Memory checks
 
@@ -111,8 +111,9 @@ with `sagc` and checks that both generate the same C for the compiler
 ([ADR-0056](adr/0056-bootstrap-and-acceptance.md)). `language_server_answers_the_sessions` sends
 each `tests/lsp/<case>.session` to `sagc lsp` about `<case>.sag` and compares the answers with
 `<case>.expected`, one message per line ([ADR-0058](adr/0058-language-server.md)). The test also
-checks the modules of `compiler/` generated from the Rust compiler; `SAG_BLESS=1 cargo test
---test selfhost` rewrites them and the expected answers of the language server.
+checks that the Rust compiler registers the codes of `compiler/src/diagnostics/codes.sag` and
+that `compiler/src/unicode.sag` has the Unicode properties of Rust's `char`; `SAG_BLESS=1 cargo
+test --test selfhost` rewrites `unicode.sag` and the expected answers of the language server.
 
 ## The harness in Sagitario
 
@@ -120,9 +121,9 @@ checks the modules of `compiler/` generated from the Rust compiler; `SAG_BLESS=1
 ([ADR-0066](adr/0066-test-harness-in-sagitario.md)). From the root of the repository:
 
 ```sh
-sagc run tests/harness/main.sag -- --sag path/to/sagc            # every group
-sagc run tests/harness/main.sag -- --sag path/to/sagc suites lsp # some of them
-SAG_BLESS=1 sagc run tests/harness/main.sag -- --sag path/to/sagc dumps lsp   # rewrite expected files
+sag run tests/harness/main.sag -- --sag path/to/sag            # every group
+sag run tests/harness/main.sag -- --sag path/to/sag suites lsp # some of them
+SAG_BLESS=1 sag run tests/harness/main.sag -- --sag path/to/sag dumps lsp   # rewrite expected files
 ```
 
 `--sag` (or `SAG_COMPILER`) is the compiler under test; `--nova` (or `NOVA_BINARY`) is Nova, which

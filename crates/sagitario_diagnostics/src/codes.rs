@@ -3,6 +3,9 @@
 //! Errors: `E0001`–`E0099` lexical, `E0100`–`E0199` syntax, `E0200`–`E0299` names,
 //! `E0300`–`E0399` types and control flow, `E0900`–`E0999` language features not implemented
 //! yet. Warnings: `W0001`–`W0999`.
+//!
+//! The source is `compiler/src/diagnostics/codes.sag`: this registry has the same codes, names and
+//! documentation (docs/adr/0067-bootstrap-from-the-seed.md).
 
 use crate::Code;
 

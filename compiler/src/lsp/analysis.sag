@@ -182,19 +182,18 @@ pub fn alone(file: String) -> Entry {
   Entry { path: file, library: true, std_module: None }
 }
 
-/// The module of the standard library a file is, if it is one of its sources: `prelude.sag`
-/// next to a directory `std`, or `std/<name>.sag` (`std/mod.sag` for `std` itself) next to a
-/// `prelude.sag`.
+/// The module of the standard library a file is, if it is one of its sources: a file of a
+/// directory `std` that holds `prelude.sag`, such as `compiler/std/`: `prelude.sag` itself,
+/// `mod.sag` for `std`, or `<name>.sag` (docs/adr/0067-bootstrap-from-the-seed.md).
 pub fn std_module_of(file: String) -> Option<String> {
-  const name = path::file_name(file)?;
   const dir = path::parent(file)?;
 
-  if name == "prelude.sag" {
-    return if fs::is_dir(push_path(dir, "std")) { Some("prelude") } else { None };
+  if path::file_name(dir)? != "std" || !fs::is_file(push_path(dir, "prelude.sag")) {
+    return None;
   }
 
-  if path::file_name(dir)? != "std" || !fs::is_file(push_path(path::parent(dir)?, "prelude.sag")) {
-    return None;
+  if path::file_name(file)? == "prelude.sag" {
+    return Some("prelude");
   }
 
   const stem = path::stem(file)?;

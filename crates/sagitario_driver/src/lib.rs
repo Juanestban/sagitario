@@ -433,22 +433,22 @@ fn load_package(options: &CompileOptions) -> Result<(Package, SourceMap, Diagnos
 }
 
 /// The part of the prelude written in Sagitario.
-const PRELUDE: &str = include_str!("prelude.sag");
+const PRELUDE: &str = include_str!("../../../compiler/std/prelude.sag");
 
 /// The modules of the standard library written in Sagitario (docs/spec/11-standard-library.md),
 /// loaded when a program names them.
 /// The file of `std` itself: helpers shared by its modules, which programs cannot name.
-const STD_ROOT: &str = include_str!("std/mod.sag");
+const STD_ROOT: &str = include_str!("../../../compiler/std/mod.sag");
 
 const STD_SOURCES: [(&str, &str); 8] = [
-  ("env", include_str!("std/env.sag")),
-  ("fs", include_str!("std/fs.sag")),
-  ("io", include_str!("std/io.sag")),
-  ("path", include_str!("std/path.sag")),
-  ("process", include_str!("std/process.sag")),
-  ("sync", include_str!("std/sync.sag")),
-  ("thread", include_str!("std/thread.sag")),
-  ("time", include_str!("std/time.sag")),
+  ("env", include_str!("../../../compiler/std/env.sag")),
+  ("fs", include_str!("../../../compiler/std/fs.sag")),
+  ("io", include_str!("../../../compiler/std/io.sag")),
+  ("path", include_str!("../../../compiler/std/path.sag")),
+  ("process", include_str!("../../../compiler/std/process.sag")),
+  ("sync", include_str!("../../../compiler/std/sync.sag")),
+  ("thread", include_str!("../../../compiler/std/thread.sag")),
+  ("time", include_str!("../../../compiler/std/time.sag")),
 ];
 
 /// The integer types, each with a function `range_<type>` in the prelude.

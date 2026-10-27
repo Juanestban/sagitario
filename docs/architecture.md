@@ -41,7 +41,8 @@ crates/
   sagitario_nova/         the `nova` binary: package manager, `Nova.toml` parser (docs/nova.md)
 runtime/            minimal C runtime (ARC, panic, String, allocation, I/O and the OS calls of std)
 tests/              end-to-end suites, and their harness in Sagitario in tests/harness/ (see testing.md)
-compiler/           the compiler written in Sagitario (F5, `sagc`), ported pass by pass
+compiler/           the compiler written in Sagitario (F5, `sag`), ported pass by pass, with its
+                    standard library in compiler/std/
 bootstrap/          the seed (the C of the compiler, with its runtime) and the scripts that build
                     the compiler from it with a C compiler alone (see testing.md)
 ```
@@ -163,7 +164,7 @@ could be added.
   the root of the current module's package, and a dependency's name is a further path root.
   Everything is then checked and lowered as one program. Nova, not the compiler, reads the
   manifests and checks the graph (names, libraries, no cycles).
-- The prelude part written in Sagitario (`crates/sagitario_driver/src/prelude.sag`, followed by
+- The prelude part written in Sagitario (`compiler/std/prelude.sag`, followed by
   one range function per integer type that the driver generates) is embedded by the driver as a
   module outside the package tree; the resolver looks names up there after a module's own items
   and imports. The compiler finds the items it relies on by name (`Resolution::prelude_item`,
@@ -171,11 +172,11 @@ could be added.
   private functions behind methods such as `List::sort` or `String::split`
   (`BuiltinMethod::Prelude`, called with the receiver first). Prelude functions are templates,
   lowered only when used.
-- The standard library modules written in Sagitario (`crates/sagitario_driver/src/std/*.sag`)
+- The standard library modules written in Sagitario (`compiler/std/*.sag`)
   are embedded by the driver too. It loads one when a loaded module names it
   (`sagitario_resolve::std_references`) and lists them in `Package::std`; the resolver makes
   them children of a `std` module outside the package tree (`Resolution::std_root`), next to
-  `std::ffi`, which the compiler implements. `std` has its own file (`std/std.sag`, loaded with
+  `std::ffi`, which the compiler implements. `std` has its own file (`compiler/std/mod.sag`, loaded with
   the first module of `std`) for helpers that only its modules see. Their functions are templates like the prelude's
   (`Resolution::in_library`). Their `extern` blocks declare runtime functions
   (`Resolution::is_runtime_extern`: names starting with `sag_`, which may take and return
@@ -280,7 +281,7 @@ Anything expressible in Sagitario belongs in `std/` instead.
 
 ## Language server
 
-`sagc lsp` (`compiler/src/lsp/mod.sag`, [ADR-0058](adr/0058-language-server.md)) speaks LSP over
+`sag lsp` (`compiler/src/lsp/mod.sag`, [ADR-0058](adr/0058-language-server.md)) speaks LSP over
 stdin and stdout. After each change it runs the front end on the program of the document, as
 `sag check` does, with the open documents in place of their files (`Loader::overrides`), and
 keeps the last analysis that reached the type checker for hover, definitions and completion
@@ -321,5 +322,5 @@ to forward arguments to the program.
   ANSI codes (Windows Terminal, VS Code, MSYS2/mintty, ConEmu).
 - A run with errors ends with `error: could not compile ... due to N previous errors`; a run
   with only warnings ends with `warning: ... generated N warnings`.
-- Diagnostic codes are registered in `crates/sagitario_diagnostics/src/codes.rs`, with one
-  range per phase.
+- Diagnostic codes are registered in `compiler/src/diagnostics/codes.sag`, with one range per
+  phase; `crates/sagitario_diagnostics/src/codes.rs` has the same ones.

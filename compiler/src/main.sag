@@ -1,5 +1,5 @@
-//! `sagc`: the Sagitario compiler written in Sagitario (F5, docs/roadmap.md), with the command
-//! line of `sag` (docs/adr/0055-driver-and-cli-port.md). The port of `sagitario_cli`.
+//! `sag`: the Sagitario compiler, written in Sagitario (F5, docs/roadmap.md), with the command
+//! line of docs/adr/0055-driver-and-cli-port.md. The port of `sagitario_cli`.
 
 use pkg::diagnostics::DiagnosticFormat;
 use pkg::driver;
@@ -12,7 +12,7 @@ use std::process;
 /// The help text, written line by line so it does not depend on the line endings of this file.
 fn usage() -> String {
   List::from([
-    "Usage: sagc <command> [options] <file.sag>",
+    "Usage: sag <command> [options] <file.sag>",
     "",
     "Commands:",
     "  build    Compile a program to an executable",
@@ -37,7 +37,7 @@ fn usage() -> String {
   ]).join("\n")
 }
 
-/// The version of the language and of `sag`, which `sagc` implements.
+/// The version of the language and of `sag`.
 const VERSION: String = "0.8.0";
 
 /// Exit code for invalid command-line usage.
@@ -352,7 +352,7 @@ fn execute(command: Command) -> i32 {
       0
     }
     Command::Version => {
-      println(`sagc ${VERSION}`);
+      println(`sag ${VERSION}`);
       0
     }
     Command::Targets => {

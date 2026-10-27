@@ -1,4 +1,4 @@
-//! `sagc lsp`: the language server (docs/adr/0058-language-server.md). It speaks LSP over stdin
+//! `sag lsp`: the language server (docs/adr/0058-language-server.md). It speaks LSP over stdin
 //! and stdout, and runs the front end of the compiler on the program of each open document:
 //! diagnostics as `sag check` reports them, hover, go to definition, completion, the symbols of a
 //! document and semantic tokens. One thread analyses after every change.
@@ -27,7 +27,7 @@ const CONSTANT: i64 = 14;
 const ENUM_MEMBER: i64 = 22;
 const STRUCT: i64 = 23;
 
-/// The version of `sagc`, which `initialize` reports.
+/// The version of `sag`, which `initialize` reports.
 const VERSION: String = "0.8.0";
 
 class Server {
@@ -367,7 +367,7 @@ fn initialize_result() -> Json {
     member("documentSymbolProvider", Json::Bool(true)),
     member("semanticTokensProvider", json::object(List::from([member("legend", tokens::legend()), member("full", Json::Bool(true))]))),
   ]));
-  const info = json::object(List::from([member("name", json::str("sagc")), member("version", json::str(VERSION))]));
+  const info = json::object(List::from([member("name", json::str("sag")), member("version", json::str(VERSION))]));
 
   json::object(List::from([member("capabilities", capabilities), member("serverInfo", info)]))
 }

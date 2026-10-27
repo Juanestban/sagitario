@@ -1,7 +1,7 @@
 //! Nova, the package manager of Sagitario (docs/nova.md): creates packages, reads `Nova.toml`
 //! and builds, runs and checks packages by running `sag` with the options of
 //! docs/adr/0060-driver-parity-for-nova.md. The port of `sagitario_nova`, built with
-//! `sagc build compiler/src/nova_main.sag --output nova`; its modules are `pkg::nova::*`, and it
+//! `sag build compiler/src/nova_main.sag --output nova`; its modules are `pkg::nova::*`, and it
 //! shares the compiler's spans and diagnostics (docs/adr/0064-nova-in-sagitario.md,
 //! docs/adr/0065-module-directories.md).
 
@@ -628,8 +628,7 @@ fn load_packages(format: DiagnosticFormat) -> Result<List<Package>, i32> {
 
 // ---- Compiling --------------------------------------------------------------------------------
 
-/// The compiler Nova runs: `SAG`, else `sag` (or, until the rename, `sagc`) next to Nova, else
-/// `sag` on PATH.
+/// The compiler Nova runs: `SAG`, else `sag` next to Nova, else `sag` on PATH.
 fn compiler() -> String {
   if let Some(configured) = env::variable("SAG") {
     if !configured.trim().is_empty() {
@@ -641,12 +640,10 @@ fn compiler() -> String {
 
   if let Some(dir) = path::parent(env::args().first().unwrap_or("")) {
     if !dir.is_empty() {
-      for name in List::from(["sag", "sagc"]) {
-        const candidate = push_path(dir, name + extension);
+      const candidate = push_path(dir, "sag" + extension);
 
-        if fs::is_file(candidate) {
-          return candidate;
-        }
+      if fs::is_file(candidate) {
+        return candidate;
       }
     }
   }

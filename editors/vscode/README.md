@@ -2,7 +2,7 @@
 
 Support for the [Sagitario](https://github.com/Juanestban/sagitario) programming language:
 
-- The language server (`sagc lsp`): the errors and warnings of `sag check` while typing, the type
+- The language server (`sag lsp`): the errors and warnings of `sag check` while typing, the type
   of what is under the cursor, go to definition (`F12` or `Ctrl+Click`, also on the modules of
   `use` and of paths), completion of members after `.`, of items after `::`, of names and of
   types, the outline of a document (`Ctrl+Shift+O`), and the colors of modules, functions and
@@ -17,14 +17,15 @@ Support for the [Sagitario](https://github.com/Juanestban/sagitario) programming
 
 ## The language server
 
-The extension starts `sagc lsp`, the compiler written in Sagitario. Build it from the
-repository, in release mode, which analyses large programs about three times faster:
+The extension starts `sag lsp`. Build and install `sag` from the repository with a C compiler,
+in release mode, which analyses large programs about three times faster than a debug build:
 
 ```sh
-sag build --release compiler/src/main.sag   # writes compiler/src/main(.exe)
+sh bootstrap/build.sh --install      # Linux and macOS: ~/.sagitario/bin, added to PATH
+bootstrap/build.ps1 --install        # Windows (PowerShell): %USERPROFILE%\.sagitario\bin
 ```
 
-Copy that executable to a directory on `PATH` as `sagc`, or set `sagitario.server.path` to it.
+Or set `sagitario.server.path` to a `sag` executable elsewhere.
 `Sagitario: Restart the language server` restarts it. Without the server, highlighting,
 snippets and the icon keep working (docs/adr/0058-language-server.md).
 

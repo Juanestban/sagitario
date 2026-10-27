@@ -4,7 +4,9 @@
 - Date: 2026-10-27
 - Refines: [ADR-0060](0060-driver-parity-for-nova.md) (the seed and its bootstrap, Q324–Q326; the
   standard library, Q330; CI, Q331; retiring Rust, Q332) and [ADR-0044](0044-c-toolchains.md)
-  (the options of `cl`, Q163)
+  (the options of `cl`, Q163); refines Q338 of
+  [ADR-0062](0062-language-server-std-sources-and-lone-files.md) (the sources of the standard
+  library)
 - Supersedes: Q214 of [ADR-0049](0049-self-hosting-plan-and-language-prerequisites.md) (the Rust
   compiler)
 
@@ -33,11 +35,12 @@ the harness have no warnings.
 | Q370 | Warnings as errors (Q331) | The scripts fail if `sag check` reports anything for the compiler, Nova or the harness. No option of the compiler is added for it. |
 | Q371 | CI | Each `bootstrap` job (the systems and C compilers of today) runs the script with `--debug` and the whole harness with stage 2 and its Nova, with sanitizers and the NDK where they exist, and publishes the SHA-256 of the C of stage 2; a last job checks that all are equal (Q325). In 3d-3 the `cargo` jobs (`test`, `gcc`, `cl`, `msrv`) go; the extension's job stays. |
 | Q372 | The name | The executable, its version (`sag 0.8.0`), its usage text, the `serverInfo` of the language server, `compiler/Nova.toml`, the default of the VS Code extension (`sag lsp`) and the harness say `sag`. Nova no longer looks for `sagc`. `sagc` and its Nova said `0.4.0` until 3d-1, behind the `0.8.0` of the workspace; they now say `0.8.0` too. |
-| Q373 | Library and codes | `prelude.sag` and `std/*.sag` move to `compiler/std/` (Q330). `compiler/src/diagnostics/codes.sag` becomes the source of the registry; `compiler/src/unicode.sag` stays committed data, with a note saying where it came from (Q329). |
+| Q373 | Library and codes | `prelude.sag` and `std/*.sag` move to `compiler/std/` (Q330), side by side: `compiler/std/prelude.sag`, `compiler/std/mod.sag` (`std` itself) and `compiler/std/<module>.sag`. `compiler/src/diagnostics/codes.sag` becomes the source of the registry, which `codes.rs` follows until 3d-3; `compiler/src/unicode.sag` stays committed data, with a note saying where it came from (Q329). |
 | Q374 | Retiring Rust (Q332) | This record supersedes Q214 of ADR-0049: the Rust compiler retires in 3d-3, with `crates/`, `Cargo.toml`, `Cargo.lock`, `rustfmt.toml` and `clippy.toml`. `docs/architecture.md`, `docs/testing.md`, `CONTRIBUTING.md`, the README and the READMEs of `tests/` are rewritten; the records about Rust stay as history. The text of `CLAUDE.md` is proposed to the author first (Q333). |
 | Q375 | `cl` in release | `cl` optimizes with `/O1` instead of `/O2` (Q163 of ADR-0044). The `/O2` of Visual Studio 18 miscompiles the compiler: a `switch` on the `uint32_t` tag of a union checks the range on 32 bits, then indexes its jump table with the whole 64-bit register, whose upper half holds the next field; stage 0 crashes. ASan and UBSan with clang find nothing, and clang and gcc at `-O2` and `cl` at `/O1` and `/Od` build a working compiler. |
 | Q376 | Embedded files | The files the compiler embeds with `include_str` (the runtime, the prelude and the standard library) and `bootstrap/` keep LF line endings in every checkout: with `core.autocrlf`, Windows embedded them with CRLF, and the C differed between systems. |
 | Q377 | Paths in `#line` | The paths of `#line` directives use `/` on every system, in both compilers: the loader joins paths with `\` on Windows, which reached the C. A panic on Windows reports its file with `/`. |
+| Q378 | Sources of the standard library in the language server | Refines Q338 for the layout of Q373: a file is a source of `std` when its directory is named `std` and holds `prelude.sag`; `prelude.sag` is the prelude, `mod.sag` is `std` and `<module>.sag` its module. A session of `tests/lsp/` opens them, with `{root}` for the repository in its messages. |
 
 ## Alternatives considered
 

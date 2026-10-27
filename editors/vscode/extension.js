@@ -1,4 +1,4 @@
-// The client of the Sagitario language server: starts `sagc lsp` for `.sag` files
+// The client of the Sagitario language server: starts `sag lsp` for `.sag` files
 // (docs/adr/0058-language-server.md). Highlighting, snippets and the file icon work without it.
 'use strict';
 
@@ -8,11 +8,11 @@ const { LanguageClient } = require('vscode-languageclient/node');
 /** @type {LanguageClient | undefined} */
 let client;
 
-/** The command of the server: the setting `sagitario.server.path`, or `sagc` on PATH. */
+/** The command of the server: the setting `sagitario.server.path`, or `sag` on PATH. */
 function serverCommand() {
   const configured = vscode.workspace.getConfiguration('sagitario').get('server.path');
 
-  return typeof configured === 'string' && configured.trim() !== '' ? configured.trim() : 'sagc';
+  return typeof configured === 'string' && configured.trim() !== '' ? configured.trim() : 'sag';
 }
 
 async function start(context) {
@@ -33,7 +33,7 @@ async function start(context) {
 
     const action = await vscode.window.showWarningMessage(
       `Sagitario: cannot start the language server \`${command} lsp\` (${error.message ?? error}). ` +
-        'Build `sagc` (`sag build --release compiler/src/main.sag`) and set `sagitario.server.path` to it. ' +
+        'Install `sag` (`bootstrap/build.sh --install`, or `bootstrap/build.ps1 --install` on Windows) or set `sagitario.server.path` to it. ' +
         'Highlighting and snippets keep working without it.',
       'Open settings',
     );

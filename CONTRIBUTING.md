@@ -28,10 +28,10 @@ sag run --release main.sag      # optimized; integer overflow wraps
 sag run --sanitize main.sag     # with ASan and UBSan (the test harness always uses it)
 sag run --sanitize=thread main.sag   # with TSan instead, on Linux and macOS
 SAG_TEST_SANITIZE=0 cargo test --workspace   # faster local runs without sanitizers
-SAG_BLESS=1 cargo test --test selfhost      # regenerate the modules of compiler/ made from Rust
-SAG_COMPILER="$PWD/compiler/src/main" cargo test --test suites   # the suites with sagc, once built
+SAG_BLESS=1 cargo test --test selfhost      # regenerate compiler/src/unicode.sag from Rust
+SAG_COMPILER="$PWD/compiler/src/main" cargo test --test suites   # the suites with the compiler in Sagitario, once built
 cargo test --test selfhost bootstrap      # stage 1 builds stage 2: both generate the same C
-sagc build compiler/src/nova_main.sag --output compiler/src/nova   # Nova in Sagitario (nova.exe on Windows)
+compiler/src/main build compiler/src/nova_main.sag --output compiler/src/nova   # Nova in Sagitario (nova.exe on Windows)
 NOVA_BINARY="$PWD/compiler/src/nova" SAG="$PWD/compiler/src/main" cargo test -p sagitario_nova --test nova
 compiler/src/main run tests/harness/main.sag -- --sag compiler/src/main   # the harness in Sagitario (docs/testing.md)
 SAG_BLESS=1 compiler/src/main run tests/harness/main.sag -- --sag compiler/src/main dumps lsp   # rewrite expected files
@@ -46,7 +46,7 @@ nova run -- a b                 # build target/debug/demo and run it
 nova check                      # front end only
 
 cd editors/vscode && npm ci && npm run package   # the VS Code extension: sagitario.vsix
-sag build --release compiler/src/main.sag        # sagc, whose `sagc lsp` the extension starts
+sh bootstrap/build.sh --install                  # sag, whose `sag lsp` the extension starts
 code --install-extension editors/vscode/sagitario.vsix
 ```
 

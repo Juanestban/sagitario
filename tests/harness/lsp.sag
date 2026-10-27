@@ -1,7 +1,8 @@
 //! The language server, `sag lsp` (docs/adr/0058-language-server.md): each
 //! `tests/lsp/<case>.session` sends its messages (one per line, `raw ` for a body sent as written)
 //! about `<case>.sag`, and `<case>.expected` holds what the server answers, one message per line,
-//! with `{uri}` for the document and `{dir}` for its directory. `SAG_BLESS=1` rewrites them.
+//! with `{uri}` for the document, `{dir}` for its directory and `{root}` for the repository.
+//! `SAG_BLESS=1` rewrites them.
 
 use pkg::support;
 use pkg::support::{Context, Test, after};
@@ -78,10 +79,11 @@ fn json_string(text: String) -> String {
   out.to_string()
 }
 
-/// A message of a session with its placeholders replaced: `{uri}` by the document's URI, and
-/// `{text:name}` by the text of `tests/lsp/name` as a JSON string.
-fn expand(line: String, uri: String, dir: String) -> Result<String, String> {
-  var out = line.replace("{uri}", uri);
+/// A message of a session with its placeholders replaced: `{uri}` by the document's URI, `{root}`
+/// by the URI of the repository, and `{text:name}` by the text of `tests/lsp/name` as a JSON
+/// string.
+fn expand(line: String, uri: String, root: String, dir: String) -> Result<String, String> {
+  var out = line.replace("{uri}", uri).replace("{root}", root);
 
   while let Some(start) = out.find("{text:") {
     const rest = out.substring(start, out.len());
@@ -119,6 +121,7 @@ fn messages(output: String) -> List<String> {
 
 fn answers_the_sessions(cx: Context) -> Result<(), String> {
   const dir = cx.file("tests/lsp");
+  const root = file_uri(cx.root);
   const failures: List<String> = new List();
   var count: usize = 0;
 
@@ -142,7 +145,7 @@ fn answers_the_sessions(cx: Context) -> Result<(), String> {
 
       const body = match after(line, "raw ") {
         Some(body) => body,
-        None => expand(line, uri, dir)?,
+        None => expand(line, uri, root, dir)?,
       };
 
       input.append(`Content-Length: ${body.len()}\r\n\r\n${body}`);
@@ -165,7 +168,7 @@ fn answers_the_sessions(cx: Context) -> Result<(), String> {
     const actual = new StringBuilder();
 
     for body in messages(output.stdout) {
-      actual.append(body.replace(uri, "{uri}").replace(dir_uri, "{dir}/"));
+      actual.append(body.replace(uri, "{uri}").replace(dir_uri, "{dir}/").replace(root, "{root}"));
       actual.append("\n");
     }
 
