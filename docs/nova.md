@@ -42,6 +42,7 @@ Programs use libraries through [dependencies](#dependencies), and C uses them th
 | `nova run [-- args]` | Compiles and runs the program with `args`; Nova exits with the program's exit code |
 | `nova check` | Checks the package without generating code |
 | `nova clean` | Removes `target/` |
+| `nova update self` | Updates Sagitario (`sag` and `nova`) to the latest release ([updating](#updating)) |
 | `nova help`, `nova version` | Usage and version |
 
 `build`, `run`, `check` and `clean` work in the package's directory or any directory below it:
@@ -59,6 +60,20 @@ Nova uses the nearest `Nova.toml` above.
 
 Exit codes: 0 on success, 1 when the package has errors or a command fails, 2 for invalid
 usage, and the program's own code for `nova run`.
+
+## Updating
+
+`nova update self` replaces `sag` and `nova` in the directory of the running Nova, such as
+`~/.sagitario/bin`, with those of the latest release of Sagitario
+([ADR-0070](adr/0070-nova-update-self.md)). It downloads the release with the `curl` of the system,
+checks it against the `SHA256SUMS` of the release, and keeps the previous tools as `sag.old` and
+`nova.old` until the next update. When the installed version is the latest, it says so.
+
+| Option | Effect |
+|---|---|
+| `--check` | Only says whether there is a newer release |
+| `--version <X.Y.Z>` | Installs that release instead, newer or not: `--version` with the previous version goes back to it |
+| `--from <url>` | Downloads from a directory with the archives and `SHA256SUMS` instead of the GitHub Release |
 
 ## `Nova.toml`
 

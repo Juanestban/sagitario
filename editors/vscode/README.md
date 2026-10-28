@@ -17,26 +17,32 @@ Support for the [Sagitario](https://github.com/Juanestban/sagitario) programming
 
 ## The language server
 
-The extension starts `sag lsp`. Build and install `sag` from the repository with a C compiler,
-in release mode, which analyses large programs about three times faster than a debug build:
+The extension starts `sag lsp`, with the `sag` of the same version of Sagitario. Install it with
+one command:
 
 ```sh
-sh bootstrap/build.sh --install      # Linux and macOS: ~/.sagitario/bin, added to PATH
-bootstrap/build.ps1 --install        # Windows (PowerShell): %USERPROFILE%\.sagitario\bin
+curl -fsSL https://github.com/Juanestban/sagitario/releases/latest/download/install.sh | sh   # Linux and macOS
 ```
 
-Or set `sagitario.server.path` to a `sag` executable elsewhere.
-`Sagitario: Restart the language server` restarts it. Without the server, highlighting,
+```powershell
+irm https://github.com/Juanestban/sagitario/releases/latest/download/install.ps1 | iex         # Windows
+```
+
+The extension finds it in `~/.sagitario/bin` (`%USERPROFILE%\.sagitario\bin` on Windows) without
+settings, also before the editor sees the new `PATH`; `bootstrap/build.sh --install` and
+`build.ps1 --install` put a build from source there too. Otherwise it runs `sag` on `PATH`, or the
+executable that `sagitario.server.path` names. After `nova update self`,
+`Sagitario: Restart the language server` starts the new `sag`. Without the server, highlighting,
 snippets and the icon keep working (docs/adr/0058-language-server.md).
 
 The file icon is shown by file icon themes that leave unknown files to the languages, such as
 the default Seti theme. Themes with their own icon for every file keep theirs. Material Icon
 Theme takes an icon of another extension through a path from its `dist` folder, which names the
-installed version of this one:
+installed version of this one (here 0.8.0):
 
 ```json
 "material-icon-theme.files.associations": {
-  "*.sag": "../../sagitario.sagitario-0.2.0/icons/sag-file"
+  "*.sag": "../../sagitario.sagitario-0.8.0/icons/sag-file"
 }
 ```
 
@@ -46,7 +52,9 @@ variants, `SCREAMING_SNAKE_CASE` names are constants, and a name before `(` is a
 
 ## Building and installing
 
-From this directory:
+The extension is `sagitario.sagitario` in the Visual Studio Marketplace, published with each
+release of Sagitario and with its version; each GitHub Release also has its `sagitario.vsix`. To
+build it from this directory:
 
 ```sh
 npm ci

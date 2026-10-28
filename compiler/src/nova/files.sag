@@ -1,0 +1,27 @@
+//! Files and directories for Nova's commands, beyond what `std::fs` does.
+
+use pkg::loader::push_path;
+use std::fs;
+
+/// Removes a directory and everything in it; `std::fs` removes empty directories only.
+pub fn remove_tree(dir: String) -> Result<(), String> {
+  const entries = match fs::read_dir(dir) {
+    Ok(found) => found,
+    Err(error) => return Err(error.message()),
+  };
+
+  for entry in entries {
+    const child = push_path(dir, entry);
+
+    if fs::is_dir(child) {
+      remove_tree(child)?;
+    } else if let Err(error) = fs::remove_file(child) {
+      return Err(error.message());
+    }
+  }
+
+  match fs::remove_dir(dir) {
+    Ok(_) => Ok(()),
+    Err(error) => Err(error.message()),
+  }
+}

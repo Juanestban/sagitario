@@ -199,10 +199,12 @@ keep it up to date with `nova update self`
 ([ADR-0063](adr/0063-distribution-phase-and-roadmap-v2.md)). It follows F6, since it ships `sag`
 and Nova written in Sagitario.
 
-**Status:** in progress: increments 1 ([ADR-0068](adr/0068-releases-and-distribution.md)) and 2
-([ADR-0069](adr/0069-installers.md)) are done. The installers put a release in `~/.sagitario/bin`,
+**Status:** in progress: increments 1 ([ADR-0068](adr/0068-releases-and-distribution.md)), 2
+([ADR-0069](adr/0069-installers.md)), 3 ([ADR-0070](adr/0070-nova-update-self.md)) and 4
+([ADR-0071](adr/0071-vscode-extension-in-the-marketplace.md)) are done; the acceptance is checked on
+the first release published with them. The installers put a release in `~/.sagitario/bin`,
 where `bootstrap/build.sh --install` and `build.ps1 --install` put a build from source (ADR-0067,
-Q368).
+Q368), and where the VS Code extension finds `sag`.
 
 Increments:
 
@@ -227,9 +229,10 @@ Increments:
 release to the next.
 
 **Settled questions** ([ADR-0068](adr/0068-releases-and-distribution.md)): downloads go through
-the `curl` of the system; SHA-256 and JSON live inside the compiler (`compiler/src/sha256.sag`,
-`compiler/src/json.sag`), not in the standard library; a C compiler is required, and the installers
-say how to install one; and the executables are not signed in F7.
+the `curl` of the system; checksums are checked with the tools of the system, and the latest
+release is found in its `SHA256SUMS`, without JSON ([ADR-0070](adr/0070-nova-update-self.md)); a C
+compiler is required, and the installers say how to install one; and the executables are not
+signed in F7.
 
 ## Later phases (post-MVP)
 

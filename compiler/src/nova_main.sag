@@ -12,6 +12,8 @@ use pkg::nova::codes;
 use pkg::nova::manifest;
 use pkg::nova::manifest::Manifest;
 use pkg::nova::toml;
+use pkg::nova::update;
+use pkg::nova::files::remove_tree;
 use pkg::span::SourceMap;
 use pkg::version;
 use std::env;
@@ -38,6 +40,7 @@ fn usage() -> String {
     "  run          Compile and run the package (arguments after `--` go to the program)",
     "  check        Check the package without generating code",
     "  clean        Remove the `target` directory",
+    "  update self  Update Sagitario (sag and nova) to the latest release",
     "  help         Show this message",
     "  version      Show Nova's version",
     "",
@@ -54,6 +57,10 @@ fn usage() -> String {
     "  --target <target>           Compile for another machine, such as `aarch64-linux-android`",
     "                              (build, check); `sag targets` lists them",
     "  --diagnostic-format <fmt>   `human` (default) or `short`: one line per diagnostic",
+    "  --check                     Only say whether there is a newer release (update self)",
+    "  --version <X.Y.Z>           Install that release instead of the latest (update self)",
+    "  --from <url>                Download from a directory with the archives and SHA256SUMS",
+    "                              instead of the GitHub Release (update self)",
   ]).join("\n")
 }
 
@@ -94,6 +101,7 @@ enum Request {
   Init { name: Option<String>, lib: bool },
   Compile(Mode, Options),
   Clean,
+  UpdateSelf(update::Options),
   Help,
   Version,
 }
@@ -127,6 +135,8 @@ fn parse_args(args: List<String>) -> Result<Request, String> {
       None => Ok(Request::Clean),
       Some(arg) => Err(`unexpected argument \`${arg}\` for \`nova clean\``),
     }
+  } else if command == "update" {
+    parse_update(args)
   } else if command == "help" || command == "--help" || command == "-h" {
     Ok(Request::Help)
   } else if command == "version" || command == "--version" || command == "-v" {
@@ -172,6 +182,52 @@ fn parse_creation(command: String, args: List<String>) -> Result<Request, String
     Some(found) => Ok(Request::New { name: found, lib: lib }),
     None => Err("`nova new` needs the package's name: `nova new my_app`"),
   }
+}
+
+/// `nova update self [--check] [--version <X.Y.Z>] [--from <url>]`.
+fn parse_update(args: List<String>) -> Result<Request, String> {
+  match args.get(1) {
+    Some(what) => {
+      if what != "self" {
+        return Err(`unexpected argument \`${what}\` for \`nova update\`; \`nova update self\` updates Sagitario`);
+      }
+    }
+    None => return Err("`nova update` updates Sagitario itself: `nova update self`"),
+  }
+
+  var check = false;
+  var version: Option<String> = None;
+  var from: Option<String> = None;
+  const index = new Position(2);
+
+  while index.value < args.len() {
+    const arg = args[index.value];
+    var flag = arg;
+    var inline: Option<String> = None;
+
+    if let Some(equals) = arg.find("=") {
+      if arg.starts_with("--") {
+        flag = arg.substring(0, equals);
+        inline = Some(arg.substring(equals + 1, arg.len()));
+      }
+    }
+
+    if flag == "--check" && inline.is_none() {
+      check = true;
+    } else if flag == "--version" {
+      version = Some(flag_value(flag, inline, args, index)?);
+    } else if flag == "--from" {
+      from = Some(flag_value(flag, inline, args, index)?);
+    } else if arg.starts_with("-") {
+      return Err(`unknown option \`${arg}\` for \`nova update self\``);
+    } else {
+      return Err(`unexpected argument \`${arg}\` for \`nova update self\``);
+    }
+
+    index.value += 1;
+  }
+
+  Ok(Request::UpdateSelf(update::Options { check: check, version: version, from: from }))
 }
 
 /// `--flag=value` or `--flag value`.
@@ -919,29 +975,6 @@ fn build_library(sag: String, args: List<String>, format: DiagnosticFormat, prof
   0
 }
 
-/// Removes a directory and everything in it; `std::fs` removes empty directories only.
-fn remove_tree(dir: String) -> Result<(), String> {
-  const entries = match fs::read_dir(dir) {
-    Ok(found) => found,
-    Err(error) => return Err(error.message()),
-  };
-
-  for entry in entries {
-    const child = push_path(dir, entry);
-
-    if fs::is_dir(child) {
-      remove_tree(child)?;
-    } else if let Err(error) = fs::remove_file(child) {
-      return Err(error.message());
-    }
-  }
-
-  match fs::remove_dir(dir) {
-    Ok(_) => Ok(()),
-    Err(error) => Err(error.message()),
-  }
-}
-
 /// `nova clean`
 fn clean() -> i32 {
   const dir = match find_package_dir() {
@@ -978,6 +1011,7 @@ fn execute(command: Request) -> i32 {
     Request::Init { name, lib } => init_package(name, lib),
     Request::Compile(mode, options) => compile(options, mode),
     Request::Clean => clean(),
+    Request::UpdateSelf(options) => update::run(options),
   }
 }
 

@@ -134,12 +134,13 @@ clang (where C's `char` is unsigned), and on macOS with clang. Each builds the c
 seed with the script of its system, in debug, and runs the harness with stage 2 and its Nova. The
 Ubuntu jobs on x86-64 require the Android NDK (`SAG_REQUIRE_NDK=1`). The `same-c` job
 checks that the C stage 2 generates for the compiler is the same in all of them, and the `vscode`
-job packages the VS Code extension.
+job packages the VS Code extension; the harness checks that its version is that of Sagitario.
 
 A tag `vX.Y.Z` runs the release workflow instead (`.github/workflows/release.yml`,
 [ADR-0068](adr/0068-releases-and-distribution.md)): on each platform of the releases, also macOS on
 x86-64, it builds in release mode with `--dist` and runs the harness with
-what it built, before publishing the archives with the installers. Then it installs the release
+what it built, before publishing the archives with the installers and the VS Code extension, which
+it then publishes in the Marketplace ([ADR-0071](adr/0071-vscode-extension-in-the-marketplace.md)). Then it installs the release
 with the commands of the README on Windows, Linux and macOS, and builds and runs a new package with
 it. In CI, the `installers` job installs the archive that `--dist` writes, through
 `--from file://…`, on the same three systems ([ADR-0069](adr/0069-installers.md)).

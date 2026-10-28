@@ -76,8 +76,10 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0065](0065-module-directories.md) | Modules with submodules in `mod.sag` | Accepted |
 | [0066](0066-test-harness-in-sagitario.md) | The test harness in Sagitario | Accepted |
 | [0067](0067-bootstrap-from-the-seed.md) | The bootstrap from the seed, and retiring Rust | Accepted |
-| [0068](0068-releases-and-distribution.md) | Releases and distribution | Accepted (completed by 0069) |
+| [0068](0068-releases-and-distribution.md) | Releases and distribution | Accepted (completed by 0069 and 0071; Q387 refined by 0070) |
 | [0069](0069-installers.md) | Installers | Accepted |
+| [0070](0070-nova-update-self.md) | `nova update self` | Accepted |
+| [0071](0071-vscode-extension-in-the-marketplace.md) | The VS Code extension in the Marketplace | Accepted |
 
 ## Template
 
