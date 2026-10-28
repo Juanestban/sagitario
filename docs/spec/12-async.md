@@ -1,6 +1,7 @@
 # 12. `async` and `await` (F8)
 
-Rationale: [ADR-0048](../adr/0048-async-await.md), [ADR-0072](../adr/0072-async-await-increments.md).
+Rationale: [ADR-0048](../adr/0048-async-await.md), [ADR-0072](../adr/0072-async-await-increments.md),
+[ADR-0073](../adr/0073-spawn-blocking.md), [ADR-0074](../adr/0074-async-methods-generics-and-values.md).
 
 ```sag
 use std::task;
@@ -28,10 +29,23 @@ async fn main() {
   that has not finished, or until its end; it then returns the task.
 - The task keeps its parameters until it finishes: the caller may release its own references
   earlier.
-- An `async fn` cannot be `extern "C"` or `@export` (`E0337`).
-- In F8 increment 1, only functions of a module may be `async`. An `async` method, a generic
-  `async fn`, and an `async fn` used as a value instead of being called are `E0900` (not
-  implemented yet).
+- An `async fn` cannot be `extern "C"` or `@export`, nor an initializer `new` (`E0337`).
+- Functions of a module, generic functions, and methods of classes, structs, enums and interfaces,
+  also `abstract`, `override`, static and default ones, may be `async`. Lambdas cannot.
+- An `async fn` returning `T` has the type of a function returning `Task<T>`: used as a value, an
+  `async fn` has the type `fn(A, ...) -> Task<T>`, and `async fn f(self) -> T` and
+  `fn f(self) -> Task<T>` implement and override each other. An `abstract` or interface method
+  declared `async` has no body.
+
+## `self` in `async` methods
+
+- In a class, the task keeps a reference to the instance: an `async` method may modify its fields,
+  and sees the changes other code makes to them while it waits.
+- In a struct or an enum, and in a default method of an interface, the task keeps a copy of
+  `self`, taken when the method is called. The method cannot modify `self`, directly or by calling
+  a method that modifies it (`E0338`): the caller's value would not change. In a default method,
+  assigning to the fields of `self` is `E0338`; a method of the interface it calls on `self` may
+  modify the copy, which the caller does not see.
 
 ## `await`
 

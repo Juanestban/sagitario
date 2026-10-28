@@ -2033,10 +2033,12 @@ fn check_async_fn(cx: Checker, decl: FnDecl) {
     );
   }
 
-  if cx.owner.is_some() {
-    cx.error(codes::NOT_IMPLEMENTED, decl.name.span, "`async` methods are not implemented yet (phase F8, increment 3)");
-  } else if !decl.generics.is_empty() {
-    cx.error(codes::NOT_IMPLEMENTED, decl.name.span, "generic `async` functions are not implemented yet (phase F8, increment 3)");
+  if cx.resolution.is_initializer(cx.package, cx.function) {
+    cx.diagnostics.push(
+      Diagnostic::error(codes::INVALID_ASYNC, decl.name.span, "an initializer cannot be `async`")
+        .with_note("`new` gives the instance itself, not a `Task`")
+        .with_help("initialize the instance synchronously, and add an `async` method or a static `async` function for the rest"),
+    );
   }
 }
 

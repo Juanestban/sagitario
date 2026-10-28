@@ -38,7 +38,9 @@ pub fn lower_async(id: u32, decl: FnDecl, sig: FnSig, locals: List<Type>, subst:
   const task_ty = sig.ret;
   const task = task_class(task_ty)?;
   const result_ty = task.args.first().unwrap_or(types::unit());
-  const param_count = decl.params.len();
+  // A method's `self` is its first parameter: an instance, or a value of which the task keeps a
+  // copy, since an `async` method cannot modify it (docs/spec/12-async.md#self-in-async-methods).
+  const param_count = decl.params.len() + (if sig.receiver.is_some() { 1 } else { 0 });
   const params: List<Type> = new List();
 
   for index in 0..param_count {
@@ -63,7 +65,7 @@ pub fn lower_async(id: u32, decl: FnDecl, sig: FnSig, locals: List<Type>, subst:
   lowering.registry.envs.push(copy_types(env_types));
 
   const env = lowering.registry.envs.len() - 1;
-  const body = resume_function(lowering, id, decl, locals, subst, env, task, result_ty)?;
+  const body = resume_function(lowering, id, decl, param_count, locals, subst, env, task, result_ty)?;
   const created = lowering.new_instance(task_ty, new List())?;
   const captures = List::from([created]);
 
@@ -108,7 +110,7 @@ pub fn lower_async(id: u32, decl: FnDecl, sig: FnSig, locals: List<Type>, subst:
 
 /// The closure of the frame, registered like a lambda: its locals are the environment, then those
 /// of the `async fn` (its parameters first), then temporaries.
-fn resume_function(lw: Lowering, id: u32, decl: FnDecl, source_locals: List<Type>, subst: Subst, env: usize, task: NamedRef, result_ty: Type) -> Result<u32, String> {
+fn resume_function(lw: Lowering, id: u32, decl: FnDecl, param_count: usize, source_locals: List<Type>, subst: Subst, env: usize, task: NamedRef, result_ty: Type) -> Result<u32, String> {
   const map = new Map<u32, u32>();
   const locals = List::from([types::unit()]);
 
@@ -132,7 +134,7 @@ fn resume_function(lw: Lowering, id: u32, decl: FnDecl, source_locals: List<Type
   // The parameters, owned by the body until it returns, like the captures of a lambda.
   const owned: List<u32> = new List();
 
-  for index in 0..decl.params.len() {
+  for index in 0..param_count {
     const local = (index + 1) as u32;
     const ty = lowering.local_type(local);
     const place = Place { local: 0, projections: List::from([Projection::EnvField { env: env, index: index + 1 }]), ty: ty };

@@ -779,7 +779,9 @@ fn lower_function(id: u32, decl: FnDecl, subst: Subst, cx: Context) -> Result<Fu
     locals.push(types::substitute(ty, subst));
   }
 
-  if decl.is_async {
+  // An abstract `async` method has no body: like any abstract method, it panics if called while
+  // its class is initialized.
+  if decl.is_async && !decl.is_abstract {
     return tasks::lower_async(id, decl, sig, locals, subst, cx);
   }
 

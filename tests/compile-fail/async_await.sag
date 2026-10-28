@@ -16,21 +16,46 @@ async fn in_lambda() {
 
 extern "C" async fn exported() {} //~ ERROR E0337
 
-struct Counter {
-  pub fn new() -> Counter {
-    Counter {}
-  }
+class Session {
+  pub var open: bool;
 
-  pub async fn method(self) {} //~ ERROR E0900
+  pub async fn new(self) { //~ ERROR E0337
+    self.open = true;
+  }
 }
 
-async fn generic<T>(x: T) -> T { //~ ERROR E0900
-  x
+struct Counter {
+  pub count: i32;
+
+  pub async fn bump(self) { //~ ERROR E0338
+    self.count += 1;
+  }
+
+  pub fn reset(self) {
+    self.count = 0;
+  }
+
+  pub async fn restart(self) { //~ ERROR E0338
+    self.reset();
+  }
+
+  pub async fn read(self) -> i32 {
+    self.count
+  }
+}
+
+interface Named {
+  var name: String;
+
+  async fn renamed(self) -> String { //~ ERROR E0338
+    self.name = "other";
+    self.name
+  }
 }
 
 async fn uses() {
   value(); //~ WARN W0009
-  const _f = value; //~ ERROR E0900
+  const _f = value;
   const _t = new Task<i32>(); //~ ERROR E0205
   const _n = await 5; //~ ERROR E0300
   const h = value();

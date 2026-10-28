@@ -1,0 +1,227 @@
+// `async` methods, generic `async fn` and `async fn` as values (docs/adr/0074): a class whose
+// fields an `async` method modifies, structs and enums whose `async` methods work on a copy,
+// interfaces as types with `async` methods and a default one, overriding across `async fn` and
+// `fn -> Task<T>`, generic `async fn` with bounds, and `async fn` passed as values.
+// expect-stdout: counter 3
+// expect-stdout: point (2, 4)
+// expect-stdout: point stays (1, 2)
+// expect-stdout: shape 12
+// expect-stdout: Ada says hi
+// expect-stdout: Rex says woof
+// expect-stdout: hello from Ada
+// expect-stdout: hello from Rex
+// expect-stdout: largest 9
+// expect-stdout: largest b
+// expect-stdout: twice 8
+// expect-stdout: applied 7 10
+// expect-stdout: made 5
+// expect-stdout: cat meows
+// expect-stdout: lion roars
+use std::task;
+use std::time::Duration;
+
+async fn pause() {
+  await task::sleep(Duration::from_millis(1));
+}
+
+class Counter {
+  pub var count: i32;
+
+  pub fn new(self) {
+    self.count = 0;
+  }
+
+  pub async fn add(self, steps: i32) -> i32 {
+    for _ in 0..steps {
+      await pause();
+      self.count += 1;
+    }
+
+    self.count
+  }
+
+  pub async fn make(start: i32) -> Counter {
+    await pause();
+
+    const counter = new Counter();
+
+    counter.count = start;
+    counter
+  }
+}
+
+struct Point {
+  pub x: i32;
+  pub y: i32;
+
+  pub async fn doubled(self) -> Point {
+    await pause();
+    Point { x: self.x * 2, y: self.y * 2 }
+  }
+}
+
+enum Shape {
+  Square(i32),
+  Rect { w: i32, h: i32 },
+
+  pub async fn area(self) -> i32 {
+    await pause();
+
+    match self {
+      Shape::Square(side) => side * side,
+      Shape::Rect { w, h } => w * h,
+    }
+  }
+}
+
+interface Speaker {
+  fn name(self) -> String;
+
+  async fn speak(self) -> String;
+
+  async fn greet(self) -> String {
+    await pause();
+    `hello from ${self.name()}`
+  }
+}
+
+class Person impl Speaker {
+  pub const label: String;
+
+  pub fn new(self, label: String) {
+    self.label = label;
+  }
+
+  pub fn name(self) -> String {
+    self.label
+  }
+
+  pub async fn speak(self) -> String {
+    await pause();
+    `${self.label} says hi`
+  }
+}
+
+struct Dog impl Speaker {
+  pub label: String;
+
+  pub fn name(self) -> String {
+    self.label
+  }
+
+  // Not `async`: it returns the task of another call.
+  pub fn speak(self) -> Task<String> {
+    bark(self.label)
+  }
+}
+
+async fn roar(name: String) -> String {
+  await pause();
+  `${name} roars`
+}
+
+async fn bark(name: String) -> String {
+  await pause();
+  `${name} says woof`
+}
+
+abstract class Animal {
+  pub abstract async fn sound(self) -> String;
+
+  pub async fn describe(self) -> String {
+    await self.sound()
+  }
+}
+
+class Cat extends Animal {
+  pub override async fn sound(self) -> String {
+    await pause();
+    "cat meows"
+  }
+}
+
+class Lion extends Cat {
+  // Not `async`: it overrides an `async fn` returning the same `Task`.
+  pub override fn sound(self) -> Task<String> {
+    roar("lion")
+  }
+}
+
+async fn largest<T: Ord>(items: List<T>) -> T {
+  await pause();
+
+  var best = items[0];
+
+  for item in items {
+    if item.compare(best) == Ordering::Greater {
+      best = item;
+    }
+  }
+
+  best
+}
+
+async fn double(n: i32) -> i32 {
+  await pause();
+  n * 2
+}
+
+async fn apply(f: fn(i32) -> Task<i32>, n: i32) -> i32 {
+  await f(n)
+}
+
+async fn main() {
+  const counter = new Counter();
+
+  await counter.add(2);
+  println(`counter ${await counter.add(1)}`);
+
+  const point = Point { x: 1, y: 2 };
+  const doubled = await point.doubled();
+
+  println(`point (${doubled.x}, ${doubled.y})`);
+  println(`point stays (${point.x}, ${point.y})`);
+
+  const shapes = List::from([Shape::Square(2), Shape::Rect { w: 2, h: 4 }]);
+  var total = 0;
+
+  for shape in shapes {
+    total += await shape.area();
+  }
+
+  println(`shape ${total}`);
+
+  const speakers = new List<Speaker>();
+
+  speakers.push(new Person("Ada"));
+  speakers.push(Dog { label: "Rex" });
+
+  for speaker in speakers {
+    println(await speaker.speak());
+  }
+
+  for speaker in speakers {
+    println(await speaker.greet());
+  }
+
+  println(`largest ${await largest(List::from([3, 9, 4]))}`);
+  println(`largest ${await largest(List::from(["a", "b"]))}`);
+
+  const f = double;
+
+  println(`twice ${await f(4)}`);
+  println(`applied ${await apply(double, 3) + 1} ${await apply((n) => double(n), 5)}`);
+
+  const made = await Counter::make(5);
+
+  println(`made ${made.count}`);
+
+  const animals = new List<Animal>();
+
+  animals.push(new Cat());
+  animals.push(new Lion());
+
+  for animal in animals {
+    println(await animal.describe());
+  }
+}
