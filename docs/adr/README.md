@@ -80,6 +80,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0069](0069-installers.md) | Installers | Accepted |
 | [0070](0070-nova-update-self.md) | `nova update self` | Accepted |
 | [0071](0071-vscode-extension-with-the-releases.md) | The VS Code extension with the releases | Accepted |
+| [0072](0072-async-await-increments.md) | `async`/`await`: increments and tasks | Accepted |
 
 ## Template
 

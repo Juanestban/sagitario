@@ -170,6 +170,12 @@ class Generator {
   pub var locals: List<Type>;
   /// Whether local 0 of the function being generated is a pointer (`var self`).
   pub var self_by_ref: bool;
+  /// In the body of an `async fn`, its frame (`sag_env<N>`), where its locals live.
+  pub var frame: Option<usize>;
+  /// The function being generated.
+  pub var function_id: u32;
+  /// The function whose frame each environment is, if it is one.
+  pub const frame_functions: Map<usize, u32>;
   /// The source file and line of the statement being generated.
   pub var source_line: Option<SourceLine>;
   /// Types behind pointers, given a C type after the aggregate being visited.
@@ -204,6 +210,16 @@ class Generator {
 
     self.locals = new List();
     self.self_by_ref = false;
+    self.frame = None;
+    self.function_id = 0;
+    self.frame_functions = new Map<usize, u32>();
+
+    for index in 0..program.functions.len() {
+      if let Some(env) = program.functions[index].frame {
+        self.frame_functions.insert(env, index as u32);
+      }
+    }
+
     self.source_line = None;
     self.pointees = new List();
     self.class_queue = new List();
@@ -704,12 +720,13 @@ class Generator {
     // The distance from the first to the last value.
     const last = if inclusive { "0" } else { "1" };
     const distance = "((uintmax_t)" + end + " - (uintmax_t)" + start + " - " + last + ")";
-    const value = if reverse { "(uintmax_t)" + end + " - " + last + ` - sag_o${n}` } else { "(uintmax_t)" + start + ` + sag_o${n}` };
+    const o = self.counter(`sag_o${n}`);
+    const d = self.counter(`sag_d${n}`);
+    const value = if reverse { "(uintmax_t)" + end + " - " + last + ` - ${o}` } else { "(uintmax_t)" + start + ` + ${o}` };
+    const init = self.counters_init("uintmax_t", List::from([`sag_o${n}`, `sag_d${n}`]), List::from(["0", `(${empty})`]));
 
     self.line("if (" + step_text + " == 0) sag_panic_at(\"the step of `step_by` must be greater than 0\", __FILE__, __LINE__);");
-    self.line(
-      `for (uintmax_t sag_o${n} = 0, sag_d${n} = (${empty}); sag_d${n} == 0; sag_d${n} = (${distance} - sag_o${n} < ${step_text}), sag_o${n} = sag_d${n} ? sag_o${n} : sag_o${n} + ${step_text}) {`,
-    );
+    self.line(`for (${init}; ${d} == 0; ${d} = (${distance} - ${o} < ${step_text}), ${o} = ${d} ? ${o} : ${o} + ${step_text}) {`);
     self.indent += 1;
     self.line(self.local(variable) + " = sag_from_uintmax_" + types::int_name(ty) + "(" + value + ");");
     self.stmts(body);
@@ -729,6 +746,13 @@ class Generator {
 
         if self.layouts.is_managed(env_types[field]) {
           releases.append("  " + self.arc_call("release", env_types[field], `env->c${field}`) + ";\n");
+        }
+      }
+
+      // The frame of an `async fn` also holds its state, locals and loop counters.
+      if let Some(function_id) = self.frame_functions.get(index) {
+        if let Some(function) = program.functions.get(function_id as usize) {
+          fields.append(self.frame_fields(function));
         }
       }
 
@@ -1307,6 +1331,13 @@ class Generator {
 
     self.locals = function.locals;
     self.self_by_ref = function.self_by_ref;
+    self.function_id = id;
+    self.frame = function.frame;
+
+    if let Some(env) = function.frame {
+      return self.frame_function(id, env, function, signature);
+    }
+
     self.out.append(linkage(function) + signature + " {\n");
     self.indent = 1;
 
@@ -1326,12 +1357,104 @@ class Generator {
     self.out.append("}\n\n");
   }
 
+  /// The body of an `async fn` (docs/spec/12-async.md): its locals are fields of its frame
+  /// `sag_f`, and it starts by jumping to where it was suspended. Before it, the function that
+  /// releases what the frame owns where it is suspended, if the program ends first.
+  prv fn frame_function(self, id: u32, env: usize, function: Function, signature: String) {
+    const awaits: List<Stmt> = new List();
+
+    collect_awaits(function.body, awaits);
+
+    self.out.append(`static void sag_frame_drop${id}(sag_object *object) {\n`);
+    self.out.append(`  sag_env${env} *sag_f = (sag_env${env} *)object;\n`);
+    self.out.append("  switch (sag_f->state) {\n");
+
+    for statement in awaits {
+      if let Stmt::Await { state, live } = statement {
+        self.out.append(`  case ${state}:\n`);
+
+        for local in live {
+          self.out.append("    " + self.arc_call("release", self.local_type(local), `sag_f->l${local}`) + ";\n");
+        }
+
+        self.out.append("    break;\n");
+      }
+    }
+
+    self.out.append("  default:\n    break;\n  }\n}\n\n");
+    self.out.append(linkage(function) + signature + " {\n");
+    self.indent = 1;
+    self.line(`sag_env${env} *sag_f = (sag_env${env} *)l0;`);
+    self.line("sag_task_enter();");
+    self.line("switch (sag_f->state) {");
+
+    for statement in awaits {
+      if let Stmt::Await { state, .. } = statement {
+        self.line(`case ${state}:`);
+        self.line("  sag_task_resumed(l0);");
+        self.line(`  goto sag_resume${state};`);
+      }
+    }
+
+    self.line("default:");
+    self.line("  break;");
+    self.line("}");
+    self.stmts(function.body);
+    self.indent = 0;
+    self.out.append("}\n\n");
+    self.frame = None;
+  }
+
+  /// The fields of a frame after its captures: the state, the locals of the body of the
+  /// `async fn` and the counters of its loops, which a `goto` into a loop must find.
+  prv fn frame_fields(self, function: Function) -> String {
+    const fields = new StringBuilder();
+
+    fields.append(" uint32_t state;");
+
+    for index in 1..function.locals.len() {
+      fields.append(" " + self.c_type(function.locals[index]) + ` l${index};`);
+    }
+
+    const counters: List<String> = new List();
+
+    collect_counters(function.body, counters);
+
+    for counter in counters {
+      fields.append(" " + counter + ";");
+    }
+
+    fields.to_string()
+  }
+
+  /// Loop counters of C type `c_ty` with their first values, as the start of a `for`. In the body
+  /// of an `async fn` they are fields of the frame, only assigned.
+  prv fn counters_init(self, c_ty: String, names: List<String>, values: List<String>) -> String {
+    const parts: List<String> = new List();
+
+    for index in 0..names.len() {
+      parts.push(self.counter(names[index]) + " = " + values.get(index).unwrap_or("0"));
+    }
+
+    if self.frame.is_some() { parts.join(", ") } else { c_ty + " " + parts.join(", ") }
+  }
+
+  /// A loop counter: a field of the frame in the body of an `async fn`.
+  prv fn counter(self, name: String) -> String {
+    if self.frame.is_some() { "sag_f->" + name } else { name }
+  }
+
   prv fn local_type(self, local: u32) -> Type {
     self.locals.get(local as usize).unwrap_or(types::error())
   }
 
-  /// A local as an lvalue; the `var self` parameter is a pointer.
+  /// A local as an lvalue; the `var self` parameter is a pointer, and the locals of the body of an
+  /// `async fn` are fields of its frame.
   prv fn local(self, local: u32) -> String {
+    if self.frame.is_some() && local > 0 {
+      return `sag_f->l${local}`;
+    }
+
     if self.self_by_ref && local == 0 { "(*l0)" } else { local_name(local) }
   }
 
@@ -1504,8 +1627,21 @@ class Generator {
       Stmt::Continue => self.line("continue;"),
       Stmt::Return(value) => match value {
         Some(found) => self.line("return " + self.operand(found) + ";"),
-        None => self.line("return;"),
+        None => {
+          if self.frame.is_some() {
+            self.line("sag_task_leave();");
+          }
+
+          self.line("return;");
+        }
       },
+      Stmt::Await { state, .. } => {
+        self.line(`sag_f->state = ${state};`);
+        self.line(`sag_task_suspended(l0, sag_frame_drop${self.function_id});`);
+        self.line("sag_task_leave();");
+        self.line("return;");
+      }
+      Stmt::Resumed(state) => self.line(`sag_resume${state}:;`),
       Stmt::Panic(PanicMessage::Static(message)) => self.line("sag_panic_at(" + c_string_literal(message) + ", __FILE__, __LINE__);"),
       Stmt::Panic(PanicMessage::Value(message)) => self.line("sag_panic_str_at(" + self.operand(message) + ", __FILE__, __LINE__);"),
       _ => {}
@@ -1526,7 +1662,7 @@ class Generator {
     }
 
     const c_ty = int_c_type(ty);
-    const counter = `sag_i${variable}`;
+    const counter = self.counter(`sag_i${variable}`);
     const start_text = self.operand(start);
     const end_text = self.operand(end);
     // A `continue` jumps to the increment, which must never step past `end`, so the closed
@@ -1534,11 +1670,14 @@ class Generator {
     var header = "";
 
     if inclusive {
-      const done = `sag_done${variable}`;
+      const done = self.counter(`sag_done${variable}`);
+      const init = self.counters_init(c_ty, List::from([`sag_i${variable}`, `sag_done${variable}`]), List::from([start_text, `(${c_ty})(${start_text} > ${end_text})`]));
 
-      header = `for (${c_ty} ${counter} = ${start_text}, ${done} = (${c_ty})(${start_text} > ${end_text}); ${done} == 0; ${done} = (${c_ty})(${counter} == ${end_text}), ${counter} = ${done} ? ${counter} : (${c_ty})(${counter} + 1))`;
+      header = `for (${init}; ${done} == 0; ${done} = (${c_ty})(${counter} == ${end_text}), ${counter} = ${done} ? ${counter} : (${c_ty})(${counter} + 1))`;
     } else {
-      header = `for (${c_ty} ${counter} = ${start_text}; ${counter} < ${end_text}; ${counter} = (${c_ty})(${counter} + 1))`;
+      const init = self.counters_init(c_ty, List::from([`sag_i${variable}`]), List::from([start_text]));
+
+      header = `for (${init}; ${counter} < ${end_text}; ${counter} = (${c_ty})(${counter} + 1))`;
     }
 
     self.line(header + " {");
@@ -1550,9 +1689,10 @@ class Generator {
   }
 
   prv fn for_array(self, variable: u32, array: u32, len: u64, body: List<Stmt>) {
-    const counter = `sag_i${variable}`;
+    const counter = self.counter(`sag_i${variable}`);
+    const init = self.counters_init("size_t", List::from([`sag_i${variable}`]), List::from(["0"]));
 
-    self.line("for (size_t " + counter + " = 0; " + counter + ` < ${len}; ` + counter + "++) {");
+    self.line("for (" + init + "; " + counter + ` < ${len}; ` + counter + "++) {");
     self.indent += 1;
     self.line(self.local(variable) + " = " + self.local(array) + ".data[" + counter + "];");
     self.stmts(body);
@@ -1561,17 +1701,18 @@ class Generator {
   }
 
   prv fn for_text(self, variable: u32, text: u32, bytes: bool, body: List<Stmt>) {
-    const counter = `sag_i${variable}`;
+    const counter = self.counter(`sag_i${variable}`);
+    const init = self.counters_init("size_t", List::from([`sag_i${variable}`]), List::from(["0"]));
     const text_name = self.local(text);
     const variable_name = self.local(variable);
 
     // `sag_utf8_next` advances the index, so `continue` needs no increment step.
     if bytes {
-      self.line("for (size_t " + counter + " = 0; " + counter + " < " + text_name + ".len; " + counter + "++) {");
+      self.line("for (" + init + "; " + counter + " < " + text_name + ".len; " + counter + "++) {");
       self.indent += 1;
       self.line(variable_name + " = " + text_name + ".ptr[" + counter + "];");
     } else {
-      self.line("for (size_t " + counter + " = 0; " + counter + " < " + text_name + ".len;) {");
+      self.line("for (" + init + "; " + counter + " < " + text_name + ".len;) {");
       self.indent += 1;
       self.line(variable_name + " = sag_utf8_next(" + text_name + ", &" + counter + ");");
     }
@@ -1585,6 +1726,10 @@ class Generator {
   prv fn assign(self, dest: String, ty: Type, value: Rvalue) {
     match value {
       Rvalue::Template(pieces) => self.template(dest, pieces),
+      Rvalue::ResumeFn => {
+        self.line(dest + " = (sag_fnval){(sag_method)" + fn_name(self.function_id) + ", l0};");
+        self.line("sag_object_retain(l0);");
+      }
       Rvalue::Closure { function, env, captures } => {
         const env_index = match env {
           Some(found) => found,
@@ -1595,6 +1740,11 @@ class Generator {
         self.line("{");
         self.indent += 1;
         self.line(`sag_env${env_index} *sag_closure = sag_object_alloc(sizeof(sag_env${env_index}));`);
+
+        // A frame starts in its first state, without values.
+        if self.frame_functions.contains_key(env_index) {
+          self.line(`*sag_closure = (sag_env${env_index}){0};`);
+        }
 
         var index = 0usize;
 
@@ -2039,4 +2189,52 @@ fn c_string_literal(text: String) -> String {
 
   out.append("\"");
   out.to_string()
+}
+
+/// The `Await` statements of the body of an `async fn`, in order.
+fn collect_awaits(body: List<Stmt>, out: List<Stmt>) {
+  for statement in body {
+    match statement {
+      Stmt::Await { .. } => out.push(statement),
+      Stmt::If { then_body, else_body, .. } => {
+        collect_awaits(then_body, out);
+        collect_awaits(else_body, out);
+      }
+      Stmt::Loop(inner) | Stmt::ForRange { body: inner, .. } | Stmt::ForArray { body: inner, .. } | Stmt::ForText { body: inner, .. } => collect_awaits(inner, out),
+      _ => {}
+    }
+  }
+}
+
+/// The declarations of the loop counters of `body`, named as `for_range`, `for_array` and
+/// `for_text` name them.
+fn collect_counters(body: List<Stmt>, out: List<String>) {
+  for statement in body {
+    match statement {
+      Stmt::If { then_body, else_body, .. } => {
+        collect_counters(then_body, out);
+        collect_counters(else_body, out);
+      }
+      Stmt::Loop(inner) => collect_counters(inner, out),
+      Stmt::ForRange { variable, ty, inclusive, reverse, step, body: inner, .. } => {
+        if reverse || step.is_some() {
+          out.push(`uintmax_t sag_o${variable}`);
+          out.push(`uintmax_t sag_d${variable}`);
+        } else {
+          out.push(int_c_type(ty) + ` sag_i${variable}`);
+
+          if inclusive {
+            out.push(int_c_type(ty) + ` sag_done${variable}`);
+          }
+        }
+
+        collect_counters(inner, out);
+      }
+      Stmt::ForArray { variable, body: inner, .. } | Stmt::ForText { variable, body: inner, .. } => {
+        out.push(`size_t sag_i${variable}`);
+        collect_counters(inner, out);
+      }
+      _ => {}
+    }
+  }
 }

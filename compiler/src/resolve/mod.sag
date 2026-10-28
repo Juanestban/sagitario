@@ -543,6 +543,20 @@ pub class Resolution {
     }
   }
 
+  /// Whether the module at this index of `Package::modules` is the prelude.
+  pub fn is_prelude_source(self, source: usize) -> bool {
+    match self.prelude {
+      Some(prelude) => match self.module(prelude) {
+        Some(module) => match module.source {
+          Some(found) => found == source,
+          None => false,
+        },
+        None => false,
+      },
+      None => false,
+    }
+  }
+
   /// Whether a function (or the type declaring it) belongs to the prelude module.
   pub fn in_prelude(self, id: u32) -> bool {
     const source = match self.prelude {
@@ -590,11 +604,11 @@ pub class Resolution {
     false
   }
 
-  /// Whether a C function is a function of the runtime, which only the standard library may
-  /// declare: its name starts with `sag_`.
+  /// Whether a C function is a function of the runtime, which only the standard library, its
+  /// prelude included, may declare: its name starts with `sag_`.
   pub fn is_runtime_extern(self, package: Package, id: u32) -> bool {
     const in_std = match self.externs.get(id as usize) {
-      Some(info) => self.is_std_source(info.module),
+      Some(info) => self.is_std_source(info.module) || self.is_prelude_source(info.module),
       None => false,
     };
 
@@ -1535,7 +1549,7 @@ pub class Resolver {
       }
       ExprKind::ArrayLit(elems) => self.exprs(elems),
       ExprKind::ArrayRepeat { value, .. } => self.expr(value),
-      ExprKind::Try(inner) => self.expr(inner),
+      ExprKind::Try(inner) | ExprKind::Await(inner) => self.expr(inner),
       ExprKind::New { path, args } => {
         self.type_args(path);
         self.new_path(path);

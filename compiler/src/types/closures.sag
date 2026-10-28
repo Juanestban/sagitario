@@ -148,6 +148,19 @@ pub fn fn_value(cx: Checker, value: Expr, path: Path, function: u32, expected: O
     Some(decl) => decl.name.name,
     None => "",
   };
+  const is_async = match cx.resolution.fn_decl(cx.package, function) {
+    Some(decl) => decl.is_async,
+    None => false,
+  };
+
+  if is_async {
+    cx.diagnostics.push(
+      Diagnostic::error(codes::NOT_IMPLEMENTED, value.span, "`async` functions as values are not implemented yet (phase F8, increment 3)")
+        .with_help("wrap the call in a lambda: `() => " + name + "()`"),
+    );
+
+    return types::error();
+  }
 
   // Its argument is checked where it is called.
   if send::is_spawn(cx, function) {

@@ -1,0 +1,39 @@
+// The rules of `async fn` and `await` (docs/spec/12-async.md).
+use std::thread;
+
+async fn value() -> i32 {
+  42
+}
+
+fn not_async() -> i32 {
+  await value() //~ ERROR E0336
+}
+
+async fn in_lambda() {
+  const _f = () => await value(); //~ ERROR E0336
+}
+
+extern "C" async fn exported() {} //~ ERROR E0337
+
+struct Counter {
+  pub fn new() -> Counter {
+    Counter {}
+  }
+
+  pub async fn method(self) {} //~ ERROR E0900
+}
+
+async fn generic<T>(x: T) -> T { //~ ERROR E0900
+  x
+}
+
+async fn uses() {
+  value(); //~ WARN W0009
+  const _f = value; //~ ERROR E0900
+  const _t = new Task<i32>(); //~ ERROR E0205
+  const _n = await 5; //~ ERROR E0300
+  const h = value();
+  const _thread = thread::spawn(() => { const _x = h; }); //~ ERROR E0332
+}
+
+fn main() {}

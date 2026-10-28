@@ -1,0 +1,109 @@
+// `async fn` and `await` (docs/spec/12-async.md): tasks that start at once and run in turns,
+// `await` in loops, conditions and `match`, managed values kept across suspensions, `?` after
+// `await`, a task awaited twice, and a task left waiting when `main` ends, released by then.
+// expect-stdout: fast after 10 ms
+// expect-stdout: slow after 20 ms
+// expect-stdout: a0
+// expect-stdout: b0
+// expect-stdout: a1
+// expect-stdout: b1
+// expect-stdout: c:012ww7
+// expect-stdout: shared
+// expect-stdout: shared
+// expect-stdout: 6
+// expect-stdout: not a number: x
+// expect-stdout: done
+use std::task;
+use std::time::Duration;
+
+async fn later(name: String, millis: u64) -> String {
+  await task::sleep(Duration::from_millis(millis));
+  `${name} after ${millis} ms`
+}
+
+async fn turns(name: String) {
+  for i in 0..2 {
+    println(`${name}${i}`);
+    await task::sleep(Duration::from_millis(0));
+  }
+}
+
+async fn parse(text: String) -> Result<i32, String> {
+  await task::sleep(Duration::from_millis(1));
+
+  match text.parse_i32() {
+    Ok(value) => Ok(value),
+    Err(_) => Err(`not a number: ${text}`),
+  }
+}
+
+async fn sum(texts: List<String>) -> Result<i32, String> {
+  var total = 0;
+
+  for text in texts {
+    total += await parse(text)?;
+  }
+
+  Ok(total)
+}
+
+async fn count(prefix: String) -> String {
+  var out = prefix;
+
+  for i in 0..3 {
+    out = out + (await later(`${i}`, 1)).substring(0, 1);
+  }
+
+  var n = 0;
+
+  while n < 2 {
+    if (await parse("1")).unwrap_or(0) == 1 {
+      out = out + "w";
+    }
+
+    n += 1;
+  }
+
+  match await parse("7") {
+    Ok(value) => out + `${value}`,
+    Err(message) => message,
+  }
+}
+
+async fn forever(name: String) {
+  const held = `${name} is held`;
+
+  await task::sleep(Duration::from_secs(3600));
+  println(held);
+}
+
+async fn main() -> Result<(), String> {
+  const slow = later("slow", 20);
+  const fast = later("fast", 10);
+
+  println(await fast);
+  println(await slow);
+
+  const a = turns("a");
+  const b = turns("b");
+
+  await a;
+  await b;
+
+  const shared = later("shared", 5);
+
+  println(await count("c:"));
+  println((await shared).substring(0, 6));
+  println((await shared).substring(0, 6));
+  println(`${await sum(List::from(["1", "2", "3"]))?}`);
+
+  match await sum(List::from(["4", "x"])) {
+    Ok(total) => println(`unexpected ${total}`),
+    Err(message) => println(message),
+  }
+
+  const _waiting = forever("never");
+
+  println("done");
+  Ok(())
+}

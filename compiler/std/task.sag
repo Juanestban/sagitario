@@ -1,0 +1,36 @@
+//! `std::task`: what tasks of `async fn` wait for, and running them from synchronous code
+//! (docs/spec/12-async.md#stdtask). `Task` is the prelude's; this module uses its private
+//! members (docs/spec/11-standard-library.md#implementation-rules).
+
+use std::time::Duration;
+
+extern "C" {
+  fn sag_task_timer(nanos: u64, resume: fn());
+  fn sag_task_step() -> bool;
+  fn sag_task_inside() -> bool;
+}
+
+/// A task that finishes after at least `duration`. Even a zero duration lets the tasks already
+/// ready run first.
+pub fn sleep(duration: Duration) -> Task<()> {
+  const task = new Task<()>();
+
+  unsafe { sag_task_timer(duration.as_nanos(), () => task.complete(())) };
+  task
+}
+
+/// Runs the tasks of this thread until `task` finishes, and returns its result. The other tasks
+/// that have not finished stay for the next `block_on`.
+pub fn block_on<T>(task: Task<T>) -> T {
+  if unsafe { sag_task_inside() } {
+    panic("`task::block_on` cannot be called inside a task: use `await`");
+  }
+
+  while !task.is_done() {
+    if !unsafe { sag_task_step() } {
+      panic("`task::block_on` waits for a task that no other task or timer can finish");
+    }
+  }
+
+  task.value()
+}

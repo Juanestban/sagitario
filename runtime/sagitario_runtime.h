@@ -631,6 +631,29 @@ uint64_t sag_sync_atomic_add(sag_fnval cell, uint64_t delta, bool subtract, uint
  * `*actual` and returns false. */
 bool sag_sync_atomic_compare_exchange(sag_fnval cell, uint64_t expected, uint64_t desired, uint64_t *actual);
 
+/* ---- Tasks (docs/spec/12-async.md) ----------------------------------------------------- */
+
+/* The executor of each thread: the ready functions, which resume tasks, in order; the timers,
+ * by deadline and then by order of creation; and the frames of the suspended tasks. */
+
+/* Queues `resume` (retained) to run after the functions already ready. */
+void sag_task_schedule(sag_fnval resume);
+/* Queues `resume` (retained) to become ready at least `nanos` nanoseconds from now. */
+void sag_task_timer(uint64_t nanos, sag_fnval resume);
+/* Runs the next ready function, or waits for the next timer and makes the timers due ready.
+ * Returns false when there is nothing to run or wait for. */
+bool sag_task_step(void);
+/* Around the code of a task, which `sag_task_inside` reports. */
+void sag_task_enter(void);
+void sag_task_leave(void);
+bool sag_task_inside(void);
+/* `frame` is suspended (not retained) until `sag_task_resumed`; `drop` releases the values it
+ * owns in its state, if the program ends first. */
+void sag_task_suspended(sag_object *frame, void (*drop)(sag_object *));
+void sag_task_resumed(sag_object *frame);
+/* Releases what the executor of this thread holds, without running it. */
+void sag_task_shutdown(void);
+
 /* ---- Program lifecycle ----------------------------------------------------------------- */
 
 void sag_rt_init(int argc, char **argv);

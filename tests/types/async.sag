@@ -1,0 +1,17 @@
+// The types of `async fn` and `await`: a call gives a `Task`, `await` its result, and `?` after
+// `await` applies to the result (docs/spec/12-async.md).
+async fn parse(text: String) -> Result<i32, String> {
+  match text.parse_i32() {
+    Ok(value) => Ok(value),
+    Err(_) => Err(text),
+  }
+}
+
+async fn double(text: String) -> Result<i32, String> {
+  const task = parse(text);
+  const value = await task?;
+
+  Ok(-await parse("1")? + value * 2)
+}
+
+fn main() {}

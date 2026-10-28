@@ -238,7 +238,7 @@ pub fn new_instance(cx: Checker, value: Expr, path: Path, id: u32, args: List<Ex
         _ => false,
       };
 
-      if types::is_private(decl.visibility) && !own {
+      if types::is_private(decl.visibility) && !own && !types::std_uses_prelude_member(cx, function) {
         cx.diagnostics.push(
           Diagnostic::error(codes::PRIVATE_MEMBER, path.span, "the initializer of `" + name + "` is private")
             .with_label(decl.name.span, "declared `prv` here")

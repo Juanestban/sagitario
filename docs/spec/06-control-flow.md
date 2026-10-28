@@ -128,7 +128,7 @@ match s {
 | Precedence (high → low) | Operators | Associativity |
 |---|---|---|
 | 1 | calls `f()`, methods `.m()`, indexing `[i]`, `?` | left |
-| 2 | unary `-x`, `!x` | — |
+| 2 | unary `-x`, `!x`, `await x` ([async](12-async.md#await): its operand ends before the first `?`) | — |
 | 3 | `as` | left |
 | 4 | `*` `/` `%` | left |
 | 5 | `+` `-` | left |

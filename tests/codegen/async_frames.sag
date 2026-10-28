@@ -1,0 +1,20 @@
+// The frame of an `async fn` (docs/spec/12-async.md, ADR-0072): its locals and the counter of a
+// loop live in the frame, the body starts by jumping to the `await` it stopped at, and a function
+// releases the values the frame owns at each `await` if the program ends first.
+use std::task;
+use std::time::Duration;
+
+async fn repeat(word: String, times: u32) -> String {
+  var out = "";
+
+  for _ in 0..times {
+    await task::sleep(Duration::from_millis(1));
+    out = out + word;
+  }
+
+  out
+}
+
+async fn main() {
+  println(await repeat("ab", 2));
+}

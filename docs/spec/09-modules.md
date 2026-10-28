@@ -93,6 +93,7 @@ Every module implicitly sees these names, without `use`:
 | Functions | `print(s: String)`, `println(s: String)`, `eprintln(s: String)`, `panic(message: String)` | F1 |
 | Types | `Error` (an interface) and `Error(message)` | F2 |
 | Types | `List`, `Map`, `Iter`, `Entry`, `Ordering`; the interfaces `Eq`, `Ord`, `Hash` | F2 |
+| Types | `Task` ([`async` and `await`](12-async.md)) | F8 |
 
 - `print` and `println` write to stdout, `eprintln` to stderr (`println`/`eprintln` add a
   newline). If writing fails they **panic**, like Rust's `println!`. Code that must handle

@@ -16,6 +16,7 @@ use pkg::sir::interfaces;
 use pkg::sir::matching;
 use pkg::sir::mono;
 use pkg::sir::strings;
+use pkg::sir::tasks;
 use pkg::types::{FloatTy, IntTy, NamedRef, Receiver, Subst, Type, TypeKind};
 use pkg::types;
 use pkg::types::consts::ConstValue;
@@ -168,6 +169,9 @@ pub struct Function {
   /// Type of every local: source bindings first, then temporaries.
   pub locals: List<Type>;
   pub body: List<Stmt>;
+  /// The body of an `async fn`, whose environment (local 0) is the frame `sag_env<N>`: every
+  /// local lives there, so that it survives an `Await` (docs/spec/12-async.md).
+  pub frame: Option<usize>;
 }
 
 /// A local, or a field or element inside it.
@@ -252,6 +256,12 @@ pub enum Stmt {
   Return(Option<Operand>),
   /// Aborts the program with a message.
   Panic(PanicMessage),
+  /// In the body of an `async fn`, after adding it to the waiters of a task: records the state
+  /// `state` and returns. `live` are the locals that own values here, released if the program
+  /// ends before the task resumes.
+  Await { state: u32, live: List<u32> },
+  /// Where the body of an `async fn` resumes in state `state`.
+  Resumed(u32),
 }
 
 pub enum PanicMessage {
@@ -294,6 +304,8 @@ pub enum Rvalue {
   ToDyn { value: Operand, itable: usize },
   /// An interface value as a value of an ancestor interface reached through `path`.
   DynUpcast { value: Operand, path: List<usize> },
+  /// In the body of an `async fn`, the closure of its frame, which resumes it.
+  ResumeFn,
 }
 
 pub enum TemplatePiece {
@@ -498,6 +510,8 @@ pub class Registry {
   pub var lambdas: List<LambdaFunction>;
   pub var envs: List<List<Type>>;
   pub var wrapped: List<u32>;
+  /// For `async fn main`, the function the C `main` calls instead.
+  pub var async_main: Option<u32>;
 
   pub fn new(self, first_instance: u32) {
     self.itables = new List();
@@ -515,6 +529,7 @@ pub class Registry {
     self.lambdas = new List();
     self.envs = new List();
     self.wrapped = new List();
+    self.async_main = None;
   }
 }
 
@@ -584,6 +599,7 @@ pub fn lower(package: Package, resolution: Resolution, typed: TypedModule, sourc
         ret: types::unit(),
         locals: new List(),
         body: new List(),
+        frame: None,
       });
       continue;
     }
@@ -675,7 +691,7 @@ pub fn lower(package: Package, resolution: Resolution, typed: TypedModule, sourc
     classes: registry.classes,
     envs: registry.envs,
     wrapped: registry.wrapped,
-    entry: entry,
+    entry: if registry.async_main.is_some() { registry.async_main } else { entry },
     source_paths: source_paths,
     externs: externs,
     itables: registry.itables,
@@ -687,7 +703,12 @@ pub fn lower(package: Package, resolution: Resolution, typed: TypedModule, sourc
 /// How the C `main` gets the message of an error that `main` returns, when it is not a `String`.
 fn main_error_of(entry: u32, cx: Context) -> Option<MainError> {
   const sig = cx.typed.sig(entry)?;
-  const error_ty = match sig.ret.kind {
+  // `async fn main` gives its result through its task.
+  const ret = match sig.ret.kind {
+    TypeKind::Class(task) if cx.resolution.fn_decl(cx.package, entry)?.is_async => task.args.first()?,
+    _ => sig.ret,
+  };
+  const error_ty = match ret.kind {
     TypeKind::Result { error, .. } => error,
     _ => return None,
   };
@@ -756,6 +777,10 @@ fn lower_function(id: u32, decl: FnDecl, subst: Subst, cx: Context) -> Result<Fu
 
   for ty in source_locals {
     locals.push(types::substitute(ty, subst));
+  }
+
+  if decl.is_async {
+    return tasks::lower_async(id, decl, sig, locals, subst, cx);
   }
 
   const lowering = new Lowering(cx, sig.ret, copy_types(locals), subst, decl.name.span);
@@ -829,6 +854,7 @@ fn lower_function(id: u32, decl: FnDecl, subst: Subst, cx: Context) -> Result<Fu
     ret: sig.ret,
     locals: lowering.locals,
     body: body,
+    frame: None,
   })
 }
 
@@ -856,6 +882,14 @@ pub struct LoopCx {
 pub struct VtableAfter {
   pub call: u32;
   pub class_id: usize;
+}
+
+/// In the body of an `async fn`: its frame, the type of its task and the instance of
+/// `Task::complete` that finishes it.
+pub struct AsyncCx {
+  pub env: usize;
+  pub task_ty: Type;
+  pub complete: u32;
 }
 
 /// Where an assignment's value comes from after `+=` on strings.
@@ -890,6 +924,10 @@ pub class Lowering {
   pub var source_fn: u32;
   /// Inside a lambda, the SIR local of each binding of the source function it uses.
   pub var local_map: Option<Map<u32, u32>>;
+  /// In the body of an `async fn`, where `return` completes its task.
+  pub var async_cx: Option<AsyncCx>;
+  /// The `await`s lowered so far in the body of an `async fn`, which number its states.
+  pub var awaits: u32;
 
   pub fn new(self, cx: Context, ret: Type, locals: List<Type>, subst: Subst, span: Span) {
     self.package = cx.package;
@@ -909,6 +947,8 @@ pub class Lowering {
     self.span = span;
     self.source_fn = 0;
     self.local_map = None;
+    self.async_cx = None;
+    self.awaits = 0;
   }
 
   pub fn context(self) -> Context {
@@ -1515,6 +1555,7 @@ pub class Lowering {
         _ => Err("unsupported path operand"),
       },
       ExprKind::Try(inner) => matching::try_expr(self, inner),
+      ExprKind::Await(inner) => tasks::await_expr(self, inner, ty),
       ExprKind::New { args, .. } => self.new_expr(ty, args),
       ExprKind::Match { scrutinee, arms } => matching::match_expr(self, ty, scrutinee, arms),
       ExprKind::Field { .. } | ExprKind::Index { .. } => self.read_place(value, ty),
@@ -1905,7 +1946,8 @@ pub class Lowering {
         const ret = self.ret;
         const returned = self.operand_as(found, ret)?;
 
-        if self.managed(ret) {
+        // The task of an `async fn` keeps its own copy of the result.
+        if self.managed(ret) && self.async_cx.is_none() {
           self.emit(Stmt::Retain(returned));
         }
 
@@ -1913,6 +1955,12 @@ pub class Lowering {
       } else {
         self.expr(found)?;
       }
+    }
+
+    if self.async_cx.is_some() {
+      tasks::finish(self, operand, None);
+
+      return Ok(unit_operand());
     }
 
     self.release_for_exit(0, 0);
@@ -2235,7 +2283,7 @@ pub class Lowering {
   }
 
   /// `new C(args)`: allocates the instance and runs the initializer on it.
-  prv fn new_instance(self, ty: Type, args: List<Expr>) -> Result<Operand, String> {
+  pub fn new_instance(self, ty: Type, args: List<Expr>) -> Result<Operand, String> {
     const class_ref = match ty.kind {
       TypeKind::Class(found) => found,
       _ => return Err("`new` of a type other than a class or `StringBuilder`"),

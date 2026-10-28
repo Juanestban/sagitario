@@ -19,6 +19,7 @@ functions it uses.
 | `std::path` | Joining paths and taking them apart | F3 |
 | `std::process` | `exit`, running programs | F3 |
 | `std::sync` | `Mutex`, atomic values and channels, shared between threads | F4 |
+| `std::task` | Tasks of `async fn`, `sleep` and `block_on` ([`async` and `await`](12-async.md#stdtask)) | F8 |
 | `std::thread` | Threads | F4 |
 | `std::time` | Durations, clocks and `sleep` | F3 |
 
@@ -336,13 +337,15 @@ Rationale: [ADR-0039](../adr/0039-time-and-commands.md).
 ## Implementation rules
 
 The modules of `std`, except `std::ffi`, are written in Sagitario and embedded in the compiler.
-They follow the rules of every module, with two exceptions that only the standard library has:
+They follow the rules of every module, with three exceptions that only the standard library has:
 
 - It may declare functions of the runtime in `extern "C"` blocks: names starting with `sag_`,
   which may also take and return `String` and take `fn()` values (borrowed arguments, new
   references as results).
 - It may name the prelude module as `std::prelude`, to implement the prelude's interfaces with
   types of the same name (`io::Error` implements `Error`).
+- It may use the `prv` members of the prelude's types: `std::task` implements `sleep` and
+  `block_on` on those of `Task` ([ADR-0072](../adr/0072-async-await-increments.md)).
 
 `std` itself has a file of private helpers, which its modules call as `super::name`: like any
 module's private items, only its submodules see them.

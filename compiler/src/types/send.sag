@@ -111,15 +111,7 @@ pub fn is_spawn(cx: Checker, id: u32) -> bool {
     None => false,
   };
 
-  matches && !in_std(cx)
-}
-
-/// Whether the function being checked belongs to the standard library.
-fn in_std(cx: Checker) -> bool {
-  match cx.resolution.functions.get(cx.function as usize) {
-    Some(info) => cx.resolution.is_std_source(info.module),
-    None => false,
-  }
+  matches && !types::in_std(cx)
 }
 
 /// The argument of `thread::spawn` is a lambda whose captures are all `Send`, or a function named

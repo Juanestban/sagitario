@@ -950,6 +950,8 @@ pub class Checker {
   pub var lambda_stack: List<u32>;
   /// Whether the result of the lambda being checked comes from its body.
   pub var inferring_ret: bool;
+  /// Whether the function being checked is an `async fn`, where `await` is allowed.
+  pub var in_async: bool;
   pub var self_calls: List<SelfCall>;
   pub var receiver_checks: List<ReceiverCheck>;
 
@@ -979,6 +981,7 @@ pub class Checker {
 
     self.lambda_stack = new List();
     self.inferring_ret = false;
+    self.in_async = false;
     self.self_calls = new List();
     self.receiver_checks = new List();
   }
@@ -1243,15 +1246,40 @@ pub class Checker {
       }
     }
 
+    // Calling an `async fn` gives its task (docs/spec/12-async.md).
+    if decl.is_async && !is_init {
+      ret = self.task_of(ret);
+    }
+
     FnSig { receiver: receiver, params: params, ret: ret }
   }
 
-  /// `fn main()` or `fn main() -> Result<(), String>`, with any visibility.
+  /// `Task<value>`, the prelude's class.
+  pub fn task_of(self, value: Type) -> Type {
+    match self.resolution.prelude_type("Task") {
+      Some(TypeItem::Class(id)) => of(TypeKind::Class(NamedRef { id: id, name: "Task", args: List::from([value]) })),
+      _ => error(),
+    }
+  }
+
+  /// `T` if `ty` is `Task<T>`.
+  pub fn task_result(self, ty: Type) -> Option<Type> {
+    match ty.kind {
+      TypeKind::Class(named) => match self.resolution.prelude_type("Task") {
+        Some(TypeItem::Class(id)) if id == named.id => named.args.first(),
+        _ => None,
+      },
+      _ => None,
+    }
+  }
+
+  /// `fn main()` or `fn main() -> Result<(), String>`, with any visibility, also `async`.
   pub fn check_main(self, id: u32, main: FnDecl) {
-    const ret = match self.typed.sigs.get(id as usize) {
+    const declared = match self.typed.sigs.get(id as usize) {
       Some(sig) => sig.ret,
       None => unit(),
     };
+    const ret = if main.is_async { self.task_result(declared).unwrap_or(declared) } else { declared };
     var is_result = false;
     // The error is a `String` or implements `Error`.
     var valid_ret = false;
@@ -1551,6 +1579,21 @@ pub fn is_private(visibility: Visibility) -> bool {
     Visibility::Private => true,
     _ => false,
   }
+}
+
+/// Whether the function being checked belongs to the standard library.
+pub fn in_std(cx: Checker) -> bool {
+  match cx.resolution.functions.get(cx.function as usize) {
+    Some(info) => cx.resolution.is_std_source(info.module),
+    None => false,
+  }
+}
+
+/// Whether the code being checked may use `member`, a `prv` member of a type of the prelude: the
+/// standard library may, as `std::task` does with `Task`
+/// (docs/spec/11-standard-library.md#implementation-rules).
+pub fn std_uses_prelude_member(cx: Checker, member: u32) -> bool {
+  in_std(cx) && cx.resolution.in_prelude(member)
 }
 
 pub fn plural(count: usize) -> String {

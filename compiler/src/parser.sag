@@ -166,10 +166,6 @@ fn is_eof(kind: TokenKind) -> bool {
   }
 }
 
-fn is_reserved(keyword: String) -> bool {
-  keyword == "async" || keyword == "await"
-}
-
 /// Tokens that end an expression, so `break`/`return` before them carry no value.
 fn ends_expression(kind: TokenKind) -> bool {
   match kind {
@@ -352,9 +348,6 @@ class Parser {
     self.diagnostics.push(Diagnostic::error(codes::NOT_IMPLEMENTED, span, what + " are not implemented yet"));
   }
 
-  prv fn reserved_keyword(self, keyword: String) {
-    self.diagnostics.push(Diagnostic::error(codes::RESERVED_KEYWORD, self.span(), "`" + keyword + "` is reserved for a future version of Sagitario"));
-  }
 
   pub fn module(self, file: u32) -> Module {
     const uses: List<UseDecl> = new List();
@@ -488,7 +481,7 @@ class Parser {
     const visibility = self.visibility();
     const kind = self.kind();
 
-    if is_keyword(kind, "fn") {
+    if is_keyword(kind, "fn") || (is_keyword(kind, "async") && is_keyword(self.nth_kind(1), "fn")) {
       const decl = self.fn_decl(visibility, start, false)?;
 
       self.apply_attributes(attributes, AttributeTarget::Fn);
@@ -708,7 +701,7 @@ class Parser {
       _ => return Err(self.unexpected("an ABI string such as `\"C\"`")),
     }
 
-    if self.at_keyword("fn") {
+    if self.at_keyword("fn") || self.at_keyword("async") {
       var decl = self.fn_decl(visibility, start, false)?;
 
       decl.extern_c = true;
@@ -965,7 +958,7 @@ class Parser {
       );
     }
 
-    if !self.at_keyword("fn") {
+    if !self.at_keyword("fn") && !self.at_keyword("async") {
       return self.field_member(Visibility::Public, start);
     }
 
@@ -1207,7 +1200,7 @@ class Parser {
     const is_abstract = self.eat_keyword("abstract");
     const is_override = self.eat_keyword("override");
 
-    if is_abstract || is_override || self.at_keyword("fn") {
+    if is_abstract || is_override || self.at_keyword("fn") || self.at_keyword("async") {
       var decl = self.method_decl(visibility, start, is_abstract)?;
 
       decl.is_override = is_override;
@@ -1315,6 +1308,7 @@ class Parser {
   /// A function's signature followed by the body `body` describes.
   prv fn signature_then(self, visibility: Visibility, start: Span, in_type: bool, body: Body) -> Result<FnDecl, ()> {
     const id = self.next_id();
+    const is_async = self.eat_keyword("async");
 
     self.expect_keyword("fn")?;
 
@@ -1401,6 +1395,7 @@ class Parser {
       visibility: visibility,
       is_abstract: is_abstract,
       is_override: false,
+      is_async: is_async,
       name: name,
       generics: generics,
       self_param: self_param,
@@ -1418,7 +1413,6 @@ class Parser {
 
         Ok(Ident { name: name, span: span })
       }
-      TokenKind::Keyword(keyword) if is_reserved(keyword) => Err(self.reserved_keyword(keyword)),
       _ => Err(self.unexpected(expected)),
     }
   }
@@ -1943,6 +1937,8 @@ class Parser {
       op = UnaryOp::Not;
     } else if self.at("*") {
       op = UnaryOp::Deref;
+    } else if self.at_keyword("await") {
+      return self.await_expr();
     } else {
       return self.postfix_expr();
     }
@@ -1954,8 +1950,25 @@ class Parser {
     Ok(self.expr_node(ExprKind::Unary { op: op, operand: operand }, span))
   }
 
+  /// `await operand`: the operand is the chain of postfix operators up to the first `?`, which,
+  /// with what follows it, applies to the awaited value: `await f()?` is `(await f())?`.
+  prv fn await_expr(self) -> Result<Expr, ()> {
+    const start = self.advance().span;
+    const operand = self.postfix_ops(self.primary_expr()?, false)?;
+    const awaited = self.expr_node(ExprKind::Await(operand), start.to(operand.span));
+
+    self.postfix_ops(awaited, true)
+  }
+
   prv fn postfix_expr(self) -> Result<Expr, ()> {
-    var expr = self.primary_expr()?;
+    const primary = self.primary_expr()?;
+
+    self.postfix_ops(primary, true)
+  }
+
+  /// The postfix operators after `expr`; with `with_try` false, stops before a `?`.
+  prv fn postfix_ops(self, base: Expr, with_try: bool) -> Result<Expr, ()> {
+    var expr = base;
 
     loop {
       if self.at("(") {
@@ -1986,7 +1999,7 @@ class Parser {
         const span = expr.span.to(end);
 
         expr = self.expr_node(ExprKind::Index { base: expr, index: index }, span);
-      } else if self.at("?") {
+      } else if with_try && self.at("?") {
         const end = self.advance().span;
         const span = expr.span.to(end);
 
@@ -2199,12 +2212,6 @@ class Parser {
       };
 
       return Ok(self.expr_node(ExprKind::Return(value), return_span));
-    }
-
-    if let TokenKind::Keyword(keyword) = kind {
-      if is_reserved(keyword) {
-        return Err(self.reserved_keyword(keyword));
-      }
     }
 
     if self.at_keyword("new") {

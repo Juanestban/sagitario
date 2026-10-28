@@ -238,7 +238,14 @@ signed in F7.
 ## Later phases (post-MVP)
 
 - **F8 `async`/`await`:** stackless tasks (`Task<T>`) on a single-threaded executor per thread,
-  as designed in [ADR-0048](adr/0048-async-await.md).
+  as designed in [ADR-0048](adr/0048-async-await.md) and planned in
+  [ADR-0072](adr/0072-async-await-increments.md). In progress, in four increments, of which 1
+  is done:
+  1. Tasks: `async fn` at module level, `await`, `Task<T>`, the state machine, the executor with
+     timers, `task::sleep`, `task::block_on` and `async fn main`.
+  2. `task::spawn_blocking`, and waking the executor from another thread.
+  3. `async` methods, generic `async fn`, and `async fn` as values.
+  4. The acceptance program, and closing F8.
 - **Roadmap v2:** a game engine written in Sagitario, with the language and library features it
   needs ([roadmap-v2.md](roadmap-v2.md)).
 

@@ -60,6 +60,9 @@ fn main() { ... }                    // return type omitted: returns ()
 fn main() -> Result<(), E> { ... }   // optional
 ```
 
+`main` may also be an `async fn` with the same return types; its body then runs with
+`task::block_on` ([`async` and `await`](12-async.md#running-tasks)).
+
 `main` is declared in the root module (the entry file), with any visibility: `pub fn main()`
 is also valid. A function called `main` in another module is an ordinary function. Declaring
 a return type on `main` is optional. When it returns `Result<(), E>`:

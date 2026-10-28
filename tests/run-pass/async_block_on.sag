@@ -1,0 +1,43 @@
+// `task::block_on` from synchronous code (docs/spec/12-async.md#running-tasks): an `async fn`
+// called without it runs up to its first suspension, and finishes in a later `block_on`; tasks
+// with equal deadlines finish in the order of their `sleep`.
+// expect-stdout: started starts
+// expect-stdout: main goes on
+// expect-stdout: x starts
+// expect-stdout: y starts
+// expect-stdout: started ends
+// expect-stdout: x ends
+// expect-stdout: y ends
+// expect-stdout: y x
+// expect-stdout: started
+// expect-stdout: 3
+use std::task;
+use std::time::Duration;
+
+async fn step(name: String, millis: u64) -> String {
+  println(`${name} starts`);
+  await task::sleep(Duration::from_millis(millis));
+  println(`${name} ends`);
+  name
+}
+
+async fn both() -> String {
+  const x = step("x", 5);
+  const y = step("y", 5);
+  const first = await y;
+
+  `${first} ${await x}`
+}
+
+async fn three() -> i32 {
+  3
+}
+
+fn main() {
+  const started = step("started", 1);
+
+  println("main goes on");
+  println(task::block_on(both()));
+  println(task::block_on(started));
+  println(`${task::block_on(three())}`);
+}

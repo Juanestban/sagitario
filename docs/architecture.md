@@ -95,6 +95,16 @@ initializer on it.
 SIR is the place for ARC optimizations and the boundary behind which other backends (LLVM)
 could be added.
 
+An `async fn` (`sir/tasks.sag`, [ADR-0072](adr/0072-async-await-increments.md)) becomes two
+functions. The one callers call creates the `Task` (a class of the prelude) and a frame, the
+environment of a closure whose captures are the task and the parameters, and calls that closure
+once. The closure is the body, marked with its frame (`Function::frame`): an `await` of a task
+that has not finished adds the closure to that task's waiters and becomes an `Await` statement,
+which records the state and returns, followed by `Resumed`, where the body continues; `return`
+completes the task. Each `Await` lists the locals that own values there (the bindings of the open
+blocks and the pending temporaries). For `async fn main`, the C `main` calls a third function that
+runs the executor until the task of `main` finishes.
+
 ## C code generation
 
 - Output is strict, portable **C11**: no GCC/clang extensions (no statement expressions, no
@@ -107,6 +117,12 @@ could be added.
   several C lines. Their paths use `/` on every system, so that the C does not depend on the
   machine that generates it.
 - `sag build --emit-c` writes the generated C for inspection.
+- The frame of an `async fn` is its environment `sag_envN`, with its state, every local of its
+  body and the counters of its loops after the captures, so that they survive a suspension. The
+  body starts with a `switch` on the state that jumps (`goto`) to the `Resumed` label of the
+  `await` it stopped at; this is valid C11, since every value it needs lives in the frame. Before
+  the body, `sag_frame_dropN` releases the locals an `Await` lists, for the frames still suspended
+  when the program ends.
 - Each struct becomes a C struct `sag_sN` (fields `fN`), each enum a `sag_eN`, and each array,
   `Option` and `Result` type a `sag_tN`. Arrays wrap a C array; enum-like types hold a `tag` and
   a union `u` with a struct `vN` per variant with fields. All are copied by assignment and
@@ -233,7 +249,11 @@ compiled with every program:
   parsing (`sag_parse_*`), ASCII `char` helpers and the ARC `StringBuilder` (`sag_builder_*`),
 - FFI support: the ARC `CString` (`sag_cstring_*`), `sag_string_from_c_at` (lossy UTF-8),
   `sag_c_char` (C's `char`) and the raw pointer macros (`SAG_PTR_ADD`, `SAG_CHECK_PTR`, ...),
-- a live-object counter checked at exit when `SAG_LEAK_CHECK` is set (exit code 102).
+- a live-object counter checked at exit when `SAG_LEAK_CHECK` is set (exit code 102),
+- the executor of tasks of each thread (`sag_task_*`, [ADR-0072](adr/0072-async-await-increments.md)):
+  the functions ready to resume tasks, first in first out, the timers of `task::sleep`, by
+  deadline, and the frames suspended, which `sag_rt_finish` (and the end of a thread) releases
+  without running them.
 
 Anything expressible in Sagitario belongs in `compiler/std/` instead.
 

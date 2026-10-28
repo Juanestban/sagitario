@@ -2120,6 +2120,171 @@ void sag_time_sleep(uint64_t nanos) {
 #endif
 }
 
+/* ---- Tasks (docs/spec/12-async.md) ----------------------------------------------------- */
+
+typedef struct sag_task_timer_entry {
+  uint64_t deadline;
+  uint64_t order;
+  sag_fnval resume;
+} sag_task_timer_entry;
+
+typedef struct sag_task_frame {
+  sag_object *frame;
+  void (*drop)(sag_object *);
+} sag_task_frame;
+
+/* The ready functions are `sag_ready[sag_ready_head..sag_ready_len]`. */
+static SAG_THREAD_LOCAL sag_fnval *sag_ready = NULL;
+static SAG_THREAD_LOCAL size_t sag_ready_head = 0;
+static SAG_THREAD_LOCAL size_t sag_ready_len = 0;
+static SAG_THREAD_LOCAL size_t sag_ready_cap = 0;
+/* Sorted by deadline, then by order of creation. */
+static SAG_THREAD_LOCAL sag_task_timer_entry *sag_timers = NULL;
+static SAG_THREAD_LOCAL size_t sag_timers_len = 0;
+static SAG_THREAD_LOCAL size_t sag_timers_cap = 0;
+static SAG_THREAD_LOCAL uint64_t sag_timers_created = 0;
+static SAG_THREAD_LOCAL sag_task_frame *sag_suspended = NULL;
+static SAG_THREAD_LOCAL size_t sag_suspended_len = 0;
+static SAG_THREAD_LOCAL size_t sag_suspended_cap = 0;
+static SAG_THREAD_LOCAL size_t sag_task_depth = 0;
+
+/* Room for one more element of `size` bytes in `*items`, which holds `len` of `*cap`. */
+static void sag_task_grow(void **items, size_t *cap, size_t len, size_t size) {
+  if (len < *cap) {
+    return;
+  }
+  size_t grown = *cap == 0 ? 8 : *cap * 2;
+  void *moved = realloc(*items, grown * size);
+  if (moved == NULL) {
+    sag_panic("out of memory");
+  }
+  *items = moved;
+  *cap = grown;
+}
+
+void sag_task_schedule(sag_fnval resume) {
+  if (sag_ready_head == sag_ready_len) {
+    sag_ready_head = 0;
+    sag_ready_len = 0;
+  }
+  sag_task_grow((void **)&sag_ready, &sag_ready_cap, sag_ready_len, sizeof(sag_fnval));
+  sag_fnval_retain(resume);
+  sag_ready[sag_ready_len++] = resume;
+}
+
+void sag_task_timer(uint64_t nanos, sag_fnval resume) {
+  uint64_t now = sag_time_monotonic();
+  uint64_t deadline = nanos > UINT64_MAX - now ? UINT64_MAX : now + nanos;
+  sag_task_grow((void **)&sag_timers, &sag_timers_cap, sag_timers_len, sizeof(sag_task_timer_entry));
+  size_t at = sag_timers_len;
+  while (at > 0 && sag_timers[at - 1].deadline > deadline) {
+    sag_timers[at] = sag_timers[at - 1];
+    at--;
+  }
+  sag_fnval_retain(resume);
+  sag_timers[at].deadline = deadline;
+  sag_timers[at].order = sag_timers_created++;
+  sag_timers[at].resume = resume;
+  sag_timers_len++;
+}
+
+bool sag_task_step(void) {
+  if (sag_ready_head < sag_ready_len) {
+    sag_fnval resume = sag_ready[sag_ready_head++];
+    ((void (*)(sag_object *))resume.fn)(resume.env);
+    sag_fnval_release(resume);
+    return true;
+  }
+  if (sag_timers_len == 0) {
+    return false;
+  }
+  uint64_t now = sag_time_monotonic();
+  if (sag_timers[0].deadline > now) {
+    sag_time_sleep(sag_timers[0].deadline - now);
+    now = sag_time_monotonic();
+  }
+  /* The timers due, in order; the queue takes their references. */
+  size_t due = 0;
+  while (due < sag_timers_len && sag_timers[due].deadline <= now) {
+    sag_task_schedule(sag_timers[due].resume);
+    sag_fnval_release(sag_timers[due].resume);
+    due++;
+  }
+  if (due == 0) {
+    /* The clock went no further than the deadline: the first timer is due. */
+    sag_task_schedule(sag_timers[0].resume);
+    sag_fnval_release(sag_timers[0].resume);
+    due = 1;
+  }
+  memmove(sag_timers, sag_timers + due, (sag_timers_len - due) * sizeof(sag_task_timer_entry));
+  sag_timers_len -= due;
+  return true;
+}
+
+void sag_task_enter(void) {
+  sag_task_depth++;
+}
+
+void sag_task_leave(void) {
+  sag_task_depth--;
+}
+
+bool sag_task_inside(void) {
+  return sag_task_depth > 0;
+}
+
+void sag_task_suspended(sag_object *frame, void (*drop)(sag_object *)) {
+  sag_task_grow((void **)&sag_suspended, &sag_suspended_cap, sag_suspended_len, sizeof(sag_task_frame));
+  sag_suspended[sag_suspended_len].frame = frame;
+  sag_suspended[sag_suspended_len].drop = drop;
+  sag_suspended_len++;
+}
+
+void sag_task_resumed(sag_object *frame) {
+  for (size_t i = sag_suspended_len; i > 0; i--) {
+    if (sag_suspended[i - 1].frame == frame) {
+      sag_suspended[i - 1] = sag_suspended[sag_suspended_len - 1];
+      sag_suspended_len--;
+      return;
+    }
+  }
+}
+
+void sag_task_shutdown(void) {
+  /* The suspended frames hold the tasks they await, whose waiters hold the frames: releasing
+   * what each frame owns breaks those cycles. The frames are kept alive until all are done. */
+  size_t frames = sag_suspended_len;
+  for (size_t i = 0; i < frames; i++) {
+    sag_object_retain(sag_suspended[i].frame);
+  }
+  for (size_t i = 0; i < frames; i++) {
+    sag_suspended[i].drop(sag_suspended[i].frame);
+  }
+  for (size_t i = sag_ready_head; i < sag_ready_len; i++) {
+    sag_fnval_release(sag_ready[i]);
+  }
+  for (size_t i = 0; i < sag_timers_len; i++) {
+    sag_fnval_release(sag_timers[i].resume);
+  }
+  sag_task_frame *held = sag_suspended;
+  sag_suspended = NULL;
+  sag_suspended_len = 0;
+  sag_suspended_cap = 0;
+  for (size_t i = 0; i < frames; i++) {
+    sag_object_release(held[i].frame);
+  }
+  free(held);
+  free(sag_ready);
+  free(sag_timers);
+  sag_ready = NULL;
+  sag_ready_head = 0;
+  sag_ready_len = 0;
+  sag_ready_cap = 0;
+  sag_timers = NULL;
+  sag_timers_len = 0;
+  sag_timers_cap = 0;
+}
+
 /* ---- Standard library: std::process::Command ------------------------------------------- */
 
 /* The parts of `text` separated by NUL characters, as NUL-terminated copies; `count` parts. */
@@ -2777,6 +2942,7 @@ static void sag_threads_release(void) {
 static void sag_thread_run(sag_thread *thread) {
   ((void (*)(sag_object *))thread->body.fn)(thread->body.env);
   sag_fnval_release(thread->body);
+  sag_task_shutdown();
   sag_drop_free();
   sag_count_dec(&sag_threads_running);
 }
@@ -3055,6 +3221,7 @@ int sag_rt_finish(void) {
   if (fflush(stdout) != 0) {
     sag_panic("failed printing to stdout");
   }
+  sag_task_shutdown();
   sag_drop_free();
   /* Objects of threads still running are alive. */
   size_t live = sag_count_get(&sag_live_objects);
