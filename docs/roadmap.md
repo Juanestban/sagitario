@@ -2,6 +2,11 @@
 
 Rationale: [ADR-0014](adr/0014-mvp-scope.md). **The MVP is F0 + F1 + F2, desktop only.**
 
+**Where we are:** F0–F6 are done: the compiler, Nova and the language server are written in
+Sagitario and build from a seed of generated C, without Rust
+([ADR-0067](adr/0067-bootstrap-from-the-seed.md)). F7 (distribution) is next. The phases before
+F6 describe the Rust compiler as it was then; it retired in F6.
+
 ## F0: Infrastructure (MVP)
 
 - Valid virtual workspace (`crates/*`), remove the root `src/main.rs`, shared lint config.
@@ -193,6 +198,9 @@ Install Sagitario on Windows, Linux and macOS with one command, as `rustup` inst
 keep it up to date with `nova update self`
 ([ADR-0063](adr/0063-distribution-phase-and-roadmap-v2.md)). It follows F6, since it ships `sag`
 and Nova written in Sagitario.
+
+**Status:** next. `bootstrap/build.sh --install` and `build.ps1 --install` already install a
+build from source to `~/.sagitario/bin`, the directory the installers will use (ADR-0067, Q368).
 
 Increments:
 
