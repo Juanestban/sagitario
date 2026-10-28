@@ -56,7 +56,8 @@ The compiler, Nova and the harness must build without warnings: the bootstrap sc
 
 The version of Sagitario is in `compiler/src/version.sag`, `compiler/Nova.toml`,
 `editors/vscode/package.json` and `editors/vscode/package-lock.json`, which must agree (the harness
-checks it). Pushing a tag `vX.Y.Z` with that version to GitHub runs `.github/workflows/release.yml`,
+checks it). The sessions in `tests/lsp/` expect it too: after changing it, rewrite them with
+`SAG_BLESS=1` and the group `lsp`. Pushing a tag `vX.Y.Z` with that version to GitHub runs `.github/workflows/release.yml`,
 which builds the archive of each platform, runs the harness with it, and publishes them with their
 checksums, the installers in `install/` and the VS Code extension as a GitHub Release
 (docs/adr/0068-releases-and-distribution.md, docs/adr/0069-installers.md,
