@@ -1,0 +1,22 @@
+// A `task::spawn_blocking` job still running when `main` ends: the program does not wait for it,
+// and the task waiting for it is released (docs/adr/0073-spawn-blocking.md).
+// sanitize: thread
+// expect-stdout: done
+use std::task;
+use std::thread;
+use std::time::Duration;
+
+async fn wait_for(job: Task<String>) {
+  println(await job);
+}
+
+async fn main() {
+  const job = task::spawn_blocking(() => {
+    thread::sleep(Duration::from_millis(300));
+    "never seen"
+  });
+  const _waiting = wait_for(job);
+
+  await task::sleep(Duration::from_millis(1));
+  println("done");
+}

@@ -653,6 +653,9 @@ void sag_task_suspended(sag_object *frame, void (*drop)(sag_object *));
 void sag_task_resumed(sag_object *frame);
 /* Releases what the executor of this thread holds, without running it. */
 void sag_task_shutdown(void);
+/* Runs `body` on a new thread and then, once that thread is joined, `done` on the executor of the
+ * calling thread (docs/adr/0073-spawn-blocking.md). Both are retained. Needs SAG_THREADS. */
+void sag_task_spawn_blocking(sag_fnval body, sag_fnval done);
 
 /* ---- Program lifecycle ----------------------------------------------------------------- */
 

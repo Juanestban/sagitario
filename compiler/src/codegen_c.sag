@@ -32,8 +32,16 @@ pub fn generate(program: Program) -> GeneratedC {
   const order = generator.aggregate_order(program);
   var threads = false;
 
-  for decl in program.externs {
+  for index in 0..program.externs.len() {
+    const decl = program.externs[index];
+
     if decl.runtime && (decl.symbol == "sag_thread_start" || decl.symbol.starts_with("sag_sync_")) {
+      threads = true;
+    }
+
+    // `std::task` declares it for every program using tasks; only one calling `spawn_blocking`
+    // needs threads (docs/adr/0073-spawn-blocking.md).
+    if decl.runtime && decl.symbol == "sag_task_spawn_blocking" && calls_extern(program, index as u32) {
       threads = true;
     }
   }
@@ -2237,4 +2245,35 @@ fn collect_counters(body: List<Stmt>, out: List<String>) {
       _ => {}
     }
   }
+}
+
+/// Whether a function of the program calls the C function `extern_id`.
+fn calls_extern(program: Program, extern_id: u32) -> bool {
+  for function in program.functions {
+    if !function.template && body_calls_extern(function.body, extern_id) {
+      return true;
+    }
+  }
+
+  false
+}
+
+fn body_calls_extern(body: List<Stmt>, extern_id: u32) -> bool {
+  for statement in body {
+    const found = match statement {
+      Stmt::Assign { value, .. } | Stmt::AssignPlace { value, .. } | Stmt::Eval(value) => match value {
+        Rvalue::Call { callee: Callee::Extern(id), .. } => id == extern_id,
+        _ => false,
+      },
+      Stmt::If { then_body, else_body, .. } => body_calls_extern(then_body, extern_id) || body_calls_extern(else_body, extern_id),
+      Stmt::Loop(inner) | Stmt::ForRange { body: inner, .. } | Stmt::ForArray { body: inner, .. } | Stmt::ForText { body: inner, .. } => body_calls_extern(inner, extern_id),
+      _ => false,
+    };
+
+    if found {
+      return true;
+    }
+  }
+
+  false
 }

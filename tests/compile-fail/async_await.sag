@@ -1,4 +1,5 @@
 // The rules of `async fn` and `await` (docs/spec/12-async.md).
+use std::task;
 use std::thread;
 
 async fn value() -> i32 {
@@ -37,3 +38,16 @@ async fn uses() {
 }
 
 fn main() {}
+
+fn blocking() -> i32 {
+  1
+}
+
+async fn spawns() {
+  const shared = new StringBuilder();
+  const _a = task::spawn_blocking(() => shared.len()); //~ ERROR E0332
+  const body = blocking;
+  const _b = task::spawn_blocking(body); //~ ERROR E0333
+  const _c = task::spawn_blocking; //~ ERROR E0333
+  const _d = task::spawn_blocking(blocking);
+}

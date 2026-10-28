@@ -1,0 +1,70 @@
+// `task::spawn_blocking` (docs/adr/0073-spawn-blocking.md): blocking work on threads while the
+// tasks of the main thread go on, results that are `String`s and lists, and several jobs at once.
+// sanitize: thread
+// expect-stdout: tick 0
+// expect-stdout: tick 1
+// expect-stdout: tick 2
+// expect-stdout: slow done
+// expect-stdout: sum 4950
+// expect-stdout: words a,b,c
+// expect-stdout: jobs 0 1 4 9 16 25
+// expect-stdout: done
+use std::task;
+use std::thread;
+use std::time::Duration;
+
+fn slow() -> String {
+  thread::sleep(Duration::from_millis(60));
+  "slow done"
+}
+
+async fn ticks() {
+  for i in 0..3 {
+    println(`tick ${i}`);
+    await task::sleep(Duration::from_millis(5));
+  }
+}
+
+async fn squares() -> String {
+  const jobs: List<Task<u64>> = new List();
+
+  for i in 0..6 {
+    const n = i as u64;
+
+    jobs.push(task::spawn_blocking(() => n * n));
+  }
+
+  var out = "jobs";
+
+  for job in jobs {
+    out = out + ` ${await job}`;
+  }
+
+  out
+}
+
+async fn main() {
+  const blocking = task::spawn_blocking(slow);
+
+  await ticks();
+  println(await blocking);
+
+  const limit = 100u64;
+  const sum = task::spawn_blocking(() => {
+    var total = 0u64;
+
+    for i in 0..limit {
+      total += i;
+    }
+
+    total
+  });
+
+  println(`sum ${await sum}`);
+
+  const words = await task::spawn_blocking(() => List::from(["a", "b", "c"]));
+
+  println(`words ${words.join(",")}`);
+  println(await squares());
+  println("done");
+}

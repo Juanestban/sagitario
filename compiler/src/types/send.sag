@@ -70,9 +70,29 @@ fn std_module(cx: Checker, name: String) -> Option<pkg::resolve::ModuleInfo> {
   None
 }
 
-/// Whether `id` starts a thread: `std::thread::spawn`, or `JoinHandle::spawn`, which it calls.
-/// Both are checked where code outside the standard library calls them.
-pub fn is_spawn(cx: Checker, id: u32) -> bool {
+/// If `id` starts a thread, how it is called for its errors: `std::thread::spawn` and
+/// `JoinHandle::spawn`, which it calls, are `thread::spawn`, and `std::task::spawn_blocking` is
+/// `task::spawn_blocking`. They are checked where code outside the standard library calls them.
+pub fn spawn_name(cx: Checker, id: u32) -> Option<String> {
+  if types::in_std(cx) {
+    return None;
+  }
+
+  if let Some(module) = std_module(cx, "task") {
+    if let Some(declared) = module.items.get("spawn_blocking") {
+      if let ItemRef::Fn(found) = declared.item {
+        if found == id {
+          return Some("task::spawn_blocking");
+        }
+      }
+    }
+  }
+
+  if is_thread_spawn(cx, id) { Some("thread::spawn") } else { None }
+}
+
+/// `std::thread::spawn`, or `JoinHandle::spawn`.
+fn is_thread_spawn(cx: Checker, id: u32) -> bool {
   const module = match std_module(cx, "thread") {
     Some(module) => module,
     None => return false,
@@ -111,12 +131,12 @@ pub fn is_spawn(cx: Checker, id: u32) -> bool {
     None => false,
   };
 
-  matches && !types::in_std(cx)
+  matches
 }
 
-/// The argument of `thread::spawn` is a lambda whose captures are all `Send`, or a function named
-/// by its path, which captures nothing.
-pub fn check_spawn_argument(cx: Checker, args: List<Expr>) {
+/// The argument of `thread::spawn` (or `task::spawn_blocking`, named `spawn`) is a lambda whose
+/// captures are all `Send`, or a function named by its path, which captures nothing.
+pub fn check_spawn_argument(cx: Checker, spawn: String, args: List<Expr>) {
   const arg = match args.first() {
     Some(arg) => arg,
     None => return,
@@ -156,15 +176,15 @@ pub fn check_spawn_argument(cx: Checker, args: List<Expr>) {
         return;
       }
 
-      spawn_argument_error(cx, arg);
+      spawn_argument_error(cx, spawn, arg);
     }
-    _ => spawn_argument_error(cx, arg),
+    _ => spawn_argument_error(cx, spawn, arg),
   }
 }
 
-fn spawn_argument_error(cx: Checker, arg: Expr) {
+fn spawn_argument_error(cx: Checker, spawn: String, arg: Expr) {
   cx.diagnostics.push(
-    Diagnostic::error(codes::INVALID_SPAWN, arg.span, "`thread::spawn` takes a lambda or the name of a function")
+    Diagnostic::error(codes::INVALID_SPAWN, arg.span, "`" + spawn + "` takes a lambda or the name of a function")
       .with_note("the compiler checks that what the thread captures is `Send`, which it cannot do for other function values"),
   );
 }

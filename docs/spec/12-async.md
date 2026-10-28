@@ -65,7 +65,8 @@ async fn main() {
   `sleep` for equal deadlines. A program that only uses tasks and `sleep` gives the same output on
   every run.
 - `task::block_on(t)` runs the executor of the thread until `t` finishes, and returns its result.
-  Called from inside a task, it panics.
+  Called from inside a task, it panics, and so it does when no task, timer or `spawn_blocking`
+  job can make `t` finish.
 - `async fn main()` and `async fn main() -> Result<(), E>` (see [errors](07-errors.md)) run their
   body with `block_on`.
 - Synchronous code that calls an `async fn` without `block_on` only runs it up to its first
@@ -80,5 +81,15 @@ async fn main() {
 |---|---|
 | `sleep(duration: Duration) -> Task<()>` | Finishes after at least `duration`; a zero duration lets the ready tasks run first |
 | `block_on(task: Task<T>) -> T` | Runs the executor until `task` finishes, and returns its result |
+| `spawn_blocking(body: fn() -> T) -> Task<T>` | Runs `body` on a new thread; the task finishes with what it returns |
 
-Not yet (F8 increment 2): `spawn_blocking`, which runs a function on a thread as a task.
+- `spawn_blocking` is for work that would stop the other tasks of the thread: reading a large
+  file, a long computation. Its argument follows the rules of `thread::spawn`
+  ([standard library](11-standard-library.md#stdthread)): a lambda capturing only `Send` values,
+  or the name of a function; what `body` returns needs not be `Send`. `spawn_blocking` cannot be
+  used as a value.
+- While a `spawn_blocking` job runs and no task is ready, the executor waits for it (and for the
+  next timer). `block_on` panics only when nothing is ready, no timer is pending and no job is
+  running.
+- When the program ends, it does not wait for jobs still running, as for threads nobody joins.
+  A panic in `body` ends the program.

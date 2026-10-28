@@ -1133,8 +1133,8 @@ fn call(cx: Checker, value: Expr, callee: Expr, args: List<Expr>, expected: Opti
     Some(Res::Fn(id)) => {
       const ty = generic::fn_call(cx, value, path, id, args, expected);
 
-      if send::is_spawn(cx, id) {
-        send::check_spawn_argument(cx, args);
+      if let Some(spawn) = send::spawn_name(cx, id) {
+        send::check_spawn_argument(cx, spawn, args);
       }
 
       return ty;

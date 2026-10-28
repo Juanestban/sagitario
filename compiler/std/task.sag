@@ -8,6 +8,16 @@ extern "C" {
   fn sag_task_timer(nanos: u64, resume: fn());
   fn sag_task_step() -> bool;
   fn sag_task_inside() -> bool;
+  fn sag_task_spawn_blocking(body: fn(), done: fn());
+}
+
+/// Where the thread of `spawn_blocking` leaves what its function returned, for its task.
+class Slot<T> {
+  pub var value: Option<T>;
+
+  pub fn new(self) {
+    self.value = None;
+  }
 }
 
 /// A task that finishes after at least `duration`. Even a zero duration lets the tasks already
@@ -16,6 +26,25 @@ pub fn sleep(duration: Duration) -> Task<()> {
   const task = new Task<()>();
 
   unsafe { sag_task_timer(duration.as_nanos(), () => task.complete(())) };
+  task
+}
+
+/// A task that runs `body` on a new thread, and finishes with what it returns: for work that
+/// would stop the other tasks of this thread. `body` is a lambda capturing only `Send` values, or
+/// the name of a function, as for `thread::spawn` (docs/adr/0073-spawn-blocking.md).
+pub fn spawn_blocking<T>(body: fn() -> T) -> Task<T> {
+  const task = new Task<T>();
+  const slot = new Slot<T>();
+
+  // The runtime joins the thread before running the second function, which so sees the value.
+  unsafe {
+    sag_task_spawn_blocking(() => { slot.value = Some(body()); }, () => {
+      match slot.value {
+        Some(value) => task.complete(value),
+        None => panic("the thread of `task::spawn_blocking` returned nothing"),
+      }
+    })
+  };
   task
 }
 
@@ -28,7 +57,7 @@ pub fn block_on<T>(task: Task<T>) -> T {
 
   while !task.is_done() {
     if !unsafe { sag_task_step() } {
-      panic("`task::block_on` waits for a task that no other task or timer can finish");
+      panic("`task::block_on` waits for a task that no other task, timer or `spawn_blocking` can finish");
     }
   }
 

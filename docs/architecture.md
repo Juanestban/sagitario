@@ -253,7 +253,9 @@ compiled with every program:
 - the executor of tasks of each thread (`sag_task_*`, [ADR-0072](adr/0072-async-await-increments.md)):
   the functions ready to resume tasks, first in first out, the timers of `task::sleep`, by
   deadline, and the frames suspended, which `sag_rt_finish` (and the end of a thread) releases
-  without running them.
+  without running them; and, with threads, the inbox where the jobs of `task::spawn_blocking` arrive
+  when their thread ends, guarded by a lock and a condition variable on which the executor waits,
+  until its next timer at most ([ADR-0073](adr/0073-spawn-blocking.md)).
 
 Anything expressible in Sagitario belongs in `compiler/std/` instead.
 

@@ -351,5 +351,5 @@ They follow the rules of every module, with three exceptions that only the stand
 module's private items, only its submodules see them.
 
 `std::process::exit` is provided by the compiler, since no function written in Sagitario can
-declare that it never returns. The compiler also checks the arguments of `thread::spawn` and
-`JoinHandle::spawn` where code outside the standard library calls them.
+declare that it never returns. The compiler also checks the arguments of `thread::spawn`,
+`JoinHandle::spawn` and `task::spawn_blocking` where code outside the standard library calls them.

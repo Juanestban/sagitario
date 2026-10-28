@@ -240,7 +240,7 @@ signed in F7.
 - **F8 `async`/`await`:** stackless tasks (`Task<T>`) on a single-threaded executor per thread,
   as designed in [ADR-0048](adr/0048-async-await.md) and planned in
   [ADR-0072](adr/0072-async-await-increments.md). In progress, in four increments, of which 1
-  is done:
+  and 2 ([ADR-0073](adr/0073-spawn-blocking.md)) are done:
   1. Tasks: `async fn` at module level, `await`, `Task<T>`, the state machine, the executor with
      timers, `task::sleep`, `task::block_on` and `async fn main`.
   2. `task::spawn_blocking`, and waking the executor from another thread.
