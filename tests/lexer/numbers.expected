@@ -1,0 +1,137 @@
+exit: 1
+--- stdout
+91..96 keyword const
+97..98 ident A
+98..99 punct :
+100..102 ident u8
+103..104 punct =
+105..110 int 255 u8
+110..111 punct ;
+112..114 keyword fn
+115..116 ident f
+116..117 punct (
+117..118 punct )
+119..120 punct {
+123..127 int 255
+128..133 int 255
+134..145 int 255
+146..155 int 1000000
+156..161 int 10 i64
+162..166 float 3.14
+167..171 float 1e10
+172..178 float 2.5e-3
+179..185 float 1.5 f32
+186..190 float 7 f64
+191..195 float 1e+5
+196..201 int 0
+202..206 int 12
+209..248 int 340282366920938463463374607431768211455
+249..288 int 0
+291..325 int 340282366920938463463374607431768211455
+326..361 int 0
+364..366 int 0
+367..369 int 0
+370..375 int 0
+376..379 int 0
+380..385 int 0
+386..391 int 0
+392..398 int 0
+399..405 int 44850
+406..407 int 1
+407..408 punct .
+408..410 ident e5
+411..412 int 5
+412..413 punct .
+413..416 ident len
+417..418 int 0
+418..420 punct ..
+420..422 int 10
+423..424 int 1
+424..427 punct ..=
+427..428 int 2
+429..431 int 0
+432..434 int 0
+434..435 punct +
+436..444 int 0
+445..446 punct }
+447..447 eof
+--- stderr
+error[E0005]: `_` must appear between digits
+ --> tests/lexer/numbers.sag:4:78
+  |
+4 |   0xFF 0o377 0b1111_1111 1_000_000 10i64 3.14 1e10 2.5e-3 1.5f32 7f64 1E+5 0x_1F 1__2
+  |                                                                              ^^^
+
+error[E0005]: integer literal is too large
+ --> tests/lexer/numbers.sag:5:43
+  |
+5 |   340282366920938463463374607431768211455 340282366920938463463374607431768211456
+  |                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0005]: integer literal is too large
+ --> tests/lexer/numbers.sag:6:38
+  |
+6 |   0xffffffffffffffffffffffffffffffff 0x1ffffffffffffffffffffffffffffffff
+  |                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0005]: `_` must appear between digits
+ --> tests/lexer/numbers.sag:7:3
+  |
+7 |   1_ 0x 0b102 0o9 12abc 1.5u8 0b1f32 0xAf32 1.e5 5.len 0..10 1..=2 7e 7e+ 1_000_.5
+  |   ^^
+
+error[E0005]: expected digits
+ --> tests/lexer/numbers.sag:7:8
+  |
+7 |   1_ 0x 0b102 0o9 12abc 1.5u8 0b1f32 0xAf32 1.e5 5.len 0..10 1..=2 7e 7e+ 1_000_.5
+  |        ^
+
+error[E0005]: invalid digit `2` in a base 2 literal
+ --> tests/lexer/numbers.sag:7:11
+  |
+7 |   1_ 0x 0b102 0o9 12abc 1.5u8 0b1f32 0xAf32 1.e5 5.len 0..10 1..=2 7e 7e+ 1_000_.5
+  |           ^^^
+
+error[E0005]: invalid digit `9` in a base 8 literal
+ --> tests/lexer/numbers.sag:7:17
+  |
+7 |   1_ 0x 0b102 0o9 12abc 1.5u8 0b1f32 0xAf32 1.e5 5.len 0..10 1..=2 7e 7e+ 1_000_.5
+  |                 ^
+
+error[E0005]: invalid suffix `abc` for a numeric literal
+ --> tests/lexer/numbers.sag:7:19
+  |
+7 |   1_ 0x 0b102 0o9 12abc 1.5u8 0b1f32 0xAf32 1.e5 5.len 0..10 1..=2 7e 7e+ 1_000_.5
+  |                   ^^^^^
+
+error[E0005]: invalid suffix `u8` for a numeric literal
+ --> tests/lexer/numbers.sag:7:25
+  |
+7 |   1_ 0x 0b102 0o9 12abc 1.5u8 0b1f32 0xAf32 1.e5 5.len 0..10 1..=2 7e 7e+ 1_000_.5
+  |                         ^^^^^
+
+error[E0005]: a base 2 literal cannot have the float suffix `f32`
+ --> tests/lexer/numbers.sag:7:31
+  |
+7 |   1_ 0x 0b102 0o9 12abc 1.5u8 0b1f32 0xAf32 1.e5 5.len 0..10 1..=2 7e 7e+ 1_000_.5
+  |                               ^^^^^^
+
+error[E0005]: invalid suffix `e` for a numeric literal
+ --> tests/lexer/numbers.sag:7:68
+  |
+7 |   1_ 0x 0b102 0o9 12abc 1.5u8 0b1f32 0xAf32 1.e5 5.len 0..10 1..=2 7e 7e+ 1_000_.5
+  |                                                                    ^^
+
+error[E0005]: invalid suffix `e` for a numeric literal
+ --> tests/lexer/numbers.sag:7:71
+  |
+7 |   1_ 0x 0b102 0o9 12abc 1.5u8 0b1f32 0xAf32 1.e5 5.len 0..10 1..=2 7e 7e+ 1_000_.5
+  |                                                                       ^^
+
+error[E0005]: `_` must appear between digits
+ --> tests/lexer/numbers.sag:7:75
+  |
+7 |   1_ 0x 0b102 0o9 12abc 1.5u8 0b1f32 0xAf32 1.e5 5.len 0..10 1..=2 7e 7e+ 1_000_.5
+  |                                                                           ^^^^^^
+
+error: could not compile `tests/lexer/numbers.sag` due to 13 previous errors

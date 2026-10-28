@@ -1,0 +1,490 @@
+//! The `.sag` suites under `tests/`: `run-pass`, `compile-fail` and `run-panic`. A case is a
+//! `.sag` file, or a directory holding a program of several files whose entry is `main.sag`. The
+//! annotations are documented in `docs/testing.md`.
+
+use pkg::support;
+use pkg::support::{Context, Test, after, expect, words};
+use std::fs;
+use std::path;
+
+pub fn tests() -> List<Test> {
+  List::from([
+    support::test("suites", run_suites),
+    support::test("every_diagnostic_code_has_a_compile_fail_test", every_code_is_covered),
+    support::test("parses_all_annotation_kinds", parses_all_annotation_kinds),
+    support::test("rejects_malformed_annotations", rejects_malformed_annotations),
+    support::test("parses_short_diagnostics_including_windows_paths", parses_short_diagnostics),
+  ])
+}
+
+/// The suites, each a directory of `tests/`.
+fn suites() -> List<String> {
+  List::from(["run-pass", "compile-fail", "run-panic"])
+}
+
+/// What a case expects, from the annotations of its files.
+class Expectations {
+  pub var stdout: List<String>;
+  pub var exit: Option<i32>;
+  pub var panic: Option<String>;
+  /// Extra options of `sag`, such as `--release`.
+  pub var flags: List<String>;
+  /// The program's command-line arguments.
+  pub var args: List<String>;
+  /// Lines written to the program's stdin, each followed by a newline.
+  pub var stdin: List<String>;
+  /// Environment variables set for the program, as `NAME=value`.
+  pub var env: List<String>;
+  /// `// sanitize: thread`: ThreadSanitizer, where the C compiler has it.
+  pub var thread_sanitizer: bool;
+  /// The `//~ ERROR Ennnn` and `//~ WARN Wnnnn` annotations, as `file:line: code`.
+  pub var diagnostics: List<String>;
+
+  pub fn new(self) {
+    self.stdout = new List();
+    self.exit = None;
+    self.panic = None;
+    self.flags = new List();
+    self.args = new List();
+    self.stdin = new List();
+    self.env = new List();
+    self.thread_sanitizer = false;
+    self.diagnostics = new List();
+  }
+}
+
+/// A diagnostic as the suites compare them: `file:line: code`, the file relative to the case's
+/// directory with `/` separators.
+fn diagnostic(file: String, line: usize, code: String) -> String {
+  `${file}:${line}: ${code}`
+}
+
+/// `rest` without the space after the colon of its annotation.
+fn one_space(rest: String) -> String {
+  after(rest, " ").unwrap_or(rest)
+}
+
+/// The expectations written in `source`; the diagnostics are given the file `file`.
+fn parse_expectations(source: String, file: String) -> Result<Expectations, String> {
+  const expectations = new Expectations();
+  const lines = source.lines();
+
+  for index in 0..lines.len() {
+    const line = lines[index];
+    const number = index + 1;
+    const trimmed = line.trim_start();
+
+    if let Some(rest) = after(trimmed, "// expect-stdout:") {
+      expectations.stdout.push(one_space(rest));
+    } else if let Some(rest) = after(trimmed, "// expect-exit:") {
+      const value = rest.trim();
+
+      match value.parse_i32() {
+        Ok(code) => {
+          expectations.exit = Some(code);
+        }
+        Err(_) => return Err(`line ${number}: invalid \`expect-exit\` value \`${value}\``),
+      }
+    } else if let Some(rest) = after(trimmed, "// expect-panic:") {
+      expectations.panic = Some(rest.trim());
+    } else if let Some(rest) = after(trimmed, "// sag-flags:") {
+      for word in words(rest) {
+        expectations.flags.push(word);
+      }
+    } else if let Some(rest) = after(trimmed, "// args:") {
+      for word in words(rest) {
+        expectations.args.push(word);
+      }
+    } else if let Some(rest) = after(trimmed, "// stdin:") {
+      expectations.stdin.push(one_space(rest));
+    } else if let Some(rest) = after(trimmed, "// sanitize:") {
+      if rest.trim() != "thread" {
+        return Err(`line ${number}: \`sanitize\` takes \`thread\``);
+      }
+
+      expectations.thread_sanitizer = true;
+    } else if let Some(rest) = after(trimmed, "// env:") {
+      const entry = rest.trim();
+
+      if entry.find("=").is_none() {
+        return Err(`line ${number}: \`env\` needs \`NAME=value\``);
+      }
+
+      expectations.env.push(entry);
+    }
+
+    if let Some(start) = line.find("//~") {
+      for code in parse_annotation(line.substring(start + 3, line.len()), number)? {
+        expectations.diagnostics.push(diagnostic(file, number, code));
+      }
+    }
+  }
+
+  Ok(expectations)
+}
+
+/// The codes of `ERROR E0300` / `WARN W0001` pairs, optionally separated by commas:
+/// `//~ ERROR E0311, WARN W0001`.
+fn parse_annotation(annotation: String, line: usize) -> Result<List<String>, String> {
+  const malformed = `line ${line}: malformed annotation \`//~${annotation}\`; expected \`//~ ERROR Ennnn\` or \`//~ WARN Wnnnn\``;
+  const parts = words(annotation.replace(",", " "));
+
+  if parts.is_empty() || parts.len() % 2 != 0 {
+    return Err(malformed);
+  }
+
+  const codes: List<String> = new List();
+  var index: usize = 0;
+
+  while index < parts.len() {
+    const kind = parts[index];
+    const code = parts[index + 1];
+    const valid = (kind == "ERROR" && is_diagnostic_code(code, "E")) || (kind == "WARN" && is_diagnostic_code(code, "W"));
+
+    if !valid {
+      return Err(malformed);
+    }
+
+    codes.push(code);
+    index += 2;
+  }
+
+  Ok(codes)
+}
+
+fn is_diagnostic_code(code: String, prefix: String) -> bool {
+  if code.len() != 5 || !code.starts_with(prefix) {
+    return false;
+  }
+
+  for c in code.substring(1, 5).chars() {
+    if !c.is_ascii_digit() {
+      return false;
+    }
+  }
+
+  true
+}
+
+/// The errors and warnings of `--diagnostic-format short` output:
+/// `path:line:column: error[E0001]: message`. The path is split from the right because Windows
+/// paths contain `:`; it is made relative to `dir`.
+fn parse_reported(stderr: String, dir: String) -> List<String> {
+  const prefix = `${support::slashes(dir)}/`;
+  const found: List<String> = new List();
+
+  for line in stderr.lines() {
+    var start = line.find(": error[");
+
+    if start.is_none() {
+      start = line.find(": warning[");
+    }
+
+    const at = match start {
+      Some(at) => at,
+      None => continue,
+    };
+    const rest = line.substring(at, line.len());
+    const open = rest.find("[").unwrap_or(0);
+    const close = match rest.find("]") {
+      Some(close) => close,
+      None => continue,
+    };
+    const code = rest.substring(open + 1, close);
+    const location = line.substring(0, at);
+    const column_colon = match support::last_index(location, ":") {
+      Some(index) => index,
+      None => continue,
+    };
+    const before = location.substring(0, column_colon);
+    const line_colon = match support::last_index(before, ":") {
+      Some(index) => index,
+      None => continue,
+    };
+    const number = match before.substring(line_colon + 1, before.len()).parse_usize() {
+      Ok(number) => number,
+      Err(_) => continue,
+    };
+    const file = support::slashes(before.substring(0, line_colon));
+
+    found.push(diagnostic(after(file, prefix).unwrap_or(file), number, code));
+  }
+
+  found
+}
+
+/// A case: the file given to `sag`, the directory diagnostics are relative to, and the source
+/// files whose annotations count.
+struct Case {
+  pub entry: String;
+  pub dir: String;
+  pub files: List<String>;
+}
+
+fn discover(cx: Context, suite: String) -> Result<List<Case>, String> {
+  const dir = cx.file(`tests/${suite}`);
+  const cases: List<Case> = new List();
+
+  for name in support::entries(dir)? {
+    const entry = path::join(dir, name);
+
+    if name.ends_with(".sag") && fs::is_file(entry) {
+      cases.push(Case { entry: entry, dir: dir, files: List::from([entry]) });
+    } else if fs::is_file(path::join(entry, "main.sag")) {
+      const files: List<String> = new List();
+
+      sources_in(entry, files)?;
+      cases.push(Case { entry: path::join(entry, "main.sag"), dir: entry, files: files });
+    }
+  }
+
+  Ok(cases)
+}
+
+/// Every `.sag` file under `dir`.
+fn sources_in(dir: String, files: List<String>) -> Result<(), String> {
+  for name in support::entries(dir)? {
+    const entry = path::join(dir, name);
+
+    if fs::is_dir(entry) {
+      sources_in(entry, files)?;
+    } else if name.ends_with(".sag") {
+      files.push(entry);
+    }
+  }
+
+  Ok(())
+}
+
+/// The expectations of a case: those of its entry file, plus the diagnostics annotated in every
+/// file of a program of several files.
+fn case_expectations(case: Case) -> Result<Expectations, String> {
+  const expectations = new Expectations();
+  const prefix = `${support::slashes(case.dir)}/`;
+
+  for file in case.files {
+    const source = support::read_file(file)?;
+    const relative = after(support::slashes(file), prefix).unwrap_or(file);
+    const parsed = match parse_expectations(source, relative) {
+      Ok(parsed) => parsed,
+      Err(error) => return Err(`${file}: ${error}`),
+    };
+
+    for found in parsed.diagnostics {
+      expectations.diagnostics.push(found);
+    }
+
+    if file == case.entry {
+      expectations.stdout = parsed.stdout;
+      expectations.exit = parsed.exit;
+      expectations.panic = parsed.panic;
+      expectations.flags = parsed.flags;
+      expectations.args = parsed.args;
+      expectations.stdin = parsed.stdin;
+      expectations.env = parsed.env;
+      expectations.thread_sanitizer = parsed.thread_sanitizer;
+    }
+  }
+
+  Ok(expectations)
+}
+
+/// `sag run <flags> <file> -- <args>` with the case's stdin and environment, in an empty working
+/// directory, and with sanitizers unless `SAG_TEST_SANITIZE=0` (docs/testing.md#memory-checks).
+fn run_program(cx: Context, expectations: Expectations, file: String) -> Result<support::Ran, String> {
+  const dir = cx.temp_dir("case")?;
+  const args = List::from(["run"]);
+
+  if cx.sanitize {
+    args.push(if expectations.thread_sanitizer { "--sanitize=thread" } else { "--sanitize" });
+  }
+
+  for flag in expectations.flags {
+    args.push(flag);
+  }
+
+  args.push(file);
+  args.push("--");
+
+  for arg in expectations.args {
+    args.push(arg);
+  }
+
+  // Programs fail with exit code 102 if ARC objects leak (docs/testing.md#memory-checks).
+  const command = cx.sag_command(args).env("SAG_LEAK_CHECK", "1").current_dir(dir);
+
+  for entry in expectations.env {
+    const split = entry.find("=").unwrap_or(0);
+
+    command.env(entry.substring(0, split), entry.substring(split + 1, entry.len()));
+  }
+
+  var input = "";
+
+  for line in expectations.stdin {
+    input = input + line + "\n";
+  }
+
+  const ran = support::run(command.input(input));
+
+  // Best effort: a leftover directory is removed with the others at the end.
+  support::remove_tree(dir).unwrap_or(());
+  ran
+}
+
+fn run_case(cx: Context, suite: String, case: Case) -> Result<(), String> {
+  const expectations = case_expectations(case)?;
+  const file = case.entry;
+
+  if suite == "run-pass" {
+    if !expectations.diagnostics.is_empty() || expectations.panic.is_some() {
+      return Err("run-pass tests cannot use `//~` annotations or `expect-panic`");
+    }
+
+    const ran = run_program(cx, expectations, file)?;
+
+    support::expect_exit("the program", ran, expectations.exit.unwrap_or(0))?;
+
+    if !expectations.stdout.is_empty() {
+      const actual = ran.stdout.lines();
+
+      if actual.join("\n") != expectations.stdout.join("\n") || actual.len() != expectations.stdout.len() {
+        return Err(`stdout mismatch\nexpected:\n${expectations.stdout.join("\n")}\nactual:\n${actual.join("\n")}`);
+      }
+    }
+
+    return Ok(());
+  }
+
+  if suite == "run-panic" {
+    const message = match expectations.panic {
+      Some(message) => message,
+      None => return Err("run-panic tests need an `expect-panic` annotation"),
+    };
+    const ran = run_program(cx, expectations, file)?;
+
+    support::expect_exit("the program", ran, 101)?;
+
+    return support::expect_contains("the panic message", ran.stderr, message);
+  }
+
+  if expectations.diagnostics.is_empty() {
+    return Err("compile-fail tests need at least one `//~ ERROR` or `//~ WARN` annotation");
+  }
+
+  const ran = support::run(cx.sag_command(List::from(["check", "--diagnostic-format", "short", file])).env("SAG_LEAK_CHECK", "1"))?;
+  // A file with only warnings compiles.
+  const has_errors = expectations.diagnostics.iter().any((found) => found.contains(": E"));
+
+  support::expect_exit("`sag check`", ran, if has_errors { 1 } else { 0 })?;
+
+  // Every reported error and warning must be annotated, and the other way around.
+  const expected = expectations.diagnostics;
+  const reported = parse_reported(ran.stderr, case.dir);
+
+  expected.sort();
+  reported.sort();
+
+  expect(expected.join("\n") == reported.join("\n"), `diagnostics mismatch\nexpected:\n${expected.join("\n")}\nreported:\n${reported.join("\n")}`)
+}
+
+fn run_suites(cx: Context) -> Result<(), String> {
+  var total: usize = 0;
+  const failures: List<String> = new List();
+
+  for suite in suites() {
+    match discover(cx, suite) {
+      Ok(cases) => {
+        for case in cases {
+          total += 1;
+
+          if let Err(error) = run_case(cx, suite, case) {
+            failures.push(`${case.entry}: ${error}`);
+          }
+        }
+      }
+      Err(error) => failures.push(error),
+    }
+  }
+
+  println(`ran ${total} .sag test(s)`);
+  expect(failures.is_empty(), `${failures.len()} of ${total} .sag test(s) failed:\n\n${failures.join("\n\n")}`)
+}
+
+/// The codes of a registry of codes: the `"E0001"` strings of its constants.
+pub fn registered_codes(source: String) -> List<String> {
+  const codes: List<String> = new List();
+
+  for line in source.lines() {
+    if !line.starts_with("pub const ") {
+      continue;
+    }
+
+    if let Some(start) = line.find("= \"") {
+      const rest = line.substring(start + 3, line.len());
+
+      if let Some(end) = rest.find("\"") {
+        codes.push(rest.substring(0, end));
+      }
+    }
+  }
+
+  codes
+}
+
+/// The Definition of Done asks for a `compile-fail` test per rule; this keeps every registered
+/// diagnostic code covered.
+fn every_code_is_covered(cx: Context) -> Result<(), String> {
+  const covered: List<String> = new List();
+
+  for case in discover(cx, "compile-fail")? {
+    for found in case_expectations(case)?.diagnostics {
+      const space = support::last_index(found, " ").unwrap_or(0);
+
+      covered.push(found.substring(space + 1, found.len()));
+    }
+  }
+
+  const codes = registered_codes(support::read_file(cx.file("compiler/src/diagnostics/codes.sag"))?);
+  const missing: List<String> = new List();
+
+  for code in codes {
+    if !covered.contains(code) {
+      missing.push(code);
+    }
+  }
+
+  expect(codes.len() > 50, `the codes of \`compiler/src/diagnostics/codes.sag\` were not found`)?;
+  expect(missing.is_empty(), `diagnostic codes without a compile-fail test: ${missing.join(", ")}`)
+}
+
+fn parses_all_annotation_kinds(_cx: Context) -> Result<(), String> {
+  const source = "// expect-stdout: total = 6\n// expect-stdout:  indented\n// expect-exit: 3\n// expect-panic: index out of bounds\n// args: a b\n// stdin: first line\n// stdin:\n// env: NAME=a=b\nconst x: i32 = \"hello\";   //~ ERROR E0042\nvar y; //~ ERROR E0311, WARN W0001 WARN W0002\n";
+  const parsed = parse_expectations(source, "a.sag")?;
+
+  expect(parsed.stdout.join("|") == "total = 6| indented", `stdout: ${parsed.stdout.join("|")}`)?;
+  expect(parsed.exit.unwrap_or(0) == 3, "exit")?;
+  expect(parsed.panic.unwrap_or("") == "index out of bounds", "panic")?;
+  expect(parsed.args.join("|") == "a|b", "args")?;
+  expect(parsed.stdin.join("|") == "first line|" && parsed.stdin.len() == 2, "stdin")?;
+  expect(parsed.env.join("|") == "NAME=a=b", "env")?;
+  expect(
+    parsed.diagnostics.join("|") == "a.sag:9: E0042|a.sag:10: E0311|a.sag:10: W0001|a.sag:10: W0002",
+    `diagnostics: ${parsed.diagnostics.join("|")}`,
+  )
+}
+
+fn rejects_malformed_annotations(_cx: Context) -> Result<(), String> {
+  for source in ["x; //~ ERROR 42", "x; //~ WARN E0042", "x; //~ ERROR W0001", "x; //~ ERROR", "// expect-exit: zero", "// env: NAME"] {
+    expect(parse_expectations(source, "a.sag").is_err(), `accepted: ${source}`)?;
+  }
+
+  Ok(())
+}
+
+fn parses_short_diagnostics(_cx: Context) -> Result<(), String> {
+  const stderr = "C:\\work\\main.sag:12:5: error[E0042]: mismatched types\ntests/a.sag:3:1: error[E0001]: unexpected token\ntests/a.sag:4:7: warning[W0001]: unused binding `x`\nwarning: something unrelated\n";
+  const found = parse_reported(stderr, "tests");
+
+  expect(found.join("|") == "C:/work/main.sag:12: E0042|a.sag:3: E0001|a.sag:4: W0001", `reported: ${found.join("|")}`)
+}

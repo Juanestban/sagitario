@@ -1997,7 +1997,28 @@ class Parser {
     }
   }
 
+  /// Deeply nested code recurses through this function: the forms that nest most go first, to
+  /// functions of their own, and the others to `other_primary_expr`, whose frame is large without
+  /// optimizations.
   prv fn primary_expr(self) -> Result<Expr, ()> {
+    if self.at("{") {
+      const block = self.block()?;
+
+      return Ok(self.expr_node(ExprKind::Block(block), block.span));
+    }
+
+    if self.at_keyword("if") {
+      return self.if_expr();
+    }
+
+    if self.at_keyword("match") {
+      return self.match_expr();
+    }
+
+    self.other_primary_expr()
+  }
+
+  prv fn other_primary_expr(self) -> Result<Expr, ()> {
     const span = self.span();
     const kind = self.kind();
 
@@ -2108,16 +2129,6 @@ class Parser {
       return Ok(inner);
     }
 
-    if self.at("{") {
-      const block = self.block()?;
-
-      return Ok(self.expr_node(ExprKind::Block(block), block.span));
-    }
-
-    if self.at_keyword("if") {
-      return self.if_expr();
-    }
-
     if self.at_keyword("while") {
       self.advance();
 
@@ -2217,10 +2228,6 @@ class Parser {
       self.advance();
 
       return Ok(self.expr_node(ExprKind::Zod, span));
-    }
-
-    if self.at_keyword("match") {
-      return self.match_expr();
     }
 
     Err(self.unexpected("an expression"))

@@ -1,3 +1,24 @@
 # Text files that tests embed byte for byte with `include_str`: their content and length must not
 # depend on `core.autocrlf` (Windows checkouts would otherwise turn their line endings into CRLF).
 tests/**/*.txt text eol=lf
+# The sessions of the language server and their documents: positions in them count lines and
+# columns, which must not depend on `core.autocrlf` either.
+tests/lsp/* text eol=lf
+# The corpus of each pass and the dumps expected from it (docs/adr/0066-test-harness-in-sagitario.md):
+# the dumps hold byte offsets, which must be the same on every system. `crlf.sag` keeps `\r\n` line
+# endings everywhere, for the lexer.
+tests/lexer/** text eol=lf
+tests/parser/** text eol=lf
+tests/resolve/** text eol=lf
+tests/types/** text eol=lf
+tests/codegen/** text eol=lf
+tests/lexer/crlf.sag text eol=crlf
+# What the compiler embeds with `include_str` (the runtime, the prelude and the standard library)
+# and the seed (docs/adr/0067-bootstrap-from-the-seed.md): the C the compiler generates must be the
+# same on every system. The seed is generated: no diffs, and not counted as source by GitHub.
+runtime/** text eol=lf
+compiler/std/** text eol=lf
+bootstrap/** text eol=lf
+bootstrap/sag.c -diff linguist-generated
+# The installers (docs/adr/0069-installers.md): `sh` does not take `\r\n`.
+install/** text eol=lf

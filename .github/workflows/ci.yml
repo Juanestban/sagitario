@@ -5,83 +5,10 @@ on:
     branches: [main]
   pull_request:
 
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
-  test:
-    name: test (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-    env:
-      # The Ubuntu runners have the Android NDK: its cross-compilation tests must not be skipped
-      # there. The macOS runners have Xcode, which the iOS tests use (docs/nova.md#targets).
-      SAG_REQUIRE_NDK: ${{ matrix.os == 'ubuntu-latest' && '1' || '0' }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-      # The official LLVM clang, which builds with sanitizers (docs/adr/0018-windows-c-toolchain.md).
-      - name: Use LLVM clang on Windows
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: echo "SAG_CC=C:\Program Files\LLVM\bin\clang.exe" >> $env:GITHUB_ENV
-      # ThreadSanitizer cannot map its shadow memory with the address randomization of recent
-      # Ubuntu kernels (docs/adr/0045-threads-and-send.md).
-      - name: Allow ThreadSanitizer's memory layout
-        if: runner.os == 'Linux'
-        run: sudo sysctl vm.mmap_rnd_bits=28
-      - run: clang --version
-      - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
-
-  gcc:
-    name: test (ubuntu-latest, gcc)
-    runs-on: ubuntu-latest
-    env:
-      SAG_CC: gcc
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      # ThreadSanitizer cannot map its shadow memory with the address randomization of recent
-      # Ubuntu kernels (docs/adr/0045-threads-and-send.md).
-      - name: Allow ThreadSanitizer's memory layout
-        if: runner.os == 'Linux'
-        run: sudo sysctl vm.mmap_rnd_bits=28
-      - run: gcc --version
-      - run: cargo test --workspace
-
-  # MSVC's cl, supported best-effort and without sanitizers (docs/adr/0044-c-toolchains.md).
-  cl:
-    name: test (windows-latest, cl)
-    runs-on: windows-latest
-    env:
-      SAG_CC: cl
-      SAG_TEST_SANITIZE: '0'
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      # The environment of a Developer Command Prompt, for the following steps.
-      - name: Set up the MSVC environment
-        shell: pwsh
-        run: |
-          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
-          cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul && set" | ForEach-Object {
-            if ($_ -match '^([^=]+)=(.*)$') { "$($Matches[1])=$($Matches[2])" >> $env:GITHUB_ENV }
-          }
-      - run: cl
-      - run: cargo test --workspace
-
-  # The self-hosted compiler (docs/adr/0056-bootstrap-and-acceptance.md): `sagc` built by `sag`
-  # (stage 1) passes the suites, and builds a stage 2 that generates the same C for the compiler.
+  # The bootstrap from the seed with a C compiler alone (docs/adr/0067-bootstrap-from-the-seed.md):
+  # stages 1 and 2 generate the same C, stage 2 passes the harness, and the C it generates for the
+  # compiler is the same on every system.
   bootstrap:
     name: bootstrap (${{ matrix.name }})
     strategy:
@@ -104,6 +31,10 @@ jobs:
           - name: ubuntu, gcc
             os: ubuntu-latest
             cc: gcc
+          # C's `char` is unsigned on Linux for ARM (docs/spec/10-ffi.md).
+          - name: ubuntu on AArch64, clang
+            os: ubuntu-24.04-arm
+            cc: clang
           - name: macos, clang
             os: macos-latest
             cc: clang
@@ -112,10 +43,11 @@ jobs:
       SAG_CC: ${{ matrix.cc }}
       # MSVC has no UndefinedBehaviorSanitizer (docs/adr/0044-c-toolchains.md).
       SAG_TEST_SANITIZE: ${{ matrix.cc == 'cl' && '0' || '1' }}
+      # The Ubuntu runners have the Android NDK: its cross-compilation tests must not be skipped
+      # there.
+      SAG_REQUIRE_NDK: ${{ matrix.os == 'ubuntu-latest' && '1' || '0' }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
       # The environment of a Developer Command Prompt, for the following steps.
       - name: Set up the MSVC environment
         if: matrix.cc == 'cl'
@@ -138,22 +70,111 @@ jobs:
       - name: Show the C compiler
         if: runner.os != 'Windows'
         run: '"$SAG_CC" --version'
-      - run: cargo build -p sagitario_cli
-      - name: Build stage 1
-        run: ./target/debug/sag build compiler/src/main.sag
-      # Before the fixed point test, which writes to `compiler/src/` too.
-      - name: Run the suites with stage 1
-        env:
-          SAG_COMPILER: ${{ github.workspace }}/compiler/src/main${{ runner.os == 'Windows' && '.exe' || '' }}
-        run: cargo test -p sagitario_cli --test suites
-      - name: Reach the fixed point
-        run: cargo test -p sagitario_cli --test selfhost bootstrap_reaches_the_fixed_point
+      # In debug, so that an integer overflow in the compiler panics.
+      - name: Bootstrap from the seed
+        if: runner.os == 'Windows'
+        run: ./bootstrap/build.ps1 --debug
+      - name: Bootstrap from the seed
+        if: runner.os != 'Windows'
+        run: sh bootstrap/build.sh --debug
+      # The harness in Sagitario with stage 2 and its Nova: the suites, the expected dumps, the
+      # language server, the editor, the command line and Nova
+      # (docs/adr/0066-test-harness-in-sagitario.md).
+      - name: Run the harness with stage 2
+        run: ./build/bin/sag run tests/harness/main.sag -- --sag build/bin/sag${{ runner.os == 'Windows' && '.exe' || '' }} --nova build/bin/nova${{ runner.os == 'Windows' && '.exe' || '' }}
+      - name: Hash the C of the compiler
+        shell: bash
+        run: (sha256sum build/sag.c 2>/dev/null || shasum -a 256 build/sag.c) | cut -d ' ' -f 1 > build/sag.c.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: c-of-the-compiler-${{ strategy.job-index }}
+          path: build/sag.c.sha256
 
-  msrv:
-    name: minimum supported Rust version
+  # The C that stage 2 generates for the compiler is the same on every system and C compiler, so
+  # that one seed serves them all.
+  same-c:
+    name: same C on every system
+    needs: bootstrap
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: c-of-the-compiler-*
+      - name: Compare the hashes
+        run: |
+          cat c-of-the-compiler-*/sag.c.sha256
+          test "$(cat c-of-the-compiler-*/sag.c.sha256 | sort -u | wc -l)" -eq 1
+
+  # The installers (docs/adr/0069-installers.md) install the archive that `--dist` writes, as they
+  # install a release, and what they install builds and runs a new package.
+  installers:
+    name: installers (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            cc: C:\Program Files\LLVM\bin\clang.exe
+          - os: ubuntu-latest
+            cc: clang
+          - os: macos-latest
+            cc: clang
+    runs-on: ${{ matrix.os }}
+    env:
+      SAG_CC: ${{ matrix.cc }}
+    steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.90
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo check --workspace --all-targets
+      - name: Build the archive of a release
+        if: runner.os == 'Windows'
+        run: ./bootstrap/build.ps1 --dist
+      - name: Build the archive of a release
+        if: runner.os != 'Windows'
+        run: sh bootstrap/build.sh --dist
+      - name: Write the checksums
+        shell: bash
+        working-directory: build/dist
+        run: |
+          archive=$(find . -maxdepth 1 -type f -name 'sagitario-*' | sed 's|^\./||')
+          (sha256sum $archive 2>/dev/null || shasum -a 256 $archive) > SHA256SUMS
+          cat SHA256SUMS
+      # Windows PowerShell 5.1, the oldest the installer supports, running it as `iex` does.
+      - name: Install
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $from = 'file:///' + ((Resolve-Path build\dist).Path -replace '\\', '/')
+          & ([scriptblock]::Create((Get-Content -Raw install\install.ps1))) -From $from -Dir "$env:RUNNER_TEMP\sagitario" -NoModifyPath
+      - name: Install
+        if: runner.os != 'Windows'
+        run: sh install/install.sh --from "file://$PWD/build/dist" --dir "$RUNNER_TEMP/sagitario" --no-modify-path
+      - name: Build and run a package with what was installed
+        if: runner.os == 'Windows'
+        working-directory: ${{ runner.temp }}
+        run: |
+          & "$env:RUNNER_TEMP\sagitario\bin\nova.exe" new demo
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Set-Location demo
+          & "$env:RUNNER_TEMP\sagitario\bin\nova.exe" run
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      - name: Build and run a package with what was installed
+        if: runner.os != 'Windows'
+        working-directory: ${{ runner.temp }}
+        run: |
+          "$RUNNER_TEMP/sagitario/bin/nova" new demo
+          cd demo && "$RUNNER_TEMP/sagitario/bin/nova" run
+
+  # The VS Code extension packages (docs/adr/0057-editor-tooling-and-independence-from-rust.md).
+  vscode:
+    name: VS Code extension
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: editors/vscode
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm run package
+

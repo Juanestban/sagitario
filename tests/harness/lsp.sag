@@ -1,0 +1,182 @@
+//! The language server, `sag lsp` (docs/adr/0058-language-server.md): each
+//! `tests/lsp/<case>.session` sends its messages (one per line, `raw ` for a body sent as written)
+//! about `<case>.sag`, and `<case>.expected` holds what the server answers, one message per line,
+//! with `{uri}` for the document, `{dir}` for its directory and `{root}` for the repository.
+//! `SAG_BLESS=1` rewrites them.
+
+use pkg::support;
+use pkg::support::{Context, Test, after};
+use std::path;
+
+pub fn tests() -> List<Test> {
+  List::from([support::test("language_server_answers_the_sessions", answers_the_sessions)])
+}
+
+const HEX: String = "0123456789ABCDEF";
+
+/// `value` as two hexadecimal digits.
+fn hex_byte(value: u8) -> String {
+  const high = (value / 16) as usize;
+  const low = (value % 16) as usize;
+
+  HEX.substring(high, high + 1) + HEX.substring(low, low + 1)
+}
+
+/// Whether `byte` stays as it is in a URI: letters, digits and `/-._~`.
+fn plain_byte(byte: u8) -> bool {
+  (byte >= 48 && byte <= 57) || (byte >= 65 && byte <= 90) || (byte >= 97 && byte <= 122) || byte == 47 || byte == 45 || byte == 46 || byte == 95 || byte == 126
+}
+
+/// The URI of a file as the server writes them: `/` as the separator, a Windows drive in
+/// lowercase with its colon encoded, and every byte but letters, digits and `/-._~` encoded.
+fn file_uri(file: String) -> String {
+  var text = support::slashes(file);
+
+  if support::windows() && text.len() >= 2 && text.substring(1, 2) == ":" {
+    text = `/${text.substring(0, 1).to_ascii_lowercase()}${text.substring(1, text.len())}`;
+  }
+
+  const uri = new StringBuilder();
+
+  uri.append("file://");
+
+  for byte in text.bytes() {
+    if plain_byte(byte) {
+      uri.append_char(byte as char);
+    } else {
+      uri.append(`%${hex_byte(byte)}`);
+    }
+  }
+
+  uri.to_string()
+}
+
+/// A JSON string holding `text`.
+fn json_string(text: String) -> String {
+  const out = new StringBuilder();
+
+  out.append("\"");
+
+  for c in text.chars() {
+    if c == '"' {
+      out.append("\\\"");
+    } else if c == '\\' {
+      out.append("\\\\");
+    } else if c == '\n' {
+      out.append("\\n");
+    } else if c == '\r' {
+      out.append("\\r");
+    } else if c == '\t' {
+      out.append("\\t");
+    } else if (c as u32) < 32 {
+      out.append(`\\u00${hex_byte(c as u8).to_ascii_lowercase()}`);
+    } else {
+      out.append_char(c);
+    }
+  }
+
+  out.append("\"");
+  out.to_string()
+}
+
+/// A message of a session with its placeholders replaced: `{uri}` by the document's URI, `{root}`
+/// by the URI of the repository, and `{text:name}` by the text of `tests/lsp/name` as a JSON
+/// string.
+fn expand(line: String, uri: String, root: String, dir: String) -> Result<String, String> {
+  var out = line.replace("{uri}", uri).replace("{root}", root);
+
+  while let Some(start) = out.find("{text:") {
+    const rest = out.substring(start, out.len());
+    const end = match rest.find("}") {
+      Some(end) => start + end,
+      None => return Err(`unterminated placeholder in: ${line}`),
+    };
+    const name = out.substring(start + 6, end);
+    const text = support::unix_lines(support::read_file(path::join(dir, name))?);
+
+    out = out.substring(0, start) + json_string(text) + out.substring(end + 1, out.len());
+  }
+
+  Ok(out)
+}
+
+/// The bodies of the messages of the server's output.
+fn messages(output: String) -> List<String> {
+  const bodies: List<String> = new List();
+  var rest = output;
+
+  while let Some(split) = rest.find("\r\n\r\n") {
+    const header = rest.substring(0, split);
+    const colon = header.find(":").unwrap_or(header.len());
+    const length = header.substring(colon + 1, header.len()).trim().parse_usize().unwrap_or(0);
+    const start = split + 4;
+    const end = if start + length > rest.len() { rest.len() } else { start + length };
+
+    bodies.push(rest.substring(start, end));
+    rest = rest.substring(end, rest.len());
+  }
+
+  bodies
+}
+
+fn answers_the_sessions(cx: Context) -> Result<(), String> {
+  const dir = cx.file("tests/lsp");
+  const root = file_uri(cx.root);
+  const failures: List<String> = new List();
+  var count: usize = 0;
+
+  for entry in support::entries(dir)? {
+    if !entry.ends_with(".session") {
+      continue;
+    }
+
+    count += 1;
+
+    const name = entry.substring(0, entry.len() - 8);
+    const uri = file_uri(path::join(dir, `${name}.sag`));
+    const input = new StringBuilder();
+
+    for raw in support::read_file(path::join(dir, entry))?.lines() {
+      const line = raw.trim();
+
+      if line.is_empty() || line.starts_with("//") {
+        continue;
+      }
+
+      const body = match after(line, "raw ") {
+        Some(body) => body,
+        None => expand(line, uri, root, dir)?,
+      };
+
+      input.append(`Content-Length: ${body.len()}\r\n\r\n${body}`);
+    }
+
+    // The output is read as it is: the framing of messages uses `\r\n`.
+    const output = match cx.sag_command(List::from(["lsp"])).current_dir(cx.root).input(input.to_string()).output() {
+      Ok(output) => output,
+      Err(error) => return Err(error.message()),
+    };
+    const code = output.status.code.unwrap_or(-1);
+
+    if code != 0 {
+      failures.push(`\`sag lsp\` on ${name}: exit ${code}\n${output.stderr}`);
+      continue;
+    }
+
+    // Other files of the directory, such as the modules a session goes to.
+    const dir_uri = file_uri(dir) + "/";
+    const actual = new StringBuilder();
+
+    for body in messages(output.stdout) {
+      actual.append(body.replace(uri, "{uri}").replace(dir_uri, "{dir}/").replace(root, "{root}"));
+      actual.append("\n");
+    }
+
+    if let Err(error) = support::check_expected(cx, `tests/lsp/${name}.expected`, actual.to_string()) {
+      failures.push(error);
+    }
+  }
+
+  support::expect(count > 0, "no sessions in `tests/lsp`")?;
+  support::expect(failures.is_empty(), failures.join("\n\n"))
+}

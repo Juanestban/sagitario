@@ -1,0 +1,86 @@
+{
+  "name": "sagitario",
+  "displayName": "Sagitario",
+  "description": "Syntax highlighting, snippets, file icons and the language server (diagnostics, hover, go to definition, completion and symbols) for the Sagitario programming language.",
+  "version": "0.2.0",
+  "publisher": "sagitario",
+  "license": "(MIT OR Apache-2.0)",
+  "icon": "icons/sagitario.png",
+  "engines": {
+    "vscode": "^1.91.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Snippets"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onLanguage:sagitario"
+  ],
+  "keywords": [
+    "sagitario",
+    "sag"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Juanestban/sagitario"
+  },
+  "contributes": {
+    "languages": [
+      {
+        "id": "sagitario",
+        "aliases": [
+          "Sagitario",
+          "sagitario"
+        ],
+        "extensions": [
+          ".sag"
+        ],
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./icons/sag-file.svg",
+          "dark": "./icons/sag-file.svg"
+        }
+      }
+    ],
+    "grammars": [
+      {
+        "language": "sagitario",
+        "scopeName": "source.sagitario",
+        "path": "./syntaxes/sagitario.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "sagitario",
+        "path": "./snippets/sagitario.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "sagitario.restartServer",
+        "title": "Restart the language server",
+        "category": "Sagitario"
+      }
+    ],
+    "configuration": {
+      "title": "Sagitario",
+      "properties": {
+        "sagitario.server.path": {
+          "type": "string",
+          "default": "sag",
+          "markdownDescription": "The `sag` executable that runs the language server (`sag lsp`). Install it with `bootstrap/build.sh --install`, or `bootstrap/build.ps1 --install` on Windows."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "package": "vsce package --out sagitario.vsix"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^3.9.2"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^11.0.0"
+  }
+}

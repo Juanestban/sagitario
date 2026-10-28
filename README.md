@@ -7,15 +7,15 @@
 Sagitario is a compiled systems programming language that combines Rust-like safety
 (no null, `Result` errors, `match`) with TypeScript/Java/C#-style classes and JavaScript-style
 functional programming. It uses automatic reference counting, compiles to portable C11, and
-aims to run on every desktop and mobile platform and eventually compile itself.
+runs on desktop and mobile platforms, and compiles itself.
 
-> **Status:** the desktop MVP (phases F0–F2) works: modules, structs, enums and `match`,
-> classes with inheritance, interfaces, generics, closures, lists, maps and iterators, compiled
-> to C11 with ARC. The [reference zoo program](tests/run-pass/reference_zoo/main.sag) shows them
-> together. Phase F3 (platform) has started with the first modules of the
-> [standard library](docs/spec/11-standard-library.md): `std::env`, `std::io`, `std::fs`, `std::path`, `std::process` and `std::time`.
-> Packages, mobile targets, concurrency and self-hosting come later (see the
-> [roadmap](docs/roadmap.md)).
+> **Status:** phases F0–F6 are done: modules, structs, enums and `match`, classes with
+> inheritance, interfaces, generics, closures, lists, maps and iterators, compiled to C11 with ARC
+> (the [reference zoo program](tests/run-pass/reference_zoo/main.sag) shows them together); the
+> [standard library](docs/spec/11-standard-library.md), packages with Nova, C libraries and
+> Android and iOS targets; threads, channels, mutexes and atomics; and a compiler, a package manager and a
+> language server written in Sagitario. Distribution is in progress: releases and installers are
+> done (see the [roadmap](docs/roadmap.md)).
 
 ```sag
 abstract class Animal {
@@ -44,6 +44,51 @@ nova new hello && cd hello
 nova run
 ```
 
+## Install
+
+On Linux and macOS:
+
+```sh
+curl -fsSL https://github.com/Juanestban/sagitario/releases/latest/download/install.sh | sh
+```
+
+On Windows (PowerShell):
+
+```powershell
+irm https://github.com/Juanestban/sagitario/releases/latest/download/install.ps1 | iex
+```
+
+The installers download the latest [release](https://github.com/Juanestban/sagitario/releases),
+check its checksum, put `sag` and `nova` in `~/.sagitario/bin` and add it to `PATH`. `sag` compiles
+through a C compiler, which the installers look for and, if there is none, say how to install:
+clang or gcc, the Xcode command line tools on macOS, or LLVM and the Visual Studio Build Tools on
+Windows. Pass `--version X.Y.Z` to install another release (`sh -s -- --version X.Y.Z` after the
+pipe; on Windows, set `SAGITARIO_VERSION`), and `--help` for the other options.
+
+To uninstall, remove `~/.sagitario` and its line in `~/.profile` (and `~/.zshrc` on macOS), or on
+Windows its entry in the `PATH` of the user. An archive downloaded with a browser instead is
+marked by the system: clear it with `Unblock-File` on Windows or
+`xattr -d com.apple.quarantine` on macOS.
+
+## Building
+
+Sagitario builds from a seed of the C its compiler generates for itself, with a C compiler alone
+(clang, gcc, MinGW or MSVC `cl`):
+
+```sh
+sh bootstrap/build.sh --install      # Linux and macOS
+bootstrap/build.ps1 --install        # Windows (PowerShell)
+```
+
+This builds `sag` and `nova` in `build/bin/` and, with `--install`, copies them to
+`~/.sagitario/bin` and adds it to `PATH` (see [Contributing](CONTRIBUTING.md)).
+
+## Editor support
+
+The VS Code extension in [`editors/vscode/`](editors/vscode/README.md) highlights `.sag` files,
+gives them an icon and adds snippets, and starts `sag lsp` for diagnostics, hover, go to
+definition and completion.
+
 ## Documentation
 
 - [Language specification](docs/spec/README.md)
@@ -51,6 +96,7 @@ nova run
 - [Design decisions (ADRs)](docs/adr/README.md)
 - [Compiler architecture](docs/architecture.md)
 - [Roadmap](docs/roadmap.md)
+- [Roadmap v2: a game engine](docs/roadmap-v2.md)
 - [Contributing](CONTRIBUTING.md)
 
 ## License

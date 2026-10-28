@@ -1,0 +1,926 @@
+//! What is under the cursor: the innermost expression, type or binding at an offset of a module,
+//! its type for hover, and where it is declared (docs/adr/0058-language-server.md).
+
+use pkg::ast::{Block, Expr, ExprKind, FnDecl, Ident, Item, Module, Package, Path, Pattern, PatternKind, Stmt, TemplatePart, TypeExpr, TypeExprKind, UseTree, UseTreeKind};
+use pkg::lsp::analysis::Analysis;
+use pkg::resolve::{EnumKind, ItemRef, Res, Resolution, TypeItem, TypeRes};
+use pkg::span::Span;
+use pkg::types;
+use pkg::types::{Type, TypeKind};
+use pkg::types::typed::TypedModule;
+
+fn contains(span: Span, offset: u32) -> bool {
+  span.start <= offset && offset <= span.end
+}
+
+/// The innermost nodes at an offset.
+pub class Hit {
+  /// The function whose body holds the offset.
+  pub var function: Option<u32>;
+  pub var expr: Option<Expr>;
+  /// A path of a type, such as the `Point` of `p: Point`.
+  pub var type_path: Option<u32>;
+  pub var type_span: Option<Span>;
+  /// The name of a declaration or binding: a function, parameter, `const`, pattern binding...
+  pub var name: Option<Ident>;
+  /// A segment of a `use` or a module before `::` in a path, such as `loader` in
+  /// `pkg::loader::push_path`.
+  pub var path: Option<PathHit>;
+
+  pub fn new(self) {
+    self.function = None;
+    self.expr = None;
+    self.type_path = None;
+    self.type_span = None;
+    self.name = None;
+    self.path = None;
+  }
+}
+
+/// The segments of a path up to the one at the offset.
+pub struct PathHit {
+  pub segments: List<String>;
+}
+
+fn names_of(segments: List<Ident>, count: usize) -> List<String> {
+  const names: List<String> = new List();
+
+  for index in 0..count {
+    if let Some(segment) = segments.get(index) {
+      names.push(segment.name);
+    }
+  }
+
+  names
+}
+
+/// Walks a module and keeps the innermost nodes holding `offset`.
+class Finder {
+  prv const analysis: Analysis;
+  prv const offset: u32;
+  pub const hit: Hit;
+  prv var current: Option<u32>;
+
+  pub fn new(self, analysis: Analysis, offset: u32) {
+    self.analysis = analysis;
+    self.offset = offset;
+    self.hit = new Hit();
+    self.current = None;
+  }
+
+  prv fn name(self, ident: Ident) {
+    if contains(ident.span, self.offset) {
+      self.hit.name = Some(ident);
+      self.hit.function = self.current;
+    }
+  }
+
+  /// The segments of a path before its last, which name modules or types.
+  prv fn path_prefix(self, path: Path) {
+    if path.segments.len() < 2 {
+      return;
+    }
+
+    for index in 0..path.segments.len() - 1 {
+      if contains(path.segments[index].span, self.offset) {
+        self.hit.path = Some(PathHit { segments: names_of(path.segments, index + 1) });
+      }
+    }
+  }
+
+  /// Every segment of a `use`, the imported one included.
+  prv fn use_tree(self, tree: UseTree, base: List<Ident>) {
+    const segments: List<Ident> = new List();
+
+    for segment in base {
+      segments.push(segment);
+    }
+
+    for segment in tree.prefix {
+      segments.push(segment);
+    }
+
+    for index in base.len()..segments.len() {
+      if contains(segments[index].span, self.offset) {
+        self.hit.path = Some(PathHit { segments: names_of(segments, index + 1) });
+      }
+    }
+
+    match tree.kind {
+      UseTreeKind::Simple(alias) => {
+        if let Some(found) = alias {
+          if contains(found.span, self.offset) {
+            self.hit.path = Some(PathHit { segments: names_of(segments, segments.len()) });
+          }
+        }
+      }
+      UseTreeKind::Group(trees) => {
+        for inner in trees {
+          self.use_tree(inner, segments);
+        }
+      }
+    }
+  }
+
+  prv fn type_expr(self, ty: TypeExpr) {
+    if !contains(ty.span, self.offset) {
+      return;
+    }
+
+    match ty.kind {
+      TypeExprKind::Path(path) => {
+        self.hit.type_path = Some(path.id);
+        self.hit.type_span = Some(path.span);
+        self.path_prefix(path);
+      }
+      TypeExprKind::Generic { path, args } => {
+        if contains(path.span, self.offset) {
+          self.hit.type_path = Some(path.id);
+          self.hit.type_span = Some(path.span);
+          self.path_prefix(path);
+        }
+
+        for arg in args {
+          self.type_expr(arg);
+        }
+      }
+      TypeExprKind::Array { elem, .. } => self.type_expr(elem),
+      TypeExprKind::Ptr { pointee, .. } => self.type_expr(pointee),
+      TypeExprKind::Fn { params, ret } => {
+        for param in params {
+          self.type_expr(param);
+        }
+
+        if let Some(found) = ret {
+          self.type_expr(found);
+        }
+      }
+      TypeExprKind::Unit => {}
+    }
+  }
+
+  pub fn module(self, module: Module) {
+    for found in module.uses {
+      if contains(found.span, self.offset) {
+        self.use_tree(found.tree, new List());
+      }
+    }
+
+    for item in module.items {
+      self.item(item);
+    }
+  }
+
+  prv fn item(self, item: Item) {
+    match item {
+      Item::Fn(decl) => self.function(decl),
+      Item::Struct(decl) => {
+        self.name(decl.name);
+
+        for field in decl.fields {
+          self.name(field.name);
+          self.type_expr(field.ty);
+        }
+
+        for function in decl.functions {
+          self.function(function);
+        }
+      }
+      Item::Enum(decl) => {
+        self.name(decl.name);
+
+        for variant in decl.variants {
+          self.name(variant.name);
+        }
+
+        for function in decl.functions {
+          self.function(function);
+        }
+      }
+      Item::Class(decl) => {
+        self.name(decl.name);
+
+        if let Some(parent) = decl.parent {
+          self.type_expr(parent);
+        }
+
+        for ty in decl.impls {
+          self.type_expr(ty);
+        }
+
+        for field in decl.fields {
+          self.name(field.name);
+          self.type_expr(field.ty);
+        }
+
+        for function in decl.functions {
+          self.function(function);
+        }
+      }
+      Item::Interface(decl) => {
+        self.name(decl.name);
+
+        for field in decl.fields {
+          self.name(field.name);
+          self.type_expr(field.ty);
+        }
+
+        for function in decl.functions {
+          self.function(function);
+        }
+      }
+      Item::Extern(block) => {
+        for function in block.functions {
+          self.name(function.name);
+
+          for param in function.params {
+            self.type_expr(param.ty);
+          }
+        }
+      }
+      Item::Const(decl) => {
+        self.name(decl.name);
+        self.type_expr(decl.ty);
+        self.expr(decl.value);
+      }
+    }
+  }
+
+  prv fn function(self, decl: FnDecl) {
+    if !contains(decl.span, self.offset) {
+      return;
+    }
+
+    const outer = self.current;
+
+    self.current = self.analysis.function_of(decl.id);
+    self.hit.function = self.current;
+    self.name(decl.name);
+
+    for param in decl.params {
+      self.name(param.name);
+      self.type_expr(param.ty);
+    }
+
+    if let Some(ret) = decl.return_type {
+      self.type_expr(ret);
+    }
+
+    self.block(decl.body);
+    self.current = outer;
+  }
+
+  prv fn block(self, block: Block) {
+    if !contains(block.span, self.offset) {
+      return;
+    }
+
+    for stmt in block.stmts {
+      match stmt {
+        Stmt::Let(decl) => {
+          self.name(decl.name);
+
+          if let Some(ty) = decl.ty {
+            self.type_expr(ty);
+          }
+
+          if let Some(init) = decl.init {
+            self.expr(init);
+          }
+        }
+        Stmt::Assign { target, value, .. } => {
+          self.expr(target);
+          self.expr(value);
+        }
+        Stmt::Expr(expr) => self.expr(expr),
+      }
+    }
+
+    if let Some(tail) = block.tail {
+      self.expr(tail);
+    }
+  }
+
+  prv fn pattern(self, pattern: Pattern) {
+    if !contains(pattern.span, self.offset) {
+      return;
+    }
+
+    match pattern.kind {
+      PatternKind::Ident(ident) => self.name(ident),
+      PatternKind::Path(path) => self.path_prefix(path),
+      PatternKind::Tuple { path, elems } => {
+        self.path_prefix(path);
+
+        for elem in elems {
+          self.pattern(elem);
+        }
+      }
+      PatternKind::Named { path, fields, .. } => {
+        self.path_prefix(path);
+
+        for field in fields {
+          self.pattern(field.pattern);
+        }
+      }
+      PatternKind::Or(alternatives) => {
+        for alternative in alternatives {
+          self.pattern(alternative);
+        }
+      }
+      _ => {}
+    }
+  }
+
+  prv fn exprs(self, exprs: List<Expr>) {
+    for expr in exprs {
+      self.expr(expr);
+    }
+  }
+
+  prv fn expr(self, expr: Expr) {
+    if !contains(expr.span, self.offset) {
+      return;
+    }
+
+    self.hit.expr = Some(expr);
+    self.hit.function = self.current;
+
+    match expr.kind {
+      ExprKind::Path(path) => self.path_prefix(path),
+      ExprKind::Template(parts) => {
+        for part in parts {
+          if let TemplatePart::Expr(inner) = part {
+            self.expr(inner);
+          }
+        }
+      }
+      ExprKind::Call { callee, args } => {
+        self.expr(callee);
+        self.exprs(args);
+      }
+      ExprKind::MethodCall { receiver, args, .. } => {
+        self.expr(receiver);
+        self.exprs(args);
+      }
+      ExprKind::Field { base, .. } => self.expr(base),
+      ExprKind::Index { base, index } => {
+        self.expr(base);
+        self.expr(index);
+      }
+      ExprKind::StructLit { path, fields } => {
+        self.path_prefix(path);
+
+        for field in fields {
+          self.expr(field.value);
+        }
+      }
+      ExprKind::ArrayLit(elems) => self.exprs(elems),
+      ExprKind::ArrayRepeat { value, .. } => self.expr(value),
+      ExprKind::Unary { operand, .. } => self.expr(operand),
+      ExprKind::Binary { lhs, rhs, .. } => {
+        self.expr(lhs);
+        self.expr(rhs);
+      }
+      ExprKind::Cast { expr: inner, ty } => {
+        self.expr(inner);
+        self.type_expr(ty);
+      }
+      ExprKind::Range { start, end, .. } => {
+        self.expr(start);
+        self.expr(end);
+      }
+      ExprKind::Try(inner) => self.expr(inner),
+      ExprKind::Lambda { params, body } => {
+        for param in params {
+          self.name(param.name);
+
+          if let Some(ty) = param.ty {
+            self.type_expr(ty);
+          }
+        }
+
+        self.expr(body);
+      }
+      ExprKind::New { path, args } => {
+        if contains(path.span, self.offset) {
+          self.hit.type_path = Some(path.id);
+          self.hit.type_span = Some(path.span);
+          self.path_prefix(path);
+        }
+
+        self.exprs(args);
+      }
+      ExprKind::Match { scrutinee, arms } => {
+        self.expr(scrutinee);
+
+        for arm in arms {
+          self.pattern(arm.pattern);
+
+          if let Some(guard) = arm.guard {
+            self.expr(guard);
+          }
+
+          self.expr(arm.body);
+        }
+      }
+      ExprKind::Block(block) => self.block(block),
+      ExprKind::Unsafe(block) => self.block(block),
+      ExprKind::If { cond, then_block, else_branch } => {
+        self.expr(cond);
+        self.block(then_block);
+
+        if let Some(branch) = else_branch {
+          self.expr(branch);
+        }
+      }
+      ExprKind::While { cond, body } => {
+        self.expr(cond);
+        self.block(body);
+      }
+      ExprKind::Loop(body) => self.block(body),
+      ExprKind::For { variable, iter, body } => {
+        self.name(variable);
+        self.expr(iter);
+        self.block(body);
+      }
+      ExprKind::Break(value) => {
+        if let Some(found) = value {
+          self.expr(found);
+        }
+      }
+      ExprKind::Return(value) => {
+        if let Some(found) = value {
+          self.expr(found);
+        }
+      }
+      _ => {}
+    }
+  }
+}
+
+/// The innermost nodes of `module` at `offset`.
+pub fn find(analysis: Analysis, module: Module, offset: u32) -> Hit {
+  const finder = new Finder(analysis, offset);
+
+  finder.module(module);
+  finder.hit
+}
+
+/// The function whose body holds `offset`, in a module. While the text being typed is newer than
+/// the analysis, the cursor may lie past the end of its function there, so the function starting
+/// last before the offset stands in for it.
+pub fn enclosing_function(analysis: Analysis, module: Module, offset: u32) -> Option<u32> {
+  if let Some(found) = find(analysis, module, offset).function {
+    return Some(found);
+  }
+
+  var nearest: Option<FnDecl> = None;
+
+  for item in module.items {
+    const functions: List<FnDecl> = match item {
+      Item::Fn(decl) => List::from([decl]),
+      Item::Struct(decl) => decl.functions,
+      Item::Enum(decl) => decl.functions,
+      Item::Class(decl) => decl.functions,
+      Item::Interface(decl) => decl.functions,
+      _ => new List(),
+    };
+
+    for decl in functions {
+      if decl.span.start <= offset {
+        const later = match nearest {
+          Some(found) => decl.span.start > found.span.start,
+          None => true,
+        };
+
+        if later {
+          nearest = Some(decl);
+        }
+      }
+    }
+  }
+
+  analysis.function_of(nearest?.id)
+}
+
+// ---- Hover ------------------------------------------------------------------------------------
+
+/// `fn name(a: A, b: B) -> R`, from a function's declaration and signature.
+pub fn signature(analysis: Analysis, id: u32) -> Option<String> {
+  const package = analysis.package?;
+  const resolution = analysis.resolution?;
+  const typed = analysis.typed?;
+  const decl = resolution.fn_decl(package, id)?;
+  const sig = typed.sigs.get(id as usize)?;
+  const params: List<String> = new List();
+
+  if decl.self_param.is_some() {
+    params.push("self");
+  }
+
+  for index in 0..decl.params.len() {
+    const ty = match sig.params.get(index) {
+      Some(found) => types::text(found),
+      None => "?",
+    };
+
+    params.push(decl.params[index].name.name + ": " + ty);
+  }
+
+  const ret = match sig.ret.kind {
+    TypeKind::Unit => "",
+    _ => " -> " + types::text(sig.ret),
+  };
+
+  Some("fn " + decl.name.name + "(" + params.join(", ") + ")" + ret)
+}
+
+/// The local of `function` declared by the name at `span`.
+fn local_at(resolution: Resolution, function: u32, span: Span) -> Option<u32> {
+  const locals = resolution.locals.get(function as usize)?;
+
+  for index in 0..locals.len() {
+    const local = locals[index];
+
+    if local.span.file == span.file && local.span.start == span.start && local.span.end == span.end {
+      return Some(index as u32);
+    }
+  }
+
+  None
+}
+
+/// What hovering the offset shows: code in Sagitario.
+pub fn hover(analysis: Analysis, module: Module, offset: u32) -> Option<String> {
+  const resolution = analysis.resolution?;
+  const typed = analysis.typed?;
+  const hit = find(analysis, module, offset);
+
+  if let Some(found) = hit.path {
+    return item_text(analysis, resolve_path(analysis, module_index_of(analysis, module)?, found.segments)?);
+  }
+
+  // A binding's name: its type; a function's name: its signature.
+  if let Some(ident) = hit.name {
+    if let Some(function) = hit.function {
+      if let Some(package) = analysis.package {
+        if let Some(decl) = resolution.fn_decl(package, function) {
+          if decl.name.span.start == ident.span.start && decl.name.span.file == ident.span.file {
+            return signature(analysis, function);
+          }
+        }
+      }
+
+      if let Some(local) = local_at(resolution, function, ident.span) {
+        if let Some(ty) = typed.local_type(function, local) {
+          return Some(ident.name + ": " + types::text(ty));
+        }
+      }
+    }
+
+    return declaration_text(analysis, module, ident);
+  }
+
+  if let Some(path) = hit.type_path {
+    return match resolution.type_paths.get(path) {
+      Some(TypeRes::Item(item)) => Some(type_item_text(analysis, item)),
+      Some(TypeRes::Builtin) => Some(hit_text(analysis, module, hit.type_span?)),
+      Some(TypeRes::Param { .. }) => Some("type parameter " + hit_text(analysis, module, hit.type_span?)),
+      _ => None,
+    };
+  }
+
+  const expr = hit.expr?;
+
+  match expr.kind {
+    ExprKind::MethodCall { method, .. } => {
+      if contains(method.span, offset) {
+        if let Some(function) = typed.method_calls.get(expr.id) {
+          return signature(analysis, function);
+        }
+      }
+    }
+    ExprKind::Path(_) => {
+      if let Some(Res::Fn(function)) = resolution.paths.get(expr.id) {
+        return signature(analysis, function);
+      }
+    }
+    _ => {}
+  }
+
+  const ty = typed.expr_types.get(expr.id)?;
+
+  Some(types::text(ty))
+}
+
+/// The declaration a name of the module declares, such as a function's or a type's name.
+fn declaration_text(analysis: Analysis, module: Module, ident: Ident) -> Option<String> {
+  const at = ident.span.start;
+
+  for item in module.items {
+    match item {
+      Item::Fn(decl) => {
+        if decl.name.span.start == at {
+          return signature(analysis, analysis.function_of(decl.id)?);
+        }
+      }
+      Item::Struct(decl) => {
+        if decl.name.span.start == at {
+          return Some("struct " + decl.name.name);
+        }
+      }
+      Item::Enum(decl) => {
+        if decl.name.span.start == at {
+          return Some("enum " + decl.name.name);
+        }
+      }
+      Item::Class(decl) => {
+        if decl.name.span.start == at {
+          return Some("class " + decl.name.name);
+        }
+      }
+      Item::Interface(decl) => {
+        if decl.name.span.start == at {
+          return Some("interface " + decl.name.name);
+        }
+      }
+      Item::Const(decl) => {
+        if decl.name.span.start == at {
+          return Some(match analysis.typed {
+            Some(typed) => match analysis.resolution {
+              Some(resolution) => const_text(analysis, resolution, typed, decl.name.name),
+              None => "const " + decl.name.name,
+            },
+            None => "const " + decl.name.name,
+          });
+        }
+      }
+      Item::Extern(_) => {}
+    }
+  }
+
+  None
+}
+
+/// `const NAME: Type` for a module-level constant of this module.
+fn const_text(analysis: Analysis, resolution: Resolution, typed: TypedModule, name: String) -> String {
+  if let Some(package) = analysis.package {
+    for index in 0..resolution.consts.len() {
+      if let Some(decl) = resolution.const_decl(package, index as u32) {
+        if decl.name.name == name {
+          if let Some(ty) = typed.const_types.get(index) {
+            return "const " + name + ": " + types::text(ty);
+          }
+        }
+      }
+    }
+  }
+
+  "const " + name
+}
+
+fn type_item_text(analysis: Analysis, item: TypeItem) -> String {
+  const name = match analysis.package {
+    Some(package) => match analysis.resolution {
+      Some(resolution) => resolution.type_name(package, item),
+      None => "",
+    },
+    None => "",
+  };
+
+  match item {
+    TypeItem::Struct(_) => "struct " + name,
+    TypeItem::Enum(_) => "enum " + name,
+    TypeItem::Class(_) => "class " + name,
+    TypeItem::Interface(_) => "interface " + name,
+  }
+}
+
+/// The text of the source a span covers, such as the name of a type.
+fn hit_text(analysis: Analysis, module: Module, span: Span) -> String {
+  match analysis.sources.get(module.file) {
+    Some(source) => source.slice(span),
+    None => "",
+  }
+}
+
+// ---- Paths ------------------------------------------------------------------------------------
+
+/// The module of the program read from module `index` of the package.
+pub fn module_id(resolution: Resolution, index: usize) -> Option<u32> {
+  for id in 0..resolution.modules.len() {
+    if let Some(source) = resolution.modules[id].source {
+      if source == index {
+        return Some(id as u32);
+      }
+    }
+  }
+
+  None
+}
+
+/// The index in the package of a module of the analysis.
+pub fn module_index_of(analysis: Analysis, module: Module) -> Option<usize> {
+  const package = analysis.package?;
+
+  for index in 0..package.modules.len() {
+    if package.modules[index].file == module.file {
+      return Some(index);
+    }
+  }
+
+  None
+}
+
+/// A name in a module: an item, an import or a child module.
+pub fn lookup(resolution: Resolution, module: u32, name: String) -> Option<ItemRef> {
+  const info = resolution.modules.get(module as usize)?;
+
+  if let Some(found) = info.items.get(name) {
+    return Some(found.item);
+  }
+
+  if let Some(found) = info.imports.get(name) {
+    return Some(found.item);
+  }
+
+  match info.children.get(name) {
+    Some(child) => Some(ItemRef::Module(child)),
+    None => None,
+  }
+}
+
+/// What the path of names refers to, read from the module at `module_index` of the package:
+/// `pkg`, `std`, `super`, `self` or a name of that module first, then names inside modules.
+pub fn resolve_path(analysis: Analysis, module_index: usize, segments: List<String>) -> Option<ItemRef> {
+  const resolution = analysis.resolution?;
+  const here = module_id(resolution, module_index)?;
+  const first = segments.first()?;
+  var current: Option<ItemRef> = None;
+
+  if first == "pkg" {
+    const package = resolution.modules.get(here as usize)?.package;
+
+    current = Some(ItemRef::Module(resolution.package_roots.get(package)?));
+  } else if first == "std" {
+    current = Some(ItemRef::Module(resolution.std_root?));
+  } else if first == "self" {
+    current = Some(ItemRef::Module(here));
+  } else if first == "super" {
+    current = Some(ItemRef::Module(resolution.modules.get(here as usize)?.parent?));
+  } else {
+    current = lookup(resolution, here, first);
+  }
+
+  for index in 1..segments.len() {
+    current = match current? {
+      ItemRef::Module(id) => lookup(resolution, id, segments[index]),
+      _ => None,
+    };
+  }
+
+  current
+}
+
+/// Where an item is declared; a module is the start of its file.
+pub fn item_span(analysis: Analysis, item: ItemRef) -> Option<Span> {
+  const package = analysis.package?;
+  const resolution = analysis.resolution?;
+
+  match item {
+    ItemRef::Module(id) => {
+      const source = resolution.modules.get(id as usize)?.source?;
+      const file = package.modules.get(source)?.file;
+
+      Some(Span { file: file, start: 0, end: 0 })
+    }
+    ItemRef::Fn(id) => Some(resolution.fn_decl(package, id)?.name.span),
+    ItemRef::Extern(id) => Some(resolution.extern_decl(package, id)?.name.span),
+    ItemRef::Const(id) => Some(resolution.const_decl(package, id)?.name.span),
+    ItemRef::Type(found) => type_item_span(package, resolution, found),
+    ItemRef::Std(_) => None,
+  }
+}
+
+/// What hovering an item shows.
+pub fn item_text(analysis: Analysis, item: ItemRef) -> Option<String> {
+  const resolution = analysis.resolution?;
+
+  match item {
+    ItemRef::Module(id) => Some("module " + resolution.modules.get(id as usize)?.display_path()),
+    ItemRef::Fn(id) => signature(analysis, id),
+    ItemRef::Type(found) => Some(type_item_text(analysis, found)),
+    ItemRef::Const(id) => {
+      const package = analysis.package?;
+      const name = resolution.const_decl(package, id)?.name.name;
+      const ty = analysis.typed?.const_types.get(id as usize)?;
+
+      Some("const " + name + ": " + types::text(ty))
+    }
+    ItemRef::Extern(id) => Some("extern fn " + resolution.extern_decl(analysis.package?, id)?.name.name),
+    ItemRef::Std(_) => None,
+  }
+}
+
+// ---- Definitions ------------------------------------------------------------------------------
+
+/// Where a type is declared: the span of its name.
+pub fn type_item_span(package: Package, resolution: Resolution, item: TypeItem) -> Option<Span> {
+  match item {
+    TypeItem::Struct(id) => Some(resolution.struct_decl(package, id)?.name.span),
+    TypeItem::Enum(id) => Some(resolution.enum_decl(package, id)?.name.span),
+    TypeItem::Class(id) => Some(resolution.class_decl(package, id)?.name.span),
+    TypeItem::Interface(id) => Some(resolution.interface_decl(package, id)?.name.span),
+  }
+}
+
+fn res_span(package: Package, resolution: Resolution, function: Option<u32>, res: Res) -> Option<Span> {
+  match res {
+    Res::Local(local) => {
+      const locals = resolution.locals.get(function? as usize)?;
+
+      Some(locals.get(local as usize)?.span)
+    }
+    Res::Fn(id) => Some(resolution.fn_decl(package, id)?.name.span),
+    Res::Extern(id) => Some(resolution.extern_decl(package, id)?.name.span),
+    Res::Struct(id) => Some(resolution.struct_decl(package, id)?.name.span),
+    Res::Const(id) => Some(resolution.const_decl(package, id)?.name.span),
+    Res::Variant(variant) => match variant.owner {
+      EnumKind::User(id) => Some(resolution.enum_decl(package, id)?.variants.get(variant.index as usize)?.name.span),
+      _ => None,
+    },
+    Res::Builtin(_) => None,
+  }
+}
+
+/// Where a field of a value of type `ty` is declared.
+fn field_span(package: Package, resolution: Resolution, typed: TypedModule, ty: Type, name: String) -> Option<Span> {
+  match ty.kind {
+    TypeKind::Struct(named) => {
+      for field in resolution.struct_decl(package, named.id)?.fields {
+        if field.name.name == name {
+          return Some(field.name.span);
+        }
+      }
+
+      None
+    }
+    TypeKind::Class(named) => {
+      const found = typed.class_field(named.id, name)?;
+
+      Some(resolution.class_decl(package, found.class_id)?.fields.get(found.index)?.name.span)
+    }
+    TypeKind::Interface(named) => {
+      for field in resolution.interface_decl(package, named.id)?.fields {
+        if field.name.name == name {
+          return Some(field.name.span);
+        }
+      }
+
+      None
+    }
+    _ => None,
+  }
+}
+
+/// Where what is at the offset is declared.
+pub fn definition(analysis: Analysis, module: Module, offset: u32) -> Option<Span> {
+  const package = analysis.package?;
+  const resolution = analysis.resolution?;
+  const typed = analysis.typed?;
+  const hit = find(analysis, module, offset);
+
+  if let Some(found) = hit.path {
+    return item_span(analysis, resolve_path(analysis, module_index_of(analysis, module)?, found.segments)?);
+  }
+
+  if let Some(ident) = hit.name {
+    return Some(ident.span);
+  }
+
+  if let Some(path) = hit.type_path {
+    return match resolution.type_paths.get(path) {
+      Some(TypeRes::Item(item)) => type_item_span(package, resolution, item),
+      _ => None,
+    };
+  }
+
+  const expr = hit.expr?;
+
+  match expr.kind {
+    ExprKind::MethodCall { method, .. } => {
+      if contains(method.span, offset) {
+        return Some(resolution.fn_decl(package, typed.method_calls.get(expr.id)?)?.name.span);
+      }
+    }
+    ExprKind::Field { base, name } => {
+      if contains(name.span, offset) {
+        return field_span(package, resolution, typed, typed.expr_types.get(base.id)?, name.name);
+      }
+    }
+    _ => {}
+  }
+
+  res_span(package, resolution, hit.function, resolution.paths.get(expr.id)?)
+}

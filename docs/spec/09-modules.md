@@ -3,7 +3,7 @@
 Rationale: [ADR-0010](../adr/0010-modules-and-packages.md),
 [ADR-0024](../adr/0024-modules-imports-and-visibility.md),
 [ADR-0025](../adr/0025-single-pub-visibility.md), [ADR-0040](../adr/0040-nova-package-manager.md),
-[ADR-0041](../adr/0041-dependencies-by-path.md).
+[ADR-0041](../adr/0041-dependencies-by-path.md), [ADR-0065](../adr/0065-module-directories.md).
 
 ## Packages
 
@@ -19,9 +19,19 @@ Rationale: [ADR-0010](../adr/0010-modules-and-packages.md),
 ## Modules
 
 - **Each file is a module**, implicitly. There are no `mod` declarations.
+
+### Files
+
 - The directory structure is the module structure: `net/http.sag`, next to the entry file, is
-  the module `pkg::net::http`. A directory without a file of its own (`net/` without
-  `net.sag`) is an empty module that only holds submodules.
+  the module `pkg::net::http`.
+- A module without submodules is the file `name.sag`. A module with submodules is the file
+  `name/mod.sag`, in the directory that holds them: `net/mod.sag` is `pkg::net`, next to
+  `net/http.sag`. A directory without `mod.sag` is an empty module that only holds submodules.
+- `name.sag` next to a directory `name/` is an error (`E0209`): a module has one place for its
+  file, `name/mod.sag` when it has submodules.
+- `mod` cannot name a module: `mod.sag` is always the file of its directory's module, and a path
+  such as `pkg::mod` names nothing (`E0200`). `mod` is not a keyword; it names anything else.
+- The entry file is the root module whatever its name; a `mod.sag` next to it is no module.
 - File and directory names must be identifiers and match the path exactly, also on
   case-insensitive file systems.
 - Only the modules that the entry file reaches through paths (directly or through other
@@ -109,7 +119,7 @@ fn main() {
 
 - As in Rust, a submodule sees the private items of all its ancestors: code in
   `net/http.sag` can call a private function of the root with `pkg::helper()` or
-  `super::super::helper()`. A private item of `net/http.sag` is not visible in `net.sag`.
+  `super::super::helper()`. A private item of `net/http.sag` is not visible in `net/mod.sag`.
 - There are no restricted forms such as Rust's `pub(crate)`: `pub(pkg)` is a syntax error.
 - Modules themselves are visible in the whole package.
 - Struct members follow their own rules (`pub`/`prv`, mandatory; a `prv` member is visible

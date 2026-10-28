@@ -1,34 +1,36 @@
 //! Reads, lexes and parses the modules of a program (docs/spec/09-modules.md), the port of the
 //! loader of `sagitario_driver`: the entry file is the root module `pkg`, and `pkg::net::http` is
 //! the file `net/http.sag` next to it. The standard library modules a program names and the
-//! prelude are embedded. Nova dependencies are not loaded yet
-//! (docs/adr/0052-resolver-port-and-resolution-dumps.md).
+//! prelude are embedded. Each dependency of a Nova package is a package of its own, with its root
+//! module and its files (docs/adr/0052-resolver-port-and-resolution-dumps.md,
+//! docs/adr/0060-driver-parity-for-nova.md).
 
 use pkg::ast::{Module, Package, PackageInfo, TargetInfo};
-use pkg::diagnostics::Diagnostics;
+use pkg::diagnostics::{Diagnostic, Diagnostics};
+use pkg::diagnostics::codes;
 use pkg::lexer;
 use pkg::parser;
 use pkg::parser::Ids;
 use pkg::resolve::modules;
 use pkg::resolve::modules::ModuleRef;
-use pkg::span::SourceMap;
+use pkg::span::{SourceMap, Span};
 use std::fs;
 use std::path;
 
 /// The part of the prelude written in Sagitario.
-const PRELUDE: String = include_str("../../crates/sagitario_driver/src/prelude.sag");
+const PRELUDE: String = include_str("../std/prelude.sag");
 
 /// The file of `std` itself: helpers shared by its modules, which programs cannot name.
-const STD_ROOT: String = include_str("../../crates/sagitario_driver/src/std/std.sag");
+const STD_ROOT: String = include_str("../std/mod.sag");
 
-const STD_ENV: String = include_str("../../crates/sagitario_driver/src/std/env.sag");
-const STD_FS: String = include_str("../../crates/sagitario_driver/src/std/fs.sag");
-const STD_IO: String = include_str("../../crates/sagitario_driver/src/std/io.sag");
-const STD_PATH: String = include_str("../../crates/sagitario_driver/src/std/path.sag");
-const STD_PROCESS: String = include_str("../../crates/sagitario_driver/src/std/process.sag");
-const STD_SYNC: String = include_str("../../crates/sagitario_driver/src/std/sync.sag");
-const STD_THREAD: String = include_str("../../crates/sagitario_driver/src/std/thread.sag");
-const STD_TIME: String = include_str("../../crates/sagitario_driver/src/std/time.sag");
+const STD_ENV: String = include_str("../std/env.sag");
+const STD_FS: String = include_str("../std/fs.sag");
+const STD_IO: String = include_str("../std/io.sag");
+const STD_PATH: String = include_str("../std/path.sag");
+const STD_PROCESS: String = include_str("../std/process.sag");
+const STD_SYNC: String = include_str("../std/sync.sag");
+const STD_THREAD: String = include_str("../std/thread.sag");
+const STD_TIME: String = include_str("../std/time.sag");
 
 /// The source of the standard library module `std::name` written in Sagitario.
 fn std_source(name: String) -> Option<String> {
@@ -117,12 +119,13 @@ fn range_template() -> String {
   lines.join("\n")
 }
 
-/// The prelude's source: `prelude.sag` followed by the range functions.
-fn prelude_source() -> String {
+/// The prelude's source: `prelude.sag` (or the text given in its place) followed by the range
+/// functions.
+fn prelude_source(prelude: String) -> String {
   const source = new StringBuilder();
   const template = range_template();
 
-  source.append(PRELUDE);
+  source.append(prelude);
 
   for ty in INT_TYPES.split(" ") {
     source.append(template.replace("TYPE", ty));
@@ -135,6 +138,15 @@ fn prelude_source() -> String {
 /// there does `std::path` treat `\` as a separator.
 pub fn windows() -> bool {
   path::join("x\\", "y") == "x\\y"
+}
+
+/// Whether the compiler runs on Linux for ARM, where C's `char` is unsigned: only the kernel of
+/// that system names the architecture of the processor in `/proc/cpuinfo`, as `CPU architecture`.
+pub fn linux_on_arm() -> bool {
+  match fs::read_to_string("/proc/cpuinfo") {
+    Ok(text) => text.contains("CPU architecture"),
+    Err(_) => false,
+  }
 }
 
 /// `name` after `dir`, as Rust's `PathBuf::push` writes it: the driver builds module paths that
@@ -153,6 +165,14 @@ pub fn push_path(dir: String, name: String) -> String {
   dir + separator + name
 }
 
+/// A path in a form that names one file however it is written: `/` as the separator and, on
+/// Windows, whose file names ignore case, in lowercase.
+pub fn path_key(file: String) -> String {
+  const slashes = file.replace("\\", "/");
+
+  if windows() { slashes.to_ascii_lowercase() } else { slashes }
+}
+
 /// Whether `dir` has an entry with exactly this name that is a directory (or a file), also on
 /// case-insensitive file systems.
 fn has_entry(dir: String, name: String, directory: bool) -> bool {
@@ -165,34 +185,103 @@ fn has_entry(dir: String, name: String, directory: bool) -> bool {
   entries.contains(name) && fs::is_dir(push_path(base, name)) == directory
 }
 
+/// A package whose modules are loaded: the input's, or a dependency.
+pub class LoadedPackage {
+  /// The name its dependents use as a path root; empty for the input's.
+  pub const name: String;
+  /// The directory of its root module, which holds its other modules.
+  pub const root: String;
+  pub const entry: String;
+  /// Indices in `Loader::packages` of its dependencies.
+  pub const dependencies: List<usize>;
+
+  pub fn new(self, name: String, entry: String, dependencies: List<usize>) {
+    self.name = name;
+    self.root = path::parent(entry).unwrap_or("");
+    self.entry = entry;
+    self.dependencies = dependencies;
+  }
+}
+
+/// Where the file of a module is.
+enum ModuleFile {
+  File(String),
+  /// `name.sag` next to a directory `name/`, which holds `mod.sag` when `merged`.
+  Conflict { file: String, merged: bool },
+  Missing,
+}
+
 pub class Loader {
-  /// The input file, the root module of the program's package.
-  prv const entry: String;
-  /// The directory of the root module, which holds the other modules.
-  prv const root: String;
+  /// The input's package first, then its dependencies.
+  pub const packages: List<LoadedPackage>;
   /// Keeps node ids unique across modules.
   prv const ids: Ids;
   pub const modules: List<Module>;
   /// Indices in `modules` of the standard library modules.
   pub const std: List<usize>;
+  /// Texts that replace files on disk, by `path_key`: the documents open in an editor.
+  pub var overrides: Map<String, String>;
+  /// Texts that replace the embedded standard library, by module: `prelude`, `std` (the file of
+  /// `std` itself) or the name of a module of `std`, for its sources open in an editor.
+  pub var std_overrides: Map<String, String>;
 
+  /// A loader for the program whose root module is `entry`, without dependencies until
+  /// `add_dependency`.
   pub fn new(self, entry: String) {
-    self.entry = entry;
-    self.root = path::parent(entry).unwrap_or("");
+    self.packages = List::from([new LoadedPackage("", entry, new List())]);
     self.ids = new Ids(0);
     self.modules = new List();
     self.std = new List();
+    self.overrides = new Map<String, String>();
+    self.std_overrides = new Map<String, String>();
   }
 
-  /// Adds a module unless it has lexical errors, which are reported later with the others.
-  /// Returns `false`, after printing why, if the file cannot be read.
-  pub fn load(self, file: String, module_path: List<String>, sources: SourceMap, diagnostics: Diagnostics) -> bool {
-    const text = match fs::read_to_string(file) {
-      Ok(text) => text,
-      Err(error) => {
-        eprintln(`error: cannot read \`${file}\`: ${error.message()}`);
+  /// Adds a package the input depends on, directly or not: package `index + 1` for dependency
+  /// `index`. `dependencies` are the indices of its own dependencies among them.
+  pub fn add_dependency(self, name: String, entry: String, dependencies: List<usize>) {
+    const packages: List<usize> = new List();
+
+    for index in dependencies {
+      packages.push(index + 1);
+    }
+
+    self.packages.push(new LoadedPackage(name, entry, packages));
+  }
+
+  /// Sets the direct dependencies of the input's package, by their index among the dependencies.
+  pub fn set_direct_dependencies(self, dependencies: List<usize>) {
+    if let Some(input) = self.packages.first() {
+      input.dependencies.clear();
+
+      for index in dependencies {
+        input.dependencies.push(index + 1);
+      }
+    }
+  }
+
+  /// Loads the root module of every package: the input's first.
+  pub fn load_entries(self, sources: SourceMap, diagnostics: Diagnostics) -> bool {
+    for package in 0..self.packages.len() {
+      if !self.load(self.packages[package].entry, new List(), package, sources, diagnostics) {
         return false;
       }
+    }
+
+    true
+  }
+
+  /// Adds a module of `package` unless it has lexical errors, which are reported later with the
+  /// others. Returns `false`, after printing why, if the file cannot be read.
+  pub fn load(self, file: String, module_path: List<String>, package: usize, sources: SourceMap, diagnostics: Diagnostics) -> bool {
+    const text = match self.overrides.get(path_key(file)) {
+      Some(found) => found,
+      None => match fs::read_to_string(file) {
+        Ok(found) => found,
+        Err(error) => {
+          eprintln(`error: cannot read \`${file}\`: ${error.message()}`);
+          return false;
+        }
+      },
     };
     const id = sources.add(file, text);
     const errors = diagnostics.error_count();
@@ -202,7 +291,7 @@ pub class Loader {
       var module = parser::parse_module_from(id, tokens, self.ids, diagnostics);
 
       module.path = module_path;
-      module.package = 0;
+      module.package = package;
       module.location = Some(file);
       self.modules.push(module);
     }
@@ -219,15 +308,19 @@ pub class Loader {
 
     while index < self.modules.len() {
       const module = self.modules[index];
-      const targets = if self.std.contains(index) { new List<ModuleRef>() } else { modules::module_references(module, new List()) };
+      const package = module.package;
+      const targets = if self.std.contains(index) { new List<ModuleRef>() } else { modules::module_references(module, self.dependency_names(package)) };
 
       for target in targets {
-        // Paths into dependencies cannot name a file: there are none yet.
-        if target.dependency.is_some() {
-          continue;
-        }
-
-        const key = target.path.join("::");
+        const target_package = match target.dependency {
+          None => Some(package),
+          Some(name) => self.dependency(package, name),
+        };
+        const found = match target_package {
+          Some(found) => found,
+          None => continue,
+        };
+        const key = `${found}:` + target.path.join("::");
 
         if attempted.contains_key(key) {
           continue;
@@ -235,10 +328,18 @@ pub class Loader {
 
         attempted.insert(key, true);
 
-        if let Some(file) = self.module_file(target.path) {
-          if !self.load(file, target.path, sources, diagnostics) {
-            return false;
+        match self.module_file(found, target.path) {
+          ModuleFile::File(file) => {
+            if !self.load(file, target.path, found, sources, diagnostics) {
+              return false;
+            }
           }
+          ModuleFile::Conflict { file, merged } => {
+            if !self.report_layout(found, target.path, file, merged, sources, diagnostics) {
+              return false;
+            }
+          }
+          ModuleFile::Missing => {}
         }
       }
 
@@ -250,7 +351,7 @@ pub class Loader {
         attempted_std.insert(name, true);
 
         if let Some(text) = std_source(name) {
-          self.load_std(name, text, sources, diagnostics);
+          self.load_std(name, self.std_overrides.get(name).unwrap_or(text), sources, diagnostics);
         }
       }
 
@@ -262,14 +363,14 @@ pub class Loader {
 
   /// Adds the prelude module, which every program sees, and returns its index.
   pub fn load_prelude(self, sources: SourceMap, diagnostics: Diagnostics) -> usize {
-    self.load_embedded("<prelude>", prelude_source(), List::from(["std", "prelude"]), sources, diagnostics)
+    self.load_embedded("<prelude>", prelude_source(self.std_overrides.get("prelude").unwrap_or(PRELUDE)), List::from(["std", "prelude"]), sources, diagnostics)
   }
 
   /// Adds the standard library module `std::name`. The first one comes with the file of `std`
   /// itself.
   prv fn load_std(self, name: String, text: String, sources: SourceMap, diagnostics: Diagnostics) {
     if self.std.is_empty() {
-      self.std.push(self.load_embedded("<std>", STD_ROOT, List::from(["std"]), sources, diagnostics));
+      self.std.push(self.load_embedded("<std>", self.std_overrides.get("std").unwrap_or(STD_ROOT), List::from(["std"]), sources, diagnostics));
     }
 
     self.std.push(self.load_embedded(`<std::${name}>`, text, List::from(["std", name]), sources, diagnostics));
@@ -287,42 +388,127 @@ pub class Loader {
     self.modules.len() - 1
   }
 
-  /// The file of the module at `module_path`, if it exists with exactly these names and is not
-  /// the entry file. Unlike the driver, which compares canonical paths, the entry file is
-  /// recognized by its name: a module of the root directory with the entry's name.
-  prv fn module_file(self, module_path: List<String>) -> Option<String> {
-    const last = module_path.last()?;
-    var dir = self.root;
+  /// The names of the dependencies of `package`.
+  prv fn dependency_names(self, package: usize) -> List<String> {
+    const names: List<String> = new List();
+
+    if let Some(loaded) = self.packages.get(package) {
+      for index in loaded.dependencies {
+        if let Some(dependency) = self.packages.get(index) {
+          names.push(dependency.name);
+        }
+      }
+    }
+
+    names
+  }
+
+  /// The package that `package` depends on under `name`.
+  prv fn dependency(self, package: usize, name: String) -> Option<usize> {
+    for index in self.packages.get(package)?.dependencies {
+      if let Some(dependency) = self.packages.get(index) {
+        if dependency.name == name {
+          return Some(index);
+        }
+      }
+    }
+
+    None
+  }
+
+  /// The file of the module at `module_path` in `package` (docs/spec/09-modules.md#files):
+  /// `name.sag`, or `name/mod.sag` for a module with submodules, with exactly these names. The
+  /// package's entry file is no module, and `mod` names none. Unlike the driver, which compares
+  /// canonical paths, the entry file is recognized by its name: a module of the root directory
+  /// with the entry's name.
+  prv fn module_file(self, package: usize, module_path: List<String>) -> ModuleFile {
+    const loaded = match self.packages.get(package) {
+      Some(found) => found,
+      None => return ModuleFile::Missing,
+    };
+    const last = match module_path.last() {
+      Some(found) => found,
+      None => return ModuleFile::Missing,
+    };
+
+    if module_path.contains("mod") {
+      return ModuleFile::Missing;
+    }
+
+    var dir = loaded.root;
 
     for index in 0..module_path.len() - 1 {
       const name = module_path[index];
 
       if !has_entry(dir, name, true) {
-        return None;
+        return ModuleFile::Missing;
       }
 
       dir = push_path(dir, name);
     }
 
     const name = last + ".sag";
-
-    if !has_entry(dir, name, false) {
-      return None;
-    }
-
-    const same = module_path.len() == 1 && match path::file_name(self.entry) {
+    const same = module_path.len() == 1 && match path::file_name(loaded.entry) {
       Some(entry_name) => entry_name == name,
       None => false,
     };
+    const has_file = has_entry(dir, name, false) && !same;
+    const has_dir = has_entry(dir, last, true);
+    const merged = has_dir && has_entry(push_path(dir, last), "mod.sag", false);
 
-    if same { None } else { Some(push_path(dir, name)) }
+    if has_file && has_dir {
+      return ModuleFile::Conflict { file: push_path(dir, name), merged: merged };
+    }
+
+    if has_file {
+      return ModuleFile::File(push_path(dir, name));
+    }
+
+    if merged { ModuleFile::File(push_path(push_path(dir, last), "mod.sag")) } else { ModuleFile::Missing }
+  }
+
+  /// Reports a module with two places for its file: `name.sag` next to a directory `name/`.
+  /// Returns `false`, after printing why, if the file cannot be read.
+  prv fn report_layout(self, package: usize, module_path: List<String>, file: String, merged: bool, sources: SourceMap, diagnostics: Diagnostics) -> bool {
+    const text = match fs::read_to_string(file) {
+      Ok(found) => found,
+      Err(error) => {
+        eprintln(`error: cannot read \`${file}\`: ${error.message()}`);
+        return false;
+      }
+    };
+    const root = match self.packages.get(package) {
+      Some(loaded) => if loaded.name.is_empty() { "pkg" } else { loaded.name },
+      None => "pkg",
+    };
+    const parts = List::from([root]);
+
+    for segment in module_path {
+      parts.push(segment);
+    }
+
+    const name = module_path.last().unwrap_or("");
+    const id = sources.add(file, text);
+    const help = if merged { `keep one file for the module: merge \`${name}.sag\` into \`${name}/mod.sag\`` } else { `move \`${name}.sag\` to \`${name}/mod.sag\`, next to its submodules` };
+
+    diagnostics.push(
+      Diagnostic::error(codes::MODULE_LAYOUT, Span::new(id, 0, 0), `the module \`${parts.join("::")}\` has both the file \`${name}.sag\` and the directory \`${name}/\``)
+        .with_note("a module with submodules is the file `mod.sag` of their directory")
+        .with_help(help),
+    );
+
+    true
   }
 
   /// The package of the program, compiled for `target`: its modules, the prelude and the
   /// standard library modules.
   pub fn package(self, prelude: usize, target: TargetInfo) -> Package {
-    const info = PackageInfo { name: "", dependencies: new List() };
+    const infos: List<PackageInfo> = new List();
 
-    Package { modules: self.modules, prelude: Some(prelude), std: self.std, library: false, packages: List::from([info]), target: target }
+    for loaded in self.packages {
+      infos.push(PackageInfo { name: loaded.name, dependencies: loaded.dependencies });
+    }
+
+    Package { modules: self.modules, prelude: Some(prelude), std: self.std, library: false, packages: infos, target: target }
   }
 }

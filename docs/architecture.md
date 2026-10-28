@@ -1,6 +1,8 @@
 # Compiler architecture
 
-How the `sag` compiler is structured. Rationale: [ADR-0001](adr/0001-compile-to-c-via-sir.md),
+How the `sag` compiler is structured. It is written in Sagitario (`compiler/`) and builds from a
+seed of the C it generates for itself ([ADR-0067](adr/0067-bootstrap-from-the-seed.md)).
+Rationale: [ADR-0001](adr/0001-compile-to-c-via-sir.md),
 [ADR-0015](adr/0015-compiler-architecture-and-toolchain.md).
 
 ## Pipeline
@@ -12,56 +14,51 @@ How the `sag` compiler is structured. Rationale: [ADR-0001](adr/0001-compile-to-
 ```
 
 Phases communicate only through data structures (tokens, AST, typed AST, SIR). There is no
-global mutable state; each crate can be tested in isolation.
+global mutable state; `sag check --dump=tokens|ast|resolve|declarations|types|c` prints the
+result of each pass, which the expected dumps of `tests/` check (docs/testing.md).
 
 A program is a *package* of modules, one per file (docs/spec/09-modules.md). The driver lexes
-and parses the entry file, asks `sagitario_resolve::module_references` which module paths it
+and parses the entry file, asks `resolve::modules::module_references` which module paths it
 mentions, loads those that exist as files (`pkg::net::http` is `net/http.sag` next to the
 entry file) and repeats for each new module. Resolution builds the module tree, resolves `use`
 declarations and checks visibility; from then on the package is analyzed as a whole, and
 functions and types are numbered across all modules.
 
-## Repository layout (target)
+## Repository layout
 
 ```
-Cargo.toml          virtual workspace; shared versions in [workspace.dependencies]
-crates/
-  sagitario_span/         source files, file ids, byte offsets, spans, line/column mapping
-  sagitario_diagnostics/  diagnostics (code E0001…, severity, spans, notes) and rendering
-  sagitario_lexer/        hand-written lexer: text → tokens
-  sagitario_ast/          AST definitions
-  sagitario_parser/       recursive descent + Pratt parsing for expressions: tokens → AST
-  sagitario_resolve/      module tree from files, `use`, name resolution, visibility
-  sagitario_types/        type checking, local inference, generics, inheritance, interfaces,
-                          `Send` and the check of `thread::spawn` (send.rs)
-  sagitario_sir/          SIR definition + lowering from typed AST + retain/release insertion
-  sagitario_codegen_c/    SIR → C11 text
-  sagitario_driver/       orchestrates the pipeline, embeds the runtime, invokes the C compiler
-  sagitario_cli/          the `sag` binary
-  sagitario_nova/         the `nova` binary: package manager, `Nova.toml` parser (docs/nova.md)
+compiler/           the compiler and Nova, written in Sagitario (compiler/Nova.toml)
+  src/main.sag            `sag`: the command line
+  src/version.sag         the version of Sagitario, shared by `sag`, its language server and Nova
+  src/span.sag            source files, file ids, byte offsets, spans, line/column mapping
+  src/diagnostics/        diagnostics (code E0001…, severity, spans, notes), rendering, and the
+                          registry of codes (codes.sag)
+  src/lexer.sag           hand-written lexer: text → tokens (unicode.sag: the Unicode data it uses)
+  src/ast/                AST definitions and their dump
+  src/parser.sag          recursive descent + Pratt parsing for expressions: tokens → AST
+  src/loader.sag          reads the entry file and the modules, dependencies and std it reaches
+  src/resolve/            module tree, `use`, name resolution, visibility
+  src/types/              type checking, local inference, generics, inheritance, interfaces,
+                          flow analysis, `Send` and the check of `thread::spawn` (send.sag)
+  src/sir/                SIR definition + lowering from the typed AST + retain/release insertion
+  src/codegen_c.sag       SIR → C11 text
+  src/driver/             orchestrates the pipeline, embeds the runtime, invokes the C compiler;
+                          library headers (header.sag) and targets (targets.sag)
+  src/lsp/                `sag lsp`, the language server
+  src/nova_main.sag       `nova`: the package manager (docs/nova.md), with src/nova/
+  std/                    the prelude and the standard library written in Sagitario
 runtime/            minimal C runtime (ARC, panic, String, allocation, I/O and the OS calls of std)
-tests/              end-to-end suites (see testing.md)
-compiler/           the compiler written in Sagitario (F5, `sagc`), ported pass by pass
+bootstrap/          the seed (the C of the compiler, with its runtime) and the scripts that build
+                    the compiler from it with a C compiler alone (see testing.md)
+tests/              end-to-end suites, and their harness in Sagitario in tests/harness/ (see testing.md)
+install/            the installers of a release: install.sh (Linux, macOS) and install.ps1 (Windows)
+editors/vscode/     the VS Code extension
 ```
 
-## Crate dependency rule
-
-Dependencies flow strictly forward through the pipeline:
-
-```
-span ◀─ diagnostics ◀─ lexer ◀─ parser ─▶ ast
-                                  ▲
-resolve ◀─ types ◀─ sir ◀─ codegen_c ◀─ driver ◀─ cli
-                                          ▲
-                                          └──── nova
-```
-
-- A crate never depends on a later phase.
-- Core crates (`sagitario_span` through `sagitario_codegen_c`) have **zero external
-  dependencies**. `sagitario_driver` should stay dependency-free too; `sagitario_cli` may use
-  CLI crates. Dev-dependencies (e.g. `insta`) are allowed everywhere.
-- Rust code is written to be portable to Sagitario (F5): plain structs, enums, functions and
-  simple traits; no proc macros or elaborate trait-level generics.
+The compiler is written in plain Sagitario, and its C is strict C11 like any program's. Each pass
+reads the result of the previous ones; none depends on a later pass, except that the loader,
+which runs the lexer and the parser, is shared by the driver, the type checker (for
+`include_str`) and the language server.
 
 ## SIR
 
@@ -107,7 +104,8 @@ could be added.
   overflow (panic in debug, wrap in release); shifts, division and indexing are checked.
 - `#line` directives map C back to `.sag` sources (the file and line of each statement); one is
   repeated right before each runtime check that reports `__LINE__`, since a statement can span
-  several C lines.
+  several C lines. Their paths use `/` on every system, so that the C does not depend on the
+  machine that generates it.
 - `sag build --emit-c` writes the generated C for inspection.
 - Each struct becomes a C struct `sag_sN` (fields `fN`), each enum a `sag_eN`, and each array,
   `Option` and `Result` type a `sag_tN`. Arrays wrap a C array; enum-like types hold a `tag` and
@@ -156,11 +154,11 @@ could be added.
 - A program can span several packages (`Package::packages`): the one being compiled, then its
   dependencies, each with its own module tree (`Module::package`, `Resolution::package_roots`).
   The driver loads each dependency's root module and the modules its paths reach
-  (`sagitario_resolve::module_references` tells which package each one belongs to). `pkg` names
+  (`resolve::modules::module_references` tells which package each one belongs to). `pkg` names
   the root of the current module's package, and a dependency's name is a further path root.
   Everything is then checked and lowered as one program. Nova, not the compiler, reads the
   manifests and checks the graph (names, libraries, no cycles).
-- The prelude part written in Sagitario (`crates/sagitario_driver/src/prelude.sag`, followed by
+- The prelude part written in Sagitario (`compiler/std/prelude.sag`, followed by
   one range function per integer type that the driver generates) is embedded by the driver as a
   module outside the package tree; the resolver looks names up there after a module's own items
   and imports. The compiler finds the items it relies on by name (`Resolution::prelude_item`,
@@ -168,13 +166,13 @@ could be added.
   private functions behind methods such as `List::sort` or `String::split`
   (`BuiltinMethod::Prelude`, called with the receiver first). Prelude functions are templates,
   lowered only when used.
-- The standard library modules written in Sagitario (`crates/sagitario_driver/src/std/*.sag`)
+- The standard library modules written in Sagitario (`compiler/std/*.sag`)
   are embedded by the driver too. It loads one when a loaded module names it
-  (`sagitario_resolve::std_references`) and lists them in `Package::std`; the resolver makes
+  (`resolve::modules::std_references`) and lists them in `Package::std`; the resolver makes
   them children of a `std` module outside the package tree (`Resolution::std_root`), next to
-  `std::ffi`, which the compiler implements. `std` has its own file (`std/std.sag`, loaded with
-  the first module of `std`) for helpers that only its modules see. Their functions are templates like the prelude's
-  (`Resolution::in_library`). Their `extern` blocks declare runtime functions
+  `std::ffi`, which the compiler implements. `std` has its own file (`compiler/std/mod.sag`,
+  loaded with the first module of `std`) for helpers that only its modules see. Their functions
+  are templates like the prelude's (`Resolution::in_library`). Their `extern` blocks declare runtime functions
   (`Resolution::is_runtime_extern`: names starting with `sag_`, which may take and return
   `String`); the C backend calls those directly, without an FFI wrapper. `std::process::exit`
   is `Builtin::Exit`, typed `Never` like `panic`.
@@ -212,7 +210,8 @@ could be added.
 
 ## Runtime
 
-Minimal C, embedded in the `sag` binary and compiled with every program:
+Minimal C, embedded in the `sag` binary (`include_str` in `compiler/src/driver/mod.sag`) and
+compiled with every program:
 
 - ARC object header and retain/release, through `sag_count`: atomic when the program uses
   `std::thread` (`SAG_THREADS`, [ADR-0045](adr/0045-threads-and-send.md)), plain otherwise,
@@ -236,7 +235,7 @@ Minimal C, embedded in the `sag` binary and compiled with every program:
   `sag_c_char` (C's `char`) and the raw pointer macros (`SAG_PTR_ADD`, `SAG_CHECK_PTR`, ...),
 - a live-object counter checked at exit when `SAG_LEAK_CHECK` is set (exit code 102).
 
-Anything expressible in Sagitario belongs in `std/` instead.
+Anything expressible in Sagitario belongs in `compiler/std/` instead.
 
 ## C toolchain
 
@@ -261,7 +260,7 @@ Anything expressible in Sagitario belongs in `std/` instead.
   generated C alone is an internal compiler error; one in the package's sources or libraries is
   an error of the package. A dynamic library exports only the `extern "C" fn` functions,
   through a module-definition file (Windows), a version script (Linux) or an exported symbols
-  list (macOS). `header.rs` writes a library's C header from the typed program, spelling
+  list (macOS). `driver/header.sag` writes a library's C header from the typed program, spelling
   `c_char` as `char` from the type written in the source.
 - Executables reserve an 8 MiB stack on Windows (`/STACK` through the linker), the default of
   Linux and macOS, so programs recurse as deeply on every system
@@ -270,10 +269,23 @@ Anything expressible in Sagitario belongs in `std/` instead.
   runtime start with `#define SAG_THREADS 1`; they compile with `-pthread` outside Windows and
   with `/experimental:c11atomics` under `cl`. `--sanitize=thread` uses `-fsanitize=thread` where
   the target has it (not Windows), and otherwise the usual sanitizers.
-- Cross-compilation (`targets.rs`): a target gives the C compiler with the arguments every call
+- Cross-compilation (`driver/targets.sag`): a target gives the C compiler with the arguments every call
   needs (`CCompiler::args`: `--target=<triple>`, and `-isysroot` for iOS) and the facts the type
   checker needs (`TargetInfo` in `Package::target`: pointer width, size of C's `long`, sign of
   C's `char`). Without `--target` they are those of the machine running the compiler.
+
+## Language server
+
+`sag lsp` (`compiler/src/lsp/mod.sag`, [ADR-0058](adr/0058-language-server.md)) speaks LSP over
+stdin and stdout. After each change it runs the front end on the program of the document, as
+`sag check` does, with the open documents in place of their files (`Loader::overrides`), and
+keeps the last analysis that reached the type checker for hover, definitions and completion
+while the code being typed does not compile. `lsp/positions.sag` converts LSP's UTF-16 columns
+to byte offsets, `lsp/query.sag` finds the node under the cursor, `lsp/completion.sag` reads the
+text before the cursor, `lsp/tokens.sag` gives the names of paths their semantic tokens
+([ADR-0059](adr/0059-language-server-paths-and-semantic-tokens.md)), and `lsp/json.sag` parses
+and writes JSON. The VS Code extension starts
+it (`editors/vscode/extension.js`).
 
 ## CLI
 
@@ -305,5 +317,5 @@ to forward arguments to the program.
   ANSI codes (Windows Terminal, VS Code, MSYS2/mintty, ConEmu).
 - A run with errors ends with `error: could not compile ... due to N previous errors`; a run
   with only warnings ends with `warning: ... generated N warnings`.
-- Diagnostic codes are registered in `crates/sagitario_diagnostics/src/codes.rs`, with one
-  range per phase.
+- Diagnostic codes are registered in `compiler/src/diagnostics/codes.sag`, with one range per
+  phase.

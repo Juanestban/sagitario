@@ -2,6 +2,11 @@
 
 Rationale: [ADR-0014](adr/0014-mvp-scope.md). **The MVP is F0 + F1 + F2, desktop only.**
 
+**Where we are:** F0–F6 are done: the compiler, Nova and the language server are written in
+Sagitario and build from a seed of generated C, without Rust
+([ADR-0067](adr/0067-bootstrap-from-the-seed.md)). F7 (distribution) is in progress. The phases before
+F6 describe the Rust compiler as it was then; it retired in F6.
+
 ## F0: Infrastructure (MVP)
 
 - Valid virtual workspace (`crates/*`), remove the root `src/main.rs`, shared lint config.
@@ -96,8 +101,8 @@ Increments:
 8. MSVC `cl` supported best-effort, `zig cc` not adopted, `c_char` spelled `char` in headers,
    and the acceptance program ([ADR-0044](adr/0044-c-toolchains.md)).
 
-**Status:** done. The acceptance program is `tests/acceptance/f3/`, run by the Nova test
-`f3_acceptance`.
+**Status:** done. The acceptance program is `tests/acceptance/f3/`, run by the test
+`f3_acceptance` of the harness.
 
 **Acceptance:** a command-line tool (a small `grep` or `wc`) built as a package reads files and
 stdin, depends on a local library package and passes with sanitizers; the same library builds
@@ -155,18 +160,85 @@ Increments:
 and macOS with clang, gcc and MinGW, and `sagc` built by stage 1 (stage 2) generates the same C
 for the compiler as stage 1.
 
-**Status:** done once the `bootstrap` CI job passes on the three systems; the fixed point holds
-on Windows with official clang, gcc (MinGW) and `cl`.
+**Status:** done. The `bootstrap` CI job builds `sagc` (stage 1), runs the suites with it and
+reaches the fixed point on Windows, Linux and macOS
+([ADR-0056](adr/0056-bootstrap-and-acceptance.md)).
+
+## F6: Editor tooling and independence from Rust (post-MVP)
+
+Write Sagitario comfortably, and develop it in itself
+([ADR-0057](adr/0057-editor-tooling-and-independence-from-rust.md)).
+
+Increments:
+
+1. The VS Code extension (`editors/vscode/`): highlighting, the file icon, the language
+   configuration and snippets.
+2. A language server written in Sagitario (`sag lsp`), with the VS Code client: diagnostics,
+   hover, go to definition, completion and symbols; `io::read_exact`, and standard streams byte
+   for byte on every system ([ADR-0058](adr/0058-language-server.md)).
+3. The pivot without Rust ([ADR-0060](adr/0060-driver-parity-for-nova.md)):
+   - 3a. `sagc` builds libraries with their C header, and takes dependencies and `[link]` through
+     options that Nova passes.
+   - 3b. Nova in Sagitario (`compiler/src/nova_main.sag`), which runs `sag`
+     ([ADR-0064](adr/0064-nova-in-sagitario.md)).
+   - 3c. The test harness in Sagitario (`tests/harness/`), with expected dumps for the corpus of
+     each pass ([ADR-0066](adr/0066-test-harness-in-sagitario.md)).
+   - 3d. The generated C of the compiler as a seed, CI without `cargo`, and `sagc` renamed to
+     `sag` with `crates/` retired ([ADR-0067](adr/0067-bootstrap-from-the-seed.md)): 3d-1 the
+     seed and the scripts of the bootstrap (`bootstrap/`), 3d-2 the rename and the standard
+     library in `compiler/std/`, 3d-3 Rust removed.
+
+**Status:** done. Sagitario builds from `bootstrap/sag.c` with a C compiler alone, and CI builds
+it and runs the harness on Windows, Linux and macOS without Rust
+([ADR-0067](adr/0067-bootstrap-from-the-seed.md)).
+
+## F7: Distribution and updates (post-MVP)
+
+Install Sagitario on Windows, Linux and macOS with one command, as `rustup` installs Rust, and
+keep it up to date with `nova update self`
+([ADR-0063](adr/0063-distribution-phase-and-roadmap-v2.md)). It follows F6, since it ships `sag`
+and Nova written in Sagitario.
+
+**Status:** in progress: increments 1 ([ADR-0068](adr/0068-releases-and-distribution.md)) and 2
+([ADR-0069](adr/0069-installers.md)) are done. The installers put a release in `~/.sagitario/bin`,
+where `bootstrap/build.sh --install` and `build.ps1 --install` put a build from source (ADR-0067,
+Q368).
+
+Increments:
+
+1. **Releases.** One version for the whole toolchain (`sag`, `nova`, the standard library and the
+   runtime). A CI job, on a tag `vX.Y.Z`, bootstraps from the seed on each platform and publishes
+   a GitHub Release of the repository with an archive per platform (Windows x86-64, Linux
+   x86-64 and AArch64, macOS AArch64 and x86-64), their SHA-256 checksums and notes.
+2. **Installers.** `install.sh` (Linux, macOS) and `install.ps1` (Windows) download the latest
+   release, check its checksum, put `sag` and `nova` in `~/.sagitario/bin`, add it to `PATH`,
+   and check for a C compiler, saying how to install one if there is none. Native packages
+   (`.msi`, `.pkg`, `.deb`) may follow.
+3. **`nova update self`.** Asks the GitHub Releases of the repository for the latest version,
+   compares it with the installed one, and when it is newer downloads the archive of the
+   platform, checks its checksum, replaces `sag`, `nova` and the standard library (on Windows a
+   running executable is renamed, then replaced), and keeps the previous version to go back to.
+   `nova update self --check` only says whether there is one.
+4. **The editor.** The VS Code extension is published to the Marketplace with each release, and
+   finds `sag` in `~/.sagitario/bin` without settings.
+
+**Acceptance:** on a clean machine of each system, one command installs Sagitario; `nova new`,
+`nova run` and the VS Code extension work; and `nova update self` updates from one published
+release to the next.
+
+**Settled questions** ([ADR-0068](adr/0068-releases-and-distribution.md)): downloads go through
+the `curl` of the system; SHA-256 and JSON live inside the compiler (`compiler/src/sha256.sag`,
+`compiler/src/json.sag`), not in the standard library; a C compiler is required, and the installers
+say how to install one; and the executables are not signed in F7.
 
 ## Later phases (post-MVP)
 
-- **F6 `async`/`await`:** stackless tasks (`Task<T>`) on a single-threaded executor per thread,
+- **F8 `async`/`await`:** stackless tasks (`Task<T>`) on a single-threaded executor per thread,
   as designed in [ADR-0048](adr/0048-async-await.md).
+- **Roadmap v2:** a game engine written in Sagitario, with the language and library features it
+  needs ([roadmap-v2.md](roadmap-v2.md)).
 
 ## Deferred decisions
-
-Revisit after F5: whether the Rust compiler retires, for example by bootstrapping from
-committed generated C, and with it the rename of `sagc` to `sag` (ADR-0049, Q212 and Q214).
 
 Revisit after the MVP: shared mutable collections between threads (ADR-0045), bounded
 channels, `try_receive` and timeouts (ADR-0047), `protected` visibility, `weak` captures in closures, operator

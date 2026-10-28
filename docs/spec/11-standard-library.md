@@ -59,11 +59,18 @@ fn main() -> Result<(), io::Error> {
 | `flush()` | Writes out what stdout holds in its buffer |
 | `read_line() -> Result<Option<String>, io::Error>` | The next line of stdin without its `\n` or `\r\n`; `None` at the end of the input |
 | `read_to_string() -> Result<String, io::Error>` | The rest of stdin; `""` at the end of the input |
+| `is_terminal(stream: io::Stream) -> bool` | Whether `io::Stream::Stdin`, `Stdout` or `Stderr` is connected to a terminal rather than to a file or a pipe |
+| `read_exact(count: usize) -> Result<String, io::Error>` | Exactly `count` bytes of stdin, such as a message whose length is known; an input that ends before is an error of kind `UnexpectedEof` |
 
 - The functions without a stated result return `Result<(), io::Error>`. The prelude's `print`,
   `println` and `eprintln` panic instead ([prelude](09-modules.md#prelude)); both write to the
   same streams, in order.
 - Input that is not valid UTF-8 is an error of kind `InvalidData`; the bytes read are lost.
+- stdin, stdout and stderr are read and written byte for byte on every system: `\n` is written as
+  `\n`, also on Windows, and nothing is translated when reading
+  ([ADR-0058](../adr/0058-language-server.md)).
+- `is_terminal` is `false` for files, pipes and, on Windows, any device that is not a console,
+  such as `NUL` ([ADR-0061](../adr/0061-terminals.md)).
 
 ### `io::Error` and `io::ErrorKind`
 

@@ -1,0 +1,647 @@
+//! Completion (docs/adr/0058-language-server.md). The text around the cursor tells what is being
+//! written, since code being typed rarely compiles: a member after `.`, an item after `::`, or a
+//! name. Types come from the last analysis of the document that reached the type checker.
+
+use pkg::ast::Module;
+use pkg::lsp::analysis::Analysis;
+use pkg::lsp::json;
+use pkg::lsp::json::{Json, member};
+use pkg::lsp::query;
+use pkg::resolve::{ItemRef, ModuleInfo, Resolution, StdItem, TypeItem};
+use pkg::types;
+use pkg::types::{Type, TypeKind};
+use pkg::types::typed::TypedModule;
+
+/// Kinds of completion items (LSP's `CompletionItemKind`).
+const METHOD: i64 = 2;
+const FUNCTION: i64 = 3;
+const FIELD: i64 = 5;
+const VARIABLE: i64 = 6;
+const CLASS: i64 = 7;
+const INTERFACE: i64 = 8;
+const MODULE: i64 = 9;
+const ENUM: i64 = 13;
+const KEYWORD: i64 = 14;
+const ENUM_MEMBER: i64 = 20;
+const CONSTANT: i64 = 21;
+const STRUCT: i64 = 22;
+
+const KEYWORDS: String = "abstract as break class const continue else enum extends extern false fn for if impl in interface let loop match new override pkg prv pub return self Self struct super true unsafe use var weak where while zod";
+
+const BUILTINS: String = "print println eprintln panic include_str";
+
+/// The types the language provides (docs/spec/02-types.md).
+const BUILTIN_TYPES: String = "i8 i16 i32 i64 isize u8 u16 u32 u64 usize f32 f64 bool char String StringBuilder List Option Result";
+
+const STD_MODULES: String = "env ffi fs io path process sync thread time";
+
+/// The methods of the types the compiler provides (docs/spec/02-types.md).
+const STRING_METHODS: String = "len is_empty contains starts_with ends_with find trim trim_start trim_end to_ascii_uppercase to_ascii_lowercase replace repeat substring chars bytes split lines parse_i8 parse_i16 parse_i32 parse_i64 parse_isize parse_u8 parse_u16 parse_u32 parse_u64 parse_usize parse_f32 parse_f64";
+const LIST_METHODS: String = "len is_empty push pop get first last insert remove clear reverse contains index_of sort sort_by join iter";
+const ARRAY_METHODS: String = "len iter map filter take skip step_by collect count fold for_each any all find";
+const OPTION_METHODS: String = "is_some is_none unwrap expect unwrap_or map and_then unwrap_or_else filter";
+const RESULT_METHODS: String = "is_ok is_err unwrap expect unwrap_or unwrap_err map map_err and_then unwrap_or_else";
+const BUILDER_METHODS: String = "append append_char len is_empty clear to_string";
+const CHAR_METHODS: String = "is_ascii_digit is_ascii_alphabetic is_ascii_alphanumeric is_ascii_whitespace is_ascii_uppercase is_ascii_lowercase to_ascii_uppercase to_ascii_lowercase to_digit";
+
+/// The completion items, without repeated labels.
+class Items {
+  pub const list: List<Json>;
+  prv const seen: Map<String, bool>;
+
+  pub fn new(self) {
+    self.list = new List();
+    self.seen = new Map<String, bool>();
+  }
+
+  pub fn add(self, label: String, kind: i64, detail: String) {
+    if label.is_empty() || self.seen.contains_key(label) {
+      return;
+    }
+
+    self.seen.insert(label, true);
+
+    const members = List::from([member("label", json::str(label)), member("kind", json::int(kind))]);
+
+    if !detail.is_empty() {
+      members.push(member("detail", json::str(detail)));
+    }
+
+    self.list.push(json::object(members));
+  }
+
+  pub fn add_words(self, words: String, kind: i64) {
+    for word in words.split(" ") {
+      self.add(word, kind, "");
+    }
+  }
+}
+
+fn is_name_char(c: char) -> bool {
+  c.is_ascii_alphanumeric() || c == '_'
+}
+
+/// The characters of `text` before `offset`.
+fn before(text: String, offset: u32) -> List<char> {
+  const end = if offset as usize > text.len() { text.len() } else { offset as usize };
+
+  text.substring(0, end).chars().collect()
+}
+
+/// A receiver written before `.` or `::`: names separated by `.`, each possibly called with `()`
+/// (`self.items.first().`), read backwards from the position of the separator.
+fn receiver_chain(chars: List<char>, end: usize) -> List<String> {
+  const segments: List<String> = new List();
+  var position = end;
+
+  while true {
+    // `name()`: the call's arguments are skipped, their result is the method's.
+    var called = false;
+
+    if position > 0 && chars.get(position - 1).unwrap_or(' ') == ')' {
+      var depth = 0usize;
+
+      while position > 0 {
+        position -= 1;
+
+        const c = chars.get(position).unwrap_or(' ');
+
+        if c == ')' {
+          depth += 1;
+        } else if c == '(' {
+          depth -= 1;
+
+          if depth == 0 {
+            break;
+          }
+        }
+      }
+
+      called = true;
+    }
+
+    const name_end = position;
+
+    while position > 0 && is_name_char(chars.get(position - 1).unwrap_or(' ')) {
+      position -= 1;
+    }
+
+    if position == name_end {
+      return new List();
+    }
+
+    const name = new StringBuilder();
+
+    for index in position..name_end {
+      name.append_char(chars.get(index).unwrap_or(' '));
+    }
+
+    segments.insert(0, if called { name.to_string() + "()" } else { name.to_string() });
+
+    if position > 0 && chars.get(position - 1).unwrap_or(' ') == '.' {
+      position -= 1;
+    } else {
+      return segments;
+    }
+  }
+
+  segments
+}
+
+/// The names before `::` (`std::fs::`), read backwards from the position of the separator.
+fn path_chain(chars: List<char>, end: usize) -> List<String> {
+  const segments: List<String> = new List();
+  var position = end;
+
+  while true {
+    const name_end = position;
+
+    while position > 0 && is_name_char(chars.get(position - 1).unwrap_or(' ')) {
+      position -= 1;
+    }
+
+    if position == name_end {
+      return segments;
+    }
+
+    const name = new StringBuilder();
+
+    for index in position..name_end {
+      name.append_char(chars.get(index).unwrap_or(' '));
+    }
+
+    segments.insert(0, name.to_string());
+
+    if position >= 2 && chars.get(position - 1).unwrap_or(' ') == ':' && chars.get(position - 2).unwrap_or(' ') == ':' {
+      position -= 2;
+    } else {
+      return segments;
+    }
+  }
+
+  segments
+}
+
+/// The completion items at `offset` of `text`, the document of `module` in `analysis`.
+pub fn complete(analysis: Option<Analysis>, module: Option<Module>, module_index: Option<usize>, text: String, offset: u32) -> Json {
+  const items = new Items();
+  const chars = before(text, offset);
+  var start = chars.len();
+
+  while start > 0 && is_name_char(chars.get(start - 1).unwrap_or(' ')) {
+    start -= 1;
+  }
+
+  const separator = if start > 0 { chars.get(start - 1).unwrap_or(' ') } else { ' ' };
+  const double_colon = separator == ':' && start >= 2 && chars.get(start - 2).unwrap_or(' ') == ':';
+
+  if let Some(found) = analysis {
+    if separator == '.' {
+      members_after(items, found, module, chars, start - 1, offset);
+      return Json::Array(items.list);
+    }
+
+    if double_colon {
+      path_members(items, found, module_index, path_chain(chars, start - 2));
+      return Json::Array(items.list);
+    }
+
+    names(items, found, module, module_index, offset);
+  }
+
+  items.add_words(BUILTIN_TYPES, STRUCT);
+  items.add_words(KEYWORDS, KEYWORD);
+  items.add_words(BUILTINS, FUNCTION);
+  Json::Array(items.list)
+}
+
+// ---- Names ------------------------------------------------------------------------------------
+
+fn item_kind(item: ItemRef) -> i64 {
+  match item {
+    ItemRef::Fn(_) => FUNCTION,
+    ItemRef::Extern(_) => FUNCTION,
+    ItemRef::Const(_) => CONSTANT,
+    ItemRef::Type(TypeItem::Struct(_)) => STRUCT,
+    ItemRef::Type(TypeItem::Enum(_)) => ENUM,
+    ItemRef::Type(TypeItem::Class(_)) => CLASS,
+    ItemRef::Type(TypeItem::Interface(_)) => INTERFACE,
+    ItemRef::Module(_) => MODULE,
+    ItemRef::Std(StdItem::Root) => MODULE,
+    ItemRef::Std(StdItem::Ffi) => MODULE,
+    ItemRef::Std(_) => FUNCTION,
+  }
+}
+
+fn item_detail(analysis: Analysis, item: ItemRef) -> String {
+  match item {
+    ItemRef::Fn(id) => query::signature(analysis, id).unwrap_or(""),
+    _ => "",
+  }
+}
+
+/// The module of the program read from module `index` of the package.
+fn module_info(resolution: Resolution, index: usize) -> Option<ModuleInfo> {
+  for info in resolution.modules {
+    if let Some(source) = info.source {
+      if source == index {
+        return Some(info);
+      }
+    }
+  }
+
+  None
+}
+
+fn add_module_items(items: Items, analysis: Analysis, info: ModuleInfo, public_only: bool) {
+  for entry in info.items.entries() {
+    if !public_only || entry.value.visibility == pkg::ast::Visibility::Public {
+      items.add(entry.key, item_kind(entry.value.item), item_detail(analysis, entry.value.item));
+    }
+  }
+
+  for name in info.children.keys() {
+    items.add(name, MODULE, "");
+  }
+}
+
+/// The bindings, items, prelude and builtins visible at `offset`.
+fn names(items: Items, analysis: Analysis, module: Option<Module>, module_index: Option<usize>, offset: u32) {
+  const resolution = match analysis.resolution {
+    Some(found) => found,
+    None => return,
+  };
+  const typed = analysis.typed;
+
+  // The bindings of the function declared before the cursor, nearest first.
+  if let Some(found_module) = module {
+    if let Some(function) = query::enclosing_function(analysis, found_module, offset) {
+      if let Some(locals) = resolution.locals.get(function as usize) {
+        var index = locals.len();
+
+        while index > 0 {
+          index -= 1;
+
+          const local = locals[index];
+
+          if local.span.start < offset {
+            var detail = "";
+
+            if let Some(found_typed) = typed {
+              if let Some(ty) = found_typed.local_type(function, index as u32) {
+                detail = types::text(ty);
+              }
+            }
+
+            items.add(local.name, VARIABLE, detail);
+          }
+        }
+      }
+    }
+  }
+
+  if let Some(index) = module_index {
+    if let Some(info) = module_info(resolution, index) {
+      add_module_items(items, analysis, info, false);
+
+      for entry in info.imports.entries() {
+        items.add(entry.key, item_kind(entry.value.item), item_detail(analysis, entry.value.item));
+      }
+    }
+  }
+
+  if let Some(prelude) = resolution.prelude {
+    if let Some(info) = resolution.modules.get(prelude as usize) {
+      add_module_items(items, analysis, info, true);
+    }
+  }
+
+  items.add("Some", ENUM_MEMBER, "");
+  items.add("None", ENUM_MEMBER, "");
+  items.add("Ok", ENUM_MEMBER, "");
+  items.add("Err", ENUM_MEMBER, "");
+  items.add("std", MODULE, "");
+}
+
+// ---- Paths ------------------------------------------------------------------------------------
+
+/// The items after `a::b::`.
+fn path_members(items: Items, analysis: Analysis, module_index: Option<usize>, chain: List<String>) {
+  const resolution = match analysis.resolution {
+    Some(found) => found,
+    None => return,
+  };
+  const first = match chain.first() {
+    Some(found) => found,
+    None => return,
+  };
+
+  if first == "std" && chain.len() == 1 {
+    items.add_words(STD_MODULES, MODULE);
+    return;
+  }
+
+  // The module the path starts from.
+  var current: Option<u32> = None;
+  var rest = 1usize;
+
+  if first == "pkg" {
+    current = resolution.package_roots.first();
+  } else if first == "std" {
+    current = resolution.std_root;
+  } else {
+    const here = match module_index {
+      Some(index) => query::module_id(resolution, index),
+      None => None,
+    };
+
+    if first == "self" {
+      current = here;
+    } else if first == "super" {
+      current = match here {
+        Some(id) => match resolution.modules.get(id as usize) {
+          Some(info) => info.parent,
+          None => None,
+        },
+        None => None,
+      };
+    } else {
+      current = here;
+      rest = 0;
+    }
+  }
+
+  var target: Option<ItemRef> = match current {
+    Some(id) => Some(ItemRef::Module(id)),
+    None => None,
+  };
+
+  for index in rest..chain.len() {
+    target = match target {
+      Some(ItemRef::Module(id)) => query::lookup(resolution, id, chain[index]),
+      _ => None,
+    };
+  }
+
+  const here = match module_index {
+    Some(index) => query::module_id(resolution, index),
+    None => None,
+  };
+
+  match target {
+    Some(ItemRef::Module(id)) => {
+      if let Some(info) = resolution.modules.get(id as usize) {
+        // Another module shows its public items only.
+        const own = match here {
+          Some(found) => found == id,
+          None => false,
+        };
+
+        add_module_items(items, analysis, info, !own);
+      }
+    }
+    Some(ItemRef::Type(item)) => type_functions(items, analysis, item),
+    _ => {}
+  }
+}
+
+/// The functions of a type without `self`, and an enum's variants: what `Type::` names.
+fn type_functions(items: Items, analysis: Analysis, item: TypeItem) {
+  const package = match analysis.package {
+    Some(found) => found,
+    None => return,
+  };
+  const resolution = match analysis.resolution {
+    Some(found) => found,
+    None => return,
+  };
+
+  if let TypeItem::Enum(id) = item {
+    if let Some(decl) = resolution.enum_decl(package, id) {
+      for variant in decl.variants {
+        items.add(variant.name.name, ENUM_MEMBER, "");
+      }
+    }
+  }
+
+  for function in functions_of(resolution, item) {
+    if let Some(decl) = resolution.fn_decl(package, function) {
+      if decl.self_param.is_none() {
+        items.add(decl.name.name, FUNCTION, query::signature(analysis, function).unwrap_or(""));
+      }
+    }
+  }
+}
+
+fn functions_of(resolution: Resolution, item: TypeItem) -> List<u32> {
+  const info = match item {
+    TypeItem::Struct(id) => resolution.structs.get(id as usize),
+    TypeItem::Enum(id) => resolution.enums.get(id as usize),
+    TypeItem::Class(id) => resolution.classes.get(id as usize),
+    TypeItem::Interface(id) => resolution.interfaces.get(id as usize),
+  };
+
+  match info {
+    Some(found) => found.functions,
+    None => new List(),
+  }
+}
+
+// ---- Members ----------------------------------------------------------------------------------
+
+/// The members after `receiver.`, where the `.` is at `dot` of the characters before the cursor.
+fn members_after(items: Items, analysis: Analysis, module: Option<Module>, chars: List<char>, dot: usize, offset: u32) {
+  const chain = receiver_chain(chars, dot);
+  const ty = match receiver_type(analysis, module, chain, offset) {
+    Some(found) => found,
+    None => return,
+  };
+
+  members(items, analysis, ty);
+}
+
+/// The type of a receiver chain: a binding, `self` or a constant, then fields and method calls.
+fn receiver_type(analysis: Analysis, module: Option<Module>, chain: List<String>, offset: u32) -> Option<Type> {
+  const resolution = analysis.resolution?;
+  const typed = analysis.typed?;
+  const first = chain.first()?;
+  var current: Option<Type> = None;
+
+  if let Some(found_module) = module {
+    if let Some(function) = query::enclosing_function(analysis, found_module, offset) {
+      if let Some(locals) = resolution.locals.get(function as usize) {
+        var index = locals.len();
+
+        while index > 0 && current.is_none() {
+          index -= 1;
+
+          if locals[index].name == first && locals[index].span.start < offset {
+            current = typed.local_type(function, index as u32);
+          }
+        }
+      }
+    }
+  }
+
+  var ty = current?;
+
+  for index in 1..chain.len() {
+    ty = member_type(analysis, ty, chain[index])?;
+  }
+
+  Some(ty)
+}
+
+/// The type of `value.name` (a field) or of `value.name()` (a method's result).
+fn member_type(analysis: Analysis, ty: Type, segment: String) -> Option<Type> {
+  const package = analysis.package?;
+  const resolution = analysis.resolution?;
+  const typed = analysis.typed?;
+  const called = segment.ends_with("()");
+  const name = if called { segment.substring(0, segment.len() - 2) } else { segment };
+
+  if called {
+    for function in methods_of(typed, resolution, ty) {
+      if let Some(decl) = resolution.fn_decl(package, function) {
+        if decl.name.name == name {
+          return Some(typed.sigs.get(function as usize)?.ret);
+        }
+      }
+    }
+
+    return None;
+  }
+
+  for field in fields_of(typed, ty) {
+    if field.name == name {
+      return Some(field.ty);
+    }
+  }
+
+  None
+}
+
+/// A field's name and type.
+struct FieldItem {
+  pub name: String;
+  pub ty: Type;
+}
+
+fn fields_of(typed: TypedModule, ty: Type) -> List<FieldItem> {
+  const found: List<FieldItem> = new List();
+
+  match ty.kind {
+    TypeKind::Struct(named) => {
+      if let Some(def) = typed.structs.get(named.id as usize) {
+        for field in def.fields {
+          found.push(FieldItem { name: field.name, ty: field.ty });
+        }
+      }
+    }
+    TypeKind::Class(named) => {
+      for class_id in typed.class_chain(named.id) {
+        if let Some(def) = typed.classes.get(class_id as usize) {
+          for field in def.fields {
+            found.push(FieldItem { name: field.name, ty: field.ty });
+          }
+        }
+      }
+    }
+    TypeKind::Interface(named) => {
+      if let Some(def) = typed.interfaces.get(named.id as usize) {
+        for field in def.fields {
+          found.push(FieldItem { name: field.name, ty: field.ty });
+        }
+      }
+    }
+    _ => {}
+  }
+
+  found
+}
+
+/// The functions with `self` of a type and of the types it inherits from.
+fn methods_of(typed: TypedModule, resolution: Resolution, ty: Type) -> List<u32> {
+  const found: List<u32> = new List();
+
+  match ty.kind {
+    TypeKind::Struct(named) => {
+      for function in functions_of(resolution, TypeItem::Struct(named.id)) {
+        found.push(function);
+      }
+    }
+    TypeKind::Enum(named) => {
+      for function in functions_of(resolution, TypeItem::Enum(named.id)) {
+        found.push(function);
+      }
+    }
+    TypeKind::Class(named) => {
+      for class_id in typed.class_chain(named.id) {
+        for function in functions_of(resolution, TypeItem::Class(class_id)) {
+          found.push(function);
+        }
+      }
+    }
+    TypeKind::Interface(named) => {
+      for function in functions_of(resolution, TypeItem::Interface(named.id)) {
+        found.push(function);
+      }
+    }
+    _ => {}
+  }
+
+  found
+}
+
+fn is_class(ty: Type) -> bool {
+  match ty.kind {
+    TypeKind::Class(_) => true,
+    _ => false,
+  }
+}
+
+/// The fields and methods of a value of type `ty`.
+fn members(items: Items, analysis: Analysis, ty: Type) {
+  const package = match analysis.package {
+    Some(found) => found,
+    None => return,
+  };
+  const resolution = match analysis.resolution {
+    Some(found) => found,
+    None => return,
+  };
+  const typed = match analysis.typed {
+    Some(found) => found,
+    None => return,
+  };
+
+  for field in fields_of(typed, ty) {
+    items.add(field.name, FIELD, types::text(field.ty));
+  }
+
+  for function in methods_of(typed, resolution, ty) {
+    if let Some(decl) = resolution.fn_decl(package, function) {
+      // A class's `new` initializes instances; `new Class(...)` calls it, an instance cannot.
+      const initializer = decl.name.name == "new" && is_class(ty);
+
+      if decl.self_param.is_some() && !initializer {
+        items.add(decl.name.name, METHOD, query::signature(analysis, function).unwrap_or(""));
+      }
+    }
+  }
+
+  const builtin = match ty.kind {
+    TypeKind::String => STRING_METHODS,
+    TypeKind::StringBuilder => BUILDER_METHODS,
+    TypeKind::List(_) => LIST_METHODS,
+    TypeKind::Array { .. } => ARRAY_METHODS,
+    TypeKind::Option(_) => OPTION_METHODS,
+    TypeKind::Result { .. } => RESULT_METHODS,
+    TypeKind::Char => CHAR_METHODS,
+    _ => "",
+  };
+
+  if !builtin.is_empty() {
+    items.add_words(builtin, METHOD);
+  }
+}

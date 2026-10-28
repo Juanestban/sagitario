@@ -1,0 +1,153 @@
+name: Release
+
+# A release of Sagitario on a tag `vX.Y.Z` (docs/adr/0068-releases-and-distribution.md): each
+# platform bootstraps from the seed in release mode, passes the harness with what it built and
+# writes its archive; the last job publishes them all, with their checksums, as a GitHub Release.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    strategy:
+      matrix:
+        include:
+          # The official LLVM clang, with the C runtime linked statically: the executables need no
+          # redistributable (docs/adr/0018-windows-c-toolchain.md).
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            cc: C:\Program Files\LLVM\bin\clang.exe
+          # The oldest Ubuntu runners, so that the executables need an older glibc.
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+            cc: clang
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04-arm
+            cc: clang
+          - target: aarch64-apple-darwin
+            os: macos-15
+            cc: clang
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+            cc: clang
+    runs-on: ${{ matrix.os }}
+    env:
+      SAG_CC: ${{ matrix.cc }}
+      # The oldest macOS the executables run on.
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check that the tag is the version of Sagitario
+        shell: bash
+        run: |
+          version=$(tr -d '\r' < compiler/Nova.toml | sed -n 's/^version = "\(.*\)"$/\1/p')
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::the tag $GITHUB_REF_NAME is not v$version, the version in compiler/Nova.toml"
+            exit 1
+          fi
+      # ThreadSanitizer cannot map its shadow memory with the address randomization of recent
+      # Ubuntu kernels (docs/adr/0045-threads-and-send.md).
+      - name: Allow ThreadSanitizer's memory layout
+        if: runner.os == 'Linux'
+        run: sudo sysctl vm.mmap_rnd_bits=28
+      - name: Show the C compiler
+        if: runner.os == 'Windows'
+        run: '& $env:SAG_CC --version'
+      - name: Show the C compiler
+        if: runner.os != 'Windows'
+        run: '"$SAG_CC" --version'
+      - name: Build and archive
+        if: runner.os == 'Windows'
+        run: ./bootstrap/build.ps1 --dist
+      - name: Build and archive
+        if: runner.os != 'Windows'
+        run: sh bootstrap/build.sh --dist
+      # What is released passes the harness, also on the platforms CI does not build on.
+      - name: Run the harness with the release
+        run: ./build/bin/sag run tests/harness/main.sag -- --sag build/bin/sag${{ runner.os == 'Windows' && '.exe' || '' }} --nova build/bin/nova${{ runner.os == 'Windows' && '.exe' || '' }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: archive-${{ matrix.target }}
+          path: |
+            build/dist/*.zip
+            build/dist/*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: publish the release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: archive-*
+          merge-multiple: true
+          path: dist
+      - name: Write the checksums
+        working-directory: dist
+        run: |
+          sha256sum sagitario-* > SHA256SUMS
+          cat SHA256SUMS
+      # With the installers (docs/adr/0069-installers.md), which `releases/latest/download/` serves.
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* install/install.sh install/install.ps1 --repo "$GITHUB_REPOSITORY" --title "Sagitario ${GITHUB_REF_NAME#v}" --generate-notes --verify-tag
+
+  # The commands of the README install the release just published, with the defaults: the
+  # directory, and PATH.
+  install:
+    name: install (${{ matrix.os }})
+    needs: publish
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            cc: C:\Program Files\LLVM\bin\clang.exe
+          - os: ubuntu-latest
+            cc: clang
+          - os: macos-latest
+            cc: clang
+    runs-on: ${{ matrix.os }}
+    env:
+      SAG_CC: ${{ matrix.cc }}
+    steps:
+      - name: Install
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          irm https://github.com/${{ github.repository }}/releases/latest/download/install.ps1 | iex
+          $installed = & "$env:USERPROFILE\.sagitario\bin\sag.exe" --version
+          if ($installed -ne "sag $($env:GITHUB_REF_NAME.Substring(1))") { throw "installed $installed" }
+          $path = [Environment]::GetEnvironmentVariable('Path', 'User') -split ';'
+          if ($path -notcontains "$env:USERPROFILE\.sagitario\bin") { throw 'the installer did not add its directory to PATH' }
+      - name: Install
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          curl -fsSL https://github.com/${{ github.repository }}/releases/latest/download/install.sh | sh
+          test "$("$HOME/.sagitario/bin/sag" --version)" = "sag ${GITHUB_REF_NAME#v}"
+          grep -F '.sagitario/bin' "$HOME/.profile"
+      - name: Build and run a package with what was installed
+        if: runner.os == 'Windows'
+        working-directory: ${{ runner.temp }}
+        run: |
+          & "$env:USERPROFILE\.sagitario\bin\nova.exe" new demo
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Set-Location demo
+          & "$env:USERPROFILE\.sagitario\bin\nova.exe" run
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      - name: Build and run a package with what was installed
+        if: runner.os != 'Windows'
+        working-directory: ${{ runner.temp }}
+        run: |
+          "$HOME/.sagitario/bin/nova" new demo
+          cd demo && "$HOME/.sagitario/bin/nova" run

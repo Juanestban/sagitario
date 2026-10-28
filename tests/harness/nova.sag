@@ -1,0 +1,955 @@
+//! Nova, the package manager (docs/nova.md): each test works in a new temporary directory.
+//! Building and running need a C compiler, found as `sag` finds it (`SAG_CC`, then `clang`,
+//! `gcc`). Nova runs the compiler under test, through `SAG`.
+
+use pkg::suites;
+use pkg::support;
+use pkg::support::{Context, Ran, Test, expect, expect_contains, expect_exit, expect_success};
+use std::env;
+use std::fs;
+use std::io;
+use std::path;
+use std::process::Command;
+
+pub fn tests() -> List<Test> {
+  List::from([
+    support::test("creates_builds_runs_and_cleans_a_program", creates_builds_runs_and_cleans_a_program),
+    support::test("runs_with_arguments_modules_and_exit_codes", runs_with_arguments_modules_and_exit_codes),
+    support::test("finds_the_package_from_a_subdirectory", finds_the_package_from_a_subdirectory),
+    support::test("builds_but_does_not_run_a_library", builds_but_does_not_run_a_library),
+    support::test("reports_errors_in_the_program", reports_errors_in_the_program),
+    support::test("init_keeps_existing_files", init_keeps_existing_files),
+    support::test("new_rejects_invalid_names_and_existing_directories", new_rejects_invalid_names),
+    support::test("reports_a_missing_manifest", reports_a_missing_manifest),
+    support::test("reports_usage_errors", reports_usage_errors),
+    support::test("reports_manifest_errors_with_their_location", reports_manifest_errors),
+    support::test("every_nova_code_has_a_test", every_nova_code_has_a_test),
+    support::test("builds_a_program_with_dependencies", builds_a_program_with_dependencies),
+    support::test("keeps_items_private_across_packages_and_lets_local_names_win", keeps_items_private),
+    support::test("reports_dependency_errors", reports_dependency_errors),
+    support::test("builds_a_library_that_c_programs_use", builds_a_library_that_c_programs_use),
+    support::test("builds_only_the_chosen_library_outputs", builds_only_the_chosen_library_outputs),
+    support::test("links_c_sources_and_libraries_into_programs", links_c_sources_and_libraries),
+    support::test("cross_compiles_libraries_and_programs_for_android", cross_compiles_for_android),
+    support::test("checks_integer_sizes_for_the_target", checks_integer_sizes_for_the_target),
+    support::test("builds_libraries_for_ios_on_macos_only", builds_libraries_for_ios_on_macos_only),
+    support::test("f3_acceptance", f3_acceptance),
+  ])
+}
+
+/// Two texts that go together: a file and its contents, a dependency and its path, a manifest
+/// and the error it causes.
+struct Pair {
+  pub key: String;
+  pub value: String;
+}
+
+fn pair(key: String, value: String) -> Pair {
+  Pair { key: key, value: value }
+}
+
+/// Nova under test: the one given to the harness, or else built from `compiler/src/nova_main.sag`
+/// by the compiler under test, once.
+fn nova_binary(cx: Context) -> Result<String, String> {
+  if let Some(nova) = cx.nova {
+    return Ok(nova);
+  }
+
+  const dir = cx.temp_dir("nova-binary")?;
+  // `--output` names the file itself, with its extension.
+  const binary = path::join(dir, exe("nova"));
+  const ran = support::sag(cx, List::from(["build", cx.file("compiler/src/nova_main.sag"), "--output", binary]))?;
+
+  expect_success("building Nova", ran)?;
+  cx.nova = Some(binary);
+  Ok(binary)
+}
+
+/// `nova <args>` in `dir`, with the compiler under test.
+fn nova_command(cx: Context, dir: String, args: List<String>) -> Result<Command, String> {
+  Ok(new Command(nova_binary(cx)?).args(args).current_dir(dir).env("SAG", cx.sag))
+}
+
+fn nova(cx: Context, dir: String, args: List<String>) -> Result<Ran, String> {
+  support::run(nova_command(cx, dir, args)?)
+}
+
+/// `nova <args>` in `dir`, which must succeed.
+fn nova_ok(cx: Context, dir: String, args: List<String>) -> Result<Ran, String> {
+  const ran = nova(cx, dir, args)?;
+
+  expect_success(`nova ${args.join(" ")}`, ran)?;
+  Ok(ran)
+}
+
+/// `nova <args>` in `dir`, which must fail with `code`.
+fn nova_fails(cx: Context, dir: String, args: List<String>, code: i32) -> Result<Ran, String> {
+  const ran = nova(cx, dir, args)?;
+
+  expect_exit(`nova ${args.join(" ")}`, ran, code)?;
+  Ok(ran)
+}
+
+fn exe(file: String) -> String {
+  file + support::exe_suffix()
+}
+
+/// `parts` joined as a path below `base`.
+fn under(base: String, parts: List<String>) -> String {
+  var file = base;
+
+  for part in parts {
+    file = path::join(file, part);
+  }
+
+  file
+}
+
+fn read(file: String) -> Result<String, String> {
+  Ok(support::unix_lines(support::read_file(file)?))
+}
+
+/// Writes a package with `Nova.toml` and the given source files in `dir`.
+fn package(dir: String, manifest: String, files: List<Pair>) -> Result<(), String> {
+  support::write_file(path::join(dir, "Nova.toml"), manifest)?;
+
+  for file in files {
+    support::write_file(path::join(path::join(dir, "src"), file.key), file.value)?;
+  }
+
+  Ok(())
+}
+
+fn manifest(name: String, dependencies: List<Pair>) -> String {
+  var text = `[package]\nname = "${name}"\nversion = "0.1.0"\n`;
+
+  if !dependencies.is_empty() {
+    text = text + "\n[dependencies]\n";
+
+    for dependency in dependencies {
+      text = text + `${dependency.key} = { path = "${dependency.value}" }\n`;
+    }
+  }
+
+  text
+}
+
+fn no_pairs() -> List<Pair> {
+  new List()
+}
+
+fn creates_builds_runs_and_cleans_a_program(cx: Context) -> Result<(), String> {
+  const temp = cx.temp_dir("nova")?;
+
+  nova_ok(cx, temp, List::from(["new", "hello"]))?;
+
+  const package = path::join(temp, "hello");
+  const target = path::join(package, "target");
+
+  support::expect_equal("Nova.toml", read(path::join(package, "Nova.toml"))?, "[package]\nname = \"hello\"\nversion = \"0.1.0\"\n")?;
+  support::expect_equal(".gitignore", read(path::join(package, ".gitignore"))?, "/target\n")?;
+  expect(fs::is_file(under(package, List::from(["src", "main.sag"]))), "src/main.sag was not created")?;
+
+  const run = nova_ok(cx, package, List::from(["run"]))?;
+
+  support::expect_equal("nova run", run.stdout, "Hello, world!\n")?;
+
+  nova_ok(cx, package, List::from(["build"]))?;
+  expect(fs::is_file(exe(under(target, List::from(["debug", "hello"])))), "the debug program was not built")?;
+
+  nova_ok(cx, package, List::from(["build", "--release", "--emit-c"]))?;
+  expect(fs::is_file(exe(under(target, List::from(["release", "hello"])))), "the release program was not built")?;
+  expect(fs::is_file(under(target, List::from(["release", "hello.c"]))), "the C was not written")?;
+
+  nova_ok(cx, package, List::from(["clean"]))?;
+  expect(!fs::exists(target), "`nova clean` left `target`")
+}
+
+fn runs_with_arguments_modules_and_exit_codes(cx: Context) -> Result<(), String> {
+  const temp = cx.temp_dir("nova")?;
+
+  nova_ok(cx, temp, List::from(["new", "tool"]))?;
+
+  const package = path::join(temp, "tool");
+  const src = path::join(package, "src");
+
+  support::write_file(under(src, List::from(["util", "text.sag"])), "pub fn shout(text: String) -> String {\n  text.to_ascii_uppercase()\n}\n")?;
+  support::write_file(
+    path::join(src, "main.sag"),
+    "use std::env;\nuse std::process;\nuse pkg::util::text;\n\nfn main() {\n  const args = env::args();\n  println(text::shout(args[1]));\n  process::exit(args.len() as i32);\n}\n",
+  )?;
+
+  const run = nova(cx, package, List::from(["run", "--", "hola", "x"]))?;
+
+  support::expect_equal("nova run", run.stdout, "HOLA\n")?;
+  expect_exit("nova run", run, 3)
+}
+
+fn finds_the_package_from_a_subdirectory(cx: Context) -> Result<(), String> {
+  const temp = cx.temp_dir("nova")?;
+
+  nova_ok(cx, temp, List::from(["new", "app"]))?;
+
+  const check = nova_ok(cx, under(temp, List::from(["app", "src"])), List::from(["check"]))?;
+
+  expect_contains("nova check", check.stderr, "Checking app v0.1.0")
+}
+
+fn builds_but_does_not_run_a_library(cx: Context) -> Result<(), String> {
+  const temp = cx.temp_dir("nova")?;
+
+  nova_ok(cx, temp, List::from(["new", "--lib", "geometry"]))?;
+
+  const package = path::join(temp, "geometry");
+  const lib = under(package, List::from(["src", "lib.sag"]));
+
+  expect(fs::is_file(lib), "src/lib.sag was not created")?;
+
+  // A library needs no `main`, and a function called `main` is an ordinary one.
+  support::write_file(lib, "pub fn main(x: i32) -> i32 {\n  x\n}\n")?;
+
+  // Without exported functions it still builds, with a warning.
+  const build = nova_ok(cx, package, List::from(["build"]))?;
+
+  expect_contains("nova build", build.stderr, "exports no functions")?;
+  expect(fs::is_file(under(package, List::from(["target", "debug", "geometry.h"]))), "the header was not written")?;
+
+  const run = nova_fails(cx, package, List::from(["run"]), 1)?;
+
+  expect_contains("nova run", run.stderr, "cannot run")?;
+  support::write_file(lib, "pub fn broken() -> i32 {\n  \"text\"\n}\n")?;
+
+  const broken = nova_fails(cx, package, List::from(["check", "--diagnostic-format", "short"]), 1)?;
+
+  expect_contains("nova check", broken.stderr, "lib.sag:2:3: error[E0300]")
+}
+
+fn reports_errors_in_the_program(cx: Context) -> Result<(), String> {
+  const temp = cx.temp_dir("nova")?;
+
+  nova_ok(cx, temp, List::from(["new", "app"]))?;
+
+  const package = path::join(temp, "app");
+
+  support::write_file(under(package, List::from(["src", "main.sag"])), "fn helper() {}\n")?;
+
+  const check = nova_fails(cx, package, List::from(["check", "--diagnostic-format", "short"]), 1)?;
+
+  expect_contains("nova check", check.stderr, "error[E0203]")
+}
+
+fn init_keeps_existing_files(cx: Context) -> Result<(), String> {
+  const temp = cx.temp_dir("nova")?;
+  const src = path::join(temp, "src");
+  const main = "fn main() {\n  println(\"mine\");\n}\n";
+
+  support::write_file(path::join(src, "main.sag"), main)?;
+  support::write_file(path::join(temp, ".gitignore"), "custom\n")?;
+
+  // The temporary directory's name is not a package name.
+  const unnamed = nova_fails(cx, temp, List::from(["init"]), 1)?;
+
+  expect_contains("nova init", unnamed.stderr, "--name")?;
+
+  nova_ok(cx, temp, List::from(["init", "--name", "mine", "--lib"]))?;
+  support::expect_equal("src/main.sag", read(path::join(src, "main.sag"))?, main)?;
+  support::expect_equal(".gitignore", read(path::join(temp, ".gitignore"))?, "custom\n")?;
+  expect(!fs::exists(path::join(src, "lib.sag")), "`nova init` wrote src/lib.sag")?;
+  expect_contains("Nova.toml", read(path::join(temp, "Nova.toml"))?, "name = \"mine\"")?;
+
+  const run = nova(cx, temp, List::from(["run"]))?;
+
+  support::expect_equal("nova run", run.stdout, "mine\n")?;
+  nova_fails(cx, temp, List::from(["init", "--name", "mine"]), 1)?;
+  Ok(())
+}
+
+fn new_rejects_invalid_names(cx: Context) -> Result<(), String> {
+  const temp = cx.temp_dir("nova")?;
+
+  for name in ["My-App", "fn", "std", "1app"] {
+    nova_fails(cx, temp, List::from(["new", name]), 1)?;
+    expect(!fs::exists(path::join(temp, name)), `\`nova new ${name}\` created a directory`)?;
+  }
+
+  nova_ok(cx, temp, List::from(["new", "app"]))?;
+  nova_fails(cx, temp, List::from(["new", "app"]), 1)?;
+  Ok(())
+}
+
+fn reports_a_missing_manifest(cx: Context) -> Result<(), String> {
+  const temp = cx.temp_dir("nova")?;
+
+  for command in ["build", "run", "check", "clean"] {
+    const ran = nova_fails(cx, temp, List::from([command]), 1)?;
+
+    expect_contains(`nova ${command}`, ran.stderr, "cannot find `Nova.toml`")?;
+  }
+
+  Ok(())
+}
+
+fn reports_usage_errors(cx: Context) -> Result<(), String> {
+  const temp = cx.temp_dir("nova")?;
+
+  nova_fails(cx, temp, List::from(["publish"]), 2)?;
+  nova_fails(cx, temp, List::from(["build", "main.sag"]), 2)?;
+  const version = nova_ok(cx, temp, List::from(["--version"]))?;
+
+  support::expect_equal("nova --version", version.stdout.trim(), `nova ${support::sagitario_version(cx)?}`)
+}
+
+/// Each manifest and the error it causes, as `line:column: error[code]`.
+fn manifest_errors() -> List<Pair> {
+  List::from([
+    pair("[package]\nname = \"app\"\nversion = 0.1\n", "3:11: error[N0001]"),
+    pair("[package]\nname = \"app\"\nname = \"other\"\nversion = \"0.1.0\"\n", "3:1: error[N0002]"),
+    pair("[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2024\"\n", "4:1: error[N0003]"),
+    pair("[package]\nname = \"app\"\n", "1:1: error[N0004]"),
+    pair("[package]\nname = \"app\"\nversion = 1\n", "3:11: error[N0005]"),
+    pair("[package]\nname = \"My-App\"\nversion = \"0.1.0\"\n", "2:8: error[N0006]"),
+    pair("[package]\nname = \"app\"\nversion = \"1.0\"\n", "3:11: error[N0007]"),
+    pair("[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nutil = { git = \"https://example.com/util\" }\n", "6:10: error[N0008]"),
+    pair("[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[library]\noutputs = [\"shared\"]\n", "6:12: error[N0014]"),
+    pair("[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[library]\n", "5:1: error[N0015]"),
+    pair("[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[link]\nsources = [\"c/missing.c\"]\n", "6:12: error[N0016]"),
+    // The layout errors point at `[package]`: no source file, then both.
+    pair("[package]\nname = \"app\"\nversion = \"0.1.0\"\n", "1:1: error[N0009]"),
+    pair("[package]\nname = \"app\"\nversion = \"0.1.0\"\n", "1:1: error[N0009]"),
+  ])
+}
+
+fn reports_manifest_errors(cx: Context) -> Result<(), String> {
+  const cases = manifest_errors();
+
+  for index in 0..cases.len() {
+    const case = cases[index];
+    const temp = cx.temp_dir("nova")?;
+    const src = path::join(temp, "src");
+
+    support::write_file(path::join(temp, "Nova.toml"), case.key)?;
+
+    // The first layout case has no source file; every other one has `src/main.sag`.
+    if index != cases.len() - 2 {
+      support::write_file(path::join(src, "main.sag"), "fn main() {}\n")?;
+    } else if let Err(error) = fs::create_dir_all(src) {
+      return Err(error.message());
+    }
+
+    if index == cases.len() - 1 {
+      support::write_file(path::join(src, "lib.sag"), "pub fn f() {}\n")?;
+    }
+
+    const ran = nova(cx, temp, List::from(["check", "--diagnostic-format", "short"]))?;
+
+    expect_exit(`nova check with:\n${case.key}`, ran, 1)?;
+    expect(ran.stderr.contains(`Nova.toml:${case.value}`), `expected \`${case.value}\` for:\n${case.key}\nreported:\n${ran.stderr}`)?;
+  }
+
+  Ok(())
+}
+
+/// The dependencies of `app`, and the error each case causes in a `Nova.toml`.
+fn dependency_errors() -> List<Pair> {
+  List::from([
+    pair("missing", "6:16: error[N0010]"),
+    pair("renamed", "6:1: error[N0011]"),
+    pair("program", "6:1: error[N0012]"),
+    pair("cycle", "6:1: error[N0013]"),
+  ])
+}
+
+fn every_nova_code_has_a_test(cx: Context) -> Result<(), String> {
+  var tests = "";
+
+  for case in manifest_errors() {
+    tests = tests + case.value;
+  }
+
+  for case in dependency_errors() {
+    tests = tests + case.value;
+  }
+
+  const codes = suites::registered_codes(support::read_file(cx.file("compiler/src/nova/codes.sag"))?);
+
+  expect(codes.len() > 10, "the codes of `compiler/src/nova/codes.sag` were not found")?;
+
+  for code in codes {
+    expect(tests.contains(code), `no test reports ${code}`)?;
+  }
+
+  Ok(())
+}
+
+fn builds_a_program_with_dependencies(cx: Context) -> Result<(), String> {
+  const temp = cx.temp_dir("nova")?;
+
+  // `app` uses `geo` and `numbers`; `geo` uses `numbers` too, which is compiled once.
+  package(
+    path::join(temp, "numbers"),
+    manifest("numbers", no_pairs()),
+    List::from([pair("lib.sag", "pub fn square(x: i32) -> i32 {\n  x * x\n}\n\n/// An ordinary function in a library.\npub fn main() -> i32 {\n  7\n}\n")]),
+  )?;
+  package(
+    path::join(temp, "geo"),
+    manifest("geo", List::from([pair("numbers", "../numbers")])),
+    List::from([
+      pair("lib.sag", "use pkg::shapes::square::Square;\n\npub fn unit() -> Square {\n  Square { side: 1 }\n}\n"),
+      pair("shapes/square.sag", "pub struct Square {\n  pub side: i32;\n\n  pub fn area(self) -> i32 {\n    numbers::square(self.side)\n  }\n}\n"),
+    ]),
+  )?;
+  package(
+    path::join(temp, "app"),
+    manifest("app", List::from([pair("geo", "../geo"), pair("numbers", "../numbers")])),
+    List::from([
+      pair(
+        "main.sag",
+        "use geo::shapes::square::Square;\n\nfn main() {\n  const big = Square { side: 4 };\n  println(`${big.area()} ${geo::unit().area()} ${numbers::main()}`);\n}\n",
+      ),
+    ]),
+  )?;
+
+  const run = nova_ok(cx, path::join(temp, "app"), List::from(["run"]))?;
+
+  support::expect_equal("nova run", run.stdout, "16 1 7\n")?;
+  expect_contains("nova run", run.stderr, "Using geo v0.1.0")?;
+
+  // A library with dependencies is checked with them.
+  nova_ok(cx, path::join(temp, "geo"), List::from(["check"]))?;
+  Ok(())
+}
+
+fn keeps_items_private(cx: Context) -> Result<(), String> {
+  const temp = cx.temp_dir("nova")?;
+  const app = path::join(temp, "app");
+
+  package(path::join(temp, "util"), manifest("util", no_pairs()), List::from([pair("lib.sag", "pub fn open() -> i32 {\n  1\n}\n\nfn hidden() -> i32 {\n  2\n}\n")]))?;
+  package(app, manifest("app", List::from([pair("util", "../util")])), List::from([pair("main.sag", "fn main() {\n  util::open();\n  util::hidden();\n}\n")]))?;
+
+  const check = nova_fails(cx, app, List::from(["check", "--diagnostic-format", "short"]), 1)?;
+
+  expect_contains("nova check", check.stderr, "main.sag:3:9: error[E0207]")?;
+
+  // An import called like a dependency hides it.
+  support::write_file(under(app, List::from(["src", "helpers.sag"])), "pub fn open() -> i32 {\n  3\n}\n")?;
+  support::write_file(under(app, List::from(["src", "main.sag"])), "use pkg::helpers as util;\n\nfn main() {\n  println(`${util::open()}`);\n}\n")?;
+
+  const run = nova(cx, app, List::from(["run"]))?;
+
+  support::expect_equal(`nova run (stderr: ${run.stderr})`, run.stdout, "3\n")
+}
+
+fn reports_dependency_errors(cx: Context) -> Result<(), String> {
+  for dependency in dependency_errors() {
+    const case = dependency.key;
+    const expected = dependency.value;
+    const temp = cx.temp_dir("nova")?;
+    const app = path::join(temp, "app");
+    const dep = path::join(temp, "dep");
+    const main = List::from([pair("main.sag", "fn main() {}\n")]);
+    const lib = List::from([pair("lib.sag", "pub fn f() {}\n")]);
+
+    // Each case's `app` depends on `dep` at `../dep`; its line 6 is the dependency.
+    package(app, manifest("app", List::from([pair("dep", "../dep")])), main)?;
+
+    if case == "renamed" {
+      package(dep, manifest("other", no_pairs()), lib)?;
+    } else if case == "program" {
+      package(dep, manifest("dep", no_pairs()), main)?;
+    } else if case == "cycle" {
+      package(dep, manifest("dep", List::from([pair("app", "../app")])), lib)?;
+    }
+
+    const ran = nova(cx, app, List::from(["check", "--diagnostic-format", "short"]))?;
+
+    expect_exit(case, ran, 1)?;
+    expect(ran.stderr.contains(`Nova.toml:${expected}`), `expected \`${expected}\` for ${case}, reported:\n${ran.stderr}`)?;
+
+    // The cycle closes in `dep`'s manifest, which points back at `app`.
+    if case == "cycle" {
+      expect_contains(case, ran.stderr, "app -> dep -> app")?;
+    }
+  }
+
+  Ok(())
+}
+
+// ---- C programs ---------------------------------------------------------------------------------
+
+/// The C compiler the tests build C programs with: `SAG_CC`, else `clang`, else `gcc`, as `sag`
+/// chooses it.
+fn c_compiler() -> String {
+  const chosen = env::variable("SAG_CC").unwrap_or("").trim();
+
+  if !chosen.is_empty() {
+    return chosen;
+  }
+
+  const works = match new Command("clang").arg("--version").output() {
+    Ok(output) => output.status.success(),
+    Err(_) => false,
+  };
+
+  if works { "clang" } else { "gcc" }
+}
+
+/// Whether the C compiler is MSVC's `cl`, which `sag` recognizes by its name.
+fn is_cl(compiler: String) -> bool {
+  path::stem(compiler).unwrap_or("").to_ascii_lowercase() == "cl"
+}
+
+/// The target triple of the C compiler.
+fn c_target(compiler: String) -> Result<String, String> {
+  if is_cl(compiler) {
+    return Ok("x86_64-pc-windows-msvc");
+  }
+
+  Ok(support::run(new Command(compiler).arg("-dumpmachine"))?.stdout.trim())
+}
+
+/// Compiles the C program `source` in `dir` into `executable`, linked with `libraries`; its
+/// stderr holds what it printed, since `cl` prints its errors to stdout.
+fn compile_c_program(compiler: String, dir: String, source: String, libraries: List<String>, executable: String) -> Result<Ran, String> {
+  const args: List<String> = new List();
+
+  if is_cl(compiler) {
+    args.push("/nologo");
+    args.push("/std:c11");
+    args.push(source);
+    support::push_all(args, libraries);
+    args.push(`/Fe${executable}`);
+  } else {
+    args.push("-std=c11");
+    args.push(source);
+    support::push_all(args, libraries);
+    args.push("-o");
+    args.push(executable);
+  }
+
+  const ran = support::run(new Command(compiler).args(args).current_dir(dir))?;
+
+  Ok(Ran { code: ran.code, stdout: "", stderr: ran.stdout + ran.stderr })
+}
+
+/// The libraries of a C program using `name`, linked statically and dynamically, for the target
+/// of the C compiler: the static library, and the import library or the `-l` options.
+struct Linking {
+  pub static_lib: List<String>;
+  pub dynamic_lib: List<String>;
+  pub windows: bool;
+}
+
+fn linking(target_triple: String, name: String, target: String) -> Linking {
+  const windows = target_triple.contains("windows") || target_triple.contains("mingw");
+  const gnu = target_triple.contains("windows-gnu") || target_triple.contains("mingw");
+  // The runtime uses libm outside Windows; the dynamic library finds its own.
+  const libm = if windows { new List<String>() } else { List::from(["-lm"]) };
+  const static_lib = if windows && !gnu { List::from([`${name}.lib`]) } else { List::from([`lib${name}.a`]) };
+  const dynamic_lib = if windows && !gnu {
+    List::from([`${name}.dll.lib`])
+  } else if windows {
+    List::from([`lib${name}.dll.a`])
+  } else {
+    List::from(["-L.", `-l${name}`, `-Wl,-rpath,${target}`])
+  };
+
+  support::push_all(static_lib, libm);
+  support::push_all(dynamic_lib, libm);
+  Linking { static_lib: static_lib, dynamic_lib: dynamic_lib, windows: windows }
+}
+
+/// Builds `source` (in `target`) against the library twice, statically and dynamically, and runs
+/// both programs, which must print `expected`.
+fn run_c_programs(target: String, name: String, source: String, extra: List<String>, expected: String) -> Result<(), String> {
+  const compiler = c_compiler();
+  const libraries = linking(c_target(compiler)?, name, target);
+  const builds = List::from([pair("c_static", ""), pair("c_dynamic", "")]);
+
+  for build in builds {
+    const executable = exe(build.key);
+    const options: List<String> = new List();
+
+    support::push_all(options, extra);
+    support::push_all(options, if build.key == "c_static" { libraries.static_lib } else { libraries.dynamic_lib });
+
+    const compiled = compile_c_program(compiler, target, source, options, executable)?;
+
+    expect(compiled.success(), `${build.key}: ${compiled.stderr}`)?;
+
+    const ran = support::run(new Command(path::join(target, executable)).current_dir(target))?;
+
+    support::expect_equal(`${build.key} (stderr: ${ran.stderr})`, ran.stdout, expected)?;
+  }
+
+  Ok(())
+}
+
+fn library_source() -> String {
+  List::from([
+    "use std::ffi::c_int;",
+    "",
+    "extern \"C\" {",
+    "  fn helper_twice(x: c_int) -> c_int;",
+    "}",
+    "",
+    "/// A point in the plane.",
+    "@repr(C)",
+    "pub struct Point {",
+    "  pub x: f64;",
+    "  pub y: f64;",
+    "}",
+    "",
+    "/// The squared distance between",
+    "/// two points.",
+    "@export(\"geo_distance2\")",
+    "pub extern \"C\" fn distance2(a: Point, b: Point) -> f64 {",
+    "  const dx = a.x - b.x;",
+    "  const dy = a.y - b.y;",
+    "  dx * dx + dy * dy",
+    "}",
+    "",
+    "/// Doubles `x` in C, after using a list.",
+    "pub extern \"C\" fn geo_twice(x: i32) -> i32 {",
+    "  const items = List::from([1, 2, 3]);",
+    "  unsafe { helper_twice(x) } + items.len() as i32 - 3",
+    "}",
+    "",
+    "pub extern \"C\" fn geo_fill(out: *mut Point) {",
+    "  unsafe { *out = Point { x: 1.5, y: 2.5 }; }",
+    "}",
+    "",
+  ]).join("\n")
+}
+
+const HOST_SOURCE: String = "#include <stdio.h>\n#include \"geo.h\"\n\nint main(void) {\n  Point a = {0.0, 0.0};\n  Point b = {3.0, 4.0};\n  Point c;\n  geo_fill(&c);\n  printf(\"%.1f %d %.1f %.1f\\n\", geo_distance2(a, b), geo_twice(21), c.x, c.y);\n  return 0;\n}\n";
+
+/// The library `geo`, with a C source of its own, in `dir`.
+fn geo_package(dir: String, extra: String) -> Result<(), String> {
+  package(dir, `${manifest("geo", no_pairs())}\n[link]\nsources = ["c/helper.c"]\n${extra}`, List::from([pair("lib.sag", library_source())]))?;
+  support::write_file(under(dir, List::from(["c", "helper.c"])), "int helper_twice(int x) {\n  return 2 * x;\n}\n")
+}
+
+fn builds_a_library_that_c_programs_use(cx: Context) -> Result<(), String> {
+  const temp = cx.temp_dir("nova")?;
+  const geo = path::join(temp, "geo");
+
+  geo_package(geo, "")?;
+  nova_ok(cx, geo, List::from(["build"]))?;
+
+  const target = under(geo, List::from(["target", "debug"]));
+  const header = read(path::join(target, "geo.h"))?;
+
+  for expected in [
+    "#ifndef GEO_H",
+    "struct Point {\n  double x;\n  double y;\n};",
+    "/* The squared distance between\n * two points. */\ndouble geo_distance2(Point a, Point b);",
+    "int32_t geo_twice(int32_t x);",
+    "void geo_fill(Point *out);",
+    "extern \"C\" {",
+  ] {
+    expect_contains("the header", header, expected)?;
+  }
+
+  support::write_file(path::join(target, "host.c"), HOST_SOURCE)?;
+  run_c_programs(target, "geo", "host.c", new List(), "25.0 42 1.5 2.5\n")
+}
+
+fn builds_only_the_chosen_library_outputs(cx: Context) -> Result<(), String> {
+  const temp = cx.temp_dir("nova")?;
+  const lib = path::join(temp, "solo");
+
+  package(lib, `${manifest("solo", no_pairs())}\n[library]\noutputs = ["static"]\n`, List::from([pair("lib.sag", "pub extern \"C\" fn solo_one() -> i32 {\n  1\n}\n")]))?;
+  nova_ok(cx, lib, List::from(["build", "--release"]))?;
+
+  const files = support::entries(under(lib, List::from(["target", "release"])))?;
+  const listed = files.join(" ");
+
+  expect(files.contains("solo.h"), `no header: ${listed}`)?;
+  expect(files.contains("solo.lib") || files.contains("libsolo.a"), `no static library: ${listed}`)?;
+  expect(!files.iter().any((file) => file.ends_with(".dll") || file.ends_with(".so") || file.ends_with(".dylib")), `a dynamic library: ${listed}`)?;
+
+  // Libraries cannot be sanitized, and one without exports is reported.
+  nova_fails(cx, lib, List::from(["build", "--sanitize"]), 1)?;
+  support::write_file(under(lib, List::from(["src", "lib.sag"])), "pub fn inner() -> i32 {\n  1\n}\n")?;
+
+  const empty = nova_ok(cx, lib, List::from(["build"]))?;
+
+  expect_contains("nova build", empty.stderr, "exports no functions")
+}
+
+fn links_c_sources_and_libraries(cx: Context) -> Result<(), String> {
+  const temp = cx.temp_dir("nova")?;
+  const app = path::join(temp, "app");
+  const libraries = if support::windows() { "" } else { "libraries = [\"m\"]\n" };
+
+  package(
+    app,
+    `${manifest("app", no_pairs())}\n[link]\n${libraries}sources = ["c/add.c"]\n`,
+    List::from([
+      pair(
+        "main.sag",
+        "use std::ffi::c_int;\n\nextern \"C\" {\n  fn c_add(a: c_int, b: c_int) -> c_int;\n}\n\nfn main() {\n  const sum = unsafe { c_add(40, 2) };\n  println(`${sum}`);\n}\n",
+      ),
+    ]),
+  )?;
+
+  const add = under(app, List::from(["c", "add.c"]));
+
+  support::write_file(add, "int c_add(int a, int b) {\n  return a + b;\n}\n")?;
+
+  const run = nova(cx, app, List::from(["run"]))?;
+
+  support::expect_equal(`nova run (stderr: ${run.stderr})`, run.stdout, "42\n")?;
+
+  // A C source that does not compile is an error of the package, not of the compiler.
+  support::write_file(add, "int c_add(int a, int b) {\n  return a +;\n}\n")?;
+
+  const broken = nova_fails(cx, app, List::from(["build"]), 1)?;
+
+  expect_contains("nova build", broken.stderr, "cannot compile the C source")
+}
+
+// ---- Other targets ------------------------------------------------------------------------------
+
+/// Whether `dir` holds an Android NDK.
+fn is_ndk(dir: String) -> bool {
+  fs::is_dir(under(dir, List::from(["toolchains", "llvm", "prebuilt"])))
+}
+
+/// Whether the Android NDK can be found, as Nova looks for it. Without it the Android tests are
+/// skipped, unless `SAG_REQUIRE_NDK=1` (set in CI) makes that a failure.
+fn ndk_available() -> Result<bool, String> {
+  var found = false;
+
+  for name in ["ANDROID_NDK_HOME", "ANDROID_NDK_ROOT"] {
+    const dir = env::variable(name).unwrap_or("");
+
+    if !dir.is_empty() && is_ndk(dir) {
+      found = true;
+    }
+  }
+
+  for name in ["ANDROID_HOME", "ANDROID_SDK_ROOT"] {
+    const sdk = env::variable(name).unwrap_or("");
+
+    if found || sdk.is_empty() {
+      continue;
+    }
+
+    const ndks = path::join(sdk, "ndk");
+
+    if let Ok(versions) = fs::read_dir(ndks) {
+      for version in versions {
+        if is_ndk(path::join(ndks, version)) {
+          found = true;
+        }
+      }
+    }
+  }
+
+  if !found && env::variable("SAG_REQUIRE_NDK").unwrap_or("") == "1" {
+    return Err("SAG_REQUIRE_NDK=1 but the Android NDK was not found");
+  }
+
+  if !found {
+    io::eprint("(skipped: the Android NDK was not found; set ANDROID_NDK_HOME) ").unwrap_or(());
+  }
+
+  Ok(found)
+}
+
+/// A C program printing the ELF class (1 for 32 bits, 2 for 64) and machine of a file, or `none`
+/// if it is not ELF: `std::fs` reads text, not bytes.
+const ELF_READER: String = "#include <stdio.h>\n\nint main(int argc, char **argv) {\n  unsigned char bytes[20];\n  FILE *file;\n  size_t read;\n  if (argc < 2) {\n    return 2;\n  }\n  file = fopen(argv[1], \"rb\");\n  if (file == NULL) {\n    return 2;\n  }\n  read = fread(bytes, 1, sizeof bytes, file);\n  fclose(file);\n  if (read < sizeof bytes || bytes[0] != 0x7f || bytes[1] != 'E' || bytes[2] != 'L' || bytes[3] != 'F') {\n    printf(\"none\\n\");\n    return 0;\n  }\n  /* `e_machine` is little-endian on these targets. */\n  printf(\"%d %d\\n\", bytes[4], bytes[18] | (bytes[19] << 8));\n  return 0;\n}\n";
+
+/// Builds the program of `ELF_READER` with the C compiler.
+fn elf_reader(cx: Context) -> Result<String, String> {
+  const dir = cx.temp_dir("elf")?;
+  const executable = exe("elf_kind");
+
+  support::write_file(path::join(dir, "elf_kind.c"), ELF_READER)?;
+
+  const compiled = compile_c_program(c_compiler(), dir, "elf_kind.c", new List(), executable)?;
+
+  expect(compiled.success(), `cannot build the ELF reader: ${compiled.stderr}`)?;
+  Ok(path::join(dir, executable))
+}
+
+/// `class machine` of an ELF file, or `none`.
+fn elf_kind(reader: String, file: String) -> Result<String, String> {
+  Ok(support::run(new Command(reader).arg(file))?.stdout.trim())
+}
+
+/// The Android targets and their ELF machines: AArch64, ARM and x86-64.
+fn android_targets() -> List<Pair> {
+  List::from([pair("aarch64-linux-android", "2 183"), pair("armv7-linux-androideabi", "1 40"), pair("x86_64-linux-android", "2 62")])
+}
+
+fn cross_compiles_for_android(cx: Context) -> Result<(), String> {
+  if !ndk_available()? {
+    return Ok(());
+  }
+
+  const reader = elf_reader(cx)?;
+  const temp = cx.temp_dir("nova")?;
+  const geo = path::join(temp, "geo");
+
+  geo_package(geo, "")?;
+
+  for target in android_targets() {
+    nova_ok(cx, geo, List::from(["build", "--target", target.key]))?;
+
+    const dir = under(geo, List::from(["target", target.key, "debug"]));
+
+    support::expect_equal(target.key, elf_kind(reader, path::join(dir, "libgeo.so"))?, target.value)?;
+    expect(fs::is_file(path::join(dir, "libgeo.a")) && fs::is_file(path::join(dir, "geo.h")), `${target.key}: the static library or the header is missing`)?;
+  }
+
+  const app = path::join(temp, "app");
+
+  package(app, manifest("app", no_pairs()), List::from([pair("main.sag", "fn main() {\n  println(\"hola\");\n}\n")]))?;
+  nova_ok(cx, app, List::from(["build", "--target", "aarch64-linux-android"]))?;
+  support::expect_equal("the program", elf_kind(reader, under(app, List::from(["target", "aarch64-linux-android", "debug", "app"])))?, "2 183")?;
+
+  // It cannot run here, nor be sanitized.
+  nova_fails(cx, app, List::from(["run", "--target", "aarch64-linux-android"]), 1)?;
+  nova_fails(cx, app, List::from(["build", "--target", "aarch64-linux-android", "--sanitize"]), 1)?;
+  Ok(())
+}
+
+fn checks_integer_sizes_for_the_target(cx: Context) -> Result<(), String> {
+  const temp = cx.temp_dir("nova")?;
+  const app = path::join(temp, "app");
+
+  // `usize` has 32 bits on `armv7`, and `c_long` 64 on 64-bit Android.
+  package(
+    app,
+    manifest("app", no_pairs()),
+    List::from([
+      pair(
+        "main.sag",
+        "use std::ffi::c_long;\n\nfn main() {\n  const big: usize = 5_000_000_000;\n  const long: c_long = 5_000_000_000;\n  println(`${big} ${long}`);\n}\n",
+      ),
+    ]),
+  )?;
+
+  const armv7 = nova(cx, app, List::from(["check", "--target", "armv7-linux-androideabi", "--diagnostic-format", "short"]))?;
+
+  expect_contains("armv7", armv7.stderr, "main.sag:4:22: error[E0302]")?;
+  expect_contains("armv7", armv7.stderr, "main.sag:5:24: error[E0302]")?;
+  nova_ok(cx, app, List::from(["check", "--target", "aarch64-linux-android"]))?;
+
+  // Unknown targets are reported with the supported ones.
+  const unknown = nova_fails(cx, app, List::from(["check", "--target", "riscv64-linux-android"]), 1)?;
+
+  expect_contains("an unknown target", unknown.stderr, "aarch64-linux-android")
+}
+
+/// Whether the harness runs on macOS.
+fn macos() -> bool {
+  !support::windows() && fs::is_dir("/System/Library")
+}
+
+fn builds_libraries_for_ios_on_macos_only(cx: Context) -> Result<(), String> {
+  const temp = cx.temp_dir("nova")?;
+  const geo = path::join(temp, "geo");
+
+  package(geo, manifest("geo", no_pairs()), List::from([pair("lib.sag", "pub extern \"C\" fn geo_one() -> i32 {\n  1\n}\n")]))?;
+
+  const app = path::join(temp, "app");
+
+  package(app, manifest("app", no_pairs()), List::from([pair("main.sag", "fn main() {}\n")]))?;
+
+  // iOS has no standalone programs.
+  nova_fails(cx, app, List::from(["build", "--target", "aarch64-apple-ios"]), 1)?;
+
+  const build = nova(cx, geo, List::from(["build", "--target", "aarch64-apple-ios"]))?;
+
+  if !macos() {
+    expect_exit("nova build --target aarch64-apple-ios", build, 1)?;
+
+    return expect_contains("nova build --target aarch64-apple-ios", build.stderr, "only be built on macOS");
+  }
+
+  expect_success("nova build --target aarch64-apple-ios", build)?;
+
+  const device = under(geo, List::from(["target", "aarch64-apple-ios", "debug"]));
+
+  // Only the static library by default, which Xcode links.
+  expect(fs::is_file(path::join(device, "libgeo.a")) && fs::is_file(path::join(device, "geo.h")), "the static library or the header is missing")?;
+  expect(!fs::exists(path::join(device, "libgeo.dylib")), "a dynamic library was built")?;
+
+  // The simulator, with the dynamic library too.
+  support::write_file(path::join(geo, "Nova.toml"), `${manifest("geo", no_pairs())}\n[library]\noutputs = ["static", "dynamic"]\n`)?;
+  nova_ok(cx, geo, List::from(["build", "--target", "aarch64-apple-ios-sim"]))?;
+  expect(fs::is_file(under(geo, List::from(["target", "aarch64-apple-ios-sim", "debug", "libgeo.dylib"]))), "no dynamic library for the simulator")
+}
+
+/// The F3 acceptance program (docs/roadmap.md): `tests/acceptance/f3/` holds `wc`, a small `wc`
+/// built as a package, which depends on the library package `textcount`, and a C program using
+/// that library.
+fn f3_acceptance(cx: Context) -> Result<(), String> {
+  const temp = cx.temp_dir("nova")?;
+
+  support::copy_tree(cx.file("tests/acceptance/f3"), temp)?;
+
+  const wc = path::join(temp, "wc");
+  const textcount = path::join(temp, "textcount");
+
+  support::write_file(path::join(wc, "a.txt"), "uno dos\ntres\n")?;
+  support::write_file(path::join(wc, "b.txt"), "cuatro cinco seis\n")?;
+
+  // Files, with sanitizers like the other end-to-end tests.
+  const run = if cx.sanitize { List::from(["run", "--sanitize"]) } else { List::from(["run"]) };
+  const files = support::concat(run, List::from(["--", "a.txt", "b.txt"]));
+  const counted = nova_ok(cx, wc, files)?;
+
+  support::expect_equal("wc of files", counted.stdout, "      2       3      13 a.txt\n      1       3      18 b.txt\n      3       6      31 total\n")?;
+
+  // Stdin.
+  const piped = support::run(nova_command(cx, wc, run)?.input("hola mundo\nadiós\n"))?;
+
+  expect_success("wc of stdin", piped)?;
+  support::expect_equal("wc of stdin", piped.stdout, "      2       3      18\n")?;
+
+  // A missing file is reported, and the others are still counted.
+  const with_missing = support::concat(run, List::from(["--", "a.txt", "missing.txt"]));
+  const missing = nova_fails(cx, wc, with_missing, 1)?;
+
+  expect_contains("wc of a missing file", missing.stderr, "wc: missing.txt:")?;
+  expect_contains("wc of a missing file", missing.stdout, " a.txt\n")?;
+
+  // The library, from C: linked statically and dynamically, compiled with warnings as errors.
+  nova_ok(cx, textcount, List::from(["build"]))?;
+
+  const target = under(textcount, List::from(["target", "debug"]));
+
+  expect_contains("the header", read(path::join(target, "textcount.h"))?, "uint64_t textcount_words(const char *text);")?;
+  support::write_file(path::join(target, "main.c"), support::read_file(under(temp, List::from(["c", "main.c"])))?)?;
+  run_c_programs(target, "textcount", "main.c", List::from([if is_cl(c_compiler()) { "/WX" } else { "-Werror" }]), "2 3\n")?;
+
+  // Android: the tool and the library. iOS runs no standalone programs: the library is checked
+  // for it everywhere, and built on macOS.
+  if ndk_available()? {
+    const reader = elf_reader(cx)?;
+
+    for target in android_targets() {
+      nova_ok(cx, wc, List::from(["build", "--target", target.key]))?;
+      nova_ok(cx, textcount, List::from(["build", "--target", target.key]))?;
+
+      const kind = elf_kind(reader, under(wc, List::from(["target", target.key, "debug", "wc"])))?;
+      const machine = target.value.substring(target.value.find(" ").unwrap_or(0), target.value.len());
+
+      expect(kind.ends_with(machine), `${target.key}: the ELF machine of \`wc\` is \`${kind}\``)?;
+    }
+  }
+
+  nova_ok(cx, textcount, List::from(["check", "--target", "aarch64-apple-ios"]))?;
+
+  if macos() {
+    nova_ok(cx, textcount, List::from(["build", "--target", "aarch64-apple-ios"]))?;
+    expect(fs::is_file(under(textcount, List::from(["target", "aarch64-apple-ios", "debug", "libtextcount.a"]))), "no static library for iOS")?;
+  }
+
+  Ok(())
+}

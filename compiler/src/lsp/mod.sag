@@ -1,0 +1,471 @@
+//! `sag lsp`: the language server (docs/adr/0058-language-server.md). It speaks LSP over stdin
+//! and stdout, and runs the front end of the compiler on the program of each open document:
+//! diagnostics as `sag check` reports them, hover, go to definition, completion, the symbols of a
+//! document and semantic tokens. One thread analyses after every change.
+
+use pkg::ast::{Item, Module};
+use pkg::lsp::analysis;
+use pkg::lsp::analysis::{Analysis, Document};
+use pkg::lsp::completion;
+use pkg::lsp::json;
+use pkg::lsp::json::{Json, member};
+use pkg::lsp::positions::{LineIndex, Position};
+use pkg::lsp::protocol;
+use pkg::lsp::query;
+use pkg::lsp::tokens;
+use pkg::loader::path_key;
+use pkg::span::Span;
+use pkg::version;
+
+/// Kinds of document symbols (LSP's `SymbolKind`).
+const CLASS: i64 = 5;
+const METHOD: i64 = 6;
+const FIELD: i64 = 8;
+const ENUM: i64 = 10;
+const INTERFACE: i64 = 11;
+const FUNCTION: i64 = 12;
+const CONSTANT: i64 = 14;
+const ENUM_MEMBER: i64 = 22;
+const STRUCT: i64 = 23;
+
+class Server {
+  /// The open documents, by `path_key`.
+  prv const documents: Map<String, Document>;
+  /// The latest analysis of each program, by the `path_key` of its entry.
+  prv const analyses: Map<String, Analysis>;
+  /// The latest analysis of each program that reached the type checker: what hover, definitions
+  /// and completion use while the code being typed does not compile.
+  prv const typed: Map<String, Analysis>;
+  /// The program of each open document, by the document's `path_key`.
+  prv const programs: Map<String, String>;
+  /// The URIs whose last published diagnostics were not empty.
+  prv const reported: Map<String, bool>;
+  pub var shutdown: bool;
+
+  pub fn new(self) {
+    self.documents = new Map<String, Document>();
+    self.analyses = new Map<String, Analysis>();
+    self.typed = new Map<String, Analysis>();
+    self.programs = new Map<String, String>();
+    self.reported = new Map<String, bool>();
+    self.shutdown = false;
+  }
+
+  /// Handles one message; returns the exit code once the client asks to exit.
+  pub fn handle(self, body: String) -> Option<i32> {
+    const message = match json::parse(body) {
+      Ok(found) => found,
+      Err(error) => {
+        protocol::respond_error(Json::Null, protocol::PARSE_ERROR, error);
+        return None;
+      }
+    };
+    const method = json::as_str(json::get(message, "method")).unwrap_or("");
+    const id = json::get(message, "id");
+    const params = json::get(message, "params").unwrap_or(Json::Null);
+
+    // A response to a request of the server, which sends none.
+    if method.is_empty() {
+      if let Some(found) = id {
+        if json::get(message, "result").is_none() && json::get(message, "error").is_none() {
+          protocol::respond_error(found, protocol::INVALID_REQUEST, "a message without a method");
+        }
+      }
+
+      return None;
+    }
+
+    if method == "exit" {
+      return Some(if self.shutdown { 0 } else { 1 });
+    }
+
+    match id {
+      Some(found) => self.request(found, method, params),
+      None => self.notification(method, params),
+    }
+
+    None
+  }
+
+  prv fn request(self, id: Json, method: String, params: Json) {
+    if method == "initialize" {
+      protocol::respond(id, initialize_result());
+    } else if method == "shutdown" {
+      self.shutdown = true;
+      protocol::respond(id, Json::Null);
+    } else if method == "textDocument/hover" {
+      protocol::respond(id, self.hover(params));
+    } else if method == "textDocument/definition" {
+      protocol::respond(id, self.definition(params));
+    } else if method == "textDocument/completion" {
+      protocol::respond(id, self.completion(params));
+    } else if method == "textDocument/documentSymbol" {
+      protocol::respond(id, self.symbols(params));
+    } else if method == "textDocument/semanticTokens/full" {
+      match self.semantic_tokens(params) {
+        Some(found) => protocol::respond(id, found),
+        // The editor asks again after the next analysis.
+        None => protocol::respond_error(id, protocol::CONTENT_MODIFIED, "the document changed since its last analysis"),
+      }
+    } else {
+      protocol::respond_error(id, protocol::METHOD_NOT_FOUND, `unknown method \`${method}\``);
+    }
+  }
+
+  prv fn notification(self, method: String, params: Json) {
+    if method == "textDocument/didOpen" {
+      const item = json::get(params, "textDocument").unwrap_or(Json::Null);
+      const uri = json::as_str(json::get(item, "uri")).unwrap_or("");
+      const text = json::as_str(json::get(item, "text")).unwrap_or("");
+
+      if let Some(file) = analysis::uri_to_path(uri) {
+        const document = new Document(uri, file, text);
+
+        self.documents.insert(path_key(file), document);
+        self.analyze(document);
+      }
+    } else if method == "textDocument/didChange" {
+      // Full synchronization: the last change holds the whole text.
+      if let Some(document) = self.document(params) {
+        const changes = json::as_array(json::get(params, "contentChanges"));
+
+        if let Some(change) = changes.last() {
+          document.text = json::as_str(json::get(change, "text")).unwrap_or(document.text);
+        }
+
+        self.analyze(document);
+      }
+    } else if method == "textDocument/didSave" {
+      if let Some(document) = self.document(params) {
+        self.analyze(document);
+      }
+    } else if method == "textDocument/didClose" {
+      if let Some(document) = self.document(params) {
+        const key = path_key(document.path);
+
+        self.documents.remove(key);
+        self.programs.remove(key);
+        self.publish_file(document.uri, new List());
+      }
+    }
+  }
+
+  /// The open document a request is about.
+  prv fn document(self, params: Json) -> Option<Document> {
+    const uri = json::as_str(json::at(params, List::from(["textDocument", "uri"])))?;
+
+    self.documents.get(path_key(analysis::uri_to_path(uri)?))
+  }
+
+  /// Analyses the program of a document and publishes its diagnostics.
+  prv fn analyze(self, document: Document) {
+    const internal: List<String> = new List();
+    var entry = analysis::find_entry(document.path);
+    var result = analysis::analyze(entry, self.documents, internal);
+
+    // A file the program of its directory does not reach is analysed alone.
+    if !result.contains(document.path) && path_key(entry.path) != path_key(document.path) {
+      entry = analysis::alone(document.path);
+      result = analysis::analyze(entry, self.documents, internal);
+    }
+
+    for message in internal {
+      protocol::log(1, `internal compiler error: ${message}`);
+    }
+
+    const key = path_key(entry.path);
+
+    self.analyses.insert(key, result);
+    self.programs.insert(path_key(document.path), key);
+
+    if result.typed.is_some() {
+      self.typed.insert(key, result);
+    }
+
+    for entry_of_file in analysis::diagnostics_by_file(result).entries() {
+      const uri = self.uri_of(entry_of_file.key);
+
+      // Files without diagnostics now and before need no message.
+      if !entry_of_file.value.is_empty() || self.reported.contains_key(uri) || path_key(entry_of_file.key) == path_key(document.path) {
+        self.publish_file(uri, entry_of_file.value);
+      }
+    }
+  }
+
+  /// The URI of a file: the one the editor uses if it is open.
+  prv fn uri_of(self, file: String) -> String {
+    match self.documents.get(path_key(file)) {
+      Some(document) => document.uri,
+      None => analysis::path_to_uri(file),
+    }
+  }
+
+  prv fn publish_file(self, uri: String, diagnostics: List<Json>) {
+    if diagnostics.is_empty() {
+      self.reported.remove(uri);
+    } else {
+      self.reported.insert(uri, true);
+    }
+
+    protocol::notify("textDocument/publishDiagnostics", json::object(List::from([member("uri", json::str(uri)), member("diagnostics", Json::Array(diagnostics))])));
+  }
+
+  /// The analysis to answer about a document: the latest, or the latest that reached the type
+  /// checker when `typed` is set.
+  prv fn analysis_of(self, document: Document, typed: bool) -> Option<Analysis> {
+    const key = self.programs.get(path_key(document.path))?;
+
+    if typed {
+      if let Some(found) = self.typed.get(key) {
+        return Some(found);
+      }
+    }
+
+    self.analyses.get(key)
+  }
+
+  prv fn position(params: Json) -> Position {
+    Position {
+      line: json::as_u32(json::at(params, List::from(["position", "line"]))).unwrap_or(0),
+      character: json::as_u32(json::at(params, List::from(["position", "character"]))).unwrap_or(0),
+    }
+  }
+
+  /// The module of a document in an analysis, and the offset of the request's position in the
+  /// text that analysis read.
+  prv fn locate(self, params: Json) -> Option<Located> {
+    const document = self.document(params)?;
+    const found = self.analysis_of(document, true)?;
+    const index = found.module_of(document.path)?;
+    const module = found.package?.modules.get(index)?;
+    const offset = found.line_index(module.file)?.offset(Server::position(params));
+
+    Some(Located { analysis: found, module: module, offset: offset })
+  }
+
+  prv fn hover(self, params: Json) -> Json {
+    const located = match self.locate(params) {
+      Some(found) => found,
+      None => return Json::Null,
+    };
+
+    match query::hover(located.analysis, located.module, located.offset) {
+      Some(text) => {
+        const contents = json::object(List::from([member("kind", json::str("markdown")), member("value", json::str("```sagitario\n" + text + "\n```"))]));
+
+        json::object(List::from([member("contents", contents)]))
+      }
+      None => Json::Null,
+    }
+  }
+
+  prv fn definition(self, params: Json) -> Json {
+    const located = match self.locate(params) {
+      Some(found) => found,
+      None => return Json::Null,
+    };
+
+    match query::definition(located.analysis, located.module, located.offset) {
+      Some(span) => located.analysis.location(span).unwrap_or(Json::Null),
+      None => Json::Null,
+    }
+  }
+
+  prv fn completion(self, params: Json) -> Json {
+    const document = match self.document(params) {
+      Some(found) => found,
+      None => return Json::Null,
+    };
+    // The cursor is in the text being typed, which the analysis may not have read.
+    const offset = new LineIndex(document.text).offset(Server::position(params));
+    const found = self.analysis_of(document, true);
+    var module: Option<Module> = None;
+    var module_index: Option<usize> = None;
+
+    if let Some(analysis) = found {
+      module_index = analysis.module_of(document.path);
+
+      if let Some(index) = module_index {
+        if let Some(package) = analysis.package {
+          module = package.modules.get(index);
+        }
+      }
+    }
+
+    const items = completion::complete(found, module, module_index, document.text, offset);
+
+    json::object(List::from([member("isIncomplete", Json::Bool(false)), member("items", items)]))
+  }
+
+  /// The semantic tokens of a document, from an analysis that read its current text: tokens of
+  /// an older text would color the wrong names.
+  prv fn semantic_tokens(self, params: Json) -> Option<Json> {
+    const document = self.document(params)?;
+
+    for typed in List::from([false, true]) {
+      if let Some(found) = self.analysis_of(document, typed) {
+        if let Some(index) = found.module_of(document.path) {
+          const module = found.package?.modules.get(index)?;
+
+          if found.sources.get(module.file)?.text == document.text && found.resolution.is_some() {
+            return tokens::semantic_tokens(found, module, index);
+          }
+        }
+      }
+    }
+
+    None
+  }
+
+  prv fn symbols(self, params: Json) -> Json {
+    const document = match self.document(params) {
+      Some(found) => found,
+      None => return Json::Array(new List()),
+    };
+    const found = match self.analysis_of(document, true) {
+      Some(analysis) => analysis,
+      None => return Json::Array(new List()),
+    };
+    const module = match found.module_of(document.path) {
+      Some(index) => match found.package {
+        Some(package) => package.modules.get(index),
+        None => None,
+      },
+      None => None,
+    };
+
+    match module {
+      Some(found_module) => Json::Array(document_symbols(found, found_module)),
+      None => Json::Array(new List()),
+    }
+  }
+}
+
+/// The analysis, module and offset of a request.
+struct Located {
+  pub analysis: Analysis;
+  pub module: Module;
+  pub offset: u32;
+}
+
+fn initialize_result() -> Json {
+  const sync = json::object(List::from([
+    member("openClose", Json::Bool(true)),
+    // Full: every change sends the whole text.
+    member("change", json::int(1)),
+    member("save", json::object(List::from([member("includeText", Json::Bool(false))]))),
+  ]));
+  const completion_options = json::object(List::from([member("triggerCharacters", Json::Array(List::from([json::str("."), json::str(":")])))]));
+  const capabilities = json::object(List::from([
+    member("positionEncoding", json::str("utf-16")),
+    member("textDocumentSync", sync),
+    member("hoverProvider", Json::Bool(true)),
+    member("definitionProvider", Json::Bool(true)),
+    member("completionProvider", completion_options),
+    member("documentSymbolProvider", Json::Bool(true)),
+    member("semanticTokensProvider", json::object(List::from([member("legend", tokens::legend()), member("full", Json::Bool(true))]))),
+  ]));
+  const info = json::object(List::from([member("name", json::str("sag")), member("version", json::str(version::VERSION))]));
+
+  json::object(List::from([member("capabilities", capabilities), member("serverInfo", info)]))
+}
+
+fn symbol(analysis: Analysis, name: String, kind: i64, span: Span, name_span: Span, children: List<Json>) -> Json {
+  json::object(List::from([
+    member("name", json::str(name)),
+    member("kind", json::int(kind)),
+    member("range", analysis.range(span)),
+    member("selectionRange", analysis.range(name_span)),
+    member("children", Json::Array(children)),
+  ]))
+}
+
+/// The items of a module, with their fields, variants and functions inside.
+fn document_symbols(analysis: Analysis, module: Module) -> List<Json> {
+  const found: List<Json> = new List();
+
+  for item in module.items {
+    match item {
+      Item::Fn(decl) => found.push(symbol(analysis, decl.name.name, FUNCTION, decl.span, decl.name.span, new List())),
+      Item::Const(decl) => found.push(symbol(analysis, decl.name.name, CONSTANT, decl.span, decl.name.span, new List())),
+      Item::Struct(decl) => {
+        const children: List<Json> = new List();
+
+        for field in decl.fields {
+          children.push(symbol(analysis, field.name.name, FIELD, field.span, field.name.span, new List()));
+        }
+
+        for function in decl.functions {
+          children.push(symbol(analysis, function.name.name, METHOD, function.span, function.name.span, new List()));
+        }
+
+        found.push(symbol(analysis, decl.name.name, STRUCT, decl.span, decl.name.span, children));
+      }
+      Item::Enum(decl) => {
+        const children: List<Json> = new List();
+
+        for variant in decl.variants {
+          children.push(symbol(analysis, variant.name.name, ENUM_MEMBER, variant.span, variant.name.span, new List()));
+        }
+
+        for function in decl.functions {
+          children.push(symbol(analysis, function.name.name, METHOD, function.span, function.name.span, new List()));
+        }
+
+        found.push(symbol(analysis, decl.name.name, ENUM, decl.span, decl.name.span, children));
+      }
+      Item::Class(decl) => {
+        const children: List<Json> = new List();
+
+        for field in decl.fields {
+          children.push(symbol(analysis, field.name.name, FIELD, field.span, field.name.span, new List()));
+        }
+
+        for function in decl.functions {
+          children.push(symbol(analysis, function.name.name, METHOD, function.span, function.name.span, new List()));
+        }
+
+        found.push(symbol(analysis, decl.name.name, CLASS, decl.span, decl.name.span, children));
+      }
+      Item::Interface(decl) => {
+        const children: List<Json> = new List();
+
+        for field in decl.fields {
+          children.push(symbol(analysis, field.name.name, FIELD, field.span, field.name.span, new List()));
+        }
+
+        for function in decl.functions {
+          children.push(symbol(analysis, function.name.name, METHOD, function.span, function.name.span, new List()));
+        }
+
+        found.push(symbol(analysis, decl.name.name, INTERFACE, decl.span, decl.name.span, children));
+      }
+      Item::Extern(block) => {
+        for function in block.functions {
+          found.push(symbol(analysis, function.name.name, FUNCTION, function.span, function.name.span, new List()));
+        }
+      }
+    }
+  }
+
+  found
+}
+
+/// Serves until the client asks to exit or closes stdin; returns the exit code.
+pub fn run() -> i32 {
+  const server = new Server();
+
+  while true {
+    match protocol::read() {
+      Ok(Some(body)) => {
+        if let Some(code) = server.handle(body) {
+          return code;
+        }
+      }
+      Ok(None) => return if server.shutdown { 0 } else { 1 },
+      Err(message) => protocol::log(1, `invalid message: ${message}`),
+    }
+  }
+
+  1
+}

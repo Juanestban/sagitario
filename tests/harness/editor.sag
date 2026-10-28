@@ -1,0 +1,92 @@
+//! The VS Code extension in `editors/vscode/`
+//! (docs/adr/0057-editor-tooling-and-independence-from-rust.md): its grammar highlights every
+//! keyword of the language, so the two cannot drift apart.
+
+use pkg::support;
+use pkg::support::{Context, Test};
+
+pub fn tests() -> List<Test> {
+  List::from([support::test("vscode_grammar_knows_every_keyword", grammar_knows_every_keyword)])
+}
+
+/// The keywords of `docs/spec/01-lexical.md`: the code block of the section "Keywords", and the
+/// keywords reserved for later phases.
+fn spec_keywords(cx: Context) -> Result<List<String>, String> {
+  const spec = support::read_file(cx.file("docs/spec/01-lexical.md"))?;
+  const section = match spec.find("## Keywords") {
+    Some(start) => spec.substring(start, spec.len()),
+    None => "",
+  };
+  const blocks = section.split("```");
+  const keywords = if blocks.len() > 1 { support::words(blocks[1]) } else { new List() };
+
+  keywords.push("async");
+  keywords.push("await");
+  Ok(keywords)
+}
+
+fn is_ident(c: char) -> bool {
+  c.is_ascii_alphanumeric() || c == '_'
+}
+
+/// The last character of `text`, or `' '`.
+fn last_char(text: String) -> char {
+  var last = ' ';
+
+  for c in text.chars() {
+    last = c;
+  }
+
+  last
+}
+
+/// The first character of `text`, or `' '`.
+fn first_char(text: String) -> char {
+  for c in text.chars() {
+    return c;
+  }
+
+  ' '
+}
+
+/// Whether `word` appears in `text` as a whole word, in a `match` of the grammar. The word
+/// boundaries of the regular expressions (`\\b` in JSON) are not part of the words.
+fn has_word(text: String, word: String) -> bool {
+  for raw in text.lines() {
+    if !raw.contains("\"match\"") {
+      continue;
+    }
+
+    const line = raw.replace("\\\\b", " ");
+    var start: usize = 0;
+
+    while let Some(index) = line.substring(start, line.len()).find(word) {
+      const at = start + index;
+      const before = last_char(line.substring(0, at));
+      const after = first_char(line.substring(at + word.len(), line.len()));
+
+      if !is_ident(before) && !is_ident(after) {
+        return true;
+      }
+
+      start = at + 1;
+    }
+  }
+
+  false
+}
+
+fn grammar_knows_every_keyword(cx: Context) -> Result<(), String> {
+  const grammar = support::read_file(cx.file("editors/vscode/syntaxes/sagitario.tmLanguage.json"))?;
+  const keywords = spec_keywords(cx)?;
+  const missing: List<String> = new List();
+
+  for keyword in keywords {
+    if !has_word(grammar, keyword) {
+      missing.push(keyword);
+    }
+  }
+
+  support::expect(keywords.len() > 30, `the keywords of the spec were not found: ${keywords.join(" ")}`)?;
+  support::expect(missing.is_empty(), `keywords of docs/spec/01-lexical.md missing from the VS Code grammar: ${missing.join(", ")}`)
+}

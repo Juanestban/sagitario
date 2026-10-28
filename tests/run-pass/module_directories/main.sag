@@ -1,0 +1,16 @@
+// Modules in directories (docs/spec/09-modules.md#files): `pkg::shapes` is `shapes/mod.sag`, next
+// to its submodule `shapes/circle.sag`, and `tools/` is a directory without `mod.sag`, which only
+// holds `pkg::tools::text`. A submodule reaches its directory's module with `super`.
+// expect-stdout: circle 3: area 27
+// expect-stdout: SHAPES: 1
+
+use pkg::shapes;
+use pkg::shapes::circle::Circle;
+use pkg::tools::text;
+
+fn main() {
+  const shape = Circle { radius: 3 };
+
+  println(`${shapes::describe(shape)}: area ${shape.area()}`);
+  println(`${text::shout("shapes")}: ${shapes::COUNT}`);
+}

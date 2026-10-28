@@ -1,0 +1,98 @@
+//! The base protocol of LSP: messages on stdin and stdout, each a JSON text after a
+//! `Content-Length` header that counts its bytes (docs/adr/0058-language-server.md).
+
+use pkg::lsp::json;
+use pkg::lsp::json::{Json, Member, member};
+use std::io;
+
+/// JSON-RPC error codes.
+pub const PARSE_ERROR: i64 = -32700;
+pub const INVALID_REQUEST: i64 = -32600;
+pub const METHOD_NOT_FOUND: i64 = -32601;
+pub const INVALID_PARAMS: i64 = -32602;
+pub const INTERNAL_ERROR: i64 = -32603;
+/// LSP: the document changed while the request was answered.
+pub const CONTENT_MODIFIED: i64 = -32801;
+
+/// The body of the next message, or `None` at the end of the input. A message without a valid
+/// header is an error, and the input is read on from the next one.
+pub fn read() -> Result<Option<String>, String> {
+  var length: Option<usize> = None;
+  var any = false;
+
+  while true {
+    const line = match io::read_line() {
+      Ok(Some(found)) => found,
+      Ok(None) => return if any { Err("the input ended inside a header") } else { Ok(None) },
+      Err(error) => return Err(error.message()),
+    };
+
+    any = true;
+
+    if line.is_empty() {
+      break;
+    }
+
+    if let Some(colon) = line.find(":") {
+      const name = line.substring(0, colon).trim().to_ascii_lowercase();
+
+      if name == "content-length" {
+        match line.substring(colon + 1, line.len()).trim().parse_usize() {
+          Ok(found) => {
+            length = Some(found);
+          }
+          Err(_) => return Err(`invalid header \`${line}\``),
+        }
+      }
+    }
+  }
+
+  const count = match length {
+    Some(found) => found,
+    None => return Err("a message without `Content-Length`"),
+  };
+
+  match io::read_exact(count) {
+    Ok(body) => Ok(Some(body)),
+    Err(error) => Err(error.message()),
+  }
+}
+
+/// Writes one message.
+pub fn send(message: Json) {
+  const body = json::write(message);
+
+  // The client is gone when stdout fails; `exit` or the end of stdin ends the server.
+  if io::print(`Content-Length: ${body.len()}\r\n\r\n${body}`).is_ok() {
+    io::flush();
+  }
+}
+
+fn with_version(members: List<Member>) -> Json {
+  const all = List::from([member("jsonrpc", json::str("2.0"))]);
+
+  for found in members {
+    all.push(found);
+  }
+
+  json::object(all)
+}
+
+pub fn respond(id: Json, result: Json) {
+  send(with_version(List::from([member("id", id), member("result", result)])))
+}
+
+pub fn respond_error(id: Json, code: i64, message: String) {
+  const error = json::object(List::from([member("code", json::int(code)), member("message", json::str(message))]));
+
+  send(with_version(List::from([member("id", id), member("error", error)])))
+}
+
+pub fn notify(method: String, params: Json) {
+  send(with_version(List::from([member("method", json::str(method)), member("params", params)])))
+}
+
+/// A message for the log of the client (`window/logMessage`, type 3 is information, 1 error).
+pub fn log(kind: i64, message: String) {
+  notify("window/logMessage", json::object(List::from([member("type", json::int(kind)), member("message", json::str(message))])))
+}

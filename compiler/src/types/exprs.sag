@@ -429,7 +429,18 @@ fn path_of(value: Expr) -> Option<Path> {
   }
 }
 
+/// Deeply nested code recurses through blocks, `if` and `match`: they skip `other_expr_kind`, whose
+/// frame is large without optimizations.
 fn expr_kind(cx: Checker, value: Expr, expected: Option<Type>) -> Type {
+  match value.kind {
+    ExprKind::Block(body) => block(cx, body, expected),
+    ExprKind::If { cond, then_block, else_branch } => if_expr(cx, cond, then_block, else_branch, expected),
+    ExprKind::Match { scrutinee, arms } => patterns::match_expr(cx, scrutinee, arms, expected),
+    _ => other_expr_kind(cx, value, expected),
+  }
+}
+
+fn other_expr_kind(cx: Checker, value: Expr, expected: Option<Type>) -> Type {
   match value.kind {
     ExprKind::Int { value: digits, suffix } => int_literal(cx, value.span, digits, false, suffix, expected),
     ExprKind::Float { suffix, .. } => float_literal_type(suffix, expected),

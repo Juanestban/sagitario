@@ -32,7 +32,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0021](0021-structs-and-fixed-arrays.md) | Structs, methods and fixed arrays | Accepted (amended by 0028) |
 | [0022](0022-enums-match-option-result.md) | Enums, `match`, `Option`/`Result` and `?` | Accepted |
 | [0023](0023-string-api-and-panic.md) | The `String` API, `StringBuilder` and `panic` | Accepted |
-| [0024](0024-modules-imports-and-visibility.md) | Modules, imports, visibility and the entry point | Accepted (amended by 0025; refined by 0037) |
+| [0024](0024-modules-imports-and-visibility.md) | Modules, imports, visibility and the entry point | Accepted (amended by 0025; refined by 0037; files of modules superseded by 0065) |
 | [0025](0025-single-pub-visibility.md) | A single `pub` visibility, without `pub(pkg)` | Accepted |
 | [0026](0026-ffi-details.md) | FFI details: pointers, `unsafe`, `std::ffi` and exports | Accepted (refined by 0043) |
 | [0027](0027-classes-and-arc.md) | Classes, construction, ARC objects and `weak` references | Accepted (refined by 0030, 0035) |
@@ -52,19 +52,32 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0041](0041-dependencies-by-path.md) | Dependencies by path | Accepted |
 | [0042](0042-library-outputs-and-linking-c.md) | Library outputs and linking C | Accepted (refined by 0044) |
 | [0043](0043-cross-compilation.md) | Cross-compilation to Android and iOS | Accepted |
-| [0044](0044-c-toolchains.md) | C toolchains: MSVC `cl` best-effort, no `zig cc`, and the F3 acceptance program | Accepted |
+| [0044](0044-c-toolchains.md) | C toolchains: MSVC `cl` best-effort, no `zig cc`, and the F3 acceptance program | Accepted (refined by 0067) |
 | [0045](0045-threads-and-send.md) | Threads and `Send` | Accepted (refined by 0046, 0047, 0048) |
 | [0046](0046-mutex-and-atomics.md) | `std::sync`: `Mutex` and atomics | Accepted |
 | [0047](0047-channels-and-thread-utilities.md) | Channels and thread utilities | Accepted |
-| [0048](0048-async-await.md) | `async`/`await`, for phase F6 | Accepted (not implemented) |
-| [0049](0049-self-hosting-plan-and-language-prerequisites.md) | The self-hosting plan, module-level constants, `include_str`, `if let` and `while let` | Accepted (refined by 0050) |
+| [0048](0048-async-await.md) | `async`/`await`, for phase F6 | Accepted (not implemented; moved to F7 by 0057, to F8 by 0063) |
+| [0049](0049-self-hosting-plan-and-language-prerequisites.md) | The self-hosting plan, module-level constants, `include_str`, `if let` and `while let` | Accepted (refined by 0050; Q214 superseded by 0067) |
 | [0050](0050-lexer-port-and-token-dumps.md) | The lexer port, token dumps and `char::from_u32` | Accepted (refined by 0051) |
 | [0051](0051-parser-port-and-ast-dumps.md) | The parser port and AST dumps | Accepted (refined by 0052) |
 | [0052](0052-resolver-port-and-resolution-dumps.md) | The resolver port and resolution dumps | Accepted (refined by 0053) |
 | [0053](0053-type-checker-port-and-type-dumps.md) | The type checker port and type dumps | Accepted (refined by 0054) |
 | [0054](0054-lowering-and-c-generation-port.md) | The lowering and C generation port | Accepted (refined by 0055) |
-| [0055](0055-driver-and-cli-port.md) | The driver and CLI port | Accepted (refined by 0056) |
+| [0055](0055-driver-and-cli-port.md) | The driver and CLI port | Accepted (refined by 0056; Q277 superseded by 0061) |
 | [0056](0056-bootstrap-and-acceptance.md) | The bootstrap and the acceptance of F5 | Accepted |
+| [0057](0057-editor-tooling-and-independence-from-rust.md) | Editor tooling and independence from Rust (phase F6) | Accepted (refined by 0058) |
+| [0058](0058-language-server.md) | The language server | Accepted (refined by 0059, 0062) |
+| [0059](0059-language-server-paths-and-semantic-tokens.md) | Paths and semantic tokens in the language server | Accepted |
+| [0060](0060-driver-parity-for-nova.md) | The pivot without Rust, and the driver for Nova | Accepted (refined by 0064, 0066, 0067) |
+| [0061](0061-terminals.md) | Terminals: `io::is_terminal` and colored diagnostics in `sagc` | Accepted |
+| [0062](0062-language-server-std-sources-and-lone-files.md) | The language server on the standard library and on lone files | Accepted (Q338 refined by 0067) |
+| [0063](0063-distribution-phase-and-roadmap-v2.md) | Distribution as phase F7, and the roadmap v2 of a game engine | Accepted (refined by 0068) |
+| [0064](0064-nova-in-sagitario.md) | Nova in Sagitario | Accepted (refined by 0066) |
+| [0065](0065-module-directories.md) | Modules with submodules in `mod.sag` | Accepted |
+| [0066](0066-test-harness-in-sagitario.md) | The test harness in Sagitario | Accepted |
+| [0067](0067-bootstrap-from-the-seed.md) | The bootstrap from the seed, and retiring Rust | Accepted |
+| [0068](0068-releases-and-distribution.md) | Releases and distribution | Accepted (completed by 0069) |
+| [0069](0069-installers.md) | Installers | Accepted |
 
 ## Template
 

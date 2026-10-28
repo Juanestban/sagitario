@@ -1,0 +1,181 @@
+//! The test harness of Sagitario (docs/testing.md), run from the root of the repository:
+//!
+//!     sag run tests/harness/main.sag -- --sag <compiler> [--nova <nova>] [group...]
+//!
+//! The groups are `suites`, `dumps`, `lsp`, `editor`, `cli` and `nova`; without any, all of them
+//! run. The compiler is `--sag`, or `SAG_COMPILER`; Nova is `--nova`, or `NOVA_BINARY`, or else
+//! the harness builds it from `compiler/src/nova_main.sag` with the compiler under test.
+//! `SAG_BLESS=1` rewrites the expected files, and `SAG_TEST_SANITIZE=0` runs the programs
+//! without sanitizers.
+
+use pkg::cli;
+use pkg::dumps;
+use pkg::editor;
+use pkg::lsp;
+use pkg::nova;
+use pkg::suites;
+use pkg::support;
+use pkg::support::{Context, Test};
+use std::env;
+use std::fs;
+use std::io;
+use std::path;
+use std::process;
+use std::time::SystemTime;
+
+const USAGE: String = "Usage: sag run tests/harness/main.sag -- --sag <compiler> [--nova <nova>] [group...]\n\nGroups: suites, dumps, lsp, editor, cli, nova (all of them by default)\n\nEnvironment: SAG_COMPILER and NOVA_BINARY for the programs under test, SAG_BLESS=1 to rewrite\nexpected files, SAG_TEST_SANITIZE=0 to run programs without sanitizers.";
+
+/// The groups of tests, by name.
+fn groups() -> List<String> {
+  List::from(["suites", "dumps", "lsp", "editor", "cli", "nova"])
+}
+
+fn tests_of(group: String) -> List<Test> {
+  if group == "suites" {
+    suites::tests()
+  } else if group == "dumps" {
+    dumps::tests()
+  } else if group == "lsp" {
+    lsp::tests()
+  } else if group == "editor" {
+    editor::tests()
+  } else if group == "cli" {
+    cli::tests()
+  } else {
+    nova::tests()
+  }
+}
+
+/// What the command line asks for.
+struct Request {
+  pub sag: Option<String>;
+  pub nova: Option<String>;
+  pub groups: List<String>;
+}
+
+fn parse_args(args: List<String>) -> Result<Request, String> {
+  var sag = env::variable("SAG_COMPILER");
+  var nova = env::variable("NOVA_BINARY");
+  const chosen: List<String> = new List();
+  var index: usize = 1;
+
+  while index < args.len() {
+    const arg = args[index];
+
+    if arg == "--sag" || arg == "--nova" {
+      if index + 1 >= args.len() {
+        return Err(`\`${arg}\` needs a path`);
+      }
+
+      if arg == "--sag" {
+        sag = Some(args[index + 1]);
+      } else {
+        nova = Some(args[index + 1]);
+      }
+
+      index += 2;
+      continue;
+    }
+
+    if !groups().contains(arg) {
+      return Err(`unknown group or option \`${arg}\``);
+    }
+
+    chosen.push(arg);
+    index += 1;
+  }
+
+  Ok(Request { sag: without_empty(sag), nova: without_empty(nova), groups: if chosen.is_empty() { groups() } else { chosen } })
+}
+
+fn without_empty(value: Option<String>) -> Option<String> {
+  match value {
+    Some(text) => if text.is_empty() { None } else { Some(text) },
+    None => None,
+  }
+}
+
+/// `file` as an absolute path, so it still names the same file from another directory.
+fn absolute(root: String, file: String) -> String {
+  const has_root = file.starts_with("/") || file.starts_with("\\") || (file.len() >= 2 && file.substring(1, 2) == ":");
+  const has_separator = file.contains("/") || file.contains("\\");
+
+  // A bare name is looked up in `PATH`.
+  if has_root || !has_separator { file } else { path::join(root, file) }
+}
+
+/// The directory for the temporary files of this run.
+fn temp_root() -> String {
+  var base = "/tmp";
+
+  for name in ["TMPDIR", "TEMP", "TMP"] {
+    if let Some(dir) = without_empty(env::variable(name)) {
+      base = dir;
+      break;
+    }
+  }
+
+  path::join(base, `sag-harness-${SystemTime::now().since_unix_epoch().as_nanos()}`)
+}
+
+fn main() {
+  const request = match parse_args(env::args()) {
+    Ok(request) => request,
+    Err(message) => {
+      eprintln(`error: ${message}\n\n${USAGE}`);
+      process::exit(2);
+    }
+  };
+  const sag = match request.sag {
+    Some(sag) => sag,
+    None => {
+      eprintln(`error: no compiler to test: pass \`--sag\` or set SAG_COMPILER\n\n${USAGE}`);
+      process::exit(2);
+    }
+  };
+  const root = fs::current_dir().unwrap_or(".");
+
+  if !fs::is_dir(path::join(root, "tests/run-pass")) || !fs::is_dir(path::join(root, "tests/harness")) {
+    eprintln("error: run the harness from the root of the repository");
+    process::exit(2);
+  }
+
+  const nova = match request.nova {
+    Some(nova) => Some(absolute(root, nova)),
+    None => None,
+  };
+  const cx = new Context(absolute(root, sag), nova, root, temp_root());
+  var total: usize = 0;
+  const failures: List<String> = new List();
+
+  for group in request.groups {
+    for test in tests_of(group) {
+      const name = `${group}::${test.name}`;
+      const body = test.body;
+
+      total += 1;
+      print(`test ${name} ... `);
+      io::flush().unwrap_or(());
+
+      match body(cx) {
+        Ok(_) => println("ok"),
+        Err(error) => {
+          println("FAILED");
+          failures.push(`---- ${name}\n${error}`);
+        }
+      }
+    }
+  }
+
+  support::remove_tree(cx.temp).unwrap_or(());
+
+  if !failures.is_empty() {
+    println(`\n${failures.join("\n\n")}\n`);
+  }
+
+  println(`\nharness: ${total - failures.len()} passed, ${failures.len()} failed`);
+
+  if !failures.is_empty() {
+    process::exit(1);
+  }
+}

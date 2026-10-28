@@ -1,0 +1,17 @@
+// `io::is_terminal`: the harness connects the three standard streams to pipes, which are not
+// terminals.
+// expect-stdout: false false false
+
+use std::io;
+use std::io::Stream;
+
+fn main() {
+  const streams = List::from([Stream::Stdin, Stream::Stdout, io::Stream::Stderr]);
+  const answers: List<String> = new List();
+
+  for stream in streams {
+    answers.push(`${io::is_terminal(stream)}`);
+  }
+
+  println(answers.join(" "));
+}

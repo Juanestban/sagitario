@@ -1,0 +1,116 @@
+exit: 1
+--- stdout
+55..57 keyword fn
+58..59 ident f
+59..60 punct (
+60..61 punct )
+62..63 punct {
+66..98 str "a\n\t\\\"'`$\u{0}A\u{1f600}"
+99..103 char "\n"
+104..108 char "\u{f1}"
+109..117 char "\u{e9}"
+120..124 str ""
+125..131 str ""
+132..138 str "\u{7}"
+139..146 str " "
+147..150 ident xé
+150..153 str " "
+154..155 ident u
+155..156 punct {
+156..162 int 110000
+162..163 punct }
+163..166 str " "
+167..168 ident u
+168..169 punct {
+169..173 ident D800
+173..174 punct }
+174..177 str " "
+178..179 ident u
+179..180 punct {
+180..181 punct }
+181..184 str " "
+185..186 ident u
+186..187 punct {
+187..194 int 1234567
+194..195 punct }
+195..198 str " "
+199..202 ident u12
+202..227 str "\n  '' 'ab' '' '\u{e9}'\n  "
+227..234 ident ñandú
+235..241 ident 漢字
+246..250 str "\n}\n"
+250..250 eof
+--- stderr
+error[E0004]: invalid escape sequence `/q`
+ --> tests/lexer/strings.sag:4:4
+  |
+4 |   "/q" "/x80" "/x+7" "/x4" "/xé" "/u{110000}" "/u{D800}" "/u{}" "/u{1234567}" "/u12"
+  |    ^^
+
+error[E0004]: invalid escape sequence `/x80`
+ --> tests/lexer/strings.sag:4:9
+  |
+4 |   "/q" "/x80" "/x+7" "/x4" "/xé" "/u{110000}" "/u{D800}" "/u{}" "/u{1234567}" "/u12"
+  |         ^^^^
+
+error[E0004]: invalid escape sequence `/x4"`
+ --> tests/lexer/strings.sag:4:23
+  |
+4 |   "/q" "/x80" "/x+7" "/x4" "/xé" "/u{110000}" "/u{D800}" "/u{}" "/u{1234567}" "/u12"
+  |                       ^^^^
+
+error[E0001]: unexpected character `/`
+ --> tests/lexer/strings.sag:4:29
+  |
+4 |   "/q" "/x80" "/x+7" "/x4" "/xé" "/u{110000}" "/u{D800}" "/u{}" "/u{1234567}" "/u12"
+  |                             ^
+
+error[E0001]: unexpected character `/`
+ --> tests/lexer/strings.sag:4:35
+  |
+4 |   "/q" "/x80" "/x+7" "/x4" "/xé" "/u{110000}" "/u{D800}" "/u{}" "/u{1234567}" "/u12"
+  |                                   ^
+
+error[E0001]: unexpected character `/`
+ --> tests/lexer/strings.sag:4:48
+  |
+4 |   "/q" "/x80" "/x+7" "/x4" "/xé" "/u{110000}" "/u{D800}" "/u{}" "/u{1234567}" "/u12"
+  |                                                ^
+
+error[E0001]: unexpected character `/`
+ --> tests/lexer/strings.sag:4:59
+  |
+4 |   "/q" "/x80" "/x+7" "/x4" "/xé" "/u{110000}" "/u{D800}" "/u{}" "/u{1234567}" "/u12"
+  |                                                           ^
+
+error[E0001]: unexpected character `/`
+ --> tests/lexer/strings.sag:4:66
+  |
+4 |   "/q" "/x80" "/x+7" "/x4" "/xé" "/u{110000}" "/u{D800}" "/u{}" "/u{1234567}" "/u12"
+  |                                                                  ^
+
+error[E0001]: unexpected character `/`
+ --> tests/lexer/strings.sag:4:80
+  |
+4 |   "/q" "/x80" "/x+7" "/x4" "/xé" "/u{110000}" "/u{D800}" "/u{}" "/u{1234567}" "/u12"
+  |                                                                                ^
+
+error[E0004]: invalid escape sequence `/z`
+ --> tests/lexer/strings.sag:5:12
+  |
+5 |   '' 'ab' '/z' 'é'
+  |            ^^
+
+error[E0001]: unexpected character `🎉`
+ --> tests/lexer/strings.sag:6:13
+  |
+6 |   "ñandú 漢字 🎉"
+  |             ^
+
+error[E0002]: unterminated string literal
+ --> tests/lexer/strings.sag:6:14
+  |
+6 |   "ñandú 漢字 🎉"
+  |              ^
+
+error: could not compile `tests/lexer/strings.sag` due to 12 previous errors

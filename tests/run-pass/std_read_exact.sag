@@ -1,0 +1,47 @@
+// `io::read_exact`: a number of bytes of stdin, mixed with `read_line`, characters of several
+// bytes, bytes that are not UTF-8, and an input that ends before.
+// stdin: hello world
+// stdin: é!
+// stdin: ñ
+// expect-stdout: [hello]
+// expect-stdout: [ world]
+// expect-stdout: 4 bytes: [é!|]
+// expect-stdout: InvalidData: stream did not contain valid UTF-8
+// expect-stdout: UnexpectedEof: failed to fill whole buffer
+
+use std::io;
+use std::io::ErrorKind;
+
+fn kind(error: io::Error) -> String {
+  match error.kind() {
+    ErrorKind::InvalidData => "InvalidData",
+    ErrorKind::UnexpectedEof => "UnexpectedEof",
+    _ => "other",
+  }
+}
+
+fn show(result: Result<String, io::Error>) {
+  match result {
+    Ok(text) => println(`${text.len()} bytes: [${text.replace("\n", "|")}]`),
+    Err(error) => println(`${kind(error)}: ${error.message()}`),
+  }
+}
+
+fn main() -> Result<(), io::Error> {
+  const word = io::read_exact(5)?;
+
+  println(`[${word}]`);
+
+  const rest = io::read_line()?.unwrap_or("none");
+
+  println(`[${rest}]`);
+
+  // Two bytes of `é`, `!` and the newline.
+  show(io::read_exact(4));
+  // The first of the two bytes of `ñ`.
+  show(io::read_exact(1));
+  // Only the second byte of `ñ` and the newline are left.
+  show(io::read_exact(10));
+
+  Ok(())
+}
