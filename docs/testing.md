@@ -129,15 +129,16 @@ builds the stages in debug, `--update-seed` writes the C of stage 2 and the runt
 ## CI
 
 GitHub Actions, with a `bootstrap` job per system and C compiler: on Windows with official clang,
-`cl` (without sanitizers) and MinGW gcc, on Ubuntu with clang and gcc, and on macOS with clang. Each
-builds the compiler from the seed with the script of its system, in debug, and runs the harness with
-stage 2 and its Nova. The Ubuntu jobs require the Android NDK (`SAG_REQUIRE_NDK=1`). The `same-c` job
+`cl` (without sanitizers) and MinGW gcc, on Ubuntu with clang and gcc, on Ubuntu for AArch64 with
+clang (where C's `char` is unsigned), and on macOS with clang. Each builds the compiler from the
+seed with the script of its system, in debug, and runs the harness with stage 2 and its Nova. The
+Ubuntu jobs on x86-64 require the Android NDK (`SAG_REQUIRE_NDK=1`). The `same-c` job
 checks that the C stage 2 generates for the compiler is the same in all of them, and the `vscode`
 job packages the VS Code extension.
 
 A tag `vX.Y.Z` runs the release workflow instead (`.github/workflows/release.yml`,
-[ADR-0068](adr/0068-releases-and-distribution.md)): on each platform of the releases, also Linux
-on AArch64 and macOS on x86-64, it builds in release mode with `--dist` and runs the harness with
+[ADR-0068](adr/0068-releases-and-distribution.md)): on each platform of the releases, also macOS on
+x86-64, it builds in release mode with `--dist` and runs the harness with
 what it built, before publishing the archives with the installers. Then it installs the release
 with the commands of the README on Windows, Linux and macOS, and builds and runs a new package with
 it. In CI, the `installers` job installs the archive that `--dist` writes, through

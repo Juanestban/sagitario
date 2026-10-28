@@ -45,10 +45,10 @@ pub struct TargetInfo {
   /// Whether C's `char` is unsigned: on Linux and Android for ARM.
   pub char_is_unsigned: bool;
 
-  /// The machine running the compiler. `sag` runs on 64-bit hosts, and only tells Windows from
-  /// the rest; a host with an unsigned `char` (Linux on ARM) is not detected yet.
+  /// The machine running the compiler. `sag` runs on 64-bit hosts, where C's `long` has 32 bits
+  /// on Windows alone and C's `char` is unsigned on Linux for ARM alone.
   pub fn host() -> TargetInfo {
-    TargetInfo { pointer_width: 64, long_is_32: loader::windows(), char_is_unsigned: false }
+    TargetInfo { pointer_width: 64, long_is_32: loader::windows(), char_is_unsigned: loader::linux_on_arm() }
   }
 }
 

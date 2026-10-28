@@ -140,6 +140,15 @@ pub fn windows() -> bool {
   path::join("x\\", "y") == "x\\y"
 }
 
+/// Whether the compiler runs on Linux for ARM, where C's `char` is unsigned: only the kernel of
+/// that system names the architecture of the processor in `/proc/cpuinfo`, as `CPU architecture`.
+pub fn linux_on_arm() -> bool {
+  match fs::read_to_string("/proc/cpuinfo") {
+    Ok(text) => text.contains("CPU architecture"),
+    Err(_) => false,
+  }
+}
+
 /// `name` after `dir`, as Rust's `PathBuf::push` writes it: the driver builds module paths that
 /// way, and the diagnostics of both compilers must name the same files.
 pub fn push_path(dir: String, name: String) -> String {
