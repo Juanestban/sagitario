@@ -29,6 +29,7 @@ functions and types are numbered across all modules.
 ```
 compiler/           the compiler and Nova, written in Sagitario (compiler/Nova.toml)
   src/main.sag            `sag`: the command line
+  src/version.sag         the version of Sagitario, shared by `sag`, its language server and Nova
   src/span.sag            source files, file ids, byte offsets, spans, line/column mapping
   src/diagnostics/        diagnostics (code E0001…, severity, spans, notes), rendering, and the
                           registry of codes (codes.sag)

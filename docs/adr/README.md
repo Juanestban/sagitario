@@ -71,11 +71,12 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0060](0060-driver-parity-for-nova.md) | The pivot without Rust, and the driver for Nova | Accepted (refined by 0064, 0066, 0067) |
 | [0061](0061-terminals.md) | Terminals: `io::is_terminal` and colored diagnostics in `sagc` | Accepted |
 | [0062](0062-language-server-std-sources-and-lone-files.md) | The language server on the standard library and on lone files | Accepted (Q338 refined by 0067) |
-| [0063](0063-distribution-phase-and-roadmap-v2.md) | Distribution as phase F7, and the roadmap v2 of a game engine | Accepted |
+| [0063](0063-distribution-phase-and-roadmap-v2.md) | Distribution as phase F7, and the roadmap v2 of a game engine | Accepted (refined by 0068) |
 | [0064](0064-nova-in-sagitario.md) | Nova in Sagitario | Accepted (refined by 0066) |
 | [0065](0065-module-directories.md) | Modules with submodules in `mod.sag` | Accepted |
 | [0066](0066-test-harness-in-sagitario.md) | The test harness in Sagitario | Accepted |
 | [0067](0067-bootstrap-from-the-seed.md) | The bootstrap from the seed, and retiring Rust | Accepted |
+| [0068](0068-releases-and-distribution.md) | Releases and distribution | Accepted |
 
 ## Template
 

@@ -6,11 +6,12 @@ set -eu
 
 usage() {
   cat <<'EOF'
-Usage: bootstrap/build.sh [--debug] [--install] [--update-seed]
+Usage: bootstrap/build.sh [--debug] [--install] [--update-seed] [--dist]
 
   --debug        Build stages 1 and 2 without optimizations; integer overflow panics
   --install      Copy sag and nova to ~/.sagitario/bin and add it to PATH
   --update-seed  Write the C of stage 2 and the runtime to bootstrap/
+  --dist         Write the archive of a release for this system to build/dist/
   --help         Show this message
 
 The C compiler is SAG_CC, else cc.
@@ -20,16 +21,23 @@ EOF
 mode=--release
 install=0
 update_seed=0
+dist=0
 
 for arg in "$@"; do
   case "$arg" in
     --debug) mode= ;;
     --install) install=1 ;;
     --update-seed) update_seed=1 ;;
+    --dist) dist=1 ;;
     --help | -h) usage; exit 0 ;;
     *) printf 'error: unknown option `%s`\n\n' "$arg" >&2; usage >&2; exit 2 ;;
   esac
 done
+
+if [ "$dist" = 1 ] && [ -z "$mode" ]; then
+  printf 'error: `--dist` builds a release; it does not take `--debug`\n' >&2
+  exit 2
+fi
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
@@ -140,6 +148,32 @@ if [ "$install" = 1 ]; then
     *":$bin:"*) ;;
     *) printf 'open a new terminal (or log in again) to use sag and nova\n' ;;
   esac
+fi
+
+if [ "$dist" = 1 ]; then
+  # The archive of a release (docs/adr/0068-releases-and-distribution.md): `sag` and `nova` in
+  # `bin/`, with the licenses and the README, named after the version and the host.
+  case "$(uname -s)" in
+    Linux) system=unknown-linux-gnu ;;
+    Darwin) system=apple-darwin ;;
+    *) printf 'error: on Windows, write the archive with `bootstrap/build.ps1 --dist`\n' >&2; exit 1 ;;
+  esac
+
+  case "$(uname -m)" in
+    x86_64 | amd64) arch=x86_64 ;;
+    aarch64 | arm64) arch=aarch64 ;;
+    *) printf 'error: releases are built for x86-64 and AArch64, not `%s`\n' "$(uname -m)" >&2; exit 1 ;;
+  esac
+
+  version=$(build/bin/sag --version | cut -d ' ' -f 2)
+  name="sagitario-$version-$arch-$system"
+
+  step "archive build/dist/$name.tar.gz"
+  rm -rf build/dist
+  mkdir -p "build/dist/$name/bin"
+  cp build/bin/sag build/bin/nova "build/dist/$name/bin/"
+  cp LICENSE-MIT LICENSE-APACHE README.md "build/dist/$name/"
+  tar -czf "build/dist/$name.tar.gz" -C build/dist "$name"
 fi
 
 step "done: build/bin/sag$exe and build/bin/nova$exe"

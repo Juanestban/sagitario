@@ -4,7 +4,7 @@ Rationale: [ADR-0014](adr/0014-mvp-scope.md). **The MVP is F0 + F1 + F2, desktop
 
 **Where we are:** F0–F6 are done: the compiler, Nova and the language server are written in
 Sagitario and build from a seed of generated C, without Rust
-([ADR-0067](adr/0067-bootstrap-from-the-seed.md)). F7 (distribution) is next. The phases before
+([ADR-0067](adr/0067-bootstrap-from-the-seed.md)). F7 (distribution) is in progress. The phases before
 F6 describe the Rust compiler as it was then; it retired in F6.
 
 ## F0: Infrastructure (MVP)
@@ -199,8 +199,9 @@ keep it up to date with `nova update self`
 ([ADR-0063](adr/0063-distribution-phase-and-roadmap-v2.md)). It follows F6, since it ships `sag`
 and Nova written in Sagitario.
 
-**Status:** next. `bootstrap/build.sh --install` and `build.ps1 --install` already install a
-build from source to `~/.sagitario/bin`, the directory the installers will use (ADR-0067, Q368).
+**Status:** in progress ([ADR-0068](adr/0068-releases-and-distribution.md)): increment 1 is done.
+`bootstrap/build.sh --install` and `build.ps1 --install` already install a build from source to
+`~/.sagitario/bin`, the directory the installers will use (ADR-0067, Q368).
 
 Increments:
 
@@ -224,17 +225,10 @@ Increments:
 `nova run` and the VS Code extension work; and `nova update self` updates from one published
 release to the next.
 
-**Open questions**, settled when the phase starts:
-
-- Downloading over HTTPS: run the `curl` every supported system ships (Windows 10 and later,
-  macOS, Linux distributions), or a `std::net` with TLS, which is much larger. Recommended:
-  `curl` first.
-- SHA-256 and JSON: in the standard library (`std::hash`, `std::json`), or inside Nova. The
-  language server already has a JSON parser (`compiler/src/lsp/json.sag`).
-- The C compiler: require one, as today, or bundle one (clang is large, and its licence and the
-  Windows SDK need care). Recommended: require it, and guide the installation.
-- Signing: Windows SmartScreen and macOS Gatekeeper warn about unsigned executables; signing
-  needs certificates, and macOS notarization an Apple developer account.
+**Settled questions** ([ADR-0068](adr/0068-releases-and-distribution.md)): downloads go through
+the `curl` of the system; SHA-256 and JSON live inside the compiler (`compiler/src/sha256.sag`,
+`compiler/src/json.sag`), not in the standard library; a C compiler is required, and the installers
+say how to install one; and the executables are not signed in F7.
 
 ## Later phases (post-MVP)
 

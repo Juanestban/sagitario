@@ -208,6 +208,20 @@ pub fn write_file(file: String, text: String) -> Result<(), String> {
   }
 }
 
+/// The version of Sagitario, as `compiler/Nova.toml` says it: `sag --version` and `nova --version`
+/// must say the same (docs/adr/0068-releases-and-distribution.md).
+pub fn sagitario_version(cx: Context) -> Result<String, String> {
+  for line in read_file(cx.file("compiler/Nova.toml"))?.lines() {
+    if let Some(rest) = after(line.trim(), "version = \"") {
+      if rest.ends_with("\"") {
+        return Ok(rest.substring(0, rest.len() - 1));
+      }
+    }
+  }
+
+  Err("`compiler/Nova.toml` has no `version`")
+}
+
 /// The text of `file`.
 pub fn read_file(file: String) -> Result<String, String> {
   match fs::read_to_string(file) {

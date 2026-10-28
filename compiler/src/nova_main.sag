@@ -13,15 +13,13 @@ use pkg::nova::manifest;
 use pkg::nova::manifest::Manifest;
 use pkg::nova::toml;
 use pkg::span::SourceMap;
+use pkg::version;
 use std::env;
 use std::fs;
 use std::io;
 use std::path;
 use std::process;
 use std::process::Command;
-
-/// The version of Nova, which is the version of Sagitario.
-const VERSION: String = "0.8.0";
 
 /// Exit code when building fails or a package is invalid.
 const EXIT_FAILURE: i32 = 1;
@@ -973,7 +971,7 @@ fn execute(command: Request) -> i32 {
       0
     }
     Request::Version => {
-      println(`nova ${VERSION}`);
+      println(`nova ${version::VERSION}`);
       0
     }
     Request::New { name, lib } => new_package(name, lib),

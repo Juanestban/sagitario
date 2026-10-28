@@ -6,6 +6,7 @@ use pkg::driver;
 use pkg::driver::{CompileOptions, DependencySpec};
 use pkg::driver::targets;
 use pkg::lsp;
+use pkg::version;
 use std::env;
 use std::process;
 
@@ -36,9 +37,6 @@ fn usage() -> String {
     "  --diagnostic-format <fmt>   `human` (default) or `short`: one line per diagnostic",
   ]).join("\n")
 }
-
-/// The version of the language and of `sag`.
-const VERSION: String = "0.8.0";
 
 /// Exit code for invalid command-line usage.
 const EXIT_USAGE: i32 = 2;
@@ -352,7 +350,7 @@ fn execute(command: Command) -> i32 {
       0
     }
     Command::Version => {
-      println(`sag ${VERSION}`);
+      println(`sag ${version::VERSION}`);
       0
     }
     Command::Targets => {

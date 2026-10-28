@@ -134,3 +134,8 @@ builds the compiler from the seed with the script of its system, in debug, and r
 stage 2 and its Nova. The Ubuntu jobs require the Android NDK (`SAG_REQUIRE_NDK=1`). The `same-c` job
 checks that the C stage 2 generates for the compiler is the same in all of them, and the `vscode`
 job packages the VS Code extension.
+
+A tag `vX.Y.Z` runs the release workflow instead (`.github/workflows/release.yml`,
+[ADR-0068](adr/0068-releases-and-distribution.md)): on each platform of the releases, also Linux
+on AArch64 and macOS on x86-64, it builds in release mode with `--dist` and runs the harness with
+what it built, before publishing the archives.

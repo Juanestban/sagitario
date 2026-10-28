@@ -40,10 +40,11 @@ fn version_prints_the_version(cx: Context) -> Result<(), String> {
   const printed = ran.stdout.trim();
 
   support::expect_success("sag --version", ran)?;
-  const space = printed.find(" ").unwrap_or(0);
-  const name = printed.substring(0, space);
 
-  expect(name == "sag" && is_version(printed.substring(space + 1, printed.len())), `unexpected version: ${printed}`)
+  const version = support::sagitario_version(cx)?;
+
+  expect(is_version(version), `\`compiler/Nova.toml\` has a version that is not MAJOR.MINOR.PATCH: ${version}`)?;
+  support::expect_equal("sag --version", printed, `sag ${version}`)
 }
 
 fn help_succeeds(cx: Context) -> Result<(), String> {

@@ -294,8 +294,9 @@ fn reports_usage_errors(cx: Context) -> Result<(), String> {
 
   nova_fails(cx, temp, List::from(["publish"]), 2)?;
   nova_fails(cx, temp, List::from(["build", "main.sag"]), 2)?;
-  nova_ok(cx, temp, List::from(["--version"]))?;
-  Ok(())
+  const version = nova_ok(cx, temp, List::from(["--version"]))?;
+
+  support::expect_equal("nova --version", version.stdout.trim(), `nova ${support::sagitario_version(cx)?}`)
 }
 
 /// Each manifest and the error it causes, as `line:column: error[code]`.

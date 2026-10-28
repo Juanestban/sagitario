@@ -19,6 +19,7 @@ bootstrap/build.ps1             # the same on Windows (PowerShell)
 sh bootstrap/build.sh --install # also copy them to ~/.sagitario/bin and add it to PATH
 sh bootstrap/build.sh --debug   # the compiler in debug: an integer overflow in it panics
 sh bootstrap/build.sh --update-seed   # write the C of the compiler and the runtime to bootstrap/
+sh bootstrap/build.sh --dist          # also write the archive of a release to build/dist/
 SAG_CC=gcc sh bootstrap/build.sh      # choose the C compiler
 
 sag build main.sag              # compile
@@ -50,6 +51,13 @@ Developer Command Prompt and set `SAG_TEST_SANITIZE=0`.
 
 The compiler, Nova and the harness must build without warnings: the bootstrap scripts fail if
 `sag check` reports anything for them.
+
+## Releasing
+
+The version of Sagitario is in `compiler/src/version.sag` and `compiler/Nova.toml`, which must
+agree. Pushing a tag `vX.Y.Z` with that version to GitHub runs `.github/workflows/release.yml`,
+which builds the archive of each platform, runs the harness with it, and publishes them with their
+checksums as a GitHub Release (docs/adr/0068-releases-and-distribution.md).
 
 ## Documentation map
 

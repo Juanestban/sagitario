@@ -15,6 +15,7 @@ use pkg::lsp::query;
 use pkg::lsp::tokens;
 use pkg::loader::path_key;
 use pkg::span::Span;
+use pkg::version;
 
 /// Kinds of document symbols (LSP's `SymbolKind`).
 const CLASS: i64 = 5;
@@ -26,9 +27,6 @@ const FUNCTION: i64 = 12;
 const CONSTANT: i64 = 14;
 const ENUM_MEMBER: i64 = 22;
 const STRUCT: i64 = 23;
-
-/// The version of `sag`, which `initialize` reports.
-const VERSION: String = "0.8.0";
 
 class Server {
   /// The open documents, by `path_key`.
@@ -367,7 +365,7 @@ fn initialize_result() -> Json {
     member("documentSymbolProvider", Json::Bool(true)),
     member("semanticTokensProvider", json::object(List::from([member("legend", tokens::legend()), member("full", Json::Bool(true))]))),
   ]));
-  const info = json::object(List::from([member("name", json::str("sag")), member("version", json::str(VERSION))]));
+  const info = json::object(List::from([member("name", json::str("sag")), member("version", json::str(version::VERSION))]));
 
   json::object(List::from([member("capabilities", capabilities), member("serverInfo", info)]))
 }

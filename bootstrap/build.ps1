@@ -5,11 +5,12 @@
 $ErrorActionPreference = 'Stop'
 
 $usage = @'
-Usage: bootstrap\build.ps1 [--debug] [--install] [--update-seed]
+Usage: bootstrap\build.ps1 [--debug] [--install] [--update-seed] [--dist]
 
   --debug        Build stages 1 and 2 without optimizations; integer overflow panics
   --install      Copy sag and nova to %USERPROFILE%\.sagitario\bin and add it to PATH
   --update-seed  Write the C of stage 2 and the runtime to bootstrap\
+  --dist         Write the archive of a release for this system to build\dist\
   --help         Show this message
 
 The C compiler is SAG_CC, else clang. With cl, run it from a Developer Command Prompt.
@@ -18,15 +19,27 @@ The C compiler is SAG_CC, else clang. With cl, run it from a Developer Command P
 $mode = @('--release')
 $install = $false
 $updateSeed = $false
+$dist = $false
 
 foreach ($arg in $args) {
   switch ($arg) {
     '--debug' { $mode = @() }
     '--install' { $install = $true }
     '--update-seed' { $updateSeed = $true }
+    '--dist' { $dist = $true }
     { $_ -eq '--help' -or $_ -eq '-h' } { Write-Output $usage; exit 0 }
     default { [Console]::Error.WriteLine("error: unknown option ``$arg```n`n$usage"); exit 2 }
   }
+}
+
+if ($dist -and $mode.Count -eq 0) {
+  [Console]::Error.WriteLine('error: `--dist` builds a release; it does not take `--debug`')
+  exit 2
+}
+
+if ($dist -and $env:PROCESSOR_ARCHITECTURE -ne 'AMD64') {
+  [Console]::Error.WriteLine("error: releases for Windows are built for x86-64, not ``$env:PROCESSOR_ARCHITECTURE``")
+  exit 1
 }
 
 $root = Split-Path -Parent $PSScriptRoot
@@ -158,6 +171,28 @@ if ($install) {
     [Environment]::SetEnvironmentVariable('Path', (($entries + $bin) | Where-Object { $_ }) -join ';', 'User')
     Write-Output "added $bin to the PATH of the user; open a new terminal to use sag and nova"
   }
+}
+
+if ($dist) {
+  # The archive of a release (docs/adr/0068-releases-and-distribution.md): `sag` and `nova` in
+  # `bin\`, with the licenses and the README, named after the version and the host.
+  $version = ((& 'build\bin\sag.exe' --version) -split ' ')[1]
+  $name = "sagitario-$version-x86_64-pc-windows-msvc"
+  $staging = "build\dist\$name"
+
+  Step "archive build\dist\$name.zip"
+
+  if (Test-Path 'build\dist') {
+    Remove-Item -Recurse -Force 'build\dist'
+  }
+
+  New-Item -ItemType Directory -Force "$staging\bin" | Out-Null
+  Copy-Item 'build\bin\sag.exe', 'build\bin\nova.exe' "$staging\bin\"
+  Copy-Item 'LICENSE-MIT', 'LICENSE-APACHE', 'README.md' "$staging\"
+
+  # ZipFile writes `/` between the directories of an entry, as every unzip expects.
+  Add-Type -AssemblyName System.IO.Compression.FileSystem
+  [IO.Compression.ZipFile]::CreateFromDirectory((Join-Path $root $staging), (Join-Path $root "build\dist\$name.zip"), 'Optimal', $true)
 }
 
 Step 'done: build\bin\sag.exe and build\bin\nova.exe'
