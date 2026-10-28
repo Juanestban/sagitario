@@ -38,11 +38,11 @@ snippets and the icon keep working (docs/adr/0058-language-server.md).
 The file icon is shown by file icon themes that leave unknown files to the languages, such as
 the default Seti theme. Themes with their own icon for every file keep theirs. Material Icon
 Theme takes an icon of another extension through a path from its `dist` folder, which names the
-installed version of this one (here 0.8.0):
+installed version of this one (here 0.9.0):
 
 ```json
 "material-icon-theme.files.associations": {
-  "*.sag": "../../sagitario.sagitario-0.8.0/icons/sag-file"
+  "*.sag": "../../sagitario.sagitario-0.9.0/icons/sag-file"
 }
 ```
 
