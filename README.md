@@ -7,14 +7,14 @@
 Sagitario is a compiled systems programming language that combines Rust-like safety
 (no null, `Result` errors, `match`) with TypeScript/Java/C#-style classes and JavaScript-style
 functional programming. It uses automatic reference counting, compiles to portable C11, and
-aims to run on every desktop and mobile platform and eventually compile itself.
+runs on desktop and mobile platforms, and compiles itself.
 
-> **Status:** the desktop MVP (phases F0–F2) works: modules, structs, enums and `match`,
-> classes with inheritance, interfaces, generics, closures, lists, maps and iterators, compiled
-> to C11 with ARC. The [reference zoo program](tests/run-pass/reference_zoo/main.sag) shows them
-> together. Phase F3 (platform) has started with the first modules of the
-> [standard library](docs/spec/11-standard-library.md): `std::env`, `std::io`, `std::fs`, `std::path`, `std::process` and `std::time`.
-> Packages, mobile targets, concurrency and self-hosting come later (see the
+> **Status:** phases F0–F6 are done: modules, structs, enums and `match`, classes with
+> inheritance, interfaces, generics, closures, lists, maps and iterators, compiled to C11 with ARC
+> (the [reference zoo program](tests/run-pass/reference_zoo/main.sag) shows them together); the
+> [standard library](docs/spec/11-standard-library.md), packages with Nova, C libraries and
+> Android and iOS targets; threads, channels, mutexes and atomics; and a compiler, a package manager and a
+> language server written in Sagitario. Distribution with installers comes next (see the
 > [roadmap](docs/roadmap.md)).
 
 ```sag
@@ -44,10 +44,24 @@ nova new hello && cd hello
 nova run
 ```
 
+## Building
+
+Sagitario builds from a seed of the C its compiler generates for itself, with a C compiler alone
+(clang, gcc, MinGW or MSVC `cl`):
+
+```sh
+sh bootstrap/build.sh --install      # Linux and macOS
+bootstrap/build.ps1 --install        # Windows (PowerShell)
+```
+
+This builds `sag` and `nova` in `build/bin/` and, with `--install`, copies them to
+`~/.sagitario/bin` and adds it to `PATH` (see [Contributing](CONTRIBUTING.md)).
+
 ## Editor support
 
 The VS Code extension in [`editors/vscode/`](editors/vscode/README.md) highlights `.sag` files,
-gives them an icon and adds snippets.
+gives them an icon and adds snippets, and starts `sag lsp` for diagnostics, hover, go to
+definition and completion.
 
 ## Documentation
 

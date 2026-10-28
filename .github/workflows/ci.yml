@@ -5,81 +5,7 @@ on:
     branches: [main]
   pull_request:
 
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
-  test:
-    name: test (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-    env:
-      # The Ubuntu runners have the Android NDK: its cross-compilation tests must not be skipped
-      # there. The macOS runners have Xcode, which the iOS tests use (docs/nova.md#targets).
-      SAG_REQUIRE_NDK: ${{ matrix.os == 'ubuntu-latest' && '1' || '0' }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-      # The official LLVM clang, which builds with sanitizers (docs/adr/0018-windows-c-toolchain.md).
-      - name: Use LLVM clang on Windows
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: echo "SAG_CC=C:\Program Files\LLVM\bin\clang.exe" >> $env:GITHUB_ENV
-      # ThreadSanitizer cannot map its shadow memory with the address randomization of recent
-      # Ubuntu kernels (docs/adr/0045-threads-and-send.md).
-      - name: Allow ThreadSanitizer's memory layout
-        if: runner.os == 'Linux'
-        run: sudo sysctl vm.mmap_rnd_bits=28
-      - run: clang --version
-      - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
-
-  gcc:
-    name: test (ubuntu-latest, gcc)
-    runs-on: ubuntu-latest
-    env:
-      SAG_CC: gcc
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      # ThreadSanitizer cannot map its shadow memory with the address randomization of recent
-      # Ubuntu kernels (docs/adr/0045-threads-and-send.md).
-      - name: Allow ThreadSanitizer's memory layout
-        if: runner.os == 'Linux'
-        run: sudo sysctl vm.mmap_rnd_bits=28
-      - run: gcc --version
-      - run: cargo test --workspace
-
-  # MSVC's cl, supported best-effort and without sanitizers (docs/adr/0044-c-toolchains.md).
-  cl:
-    name: test (windows-latest, cl)
-    runs-on: windows-latest
-    env:
-      SAG_CC: cl
-      SAG_TEST_SANITIZE: '0'
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      # The environment of a Developer Command Prompt, for the following steps.
-      - name: Set up the MSVC environment
-        shell: pwsh
-        run: |
-          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
-          cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul && set" | ForEach-Object {
-            if ($_ -match '^([^=]+)=(.*)$') { "$($Matches[1])=$($Matches[2])" >> $env:GITHUB_ENV }
-          }
-      - run: cl
-      - run: cargo test --workspace
-
   # The bootstrap from the seed with a C compiler alone (docs/adr/0067-bootstrap-from-the-seed.md):
   # stages 1 and 2 generate the same C, stage 2 passes the harness, and the C it generates for the
   # compiler is the same on every system.
@@ -190,11 +116,3 @@ jobs:
       - run: npm ci
       - run: npm run package
 
-  msrv:
-    name: minimum supported Rust version
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.90
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo check --workspace --all-targets

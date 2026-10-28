@@ -96,8 +96,8 @@ Increments:
 8. MSVC `cl` supported best-effort, `zig cc` not adopted, `c_char` spelled `char` in headers,
    and the acceptance program ([ADR-0044](adr/0044-c-toolchains.md)).
 
-**Status:** done. The acceptance program is `tests/acceptance/f3/`, run by the Nova test
-`f3_acceptance`.
+**Status:** done. The acceptance program is `tests/acceptance/f3/`, run by the test
+`f3_acceptance` of the harness.
 
 **Acceptance:** a command-line tool (a small `grep` or `wc`) built as a package reads files and
 stdin, depends on a local library package and passes with sanitizers; the same library builds
@@ -168,7 +168,7 @@ Increments:
 
 1. The VS Code extension (`editors/vscode/`): highlighting, the file icon, the language
    configuration and snippets.
-2. A language server written in Sagitario (`sagc lsp`), with the VS Code client: diagnostics,
+2. A language server written in Sagitario (`sag lsp`), with the VS Code client: diagnostics,
    hover, go to definition, completion and symbols; `io::read_exact`, and standard streams byte
    for byte on every system ([ADR-0058](adr/0058-language-server.md)).
 3. The pivot without Rust ([ADR-0060](adr/0060-driver-parity-for-nova.md)):
@@ -182,6 +182,10 @@ Increments:
      `sag` with `crates/` retired ([ADR-0067](adr/0067-bootstrap-from-the-seed.md)): 3d-1 the
      seed and the scripts of the bootstrap (`bootstrap/`), 3d-2 the rename and the standard
      library in `compiler/std/`, 3d-3 Rust removed.
+
+**Status:** done. Sagitario builds from `bootstrap/sag.c` with a C compiler alone, and CI builds
+it and runs the harness on Windows, Linux and macOS without Rust
+([ADR-0067](adr/0067-bootstrap-from-the-seed.md)).
 
 ## F7: Distribution and updates (post-MVP)
 

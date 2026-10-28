@@ -6,21 +6,21 @@ Rationale: [ADR-0016](adr/0016-engineering-process.md).
 
 | Level | Location | What it checks |
 |---|---|---|
-| Unit | inside each crate | Lexer tokens, parser AST, type errors, SIR, C output. Snapshot tests with `insta`. |
+| Pass dumps | `tests/lexer/`, `tests/parser/`, `tests/resolve/`, `tests/types/`, `tests/codegen/` | The tokens, syntax tree, resolution, types or C of each case, with its diagnostics, against `<case>.expected`. |
 | `run-pass` | `tests/run-pass/*.sag` | Program compiles, runs, and matches expected stdout and exit code. |
 | `compile-fail` | `tests/compile-fail/*.sag` | Compiler rejects the program with the expected diagnostic codes at the expected lines. |
 | `run-panic` | `tests/run-panic/*.sag` | Program panics with the expected message and exit code 101. |
+| Language server | `tests/lsp/` | Sessions of `sag lsp` against the answers they expect. |
+| Command line, Nova, editor | `tests/harness/` | Exit codes and messages of `sag`, Nova end to end, and the VS Code grammar. |
 
 A case is a single `.sag` file, or a directory holding a multi-file program whose entry file
 is `main.sag` (for example `tests/run-pass/modules/main.sag` with `geometry.sag` and
 `util/strings.sag` beside it).
 
-The end-to-end suites run through an own harness (in the style of rustc's `compiletest`),
-`crates/sagitario_cli/tests/suites.rs`, invoked by `cargo test --workspace`. It runs the built
-`sag` binary: `sag run <file>` for `run-pass` and `run-panic`, and
-`sag check --diagnostic-format short <file>` for `compile-fail` (expected exit code 1). They require a C compiler (see
-[architecture](architecture.md#c-toolchain)). The harness in Sagitario (`tests/harness/`, below)
-runs the same suites with the same annotations, and replaces the Cargo tests when Rust is retired.
+Every level runs through the harness in Sagitario (`tests/harness/`, below), in the style of
+rustc's `compiletest`. It runs the `sag` under test: `sag run <file>` for `run-pass` and
+`run-panic`, and `sag check --diagnostic-format short <file>` for `compile-fail` (expected exit
+code 1). They require a C compiler (see [architecture](architecture.md#c-toolchain)).
 
 ## Annotations
 
@@ -63,7 +63,6 @@ fn main() { ... }
   otherwise the exit code must be 1. Prefix incidental bindings with `_` to keep tests focused.
 - `every_diagnostic_code_has_a_compile_fail_test` fails if a code in
   `compiler/src/diagnostics/codes.sag`, the registry of codes, has no `compile-fail` case.
-  `crates/sagitario_diagnostics/src/codes.rs` registers the same codes until Rust retires.
 
 ## Memory checks
 
@@ -78,7 +77,7 @@ fn main() { ... }
 - `tests/run-pass/reference_wordcount/` is the reference program of the F4 acceptance
   criteria, run with ThreadSanitizer ([ADR-0048](adr/0048-async-await.md)).
 - `tests/acceptance/f3/` is the F3 acceptance program: the `wc` and `textcount` packages and a C
-  program using the library, run by the Nova test `f3_acceptance`
+  program using the library, run by the test `f3_acceptance` of the harness
   ([ADR-0044](adr/0044-c-toolchains.md)).
 
 ## Rules
@@ -90,34 +89,9 @@ fn main() { ... }
 - Benchmarks (fibonacci, n-body, binary-trees versus equivalent C) are informational and do
   not gate the MVP.
 
-## The self-hosted compiler
-
-`crates/sagitario_cli/tests/selfhost.rs` builds `compiler/` (`sagc`) with `sag` and checks that,
-for every `.sag` file of the repository, both compilers give the same exit code, stdout and
-stderr: today for `check --dump=tokens`, `--dump=ast`, `--dump=resolve`, `--dump=types` (which
-includes everything `--dump=declarations` shows) and `--dump=c` (the generated C), and for more
-passes as they are ported
-([ADR-0050](adr/0050-lexer-port-and-token-dumps.md),
-[ADR-0051](adr/0051-parser-port-and-ast-dumps.md),
-[ADR-0052](adr/0052-resolver-port-and-resolution-dumps.md),
-[ADR-0053](adr/0053-type-checker-port-and-type-dumps.md),
-[ADR-0054](adr/0054-lowering-and-c-generation-port.md)). `tests/lexer/`, `tests/parser/`,
-`tests/resolve/`, `tests/types/` and `tests/codegen/` hold edge cases of each pass. With
-`SAG_COMPILER=<path to sagc>`, the harness of the suites runs that compiler instead of `sag`
-([ADR-0055](adr/0055-driver-and-cli-port.md)), and with `NOVA_BINARY=<path to Nova>` the tests of Nova
-(`crates/sagitario_nova/tests/nova.rs`) run that Nova, such as Nova in Sagitario
-([ADR-0064](adr/0064-nova-in-sagitario.md)). `bootstrap_reaches_the_fixed_point` builds stage 2
-with `sagc` and checks that both generate the same C for the compiler
-([ADR-0056](adr/0056-bootstrap-and-acceptance.md)). `language_server_answers_the_sessions` sends
-each `tests/lsp/<case>.session` to `sagc lsp` about `<case>.sag` and compares the answers with
-`<case>.expected`, one message per line ([ADR-0058](adr/0058-language-server.md)). The test also
-checks that the Rust compiler registers the codes of `compiler/src/diagnostics/codes.sag` and
-that `compiler/src/unicode.sag` has the Unicode properties of Rust's `char`; `SAG_BLESS=1 cargo
-test --test selfhost` rewrites `unicode.sag` and the expected answers of the language server.
-
 ## The harness in Sagitario
 
-`tests/harness/` is a program in Sagitario that runs every end-to-end test without Cargo
+`tests/harness/` is a program in Sagitario that runs every test
 ([ADR-0066](adr/0066-test-harness-in-sagitario.md)). From the root of the repository:
 
 ```sh
@@ -132,9 +106,9 @@ the harness otherwise builds from `compiler/src/nova_main.sag` with that compile
 | Group | What it checks |
 |---|---|
 | `suites` | `run-pass`, `compile-fail` and `run-panic`, as above, and that every diagnostic code has a `compile-fail` case. |
-| `dumps` | Each case of `tests/lexer`, `tests/parser`, `tests/resolve`, `tests/types` and `tests/codegen` against `<case>.expected` next to it: the exit code, the dump of that pass (`--dump=tokens`, `ast`, `resolve`, `types`, `c`) and the diagnostics, made for `x86_64-linux-android` so that they are the same on every host. |
-| `lsp` | The sessions of `tests/lsp/` against their `.expected` answers. |
-| `editor` | The keywords of the VS Code grammar. |
+| `dumps` | Each case of `tests/lexer`, `tests/parser`, `tests/resolve`, `tests/types` and `tests/codegen` against `<case>.expected` next to it: the exit code, the dump of that pass (`--dump=tokens`, `ast`, `resolve`, `types`, `c`) and the diagnostics, made for `x86_64-linux-android` so that they are the same on every host. These directories hold the edge cases of each pass. |
+| `lsp` | Each `tests/lsp/<case>.session` sent to `sag lsp` (one message per line, `raw ` for a body sent as written) about `<case>.sag`, against `<case>.expected`, one message per line, with `{uri}` for the document, `{dir}` for its directory and `{root}` for the repository ([ADR-0058](adr/0058-language-server.md)). |
+| `editor` | The grammar of the VS Code extension (`editors/vscode/`) has every keyword of `docs/spec/01-lexical.md` ([ADR-0057](adr/0057-editor-tooling-and-independence-from-rust.md)). |
 | `cli` | Exit codes and messages of the command line. |
 | `nova` | Nova end to end, in temporary packages, also building C programs with its libraries and, with the Android NDK, cross-compiling. |
 
@@ -152,19 +126,11 @@ and the harness, then build Nova; the result is `build/bin/sag` and `build/bin/n
 builds the stages in debug, `--update-seed` writes the C of stage 2 and the runtime to
 `bootstrap/`, and `--install` copies `sag` and `nova` to `~/.sagitario/bin` and adds it to `PATH`.
 
-## The editor
-
-`crates/sagitario_cli/tests/editor.rs` checks that the grammar of the VS Code extension
-(`editors/vscode/`) has every keyword of `docs/spec/01-lexical.md`
-([ADR-0057](adr/0057-editor-tooling-and-independence-from-rust.md)).
-
 ## CI
 
-GitHub Actions matrix on Windows, Linux and macOS running `cargo fmt --check`,
-`cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` with
-clang, plus a Linux job with `SAG_CC=gcc` and a Windows job with `SAG_CC=cl` (without
-sanitizers). The Ubuntu job requires the Android NDK (`SAG_REQUIRE_NDK=1`). The `bootstrap` job
-builds the compiler from the seed with the script of its system in debug, and runs the harness in
-Sagitario with stage 2 and its Nova, on Windows with official clang, `cl` and MinGW gcc, on Ubuntu
-with clang and gcc, and on macOS with clang; the `same-c` job checks that the C stage 2 generates
-for the compiler is the same in all of them. The `vscode` job packages the VS Code extension.
+GitHub Actions, with a `bootstrap` job per system and C compiler: on Windows with official clang,
+`cl` (without sanitizers) and MinGW gcc, on Ubuntu with clang and gcc, and on macOS with clang. Each
+builds the compiler from the seed with the script of its system, in debug, and runs the harness with
+stage 2 and its Nova. The Ubuntu jobs require the Android NDK (`SAG_REQUIRE_NDK=1`). The `same-c` job
+checks that the C stage 2 generates for the compiler is the same in all of them, and the `vscode`
+job packages the VS Code extension.
