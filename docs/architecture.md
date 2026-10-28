@@ -51,6 +51,7 @@ runtime/            minimal C runtime (ARC, panic, String, allocation, I/O and t
 bootstrap/          the seed (the C of the compiler, with its runtime) and the scripts that build
                     the compiler from it with a C compiler alone (see testing.md)
 tests/              end-to-end suites, and their harness in Sagitario in tests/harness/ (see testing.md)
+install/            the installers of a release: install.sh (Linux, macOS) and install.ps1 (Windows)
 editors/vscode/     the VS Code extension
 ```
 

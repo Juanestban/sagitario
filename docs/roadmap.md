@@ -199,9 +199,10 @@ keep it up to date with `nova update self`
 ([ADR-0063](adr/0063-distribution-phase-and-roadmap-v2.md)). It follows F6, since it ships `sag`
 and Nova written in Sagitario.
 
-**Status:** in progress ([ADR-0068](adr/0068-releases-and-distribution.md)): increment 1 is done.
-`bootstrap/build.sh --install` and `build.ps1 --install` already install a build from source to
-`~/.sagitario/bin`, the directory the installers will use (ADR-0067, Q368).
+**Status:** in progress: increments 1 ([ADR-0068](adr/0068-releases-and-distribution.md)) and 2
+([ADR-0069](adr/0069-installers.md)) are done. The installers put a release in `~/.sagitario/bin`,
+where `bootstrap/build.sh --install` and `build.ps1 --install` put a build from source (ADR-0067,
+Q368).
 
 Increments:
 

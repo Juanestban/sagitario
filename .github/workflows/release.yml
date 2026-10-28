@@ -84,6 +84,7 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           pattern: archive-*
@@ -94,7 +95,59 @@ jobs:
         run: |
           sha256sum sagitario-* > SHA256SUMS
           cat SHA256SUMS
+      # With the installers (docs/adr/0069-installers.md), which `releases/latest/download/` serves.
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "Sagitario ${GITHUB_REF_NAME#v}" --generate-notes --verify-tag
+        run: gh release create "$GITHUB_REF_NAME" dist/* install/install.sh install/install.ps1 --repo "$GITHUB_REPOSITORY" --title "Sagitario ${GITHUB_REF_NAME#v}" --generate-notes --verify-tag
+
+  # The commands of the README install the release just published, with the defaults: the
+  # directory, and PATH.
+  install:
+    name: install (${{ matrix.os }})
+    needs: publish
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            cc: C:\Program Files\LLVM\bin\clang.exe
+          - os: ubuntu-latest
+            cc: clang
+          - os: macos-latest
+            cc: clang
+    runs-on: ${{ matrix.os }}
+    env:
+      SAG_CC: ${{ matrix.cc }}
+    steps:
+      - name: Install
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          irm https://github.com/${{ github.repository }}/releases/latest/download/install.ps1 | iex
+          $installed = & "$env:USERPROFILE\.sagitario\bin\sag.exe" --version
+          if ($installed -ne "sag $($env:GITHUB_REF_NAME.Substring(1))") { throw "installed $installed" }
+          $path = [Environment]::GetEnvironmentVariable('Path', 'User') -split ';'
+          if ($path -notcontains "$env:USERPROFILE\.sagitario\bin") { throw 'the installer did not add its directory to PATH' }
+      - name: Install
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          curl -fsSL https://github.com/${{ github.repository }}/releases/latest/download/install.sh | sh
+          test "$("$HOME/.sagitario/bin/sag" --version)" = "sag ${GITHUB_REF_NAME#v}"
+          grep -F '.sagitario/bin' "$HOME/.profile"
+      - name: Build and run a package with what was installed
+        if: runner.os == 'Windows'
+        working-directory: ${{ runner.temp }}
+        run: |
+          & "$env:USERPROFILE\.sagitario\bin\nova.exe" new demo
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Set-Location demo
+          & "$env:USERPROFILE\.sagitario\bin\nova.exe" run
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      - name: Build and run a package with what was installed
+        if: runner.os != 'Windows'
+        working-directory: ${{ runner.temp }}
+        run: |
+          "$HOME/.sagitario/bin/nova" new demo
+          cd demo && "$HOME/.sagitario/bin/nova" run

@@ -14,8 +14,8 @@ runs on desktop and mobile platforms, and compiles itself.
 > (the [reference zoo program](tests/run-pass/reference_zoo/main.sag) shows them together); the
 > [standard library](docs/spec/11-standard-library.md), packages with Nova, C libraries and
 > Android and iOS targets; threads, channels, mutexes and atomics; and a compiler, a package manager and a
-> language server written in Sagitario. Distribution with installers comes next (see the
-> [roadmap](docs/roadmap.md)).
+> language server written in Sagitario. Distribution is in progress: releases and installers are
+> done (see the [roadmap](docs/roadmap.md)).
 
 ```sag
 abstract class Animal {
@@ -43,6 +43,32 @@ Packages are created and built with Nova, the package manager:
 nova new hello && cd hello
 nova run
 ```
+
+## Install
+
+On Linux and macOS:
+
+```sh
+curl -fsSL https://github.com/Juanestban/sagitario/releases/latest/download/install.sh | sh
+```
+
+On Windows (PowerShell):
+
+```powershell
+irm https://github.com/Juanestban/sagitario/releases/latest/download/install.ps1 | iex
+```
+
+The installers download the latest [release](https://github.com/Juanestban/sagitario/releases),
+check its checksum, put `sag` and `nova` in `~/.sagitario/bin` and add it to `PATH`. `sag` compiles
+through a C compiler, which the installers look for and, if there is none, say how to install:
+clang or gcc, the Xcode command line tools on macOS, or LLVM and the Visual Studio Build Tools on
+Windows. Pass `--version X.Y.Z` to install another release (`sh -s -- --version X.Y.Z` after the
+pipe; on Windows, set `SAGITARIO_VERSION`), and `--help` for the other options.
+
+To uninstall, remove `~/.sagitario` and its line in `~/.profile` (and `~/.zshrc` on macOS), or on
+Windows its entry in the `PATH` of the user. An archive downloaded with a browser instead is
+marked by the system: clear it with `Unblock-File` on Windows or
+`xattr -d com.apple.quarantine` on macOS.
 
 ## Building
 

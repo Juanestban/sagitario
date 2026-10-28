@@ -101,6 +101,64 @@ jobs:
           cat c-of-the-compiler-*/sag.c.sha256
           test "$(cat c-of-the-compiler-*/sag.c.sha256 | sort -u | wc -l)" -eq 1
 
+  # The installers (docs/adr/0069-installers.md) install the archive that `--dist` writes, as they
+  # install a release, and what they install builds and runs a new package.
+  installers:
+    name: installers (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            cc: C:\Program Files\LLVM\bin\clang.exe
+          - os: ubuntu-latest
+            cc: clang
+          - os: macos-latest
+            cc: clang
+    runs-on: ${{ matrix.os }}
+    env:
+      SAG_CC: ${{ matrix.cc }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the archive of a release
+        if: runner.os == 'Windows'
+        run: ./bootstrap/build.ps1 --dist
+      - name: Build the archive of a release
+        if: runner.os != 'Windows'
+        run: sh bootstrap/build.sh --dist
+      - name: Write the checksums
+        shell: bash
+        working-directory: build/dist
+        run: |
+          archive=$(find . -maxdepth 1 -type f -name 'sagitario-*' | sed 's|^\./||')
+          (sha256sum $archive 2>/dev/null || shasum -a 256 $archive) > SHA256SUMS
+          cat SHA256SUMS
+      # Windows PowerShell 5.1, the oldest the installer supports, running it as `iex` does.
+      - name: Install
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $from = 'file:///' + ((Resolve-Path build\dist).Path -replace '\\', '/')
+          & ([scriptblock]::Create((Get-Content -Raw install\install.ps1))) -From $from -Dir "$env:RUNNER_TEMP\sagitario" -NoModifyPath
+      - name: Install
+        if: runner.os != 'Windows'
+        run: sh install/install.sh --from "file://$PWD/build/dist" --dir "$RUNNER_TEMP/sagitario" --no-modify-path
+      - name: Build and run a package with what was installed
+        if: runner.os == 'Windows'
+        working-directory: ${{ runner.temp }}
+        run: |
+          & "$env:RUNNER_TEMP\sagitario\bin\nova.exe" new demo
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Set-Location demo
+          & "$env:RUNNER_TEMP\sagitario\bin\nova.exe" run
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      - name: Build and run a package with what was installed
+        if: runner.os != 'Windows'
+        working-directory: ${{ runner.temp }}
+        run: |
+          "$RUNNER_TEMP/sagitario/bin/nova" new demo
+          cd demo && "$RUNNER_TEMP/sagitario/bin/nova" run
+
   # The VS Code extension packages (docs/adr/0057-editor-tooling-and-independence-from-rust.md).
   vscode:
     name: VS Code extension

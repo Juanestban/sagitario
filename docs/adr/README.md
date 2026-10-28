@@ -76,7 +76,8 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0065](0065-module-directories.md) | Modules with submodules in `mod.sag` | Accepted |
 | [0066](0066-test-harness-in-sagitario.md) | The test harness in Sagitario | Accepted |
 | [0067](0067-bootstrap-from-the-seed.md) | The bootstrap from the seed, and retiring Rust | Accepted |
-| [0068](0068-releases-and-distribution.md) | Releases and distribution | Accepted |
+| [0068](0068-releases-and-distribution.md) | Releases and distribution | Accepted (completed by 0069) |
+| [0069](0069-installers.md) | Installers | Accepted |
 
 ## Template
 

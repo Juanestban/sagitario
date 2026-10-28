@@ -57,7 +57,14 @@ The compiler, Nova and the harness must build without warnings: the bootstrap sc
 The version of Sagitario is in `compiler/src/version.sag` and `compiler/Nova.toml`, which must
 agree. Pushing a tag `vX.Y.Z` with that version to GitHub runs `.github/workflows/release.yml`,
 which builds the archive of each platform, runs the harness with it, and publishes them with their
-checksums as a GitHub Release (docs/adr/0068-releases-and-distribution.md).
+checksums and the installers in `install/` as a GitHub Release
+(docs/adr/0068-releases-and-distribution.md, docs/adr/0069-installers.md). To try the installers
+on a local archive:
+
+```sh
+sh bootstrap/build.sh --dist && (cd build/dist && sha256sum sagitario-*.tar.gz > SHA256SUMS)
+sh install/install.sh --from "file://$PWD/build/dist" --dir /tmp/sagitario --no-modify-path
+```
 
 ## Documentation map
 

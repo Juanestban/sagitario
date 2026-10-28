@@ -138,4 +138,7 @@ job packages the VS Code extension.
 A tag `vX.Y.Z` runs the release workflow instead (`.github/workflows/release.yml`,
 [ADR-0068](adr/0068-releases-and-distribution.md)): on each platform of the releases, also Linux
 on AArch64 and macOS on x86-64, it builds in release mode with `--dist` and runs the harness with
-what it built, before publishing the archives.
+what it built, before publishing the archives with the installers. Then it installs the release
+with the commands of the README on Windows, Linux and macOS, and builds and runs a new package with
+it. In CI, the `installers` job installs the archive that `--dist` writes, through
+`--from file://…`, on the same three systems ([ADR-0069](adr/0069-installers.md)).
