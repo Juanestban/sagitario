@@ -1084,10 +1084,10 @@ fn tool_output(program: String, args: List<String>, dir: String) -> Result<Strin
   Ok(ran.stdout.trim())
 }
 
-/// The SHA-256 of `file`, in lowercase hexadecimal.
+/// The SHA-256 of `file`, in lowercase hexadecimal; on Windows through .NET, as Nova does.
 fn sha256_of(file: String) -> Result<String, String> {
   if support::windows() {
-    const command = `(Get-FileHash -Algorithm SHA256 -LiteralPath '${file}').Hash`;
+    const command = `[BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([IO.File]::ReadAllBytes('${file}'))).Replace('-', '')`;
 
     return Ok(tool_output("powershell", List::from(["-NoProfile", "-NonInteractive", "-Command", command]), ".")?.to_ascii_lowercase());
   }

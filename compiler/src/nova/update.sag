@@ -328,10 +328,12 @@ fn download(url: String, file: String) -> Result<(), String> {
 }
 
 /// The SHA-256 of `file`, in lowercase hexadecimal, from the tools of the system (ADR-0070, Q404).
+/// On Windows through .NET rather than `Get-FileHash`, whose module Windows PowerShell may fail to
+/// load when it inherits the `PSModulePath` of PowerShell 7.
 fn sha256(file: String) -> Result<String, String> {
   const digest = if windows() {
     const powershell = system_tool("WindowsPowerShell\\v1.0\\powershell", "powershell");
-    const command = `(Get-FileHash -Algorithm SHA256 -LiteralPath '${file.replace("'", "''")}').Hash`;
+    const command = `[BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([IO.File]::ReadAllBytes('${file.replace("'", "''")}'))).Replace('-', '')`;
 
     run_tool(powershell, List::from(["-NoProfile", "-NonInteractive", "-Command", command]))?
   } else {
