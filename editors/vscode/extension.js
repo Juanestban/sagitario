@@ -12,7 +12,7 @@ const { LanguageClient } = require('vscode-languageclient/node');
 let client;
 
 /**
- * The command of the server (docs/adr/0071-vscode-extension-in-the-marketplace.md): the setting
+ * The command of the server (docs/adr/0071-vscode-extension-with-the-releases.md): the setting
  * `sagitario.server.path`, else the `sag` of the installers in `~/.sagitario/bin`, else `sag` on
  * PATH, which an editor started before installing, or from the Dock on macOS, may not see.
  */

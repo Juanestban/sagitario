@@ -88,8 +88,8 @@ This builds `sag` and `nova` in `build/bin/` and, with `--install`, copies them 
 
 The VS Code extension in [`editors/vscode/`](editors/vscode/README.md) highlights `.sag` files,
 gives them an icon and adds snippets, and starts `sag lsp` for diagnostics, hover, go to
-definition and completion. Install `Sagitario` (`sagitario.sagitario`) from the Extensions view;
-it finds the `sag` of the installers without settings.
+definition and completion. Each release has its `sagitario.vsix`
+(`code --install-extension sagitario.vsix`); it finds the `sag` of the installers without settings.
 
 ## Documentation
 

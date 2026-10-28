@@ -52,8 +52,8 @@ variants, `SCREAMING_SNAKE_CASE` names are constants, and a name before `(` is a
 
 ## Building and installing
 
-The extension is `sagitario.sagitario` in the Visual Studio Marketplace, published with each
-release of Sagitario and with its version; each GitHub Release also has its `sagitario.vsix`. To
+Each [release of Sagitario](https://github.com/Juanestban/sagitario/releases) has its
+`sagitario.vsix`, with its version: install it with `code --install-extension sagitario.vsix`. To
 build it from this directory:
 
 ```sh

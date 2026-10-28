@@ -2,8 +2,8 @@ name: Release
 
 # A release of Sagitario on a tag `vX.Y.Z` (docs/adr/0068-releases-and-distribution.md): each
 # platform bootstraps from the seed in release mode, passes the harness with what it built and
-# writes its archive; then they are published, with their checksums and the VS Code extension, as a
-# GitHub Release, and the extension in the Marketplace (docs/adr/0071-vscode-extension-in-the-marketplace.md).
+# writes its archive; then they are published, with their checksums, the installers and the VS Code
+# extension (docs/adr/0071-vscode-extension-with-the-releases.md), as a GitHub Release.
 on:
   push:
     tags: ['v*']
@@ -79,7 +79,7 @@ jobs:
           if-no-files-found: error
 
   # The VS Code extension, with the version of the release (the harness checks it): one package for
-  # every platform, since it is plain JavaScript (docs/adr/0071-vscode-extension-in-the-marketplace.md).
+  # every platform, since it is plain JavaScript (docs/adr/0071-vscode-extension-with-the-releases.md).
   vscode:
     name: package the VS Code extension
     runs-on: ubuntu-latest
@@ -127,35 +127,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" dist/* install/install.sh install/install.ps1 vscode/sagitario.vsix --repo "$GITHUB_REPOSITORY" --title "Sagitario ${GITHUB_REF_NAME#v}" --generate-notes --verify-tag
-
-  # The extension attached to the release, once the release exists, with the token of the
-  # publisher `sagitario` (docs/adr/0071-vscode-extension-in-the-marketplace.md).
-  marketplace:
-    name: publish the VS Code extension
-    needs: publish
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: editors/vscode
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - run: npm ci
-      - uses: actions/download-artifact@v4
-        with:
-          name: vscode-extension
-          path: editors/vscode
-      - name: Publish to the Visual Studio Marketplace
-        env:
-          VSCE_PAT: ${{ secrets.VSCE_PAT }}
-        run: |
-          if [ -z "$VSCE_PAT" ]; then
-            echo "::error::the secret VSCE_PAT, a token of the publisher sagitario, is not set"
-            exit 1
-          fi
-          npx vsce publish --packagePath sagitario.vsix
 
   # The commands of the README install the release just published, with the defaults: the
   # directory, and PATH.

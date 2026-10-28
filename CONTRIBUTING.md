@@ -58,10 +58,9 @@ The version of Sagitario is in `compiler/src/version.sag`, `compiler/Nova.toml`,
 `editors/vscode/package.json` and `editors/vscode/package-lock.json`, which must agree (the harness
 checks it). Pushing a tag `vX.Y.Z` with that version to GitHub runs `.github/workflows/release.yml`,
 which builds the archive of each platform, runs the harness with it, and publishes them with their
-checksums, the installers in `install/` and the VS Code extension as a GitHub Release, then the
-extension in the Visual Studio Marketplace with the token of the secret `VSCE_PAT`
+checksums, the installers in `install/` and the VS Code extension as a GitHub Release
 (docs/adr/0068-releases-and-distribution.md, docs/adr/0069-installers.md,
-docs/adr/0071-vscode-extension-in-the-marketplace.md). To try the installers on a local archive:
+docs/adr/0071-vscode-extension-with-the-releases.md). To try the installers on a local archive:
 
 ```sh
 sh bootstrap/build.sh --dist && (cd build/dist && sha256sum sagitario-*.tar.gz > SHA256SUMS)

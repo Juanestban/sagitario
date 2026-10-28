@@ -201,7 +201,7 @@ and Nova written in Sagitario.
 
 **Status:** in progress: increments 1 ([ADR-0068](adr/0068-releases-and-distribution.md)), 2
 ([ADR-0069](adr/0069-installers.md)), 3 ([ADR-0070](adr/0070-nova-update-self.md)) and 4
-([ADR-0071](adr/0071-vscode-extension-in-the-marketplace.md)) are done; the acceptance is checked on
+([ADR-0071](adr/0071-vscode-extension-with-the-releases.md)) are done; the acceptance is checked on
 the first release published with them. The installers put a release in `~/.sagitario/bin`,
 where `bootstrap/build.sh --install` and `build.ps1 --install` put a build from source (ADR-0067,
 Q368), and where the VS Code extension finds `sag`.
@@ -221,12 +221,13 @@ Increments:
    platform, checks its checksum, replaces `sag`, `nova` and the standard library (on Windows a
    running executable is renamed, then replaced), and keeps the previous version to go back to.
    `nova update self --check` only says whether there is one.
-4. **The editor.** The VS Code extension is published to the Marketplace with each release, and
-   finds `sag` in `~/.sagitario/bin` without settings.
+4. **The editor.** The VS Code extension has the version of Sagitario, is attached to each
+   release, and finds `sag` in `~/.sagitario/bin` without settings. Publishing it in the
+   Marketplace is not planned for now, and not required by the acceptance.
 
 **Acceptance:** on a clean machine of each system, one command installs Sagitario; `nova new`,
-`nova run` and the VS Code extension work; and `nova update self` updates from one published
-release to the next.
+`nova run` work; and `nova update self` updates from one published release to the next.
+Optional: the VS Code extension of the release works with the installed `sag`.
 
 **Settled questions** ([ADR-0068](adr/0068-releases-and-distribution.md)): downloads go through
 the `curl` of the system; checksums are checked with the tools of the system, and the latest
