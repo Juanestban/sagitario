@@ -3308,7 +3308,8 @@ static void sag_task_job_run(sag_object *object) {
   sag_task_inbox *inbox = job->inbox;
   ((void (*)(sag_object *))job->body.fn)(job->body.env);
   sag_inbox_lock(inbox);
-  if (!inbox->closed) {
+  bool closed = inbox->closed;
+  if (!closed) {
     sag_object_retain(&job->header);
     job->next = NULL;
     if (inbox->last != NULL) {
@@ -3324,6 +3325,14 @@ static void sag_task_job_run(sag_object *object) {
 #endif
   }
   sag_inbox_unlock(inbox);
+#ifndef _WIN32
+  /* The executor ended, so nobody will join this thread: it ends on its own, without being
+   * reported as a leaked thread (ThreadSanitizer). On Windows its handle is never closed, which
+   * only matters until the process ends. */
+  if (closed) {
+    pthread_detach(pthread_self());
+  }
+#endif
 }
 
 void sag_task_spawn_blocking(sag_fnval body, sag_fnval done) {
