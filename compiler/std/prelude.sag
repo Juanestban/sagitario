@@ -607,3 +607,53 @@ fn string_lines(text: String) -> List<String> {
 
   lines
 }
+
+extern "C" {
+  fn sag_task_schedule(resume: fn());
+}
+
+/// The task of a call to an `async fn` or of `task::sleep` (docs/spec/12-async.md): its result,
+/// once it has finished, and the functions that resume the tasks awaiting it until then. It has
+/// no public members: `await`, `std::task` and the code the compiler generates for `async fn` use
+/// the private ones.
+pub class Task<T> {
+  prv var result: Option<T>;
+  prv var waiters: List<fn()>;
+
+  prv fn new(self) {
+    self.result = None;
+    self.waiters = new List();
+  }
+
+  prv fn is_done(self) -> bool {
+    match self.result {
+      Some(_) => true,
+      None => false,
+    }
+  }
+
+  /// Makes `resume` ready when the task finishes.
+  prv fn wait(self, resume: fn()) {
+    self.waiters.push(resume);
+  }
+
+  /// Finishes the task with `value`, making the tasks awaiting it ready in the order they began
+  /// to.
+  prv fn complete(self, value: T) {
+    self.result = Some(value);
+
+    for resume in self.waiters {
+      unsafe { sag_task_schedule(resume) };
+    }
+
+    self.waiters = new List();
+  }
+
+  /// The result of a finished task, again each time.
+  prv fn value(self) -> T {
+    match self.result {
+      Some(value) => value,
+      None => panic("the task has not finished"),
+    }
+  }
+}

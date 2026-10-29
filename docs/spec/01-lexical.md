@@ -18,15 +18,17 @@
 In the MVP, documentation comments are kept by the lexer as doc tokens but are otherwise
 treated as comments. A documentation tool (`sag doc`) is post-MVP.
 
-## Keywords (F1/F2)
+## Keywords (F1/F2, F8)
 
 ```
-abstract  as        break     class     const     continue  else      enum
-extends   extern    false     fn        for       if        impl      in
-interface let       loop      match     new       override  pkg       prv
-pub       return    self      Self      struct    super     true      unsafe
-use       var       weak      where     while     zod
+abstract  as        async     await     break     class     const     continue
+else      enum      extends   extern    false     fn        for       if
+impl      in        interface let       loop      match     new       override
+pkg       prv       pub       return    self      Self      struct    super
+true      unsafe    use       var       weak      where     while     zod
 ```
+
+`async` and `await` are those of [`async` functions](12-async.md) (F8).
 
 `let` only appears in `if let` and `while let` (F5,
 [control flow](06-control-flow.md#if-let-and-while-let)); bindings are `const` and `var`.
@@ -39,8 +41,8 @@ refers to the type being declared (see [types](02-types.md#self)).
 
 These must be rejected as identifiers so they can be introduced later without breaking code:
 
-- Keywords: `async`, `await`, for phase F8 ([ADR-0048](../adr/0048-async-await.md),
-  [ADR-0063](../adr/0063-distribution-phase-and-roadmap-v2.md)).
+- No keywords at the moment: `async` and `await`, reserved until F8, are keywords of
+  [`async` functions](12-async.md) ([ADR-0072](../adr/0072-async-await-increments.md)).
 - Names of the concurrency model, which programs cannot declare: `Send` (the prelude's
   interface, F4) and `Sync` (reserved). `spawn`, reserved until F4, is now
   `std::thread::spawn` and an ordinary name ([ADR-0045](../adr/0045-threads-and-send.md)).

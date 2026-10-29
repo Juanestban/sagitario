@@ -1,0 +1,78 @@
+// The rules of `async fn` and `await` (docs/spec/12-async.md).
+use std::task;
+use std::thread;
+
+async fn value() -> i32 {
+  42
+}
+
+fn not_async() -> i32 {
+  await value() //~ ERROR E0336
+}
+
+async fn in_lambda() {
+  const _f = () => await value(); //~ ERROR E0336
+}
+
+extern "C" async fn exported() {} //~ ERROR E0337
+
+class Session {
+  pub var open: bool;
+
+  pub async fn new(self) { //~ ERROR E0337
+    self.open = true;
+  }
+}
+
+struct Counter {
+  pub count: i32;
+
+  pub async fn bump(self) { //~ ERROR E0338
+    self.count += 1;
+  }
+
+  pub fn reset(self) {
+    self.count = 0;
+  }
+
+  pub async fn restart(self) { //~ ERROR E0338
+    self.reset();
+  }
+
+  pub async fn read(self) -> i32 {
+    self.count
+  }
+}
+
+interface Named {
+  var name: String;
+
+  async fn renamed(self) -> String { //~ ERROR E0338
+    self.name = "other";
+    self.name
+  }
+}
+
+async fn uses() {
+  value(); //~ WARN W0009
+  const _f = value;
+  const _t = new Task<i32>(); //~ ERROR E0205
+  const _n = await 5; //~ ERROR E0300
+  const h = value();
+  const _thread = thread::spawn(() => { const _x = h; }); //~ ERROR E0332
+}
+
+fn main() {}
+
+fn blocking() -> i32 {
+  1
+}
+
+async fn spawns() {
+  const shared = new StringBuilder();
+  const _a = task::spawn_blocking(() => shared.len()); //~ ERROR E0332
+  const body = blocking;
+  const _b = task::spawn_blocking(body); //~ ERROR E0333
+  const _c = task::spawn_blocking; //~ ERROR E0333
+  const _d = task::spawn_blocking(blocking);
+}

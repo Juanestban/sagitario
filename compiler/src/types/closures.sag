@@ -148,11 +148,10 @@ pub fn fn_value(cx: Checker, value: Expr, path: Path, function: u32, expected: O
     Some(decl) => decl.name.name,
     None => "",
   };
-
   // Its argument is checked where it is called.
-  if send::is_spawn(cx, function) {
+  if let Some(spawn) = send::spawn_name(cx, function) {
     cx.diagnostics.push(
-      Diagnostic::error(codes::INVALID_SPAWN, value.span, "`thread::spawn` cannot be used as a value")
+      Diagnostic::error(codes::INVALID_SPAWN, value.span, "`" + spawn + "` cannot be used as a value")
         .with_note("the compiler checks what a thread captures where `thread::spawn` is called"),
     );
 

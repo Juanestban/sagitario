@@ -1,0 +1,323 @@
+//! `async fn` and `await` (docs/spec/12-async.md, ADR-0072). An `async fn` becomes two functions.
+//! The one callers call creates the `Task` and a frame, the environment of a closure whose
+//! captures are the task and the parameters, and runs that closure once. The closure is the body:
+//! at an `await` of a task that has not finished it adds itself to that task's waiters and
+//! returns, and the task resumes it when it finishes; `return` completes its own task. Code
+//! generation keeps every local of the body in the frame (`Function::frame`), so that they survive
+//! a suspension, and jumps back after the `await` the frame stopped at.
+
+use pkg::ast::{Expr, FnDecl};
+use pkg::resolve::{ParamOwner, TypeItem};
+use pkg::sir::{AsyncCx, Callee, Context, Function, Instance, LambdaFunction, Lowering, Operand, PanicMessage, Place, Projection, Rvalue, Stmt, copy_types, is_valueless, unit_operand};
+use pkg::sir::mono;
+use pkg::types::{FnSig, NamedRef, Subst, Type, TypeKind};
+use pkg::types;
+
+/// The `Task<T>` class of `ty`.
+fn task_class(ty: Type) -> Result<NamedRef, String> {
+  match ty.kind {
+    TypeKind::Class(named) => Ok(named),
+    _ => Err("a task that is not a `Task`"),
+  }
+}
+
+/// The instance of the method `name` of the `Task` class `task`.
+fn task_method(lw: Lowering, task: NamedRef, name: String) -> Result<u32, String> {
+  const function = match lw.resolution.type_function(lw.package, TypeItem::Class(task.id), name) {
+    Some(found) => found,
+    None => return Err("the prelude's `Task` has no method `" + name + "`"),
+  };
+
+  Ok(mono::instance(lw, function, Subst::of(ParamOwner::Item(TypeItem::Class(task.id)), task.args)))
+}
+
+/// The function callers call: creates the task and the frame, and runs the frame until its first
+/// suspension. For `async fn main`, also registers the function the C `main` calls, which runs the
+/// task with the executor as `task::block_on` does.
+pub fn lower_async(id: u32, decl: FnDecl, sig: FnSig, locals: List<Type>, subst: Subst, cx: Context) -> Result<Function, String> {
+  const task_ty = sig.ret;
+  const task = task_class(task_ty)?;
+  const result_ty = task.args.first().unwrap_or(types::unit());
+  // A method's `self` is its first parameter: an instance, or a value of which the task keeps a
+  // copy, since an `async` method cannot modify it (docs/spec/12-async.md#self-in-async-methods).
+  const param_count = decl.params.len() + (if sig.receiver.is_some() { 1 } else { 0 });
+  const params: List<Type> = new List();
+
+  for index in 0..param_count {
+    params.push(locals.get(index).unwrap_or(types::error()));
+  }
+
+  const lowering = new Lowering(cx, task_ty, copy_types(params), subst, decl.name.span);
+
+  lowering.source_fn = id;
+
+  for ty in params {
+    mono::register_types(lowering, ty);
+  }
+
+  // The frame: the task, then the parameters, which the frame keeps until it finishes.
+  const env_types = List::from([task_ty]);
+
+  for ty in params {
+    env_types.push(ty);
+  }
+
+  lowering.registry.envs.push(copy_types(env_types));
+
+  const env = lowering.registry.envs.len() - 1;
+  const body = resume_function(lowering, id, decl, param_count, locals, subst, env, task, result_ty)?;
+  const created = lowering.new_instance(task_ty, new List())?;
+  const captures = List::from([created]);
+
+  for index in 0..param_count {
+    captures.push(Operand::Local(index as u32));
+  }
+
+  const frame_ty = types::of(TypeKind::Function { params: new List(), ret: types::unit() });
+  const frame = lowering.new_value(frame_ty, Rvalue::Closure { function: body, env: Some(env), captures: captures });
+
+  lowering.call(Callee::Closure { params: new List(), ret: types::unit() }, List::from([frame]), types::unit());
+
+  // The task is returned, owned by the caller.
+  const returned = lowering.temp(task_ty);
+
+  lowering.store(returned, created);
+  lowering.release_pending_from(0);
+  lowering.emit(Stmt::Return(Some(Operand::Local(returned))));
+
+  const is_main = match cx.resolution.main {
+    Some(main) => main == id,
+    None => false,
+  };
+
+  if is_main && subst.params.is_empty() {
+    lowering.registry.async_main = Some(entry_function(lowering, id, decl, task_ty, task, result_ty)?);
+  }
+
+  Ok(Function {
+    name: decl.name.name,
+    template: false,
+    closure: false,
+    param_count: param_count,
+    self_by_ref: false,
+    export: None,
+    ret: task_ty,
+    locals: lowering.locals,
+    body: lowering.buffers.pop().unwrap_or(new List()),
+    frame: None,
+  })
+}
+
+/// The closure of the frame, registered like a lambda: its locals are the environment, then those
+/// of the `async fn` (its parameters first), then temporaries.
+fn resume_function(lw: Lowering, id: u32, decl: FnDecl, param_count: usize, source_locals: List<Type>, subst: Subst, env: usize, task: NamedRef, result_ty: Type) -> Result<u32, String> {
+  const map = new Map<u32, u32>();
+  const locals = List::from([types::unit()]);
+
+  for index in 0..source_locals.len() {
+    map.insert(index as u32, locals.len() as u32);
+    locals.push(source_locals[index]);
+  }
+
+  const slot = lw.registry.instances.len();
+
+  lw.registry.instances.push(Instance { template: id, subst: subst, lambda: true });
+
+  const function = lw.registry.first_instance + slot as u32;
+  const task_ty = types::of(TypeKind::Class(task));
+  const lowering = new Lowering(lw.context(), result_ty, locals, subst, decl.name.span);
+
+  lowering.source_fn = id;
+  lowering.local_map = Some(map);
+  lowering.async_cx = Some(AsyncCx { env: env, task_ty: task_ty, complete: task_method(lw, task, "complete")? });
+
+  // The parameters, owned by the body until it returns, like the captures of a lambda.
+  const owned: List<u32> = new List();
+
+  for index in 0..param_count {
+    const local = (index + 1) as u32;
+    const ty = lowering.local_type(local);
+    const place = Place { local: 0, projections: List::from([Projection::EnvField { env: env, index: index + 1 }]), ty: ty };
+
+    lowering.store(local, Operand::Place(place));
+
+    if lowering.managed(ty) {
+      owned.push(local);
+    }
+  }
+
+  lowering.scopes.push(owned);
+
+  if is_valueless(result_ty) {
+    lowering.block_into(decl.body, None)?;
+    finish(lowering, None, None);
+  } else {
+    const result = lowering.temp(result_ty);
+
+    lowering.block_into(decl.body, Some(result))?;
+    finish(lowering, Some(Operand::Local(result)), Some(result));
+  }
+
+  const lowered = Function {
+    name: decl.name.name + " (async)",
+    template: false,
+    closure: true,
+    param_count: 1,
+    self_by_ref: false,
+    export: None,
+    ret: types::unit(),
+    locals: lowering.locals,
+    body: lowering.buffers.pop().unwrap_or(new List()),
+    frame: Some(env),
+  };
+
+  lw.registry.lambdas.push(LambdaFunction { slot: slot, function: lowered });
+
+  Ok(function)
+}
+
+/// The function the C `main` calls for `async fn main`: runs the task of `main` with the executor
+/// until it finishes, and returns its result.
+fn entry_function(lw: Lowering, main: u32, decl: FnDecl, task_ty: Type, task: NamedRef, result_ty: Type) -> Result<u32, String> {
+  const slot = lw.registry.instances.len();
+
+  lw.registry.instances.push(Instance { template: main, subst: Subst::empty(), lambda: true });
+
+  const function = lw.registry.first_instance + slot as u32;
+  const lowering = new Lowering(lw.context(), result_ty, new List(), Subst::empty(), decl.name.span);
+  const started = lowering.call(Callee::Fn(main), new List(), task_ty);
+  const awaited = run_until_done(lowering, started, task)?;
+  var returned: Option<Operand> = None;
+
+  if !is_valueless(result_ty) {
+    const local = lowering.temp(result_ty);
+
+    lowering.store(local, awaited);
+    returned = Some(Operand::Local(local));
+  }
+
+  lowering.release_pending_from(0);
+  lowering.emit(Stmt::Return(returned));
+
+  lw.registry.lambdas.push(LambdaFunction {
+    slot: slot,
+    function: Function {
+      name: "main (async)",
+      template: false,
+      closure: false,
+      param_count: 0,
+      self_by_ref: false,
+      export: None,
+      ret: result_ty,
+      locals: lowering.locals,
+      body: lowering.buffers.pop().unwrap_or(new List()),
+      frame: None,
+    },
+  });
+
+  Ok(function)
+}
+
+/// Runs the executor until `started` finishes, as `task::block_on` does, and reads its result.
+fn run_until_done(lw: Lowering, started: Operand, task: NamedRef) -> Result<Operand, String> {
+  const is_done = task_method(lw, task, "is_done")?;
+  const value = task_method(lw, task, "value")?;
+  const bool_ty = types::of(TypeKind::Bool);
+  const loop_mark = lw.open_buffer();
+  const done = lw.call(Callee::Fn(is_done), List::from([started]), bool_ty);
+  const stepped_mark = lw.open_buffer();
+  const stepped = lw.call(Callee::Runtime { function: "sag_task_step", located: false }, new List(), bool_ty);
+  const stuck_mark = lw.open_buffer();
+
+  lw.emit(Stmt::Panic(PanicMessage::Static("`async fn main` waits for a task that no other task or timer can finish")));
+
+  const stuck = lw.close_buffer(stuck_mark);
+
+  lw.emit(Stmt::If { cond: stepped, then_body: new List(), else_body: stuck });
+
+  const step = lw.close_buffer(stepped_mark);
+
+  lw.emit(Stmt::If { cond: done, then_body: List::from([Stmt::Break]), else_body: step });
+
+  const body = lw.close_buffer(loop_mark);
+
+  lw.emit(Stmt::Loop(body));
+
+  Ok(lw.call(Callee::Fn(value), List::from([started]), task.args.first().unwrap_or(types::unit())))
+}
+
+/// The end of the body, at `return` or after its last expression: completes the task with
+/// `value` (the unit value if `None`), releases `owned` (the result, owned by the body) and every
+/// open scope, and returns.
+pub fn finish(lw: Lowering, value: Option<Operand>, owned: Option<u32>) {
+  const cx = match lw.async_cx {
+    Some(found) => found,
+    None => return,
+  };
+  const task = Operand::Place(Place { local: 0, projections: List::from([Projection::EnvField { env: cx.env, index: 0 }]), ty: cx.task_ty });
+
+  lw.call(Callee::Fn(cx.complete), List::from([task, value.unwrap_or(unit_operand())]), types::unit());
+
+  if let Some(local) = owned {
+    if lw.managed(lw.local_type(local)) {
+      lw.emit(Stmt::Release(local));
+    }
+  }
+
+  lw.release_for_exit(0, 0);
+  lw.emit(Stmt::Return(None));
+}
+
+/// `await inner`: when the task has not finished, the frame waits for it and suspends; then its
+/// result, an owned copy.
+pub fn await_expr(lw: Lowering, inner: Expr, ty: Type) -> Result<Operand, String> {
+  const task_ty = lw.type_of(inner)?;
+  const task = task_class(task_ty)?;
+  const value = lw.expr(inner)?;
+  // A local that holds the task while the frame waits.
+  const held = lw.temp(task_ty);
+
+  lw.store(held, value);
+  lw.pending.push(held);
+
+  const is_done = task_method(lw, task, "is_done")?;
+  const wait = task_method(lw, task, "wait")?;
+  const result = task_method(lw, task, "value")?;
+  const state = lw.awaits + 1;
+
+  lw.awaits = state;
+
+  const done = lw.call(Callee::Fn(is_done), List::from([Operand::Local(held)]), types::of(TypeKind::Bool));
+  const mark = lw.open_buffer();
+  const resume_ty = types::of(TypeKind::Function { params: new List(), ret: types::unit() });
+  const resume = lw.new_value(resume_ty, Rvalue::ResumeFn);
+
+  lw.call(Callee::Fn(wait), List::from([Operand::Local(held), resume]), types::unit());
+  lw.release_pending_from(mark);
+  lw.emit(Stmt::Await { state: state, live: live_locals(lw) });
+
+  const suspend = lw.buffers.pop().unwrap_or(new List());
+
+  lw.emit(Stmt::If { cond: done, then_body: new List(), else_body: suspend });
+  lw.emit(Stmt::Resumed(state));
+
+  Ok(lw.call(Callee::Fn(result), List::from([Operand::Local(held)]), ty))
+}
+
+/// The locals that own values at this point: the managed bindings of the open blocks, and the
+/// pending temporaries.
+fn live_locals(lw: Lowering) -> List<u32> {
+  const live: List<u32> = new List();
+
+  for scope in lw.scopes {
+    for local in scope {
+      live.push(local);
+    }
+  }
+
+  for local in lw.pending {
+    live.push(local);
+  }
+
+  live
+}

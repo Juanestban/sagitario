@@ -1,0 +1,53 @@
+// `std::math` and the methods of numbers (docs/adr/0076-std-math-and-methods-of-numbers.md):
+// constants, infinities and NaN in constants, the methods of floats and integers, and the
+// functions of `std::math` on `f64`.
+// expect-stdout: pi 3.141592653589793 tau 6.283185307179586 e 2.718281828459045
+// expect-stdout: sqrt2 1.4142135623730951 ln2 0.6931471805599453 ln10 2.302585092994046
+// expect-stdout: epsilon true max true min true
+// expect-stdout: inf inf -inf NaN nan-eq false nan-ne true
+// expect-stdout: pi32 3.1415927
+// expect-stdout: abs 2.5 2.5 signum 1 -1 -1 copysign -3
+// expect-stdout: min 1 max 2 nan-min 1 nan-max 2
+// expect-stdout: clamp 0 10 5 nan true
+// expect-stdout: lerp 0 5 10 7.5
+// expect-stdout: floor -2 ceil -1 round 3 -3 2 trunc -1 fract -0.5
+// expect-stdout: nan true false inf true true false finite true false false
+// expect-stdout: f32 2.5 3 0.25 true
+// expect-stdout: int abs 7 7 signum -1 0 1
+// expect-stdout: int min -3 max 4 clamp 0 9 5
+// expect-stdout: pow 1024 1 -128 0 1
+// expect-stdout: unsigned 3 200 255 81
+// expect-stdout: functions 2 -1 1 3 0.5 4 -4 true
+use std::math;
+use std::math::{INFINITY, NAN, PI};
+
+const HALF_PI: f64 = PI / 2.0;
+const NOT_A_NUMBER: bool = NAN == NAN;
+
+fn main() {
+  println(`pi ${PI} tau ${math::TAU} e ${math::E}`);
+  println(`sqrt2 ${math::SQRT_2} ln2 ${math::LN_2} ln10 ${math::LN_10}`);
+  println(`epsilon ${1.0 + math::EPSILON > 1.0} max ${math::MAX * 2.0 == INFINITY} min ${math::MIN == -math::MAX}`);
+  println(`inf ${INFINITY} ${math::NEG_INFINITY} ${NAN} nan-eq ${NOT_A_NUMBER} nan-ne ${NAN != NAN}`);
+  println(`pi32 ${PI as f32}`);
+
+  println(`abs ${(-2.5).abs()} ${2.5.abs()} signum ${0.0.signum()} ${(-0.0).signum()} ${(-7.0).signum()} copysign ${3.0.copysign(-1.0)}`);
+  println(`min ${1.0.min(2.0)} max ${1.0.max(2.0)} nan-min ${NAN.min(1.0)} nan-max ${2.0.max(NAN)}`);
+  println(`clamp ${(-4.0).clamp(0.0, 10.0)} ${40.0.clamp(0.0, 10.0)} ${5.0.clamp(0.0, 10.0)} nan ${NAN.clamp(0.0, 1.0).is_nan()}`);
+  println(`lerp ${0.0.lerp(10.0, 0.0)} ${0.0.lerp(10.0, 0.5)} ${0.0.lerp(10.0, 1.0)} ${5.0.lerp(10.0, 0.5)}`);
+  println(`floor ${(-1.5).floor()} ceil ${(-1.5).ceil()} round ${2.5.round()} ${(-2.5).round()} ${2.4.round()} trunc ${(-1.5).trunc()} fract ${(-1.5).fract()}`);
+  println(`nan ${NAN.is_nan()} ${NAN.is_finite()} inf ${INFINITY.is_infinite()} ${math::NEG_INFINITY.is_infinite()} ${INFINITY.is_finite()} finite ${HALF_PI.is_finite()} ${HALF_PI.is_nan()} ${HALF_PI.is_infinite()}`);
+
+  const third: f32 = 0.25;
+  println(`f32 ${(-2.5f32).abs()} ${2.5f32.round()} ${third.clamp(0.0, 1.0)} ${(third / 0.0).is_infinite()}`);
+
+  const negative = -7;
+  println(`int abs ${negative.abs()} ${7.abs()} signum ${negative.signum()} ${0.signum()} ${12i64.signum()}`);
+  println(`int min ${(-3).min(4)} max ${(-3).max(4)} clamp ${(-3).clamp(0, 9)} ${30.clamp(0, 9)} ${5.clamp(0, 9)}`);
+  println(`pow ${2.pow(10)} ${5.pow(0)} ${(-2i8).pow(7)} ${0.pow(3)} ${(-1).pow(4)}`);
+
+  const small: u8 = 200;
+  println(`unsigned ${3u32.min(5)} ${small.max(7)} ${small.clamp(255, 255)} ${3u64.pow(4)}`);
+
+  println(`functions ${math::abs(-2.0)} ${math::signum(-3.0)} ${math::min(1.0, 2.0)} ${math::max(3.0, NAN)} ${math::clamp(0.5, 0.0, 1.0)} ${math::lerp(2.0, 6.0, 0.5)} ${math::floor(-3.5)} ${math::is_nan(NAN)}`);
+}

@@ -2,17 +2,37 @@
 // (docs/adr/0058-language-server.md). Highlighting, snippets and the file icon work without it.
 'use strict';
 
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const vscode = require('vscode');
 const { LanguageClient } = require('vscode-languageclient/node');
 
 /** @type {LanguageClient | undefined} */
 let client;
 
-/** The command of the server: the setting `sagitario.server.path`, or `sag` on PATH. */
+/**
+ * The command of the server (docs/adr/0071-vscode-extension-with-the-releases.md): the setting
+ * `sagitario.server.path`, else the `sag` of the installers in `~/.sagitario/bin`, else `sag` on
+ * PATH, which an editor started before installing, or from the Dock on macOS, may not see.
+ */
 function serverCommand() {
   const configured = vscode.workspace.getConfiguration('sagitario').get('server.path');
 
-  return typeof configured === 'string' && configured.trim() !== '' ? configured.trim() : 'sag';
+  if (typeof configured === 'string' && configured.trim() !== '') {
+    return configured.trim();
+  }
+
+  const installed = path.join(os.homedir(), '.sagitario', 'bin', process.platform === 'win32' ? 'sag.exe' : 'sag');
+
+  return fs.existsSync(installed) ? installed : 'sag';
+}
+
+/** The command that installs Sagitario, as the README gives it. */
+function installCommand() {
+  return process.platform === 'win32'
+    ? 'irm https://github.com/Juanestban/sagitario/releases/latest/download/install.ps1 | iex'
+    : 'curl -fsSL https://github.com/Juanestban/sagitario/releases/latest/download/install.sh | sh';
 }
 
 async function start(context) {
@@ -33,7 +53,7 @@ async function start(context) {
 
     const action = await vscode.window.showWarningMessage(
       `Sagitario: cannot start the language server \`${command} lsp\` (${error.message ?? error}). ` +
-        'Install `sag` (`bootstrap/build.sh --install`, or `bootstrap/build.ps1 --install` on Windows) or set `sagitario.server.path` to it. ' +
+        `Install Sagitario (\`${installCommand()}\`) or set \`sagitario.server.path\` to a \`sag\`. ` +
         'Highlighting and snippets keep working without it.',
       'Open settings',
     );

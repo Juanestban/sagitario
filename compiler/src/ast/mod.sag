@@ -213,6 +213,8 @@ pub struct FnDecl {
   pub visibility: Visibility;
   pub is_abstract: bool;
   pub is_override: bool;
+  /// `async fn`: calling it returns a `Task` (docs/spec/12-async.md).
+  pub is_async: bool;
   pub name: Ident;
   pub generics: List<GenericParam>;
   /// The span of `self`, only in methods.
@@ -400,6 +402,8 @@ pub enum ExprKind {
   Range { start: Expr, end: Expr, inclusive: bool },
   /// `expr?`
   Try(Expr),
+  /// `await task`, only inside an `async fn`.
+  Await(Expr),
   /// `zod`, the parent class's view of `self`.
   Zod,
   /// `(a, b: T) => body` or `x => body`.

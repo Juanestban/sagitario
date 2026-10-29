@@ -34,6 +34,7 @@ pub fn tests() -> List<Test> {
     support::test("checks_integer_sizes_for_the_target", checks_integer_sizes_for_the_target),
     support::test("builds_libraries_for_ios_on_macos_only", builds_libraries_for_ios_on_macos_only),
     support::test("f3_acceptance", f3_acceptance),
+    support::test("updates_itself_from_a_release", updates_itself_from_a_release),
   ])
 }
 
@@ -952,4 +953,173 @@ fn f3_acceptance(cx: Context) -> Result<(), String> {
   }
 
   Ok(())
+}
+
+/// `nova update self` (docs/adr/0070-nova-update-self.md), from fake releases in temporary
+/// directories: an installation of `sag` and the Nova under test is updated to a release
+/// `99.0.0` holding the same tools, and `--check`, an installation that is up to date, a wrong
+/// checksum and a missing version are reported.
+fn updates_itself_from_a_release(cx: Context) -> Result<(), String> {
+  const temp = cx.temp_dir("update")?;
+  const triple = release_triple()?;
+  const extension = if support::windows() { ".zip" } else { ".tar.gz" };
+  const installed = support::sagitario_version(cx)?;
+  const tools = List::from([pair("sag", cx.sag), pair("nova", nova_binary(cx)?)]);
+
+  // The release: its archive and `SHA256SUMS`.
+  const release = path::join(temp, "release");
+  const name = `sagitario-99.0.0-${triple}`;
+  const archive = `${name}${extension}`;
+
+  for tool in tools {
+    executable_copy(tool.value, under(release, List::from([name, "bin", exe(tool.key)])))?;
+  }
+
+  if support::windows() {
+    tool_output(system_tar(), List::from(["-a", "-cf", archive, name]), release)?;
+  } else {
+    tool_output("tar", List::from(["-czf", archive, name]), release)?;
+  }
+
+  support::remove_tree(path::join(release, name))?;
+
+  const sha256 = sha256_of(path::join(release, archive))?;
+
+  support::write_file(path::join(release, "SHA256SUMS"), `${sha256}  ${archive}\n`)?;
+
+  // The installation.
+  const bin = path::join(temp, "bin");
+
+  for tool in tools {
+    executable_copy(tool.value, path::join(bin, exe(tool.key)))?;
+  }
+
+  const nova = path::join(bin, exe("nova"));
+  const from = List::from(["update", "self", "--from", file_url(release)]);
+
+  const checked = support::run(new Command(nova).args(support::concat(from, List::from(["--check"]))))?;
+
+  expect_success("nova update self --check", checked)?;
+  expect_contains("nova update self --check", checked.stdout, `Sagitario 99.0.0 is available (installed: ${installed})`)?;
+
+  const updated = support::run(new Command(nova).args(from))?;
+
+  expect_success("nova update self", updated)?;
+  expect_contains("nova update self", updated.stdout, `Updating Sagitario from ${installed} to 99.0.0`)?;
+
+  for tool in tools {
+    expect(fs::is_file(path::join(bin, exe(tool.key))), `nova update self removed ${tool.key}`)?;
+    expect(fs::is_file(path::join(bin, exe(`${tool.key}.old`))), `nova update self kept no previous ${tool.key}`)?;
+  }
+
+  expect(!fs::exists(path::join(bin, ".update")), "nova update self left its temporary directory")?;
+
+  // The updated Nova runs.
+  const version = support::run(new Command(nova).arg("--version"))?;
+
+  expect_success("the updated nova --version", version)?;
+
+  // A release of the installed version, a wrong checksum, a missing version.
+  const same = path::join(temp, "same");
+
+  support::write_file(path::join(same, "SHA256SUMS"), `${sha256}  sagitario-${installed}-${triple}${extension}\n`)?;
+
+  const current = support::run(new Command(nova).args(List::from(["update", "self", "--from", file_url(same)])))?;
+
+  expect_success("nova update self, up to date", current)?;
+  expect_contains("nova update self, up to date", current.stdout, `Sagitario ${installed} is up to date`)?;
+
+  const wrong = path::join(temp, "wrong");
+
+  support::write_file(path::join(wrong, "SHA256SUMS"), `${"0".repeat(64)}  ${archive}\n`)?;
+  executable_copy(path::join(release, archive), path::join(wrong, archive))?;
+
+  const mismatch = support::run(new Command(nova).args(List::from(["update", "self", "--from", file_url(wrong)])))?;
+
+  expect_exit("nova update self, wrong checksum", mismatch, 1)?;
+  expect_contains("nova update self, wrong checksum", mismatch.stderr, "does not match SHA256SUMS")?;
+  expect(fs::is_file(path::join(bin, exe("sag"))), "a wrong checksum removed sag")?;
+
+  const missing = support::run(new Command(nova).args(support::concat(from, List::from(["--version", "1.2.3"]))))?;
+
+  expect_exit("nova update self --version 1.2.3", missing, 1)?;
+  expect_contains("nova update self --version 1.2.3", missing.stderr, `has no archive of Sagitario 1.2.3 for ${triple}`)?;
+
+  nova_fails(cx, temp, List::from(["update"]), 2)?;
+  nova_fails(cx, temp, List::from(["update", "self", "--bogus"]), 2)?;
+  Ok(())
+}
+
+/// The platform of the releases this machine uses (docs/adr/0068-releases-and-distribution.md).
+fn release_triple() -> Result<String, String> {
+  if support::windows() {
+    return Ok("x86_64-pc-windows-msvc");
+  }
+
+  const system = if tool_output("uname", List::from(["-s"]), ".")? == "Darwin" { "apple-darwin" } else { "unknown-linux-gnu" };
+  const machine = tool_output("uname", List::from(["-m"]), ".")?;
+  var arch = if machine == "aarch64" || machine == "arm64" { "aarch64" } else { "x86_64" };
+
+  if system == "apple-darwin" {
+    if let Ok(translated) = tool_output("sysctl", List::from(["-n", "sysctl.proc_translated"]), ".") {
+      if translated == "1" {
+        arch = "aarch64";
+      }
+    }
+  }
+
+  Ok(`${arch}-${system}`)
+}
+
+/// The `tar` of Windows, which writes `.zip`.
+fn system_tar() -> String {
+  path::join(path::join(env::variable("SystemRoot").unwrap_or("C:\\Windows"), "System32"), "tar.exe")
+}
+
+/// Runs `program` in `dir`, which must succeed, and returns its stdout, trimmed.
+fn tool_output(program: String, args: List<String>, dir: String) -> Result<String, String> {
+  const ran = support::run(new Command(program).args(args).current_dir(dir))?;
+
+  expect_success(`${program} ${args.join(" ")}`, ran)?;
+  Ok(ran.stdout.trim())
+}
+
+/// The SHA-256 of `file`, in lowercase hexadecimal; on Windows through .NET, as Nova does.
+fn sha256_of(file: String) -> Result<String, String> {
+  if support::windows() {
+    const command = `[BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([IO.File]::ReadAllBytes('${file}'))).Replace('-', '')`;
+
+    return Ok(tool_output("powershell", List::from(["-NoProfile", "-NonInteractive", "-Command", command]), ".")?.to_ascii_lowercase());
+  }
+
+  const line = match tool_output("sha256sum", List::from([file]), ".") {
+    Ok(found) => found,
+    Err(_) => tool_output("shasum", List::from(["-a", "256", file]), ".")?,
+  };
+
+  Ok(line.substring(0, line.find(" ").unwrap_or(line.len())))
+}
+
+/// Copies `from` to `to`, creating its directory, executable on Unix (`fs::copy` keeps no mode).
+fn executable_copy(from: String, to: String) -> Result<(), String> {
+  if let Some(dir) = path::parent(to) {
+    if let Err(error) = fs::create_dir_all(dir) {
+      return Err(error.message());
+    }
+  }
+
+  if let Err(error) = fs::copy(from, to) {
+    return Err(error.message());
+  }
+
+  if !support::windows() {
+    tool_output("chmod", List::from(["+x", to]), ".")?;
+  }
+
+  Ok(())
+}
+
+/// The `file:` URL of a directory, for `--from`.
+fn file_url(dir: String) -> String {
+  if support::windows() { `file:///${support::slashes(dir)}` } else { `file://${dir}` }
 }

@@ -14,8 +14,8 @@ runs on desktop and mobile platforms, and compiles itself.
 > (the [reference zoo program](tests/run-pass/reference_zoo/main.sag) shows them together); the
 > [standard library](docs/spec/11-standard-library.md), packages with Nova, C libraries and
 > Android and iOS targets; threads, channels, mutexes and atomics; and a compiler, a package manager and a
-> language server written in Sagitario. Distribution is in progress: releases and installers are
-> done (see the [roadmap](docs/roadmap.md)).
+> language server written in Sagitario. Distribution is in progress: releases, installers and
+> `nova update self` are done (see the [roadmap](docs/roadmap.md)).
 
 ```sag
 abstract class Animal {
@@ -62,7 +62,8 @@ The installers download the latest [release](https://github.com/Juanestban/sagit
 check its checksum, put `sag` and `nova` in `~/.sagitario/bin` and add it to `PATH`. `sag` compiles
 through a C compiler, which the installers look for and, if there is none, say how to install:
 clang or gcc, the Xcode command line tools on macOS, or LLVM and the Visual Studio Build Tools on
-Windows. Pass `--version X.Y.Z` to install another release (`sh -s -- --version X.Y.Z` after the
+Windows. `nova update self` updates them to the next release. Pass `--version X.Y.Z` to install
+another release (`sh -s -- --version X.Y.Z` after the
 pipe; on Windows, set `SAGITARIO_VERSION`), and `--help` for the other options.
 
 To uninstall, remove `~/.sagitario` and its line in `~/.profile` (and `~/.zshrc` on macOS), or on
@@ -87,7 +88,8 @@ This builds `sag` and `nova` in `build/bin/` and, with `--install`, copies them 
 
 The VS Code extension in [`editors/vscode/`](editors/vscode/README.md) highlights `.sag` files,
 gives them an icon and adds snippets, and starts `sag lsp` for diagnostics, hover, go to
-definition and completion.
+definition and completion. Each release has its `sagitario.vsix`
+(`code --install-extension sagitario.vsix`); it finds the `sag` of the installers without settings.
 
 ## Documentation
 

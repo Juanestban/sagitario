@@ -1,0 +1,15 @@
+// `task::block_on` inside a task would run other tasks in the middle of it.
+// expect-panic: `task::block_on` cannot be called inside a task: use `await`
+use std::task;
+
+async fn inner() -> i32 {
+  1
+}
+
+async fn outer() -> i32 {
+  task::block_on(inner())
+}
+
+fn main() {
+  println(`${task::block_on(outer())}`);
+}

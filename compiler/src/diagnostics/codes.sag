@@ -26,9 +26,6 @@ pub const INVALID_CHAR_LITERAL: String = "E0006";
 /// A token that does not fit the grammar at that point.
 pub const UNEXPECTED_TOKEN: String = "E0100";
 
-/// A keyword reserved for a future phase (`async`, `await`) used in the program.
-pub const RESERVED_KEYWORD: String = "E0101";
-
 /// Chained non-associative operators, such as `a < b < c`.
 pub const CHAINED_OPERATORS: String = "E0102";
 
@@ -187,6 +184,15 @@ pub const NOT_CONSTANT: String = "E0334";
 /// that cannot be read.
 pub const INVALID_INCLUDE: String = "E0335";
 
+/// `await` outside an `async fn`, or inside a lambda written in one.
+pub const AWAIT_OUTSIDE_ASYNC: String = "E0336";
+
+/// An `async fn` that cannot be one: `extern "C"`, `@export` or an initializer.
+pub const INVALID_ASYNC: String = "E0337";
+
+/// An `async` method that modifies `self`, a copy of a struct or enum value.
+pub const ASYNC_MODIFIES_SELF: String = "E0338";
+
 /// A language feature that is specified but not implemented yet.
 pub const NOT_IMPLEMENTED: String = "E0900";
 
@@ -213,3 +219,6 @@ pub const UNUSED_UNSAFE: String = "W0007";
 
 /// A closure stored in a field of the object it captures: a reference cycle ARC never frees.
 pub const CLOSURE_CYCLE: String = "W0008";
+
+/// A `Task` discarded by an expression statement, which neither awaits it nor keeps it.
+pub const UNUSED_TASK: String = "W0009";

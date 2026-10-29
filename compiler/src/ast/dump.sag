@@ -521,6 +521,12 @@ class Dumper {
         self.expr("expr", inner);
         self.depth -= 1;
       }
+      ExprKind::Await(inner) => {
+        self.node(label, expr, "Await", "");
+        self.depth += 1;
+        self.expr("expr", inner);
+        self.depth -= 1;
+      }
       ExprKind::Zod => self.node(label, expr, "Zod", ""),
       ExprKind::Lambda { params, body } => {
         self.node(label, expr, "Lambda", "");

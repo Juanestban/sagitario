@@ -7,6 +7,7 @@ use std::path;
 pub fn tests() -> List<Test> {
   List::from([
     support::test("version_prints_the_version", version_prints_the_version),
+    support::test("the_vscode_extension_has_the_version", the_vscode_extension_has_the_version),
     support::test("help_succeeds", help_succeeds),
     support::test("invalid_usage_exits_with_2", invalid_usage_exits_with_2),
     support::test("missing_input_exits_with_1", missing_input_exits_with_1),
@@ -45,6 +46,29 @@ fn version_prints_the_version(cx: Context) -> Result<(), String> {
 
   expect(is_version(version), `\`compiler/Nova.toml\` has a version that is not MAJOR.MINOR.PATCH: ${version}`)?;
   support::expect_equal("sag --version", printed, `sag ${version}`)
+}
+
+/// The extension is released with the toolchain, with its version
+/// (docs/adr/0071-vscode-extension-with-the-releases.md): its `package.json` and the package of
+/// its `package-lock.json`, whose first `version` is that of the extension, say the version of
+/// `compiler/Nova.toml`.
+fn the_vscode_extension_has_the_version(cx: Context) -> Result<(), String> {
+  const version = support::sagitario_version(cx)?;
+
+  for file in ["editors/vscode/package.json", "editors/vscode/package-lock.json"] {
+    var found = "none";
+
+    for line in support::read_file(cx.file(file))?.lines() {
+      if let Some(rest) = support::after(line.trim(), "\"version\": ") {
+        found = rest;
+        break;
+      }
+    }
+
+    support::expect_equal(`the version in \`${file}\``, found, `"${version}",`)?;
+  }
+
+  Ok(())
 }
 
 fn help_succeeds(cx: Context) -> Result<(), String> {

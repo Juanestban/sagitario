@@ -962,7 +962,7 @@ fn expr_paths(expr: Expr, out: List<Path>) {
     }
     ExprKind::ArrayLit(elems) => exprs_paths(elems, out),
     ExprKind::ArrayRepeat { value, .. } => expr_paths(value, out),
-    ExprKind::Try(value) => expr_paths(value, out),
+    ExprKind::Try(value) | ExprKind::Await(value) => expr_paths(value, out),
     ExprKind::Unary { operand, .. } => expr_paths(operand, out),
     ExprKind::New { path, args } => {
       expr_path(path, out);

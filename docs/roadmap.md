@@ -4,7 +4,8 @@ Rationale: [ADR-0014](adr/0014-mvp-scope.md). **The MVP is F0 + F1 + F2, desktop
 
 **Where we are:** F0–F6 are done: the compiler, Nova and the language server are written in
 Sagitario and build from a seed of generated C, without Rust
-([ADR-0067](adr/0067-bootstrap-from-the-seed.md)). F7 (distribution) is in progress. The phases before
+([ADR-0067](adr/0067-bootstrap-from-the-seed.md)). F7 (distribution) is in progress, and F8
+(`async`/`await`) is done. The phases before
 F6 describe the Rust compiler as it was then; it retired in F6.
 
 ## F0: Infrastructure (MVP)
@@ -199,10 +200,12 @@ keep it up to date with `nova update self`
 ([ADR-0063](adr/0063-distribution-phase-and-roadmap-v2.md)). It follows F6, since it ships `sag`
 and Nova written in Sagitario.
 
-**Status:** in progress: increments 1 ([ADR-0068](adr/0068-releases-and-distribution.md)) and 2
-([ADR-0069](adr/0069-installers.md)) are done. The installers put a release in `~/.sagitario/bin`,
+**Status:** in progress: increments 1 ([ADR-0068](adr/0068-releases-and-distribution.md)), 2
+([ADR-0069](adr/0069-installers.md)), 3 ([ADR-0070](adr/0070-nova-update-self.md)) and 4
+([ADR-0071](adr/0071-vscode-extension-with-the-releases.md)) are done; the acceptance is checked on
+the first release published with them. The installers put a release in `~/.sagitario/bin`,
 where `bootstrap/build.sh --install` and `build.ps1 --install` put a build from source (ADR-0067,
-Q368).
+Q368), and where the VS Code extension finds `sag`.
 
 Increments:
 
@@ -219,22 +222,41 @@ Increments:
    platform, checks its checksum, replaces `sag`, `nova` and the standard library (on Windows a
    running executable is renamed, then replaced), and keeps the previous version to go back to.
    `nova update self --check` only says whether there is one.
-4. **The editor.** The VS Code extension is published to the Marketplace with each release, and
-   finds `sag` in `~/.sagitario/bin` without settings.
+4. **The editor.** The VS Code extension has the version of Sagitario, is attached to each
+   release, and finds `sag` in `~/.sagitario/bin` without settings. Publishing it in the
+   Marketplace is not planned for now, and not required by the acceptance.
 
 **Acceptance:** on a clean machine of each system, one command installs Sagitario; `nova new`,
-`nova run` and the VS Code extension work; and `nova update self` updates from one published
-release to the next.
+`nova run` work; and `nova update self` updates from one published release to the next.
+Optional: the VS Code extension of the release works with the installed `sag`.
 
 **Settled questions** ([ADR-0068](adr/0068-releases-and-distribution.md)): downloads go through
-the `curl` of the system; SHA-256 and JSON live inside the compiler (`compiler/src/sha256.sag`,
-`compiler/src/json.sag`), not in the standard library; a C compiler is required, and the installers
-say how to install one; and the executables are not signed in F7.
+the `curl` of the system; checksums are checked with the tools of the system, and the latest
+release is found in its `SHA256SUMS`, without JSON ([ADR-0070](adr/0070-nova-update-self.md)); a C
+compiler is required, and the installers say how to install one; and the executables are not
+signed in F7.
 
 ## Later phases (post-MVP)
 
 - **F8 `async`/`await`:** stackless tasks (`Task<T>`) on a single-threaded executor per thread,
-  as designed in [ADR-0048](adr/0048-async-await.md).
+  as designed in [ADR-0048](adr/0048-async-await.md) and planned in
+  [ADR-0072](adr/0072-async-await-increments.md). Done, in four increments
+  ([ADR-0073](adr/0073-spawn-blocking.md), [ADR-0074](adr/0074-async-methods-generics-and-values.md),
+  [ADR-0075](adr/0075-f8-acceptance.md)):
+  1. Tasks: `async fn` at module level, `await`, `Task<T>`, the state machine, the executor with
+     timers, `task::sleep`, `task::block_on` and `async fn main`.
+  2. `task::spawn_blocking`, and waking the executor from another thread.
+  3. `async` methods, generic `async fn`, and `async fn` as values.
+  4. The acceptance program, and closing F8.
+
+  **Status:** done. The acceptance program is `tests/run-pass/reference_async/`.
+
+  **Acceptance:** an asynchronous pipeline of files: `async fn main` reads files on threads with
+  `spawn_blocking` through an `async fn` passed as a value, summarizes them through an interface
+  with `async` methods of a class and a struct, gathers them with a generic `async fn`, passes an
+  error with `?` after `await`, and orders timers by their deadlines; it passes with
+  ThreadSanitizer on Linux and macOS, and with the leak check. `async` lambdas, cancellation, a
+  multi-threaded executor and asynchronous I/O are left for later.
 - **Roadmap v2:** a game engine written in Sagitario, with the language and library features it
   needs ([roadmap-v2.md](roadmap-v2.md)).
 

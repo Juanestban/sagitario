@@ -238,7 +238,7 @@ pub fn new_instance(cx: Checker, value: Expr, path: Path, id: u32, args: List<Ex
         _ => false,
       };
 
-      if types::is_private(decl.visibility) && !own {
+      if types::is_private(decl.visibility) && !own && !types::std_uses_prelude_member(cx, function) {
         cx.diagnostics.push(
           Diagnostic::error(codes::PRIVATE_MEMBER, path.span, "the initializer of `" + name + "` is private")
             .with_label(decl.name.span, "declared `prv` here")
@@ -324,6 +324,28 @@ pub fn class_field(cx: Checker, id: u32, base_ty: Type, name: Ident) -> Type {
   found.field.ty
 }
 
+fn is_async_method(cx: Checker, function: u32) -> bool {
+  match cx.resolution.fn_decl(cx.package, function) {
+    Some(decl) => decl.is_async,
+    None => false,
+  }
+}
+
+/// An `async` method of a struct or an enum, or a default one of an interface, keeps a copy of
+/// `self`, which it cannot modify (docs/spec/12-async.md#self-in-async-methods).
+fn async_modifies_self(cx: Checker, function: u32) {
+  const decl = match cx.resolution.fn_decl(cx.package, function) {
+    Some(decl) => decl,
+    None => return,
+  };
+
+  cx.diagnostics.push(
+    Diagnostic::error(codes::ASYNC_MODIFIES_SELF, decl.name.span, "the `async` method `" + decl.name.name + "` modifies `self`")
+      .with_note("its task keeps a copy of the value it is called on, so the change would not reach the caller's value")
+      .with_help("make the type a class, whose `async` methods may modify its fields, or return the new value"),
+  );
+}
+
 /// Records that the method being checked modifies `self`.
 pub fn mark_self_modified(cx: Checker) {
   if (cx.function as usize) < cx.mutates_self.len() {
@@ -394,6 +416,21 @@ fn part_of(cx: Checker, base: Expr) -> PlaceBase {
   match place_base(cx, base) {
     PlaceBase::ListElement(_) => PlaceBase::ListElement(false),
     other => other,
+  }
+}
+
+fn in_interface(cx: Checker) -> bool {
+  match cx.owner {
+    Some(TypeItem::Interface(_)) => true,
+    _ => false,
+  }
+}
+
+/// Whether `place` is `self` or one of its fields or elements.
+fn rooted_at_self(cx: Checker, place: Expr) -> bool {
+  match place.kind {
+    ExprKind::Field { base, .. } | ExprKind::Index { base, .. } => rooted_at_self(cx, base),
+    _ => is_self(cx, place),
   }
 }
 
@@ -569,6 +606,12 @@ pub fn check_mutable_place(cx: Checker, place: Expr, place_use: PlaceUse) {
     return;
   }
 
+  // The fields of `self` in a default method are those of the implementing value, of which an
+  // `async` one keeps a copy (docs/spec/12-async.md#self-in-async-methods).
+  if cx.in_async && in_interface(cx) && rooted_at_self(cx, place) {
+    return async_modifies_self(cx, cx.function);
+  }
+
   match place_access(cx, place, place_use) {
     PlaceAccess::Mutable => {}
     PlaceAccess::OfSelf => mark_self_modified(cx),
@@ -648,7 +691,11 @@ pub fn infer_mutating_methods(cx: Checker) {
     };
 
     if mutating[index] && by_value {
-      cx.typed.sigs[index] = types::FnSig { receiver: Some(Receiver::Var), params: sig.params, ret: sig.ret };
+      if is_async_method(cx, index as u32) {
+        async_modifies_self(cx, index as u32);
+      } else {
+        cx.typed.sigs[index] = types::FnSig { receiver: Some(Receiver::Var), params: sig.params, ret: sig.ret };
+      }
     }
 
     index += 1;

@@ -21,6 +21,7 @@ use pkg::types::generic;
 use pkg::types::generic::Unknowns;
 use pkg::types::inheritance;
 use pkg::types::interfaces;
+use pkg::types::numbers;
 use pkg::types::patterns;
 use pkg::types::send;
 use pkg::types::strings;
@@ -134,16 +135,28 @@ pub fn function(cx: Checker, id: u32, decl: FnDecl) {
     }
   }
 
-  // An abstract method has no body to check.
-  const body_ty = if decl.is_abstract { sig.ret } else { block(cx, decl.body, Some(sig.ret)) };
+  // The body of an `async fn` gives the result of its task.
+  const ret = if decl.is_async { cx.task_result(sig.ret).unwrap_or(sig.ret) } else { sig.ret };
 
-  if !cx.fits(body_ty, sig.ret) {
+  cx.ret = ret;
+  cx.in_async = decl.is_async;
+
+  if decl.is_async {
+    check_async_fn(cx, decl);
+  }
+
+  // An abstract method has no body to check.
+  const body_ty = if decl.is_abstract { ret } else { block(cx, decl.body, Some(ret)) };
+
+  cx.in_async = false;
+
+  if !cx.fits(body_ty, ret) {
     const span = match decl.body.tail {
       Some(tail) => tail.span,
       None => decl.body.span,
     };
-    var diagnostic = Diagnostic::error(codes::MISMATCHED_TYPES, span, "expected `" + types::text(sig.ret) + "`, found `" + types::text(body_ty) + "`")
-      .with_note("the function `" + decl.name.name + "` must return a value of type `" + types::text(sig.ret) + "` on every path");
+    var diagnostic = Diagnostic::error(codes::MISMATCHED_TYPES, span, "expected `" + types::text(ret) + "`, found `" + types::text(body_ty) + "`")
+      .with_note("the function `" + decl.name.name + "` must return a value of type `" + types::text(ret) + "` on every path");
 
     if let Some(ret_span) = cx.ret_span {
       diagnostic = diagnostic.with_label(ret_span, "expected because of the return type");
@@ -271,7 +284,19 @@ fn stmt(cx: Checker, statement: Stmt) -> Type {
       if never { types::of(TypeKind::Never) } else { types::unit() }
     }
     Stmt::Assign { target, op, value, .. } => assign(cx, target, op, value),
-    Stmt::Expr(value) => expr(cx, value, None),
+    Stmt::Expr(value) => {
+      const ty = expr(cx, value, None);
+
+      if cx.task_result(ty).is_some() {
+        cx.diagnostics.push(
+          Diagnostic::warning(codes::UNUSED_TASK, value.span, "this `Task` is not awaited")
+            .with_note("the task runs until its first suspension, and then only while other code awaits or `task::block_on` runs")
+            .with_help("`await` it, or bind it to keep it running without awaiting it: `const _task = ...;`"),
+        );
+      }
+
+      ty
+    }
   }
 }
 
@@ -509,6 +534,7 @@ fn other_expr_kind(cx: Checker, value: Expr, expected: Option<Type>) -> Type {
       call(cx, value, callee, args, expected)
     }
     ExprKind::Try(inner) => try_expr(cx, inner),
+    ExprKind::Await(inner) => await_expr(cx, value, inner, expected),
     ExprKind::New { path, args } => strings::new_expr(cx, value, path, args, expected),
     ExprKind::Match { scrutinee, arms } => patterns::match_expr(cx, scrutinee, arms, expected),
     ExprKind::MethodCall { receiver, method, args } => method_call(cx, value, receiver, method, args),
@@ -1108,8 +1134,8 @@ fn call(cx: Checker, value: Expr, callee: Expr, args: List<Expr>, expected: Opti
     Some(Res::Fn(id)) => {
       const ty = generic::fn_call(cx, value, path, id, args, expected);
 
-      if send::is_spawn(cx, id) {
-        send::check_spawn_argument(cx, args);
+      if let Some(spawn) = send::spawn_name(cx, id) {
+        send::check_spawn_argument(cx, spawn, args);
       }
 
       return ty;
@@ -1195,6 +1221,10 @@ fn method_call(cx: Checker, value: Expr, receiver: Expr, method: Ident, args: Li
   }
 
   if let Some(ty) = collections::primitive_method(cx, value, receiver_ty, method, args) {
+    return ty;
+  }
+
+  if let Some(ty) = numbers::number_method(cx, value, receiver_ty, method, args) {
     return ty;
   }
 
@@ -1355,7 +1385,7 @@ fn method_call(cx: Checker, value: Expr, receiver: Expr, method: Ident, args: Li
         None => function_owner.is_none(),
       };
 
-      if types::is_private(decl.visibility) && !own {
+      if types::is_private(decl.visibility) && !own && !types::std_uses_prelude_member(cx, function) {
         cx.diagnostics.push(
           Diagnostic::error(codes::PRIVATE_MEMBER, method.span, "the method `" + name + "` of `" + shown + "` is private").with_label(decl.name.span, "declared `prv` here"),
         );
@@ -1998,6 +2028,56 @@ fn builtin_method(cx: Checker, value: Expr, receiver_ty: Type, method: Ident, ar
 }
 
 /// `value?` (docs/spec/07-errors.md#the--operator).
+/// What an `async fn` cannot be (docs/spec/12-async.md#async-fn).
+fn check_async_fn(cx: Checker, decl: FnDecl) {
+  if decl.extern_c || decl.export.is_some() {
+    cx.diagnostics.push(
+      Diagnostic::error(codes::INVALID_ASYNC, decl.name.span, "an `async fn` cannot be called from C")
+        .with_note("C cannot await the `Task` it returns")
+        .with_help("remove `async`, or call the `async fn` from a function that C calls and run it with `task::block_on`"),
+    );
+  }
+
+  if cx.resolution.is_initializer(cx.package, cx.function) {
+    cx.diagnostics.push(
+      Diagnostic::error(codes::INVALID_ASYNC, decl.name.span, "an initializer cannot be `async`")
+        .with_note("`new` gives the instance itself, not a `Task`")
+        .with_help("initialize the instance synchronously, and add an `async` method or a static `async` function for the rest"),
+    );
+  }
+}
+
+/// `await task`: the result of a `Task`, inside an `async fn`.
+fn await_expr(cx: Checker, value: Expr, inner: Expr, expected: Option<Type>) -> Type {
+  const hint = match expected {
+    Some(ty) => Some(cx.task_of(ty)),
+    None => None,
+  };
+  const ty = expr(cx, inner, hint);
+
+  if !cx.in_async || !cx.lambda_stack.is_empty() {
+    const message = if cx.in_async { "`await` cannot be used inside a lambda" } else { "`await` can only be used inside an `async fn`" };
+    const help = if cx.in_async { "move the `await` out of the lambda" } else { "declare the function as `async fn`, or run the task with `task::block_on` in synchronous code" };
+
+    cx.diagnostics.push(Diagnostic::error(codes::AWAIT_OUTSIDE_ASYNC, value.span, message).with_help(help));
+  }
+
+  match ty.kind {
+    TypeKind::Error | TypeKind::Never => types::error(),
+    _ => match cx.task_result(ty) {
+      Some(result) => result,
+      None => {
+        cx.diagnostics.push(
+          Diagnostic::error(codes::MISMATCHED_TYPES, inner.span, "`await` needs a `Task`, found `" + types::text(ty) + "`")
+            .with_note("a `Task` is what calling an `async fn` or `task::sleep` returns"),
+        );
+
+        types::error()
+      }
+    },
+  }
+}
+
 fn try_expr(cx: Checker, inner: Expr) -> Type {
   const ty = expr(cx, inner, None);
   const ret = cx.ret;

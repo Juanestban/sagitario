@@ -1,0 +1,402 @@
+//! `nova update self` (docs/adr/0070-nova-update-self.md): replaces `sag` and `nova` in the
+//! directory of the running Nova with those of a release of Sagitario. As the installers do
+//! (docs/adr/0069-installers.md), it downloads with the `curl` of the system, checks the archive
+//! against the `SHA256SUMS` of the release with the tools of the system, and extracts it with the
+//! `tar` of the system.
+
+use pkg::loader::{push_path, windows};
+use pkg::nova::files::remove_tree;
+use pkg::version;
+use std::env;
+use std::fs;
+use std::path;
+use std::process::Command;
+
+/// Where the releases are published (docs/adr/0068-releases-and-distribution.md).
+const REPOSITORY: String = "https://github.com/Juanestban/sagitario";
+
+/// The options of `nova update self`.
+pub struct Options {
+  /// `--check`: only say whether there is a newer release.
+  pub check: bool;
+  /// `--version X.Y.Z`: install that release, newer or not.
+  pub version: Option<String>;
+  /// `--from URL`: a directory with the archives and `SHA256SUMS`, instead of the GitHub Release.
+  pub from: Option<String>;
+}
+
+/// The archive of a release for this machine, as `SHA256SUMS` names it.
+struct Archive {
+  pub name: String;
+  pub version: String;
+  pub sha256: String;
+}
+
+/// `nova update self`; returns the exit code.
+pub fn run(options: Options) -> i32 {
+  match update(options) {
+    Ok(_) => 0,
+    Err(message) => {
+      eprintln(`error: ${message}`);
+      1
+    }
+  }
+}
+
+fn update(options: Options) -> Result<(), String> {
+  const dir = installation()?;
+  const triple = platform()?;
+
+  var base = match options.from {
+    Some(from) => from,
+    None => match options.version {
+      Some(wanted) => `${REPOSITORY}/releases/download/v${wanted}`,
+      None => `${REPOSITORY}/releases/latest/download`,
+    },
+  };
+
+  while base.ends_with("/") {
+    base = base.substring(0, base.len() - 1);
+  }
+
+  // In the directory of the installation, so that the new executables are renamed into place
+  // within one file system, keeping the permissions `tar` gives them.
+  const work = push_path(dir, ".update");
+
+  if fs::exists(work) {
+    remove_tree(work)?;
+  }
+
+  if let Err(error) = fs::create_dir(work) {
+    return Err(error.message());
+  }
+
+  const result = install(options, dir, triple, base, work);
+
+  remove_tree(work);
+  result
+}
+
+fn install(options: Options, dir: String, triple: String, base: String, work: String) -> Result<(), String> {
+  const sums = push_path(work, "SHA256SUMS");
+
+  download(`${base}/SHA256SUMS`, sums)?;
+
+  const text = match fs::read_to_string(sums) {
+    Ok(found) => found,
+    Err(error) => return Err(error.message()),
+  };
+  const archive = find_archive(text, triple, options.version)?;
+
+  if options.version.is_none() && !newer(archive.version, version::VERSION)? {
+    println(`Sagitario ${version::VERSION} is up to date`);
+    return Ok(());
+  }
+
+  if options.check {
+    println(`Sagitario ${archive.version} is available (installed: ${version::VERSION}); run \`nova update self\` to install it`);
+    return Ok(());
+  }
+
+  println(`Updating Sagitario from ${version::VERSION} to ${archive.version}`);
+
+  const file = push_path(work, archive.name);
+
+  download(`${base}/${archive.name}`, file)?;
+
+  if sha256(file)? != archive.sha256 {
+    return Err(`the checksum of ${archive.name} does not match SHA256SUMS`);
+  }
+
+  extract(file, work)?;
+
+  const extension = if windows() { ".exe" } else { "" };
+  const suffix = if windows() { ".zip" } else { ".tar.gz" };
+  const bin = push_path(push_path(work, archive.name.substring(0, archive.name.len() - suffix.len())), "bin");
+  const tools = List::from(["sag", "nova"]);
+
+  for tool in tools {
+    if !fs::is_file(push_path(bin, tool + extension)) {
+      return Err(`${archive.name} does not hold bin/${tool}${extension}`);
+    }
+  }
+
+  // Each tool is renamed to `<tool>.old` and the new one takes its place: a running executable
+  // can be renamed, also on Windows. A failure puts back the tools already replaced.
+  const replaced: List<String> = new List();
+
+  for tool in tools {
+    if let Err(message) = replace(dir, bin, tool, extension) {
+      for done in replaced {
+        restore(dir, done, extension);
+      }
+
+      return Err(message);
+    }
+
+    replaced.push(tool);
+  }
+
+  println(`Installed ${reported(push_path(dir, "sag" + extension))} and ${reported(push_path(dir, "nova" + extension))} to ${dir}`);
+  Ok(())
+}
+
+/// The directory of the running Nova, which holds `sag` too in an installation.
+fn installation() -> Result<String, String> {
+  const extension = if windows() { ".exe" } else { "" };
+  const program = env::args().first().unwrap_or("nova");
+  var dir: Option<String> = None;
+
+  if program.contains("/") || (windows() && program.contains("\\")) {
+    dir = path::parent(program);
+  } else if let Some(paths) = env::variable("PATH") {
+    for entry in paths.split(if windows() { ";" } else { ":" }) {
+      if !entry.is_empty() && fs::is_file(push_path(entry, "nova" + extension)) {
+        dir = Some(entry);
+        break;
+      }
+    }
+  }
+
+  const found = match dir {
+    Some(found) => if found.is_empty() { "." } else { found },
+    None => return Err("cannot find the directory of Nova"),
+  };
+
+  if !fs::is_file(push_path(found, "sag" + extension)) {
+    return Err(`there is no \`sag\` next to Nova in ${found}; \`nova update self\` updates an installation of Sagitario, which holds both`);
+  }
+
+  Ok(found)
+}
+
+/// The platform of this machine, named as the archives of a release are (ADR-0068, Q381).
+fn platform() -> Result<String, String> {
+  if windows() {
+    return Ok("x86_64-pc-windows-msvc");
+  }
+
+  const name = run_tool("uname", List::from(["-s"]))?;
+  const system = if name == "Linux" {
+    "unknown-linux-gnu"
+  } else if name == "Darwin" {
+    "apple-darwin"
+  } else {
+    return Err(`there are no releases of Sagitario for ${name}`);
+  };
+
+  const machine = run_tool("uname", List::from(["-m"]))?;
+  var arch = if machine == "x86_64" || machine == "amd64" {
+    "x86_64"
+  } else if machine == "aarch64" || machine == "arm64" {
+    "aarch64"
+  } else {
+    return Err(`there are no releases of Sagitario for ${machine}`);
+  };
+
+  // Under Rosetta, an Apple silicon Mac reports x86-64.
+  if system == "apple-darwin" {
+    if let Ok(translated) = run_tool("sysctl", List::from(["-n", "sysctl.proc_translated"])) {
+      if translated == "1" {
+        arch = "aarch64";
+      }
+    }
+  }
+
+  Ok(`${arch}-${system}`)
+}
+
+/// The archive for `triple` that `SHA256SUMS` lists, of the version `wanted` if given. Its lines
+/// are `<sha256>  <name>`, or `<sha256> *<name>`, as `sha256sum` writes them.
+fn find_archive(sums: String, triple: String, wanted: Option<String>) -> Result<Archive, String> {
+  const prefix = "sagitario-";
+  const suffix = if windows() { `-${triple}.zip` } else { `-${triple}.tar.gz` };
+
+  for line in sums.lines() {
+    const space = match line.find(" ") {
+      Some(found) => found,
+      None => continue,
+    };
+    var name = line.substring(space + 1, line.len()).trim();
+
+    if name.starts_with("*") {
+      name = name.substring(1, name.len());
+    }
+
+    if !name.starts_with(prefix) || !name.ends_with(suffix) || name.len() <= prefix.len() + suffix.len() {
+      continue;
+    }
+
+    const found = name.substring(prefix.len(), name.len() - suffix.len());
+
+    if let Some(version) = wanted {
+      if found != version {
+        continue;
+      }
+    }
+
+    return Ok(Archive { name: name, version: found, sha256: line.substring(0, space).to_ascii_lowercase() });
+  }
+
+  match wanted {
+    Some(version) => Err(`the release has no archive of Sagitario ${version} for ${triple}`),
+    None => Err(`the release has no archive for ${triple}`),
+  }
+}
+
+/// The parts of a version `X.Y.Z`.
+fn parts(version: String) -> Result<List<u64>, String> {
+  const result: List<u64> = new List();
+  const pieces = version.split(".");
+
+  if pieces.len() != 3 {
+    return Err(`\`${version}\` is not a version X.Y.Z`);
+  }
+
+  for piece in pieces {
+    var digits = !piece.is_empty();
+
+    for c in piece.chars() {
+      digits = digits && c.is_ascii_digit();
+    }
+
+    if !digits {
+      return Err(`\`${version}\` is not a version X.Y.Z`);
+    }
+
+    match piece.parse_u64() {
+      Ok(number) => result.push(number),
+      Err(_) => return Err(`\`${version}\` is not a version X.Y.Z`),
+    }
+  }
+
+  Ok(result)
+}
+
+/// Whether the version `candidate` is newer than `installed`.
+fn newer(candidate: String, installed: String) -> Result<bool, String> {
+  const a = parts(candidate)?;
+  const b = parts(installed)?;
+
+  for index in 0usize..3 {
+    if a[index] != b[index] {
+      return Ok(a[index] > b[index]);
+    }
+  }
+
+  Ok(false)
+}
+
+/// A program of Windows in `System32` (`relative` without `.exe`), else `fallback` from PATH:
+/// PATH may hold others first, such as the `tar` of Git, which reads no `.zip`.
+fn system_tool(relative: String, fallback: String) -> String {
+  if windows() {
+    if let Some(root) = env::variable("SystemRoot") {
+      const tool = push_path(push_path(root, "System32"), relative + ".exe");
+
+      if fs::is_file(tool) {
+        return tool;
+      }
+    }
+  }
+
+  fallback
+}
+
+/// Runs `program` and returns its stdout, trimmed.
+fn run_tool(program: String, args: List<String>) -> Result<String, String> {
+  const output = match new Command(program).args(args).output() {
+    Ok(found) => found,
+    Err(_) => return Err(`cannot run \`${program}\``),
+  };
+
+  if !output.status.success() {
+    return Err(`\`${program}\` failed: ${output.stderr.trim()}`);
+  }
+
+  Ok(output.stdout.trim())
+}
+
+/// Downloads `url` to `file` with the `curl` of the system (ADR-0068, Q386).
+fn download(url: String, file: String) -> Result<(), String> {
+  const curl = system_tool("curl", "curl");
+
+  match run_tool(curl, List::from(["--proto", "=https,file", "-fsSL", "-o", file, url])) {
+    Ok(_) => Ok(()),
+    Err(message) => Err(`cannot download ${url}: ${message}`),
+  }
+}
+
+/// The SHA-256 of `file`, in lowercase hexadecimal, from the tools of the system (ADR-0070, Q404).
+/// On Windows through .NET rather than `Get-FileHash`, whose module Windows PowerShell may fail to
+/// load when it inherits the `PSModulePath` of PowerShell 7.
+fn sha256(file: String) -> Result<String, String> {
+  const digest = if windows() {
+    const powershell = system_tool("WindowsPowerShell\\v1.0\\powershell", "powershell");
+    const command = `[BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([IO.File]::ReadAllBytes('${file.replace("'", "''")}'))).Replace('-', '')`;
+
+    run_tool(powershell, List::from(["-NoProfile", "-NonInteractive", "-Command", command]))?
+  } else {
+    const line = match run_tool("sha256sum", List::from([file])) {
+      Ok(found) => found,
+      Err(_) => run_tool("shasum", List::from(["-a", "256", file]))?,
+    };
+
+    match line.find(" ") {
+      Some(space) => line.substring(0, space),
+      None => line,
+    }
+  };
+
+  Ok(digest.to_ascii_lowercase())
+}
+
+/// Extracts `archive` into `dir` with the `tar` of the system, which on Windows reads `.zip`.
+fn extract(archive: String, dir: String) -> Result<(), String> {
+  const tar = system_tool("tar", "tar");
+  const mode = if windows() { "-xf" } else { "-xzf" };
+
+  match run_tool(tar, List::from([mode, archive, "-C", dir])) {
+    Ok(_) => Ok(()),
+    Err(message) => Err(`cannot extract ${archive}: ${message}`),
+  }
+}
+
+/// Puts `tool` from `bin` in `dir`, keeping the previous one as `<tool>.old`.
+fn replace(dir: String, bin: String, tool: String, extension: String) -> Result<(), String> {
+  const target = push_path(dir, tool + extension);
+  const old = push_path(dir, tool + ".old" + extension);
+
+  if fs::exists(old) {
+    if let Err(error) = fs::remove_file(old) {
+      return Err(error.message());
+    }
+  }
+
+  if let Err(error) = fs::rename(target, old) {
+    return Err(error.message());
+  }
+
+  if let Err(error) = fs::rename(push_path(bin, tool + extension), target) {
+    fs::rename(old, target);
+    return Err(error.message());
+  }
+
+  Ok(())
+}
+
+/// Puts back the previous `tool`, which `replace` kept as `<tool>.old`.
+fn restore(dir: String, tool: String, extension: String) {
+  const target = push_path(dir, tool + extension);
+
+  fs::remove_file(target);
+  fs::rename(push_path(dir, tool + ".old" + extension), target);
+}
+
+/// What `program --version` prints, such as `sag 0.9.0`.
+fn reported(program: String) -> String {
+  match run_tool(program, List::from(["--version"])) {
+    Ok(found) => found,
+    Err(message) => message,
+  }
+}

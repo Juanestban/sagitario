@@ -18,11 +18,7 @@ fn spec_keywords(cx: Context) -> Result<List<String>, String> {
     None => "",
   };
   const blocks = section.split("```");
-  const keywords = if blocks.len() > 1 { support::words(blocks[1]) } else { new List() };
-
-  keywords.push("async");
-  keywords.push("await");
-  Ok(keywords)
+  Ok(if blocks.len() > 1 { support::words(blocks[1]) } else { new List() })
 }
 
 fn is_ident(c: char) -> bool {

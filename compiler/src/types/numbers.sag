@@ -1,0 +1,125 @@
+//! Methods of integers and floats (docs/spec/02-types.md#methods-of-numbers), all implemented by
+//! runtime functions taking the receiver and the arguments in order
+//! (docs/adr/0076-std-math-and-methods-of-numbers.md).
+
+use pkg::ast::{Expr, Ident};
+use pkg::diagnostics;
+use pkg::diagnostics::Diagnostic;
+use pkg::diagnostics::codes;
+use pkg::types::{Checker, FloatTy, IntTy, Type, TypeKind};
+use pkg::types;
+use pkg::types::exprs;
+use pkg::types::typed::BuiltinMethod;
+
+/// A method of a number: its name, parameters and result, and the runtime function implementing
+/// it, which also receives the source location when `located` (to report panics).
+struct NumberMethod {
+  pub name: String;
+  pub params: List<Type>;
+  pub ret: Type;
+  pub function: String;
+  pub located: bool;
+}
+
+fn method(name: String, params: List<Type>, ret: Type, function: String) -> NumberMethod {
+  NumberMethod { name: name, params: params, ret: ret, function: function, located: false }
+}
+
+fn located(name: String, params: List<Type>, ret: Type, function: String) -> NumberMethod {
+  NumberMethod { name: name, params: params, ret: ret, function: function, located: true }
+}
+
+/// The methods of an integer type; `abs` and `signum` only exist on signed ones.
+fn int_methods(int_ty: IntTy) -> List<NumberMethod> {
+  const ty = types::int(int_ty);
+  const name = types::int_name(int_ty);
+  const methods = List::from([
+    method("min", List::from([ty]), ty, `sag_min_${name}`),
+    method("max", List::from([ty]), ty, `sag_max_${name}`),
+    located("clamp", List::from([ty, ty]), ty, `sag_clamp_${name}_at`),
+    located("pow", List::from([types::int(IntTy::U32)]), ty, `sag_pow_${name}_at`),
+  ]);
+
+  if types::is_signed(int_ty) {
+    methods.push(located("abs", new List(), ty, `sag_abs_${name}_at`));
+    methods.push(method("signum", new List(), ty, `sag_signum_${name}`));
+  }
+
+  methods
+}
+
+fn float_methods(float_ty: FloatTy) -> List<NumberMethod> {
+  const ty = types::of(TypeKind::Float(float_ty));
+  const bool_ty = types::of(TypeKind::Bool);
+  const prefix = if float_ty == FloatTy::F32 { "sag_f32_" } else { "sag_f64_" };
+  const methods = List::from([
+    method("copysign", List::from([ty]), ty, prefix + "copysign"),
+    method("min", List::from([ty]), ty, prefix + "min"),
+    method("max", List::from([ty]), ty, prefix + "max"),
+    located("clamp", List::from([ty, ty]), ty, prefix + "clamp_at"),
+    method("lerp", List::from([ty, ty]), ty, prefix + "lerp"),
+  ]);
+
+  for name in List::from(["abs", "signum", "floor", "ceil", "round", "trunc", "fract"]) {
+    methods.push(method(name, new List(), ty, prefix + name));
+  }
+
+  for name in List::from(["is_nan", "is_infinite", "is_finite"]) {
+    methods.push(method(name, new List(), bool_ty, prefix + name));
+  }
+
+  methods
+}
+
+/// A method call on an integer or a float, other than `equals`, `compare`, `hash` and
+/// `total_compare`; `None` for other receivers.
+pub fn number_method(cx: Checker, value: Expr, receiver_ty: Type, method: Ident, args: List<Expr>) -> Option<Type> {
+  const name = method.name;
+  var unsigned = false;
+  const methods = match receiver_ty.kind {
+    TypeKind::Int(int_ty) => {
+      unsigned = !types::is_signed(int_ty);
+      int_methods(int_ty)
+    }
+    TypeKind::Float(float_ty) => float_methods(float_ty),
+    _ => return None,
+  };
+  var found: Option<NumberMethod> = None;
+
+  for candidate in methods {
+    if found.is_none() && candidate.name == name {
+      found = Some(candidate);
+    }
+  }
+
+  const chosen = match found {
+    Some(chosen) => chosen,
+    None => {
+      var diagnostic = Diagnostic::error(codes::UNKNOWN_MEMBER, method.span, "no method `" + name + "` on type `" + types::text(receiver_ty) + "`");
+
+      if unsigned && (name == "abs" || name == "signum") {
+        diagnostic = diagnostic.with_note("unsigned integers are never negative");
+      } else {
+        const names: List<String> = new List();
+
+        for candidate in methods {
+          names.push(candidate.name);
+        }
+
+        if let Some(similar) = diagnostics::closest_match(name, names) {
+          diagnostic = diagnostic.with_help("a method with a similar name exists: `" + similar + "`");
+        }
+      }
+
+      cx.diagnostics.push(diagnostic);
+      exprs::unchecked_args(cx, args);
+
+      return Some(types::error());
+    }
+  };
+
+  exprs::check_args(cx, value.span, "method", chosen.params, args);
+  cx.typed.builtin_methods.insert(value.id, BuiltinMethod::Runtime { function: chosen.function, located: chosen.located });
+
+  Some(chosen.ret)
+}

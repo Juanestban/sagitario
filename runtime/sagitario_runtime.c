@@ -2120,6 +2120,192 @@ void sag_time_sleep(uint64_t nanos) {
 #endif
 }
 
+/* ---- Tasks (docs/spec/12-async.md) ----------------------------------------------------- */
+
+typedef struct sag_task_timer_entry {
+  uint64_t deadline;
+  uint64_t order;
+  sag_fnval resume;
+} sag_task_timer_entry;
+
+typedef struct sag_task_frame {
+  sag_object *frame;
+  void (*drop)(sag_object *);
+} sag_task_frame;
+
+/* The ready functions are `sag_ready[sag_ready_head..sag_ready_len]`. */
+static SAG_THREAD_LOCAL sag_fnval *sag_ready = NULL;
+static SAG_THREAD_LOCAL size_t sag_ready_head = 0;
+static SAG_THREAD_LOCAL size_t sag_ready_len = 0;
+static SAG_THREAD_LOCAL size_t sag_ready_cap = 0;
+/* Sorted by deadline, then by order of creation. */
+static SAG_THREAD_LOCAL sag_task_timer_entry *sag_timers = NULL;
+static SAG_THREAD_LOCAL size_t sag_timers_len = 0;
+static SAG_THREAD_LOCAL size_t sag_timers_cap = 0;
+static SAG_THREAD_LOCAL uint64_t sag_timers_created = 0;
+static SAG_THREAD_LOCAL sag_task_frame *sag_suspended = NULL;
+static SAG_THREAD_LOCAL size_t sag_suspended_len = 0;
+static SAG_THREAD_LOCAL size_t sag_suspended_cap = 0;
+static SAG_THREAD_LOCAL size_t sag_task_depth = 0;
+/* The jobs of `spawn_blocking` started by this thread and not yet back in its inbox. */
+static SAG_THREAD_LOCAL size_t sag_task_jobs = 0;
+
+#ifdef SAG_THREADS
+static void sag_task_drain(void);
+static void sag_task_wait_inbox(uint64_t nanos);
+static void sag_task_close_inbox(void);
+#endif
+
+/* Room for one more element of `size` bytes in `*items`, which holds `len` of `*cap`. */
+static void sag_task_grow(void **items, size_t *cap, size_t len, size_t size) {
+  if (len < *cap) {
+    return;
+  }
+  size_t grown = *cap == 0 ? 8 : *cap * 2;
+  void *moved = realloc(*items, grown * size);
+  if (moved == NULL) {
+    sag_panic("out of memory");
+  }
+  *items = moved;
+  *cap = grown;
+}
+
+void sag_task_schedule(sag_fnval resume) {
+  if (sag_ready_head == sag_ready_len) {
+    sag_ready_head = 0;
+    sag_ready_len = 0;
+  }
+  sag_task_grow((void **)&sag_ready, &sag_ready_cap, sag_ready_len, sizeof(sag_fnval));
+  sag_fnval_retain(resume);
+  sag_ready[sag_ready_len++] = resume;
+}
+
+void sag_task_timer(uint64_t nanos, sag_fnval resume) {
+  uint64_t now = sag_time_monotonic();
+  uint64_t deadline = nanos > UINT64_MAX - now ? UINT64_MAX : now + nanos;
+  sag_task_grow((void **)&sag_timers, &sag_timers_cap, sag_timers_len, sizeof(sag_task_timer_entry));
+  size_t at = sag_timers_len;
+  while (at > 0 && sag_timers[at - 1].deadline > deadline) {
+    sag_timers[at] = sag_timers[at - 1];
+    at--;
+  }
+  sag_fnval_retain(resume);
+  sag_timers[at].deadline = deadline;
+  sag_timers[at].order = sag_timers_created++;
+  sag_timers[at].resume = resume;
+  sag_timers_len++;
+}
+
+bool sag_task_step(void) {
+#ifdef SAG_THREADS
+  sag_task_drain();
+#endif
+  if (sag_ready_head < sag_ready_len) {
+    sag_fnval resume = sag_ready[sag_ready_head++];
+    ((void (*)(sag_object *))resume.fn)(resume.env);
+    sag_fnval_release(resume);
+    return true;
+  }
+  if (sag_timers_len == 0 && sag_task_jobs == 0) {
+    return false;
+  }
+  uint64_t now = sag_time_monotonic();
+  if (sag_timers_len == 0 || sag_timers[0].deadline > now) {
+#ifdef SAG_THREADS
+    /* A job may end before the next timer is due. */
+    if (sag_task_jobs > 0) {
+      sag_task_wait_inbox(sag_timers_len == 0 ? UINT64_MAX : sag_timers[0].deadline - now);
+      return true;
+    }
+#endif
+    sag_time_sleep(sag_timers[0].deadline - now);
+    now = sag_time_monotonic();
+  }
+  /* The timers due, in order; the queue takes their references. */
+  size_t due = 0;
+  while (due < sag_timers_len && sag_timers[due].deadline <= now) {
+    sag_task_schedule(sag_timers[due].resume);
+    sag_fnval_release(sag_timers[due].resume);
+    due++;
+  }
+  if (due == 0) {
+    /* The clock went no further than the deadline: the first timer is due. */
+    sag_task_schedule(sag_timers[0].resume);
+    sag_fnval_release(sag_timers[0].resume);
+    due = 1;
+  }
+  memmove(sag_timers, sag_timers + due, (sag_timers_len - due) * sizeof(sag_task_timer_entry));
+  sag_timers_len -= due;
+  return true;
+}
+
+void sag_task_enter(void) {
+  sag_task_depth++;
+}
+
+void sag_task_leave(void) {
+  sag_task_depth--;
+}
+
+bool sag_task_inside(void) {
+  return sag_task_depth > 0;
+}
+
+void sag_task_suspended(sag_object *frame, void (*drop)(sag_object *)) {
+  sag_task_grow((void **)&sag_suspended, &sag_suspended_cap, sag_suspended_len, sizeof(sag_task_frame));
+  sag_suspended[sag_suspended_len].frame = frame;
+  sag_suspended[sag_suspended_len].drop = drop;
+  sag_suspended_len++;
+}
+
+void sag_task_resumed(sag_object *frame) {
+  for (size_t i = sag_suspended_len; i > 0; i--) {
+    if (sag_suspended[i - 1].frame == frame) {
+      sag_suspended[i - 1] = sag_suspended[sag_suspended_len - 1];
+      sag_suspended_len--;
+      return;
+    }
+  }
+}
+
+void sag_task_shutdown(void) {
+#ifdef SAG_THREADS
+  sag_task_close_inbox();
+#endif
+  /* The suspended frames hold the tasks they await, whose waiters hold the frames: releasing
+   * what each frame owns breaks those cycles. The frames are kept alive until all are done. */
+  size_t frames = sag_suspended_len;
+  for (size_t i = 0; i < frames; i++) {
+    sag_object_retain(sag_suspended[i].frame);
+  }
+  for (size_t i = 0; i < frames; i++) {
+    sag_suspended[i].drop(sag_suspended[i].frame);
+  }
+  for (size_t i = sag_ready_head; i < sag_ready_len; i++) {
+    sag_fnval_release(sag_ready[i]);
+  }
+  for (size_t i = 0; i < sag_timers_len; i++) {
+    sag_fnval_release(sag_timers[i].resume);
+  }
+  sag_task_frame *held = sag_suspended;
+  sag_suspended = NULL;
+  sag_suspended_len = 0;
+  sag_suspended_cap = 0;
+  for (size_t i = 0; i < frames; i++) {
+    sag_object_release(held[i].frame);
+  }
+  free(held);
+  free(sag_ready);
+  free(sag_timers);
+  sag_ready = NULL;
+  sag_ready_head = 0;
+  sag_ready_len = 0;
+  sag_ready_cap = 0;
+  sag_timers = NULL;
+  sag_timers_len = 0;
+  sag_timers_cap = 0;
+}
+
 /* ---- Standard library: std::process::Command ------------------------------------------- */
 
 /* The parts of `text` separated by NUL characters, as NUL-terminated copies; `count` parts. */
@@ -2777,6 +2963,7 @@ static void sag_threads_release(void) {
 static void sag_thread_run(sag_thread *thread) {
   ((void (*)(sag_object *))thread->body.fn)(thread->body.env);
   sag_fnval_release(thread->body);
+  sag_task_shutdown();
   sag_drop_free();
   sag_count_dec(&sag_threads_running);
 }
@@ -3027,6 +3214,220 @@ bool sag_sync_atomic_compare_exchange(sag_fnval cell, uint64_t expected, uint64_
   *actual = current;
   return false;
 }
+
+/* ---- Tasks across threads (docs/adr/0073-spawn-blocking.md) ----------------------------- */
+
+struct sag_task_job;
+
+/* The inbox of an executor: the jobs of `spawn_blocking` whose body returned, in order. The
+ * executor and the threads of its jobs hold references to it. */
+typedef struct sag_task_inbox {
+  sag_object header;
+  struct sag_task_job *first;
+  struct sag_task_job *last;
+  /* The executor ended: jobs that end later only release what they hold. */
+  bool closed;
+#ifdef _WIN32
+  void *lock;
+  void *condition;
+#else
+  pthread_mutex_t lock;
+  pthread_cond_t condition;
+#endif
+} sag_task_inbox;
+
+/* A call of `spawn_blocking`: `body` runs on `thread`, then `done` on the executor of `inbox`. */
+typedef struct sag_task_job {
+  sag_object header;
+  sag_fnval body;
+  sag_fnval done;
+  sag_task_inbox *inbox;
+  void *thread;
+  struct sag_task_job *next;
+} sag_task_job;
+
+static SAG_THREAD_LOCAL sag_task_inbox *sag_inbox = NULL;
+
+static void sag_inbox_lock(sag_task_inbox *inbox) {
+#ifdef _WIN32
+  AcquireSRWLockExclusive(&inbox->lock);
+#else
+  pthread_mutex_lock(&inbox->lock);
+#endif
+}
+
+static void sag_inbox_unlock(sag_task_inbox *inbox) {
+#ifdef _WIN32
+  ReleaseSRWLockExclusive(&inbox->lock);
+#else
+  pthread_mutex_unlock(&inbox->lock);
+#endif
+}
+
+static void sag_task_inbox_drop(sag_object *object) {
+#ifdef _WIN32
+  (void)object;
+#else
+  pthread_cond_destroy(&((sag_task_inbox *)object)->condition);
+  pthread_mutex_destroy(&((sag_task_inbox *)object)->lock);
+#endif
+}
+
+static void sag_task_job_drop(sag_object *object) {
+  sag_task_job *job = (sag_task_job *)object;
+  sag_fnval_release(job->body);
+  sag_fnval_release(job->done);
+  sag_object_release(&job->inbox->header);
+}
+
+/* The inbox of this thread's executor, created when its first job starts. */
+static sag_task_inbox *sag_task_inbox_get(void) {
+  if (sag_inbox != NULL) {
+    return sag_inbox;
+  }
+  sag_task_inbox *inbox = sag_object_alloc(sizeof(sag_task_inbox));
+  inbox->first = NULL;
+  inbox->last = NULL;
+  inbox->closed = false;
+#ifdef _WIN32
+  InitializeSRWLock(&inbox->lock);
+  InitializeConditionVariable(&inbox->condition);
+#else
+  if (pthread_mutex_init(&inbox->lock, NULL) != 0 || pthread_cond_init(&inbox->condition, NULL) != 0) {
+    sag_panic("failed to create the inbox of the executor");
+  }
+#endif
+  sag_object_init(&inbox->header, sag_task_inbox_drop, NULL);
+  sag_inbox = inbox;
+  return inbox;
+}
+
+/* On the job's thread: runs its body, then hands the job to the executor and wakes it. */
+static void sag_task_job_run(sag_object *object) {
+  sag_task_job *job = (sag_task_job *)object;
+  sag_task_inbox *inbox = job->inbox;
+  ((void (*)(sag_object *))job->body.fn)(job->body.env);
+  sag_inbox_lock(inbox);
+  bool closed = inbox->closed;
+  if (!closed) {
+    sag_object_retain(&job->header);
+    job->next = NULL;
+    if (inbox->last != NULL) {
+      inbox->last->next = job;
+    } else {
+      inbox->first = job;
+    }
+    inbox->last = job;
+#ifdef _WIN32
+    WakeAllConditionVariable(&inbox->condition);
+#else
+    pthread_cond_broadcast(&inbox->condition);
+#endif
+  }
+  sag_inbox_unlock(inbox);
+#ifndef _WIN32
+  /* The executor ended, so nobody will join this thread: it ends on its own, without being
+   * reported as a leaked thread (ThreadSanitizer). On Windows its handle is never closed, which
+   * only matters until the process ends. */
+  if (closed) {
+    pthread_detach(pthread_self());
+  }
+#endif
+}
+
+void sag_task_spawn_blocking(sag_fnval body, sag_fnval done) {
+  sag_task_inbox *inbox = sag_task_inbox_get();
+  sag_task_job *job = sag_object_alloc(sizeof(sag_task_job));
+  job->body = body;
+  job->done = done;
+  job->inbox = inbox;
+  job->thread = NULL;
+  job->next = NULL;
+  sag_fnval_retain(body);
+  sag_fnval_retain(done);
+  sag_object_retain(&inbox->header);
+  sag_object_init(&job->header, sag_task_job_drop, NULL);
+  sag_fnval run;
+  run.fn = (sag_method)sag_task_job_run;
+  run.env = &job->header;
+  /* The thread holds its own reference while it runs. */
+  job->thread = sag_thread_start(run);
+  sag_object_release(&job->header);
+  sag_task_jobs++;
+}
+
+/* Takes the jobs that ended: joins their threads and makes their `done` ready, in order. */
+static void sag_task_drain(void) {
+  sag_task_inbox *inbox = sag_inbox;
+  if (inbox == NULL) {
+    return;
+  }
+  sag_inbox_lock(inbox);
+  sag_task_job *job = inbox->first;
+  inbox->first = NULL;
+  inbox->last = NULL;
+  sag_inbox_unlock(inbox);
+  while (job != NULL) {
+    sag_task_job *next = job->next;
+    sag_thread_join(job->thread);
+    sag_task_jobs--;
+    sag_task_schedule(job->done);
+    sag_object_release(&job->header);
+    job = next;
+  }
+}
+
+/* Waits until a job ends, or at most `nanos` nanoseconds (UINT64_MAX: without limit). */
+static void sag_task_wait_inbox(uint64_t nanos) {
+  sag_task_inbox *inbox = sag_inbox;
+  if (inbox == NULL) {
+    return;
+  }
+  sag_inbox_lock(inbox);
+  if (inbox->first == NULL) {
+#ifdef _WIN32
+    /* Whole milliseconds, rounded up, below INFINITE. */
+    uint64_t millis = nanos == UINT64_MAX ? SAG_WIN_INFINITE : nanos / 1000000 + (nanos % 1000000 != 0);
+    SleepConditionVariableSRW(&inbox->condition, &inbox->lock, millis >= SAG_WIN_INFINITE ? SAG_WIN_INFINITE : (unsigned long)millis, 0);
+#else
+    if (nanos == UINT64_MAX) {
+      pthread_cond_wait(&inbox->condition, &inbox->lock);
+    } else {
+      struct timespec deadline;
+      clock_gettime(CLOCK_REALTIME, &deadline);
+      uint64_t seconds = nanos / 1000000000 + ((uint64_t)deadline.tv_nsec + nanos % 1000000000) / 1000000000;
+      deadline.tv_nsec = (long)(((uint64_t)deadline.tv_nsec + nanos % 1000000000) % 1000000000);
+      deadline.tv_sec = seconds > (uint64_t)INT32_MAX ? deadline.tv_sec + INT32_MAX : deadline.tv_sec + (time_t)seconds;
+      pthread_cond_timedwait(&inbox->condition, &inbox->lock, &deadline);
+    }
+#endif
+  }
+  sag_inbox_unlock(inbox);
+}
+
+/* The executor ends: jobs that ended are joined and released without running their `done`, and
+ * those still running will only release what they hold. */
+static void sag_task_close_inbox(void) {
+  sag_task_inbox *inbox = sag_inbox;
+  if (inbox == NULL) {
+    return;
+  }
+  sag_inbox = NULL;
+  sag_inbox_lock(inbox);
+  inbox->closed = true;
+  sag_task_job *job = inbox->first;
+  inbox->first = NULL;
+  inbox->last = NULL;
+  sag_inbox_unlock(inbox);
+  while (job != NULL) {
+    sag_task_job *next = job->next;
+    sag_thread_join(job->thread);
+    sag_object_release(&job->header);
+    job = next;
+  }
+  sag_task_jobs = 0;
+  sag_object_release(&inbox->header);
+}
 #endif
 
 /* ---- Program lifecycle ----------------------------------------------------------------- */
@@ -3055,6 +3456,7 @@ int sag_rt_finish(void) {
   if (fflush(stdout) != 0) {
     sag_panic("failed printing to stdout");
   }
+  sag_task_shutdown();
   sag_drop_free();
   /* Objects of threads still running are alive. */
   size_t live = sag_count_get(&sag_live_objects);

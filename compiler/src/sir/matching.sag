@@ -9,6 +9,7 @@ use pkg::sir::{Lowering, Operand, PanicMessage, Place, Projection, Rvalue, Stmt,
 use pkg::sir::closures;
 use pkg::sir::interfaces;
 use pkg::sir::strings;
+use pkg::sir::tasks;
 use pkg::types::{IntTy, Type, TypeKind};
 use pkg::types;
 use pkg::types::typed::BuiltinMethod;
@@ -186,8 +187,13 @@ pub fn try_expr(lw: Lowering, inner: Expr) -> Result<Operand, String> {
   }
 
   lw.emit(Stmt::Assign { dest: result, value: Rvalue::Variant { index: failure, fields: fields } });
-  lw.release_for_exit(0, 0);
-  lw.emit(Stmt::Return(Some(Operand::Local(result))));
+
+  if lw.async_cx.is_some() {
+    tasks::finish(lw, Some(Operand::Local(result)), Some(result));
+  } else {
+    lw.release_for_exit(0, 0);
+    lw.emit(Stmt::Return(Some(Operand::Local(result))));
+  }
 
   const then_body = lw.close_buffer(then_mark);
 

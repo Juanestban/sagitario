@@ -1,0 +1,21 @@
+// `async fn main` returning `Err` prints the error and exits with code 1, as `main` does.
+// expect-stdout: checking 1
+// expect-stdout: checking 2
+// expect-exit: 1
+use std::task;
+use std::time::Duration;
+
+async fn check(n: i32) -> Result<i32, String> {
+  await task::sleep(Duration::from_millis(1));
+
+  if n > 1 { Err(`${n} is too big`) } else { Ok(n) }
+}
+
+async fn main() -> Result<(), String> {
+  for i in 1..3 {
+    println(`checking ${i}`);
+    await check(i)?;
+  }
+
+  Ok(())
+}

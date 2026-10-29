@@ -76,6 +76,8 @@ fn main() { ... }
 - `tests/run-pass/reference_zoo/` is the reference program of the F2 acceptance criteria.
 - `tests/run-pass/reference_wordcount/` is the reference program of the F4 acceptance
   criteria, run with ThreadSanitizer ([ADR-0048](adr/0048-async-await.md)).
+- `tests/run-pass/reference_async/` is the reference program of the F8 acceptance criteria, run
+  with ThreadSanitizer ([ADR-0075](adr/0075-f8-acceptance.md)).
 - `tests/acceptance/f3/` is the F3 acceptance program: the `wc` and `textcount` packages and a C
   program using the library, run by the test `f3_acceptance` of the harness
   ([ADR-0044](adr/0044-c-toolchains.md)).
@@ -134,12 +136,13 @@ clang (where C's `char` is unsigned), and on macOS with clang. Each builds the c
 seed with the script of its system, in debug, and runs the harness with stage 2 and its Nova. The
 Ubuntu jobs on x86-64 require the Android NDK (`SAG_REQUIRE_NDK=1`). The `same-c` job
 checks that the C stage 2 generates for the compiler is the same in all of them, and the `vscode`
-job packages the VS Code extension.
+job packages the VS Code extension; the harness checks that its version is that of Sagitario.
 
 A tag `vX.Y.Z` runs the release workflow instead (`.github/workflows/release.yml`,
 [ADR-0068](adr/0068-releases-and-distribution.md)): on each platform of the releases, also macOS on
 x86-64, it builds in release mode with `--dist` and runs the harness with
-what it built, before publishing the archives with the installers. Then it installs the release
+what it built, before publishing the archives with the installers and the VS Code extension
+([ADR-0071](adr/0071-vscode-extension-with-the-releases.md)). Then it installs the release
 with the commands of the README on Windows, Linux and macOS, and builds and runs a new package with
 it. In CI, the `installers` job installs the archive that `--dist` writes, through
 `--from file://…`, on the same three systems ([ADR-0069](adr/0069-installers.md)).

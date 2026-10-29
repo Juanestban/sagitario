@@ -1,5 +1,5 @@
 // Constants as C literals: integers at the limits of their types, floats at their extremes and
-// negative zero, characters outside ASCII, strings escaping quotes, backslashes, trigraphs and
+// negative zero, infinities and NaN, characters outside ASCII, strings escaping quotes, backslashes, trigraphs and
 // control and non-ASCII bytes, and strings too long for a C literal, used twice.
 
 const I64_MIN: i64 = -9223372036854775808;
@@ -11,6 +11,9 @@ const F32_MAX: f32 = 3.4028235e38;
 const NEGATIVE_ZERO: f64 = -0.0;
 const WHOLE: f64 = 3.0;
 const THIRD: f32 = 1.0 / 3.0;
+const INFINITE: f64 = 1.0 / 0.0;
+const NEGATIVE_INFINITE: f32 = -F32_MAX * 2.0;
+const NOT_A_NUMBER: f64 = 0.0 / 0.0;
 
 const CHUNK: String = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-+";
 const BLOCK: String = CHUNK + CHUNK + CHUNK + CHUNK + CHUNK + CHUNK + CHUNK + CHUNK;
@@ -24,6 +27,7 @@ pub fn main() {
   println(`${I64_MIN} ${U64_MAX} ${I8_MIN} ${-1i64} ${0i64}`);
   println(`${F64_MAX} ${F64_TINY} ${F32_MAX} ${NEGATIVE_ZERO} ${WHOLE} ${THIRD}`);
   println(`${1.0 / 0.0} ${-1.0 / 0.0} ${0.5f32 / 0.0f32}`);
+  println(`${INFINITE} ${NEGATIVE_INFINITE} ${NOT_A_NUMBER} ${NOT_A_NUMBER == NOT_A_NUMBER}`);
 
   for c in chars() {
     print(`${c as u32} `);

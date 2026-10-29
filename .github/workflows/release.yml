@@ -2,7 +2,8 @@ name: Release
 
 # A release of Sagitario on a tag `vX.Y.Z` (docs/adr/0068-releases-and-distribution.md): each
 # platform bootstraps from the seed in release mode, passes the harness with what it built and
-# writes its archive; the last job publishes them all, with their checksums, as a GitHub Release.
+# writes its archive; then they are published, with their checksums, the installers and the VS Code
+# extension (docs/adr/0071-vscode-extension-with-the-releases.md), as a GitHub Release.
 on:
   push:
     tags: ['v*']
@@ -77,9 +78,30 @@ jobs:
             build/dist/*.tar.gz
           if-no-files-found: error
 
+  # The VS Code extension, with the version of the release (the harness checks it): one package for
+  # every platform, since it is plain JavaScript (docs/adr/0071-vscode-extension-with-the-releases.md).
+  vscode:
+    name: package the VS Code extension
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: editors/vscode
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm run package
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vscode-extension
+          path: editors/vscode/sagitario.vsix
+          if-no-files-found: error
+
   publish:
     name: publish the release
-    needs: build
+    needs: [build, vscode]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -90,16 +112,21 @@ jobs:
           pattern: archive-*
           merge-multiple: true
           path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: vscode-extension
+          path: vscode
       - name: Write the checksums
         working-directory: dist
         run: |
           sha256sum sagitario-* > SHA256SUMS
           cat SHA256SUMS
-      # With the installers (docs/adr/0069-installers.md), which `releases/latest/download/` serves.
+      # With the installers (docs/adr/0069-installers.md), which `releases/latest/download/` serves,
+      # and the VS Code extension.
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* install/install.sh install/install.ps1 --repo "$GITHUB_REPOSITORY" --title "Sagitario ${GITHUB_REF_NAME#v}" --generate-notes --verify-tag
+        run: gh release create "$GITHUB_REF_NAME" dist/* install/install.sh install/install.ps1 vscode/sagitario.vsix --repo "$GITHUB_REPOSITORY" --title "Sagitario ${GITHUB_REF_NAME#v}" --generate-notes --verify-tag
 
   # The commands of the README install the release just published, with the defaults: the
   # directory, and PATH.

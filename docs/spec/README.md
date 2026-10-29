@@ -17,6 +17,7 @@ what it means, and what the compiler must reject. The reasons behind each decisi
 9. [Modules and packages](09-modules.md)
 10. [Foreign function interface](10-ffi.md)
 11. [Standard library](11-standard-library.md)
+12. [`async` and `await`](12-async.md)
 
 ## Conventions
 
