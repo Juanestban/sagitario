@@ -1,0 +1,123 @@
+// The reference program of the F8 acceptance criteria (docs/roadmap.md): an asynchronous pipeline
+// of files. `async fn main` writes 6 files and starts a task per file, which reads it on a thread
+// (`spawn_blocking`) through an `async fn` passed as a value, then summarizes it through an
+// interface whose `async` methods are implemented by a class (counting the words on a thread and
+// adding them to its field) and a struct; a generic `async fn` gathers the results in order, `?`
+// after `await` passes the error of a missing file, timers fire in the order of their deadlines,
+// and a task left unfinished is released when `main` ends. The output does not depend on how the
+// threads are scheduled. The harness runs it with ThreadSanitizer where the C compiler has it, and
+// fails it on any leak.
+// sanitize: thread
+// expect-stdout: file_0.txt words 4 lines 1
+// expect-stdout: file_1.txt words 12 lines 2
+// expect-stdout: file_2.txt words 24 lines 3
+// expect-stdout: file_3.txt words 40 lines 4
+// expect-stdout: file_4.txt words 60 lines 5
+// expect-stdout: file_5.txt words 84 lines 6
+// expect-stdout: total words 224
+// expect-stdout: missing.txt failed
+// expect-stdout: first
+// expect-stdout: second
+// expect-stdout: third
+// expect-stdout: done
+
+use pkg::pipeline;
+use pkg::pipeline::{LineCount, Summary, WordCount};
+use std::fs;
+use std::io;
+use std::task;
+use std::time::Duration;
+
+/// How many files the program writes and reads.
+fn file_count() -> i64 {
+  6
+}
+
+fn name_of(file: i64) -> String {
+  `file_${file}.txt`
+}
+
+/// The text of the file number `file`: `file + 1` lines, the line `n` with `(n + 1) * 4` words.
+fn text_of(file: i64) -> String {
+  const words = List::from(["sol", "luna", "mar", "rio", "monte", "nube", "viento", "fuego"]);
+  const builder = new StringBuilder();
+
+  for line in 0..file + 1 {
+    for index in 0..(line + 1) * 4 {
+      if index > 0 {
+        builder.append(" ");
+      }
+
+      builder.append(words[((file * 5 + line * 3 + index) % 8) as usize]);
+    }
+
+    builder.append("\n");
+  }
+
+  builder.to_string()
+}
+
+/// The line of the report of the file `name`: what each summary says of it.
+async fn report(
+  name: String,
+  reader: fn(String) -> Task<Result<String, io::Error>>,
+  summaries: List<Summary>,
+) -> Result<String, io::Error> {
+  const text = await reader(name)?;
+  var line = name;
+
+  for summary in summaries {
+    line = line + ` ${summary.label()} ${await summary.summarize(text)}`;
+  }
+
+  Ok(line)
+}
+
+/// Prints `text` after `millis` milliseconds.
+async fn after(millis: u64, text: String) {
+  await task::sleep(Duration::from_millis(millis));
+  println(text);
+}
+
+async fn main() -> Result<(), io::Error> {
+  for file in 0..file_count() {
+    fs::write(name_of(file), text_of(file))?;
+  }
+
+  const words = new WordCount();
+  const summaries = new List<Summary>();
+
+  summaries.push(words);
+  summaries.push(LineCount { separator: "\n" });
+
+  const reports: List<Task<Result<String, io::Error>>> = new List();
+
+  for file in 0..file_count() {
+    reports.push(report(name_of(file), pipeline::load, summaries));
+  }
+
+  for line in await pipeline::gather(reports) {
+    println(line?);
+  }
+
+  println(`total words ${words.total}`);
+
+  match await report("missing.txt", pipeline::load, summaries) {
+    Ok(_) => println("missing.txt was read"),
+    Err(_) => println("missing.txt failed"),
+  }
+
+  const third = after(30, "third");
+  const first = after(10, "first");
+  const second = after(20, "second");
+
+  await third;
+  await first;
+  await second;
+
+  // Never awaited: it is released, without running further, when `main` ends.
+  const _late = after(60000, "late");
+
+  println("done");
+  Ok(())
+}

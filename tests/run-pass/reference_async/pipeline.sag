@@ -1,0 +1,76 @@
+use std::fs;
+use std::io;
+use std::task;
+use std::time::Duration;
+
+/// A step of the report: turns the text of a file into one of its columns.
+pub interface Summary {
+  fn label(self) -> String;
+
+  async fn summarize(self, text: String) -> String;
+}
+
+/// Counts the words of each file on a thread, and the words of all of them in `total`.
+pub class WordCount impl Summary {
+  pub var total: i64;
+
+  pub fn new(self) {
+    self.total = 0;
+  }
+
+  pub fn label(self) -> String {
+    "words"
+  }
+
+  pub async fn summarize(self, text: String) -> String {
+    const words = await task::spawn_blocking(() => count_words(text));
+
+    self.total += words;
+    `${words}`
+  }
+}
+
+/// Counts the lines of each file, without blocking; a struct, so its tasks work on a copy.
+pub struct LineCount impl Summary {
+  pub separator: String;
+
+  pub fn label(self) -> String {
+    "lines"
+  }
+
+  pub async fn summarize(self, text: String) -> String {
+    await task::sleep(Duration::from_millis(1));
+    `${text.trim().split(self.separator).count()}`
+  }
+}
+
+/// The number of words of `text`, separated by spaces and new lines.
+fn count_words(text: String) -> i64 {
+  var words: i64 = 0;
+
+  for line in text.trim().split("\n") {
+    for word in line.split(" ") {
+      if !word.is_empty() {
+        words += 1;
+      }
+    }
+  }
+
+  words
+}
+
+/// Reads the file `name` on a thread.
+pub async fn load(name: String) -> Result<String, io::Error> {
+  await task::spawn_blocking(() => fs::read_to_string(name))
+}
+
+/// The results of `tasks`, in their order, once all of them have finished.
+pub async fn gather<T>(tasks: List<Task<T>>) -> List<T> {
+  const results = new List<T>();
+
+  for task in tasks {
+    results.push(await task);
+  }
+
+  results
+}
