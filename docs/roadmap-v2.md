@@ -28,6 +28,11 @@ changes the language until a record does.
 What engines need from the language, much of it among the deferred decisions of the first
 roadmap.
 
+**Status:** in progress. `std::math` comes in three increments
+([ADR-0076](adr/0076-std-math-and-methods-of-numbers.md)), of which 1 is done: the basic methods of
+floats and integers, the constants, and infinities and NaN in constants. Powers and logarithms,
+then trigonometry, follow.
+
 - **Operator overloading** (`a + b` on vectors and matrices), today a deferred decision.
 - **Slices and byte buffers**: views of arrays and lists without copies, and reading and writing
   bytes (`fs` reads only UTF-8 text today).

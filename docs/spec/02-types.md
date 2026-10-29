@@ -73,6 +73,34 @@ Division by zero, out-of-bounds indexing and every other panic behave the same i
 - The generated C must never rely on undefined behavior (see
   [architecture](../architecture.md#c-code-generation)).
 
+## Methods of numbers (G1)
+
+Rationale: [ADR-0076](../adr/0076-std-math-and-methods-of-numbers.md). Besides `equals`,
+`compare` and `hash` (integers) and `total_compare` (floats), numbers have these methods; their
+arguments have the type of the receiver, unless written otherwise.
+
+| Method | Integers | Floats | Result |
+|---|---|---|---|
+| `abs()` | signed | yes | the absolute value |
+| `signum()` | signed | yes | `-1`, `0` or `1`; for floats `1.0` or `-1.0` with the sign of `x` (also `±0.0` and infinities), NaN for NaN |
+| `min(other)`, `max(other)` | yes | yes | the smaller or larger value; for floats, if one is NaN, the other |
+| `clamp(min, max)` | yes | yes | `x` restricted to `min..=max`; NaN for a NaN `x`; **panics** unless `min <= max` (also when a bound is NaN) |
+| `pow(exp: u32)` | yes | | `x` multiplied by itself `exp` times; `0.pow(0)` is `1` |
+| `copysign(sign)` | | yes | the magnitude of `x` with the sign of `sign` |
+| `lerp(b, t)` | | yes | `(1 - t) * x + t * b`: `x` at `t == 0`, `b` at `t == 1`; `t` is not clamped |
+| `floor()`, `ceil()`, `trunc()` | | yes | the integer below, above, or towards zero |
+| `round()` | | yes | the nearest integer, halves away from zero (`2.5` → `3`, `-2.5` → `-3`) |
+| `fract()` | | yes | `x - x.trunc()` |
+| `is_nan()`, `is_infinite()`, `is_finite()` | | yes | `bool` |
+
+- `abs()` and `pow()` overflow as arithmetic does: a panic in debug builds, wrapping in release
+  builds (the `abs()` of the smallest value of a type is itself). On unsigned integers `abs()`
+  and `signum()` do not exist.
+- Methods of a literal need no parentheses unless it is negative: `2.5.floor()`, `(-2.5).abs()`
+  (`-2.5.abs()` is `-(2.5.abs())`).
+- [`std::math`](11-standard-library.md#stdmath) has the constants (`math::PI`) and the methods of
+  floats as functions of `f64` (`math::floor(x)`).
+
 ## `String` (F1)
 
 - Always valid UTF-8 and **immutable**.

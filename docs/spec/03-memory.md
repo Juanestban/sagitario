@@ -67,8 +67,11 @@ const RUNTIME: String = include_str("../runtime/runtime.c");
 - The compiler computes its value from literals, other constants, unary `-` and `!`, the
   arithmetic operators (`+` also joins strings), comparisons, `&&`, `||`, `as` between primitive
   types and `include_str`. A constant cannot need its own value.
-- A value outside its type, a division by zero, a float that is not finite, or any other
-  expression (a call, a lambda, `new`) is an error.
+- A value outside its type, an integer division by zero, a float literal too large for its type
+  (`1e39` as `f32`), or any other expression (a call, a lambda, `new`) is an error.
+- Float arithmetic follows IEEE-754: a constant may be infinite or NaN (`1.0 / 0.0`, `0.0 / 0.0`),
+  and every comparison with NaN is false except `!=`
+  ([ADR-0076](../adr/0076-std-math-and-methods-of-numbers.md)).
 - `include_str("path")` is the text of a file, as a `String`. It is only valid in the value of
   a module-level constant; the path is a string literal relative to the directory of the
   source file, and the file must be UTF-8. The file is read when the program is compiled.

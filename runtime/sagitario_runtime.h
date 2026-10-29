@@ -386,6 +386,113 @@ SAG_UNSIGNED_OPS(u32, uint32_t, UINT32_MAX)
 SAG_UNSIGNED_OPS(u64, uint64_t, UINT64_MAX)
 SAG_UNSIGNED_OPS(usize, size_t, SIZE_MAX)
 
+/* ---- Methods of numbers (docs/adr/0076-std-math-and-methods-of-numbers.md) ---------------
+ * `pow` multiplies through the checked helpers above, so it panics (debug) or wraps (release)
+ * as `*` does. It squares the base only while bits of the exponent remain: a square that
+ * overflows then means that the result overflows too. */
+
+#define SAG_INT_METHODS(NAME, T)                                                                          \
+  static inline T sag_min_##NAME(T a, T b) {                                                              \
+    return a < b ? a : b;                                                                                 \
+  }                                                                                                       \
+  static inline T sag_max_##NAME(T a, T b) {                                                              \
+    return a > b ? a : b;                                                                                 \
+  }                                                                                                       \
+  static inline T sag_clamp_##NAME##_at(T x, T lo, T hi, const char *file, int line) {                    \
+    if (lo > hi) {                                                                                        \
+      sag_panic_at("`clamp` needs min <= max", file, line);                                               \
+    }                                                                                                     \
+    return x < lo ? lo : (x > hi ? hi : x);                                                               \
+  }                                                                                                       \
+  static inline T sag_pow_##NAME##_at(T base, uint32_t exp, const char *file, int line) {                 \
+    T result = (T)1;                                                                                      \
+    while (exp > 0) {                                                                                     \
+      if ((exp & 1u) != 0) {                                                                              \
+        result = sag_mul_##NAME##_at(result, base, file, line);                                           \
+      }                                                                                                   \
+      exp >>= 1;                                                                                          \
+      if (exp > 0) {                                                                                      \
+        base = sag_mul_##NAME##_at(base, base, file, line);                                               \
+      }                                                                                                   \
+    }                                                                                                     \
+    return result;                                                                                        \
+  }
+
+#define SAG_SIGNED_METHODS(NAME, T)                                                                       \
+  SAG_INT_METHODS(NAME, T)                                                                                \
+  static inline T sag_abs_##NAME##_at(T a, const char *file, int line) {                                  \
+    return a < 0 ? sag_neg_##NAME##_at(a, file, line) : a;                                                \
+  }                                                                                                       \
+  static inline T sag_signum_##NAME(T a) {                                                                \
+    return (T)((a > 0) - (a < 0));                                                                        \
+  }
+
+SAG_SIGNED_METHODS(i8, int8_t)
+SAG_SIGNED_METHODS(i16, int16_t)
+SAG_SIGNED_METHODS(i32, int32_t)
+SAG_SIGNED_METHODS(i64, int64_t)
+SAG_SIGNED_METHODS(isize, intptr_t)
+SAG_INT_METHODS(u8, uint8_t)
+SAG_INT_METHODS(u16, uint16_t)
+SAG_INT_METHODS(u32, uint32_t)
+SAG_INT_METHODS(u64, uint64_t)
+SAG_INT_METHODS(usize, size_t)
+
+/* F is the suffix of the <math.h> functions of T: `f` for float, nothing for double. `min` and
+ * `max` ignore a NaN (fmin, fmax); `round` rounds halves away from zero. */
+#define SAG_FLOAT_METHODS(NAME, T, F)                                                                     \
+  static inline T sag_##NAME##_abs(T x) {                                                                 \
+    return fabs##F(x);                                                                                    \
+  }                                                                                                       \
+  static inline T sag_##NAME##_signum(T x) {                                                              \
+    return isnan(x) ? x : copysign##F((T)1, x);                                                           \
+  }                                                                                                       \
+  static inline T sag_##NAME##_copysign(T x, T sign) {                                                    \
+    return copysign##F(x, sign);                                                                          \
+  }                                                                                                       \
+  static inline T sag_##NAME##_min(T a, T b) {                                                            \
+    return fmin##F(a, b);                                                                                 \
+  }                                                                                                       \
+  static inline T sag_##NAME##_max(T a, T b) {                                                            \
+    return fmax##F(a, b);                                                                                 \
+  }                                                                                                       \
+  static inline T sag_##NAME##_clamp_at(T x, T lo, T hi, const char *file, int line) {                    \
+    if (!(lo <= hi)) {                                                                                    \
+      sag_panic_at("`clamp` needs min <= max, and neither of them NaN", file, line);                      \
+    }                                                                                                     \
+    return x < lo ? lo : (x > hi ? hi : x);                                                               \
+  }                                                                                                       \
+  static inline T sag_##NAME##_lerp(T a, T b, T t) {                                                      \
+    return ((T)1 - t) * a + t * b;                                                                        \
+  }                                                                                                       \
+  static inline T sag_##NAME##_floor(T x) {                                                               \
+    return floor##F(x);                                                                                   \
+  }                                                                                                       \
+  static inline T sag_##NAME##_ceil(T x) {                                                                \
+    return ceil##F(x);                                                                                    \
+  }                                                                                                       \
+  static inline T sag_##NAME##_round(T x) {                                                               \
+    return round##F(x);                                                                                   \
+  }                                                                                                       \
+  static inline T sag_##NAME##_trunc(T x) {                                                               \
+    return trunc##F(x);                                                                                   \
+  }                                                                                                       \
+  static inline T sag_##NAME##_fract(T x) {                                                               \
+    return x - trunc##F(x);                                                                               \
+  }                                                                                                       \
+  static inline bool sag_##NAME##_is_nan(T x) {                                                           \
+    return isnan(x) != 0;                                                                                 \
+  }                                                                                                       \
+  static inline bool sag_##NAME##_is_infinite(T x) {                                                      \
+    return isinf(x) != 0;                                                                                 \
+  }                                                                                                       \
+  static inline bool sag_##NAME##_is_finite(T x) {                                                        \
+    return isfinite(x) != 0;                                                                              \
+  }
+
+SAG_FLOAT_METHODS(f32, float, f)
+SAG_FLOAT_METHODS(f64, double, )
+
 /* ---- Conversions (`as`) -----------------------------------------------------------------
  * Float to integer saturates and maps NaN to 0; LIMIT is 2^(bits-1) for signed types and 2^bits
  * for unsigned ones, both exact in a double. */

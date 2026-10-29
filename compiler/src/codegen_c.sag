@@ -2163,6 +2163,24 @@ fn constant(value: Const) -> String {
       "((" + int_c_type(ty) + `)(-(int64_t)${magnitude - 1}ll - 1))`
     }
     Const::Float { text, ty } => {
+      // Infinities and NaN, from constants (docs/adr/0076), through the macros of <math.h>.
+      const c_type = match ty {
+        FloatTy::F32 => "float",
+        FloatTy::F64 => "double",
+      };
+
+      if text == "inf" {
+        return "((" + c_type + ")INFINITY)";
+      }
+
+      if text == "-inf" {
+        return "(-(" + c_type + ")INFINITY)";
+      }
+
+      if text == "NaN" {
+        return "((" + c_type + ")NAN)";
+      }
+
       const literal = if text.contains(".") || text.contains("e") { text } else { text + ".0" };
 
       match ty {

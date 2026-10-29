@@ -21,6 +21,7 @@ use pkg::types::generic;
 use pkg::types::generic::Unknowns;
 use pkg::types::inheritance;
 use pkg::types::interfaces;
+use pkg::types::numbers;
 use pkg::types::patterns;
 use pkg::types::send;
 use pkg::types::strings;
@@ -1220,6 +1221,10 @@ fn method_call(cx: Checker, value: Expr, receiver: Expr, method: Ident, args: Li
   }
 
   if let Some(ty) = collections::primitive_method(cx, value, receiver_ty, method, args) {
+    return ty;
+  }
+
+  if let Some(ty) = numbers::number_method(cx, value, receiver_ty, method, args) {
     return ty;
   }
 

@@ -262,8 +262,20 @@ fn const_eval(cx: Checker, expr: Expr, hint: Option<Type>, module: usize) -> Opt
         Ok(parsed) => parsed,
         Err(_) => return None,
       };
+      const typed = const_float(parsed, float_ty)?;
 
-      const_float(cx, parsed, float_ty, expr.span)
+      // Infinities and NaN come from arithmetic (`1.0 / 0.0`), never from a literal too large.
+      if let ConstValue::Float(rounded) = typed.value {
+        if !is_finite(rounded) {
+          const name = if float_ty == FloatTy::F32 { "f32" } else { "f64" };
+
+          cx.error(codes::NOT_CONSTANT, expr.span, "this float literal is too large for `" + name + "`");
+
+          return None;
+        }
+      }
+
+      Some(typed)
     }
     ExprKind::Path(_) => match cx.resolution.paths.get(expr.id) {
       Some(Res::Const(other)) => const_value(cx, other, Some(expr.span)),
@@ -295,7 +307,7 @@ fn const_eval(cx: Checker, expr: Expr, hint: Option<Type>, module: usize) -> Opt
         ConstValue::Float(value) => {
           if op == UnaryOp::Neg {
             if let TypeKind::Float(float_ty) = found.ty.kind {
-              return const_float(cx, -value, float_ty, expr.span);
+              return const_float(-value, float_ty);
             }
           }
         }
@@ -396,19 +408,21 @@ fn const_int(cx: Checker, value: Option<Wide>, int_ty: IntTy, span: Span) -> Opt
   None
 }
 
+fn is_nan(value: ConstValue) -> bool {
+  match value {
+    ConstValue::Float(found) => found != found,
+    _ => false,
+  }
+}
+
 /// Whether a float is a finite number: neither infinite nor NaN.
 fn is_finite(value: f64) -> bool {
   value - value == 0.0
 }
 
-fn const_float(cx: Checker, value: f64, float_ty: FloatTy, span: Span) -> Option<Typed> {
+/// A float of `float_ty`: infinities and NaN are values like any other (docs/adr/0076).
+fn const_float(value: f64, float_ty: FloatTy) -> Option<Typed> {
   const rounded = if float_ty == FloatTy::F32 { (value as f32) as f64 } else { value };
-
-  if !is_finite(rounded) {
-    cx.error(codes::NOT_CONSTANT, span, "a float constant must be a finite number");
-
-    return None;
-  }
 
   Some(Typed { ty: types::of(TypeKind::Float(float_ty)), value: ConstValue::Float(rounded) })
 }
@@ -440,6 +454,11 @@ fn compare_values(lhs: ConstValue, rhs: ConstValue) -> Option<Ordering> {
 
 fn const_binary(cx: Checker, op: BinaryOp, ty: Type, lhs: ConstValue, rhs: ConstValue, span: Span) -> Option<Typed> {
   if is_comparison(op) {
+    // NaN is unordered: only `!=` holds.
+    if is_nan(lhs) || is_nan(rhs) {
+      return Some(Typed { ty: types::of(TypeKind::Bool), value: ConstValue::Bool(op == BinaryOp::Ne) });
+    }
+
     const ordering = compare_values(lhs, rhs)?;
     var result = false;
 
@@ -518,23 +537,23 @@ fn const_binary(cx: Checker, op: BinaryOp, ty: Type, lhs: ConstValue, rhs: Const
       if let ConstValue::Float(b) = rhs {
         if let TypeKind::Float(float_ty) = ty.kind {
           if op == BinaryOp::Add {
-            return const_float(cx, a + b, float_ty, span);
+            return const_float(a + b, float_ty);
           }
 
           if op == BinaryOp::Sub {
-            return const_float(cx, a - b, float_ty, span);
+            return const_float(a - b, float_ty);
           }
 
           if op == BinaryOp::Mul {
-            return const_float(cx, a * b, float_ty, span);
+            return const_float(a * b, float_ty);
           }
 
           if op == BinaryOp::Div {
-            return const_float(cx, a / b, float_ty, span);
+            return const_float(a / b, float_ty);
           }
 
           if op == BinaryOp::Rem {
-            return const_float(cx, a % b, float_ty, span);
+            return const_float(a % b, float_ty);
           }
 
           return const_operand_error(cx, span, symbol, ty);
@@ -642,8 +661,8 @@ fn const_cast(cx: Checker, from: Type, value: ConstValue, to: Type, span: Span) 
       _ => {}
     },
     TypeKind::Float(float_ty) => match value {
-      ConstValue::Int(found) => return const_float(cx, found.to_f64(), float_ty, span),
-      ConstValue::Float(found) => return const_float(cx, found, float_ty, span),
+      ConstValue::Int(found) => return const_float(found.to_f64(), float_ty),
+      ConstValue::Float(found) => return const_float(found, float_ty),
       _ => {}
     },
     TypeKind::Char => {

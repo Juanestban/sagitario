@@ -57,7 +57,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0046](0046-mutex-and-atomics.md) | `std::sync`: `Mutex` and atomics | Accepted |
 | [0047](0047-channels-and-thread-utilities.md) | Channels and thread utilities | Accepted |
 | [0048](0048-async-await.md) | `async`/`await`, for phase F6 | Accepted (not implemented; moved to F7 by 0057, to F8 by 0063) |
-| [0049](0049-self-hosting-plan-and-language-prerequisites.md) | The self-hosting plan, module-level constants, `include_str`, `if let` and `while let` | Accepted (refined by 0050; Q214 superseded by 0067) |
+| [0049](0049-self-hosting-plan-and-language-prerequisites.md) | The self-hosting plan, module-level constants, `include_str`, `if let` and `while let` | Accepted (refined by 0050 and 0076; Q214 superseded by 0067) |
 | [0050](0050-lexer-port-and-token-dumps.md) | The lexer port, token dumps and `char::from_u32` | Accepted (refined by 0051) |
 | [0051](0051-parser-port-and-ast-dumps.md) | The parser port and AST dumps | Accepted (refined by 0052) |
 | [0052](0052-resolver-port-and-resolution-dumps.md) | The resolver port and resolution dumps | Accepted (refined by 0053) |
@@ -71,7 +71,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0060](0060-driver-parity-for-nova.md) | The pivot without Rust, and the driver for Nova | Accepted (refined by 0064, 0066, 0067) |
 | [0061](0061-terminals.md) | Terminals: `io::is_terminal` and colored diagnostics in `sagc` | Accepted |
 | [0062](0062-language-server-std-sources-and-lone-files.md) | The language server on the standard library and on lone files | Accepted (Q338 refined by 0067) |
-| [0063](0063-distribution-phase-and-roadmap-v2.md) | Distribution as phase F7, and the roadmap v2 of a game engine | Accepted (refined by 0068) |
+| [0063](0063-distribution-phase-and-roadmap-v2.md) | Distribution as phase F7, and the roadmap v2 of a game engine | Accepted (refined by 0068 and 0076) |
 | [0064](0064-nova-in-sagitario.md) | Nova in Sagitario | Accepted (refined by 0066) |
 | [0065](0065-module-directories.md) | Modules with submodules in `mod.sag` | Accepted |
 | [0066](0066-test-harness-in-sagitario.md) | The test harness in Sagitario | Accepted |
@@ -84,6 +84,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0073](0073-spawn-blocking.md) | `task::spawn_blocking` | Accepted |
 | [0074](0074-async-methods-generics-and-values.md) | `async` methods, generic `async fn` and `async fn` as values | Accepted |
 | [0075](0075-f8-acceptance.md) | The acceptance of F8 | Accepted |
+| [0076](0076-std-math-and-methods-of-numbers.md) | `std::math` and the methods of numbers | Accepted |
 
 ## Template
 

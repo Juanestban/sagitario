@@ -1,6 +1,7 @@
 // In release builds integer overflow wraps instead of panicking.
 // sag-flags: --release
 // expect-stdout: 4 -128 -128
+// expect-stdout: -128 0 -2147483648
 pub fn main() {
   var x: u8 = 250;
 
@@ -12,4 +13,8 @@ pub fn main() {
   y += 1;
 
   println(`${x} ${y} ${-y}`);
+
+  const z: i32 = -2147483648;
+
+  println(`${y.abs()} ${2i8.pow(8)} ${z.abs()}`);
 }
