@@ -58,9 +58,19 @@ fn float_methods(float_ty: FloatTy) -> List<NumberMethod> {
     method("max", List::from([ty]), ty, prefix + "max"),
     located("clamp", List::from([ty, ty]), ty, prefix + "clamp_at"),
     method("lerp", List::from([ty, ty]), ty, prefix + "lerp"),
+    method("powi", List::from([types::int(IntTy::I32)]), ty, prefix + "powi"),
+    method("powf", List::from([ty]), ty, prefix + "powf"),
+    method("log", List::from([ty]), ty, prefix + "log"),
+    method("hypot", List::from([ty]), ty, prefix + "hypot"),
+    method("mul_add", List::from([ty, ty]), ty, prefix + "mul_add"),
   ]);
+  const unary = List::from(["abs", "signum", "floor", "ceil", "round", "trunc", "fract"]);
 
-  for name in List::from(["abs", "signum", "floor", "ceil", "round", "trunc", "fract"]) {
+  for name in List::from(["sqrt", "cbrt", "exp", "exp2", "ln", "log2", "log10"]) {
+    unary.push(name);
+  }
+
+  for name in unary {
     methods.push(method(name, new List(), ty, prefix + name));
   }
 

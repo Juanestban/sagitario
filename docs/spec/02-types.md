@@ -75,7 +75,8 @@ Division by zero, out-of-bounds indexing and every other panic behave the same i
 
 ## Methods of numbers (G1)
 
-Rationale: [ADR-0076](../adr/0076-std-math-and-methods-of-numbers.md). Besides `equals`,
+Rationale: [ADR-0076](../adr/0076-std-math-and-methods-of-numbers.md),
+[ADR-0077](../adr/0077-std-math-powers-and-logarithms.md). Besides `equals`,
 `compare` and `hash` (integers) and `total_compare` (floats), numbers have these methods; their
 arguments have the type of the receiver, unless written otherwise.
 
@@ -92,10 +93,19 @@ arguments have the type of the receiver, unless written otherwise.
 | `round()` | | yes | the nearest integer, halves away from zero (`2.5` → `3`, `-2.5` → `-3`) |
 | `fract()` | | yes | `x - x.trunc()` |
 | `is_nan()`, `is_infinite()`, `is_finite()` | | yes | `bool` |
+| `sqrt()`, `cbrt()` | | yes | the square root (NaN for a negative number, `-0.0` for `-0.0`), the cube root |
+| `powi(n: i32)`, `powf(y)` | | yes | `x` to the power `n` or `y`; `1.0` for a zero exponent, also for NaN; NaN for a negative `x` and a fractional `y` |
+| `exp()`, `exp2()` | | yes | e or 2 to the power `x` |
+| `ln()`, `log2()`, `log10()`, `log(base)` | | yes | the logarithm (NaN for a negative number, negative infinity for zero); `log(base)` is `ln(x) / ln(base)` |
+| `hypot(y)` | | yes | √(x² + y²), without overflowing in between |
+| `mul_add(a, b)` | | yes | `x * a + b`, rounded once |
 
 - `abs()` and `pow()` overflow as arithmetic does: a panic in debug builds, wrapping in release
   builds (the `abs()` of the smallest value of a type is itself). On unsigned integers `abs()`
   and `signum()` do not exist.
+- `sqrt` and `mul_add` are exact to the last bit. The other functions of floats from `cbrt` on
+  are those of the system's C library, whose results may differ between systems in the last
+  digit; `powi` computes in `f64`.
 - Methods of a literal need no parentheses unless it is negative: `2.5.floor()`, `(-2.5).abs()`
   (`-2.5.abs()` is `-(2.5.abs())`).
 - [`std::math`](11-standard-library.md#stdmath) has the constants (`math::PI`) and the methods of

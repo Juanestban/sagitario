@@ -4,7 +4,8 @@ Rationale: [ADR-0037](../adr/0037-standard-library-env-io-process.md),
 [ADR-0038](../adr/0038-file-system-and-paths.md), [ADR-0039](../adr/0039-time-and-commands.md),
 [ADR-0045](../adr/0045-threads-and-send.md), [ADR-0046](../adr/0046-mutex-and-atomics.md),
 [ADR-0047](../adr/0047-channels-and-thread-utilities.md),
-[ADR-0076](../adr/0076-std-math-and-methods-of-numbers.md).
+[ADR-0076](../adr/0076-std-math-and-methods-of-numbers.md),
+[ADR-0077](../adr/0077-std-math-powers-and-logarithms.md).
 
 The standard library is the set of modules under the path root `std`. A program imports them
 with `use` like its own modules (`use std::io;`, `use std::env::args;`) or names them in full
@@ -153,11 +154,12 @@ fn main() {
 
 - For `f32`, convert them: `math::PI as f32`.
 - The functions `abs`, `signum`, `copysign`, `min`, `max`, `clamp`, `lerp`, `floor`, `ceil`,
-  `round`, `trunc`, `fract`, `is_nan`, `is_infinite` and `is_finite` take `f64`s and are the
+  `round`, `trunc`, `fract`, `is_nan`, `is_infinite`, `is_finite`, `sqrt`, `cbrt`, `powi`,
+  `powf`, `exp`, `exp2`, `ln`, `log2`, `log10`, `log`, `hypot` and `mul_add` take `f64`s (`powi`
+  an `i32` exponent) and are the
   [methods of floats](02-types.md#methods-of-numbers-g1) of the same name: `math::lerp(a, b, t)`
   is `a.lerp(b, t)`. A panic in `math::clamp` reports its place in the standard library.
-- Not yet: powers, roots and logarithms (`sqrt`, `pow`, `exp`, `ln`...), and trigonometry
-  (`sin`, `cos`, `atan2`...), in the next increments of G1
+- Not yet: trigonometry (`sin`, `cos`, `atan2`...), in the next increment of G1
   ([ADR-0076](../adr/0076-std-math-and-methods-of-numbers.md), Q453).
 
 ## `std::path`

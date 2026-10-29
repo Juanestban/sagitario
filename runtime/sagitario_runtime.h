@@ -439,7 +439,8 @@ SAG_INT_METHODS(u64, uint64_t)
 SAG_INT_METHODS(usize, size_t)
 
 /* F is the suffix of the <math.h> functions of T: `f` for float, nothing for double. `min` and
- * `max` ignore a NaN (fmin, fmax); `round` rounds halves away from zero. */
+ * `max` ignore a NaN (fmin, fmax); `round` rounds halves away from zero; `powi` computes in double,
+ * where every `i32` exponent is exact; `mul_add` rounds once (fma). */
 #define SAG_FLOAT_METHODS(NAME, T, F)                                                                     \
   static inline T sag_##NAME##_abs(T x) {                                                                 \
     return fabs##F(x);                                                                                    \
@@ -488,6 +489,42 @@ SAG_INT_METHODS(usize, size_t)
   }                                                                                                       \
   static inline bool sag_##NAME##_is_finite(T x) {                                                        \
     return isfinite(x) != 0;                                                                              \
+  }                                                                                                       \
+  static inline T sag_##NAME##_sqrt(T x) {                                                                \
+    return sqrt##F(x);                                                                                    \
+  }                                                                                                       \
+  static inline T sag_##NAME##_cbrt(T x) {                                                                \
+    return cbrt##F(x);                                                                                    \
+  }                                                                                                       \
+  static inline T sag_##NAME##_powi(T x, int32_t n) {                                                     \
+    return (T)pow((double)x, (double)n);                                                                  \
+  }                                                                                                       \
+  static inline T sag_##NAME##_powf(T x, T y) {                                                           \
+    return pow##F(x, y);                                                                                  \
+  }                                                                                                       \
+  static inline T sag_##NAME##_exp(T x) {                                                                 \
+    return exp##F(x);                                                                                     \
+  }                                                                                                       \
+  static inline T sag_##NAME##_exp2(T x) {                                                                \
+    return exp2##F(x);                                                                                    \
+  }                                                                                                       \
+  static inline T sag_##NAME##_ln(T x) {                                                                  \
+    return log##F(x);                                                                                     \
+  }                                                                                                       \
+  static inline T sag_##NAME##_log2(T x) {                                                                \
+    return log2##F(x);                                                                                    \
+  }                                                                                                       \
+  static inline T sag_##NAME##_log10(T x) {                                                               \
+    return log10##F(x);                                                                                   \
+  }                                                                                                       \
+  static inline T sag_##NAME##_log(T x, T base) {                                                         \
+    return log##F(x) / log##F(base);                                                                      \
+  }                                                                                                       \
+  static inline T sag_##NAME##_hypot(T x, T y) {                                                          \
+    return hypot##F(x, y);                                                                                \
+  }                                                                                                       \
+  static inline T sag_##NAME##_mul_add(T x, T a, T b) {                                                   \
+    return fma##F(x, a, b);                                                                               \
   }
 
 SAG_FLOAT_METHODS(f32, float, f)

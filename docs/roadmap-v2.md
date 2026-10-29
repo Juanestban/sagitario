@@ -29,9 +29,10 @@ What engines need from the language, much of it among the deferred decisions of 
 roadmap.
 
 **Status:** in progress. `std::math` comes in three increments
-([ADR-0076](adr/0076-std-math-and-methods-of-numbers.md)), of which 1 is done: the basic methods of
-floats and integers, the constants, and infinities and NaN in constants. Powers and logarithms,
-then trigonometry, follow.
+([ADR-0076](adr/0076-std-math-and-methods-of-numbers.md)), of which 1 and 2 are done: the basic
+methods of floats and integers, the constants, and infinities and NaN in constants; then powers,
+roots and logarithms ([ADR-0077](adr/0077-std-math-powers-and-logarithms.md)). Trigonometry
+follows.
 
 - **Operator overloading** (`a + b` on vectors and matrices), today a deferred decision.
 - **Slices and byte buffers**: views of arrays and lists without copies, and reading and writing
