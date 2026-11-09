@@ -13,7 +13,8 @@ Support for the [Sagitario](https://github.com/Juanestban/sagitario) programming
 - An icon for `.sag` files in the explorer and the tabs.
 - Commenting with `Ctrl+/`, matching and auto-closing brackets and quotes, and folding.
 - Snippets: `main`, `mainr`, `fn`, `pfn`, `struct`, `class`, `enum`, `interface`, `match`,
-  `iflet`, `whilelet`, `for`, `forin`, `if`, `ifelse`, `println` and `use`.
+  `iflet`, `whilelet`, `for`, `forin`, `if`, `ifelse`, `println` and `use`; and for the FFI,
+  `extern` (a block of C functions), `externfn`, `export`, `reprc`, `unsafe` and `cstring`.
 
 ## The language server
 
