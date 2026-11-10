@@ -74,6 +74,8 @@ pub struct Layouts {
     match ty.kind {
       TypeKind::String | TypeKind::StringBuilder | TypeKind::CString | TypeKind::Class(_) | TypeKind::Interface(_) | TypeKind::Function { .. }
         | TypeKind::List(_) => true,
+      // A slice of a list holds the list, and counts in its loans.
+      TypeKind::Slice { .. } => true,
       TypeKind::Array { elem, .. } => self.is_managed(elem),
       TypeKind::Struct(named) => {
         for field in self.struct_fields(named) {
@@ -293,6 +295,8 @@ pub enum Projection {
   Deref,
   /// The value a reference parameter refers to, never null.
   Borrowed,
+  /// A bounds-checked element, of type `elem`, of a slice.
+  SliceElem { index: Operand, elem: Type },
 }
 
 pub enum Stmt {
@@ -384,6 +388,8 @@ pub enum Rvalue {
   UnionValue { field: usize, value: Operand },
   /// Whether the integer is the value of a variant of enum `enum_id`.
   EnumValid { enum_id: usize, operand: Operand },
+  /// A slice of elements of type `elem`, all of `source` or the given range of it.
+  Slice { source: SliceSource, elem: Type, range: Option<SliceRange> },
   ListNew,
   ListLen(Operand),
   ListPop(Operand),
@@ -396,6 +402,21 @@ pub enum Rvalue {
   DynUpcast { value: Operand, path: List<usize> },
   /// In the body of an `async fn`, the closure of its frame, which resumes it.
   ResumeFn,
+}
+
+/// What a slice views.
+pub enum SliceSource {
+  /// An array of `len` elements in a place.
+  Array { place: Place, len: u64 },
+  List(Operand),
+  Slice(Operand),
+}
+
+/// `start..end`, or `start..=end`.
+pub struct SliceRange {
+  pub start: Operand;
+  pub end: Operand;
+  pub inclusive: bool;
 }
 
 pub enum TemplatePiece {
@@ -482,6 +503,7 @@ pub fn type_key(ty: Type) -> String {
     TypeKind::Result { value, error } => "R(" + type_key(value) + "," + type_key(error) + ")",
     TypeKind::Ptr { mutable, pointee } => (if mutable { "*m" } else { "*c" }) + "(" + type_key(pointee) + ")",
     TypeKind::Ref { mutable, pointee } => (if mutable { "&m" } else { "&c" }) + "(" + type_key(pointee) + ")",
+    TypeKind::Slice { mutable, elem } => (if mutable { "&m[" } else { "&c[" }) + type_key(elem) + "]",
     _ => types::text(ty),
   }
 }
@@ -1465,6 +1487,13 @@ pub class Lowering {
           return collections::list_elem_place(self, base, index, ty);
         }
 
+        if let TypeKind::Slice { .. } = base_ty.kind {
+          const slice = self.base_place(base)?;
+          const position = self.expr(index)?;
+
+          return Ok(project(slice, Projection::SliceElem { index: position, elem: ty }, ty));
+        }
+
         const len = match base_ty.kind {
           TypeKind::Array { len, .. } => len,
           _ => return Err("index into a value that is not an array"),
@@ -1544,6 +1573,67 @@ pub class Lowering {
     }
   }
 
+  /// A slice `ty` of an array, a list or a slice, or of a range of one (`&list[a..b]`): a new
+  /// value, which keeps a list it views alive and lent until it is released.
+  prv fn slice(self, operand: Expr, ty: Type) -> Result<Operand, String> {
+    const elem = match ty.kind {
+      TypeKind::Slice { elem, .. } => elem,
+      _ => return Err("slice of another type"),
+    };
+    var viewed = operand;
+    var bounds: Option<RangeParts> = None;
+
+    if let ExprKind::Index { base, index } = operand.kind {
+      if let ExprKind::Range { start, end, inclusive } = index.kind {
+        viewed = base;
+        bounds = Some(RangeParts { start: start, end: end, inclusive: inclusive });
+      }
+    }
+
+    const viewed_ty = self.type_of(viewed)?;
+    var source = SliceSource::List(unit_operand());
+
+    match viewed_ty.kind {
+      TypeKind::Array { len, .. } => {
+        const place = match self.lent_place(viewed)? {
+          Some(found) => found,
+          None => {
+            // An array that is not stored anywhere lives until the end of the statement.
+            const value = self.expr(viewed)?;
+
+            match self.owned_copy(viewed_ty, value) {
+              Operand::Local(local) => local_place(local, viewed_ty),
+              other => match self.new_value(viewed_ty, Rvalue::Use(other)) {
+                Operand::Local(local) => local_place(local, viewed_ty),
+                _ => return Err("sliced array without a local"),
+              },
+            }
+          }
+        };
+
+        source = SliceSource::Array { place: place, len: len };
+      }
+      TypeKind::List(_) => {
+        source = SliceSource::List(self.expr(viewed)?);
+      }
+      TypeKind::Slice { .. } => {
+        source = SliceSource::Slice(self.expr(viewed)?);
+      }
+      _ => return Err("slice of a value that is not an array, a list or a slice"),
+    }
+
+    var range: Option<SliceRange> = None;
+
+    if let Some(parts) = bounds {
+      const start = self.operand_as(parts.start, types::int(IntTy::Usize))?;
+      const end = self.operand_as(parts.end, types::int(IntTy::Usize))?;
+
+      range = Some(SliceRange { start: start, end: end, inclusive: parts.inclusive });
+    }
+
+    Ok(self.new_value(ty, Rvalue::Slice { source: source, elem: elem, range: range }))
+  }
+
   /// The place a borrow lends, or `None` for a temporary value.
   prv fn lent_place(self, value: Expr) -> Result<Option<Place>, String> {
     match value.kind {
@@ -1575,6 +1665,12 @@ pub class Lowering {
       }
       ExprKind::Index { base, index } => {
         const base_ty = self.type_of(base)?;
+
+        // An element of a slice.
+        if let TypeKind::Slice { .. } = base_ty.kind {
+          return Ok(Some(self.place(value)?));
+        }
+
         const len = match base_ty.kind {
           TypeKind::Array { len, .. } => len,
           _ => return Ok(None),
@@ -1780,7 +1876,14 @@ pub class Lowering {
       ExprKind::Await(inner) => tasks::await_expr(self, inner, ty),
       ExprKind::New { args, .. } => self.new_expr(ty, args),
       ExprKind::Match { scrutinee, arms } => matching::match_expr(self, ty, scrutinee, arms),
-      ExprKind::Field { .. } | ExprKind::Index { .. } => self.read_place(value, ty),
+      ExprKind::Field { .. } | ExprKind::Index { .. } => {
+        // `slice[a..b]`, a part of a slice parameter.
+        if let TypeKind::Slice { .. } = ty.kind {
+          return self.slice(value, ty);
+        }
+
+        self.read_place(value, ty)
+      }
       ExprKind::Template(parts) => self.template(ty, parts),
       ExprKind::Call { callee, args } => {
         if collections::is_list_from(self, callee) {
@@ -1796,6 +1899,10 @@ pub class Lowering {
       ExprKind::Unary { op, operand } => self.unary(value, ty, op, operand),
       ExprKind::Binary { op, lhs, rhs } => self.binary(ty, op, lhs, rhs),
       ExprKind::AddrOf { place, raw, .. } => {
+        if let TypeKind::Slice { .. } = ty.kind {
+          return self.slice(place, ty);
+        }
+
         if !raw {
           return self.borrow(place);
         }

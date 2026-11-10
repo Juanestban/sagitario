@@ -896,6 +896,7 @@ sag_object *sag_list_new(size_t size, void (*release)(void *element)) {
   list->size = size == 0 ? 1 : size;
   list->data = NULL;
   list->release = release;
+  list->lent = 0;
   sag_object_init(&list->header, sag_list_drop, NULL);
   return &list->header;
 }
@@ -911,14 +912,23 @@ sag_object *sag_list_from(size_t size, void (*release)(void *element), const voi
   return object;
 }
 
+/* A list lent as a slice keeps its length, so that its elements do not move. */
+static void sag_list_check_unlent(sag_list *list) {
+  if (list->lent > 0) {
+    sag_panic("cannot change the length of a list while it is borrowed");
+  }
+}
+
 void *sag_list_push(sag_object *object) {
   sag_list *list = (sag_list *)object;
+  sag_list_check_unlent(list);
   sag_list_grow(list);
   return list->data + list->len++ * list->size;
 }
 
 void *sag_list_insert(sag_object *object, size_t index, const char *file, int line) {
   sag_list *list = (sag_list *)object;
+  sag_list_check_unlent(list);
   if (index > list->len) {
     char message[128];
     snprintf(message, sizeof message, "insertion index (is %zu) should be <= len (is %zu)", index, list->len);
@@ -933,6 +943,7 @@ void *sag_list_insert(sag_object *object, size_t index, const char *file, int li
 
 void *sag_list_pop(sag_object *object) {
   sag_list *list = (sag_list *)object;
+  sag_list_check_unlent(list);
   if (list->len == 0) {
     sag_panic("pop from an empty list");
   }
@@ -941,6 +952,7 @@ void *sag_list_pop(sag_object *object) {
 
 void *sag_list_remove(sag_object *object, size_t index, const char *file, int line) {
   sag_list *list = (sag_list *)object;
+  sag_list_check_unlent(list);
   if (index >= list->len) {
     char message[128];
     snprintf(message, sizeof message, "removal index (is %zu) should be < len (is %zu)", index, list->len);
@@ -956,6 +968,7 @@ void *sag_list_remove(sag_object *object, size_t index, const char *file, int li
 
 void sag_list_clear(sag_object *object) {
   sag_list *list = (sag_list *)object;
+  sag_list_check_unlent(list);
   size_t len = list->len;
   /* Emptied first: releasing an element cannot reach the list again. */
   list->len = 0;
@@ -963,6 +976,80 @@ void sag_list_clear(sag_object *object) {
     for (size_t i = 0; i < len; i++) {
       list->release(list->data + i * list->size);
     }
+  }
+}
+
+/* ---- Slices ---------------------------------------------------------------------------- */
+
+/* Checks `start..end` (or `start..=end`) against `len` with Rust's messages, and returns the
+ * number of elements; `*first` gets the first one. */
+static size_t sag_slice_range(size_t len, bool whole, size_t start, size_t end, bool inclusive, size_t *first, const char *file, int line) {
+  if (whole) {
+    *first = 0;
+    return len;
+  }
+  char message[128];
+  if (inclusive) {
+    if (end == SIZE_MAX) {
+      sag_panic_at("attempted to index slice up to maximum usize", file, line);
+    }
+    end++;
+  }
+  if (start > end) {
+    snprintf(message, sizeof message, "slice index starts at %zu but ends at %zu", start, end);
+    sag_panic_at(message, file, line);
+  }
+  if (end > len) {
+    snprintf(message, sizeof message, "range end index %zu out of range for slice of length %zu", end, len);
+    sag_panic_at(message, file, line);
+  }
+  *first = start;
+  return end - start;
+}
+
+/* `count` elements from the element `first` of `data`; a null `data` holds no elements. */
+static sag_slice sag_slice_make(void *data, size_t size, size_t first, size_t count, sag_object *owner) {
+  sag_slice slice;
+  slice.data = data == NULL ? NULL : (unsigned char *)data + first * size;
+  slice.len = count;
+  slice.owner = owner;
+  return slice;
+}
+
+sag_slice sag_slice_list(sag_object *object, bool whole, size_t start, size_t end, bool inclusive, const char *file, int line) {
+  sag_list *list = (sag_list *)object;
+  size_t first = 0;
+  size_t count = sag_slice_range(list->len, whole, start, end, inclusive, &first, file, line);
+  sag_object_retain(object);
+  list->lent++;
+  return sag_slice_make(list->data, list->size, first, count, object);
+}
+
+sag_slice sag_slice_array(void *data, size_t len, size_t size, bool whole, size_t start, size_t end, bool inclusive, const char *file, int line) {
+  size_t first = 0;
+  size_t count = sag_slice_range(len, whole, start, end, inclusive, &first, file, line);
+  return sag_slice_make(data, size, first, count, NULL);
+}
+
+sag_slice sag_slice_sub(sag_slice slice, size_t size, bool whole, size_t start, size_t end, bool inclusive, const char *file, int line) {
+  size_t first = 0;
+  size_t count = sag_slice_range(slice.len, whole, start, end, inclusive, &first, file, line);
+  sag_slice part = sag_slice_make(slice.data, size, first, count, slice.owner);
+  sag_slice_retain(part);
+  return part;
+}
+
+void sag_slice_retain(sag_slice slice) {
+  if (slice.owner != NULL) {
+    sag_object_retain(slice.owner);
+    ((sag_list *)slice.owner)->lent++;
+  }
+}
+
+void sag_slice_release(sag_slice slice) {
+  if (slice.owner != NULL) {
+    ((sag_list *)slice.owner)->lent--;
+    sag_object_release(slice.owner);
   }
 }
 

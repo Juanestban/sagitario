@@ -1107,7 +1107,7 @@ fn for_iter(cx: Checker, iter: Expr) -> Type {
       }
 
       return match ty.kind {
-        TypeKind::Array { elem, .. } => elem,
+        TypeKind::Array { elem, .. } | TypeKind::Slice { elem, .. } => elem,
         TypeKind::Error | TypeKind::Never => types::error(),
         _ => {
           cx.diagnostics.push(
@@ -1294,6 +1294,10 @@ fn method_call(cx: Checker, value: Expr, receiver: Expr, method: Ident, args: Li
 
   const receiver_ty = borrow::deref_base(cx, receiver);
   const name = method.name;
+
+  if let TypeKind::Slice { .. } = receiver_ty.kind {
+    return borrow::slice_method(cx, value, receiver_ty, method, args);
+  }
 
   if let Some(ty) = ffi::ffi_method(cx, value, receiver, receiver_ty, method, args) {
     return ty;
@@ -1583,10 +1587,15 @@ fn field(cx: Checker, base: Expr, name: Ident) -> Type {
 fn index(cx: Checker, base: Expr, position: Expr) -> Type {
   const base_ty = borrow::deref_base(cx, base);
 
+  if let ExprKind::Range { start, end, .. } = position.kind {
+    return borrow::range_index(cx, base, base_ty, start, end);
+  }
+
   expect(cx, position, types::int(IntTy::Usize));
 
   match base_ty.kind {
     TypeKind::Array { elem, .. } => elem,
+    TypeKind::Slice { elem, .. } => elem,
     TypeKind::List(elem) => elem,
     TypeKind::Error | TypeKind::Never => types::error(),
     TypeKind::String => {

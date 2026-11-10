@@ -351,6 +351,12 @@ class Dumper {
         self.type_expr("pointee", pointee);
         self.depth -= 1;
       }
+      TypeExprKind::Slice(elem) => {
+        self.line(label, "SliceType", Some(ty.span), None, "");
+        self.depth += 1;
+        self.type_expr("elem", elem);
+        self.depth -= 1;
+      }
       TypeExprKind::Fn { params, ret } => {
         self.line(label, "FnType", Some(ty.span), None, "");
         self.depth += 1;

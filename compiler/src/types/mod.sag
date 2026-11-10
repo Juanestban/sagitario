@@ -156,6 +156,8 @@ pub enum TypeKind {
   /// `&T` or `&mut T`: a reference, only the type of a parameter
   /// (docs/adr/0079-references-and-borrowing.md).
   Ref { mutable: bool, pointee: Type },
+  /// `&[T]` or `&mut [T]`: a view of a run of elements, only the type of a parameter (Q494).
+  Slice { mutable: bool, elem: Type },
   CVoid,
   CString,
   /// The type of expressions that never produce a value.
@@ -227,6 +229,14 @@ pub fn is_unit(ty: Type) -> bool {
 
 pub fn is_error(ty: Type) -> bool {
   tag(ty) == 8
+}
+
+/// Whether `ty` is a reference or a slice, which only parameters have.
+pub fn is_borrowed(ty: Type) -> bool {
+  match ty.kind {
+    TypeKind::Ref { .. } | TypeKind::Slice { .. } => true,
+    _ => false,
+  }
 }
 
 pub fn is_never(ty: Type) -> bool {
@@ -332,6 +342,10 @@ pub fn same_type(a: Type, b: Type) -> bool {
       TypeKind::Ref { mutable: other_mutable, pointee: other_pointee } => mutable == other_mutable && same_type(pointee, other_pointee),
       _ => false,
     },
+    TypeKind::Slice { mutable, elem } => match b.kind {
+      TypeKind::Slice { mutable: other_mutable, elem: other_elem } => mutable == other_mutable && same_type(elem, other_elem),
+      _ => false,
+    },
     _ => tag(a) == tag(b),
   }
 }
@@ -371,6 +385,12 @@ pub fn plain_fits(actual: Type, expected: Type) -> bool {
   // A `&mut T` can be used as a `&T`, and a reference as a raw pointer to C, as in Rust
   // (docs/adr/0079-references-and-borrowing.md, Q489 and Q496).
   var reference = false;
+
+  if let TypeKind::Slice { mutable, elem } = actual.kind {
+    if let TypeKind::Slice { mutable: expected_mutable, elem: expected_elem } = expected.kind {
+      reference = mutable && !expected_mutable && same_type(elem, expected_elem);
+    }
+  }
 
   if let TypeKind::Ref { mutable, pointee } = actual.kind {
     match expected.kind {
@@ -445,6 +465,7 @@ pub fn text(ty: Type) -> String {
     TypeKind::StringBuilder => "StringBuilder",
     TypeKind::Ptr { mutable, pointee } => (if mutable { "*mut " } else { "*const " }) + text(pointee),
     TypeKind::Ref { mutable, pointee } => (if mutable { "&mut " } else { "&" }) + text(pointee),
+    TypeKind::Slice { mutable, elem } => (if mutable { "&mut [" } else { "&[" }) + text(elem) + "]",
     TypeKind::CVoid => "c_void",
     TypeKind::CString => "CString",
     TypeKind::Never => "never",
@@ -598,6 +619,7 @@ pub fn substitute(ty: Type, subst: Subst) -> Type {
     TypeKind::Result { value, error } => of(TypeKind::Result { value: substitute(value, subst), error: substitute(error, subst) }),
     TypeKind::Ptr { mutable, pointee } => of(TypeKind::Ptr { mutable: mutable, pointee: substitute(pointee, subst) }),
     TypeKind::Ref { mutable, pointee } => of(TypeKind::Ref { mutable: mutable, pointee: substitute(pointee, subst) }),
+    TypeKind::Slice { mutable, elem } => of(TypeKind::Slice { mutable: mutable, elem: substitute(elem, subst) }),
     TypeKind::Function { params, ret } => of(TypeKind::Function { params: substitute_all(params, subst), ret: substitute(ret, subst) }),
     TypeKind::CFn { is_unsafe, params, ret } => of(TypeKind::CFn { is_unsafe: is_unsafe, params: substitute_all(params, subst), ret: substitute(ret, subst) }),
     _ => ty,
@@ -618,7 +640,7 @@ pub fn depth(ty: Type) -> usize {
     TypeKind::Array { elem, .. } => 1 + depth(elem),
     TypeKind::List(elem) => 1 + depth(elem),
     TypeKind::Option(elem) => 1 + depth(elem),
-    TypeKind::Ptr { pointee, .. } | TypeKind::Ref { pointee, .. } => 1 + depth(pointee),
+    TypeKind::Ptr { pointee, .. } | TypeKind::Ref { pointee, .. } | TypeKind::Slice { elem: pointee, .. } => 1 + depth(pointee),
     TypeKind::Result { value, error } => {
       const a = depth(value);
       const b = depth(error);
@@ -666,7 +688,7 @@ pub fn has_self(ty: Type) -> bool {
     TypeKind::Array { elem, .. } => has_self(elem),
     TypeKind::List(elem) => has_self(elem),
     TypeKind::Option(elem) => has_self(elem),
-    TypeKind::Ptr { pointee, .. } | TypeKind::Ref { pointee, .. } => has_self(pointee),
+    TypeKind::Ptr { pointee, .. } | TypeKind::Ref { pointee, .. } | TypeKind::Slice { elem: pointee, .. } => has_self(pointee),
     TypeKind::Result { value, error } => has_self(value) || has_self(error),
     TypeKind::Function { params, ret } => any_has_self(params) || has_self(ret),
     TypeKind::CFn { params, ret, .. } => any_has_self(params) || has_self(ret),
@@ -1539,7 +1561,12 @@ pub class Checker {
   pub fn type_expr_at(self, ty: TypeExpr, behind_pointer: bool) -> Type {
     match ty.kind {
       TypeExprKind::Ptr { mutable, pointee } => ffi::pointer_type(self, mutable, pointee),
-      TypeExprKind::Ref { mutable, pointee } => of(TypeKind::Ref { mutable: mutable, pointee: self.type_expr(pointee) }),
+      TypeExprKind::Ref { mutable, pointee } => match pointee.kind {
+        TypeExprKind::Slice(elem) => of(TypeKind::Slice { mutable: mutable, elem: self.type_expr(elem) }),
+        _ => of(TypeKind::Ref { mutable: mutable, pointee: self.type_expr(pointee) }),
+      },
+      // A slice outside a reference was reported by the parser.
+      TypeExprKind::Slice(_) => error(),
       TypeExprKind::Fn { params, ret } => {
         const types: List<Type> = new List();
 

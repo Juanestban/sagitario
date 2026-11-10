@@ -612,6 +612,9 @@ typedef struct sag_list {
   size_t size;
   unsigned char *data;
   void (*release)(void *element);
+  /* The slices lent from the list: while there are any, its length cannot change
+   * (docs/adr/0079-references-and-borrowing.md, Q495). */
+  size_t lent;
 } sag_list;
 
 sag_object *sag_list_new(size_t size, void (*release)(void *element));
@@ -640,6 +643,41 @@ void *sag_list_pop(sag_object *list);
 void *sag_list_remove(sag_object *list, size_t index, const char *file, int line);
 void sag_list_clear(sag_object *list);
 void sag_list_reverse(sag_object *list);
+
+/* ---- Slices (docs/adr/0079-references-and-borrowing.md, Q494) ----------------------------- */
+
+/* `&[T]` and `&mut [T]`: `len` elements at `data`. A slice of a list holds a reference to the list
+ * in `owner` and counts in its `lent`; a slice of an array has no owner. */
+typedef struct sag_slice {
+  void *data;
+  size_t len;
+  sag_object *owner;
+} sag_slice;
+
+/* The elements `start..end` (`start..=end` with `inclusive`), or all of them with `whole`, of a
+ * list, of `len` elements of `size` bytes at `data`, or of another slice; panics if the range is
+ * out of bounds. */
+sag_slice sag_slice_list(sag_object *list, bool whole, size_t start, size_t end, bool inclusive, const char *file, int line);
+sag_slice sag_slice_array(void *data, size_t len, size_t size, bool whole, size_t start, size_t end, bool inclusive, const char *file, int line);
+sag_slice sag_slice_sub(sag_slice slice, size_t size, bool whole, size_t start, size_t end, bool inclusive, const char *file, int line);
+void sag_slice_retain(sag_slice slice);
+void sag_slice_release(sag_slice slice);
+
+static inline size_t sag_slice_len(sag_slice slice) {
+  return slice.len;
+}
+
+static inline bool sag_slice_is_empty(sag_slice slice) {
+  return slice.len == 0;
+}
+
+#define SAG_SLICE_PTR(slice) ((slice).data)
+
+/* The element at `index`, of `size` bytes; panics if it is out of bounds. */
+static inline void *sag_slice_at(sag_slice slice, size_t index, size_t size, const char *file, int line) {
+  size_t checked = sag_index_at(index, slice.len, file, line);
+  return (unsigned char *)slice.data + checked * size;
+}
 
 /* ---- Hashing and order (docs/spec/05-interfaces-generics.md) ------------------------------ */
 

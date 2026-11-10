@@ -1,0 +1,130 @@
+// Slices (docs/spec/02-types.md#slices, docs/adr/0079-references-and-borrowing.md, Q494 and
+// Q495): views of arrays, lists and slices, and of ranges of them, without copies.
+// expect-stdout: 10 5 60 30 3
+// expect-stdout: 2 6 40 60 11
+// expect-stdout: abc
+// expect-stdout: 100 4 14
+// expect-stdout: zed bo
+// expect-stdout: 9 zed true
+// expect-stdout: 1 0 0 4
+// expect-stdout: 3
+// expect-stdout: 3 0
+// expect-stdout: 4
+use std::ffi::{c_int, c_void};
+
+extern "C" {
+  fn memset(dest: *mut c_void, value: c_int, count: usize) -> *mut c_void;
+}
+
+struct Vec2 {
+  pub x: i32;
+  pub y: i32;
+
+  pub fn grow(self) {
+    self.x += 1;
+  }
+}
+
+fn bump(v: &mut Vec2) {
+  v.y += 10;
+}
+
+fn edit(points: &mut [Vec2]) {
+  points[0].x = 100;
+  points[1].grow();
+  bump(&mut points[1]);
+}
+
+fn rename(names: &mut [String]) {
+  names[0] = "zed";
+}
+
+fn largest<T: Ord>(values: &[T]) -> Option<T> {
+  if values.is_empty() {
+    return None;
+  }
+
+  var best = values[0];
+
+  for value in values {
+    if value.compare(best) == Ordering::Greater {
+      best = value;
+    }
+  }
+
+  Some(best)
+}
+
+fn zero(bytes: &mut [u8]) {
+  unsafe { memset(bytes.as_mut_ptr() as *mut c_void, 0, bytes.len()); }
+}
+
+fn sum(values: &[i32]) -> i32 {
+  var total = 0;
+
+  for value in values {
+    total += value;
+  }
+
+  total
+}
+
+fn double(values: &mut [i32]) {
+  for index in 0..values.len() {
+    values[index] = values[index] * 2;
+  }
+}
+
+fn first_two(values: &[i32]) -> i32 {
+  sum(values[0..2])
+}
+
+fn names_of(values: &[String]) -> String {
+  var out = "";
+
+  for name in values.iter() {
+    out = out + name;
+  }
+
+  out
+}
+
+/// The list is lent only while the call that takes the slice runs.
+fn measure(values: &[i32]) -> usize {
+  values.len()
+}
+
+fn main() {
+  const array = [1, 2, 3, 4];
+  var mutable = [1, 2, 3];
+  const list = List::from([10, 20, 30]);
+
+  println(`${sum(&array)} ${sum(&array[1..3])} ${sum(&list)} ${sum(&list[0..=1])} ${first_two(&array)}`);
+  double(&mut mutable);
+  double(&mut list[1..3]);
+  println(`${mutable[0]} ${mutable[2]} ${list[1]} ${list[2]} ${sum(&[5, 6])}`);
+  println(names_of(&List::from(["a", "b", "c"])));
+
+  var points = [Vec2 { x: 1, y: 2 }, Vec2 { x: 3, y: 4 }];
+
+  edit(&mut points);
+  println(`${points[0].x} ${points[1].x} ${points[1].y}`);
+
+  const names = List::from(["ana", "bo"]);
+
+  rename(&mut names);
+  println(`${names[0]} ${names[1]}`);
+  println(`${largest(&[3, 9, 2]).unwrap()} ${largest(&names).unwrap()} ${largest(&new List<i32>()).is_none()}`);
+
+  const bytes = List::from([1u8, 2, 3, 4]);
+
+  zero(&mut bytes[1..3]);
+  println(`${bytes[0]} ${bytes[1]} ${bytes[2]} ${bytes[3]}`);
+
+  const each = (values: &[i32]) => values.len();
+
+  println(`${each(&[1, 2, 3])}`);
+  println(`${measure(&list)} ${measure(&list[1..1])}`);
+  list.push(40);
+  println(`${list.len()}`);
+}

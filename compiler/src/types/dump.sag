@@ -391,6 +391,7 @@ pub fn ty(value: Type) -> String {
     TypeKind::Result { value: ok, error } => "Result<" + ty(ok) + ", " + ty(error) + ">",
     TypeKind::Ptr { mutable, pointee } => (if mutable { "*mut " } else { "*const " }) + ty(pointee),
     TypeKind::Ref { mutable, pointee } => (if mutable { "&mut " } else { "&" }) + ty(pointee),
+    TypeKind::Slice { mutable, elem } => (if mutable { "&mut [" } else { "&[" }) + ty(elem) + "]",
     _ => types::text(value),
   }
 }

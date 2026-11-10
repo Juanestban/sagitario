@@ -1,0 +1,12 @@
+// A list lent as a slice keeps its length until the slice is released
+// (docs/adr/0079-references-and-borrowing.md, Q495).
+// expect-panic: cannot change the length of a list while it is borrowed
+fn grow(list: List<i32>, values: &[i32]) {
+  list.push(values[0]);
+}
+
+fn main() {
+  const list = List::from([1, 2, 3]);
+
+  grow(list, &list);
+}

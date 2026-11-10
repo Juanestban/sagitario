@@ -1,0 +1,18 @@
+// A slice is a reference: it is only passed to parameters, and a `&mut` one is the only way to its
+// elements in a call (docs/adr/0079-references-and-borrowing.md, Q488 and Q492).
+fn pair(_a: &mut [i32], _b: &[i32]) {}
+
+fn keep(values: &[i32]) -> usize {
+  const _copy = values; //~ ERROR E0339
+  const _part = values[0..1]; //~ ERROR E0339
+  values.len()
+}
+
+fn main() {
+  var grid = [1, 2, 3, 4];
+  const list = List::from([1, 2, 3]);
+
+  pair(&mut grid[0..2], &grid[2..4]); //~ ERROR E0341
+  pair(&mut list, &list); //~ ERROR E0341
+  keep(&grid);
+}

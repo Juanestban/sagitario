@@ -605,6 +605,15 @@ fn place_access(cx: Checker, place: Expr, place_use: PlaceUse) -> PlaceAccess {
                 label = "parameter declared here";
                 help = "take a `&mut " + types::text(pointee) + "` parameter, and lend it with `&mut`";
               }
+              TypeKind::Slice { mutable, elem } => {
+                if mutable {
+                  return PlaceAccess::Mutable;
+                }
+
+                reason = "it is a `&[" + types::text(elem) + "]` slice";
+                label = "parameter declared here";
+                help = "take a `&mut [" + types::text(elem) + "]` parameter, and lend it with `&mut`";
+              }
               _ => {
                 reason = "parameters are immutable";
                 label = "parameter declared here";

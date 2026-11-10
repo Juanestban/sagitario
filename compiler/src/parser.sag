@@ -244,6 +244,8 @@ class Parser {
   /// Set in the guard of a `match` arm, where `name =>` ends the guard instead of starting a
   /// lambda.
   prv var in_guard: bool;
+  /// Whether the type being parsed may be a slice `[T]`: right after the `&` of a parameter's type.
+  prv var slice_allowed: bool;
 
   pub fn new(self, file: u32, tokens: List<Token>, ids: Ids, diagnostics: Diagnostics) {
     // Documentation comments are not processed in the MVP (docs/spec/01-lexical.md).
@@ -268,6 +270,7 @@ class Parser {
     self.diagnostics = diagnostics;
     self.no_struct_literal = false;
     self.in_guard = false;
+    self.slice_allowed = false;
   }
 
   prv fn current(self) -> Token {
@@ -1577,13 +1580,15 @@ class Parser {
     self.ref_type_rest(start)
   }
 
-  /// `T` or `mut T` after a `&`.
+  /// `T` or `mut T` after a `&`; `T` may be a slice `[T]`.
   prv fn ref_type_rest(self, start: Span) -> Result<TypeExpr, ()> {
     const mutable = is_mut(self.kind());
 
     if mutable {
       self.advance();
     }
+
+    self.slice_allowed = true;
 
     const pointee = self.type_expr()?;
 
@@ -1601,6 +1606,9 @@ class Parser {
   prv fn type_expr(self) -> Result<TypeExpr, ()> {
     const start = self.span();
     const kind = self.kind();
+    const slice_allowed = self.slice_allowed;
+
+    self.slice_allowed = false;
 
     // References only live while a call does, so they are only the types of parameters
     // (docs/adr/0079-references-and-borrowing.md, Q488); the type after `&` is kept to go on.
@@ -1649,6 +1657,21 @@ class Parser {
       self.advance();
 
       const elem = self.type_expr()?;
+
+      // `[T]`: a slice, only behind the reference of a parameter (docs/adr/0079-references-and-borrowing.md, Q494).
+      if self.at("]") {
+        const end = self.advance().span;
+        const span = start.to(end);
+
+        if !slice_allowed {
+          self.diagnostics.push(
+            Diagnostic::error(codes::INVALID_REFERENCE, span, "a slice can only be the type of a parameter, behind `&` or `&mut`")
+              .with_help("write `&[" + "T]` in a parameter, or use an array `[T; N]` or a `List<T>`"),
+          );
+        }
+
+        return Ok(new TypeExpr(TypeExprKind::Slice(elem), span));
+      }
 
       self.expect(";")?;
 

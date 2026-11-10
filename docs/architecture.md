@@ -101,7 +101,11 @@ is still a reference. `&value` lowers to `Operand::Ref` of the place, or of a te
 instance a lent field is reached through gets an owned copy for the statement. `borrow.sag` holds
 the operators, and the borrow checker, a pass over each function after the type checker (skipped
 when it reported errors): where references may appear, and the exclusivity of `&mut` among the
-arguments of a call.
+arguments of a call. A slice is a `sag_slice` (data, length and the list it views, or NULL),
+built by `Rvalue::Slice` and managed like a reference: making or retaining one retains the list
+and adds to its `lent` count, releasing it undoes both, and the runtime functions that change a
+list's length panic while `lent` is not zero. `Projection::SliceElem` reads an element through
+`sag_slice_at`.
 
 SIR is the place for ARC optimizations and the boundary behind which other backends (LLVM)
 could be added.

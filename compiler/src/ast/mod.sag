@@ -275,6 +275,8 @@ pub enum TypeExprKind {
   Ptr { mutable: bool, pointee: TypeExpr },
   /// `&T` or `&mut T`, only the type of a parameter.
   Ref { mutable: bool, pointee: TypeExpr },
+  /// `[T]`, only after the `&` or `&mut` of a parameter's type: a slice.
+  Slice(TypeExpr),
   /// `fn(A, B) -> R`
   Fn { params: List<TypeExpr>, ret: Option<TypeExpr> },
   /// `extern "C" fn(A, B) -> R`, or `unsafe extern "C" fn(...)`: a C function pointer.

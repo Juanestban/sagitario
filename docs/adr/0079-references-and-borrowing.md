@@ -68,6 +68,10 @@ live while a call does. That form needs no lifetimes and leaves classes as they 
 ## Implementation notes
 
 - Increment 1 (references in parameters and the borrow checker) is done: `docs/spec/03-memory.md#references`.
+- Increment 2 (slices and borrowed lists) is done: `docs/spec/02-types.md#slices`. `iter()`
+  iterates a copy of the elements, since an iterator may outlive the call; `for value in slice`
+  reads them in place. `&mut list` needs no `var` binding, as `list[i] = value` does not. Two
+  ranges of the same binding are never disjoint for the borrow checker, as two elements are not.
 - Q490 for classes and lists: their values are references, so a `&Player` cannot replace the
   instance (`*player = ...` needs `&mut`), while the `var` fields of the instance stay changeable
   through it, as through any `const` binding or parameter (`docs/spec/03-memory.md#class-field-mutability-f2`).

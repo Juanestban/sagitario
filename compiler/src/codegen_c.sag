@@ -6,7 +6,7 @@
 use pkg::ast::{BinaryOp, UnaryOp};
 use pkg::ast;
 use pkg::sir::{
-  Callee, ClassInstance, Const, ExternDecl, FieldAt, Function, ItableEntry, Layouts, Operand, PanicMessage, Place, Program, Projection, Rvalue, Stmt,
+  Callee, ClassInstance, Const, ExternDecl, FieldAt, Function, ItableEntry, Layouts, Operand, PanicMessage, Place, Program, Projection, Rvalue, SliceSource, Stmt,
   TemplatePiece, type_key,
 };
 use pkg::types::{FloatTy, IntTy, NamedRef, Type, TypeKind};
@@ -423,7 +423,7 @@ class Generator {
         return self.visit_instance(ty, done, order);
       }
       TypeKind::Array { .. } | TypeKind::Result { .. } => return self.visit_instance(ty, done, order),
-      TypeKind::Ptr { pointee, .. } | TypeKind::Ref { pointee, .. } => {
+      TypeKind::Ptr { pointee, .. } | TypeKind::Ref { pointee, .. } | TypeKind::Slice { elem: pointee, .. } => {
         self.pointees.push(pointee);
 
         return;
@@ -1104,6 +1104,7 @@ class Generator {
       TypeKind::Class(_) | TypeKind::List(_) => "sag_object_" + action + "(" + value + ")",
       TypeKind::Interface(_) => "sag_dyn_" + action + "(" + value + ")",
       TypeKind::Function { .. } => "sag_fnval_" + action + "(" + value + ")",
+      TypeKind::Slice { .. } => "sag_slice_" + action + "(" + value + ")",
       _ => "sag_" + action + "_" + without_sag_prefix(self.c_type(ty)) + "(&" + value + ")",
     }
   }
@@ -1252,6 +1253,7 @@ class Generator {
       TypeKind::CString => "sag_cstring",
       TypeKind::CVoid => "void",
       TypeKind::Ptr { mutable, pointee } | TypeKind::Ref { mutable, pointee } => self.c_type(pointee) + (if mutable { "" } else { " const" }) + "*",
+      TypeKind::Slice { .. } => "sag_slice",
     }
   }
 
@@ -1596,7 +1598,7 @@ class Generator {
       const ty = function.locals[index];
       const init = match ty.kind {
         TypeKind::String | TypeKind::Interface(_) | TypeKind::Function { .. } | TypeKind::Struct(_) | TypeKind::Enum(_) | TypeKind::Array { .. } | TypeKind::Option(_)
-          | TypeKind::Result { .. } => "{0}",
+          | TypeKind::Result { .. } | TypeKind::Slice { .. } => "{0}",
         _ => "0",
       };
 
@@ -1746,6 +1748,11 @@ class Generator {
         }
         Projection::Borrowed => {
           out = "(*" + out + ")";
+        }
+        Projection::SliceElem { index, elem } => {
+          const elem_type = self.c_type(elem);
+
+          out = "(*(" + elem_type + " *)sag_slice_at(" + out + ", " + self.operand(index) + ", sizeof(" + elem_type + "), __FILE__, __LINE__))";
         }
       }
     }
@@ -2151,6 +2158,19 @@ class Generator {
       Rvalue::Zeroed => self.zeroed(ty),
       Rvalue::UnionValue { field, value } => "(" + self.c_type(ty) + `){.f${field} = ` + self.operand(value) + "}",
       Rvalue::EnumValid { enum_id, operand } => `sag_e${enum_id}_valid(` + self.operand(operand) + ")",
+      Rvalue::Slice { source, elem, range } => {
+        const size = "sizeof(" + self.c_type(elem) + ")";
+        const bounds = match range {
+          Some(found) => "false, " + self.operand(found.start) + ", " + self.operand(found.end) + ", " + (if found.inclusive { "true" } else { "false" }),
+          None => "true, 0, 0, false",
+        };
+
+        match source {
+          SliceSource::Array { place, len } => `sag_slice_array((void *)${self.place(place)}.data, ${len}, ${size}, ${bounds}, __FILE__, __LINE__)`,
+          SliceSource::List(list) => "sag_slice_list(" + self.operand(list) + ", " + bounds + ", __FILE__, __LINE__)",
+          SliceSource::Slice(slice) => "sag_slice_sub(" + self.operand(slice) + ", " + size + ", " + bounds + ", __FILE__, __LINE__)",
+        }
+      }
       Rvalue::ExternFnValue(index) => ffi_name(index as usize),
       Rvalue::Aggregate(parts) => {
         const texts = self.operands(parts);

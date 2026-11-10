@@ -58,30 +58,31 @@ sig 54 value [] -> ()
 sig 55 - [List<T#fn55.0>] -> Iter#class4<T#fn55.0>
 sig 56 - [List<T#fn56.0>, T#fn56.0] -> Option<usize>
 sig 57 - [List<T#fn57.0>, T#fn57.0] -> bool
-sig 58 - [List<T#fn58.0>, usize, T#fn58.0] -> ()
-sig 59 - [List<T#fn59.0>] -> ()
-sig 60 - [List<T#fn60.0>, fn(T#fn60.0, T#fn60.0) -> Ordering#enum3] -> ()
-sig 61 - [List<T#fn61.0>, fn(T#fn61.0, T#fn61.0) -> Ordering#enum3] -> List<T#fn61.0>
-sig 62 - [List<String>, String] -> String
-sig 63 - [String] -> Iter#class4<char>
-sig 64 - [String] -> Iter#class4<u8>
-sig 65 - [String, String] -> List<String>
-sig 66 - [String] -> List<String>
-sig 67 init [] -> ()
-sig 68 value [] -> bool
-sig 69 value [fn()] -> ()
-sig 70 value [T#class6.0] -> ()
-sig 71 value [] -> T#class6.0
-sig 72 - [i8, i8, bool, bool] -> Iter#class4<i8>
-sig 73 - [i16, i16, bool, bool] -> Iter#class4<i16>
-sig 74 - [i32, i32, bool, bool] -> Iter#class4<i32>
-sig 75 - [i64, i64, bool, bool] -> Iter#class4<i64>
-sig 76 - [isize, isize, bool, bool] -> Iter#class4<isize>
-sig 77 - [u8, u8, bool, bool] -> Iter#class4<u8>
-sig 78 - [u16, u16, bool, bool] -> Iter#class4<u16>
-sig 79 - [u32, u32, bool, bool] -> Iter#class4<u32>
-sig 80 - [u64, u64, bool, bool] -> Iter#class4<u64>
-sig 81 - [usize, usize, bool, bool] -> Iter#class4<usize>
+sig 58 - [&[T#fn58.0]] -> Iter#class4<T#fn58.0>
+sig 59 - [List<T#fn59.0>, usize, T#fn59.0] -> ()
+sig 60 - [List<T#fn60.0>] -> ()
+sig 61 - [List<T#fn61.0>, fn(T#fn61.0, T#fn61.0) -> Ordering#enum3] -> ()
+sig 62 - [List<T#fn62.0>, fn(T#fn62.0, T#fn62.0) -> Ordering#enum3] -> List<T#fn62.0>
+sig 63 - [List<String>, String] -> String
+sig 64 - [String] -> Iter#class4<char>
+sig 65 - [String] -> Iter#class4<u8>
+sig 66 - [String, String] -> List<String>
+sig 67 - [String] -> List<String>
+sig 68 init [] -> ()
+sig 69 value [] -> bool
+sig 70 value [fn()] -> ()
+sig 71 value [T#class6.0] -> ()
+sig 72 value [] -> T#class6.0
+sig 73 - [i8, i8, bool, bool] -> Iter#class4<i8>
+sig 74 - [i16, i16, bool, bool] -> Iter#class4<i16>
+sig 75 - [i32, i32, bool, bool] -> Iter#class4<i32>
+sig 76 - [i64, i64, bool, bool] -> Iter#class4<i64>
+sig 77 - [isize, isize, bool, bool] -> Iter#class4<isize>
+sig 78 - [u8, u8, bool, bool] -> Iter#class4<u8>
+sig 79 - [u16, u16, bool, bool] -> Iter#class4<u16>
+sig 80 - [u32, u32, bool, bool] -> Iter#class4<u32>
+sig 81 - [u64, u64, bool, bool] -> Iter#class4<u64>
+sig 82 - [usize, usize, bool, bool] -> Iter#class4<usize>
 extern_sig 0 - [i32] -> i32
 extern_sig 1 - [i32] -> String
 extern_sig 2 - [String] -> *mut c_void
@@ -154,9 +155,9 @@ class 5 Map parent=- abstract=false initializer=41 vtable=-
   field slots: List<i64> prv var 4:5733..5758
   field count: usize prv var 4:5790..5811
   field used: usize prv var 4:5859..5879
-class 6 Task parent=- abstract=false initializer=67 vtable=-
-  field result: Option<T#class6.0> prv var 4:14244..14270
-  field waiters: List<fn()> prv var 4:14273..14301
+class 6 Task parent=- abstract=false initializer=68 vtable=-
+  field result: Option<T#class6.0> prv var 4:14552..14578
+  field waiters: List<fn()> prv var 4:14581..14609
 interface 0 Error parents=[] methods=20 uses_self=false
 interface 1 Eq parents=[] methods=23 uses_self=true
 interface 2 Ord parents=[Eq#interface1] methods=24 uses_self=true
@@ -176,9 +177,10 @@ generics fn55 -> T: []
 generics fn56 -> T: [Eq#interface1]
 generics fn57 -> T: [Eq#interface1]
 generics fn58 -> T: []
-generics fn59 -> T: [Ord#interface2]
-generics fn60 -> T: []
+generics fn59 -> T: []
+generics fn60 -> T: [Ord#interface2]
 generics fn61 -> T: []
+generics fn62 -> T: []
 error_types interface 0 class 2
 prelude ordering=3 eq=1 ord=2 hash=3 entry=5 iter=4 map=5 send=4
 sync_classes -
@@ -389,71 +391,75 @@ locals 57
   local 0 List<T#fn57.0>
   local 1 T#fn57.0
 locals 58
-  local 0 List<T#fn58.0>
-  local 1 usize
+  local 0 &[T#fn58.0]
+  local 1 List<T#fn58.0>
   local 2 T#fn58.0
 locals 59
   local 0 List<T#fn59.0>
-  local 1 T#fn59.0
+  local 1 usize
   local 2 T#fn59.0
 locals 60
   local 0 List<T#fn60.0>
-  local 1 fn(T#fn60.0, T#fn60.0) -> Ordering#enum3
-  local 2 List<T#fn60.0>
-  local 3 usize
+  local 1 T#fn60.0
+  local 2 T#fn60.0
 locals 61
   local 0 List<T#fn61.0>
   local 1 fn(T#fn61.0, T#fn61.0) -> Ordering#enum3
+  local 2 List<T#fn61.0>
+  local 3 usize
+locals 62
+  local 0 List<T#fn62.0>
+  local 1 fn(T#fn62.0, T#fn62.0) -> Ordering#enum3
   local 2 usize
-  local 3 List<T#fn61.0>
-  local 4 List<T#fn61.0>
+  local 3 List<T#fn62.0>
+  local 4 List<T#fn62.0>
   local 5 usize
-  local 6 List<T#fn61.0>
-  local 7 List<T#fn61.0>
-  local 8 List<T#fn61.0>
+  local 6 List<T#fn62.0>
+  local 7 List<T#fn62.0>
+  local 8 List<T#fn62.0>
   local 9 usize
   local 10 usize
-locals 62
+locals 63
   local 0 List<String>
   local 1 String
   local 2 StringBuilder
   local 3 usize
-locals 63
+locals 64
   local 0 String
   local 1 List<char>
   local 2 char
-locals 64
+locals 65
   local 0 String
   local 1 List<u8>
   local 2 u8
-locals 65
+locals 66
   local 0 String
   local 1 String
   local 2 List<String>
   local 3 char
   local 4 String
   local 5 usize
-locals 66
+locals 67
   local 0 String
   local 1 List<String>
   local 2 List<String>
   local 3 usize
   local 4 String
-locals 67
-  local 0 Task#class6<T#class6.0>
 locals 68
   local 0 Task#class6<T#class6.0>
 locals 69
   local 0 Task#class6<T#class6.0>
-  local 1 fn()
 locals 70
   local 0 Task#class6<T#class6.0>
-  local 1 T#class6.0
-  local 2 fn()
+  local 1 fn()
 locals 71
   local 0 Task#class6<T#class6.0>
   local 1 T#class6.0
+  local 2 fn()
 locals 72
+  local 0 Task#class6<T#class6.0>
+  local 1 T#class6.0
+locals 73
   local 0 i8
   local 1 i8
   local 2 bool
@@ -461,7 +467,7 @@ locals 72
   local 4 Cell#class3<i8>
   local 5 Cell#class3<bool>
   local 6 i8
-locals 73
+locals 74
   local 0 i16
   local 1 i16
   local 2 bool
@@ -469,7 +475,7 @@ locals 73
   local 4 Cell#class3<i16>
   local 5 Cell#class3<bool>
   local 6 i16
-locals 74
+locals 75
   local 0 i32
   local 1 i32
   local 2 bool
@@ -477,7 +483,7 @@ locals 74
   local 4 Cell#class3<i32>
   local 5 Cell#class3<bool>
   local 6 i32
-locals 75
+locals 76
   local 0 i64
   local 1 i64
   local 2 bool
@@ -485,7 +491,7 @@ locals 75
   local 4 Cell#class3<i64>
   local 5 Cell#class3<bool>
   local 6 i64
-locals 76
+locals 77
   local 0 isize
   local 1 isize
   local 2 bool
@@ -493,7 +499,7 @@ locals 76
   local 4 Cell#class3<isize>
   local 5 Cell#class3<bool>
   local 6 isize
-locals 77
+locals 78
   local 0 u8
   local 1 u8
   local 2 bool
@@ -501,7 +507,7 @@ locals 77
   local 4 Cell#class3<u8>
   local 5 Cell#class3<bool>
   local 6 u8
-locals 78
+locals 79
   local 0 u16
   local 1 u16
   local 2 bool
@@ -509,7 +515,7 @@ locals 78
   local 4 Cell#class3<u16>
   local 5 Cell#class3<bool>
   local 6 u16
-locals 79
+locals 80
   local 0 u32
   local 1 u32
   local 2 bool
@@ -517,7 +523,7 @@ locals 79
   local 4 Cell#class3<u32>
   local 5 Cell#class3<bool>
   local 6 u32
-locals 80
+locals 81
   local 0 u64
   local 1 u64
   local 2 bool
@@ -525,7 +531,7 @@ locals 80
   local 4 Cell#class3<u64>
   local 5 Cell#class3<bool>
   local 6 u64
-locals 81
+locals 82
   local 0 usize
   local 1 usize
   local 2 bool
@@ -1269,1422 +1275,1430 @@ expr #1486 -> List<T#fn57.0>
 expr #1488 -> T#fn57.0
 expr #1489 -> Option<usize>
 expr #1490 -> bool
-expr #1497 -> List<T#fn58.0>
-expr #1498 -> usize
-expr #1500 -> usize
-expr #1501 -> bool
-expr #1503 -> List<T#fn58.0>
-expr #1504 -> Option<T#fn58.0>
+expr #1498 -> List<T#fn58.0>
+expr #1500 -> &[T#fn58.0]
+expr #1502 -> List<T#fn58.0>
+expr #1504 -> T#fn58.0
 expr #1505 -> ()
-expr #1507 -> List<T#fn58.0>
-expr #1508 -> usize
-expr #1510 -> usize
-expr #1511 -> bool
-expr #1513 -> List<T#fn58.0>
-expr #1515 -> T#fn58.0
-expr #1516 -> ()
-expr #1517 -> ()
-expr #1525 -> List<T#fn59.0>
-expr #1529 -> T#fn59.0
-expr #1531 -> T#fn59.0
-expr #1532 -> Ordering#enum3
-expr #1533 -> fn(T#fn59.0, T#fn59.0) -> Ordering#enum3
-expr #1534 -> ()
-expr #1545 -> List<T#fn60.0>
-expr #1547 -> fn(T#fn60.0, T#fn60.0) -> Ordering#enum3
-expr #1548 -> List<T#fn60.0>
-expr #1549 -> usize
-expr #1551 -> List<T#fn60.0>
-expr #1552 -> usize
-expr #1553 -> usize
-expr #1555 -> List<T#fn60.0>
-expr #1557 -> usize
-expr #1558 -> T#fn60.0
-expr #1560 -> List<T#fn60.0>
-expr #1562 -> usize
-expr #1563 -> T#fn60.0
-expr #1564 -> ()
-expr #1575 -> List<T#fn61.0>
-expr #1576 -> usize
+expr #1506 -> ()
+expr #1510 -> List<T#fn58.0>
+expr #1511 -> Iter#class4<T#fn58.0>
+expr #1518 -> List<T#fn59.0>
+expr #1519 -> usize
+expr #1521 -> usize
+expr #1522 -> bool
+expr #1524 -> List<T#fn59.0>
+expr #1525 -> Option<T#fn59.0>
+expr #1526 -> ()
+expr #1528 -> List<T#fn59.0>
+expr #1529 -> usize
+expr #1531 -> usize
+expr #1532 -> bool
+expr #1534 -> List<T#fn59.0>
+expr #1536 -> T#fn59.0
+expr #1537 -> ()
+expr #1538 -> ()
+expr #1546 -> List<T#fn60.0>
+expr #1550 -> T#fn60.0
+expr #1552 -> T#fn60.0
+expr #1553 -> Ordering#enum3
+expr #1554 -> fn(T#fn60.0, T#fn60.0) -> Ordering#enum3
+expr #1555 -> ()
+expr #1566 -> List<T#fn61.0>
+expr #1568 -> fn(T#fn61.0, T#fn61.0) -> Ordering#enum3
+expr #1569 -> List<T#fn61.0>
+expr #1570 -> usize
+expr #1572 -> List<T#fn61.0>
+expr #1573 -> usize
+expr #1574 -> usize
+expr #1576 -> List<T#fn61.0>
 expr #1578 -> usize
-expr #1579 -> usize
-expr #1580 -> bool
-expr #1582 -> List<T#fn61.0>
-expr #1583 -> never
-expr #1584 -> ()
-expr #1588 -> List<T#fn61.0>
-expr #1592 -> List<T#fn61.0>
-expr #1593 -> usize
-expr #1595 -> usize
-expr #1596 -> usize
+expr #1579 -> T#fn61.0
+expr #1581 -> List<T#fn61.0>
+expr #1583 -> usize
+expr #1584 -> T#fn61.0
+expr #1585 -> ()
+expr #1596 -> List<T#fn62.0>
+expr #1597 -> usize
 expr #1599 -> usize
-expr #1601 -> usize
-expr #1602 -> usize
-expr #1603 -> usize
-expr #1604 -> bool
-expr #1606 -> List<T#fn61.0>
-expr #1608 -> List<T#fn61.0>
-expr #1610 -> usize
-expr #1611 -> T#fn61.0
-expr #1612 -> ()
-expr #1614 -> List<T#fn61.0>
-expr #1616 -> List<T#fn61.0>
-expr #1618 -> usize
-expr #1619 -> T#fn61.0
-expr #1620 -> ()
-expr #1621 -> ()
-expr #1622 -> ()
-expr #1623 -> ()
-expr #1628 -> List<T#fn61.0>
-expr #1630 -> fn(T#fn61.0, T#fn61.0) -> Ordering#enum3
-expr #1631 -> List<T#fn61.0>
-expr #1636 -> List<T#fn61.0>
-expr #1638 -> fn(T#fn61.0, T#fn61.0) -> Ordering#enum3
-expr #1639 -> List<T#fn61.0>
-expr #1643 -> List<T#fn61.0>
-expr #1646 -> usize
-expr #1649 -> usize
-expr #1652 -> usize
-expr #1654 -> List<T#fn61.0>
-expr #1655 -> usize
-expr #1656 -> bool
-expr #1659 -> usize
-expr #1661 -> List<T#fn61.0>
-expr #1662 -> usize
-expr #1663 -> bool
-expr #1664 -> bool
-expr #1666 -> fn(T#fn61.0, T#fn61.0) -> Ordering#enum3
-expr #1668 -> List<T#fn61.0>
+expr #1600 -> usize
+expr #1601 -> bool
+expr #1603 -> List<T#fn62.0>
+expr #1604 -> never
+expr #1605 -> ()
+expr #1609 -> List<T#fn62.0>
+expr #1613 -> List<T#fn62.0>
+expr #1614 -> usize
+expr #1616 -> usize
+expr #1617 -> usize
+expr #1620 -> usize
+expr #1622 -> usize
+expr #1623 -> usize
+expr #1624 -> usize
+expr #1625 -> bool
+expr #1627 -> List<T#fn62.0>
+expr #1629 -> List<T#fn62.0>
+expr #1631 -> usize
+expr #1632 -> T#fn62.0
+expr #1633 -> ()
+expr #1635 -> List<T#fn62.0>
+expr #1637 -> List<T#fn62.0>
+expr #1639 -> usize
+expr #1640 -> T#fn62.0
+expr #1641 -> ()
+expr #1642 -> ()
+expr #1643 -> ()
+expr #1644 -> ()
+expr #1649 -> List<T#fn62.0>
+expr #1651 -> fn(T#fn62.0, T#fn62.0) -> Ordering#enum3
+expr #1652 -> List<T#fn62.0>
+expr #1657 -> List<T#fn62.0>
+expr #1659 -> fn(T#fn62.0, T#fn62.0) -> Ordering#enum3
+expr #1660 -> List<T#fn62.0>
+expr #1664 -> List<T#fn62.0>
+expr #1667 -> usize
 expr #1670 -> usize
-expr #1671 -> T#fn61.0
-expr #1673 -> List<T#fn61.0>
-expr #1675 -> usize
-expr #1676 -> T#fn61.0
-expr #1677 -> Ordering#enum3
-expr #1679 -> Ordering#enum3
-expr #1680 -> bool
-expr #1682 -> List<T#fn61.0>
-expr #1684 -> List<T#fn61.0>
-expr #1686 -> usize
-expr #1687 -> T#fn61.0
-expr #1688 -> ()
-expr #1690 -> usize
+expr #1673 -> usize
+expr #1675 -> List<T#fn62.0>
+expr #1676 -> usize
+expr #1677 -> bool
+expr #1680 -> usize
+expr #1682 -> List<T#fn62.0>
+expr #1683 -> usize
+expr #1684 -> bool
+expr #1685 -> bool
+expr #1687 -> fn(T#fn62.0, T#fn62.0) -> Ordering#enum3
+expr #1689 -> List<T#fn62.0>
 expr #1691 -> usize
-expr #1693 -> List<T#fn61.0>
-expr #1695 -> List<T#fn61.0>
-expr #1697 -> usize
-expr #1698 -> T#fn61.0
-expr #1699 -> ()
-expr #1701 -> usize
-expr #1702 -> usize
-expr #1703 -> ()
-expr #1704 -> ()
-expr #1705 -> ()
-expr #1708 -> usize
-expr #1710 -> List<T#fn61.0>
+expr #1692 -> T#fn62.0
+expr #1694 -> List<T#fn62.0>
+expr #1696 -> usize
+expr #1697 -> T#fn62.0
+expr #1698 -> Ordering#enum3
+expr #1700 -> Ordering#enum3
+expr #1701 -> bool
+expr #1703 -> List<T#fn62.0>
+expr #1705 -> List<T#fn62.0>
+expr #1707 -> usize
+expr #1708 -> T#fn62.0
+expr #1709 -> ()
 expr #1711 -> usize
-expr #1712 -> bool
-expr #1714 -> List<T#fn61.0>
-expr #1716 -> List<T#fn61.0>
+expr #1712 -> usize
+expr #1714 -> List<T#fn62.0>
+expr #1716 -> List<T#fn62.0>
 expr #1718 -> usize
-expr #1719 -> T#fn61.0
+expr #1719 -> T#fn62.0
 expr #1720 -> ()
 expr #1722 -> usize
 expr #1723 -> usize
 expr #1724 -> ()
-expr #1727 -> usize
-expr #1729 -> List<T#fn61.0>
-expr #1730 -> usize
-expr #1731 -> bool
-expr #1733 -> List<T#fn61.0>
-expr #1735 -> List<T#fn61.0>
-expr #1737 -> usize
-expr #1738 -> T#fn61.0
-expr #1739 -> ()
-expr #1741 -> usize
-expr #1742 -> usize
-expr #1743 -> ()
-expr #1745 -> List<T#fn61.0>
-expr #1753 -> StringBuilder
-expr #1754 -> usize
-expr #1756 -> List<String>
-expr #1757 -> usize
+expr #1725 -> ()
+expr #1726 -> ()
+expr #1729 -> usize
+expr #1731 -> List<T#fn62.0>
+expr #1732 -> usize
+expr #1733 -> bool
+expr #1735 -> List<T#fn62.0>
+expr #1737 -> List<T#fn62.0>
+expr #1739 -> usize
+expr #1740 -> T#fn62.0
+expr #1741 -> ()
+expr #1743 -> usize
+expr #1744 -> usize
+expr #1745 -> ()
+expr #1748 -> usize
+expr #1750 -> List<T#fn62.0>
+expr #1751 -> usize
+expr #1752 -> bool
+expr #1754 -> List<T#fn62.0>
+expr #1756 -> List<T#fn62.0>
 expr #1758 -> usize
-expr #1760 -> usize
-expr #1761 -> usize
-expr #1762 -> bool
-expr #1764 -> StringBuilder
-expr #1766 -> String
-expr #1767 -> ()
-expr #1768 -> ()
-expr #1770 -> StringBuilder
-expr #1772 -> List<String>
-expr #1774 -> usize
-expr #1775 -> String
-expr #1776 -> ()
-expr #1777 -> ()
-expr #1779 -> StringBuilder
-expr #1780 -> String
-expr #1788 -> List<char>
-expr #1790 -> String
-expr #1791 -> ()
-expr #1793 -> List<char>
-expr #1795 -> char
-expr #1796 -> ()
+expr #1759 -> T#fn62.0
+expr #1760 -> ()
+expr #1762 -> usize
+expr #1763 -> usize
+expr #1764 -> ()
+expr #1766 -> List<T#fn62.0>
+expr #1774 -> StringBuilder
+expr #1775 -> usize
+expr #1777 -> List<String>
+expr #1778 -> usize
+expr #1779 -> usize
+expr #1781 -> usize
+expr #1782 -> usize
+expr #1783 -> bool
+expr #1785 -> StringBuilder
+expr #1787 -> String
+expr #1788 -> ()
+expr #1789 -> ()
+expr #1791 -> StringBuilder
+expr #1793 -> List<String>
+expr #1795 -> usize
+expr #1796 -> String
 expr #1797 -> ()
-expr #1801 -> List<char>
-expr #1802 -> Iter#class4<char>
-expr #1810 -> List<u8>
-expr #1812 -> String
-expr #1813 -> ()
-expr #1815 -> List<u8>
-expr #1817 -> u8
+expr #1798 -> ()
+expr #1800 -> StringBuilder
+expr #1801 -> String
+expr #1809 -> List<char>
+expr #1811 -> String
+expr #1812 -> ()
+expr #1814 -> List<char>
+expr #1816 -> char
+expr #1817 -> ()
 expr #1818 -> ()
-expr #1819 -> ()
-expr #1823 -> List<u8>
-expr #1824 -> Iter#class4<u8>
-expr #1833 -> List<String>
-expr #1835 -> String
-expr #1836 -> bool
-expr #1838 -> String
+expr #1822 -> List<char>
+expr #1823 -> Iter#class4<char>
+expr #1831 -> List<u8>
+expr #1833 -> String
+expr #1834 -> ()
+expr #1836 -> List<u8>
+expr #1838 -> u8
 expr #1839 -> ()
-expr #1841 -> List<String>
-expr #1843 -> char
-expr #1844 -> String
-expr #1845 -> ()
-expr #1846 -> ()
-expr #1848 -> List<String>
-expr #1849 -> never
-expr #1850 -> ()
-expr #1853 -> String
-expr #1855 -> String
-expr #1857 -> String
-expr #1858 -> Option<usize>
-expr #1864 -> List<String>
-expr #1866 -> String
-expr #1867 -> usize
-expr #1869 -> usize
-expr #1870 -> String
+expr #1840 -> ()
+expr #1844 -> List<u8>
+expr #1845 -> Iter#class4<u8>
+expr #1854 -> List<String>
+expr #1856 -> String
+expr #1857 -> bool
+expr #1859 -> String
+expr #1860 -> ()
+expr #1862 -> List<String>
+expr #1864 -> char
+expr #1865 -> String
+expr #1866 -> ()
+expr #1867 -> ()
+expr #1869 -> List<String>
+expr #1870 -> never
 expr #1871 -> ()
-expr #1873 -> String
-expr #1875 -> String
-expr #1877 -> usize
-expr #1879 -> String
-expr #1880 -> usize
-expr #1881 -> usize
-expr #1883 -> String
-expr #1884 -> usize
-expr #1885 -> String
-expr #1886 -> ()
-expr #1890 -> List<String>
-expr #1892 -> String
-expr #1893 -> ()
-expr #1895 -> List<String>
-expr #1896 -> never
-expr #1897 -> never
-expr #1898 -> ()
-expr #1899 -> never
-expr #1907 -> List<String>
-expr #1909 -> String
-expr #1910 -> bool
-expr #1912 -> List<String>
-expr #1913 -> never
+expr #1874 -> String
+expr #1876 -> String
+expr #1878 -> String
+expr #1879 -> Option<usize>
+expr #1885 -> List<String>
+expr #1887 -> String
+expr #1888 -> usize
+expr #1890 -> usize
+expr #1891 -> String
+expr #1892 -> ()
+expr #1894 -> String
+expr #1896 -> String
+expr #1898 -> usize
+expr #1900 -> String
+expr #1901 -> usize
+expr #1902 -> usize
+expr #1904 -> String
+expr #1905 -> usize
+expr #1906 -> String
+expr #1907 -> ()
+expr #1911 -> List<String>
+expr #1913 -> String
 expr #1914 -> ()
-expr #1919 -> String
-expr #1920 -> String
-expr #1921 -> List<String>
-expr #1922 -> usize
-expr #1924 -> List<String>
-expr #1925 -> usize
-expr #1926 -> usize
-expr #1929 -> List<String>
-expr #1931 -> usize
-expr #1932 -> String
-expr #1934 -> usize
-expr #1935 -> usize
-expr #1936 -> usize
-expr #1938 -> List<String>
-expr #1939 -> usize
-expr #1940 -> bool
-expr #1942 -> String
-expr #1943 -> bool
-expr #1944 -> bool
-expr #1945 -> never
-expr #1946 -> ()
-expr #1948 -> String
-expr #1949 -> String
-expr #1950 -> bool
-expr #1952 -> List<String>
-expr #1954 -> String
+expr #1916 -> List<String>
+expr #1917 -> never
+expr #1918 -> never
+expr #1919 -> ()
+expr #1920 -> never
+expr #1928 -> List<String>
+expr #1930 -> String
+expr #1931 -> bool
+expr #1933 -> List<String>
+expr #1934 -> never
+expr #1935 -> ()
+expr #1940 -> String
+expr #1941 -> String
+expr #1942 -> List<String>
+expr #1943 -> usize
+expr #1945 -> List<String>
+expr #1946 -> usize
+expr #1947 -> usize
+expr #1950 -> List<String>
+expr #1952 -> usize
+expr #1953 -> String
 expr #1955 -> usize
-expr #1957 -> String
-expr #1958 -> usize
-expr #1959 -> usize
+expr #1956 -> usize
+expr #1957 -> usize
+expr #1959 -> List<String>
 expr #1960 -> usize
-expr #1961 -> String
-expr #1962 -> ()
-expr #1964 -> List<String>
-expr #1966 -> String
+expr #1961 -> bool
+expr #1963 -> String
+expr #1964 -> bool
+expr #1965 -> bool
+expr #1966 -> never
 expr #1967 -> ()
-expr #1968 -> ()
-expr #1969 -> ()
-expr #1970 -> ()
-expr #1972 -> List<String>
-expr #1978 -> Task#class6<T#class6.0>
-expr #1979 -> Option<T#class6.0>
-expr #1981 -> Option<T#class6.0>
-expr #1983 -> Task#class6<T#class6.0>
-expr #1984 -> List<fn()>
-expr #1986 -> List<fn()>
-expr #1990 -> Task#class6<T#class6.0>
-expr #1991 -> Option<T#class6.0>
-expr #1996 -> bool
-expr #1999 -> bool
-expr #2000 -> bool
-expr #2003 -> Task#class6<T#class6.0>
-expr #2004 -> List<fn()>
-expr #2006 -> fn()
-expr #2007 -> ()
+expr #1969 -> String
+expr #1970 -> String
+expr #1971 -> bool
+expr #1973 -> List<String>
+expr #1975 -> String
+expr #1976 -> usize
+expr #1978 -> String
+expr #1979 -> usize
+expr #1980 -> usize
+expr #1981 -> usize
+expr #1982 -> String
+expr #1983 -> ()
+expr #1985 -> List<String>
+expr #1987 -> String
+expr #1988 -> ()
+expr #1989 -> ()
+expr #1990 -> ()
+expr #1991 -> ()
+expr #1993 -> List<String>
+expr #1999 -> Task#class6<T#class6.0>
+expr #2000 -> Option<T#class6.0>
+expr #2002 -> Option<T#class6.0>
+expr #2004 -> Task#class6<T#class6.0>
+expr #2005 -> List<fn()>
+expr #2007 -> List<fn()>
 expr #2011 -> Task#class6<T#class6.0>
 expr #2012 -> Option<T#class6.0>
-expr #2014 -> Option<T#class6.0>
-expr #2016 -> T#class6.0
-expr #2017 -> Option<T#class6.0>
-expr #2019 -> Task#class6<T#class6.0>
-expr #2020 -> List<fn()>
-expr #2024 -> fn()
-expr #2025 -> ()
-expr #2026 -> ()
-expr #2027 -> ()
-expr #2029 -> Task#class6<T#class6.0>
-expr #2030 -> List<fn()>
-expr #2032 -> List<fn()>
-expr #2036 -> Task#class6<T#class6.0>
-expr #2037 -> Option<T#class6.0>
-expr #2043 -> T#class6.0
-expr #2048 -> String
-expr #2049 -> never
-expr #2050 -> T#class6.0
-expr #2062 -> bool
-expr #2064 -> i8
-expr #2066 -> i8
-expr #2067 -> i8
-expr #2068 -> i8
-expr #2069 -> Cell#class3<i8>
-expr #2073 -> bool
-expr #2074 -> Cell#class3<bool>
-expr #2078 -> Cell#class3<bool>
-expr #2079 -> bool
-expr #2081 -> Option<i8>
-expr #2082 -> never
-expr #2083 -> ()
-expr #2086 -> Cell#class3<i8>
+expr #2017 -> bool
+expr #2020 -> bool
+expr #2021 -> bool
+expr #2024 -> Task#class6<T#class6.0>
+expr #2025 -> List<fn()>
+expr #2027 -> fn()
+expr #2028 -> ()
+expr #2032 -> Task#class6<T#class6.0>
+expr #2033 -> Option<T#class6.0>
+expr #2035 -> Option<T#class6.0>
+expr #2037 -> T#class6.0
+expr #2038 -> Option<T#class6.0>
+expr #2040 -> Task#class6<T#class6.0>
+expr #2041 -> List<fn()>
+expr #2045 -> fn()
+expr #2046 -> ()
+expr #2047 -> ()
+expr #2048 -> ()
+expr #2050 -> Task#class6<T#class6.0>
+expr #2051 -> List<fn()>
+expr #2053 -> List<fn()>
+expr #2057 -> Task#class6<T#class6.0>
+expr #2058 -> Option<T#class6.0>
+expr #2064 -> T#class6.0
+expr #2069 -> String
+expr #2070 -> never
+expr #2071 -> T#class6.0
+expr #2083 -> bool
+expr #2085 -> i8
 expr #2087 -> i8
-expr #2089 -> bool
-expr #2091 -> bool
-expr #2094 -> i8
-expr #2096 -> i8
-expr #2097 -> bool
+expr #2088 -> i8
+expr #2089 -> i8
+expr #2090 -> Cell#class3<i8>
+expr #2094 -> bool
+expr #2095 -> Cell#class3<bool>
 expr #2099 -> Cell#class3<bool>
 expr #2100 -> bool
-expr #2101 -> bool
-expr #2103 -> Option<i8>
-expr #2104 -> never
-expr #2105 -> ()
-expr #2107 -> i8
-expr #2109 -> i8
+expr #2102 -> Option<i8>
+expr #2103 -> never
+expr #2104 -> ()
+expr #2107 -> Cell#class3<i8>
+expr #2108 -> i8
 expr #2110 -> bool
-expr #2112 -> Cell#class3<bool>
-expr #2113 -> bool
-expr #2114 -> bool
-expr #2116 -> Cell#class3<i8>
+expr #2112 -> bool
+expr #2115 -> i8
 expr #2117 -> i8
-expr #2119 -> i8
-expr #2120 -> i8
-expr #2121 -> i8
-expr #2122 -> ()
-expr #2123 -> ()
-expr #2125 -> Option<i8>
-expr #2127 -> i8
-expr #2128 -> Option<i8>
+expr #2118 -> bool
+expr #2120 -> Cell#class3<bool>
+expr #2121 -> bool
+expr #2122 -> bool
+expr #2124 -> Option<i8>
+expr #2125 -> never
+expr #2126 -> ()
+expr #2128 -> i8
 expr #2130 -> i8
-expr #2132 -> i8
-expr #2133 -> bool
-expr #2135 -> Cell#class3<bool>
-expr #2136 -> bool
-expr #2137 -> bool
-expr #2139 -> Option<i8>
-expr #2140 -> never
-expr #2141 -> ()
-expr #2143 -> Cell#class3<i8>
-expr #2144 -> i8
-expr #2146 -> i8
-expr #2147 -> i8
+expr #2131 -> bool
+expr #2133 -> Cell#class3<bool>
+expr #2134 -> bool
+expr #2135 -> bool
+expr #2137 -> Cell#class3<i8>
+expr #2138 -> i8
+expr #2140 -> i8
+expr #2141 -> i8
+expr #2142 -> i8
+expr #2143 -> ()
+expr #2144 -> ()
+expr #2146 -> Option<i8>
 expr #2148 -> i8
-expr #2150 -> Option<i8>
-expr #2152 -> i8
+expr #2149 -> Option<i8>
+expr #2151 -> i8
 expr #2153 -> i8
-expr #2154 -> i8
-expr #2155 -> Option<i8>
-expr #2156 -> Option<i8>
-expr #2157 -> Option<i8>
-expr #2159 -> bool
-expr #2161 -> i8
-expr #2163 -> i8
-expr #2164 -> bool
-expr #2166 -> Cell#class3<bool>
-expr #2167 -> bool
-expr #2168 -> bool
-expr #2170 -> Option<i8>
-expr #2171 -> never
-expr #2172 -> ()
+expr #2154 -> bool
+expr #2156 -> Cell#class3<bool>
+expr #2157 -> bool
+expr #2158 -> bool
+expr #2160 -> Option<i8>
+expr #2161 -> never
+expr #2162 -> ()
+expr #2164 -> Cell#class3<i8>
+expr #2165 -> i8
+expr #2167 -> i8
+expr #2168 -> i8
+expr #2169 -> i8
+expr #2171 -> Option<i8>
+expr #2173 -> i8
 expr #2174 -> i8
-expr #2176 -> i8
-expr #2177 -> bool
-expr #2179 -> Cell#class3<bool>
+expr #2175 -> i8
+expr #2176 -> Option<i8>
+expr #2177 -> Option<i8>
+expr #2178 -> Option<i8>
 expr #2180 -> bool
-expr #2181 -> bool
-expr #2183 -> Cell#class3<i8>
+expr #2182 -> i8
 expr #2184 -> i8
-expr #2186 -> i8
-expr #2187 -> i8
-expr #2188 -> i8
-expr #2189 -> ()
-expr #2190 -> ()
-expr #2192 -> Option<i8>
-expr #2194 -> i8
-expr #2195 -> Option<i8>
+expr #2185 -> bool
+expr #2187 -> Cell#class3<bool>
+expr #2188 -> bool
+expr #2189 -> bool
+expr #2191 -> Option<i8>
+expr #2192 -> never
+expr #2193 -> ()
+expr #2195 -> i8
 expr #2197 -> i8
-expr #2199 -> i8
-expr #2200 -> bool
-expr #2202 -> Cell#class3<bool>
-expr #2203 -> bool
-expr #2204 -> bool
-expr #2206 -> Option<i8>
-expr #2207 -> never
-expr #2208 -> ()
-expr #2210 -> Cell#class3<i8>
-expr #2211 -> i8
-expr #2213 -> i8
-expr #2214 -> i8
+expr #2198 -> bool
+expr #2200 -> Cell#class3<bool>
+expr #2201 -> bool
+expr #2202 -> bool
+expr #2204 -> Cell#class3<i8>
+expr #2205 -> i8
+expr #2207 -> i8
+expr #2208 -> i8
+expr #2209 -> i8
+expr #2210 -> ()
+expr #2211 -> ()
+expr #2213 -> Option<i8>
 expr #2215 -> i8
-expr #2217 -> Option<i8>
-expr #2219 -> i8
-expr #2220 -> Option<i8>
-expr #2221 -> Option<i8>
-expr #2222 -> Option<i8>
-expr #2223 -> Option<i8>
-expr #2224 -> Option<i8>
-expr #2225 -> fn() -> Option<i8>
-expr #2226 -> Iter#class4<i8>
-expr #2238 -> bool
-expr #2240 -> i16
-expr #2242 -> i16
-expr #2243 -> i16
-expr #2244 -> i16
-expr #2245 -> Cell#class3<i16>
-expr #2249 -> bool
-expr #2250 -> Cell#class3<bool>
-expr #2254 -> Cell#class3<bool>
-expr #2255 -> bool
-expr #2257 -> Option<i16>
-expr #2258 -> never
-expr #2259 -> ()
-expr #2262 -> Cell#class3<i16>
+expr #2216 -> Option<i8>
+expr #2218 -> i8
+expr #2220 -> i8
+expr #2221 -> bool
+expr #2223 -> Cell#class3<bool>
+expr #2224 -> bool
+expr #2225 -> bool
+expr #2227 -> Option<i8>
+expr #2228 -> never
+expr #2229 -> ()
+expr #2231 -> Cell#class3<i8>
+expr #2232 -> i8
+expr #2234 -> i8
+expr #2235 -> i8
+expr #2236 -> i8
+expr #2238 -> Option<i8>
+expr #2240 -> i8
+expr #2241 -> Option<i8>
+expr #2242 -> Option<i8>
+expr #2243 -> Option<i8>
+expr #2244 -> Option<i8>
+expr #2245 -> Option<i8>
+expr #2246 -> fn() -> Option<i8>
+expr #2247 -> Iter#class4<i8>
+expr #2259 -> bool
+expr #2261 -> i16
 expr #2263 -> i16
-expr #2265 -> bool
-expr #2267 -> bool
-expr #2270 -> i16
-expr #2272 -> i16
-expr #2273 -> bool
+expr #2264 -> i16
+expr #2265 -> i16
+expr #2266 -> Cell#class3<i16>
+expr #2270 -> bool
+expr #2271 -> Cell#class3<bool>
 expr #2275 -> Cell#class3<bool>
 expr #2276 -> bool
-expr #2277 -> bool
-expr #2279 -> Option<i16>
-expr #2280 -> never
-expr #2281 -> ()
-expr #2283 -> i16
-expr #2285 -> i16
+expr #2278 -> Option<i16>
+expr #2279 -> never
+expr #2280 -> ()
+expr #2283 -> Cell#class3<i16>
+expr #2284 -> i16
 expr #2286 -> bool
-expr #2288 -> Cell#class3<bool>
-expr #2289 -> bool
-expr #2290 -> bool
-expr #2292 -> Cell#class3<i16>
+expr #2288 -> bool
+expr #2291 -> i16
 expr #2293 -> i16
-expr #2295 -> i16
-expr #2296 -> i16
-expr #2297 -> i16
-expr #2298 -> ()
-expr #2299 -> ()
-expr #2301 -> Option<i16>
-expr #2303 -> i16
-expr #2304 -> Option<i16>
+expr #2294 -> bool
+expr #2296 -> Cell#class3<bool>
+expr #2297 -> bool
+expr #2298 -> bool
+expr #2300 -> Option<i16>
+expr #2301 -> never
+expr #2302 -> ()
+expr #2304 -> i16
 expr #2306 -> i16
-expr #2308 -> i16
-expr #2309 -> bool
-expr #2311 -> Cell#class3<bool>
-expr #2312 -> bool
-expr #2313 -> bool
-expr #2315 -> Option<i16>
-expr #2316 -> never
-expr #2317 -> ()
-expr #2319 -> Cell#class3<i16>
-expr #2320 -> i16
-expr #2322 -> i16
-expr #2323 -> i16
+expr #2307 -> bool
+expr #2309 -> Cell#class3<bool>
+expr #2310 -> bool
+expr #2311 -> bool
+expr #2313 -> Cell#class3<i16>
+expr #2314 -> i16
+expr #2316 -> i16
+expr #2317 -> i16
+expr #2318 -> i16
+expr #2319 -> ()
+expr #2320 -> ()
+expr #2322 -> Option<i16>
 expr #2324 -> i16
-expr #2326 -> Option<i16>
-expr #2328 -> i16
+expr #2325 -> Option<i16>
+expr #2327 -> i16
 expr #2329 -> i16
-expr #2330 -> i16
-expr #2331 -> Option<i16>
-expr #2332 -> Option<i16>
-expr #2333 -> Option<i16>
-expr #2335 -> bool
-expr #2337 -> i16
-expr #2339 -> i16
-expr #2340 -> bool
-expr #2342 -> Cell#class3<bool>
-expr #2343 -> bool
-expr #2344 -> bool
-expr #2346 -> Option<i16>
-expr #2347 -> never
-expr #2348 -> ()
+expr #2330 -> bool
+expr #2332 -> Cell#class3<bool>
+expr #2333 -> bool
+expr #2334 -> bool
+expr #2336 -> Option<i16>
+expr #2337 -> never
+expr #2338 -> ()
+expr #2340 -> Cell#class3<i16>
+expr #2341 -> i16
+expr #2343 -> i16
+expr #2344 -> i16
+expr #2345 -> i16
+expr #2347 -> Option<i16>
+expr #2349 -> i16
 expr #2350 -> i16
-expr #2352 -> i16
-expr #2353 -> bool
-expr #2355 -> Cell#class3<bool>
+expr #2351 -> i16
+expr #2352 -> Option<i16>
+expr #2353 -> Option<i16>
+expr #2354 -> Option<i16>
 expr #2356 -> bool
-expr #2357 -> bool
-expr #2359 -> Cell#class3<i16>
+expr #2358 -> i16
 expr #2360 -> i16
-expr #2362 -> i16
-expr #2363 -> i16
-expr #2364 -> i16
-expr #2365 -> ()
-expr #2366 -> ()
-expr #2368 -> Option<i16>
-expr #2370 -> i16
-expr #2371 -> Option<i16>
+expr #2361 -> bool
+expr #2363 -> Cell#class3<bool>
+expr #2364 -> bool
+expr #2365 -> bool
+expr #2367 -> Option<i16>
+expr #2368 -> never
+expr #2369 -> ()
+expr #2371 -> i16
 expr #2373 -> i16
-expr #2375 -> i16
-expr #2376 -> bool
-expr #2378 -> Cell#class3<bool>
-expr #2379 -> bool
-expr #2380 -> bool
-expr #2382 -> Option<i16>
-expr #2383 -> never
-expr #2384 -> ()
-expr #2386 -> Cell#class3<i16>
-expr #2387 -> i16
-expr #2389 -> i16
-expr #2390 -> i16
+expr #2374 -> bool
+expr #2376 -> Cell#class3<bool>
+expr #2377 -> bool
+expr #2378 -> bool
+expr #2380 -> Cell#class3<i16>
+expr #2381 -> i16
+expr #2383 -> i16
+expr #2384 -> i16
+expr #2385 -> i16
+expr #2386 -> ()
+expr #2387 -> ()
+expr #2389 -> Option<i16>
 expr #2391 -> i16
-expr #2393 -> Option<i16>
-expr #2395 -> i16
-expr #2396 -> Option<i16>
-expr #2397 -> Option<i16>
-expr #2398 -> Option<i16>
-expr #2399 -> Option<i16>
-expr #2400 -> Option<i16>
-expr #2401 -> fn() -> Option<i16>
-expr #2402 -> Iter#class4<i16>
-expr #2414 -> bool
-expr #2416 -> i32
-expr #2418 -> i32
-expr #2419 -> i32
-expr #2420 -> i32
-expr #2421 -> Cell#class3<i32>
-expr #2425 -> bool
-expr #2426 -> Cell#class3<bool>
-expr #2430 -> Cell#class3<bool>
-expr #2431 -> bool
-expr #2433 -> Option<i32>
-expr #2434 -> never
-expr #2435 -> ()
-expr #2438 -> Cell#class3<i32>
+expr #2392 -> Option<i16>
+expr #2394 -> i16
+expr #2396 -> i16
+expr #2397 -> bool
+expr #2399 -> Cell#class3<bool>
+expr #2400 -> bool
+expr #2401 -> bool
+expr #2403 -> Option<i16>
+expr #2404 -> never
+expr #2405 -> ()
+expr #2407 -> Cell#class3<i16>
+expr #2408 -> i16
+expr #2410 -> i16
+expr #2411 -> i16
+expr #2412 -> i16
+expr #2414 -> Option<i16>
+expr #2416 -> i16
+expr #2417 -> Option<i16>
+expr #2418 -> Option<i16>
+expr #2419 -> Option<i16>
+expr #2420 -> Option<i16>
+expr #2421 -> Option<i16>
+expr #2422 -> fn() -> Option<i16>
+expr #2423 -> Iter#class4<i16>
+expr #2435 -> bool
+expr #2437 -> i32
 expr #2439 -> i32
-expr #2441 -> bool
-expr #2443 -> bool
-expr #2446 -> i32
-expr #2448 -> i32
-expr #2449 -> bool
+expr #2440 -> i32
+expr #2441 -> i32
+expr #2442 -> Cell#class3<i32>
+expr #2446 -> bool
+expr #2447 -> Cell#class3<bool>
 expr #2451 -> Cell#class3<bool>
 expr #2452 -> bool
-expr #2453 -> bool
-expr #2455 -> Option<i32>
-expr #2456 -> never
-expr #2457 -> ()
-expr #2459 -> i32
-expr #2461 -> i32
+expr #2454 -> Option<i32>
+expr #2455 -> never
+expr #2456 -> ()
+expr #2459 -> Cell#class3<i32>
+expr #2460 -> i32
 expr #2462 -> bool
-expr #2464 -> Cell#class3<bool>
-expr #2465 -> bool
-expr #2466 -> bool
-expr #2468 -> Cell#class3<i32>
+expr #2464 -> bool
+expr #2467 -> i32
 expr #2469 -> i32
-expr #2471 -> i32
-expr #2472 -> i32
-expr #2473 -> i32
-expr #2474 -> ()
-expr #2475 -> ()
-expr #2477 -> Option<i32>
-expr #2479 -> i32
-expr #2480 -> Option<i32>
+expr #2470 -> bool
+expr #2472 -> Cell#class3<bool>
+expr #2473 -> bool
+expr #2474 -> bool
+expr #2476 -> Option<i32>
+expr #2477 -> never
+expr #2478 -> ()
+expr #2480 -> i32
 expr #2482 -> i32
-expr #2484 -> i32
-expr #2485 -> bool
-expr #2487 -> Cell#class3<bool>
-expr #2488 -> bool
-expr #2489 -> bool
-expr #2491 -> Option<i32>
-expr #2492 -> never
-expr #2493 -> ()
-expr #2495 -> Cell#class3<i32>
-expr #2496 -> i32
-expr #2498 -> i32
-expr #2499 -> i32
+expr #2483 -> bool
+expr #2485 -> Cell#class3<bool>
+expr #2486 -> bool
+expr #2487 -> bool
+expr #2489 -> Cell#class3<i32>
+expr #2490 -> i32
+expr #2492 -> i32
+expr #2493 -> i32
+expr #2494 -> i32
+expr #2495 -> ()
+expr #2496 -> ()
+expr #2498 -> Option<i32>
 expr #2500 -> i32
-expr #2502 -> Option<i32>
-expr #2504 -> i32
+expr #2501 -> Option<i32>
+expr #2503 -> i32
 expr #2505 -> i32
-expr #2506 -> i32
-expr #2507 -> Option<i32>
-expr #2508 -> Option<i32>
-expr #2509 -> Option<i32>
-expr #2511 -> bool
-expr #2513 -> i32
-expr #2515 -> i32
-expr #2516 -> bool
-expr #2518 -> Cell#class3<bool>
-expr #2519 -> bool
-expr #2520 -> bool
-expr #2522 -> Option<i32>
-expr #2523 -> never
-expr #2524 -> ()
+expr #2506 -> bool
+expr #2508 -> Cell#class3<bool>
+expr #2509 -> bool
+expr #2510 -> bool
+expr #2512 -> Option<i32>
+expr #2513 -> never
+expr #2514 -> ()
+expr #2516 -> Cell#class3<i32>
+expr #2517 -> i32
+expr #2519 -> i32
+expr #2520 -> i32
+expr #2521 -> i32
+expr #2523 -> Option<i32>
+expr #2525 -> i32
 expr #2526 -> i32
-expr #2528 -> i32
-expr #2529 -> bool
-expr #2531 -> Cell#class3<bool>
+expr #2527 -> i32
+expr #2528 -> Option<i32>
+expr #2529 -> Option<i32>
+expr #2530 -> Option<i32>
 expr #2532 -> bool
-expr #2533 -> bool
-expr #2535 -> Cell#class3<i32>
+expr #2534 -> i32
 expr #2536 -> i32
-expr #2538 -> i32
-expr #2539 -> i32
-expr #2540 -> i32
-expr #2541 -> ()
-expr #2542 -> ()
-expr #2544 -> Option<i32>
-expr #2546 -> i32
-expr #2547 -> Option<i32>
+expr #2537 -> bool
+expr #2539 -> Cell#class3<bool>
+expr #2540 -> bool
+expr #2541 -> bool
+expr #2543 -> Option<i32>
+expr #2544 -> never
+expr #2545 -> ()
+expr #2547 -> i32
 expr #2549 -> i32
-expr #2551 -> i32
-expr #2552 -> bool
-expr #2554 -> Cell#class3<bool>
-expr #2555 -> bool
-expr #2556 -> bool
-expr #2558 -> Option<i32>
-expr #2559 -> never
-expr #2560 -> ()
-expr #2562 -> Cell#class3<i32>
-expr #2563 -> i32
-expr #2565 -> i32
-expr #2566 -> i32
+expr #2550 -> bool
+expr #2552 -> Cell#class3<bool>
+expr #2553 -> bool
+expr #2554 -> bool
+expr #2556 -> Cell#class3<i32>
+expr #2557 -> i32
+expr #2559 -> i32
+expr #2560 -> i32
+expr #2561 -> i32
+expr #2562 -> ()
+expr #2563 -> ()
+expr #2565 -> Option<i32>
 expr #2567 -> i32
-expr #2569 -> Option<i32>
-expr #2571 -> i32
-expr #2572 -> Option<i32>
-expr #2573 -> Option<i32>
-expr #2574 -> Option<i32>
-expr #2575 -> Option<i32>
-expr #2576 -> Option<i32>
-expr #2577 -> fn() -> Option<i32>
-expr #2578 -> Iter#class4<i32>
-expr #2590 -> bool
-expr #2592 -> i64
-expr #2594 -> i64
-expr #2595 -> i64
-expr #2596 -> i64
-expr #2597 -> Cell#class3<i64>
-expr #2601 -> bool
-expr #2602 -> Cell#class3<bool>
-expr #2606 -> Cell#class3<bool>
-expr #2607 -> bool
-expr #2609 -> Option<i64>
-expr #2610 -> never
-expr #2611 -> ()
-expr #2614 -> Cell#class3<i64>
+expr #2568 -> Option<i32>
+expr #2570 -> i32
+expr #2572 -> i32
+expr #2573 -> bool
+expr #2575 -> Cell#class3<bool>
+expr #2576 -> bool
+expr #2577 -> bool
+expr #2579 -> Option<i32>
+expr #2580 -> never
+expr #2581 -> ()
+expr #2583 -> Cell#class3<i32>
+expr #2584 -> i32
+expr #2586 -> i32
+expr #2587 -> i32
+expr #2588 -> i32
+expr #2590 -> Option<i32>
+expr #2592 -> i32
+expr #2593 -> Option<i32>
+expr #2594 -> Option<i32>
+expr #2595 -> Option<i32>
+expr #2596 -> Option<i32>
+expr #2597 -> Option<i32>
+expr #2598 -> fn() -> Option<i32>
+expr #2599 -> Iter#class4<i32>
+expr #2611 -> bool
+expr #2613 -> i64
 expr #2615 -> i64
-expr #2617 -> bool
-expr #2619 -> bool
-expr #2622 -> i64
-expr #2624 -> i64
-expr #2625 -> bool
+expr #2616 -> i64
+expr #2617 -> i64
+expr #2618 -> Cell#class3<i64>
+expr #2622 -> bool
+expr #2623 -> Cell#class3<bool>
 expr #2627 -> Cell#class3<bool>
 expr #2628 -> bool
-expr #2629 -> bool
-expr #2631 -> Option<i64>
-expr #2632 -> never
-expr #2633 -> ()
-expr #2635 -> i64
-expr #2637 -> i64
+expr #2630 -> Option<i64>
+expr #2631 -> never
+expr #2632 -> ()
+expr #2635 -> Cell#class3<i64>
+expr #2636 -> i64
 expr #2638 -> bool
-expr #2640 -> Cell#class3<bool>
-expr #2641 -> bool
-expr #2642 -> bool
-expr #2644 -> Cell#class3<i64>
+expr #2640 -> bool
+expr #2643 -> i64
 expr #2645 -> i64
-expr #2647 -> i64
-expr #2648 -> i64
-expr #2649 -> i64
-expr #2650 -> ()
-expr #2651 -> ()
-expr #2653 -> Option<i64>
-expr #2655 -> i64
-expr #2656 -> Option<i64>
+expr #2646 -> bool
+expr #2648 -> Cell#class3<bool>
+expr #2649 -> bool
+expr #2650 -> bool
+expr #2652 -> Option<i64>
+expr #2653 -> never
+expr #2654 -> ()
+expr #2656 -> i64
 expr #2658 -> i64
-expr #2660 -> i64
-expr #2661 -> bool
-expr #2663 -> Cell#class3<bool>
-expr #2664 -> bool
-expr #2665 -> bool
-expr #2667 -> Option<i64>
-expr #2668 -> never
-expr #2669 -> ()
-expr #2671 -> Cell#class3<i64>
-expr #2672 -> i64
-expr #2674 -> i64
-expr #2675 -> i64
+expr #2659 -> bool
+expr #2661 -> Cell#class3<bool>
+expr #2662 -> bool
+expr #2663 -> bool
+expr #2665 -> Cell#class3<i64>
+expr #2666 -> i64
+expr #2668 -> i64
+expr #2669 -> i64
+expr #2670 -> i64
+expr #2671 -> ()
+expr #2672 -> ()
+expr #2674 -> Option<i64>
 expr #2676 -> i64
-expr #2678 -> Option<i64>
-expr #2680 -> i64
+expr #2677 -> Option<i64>
+expr #2679 -> i64
 expr #2681 -> i64
-expr #2682 -> i64
-expr #2683 -> Option<i64>
-expr #2684 -> Option<i64>
-expr #2685 -> Option<i64>
-expr #2687 -> bool
-expr #2689 -> i64
-expr #2691 -> i64
-expr #2692 -> bool
-expr #2694 -> Cell#class3<bool>
-expr #2695 -> bool
-expr #2696 -> bool
-expr #2698 -> Option<i64>
-expr #2699 -> never
-expr #2700 -> ()
+expr #2682 -> bool
+expr #2684 -> Cell#class3<bool>
+expr #2685 -> bool
+expr #2686 -> bool
+expr #2688 -> Option<i64>
+expr #2689 -> never
+expr #2690 -> ()
+expr #2692 -> Cell#class3<i64>
+expr #2693 -> i64
+expr #2695 -> i64
+expr #2696 -> i64
+expr #2697 -> i64
+expr #2699 -> Option<i64>
+expr #2701 -> i64
 expr #2702 -> i64
-expr #2704 -> i64
-expr #2705 -> bool
-expr #2707 -> Cell#class3<bool>
+expr #2703 -> i64
+expr #2704 -> Option<i64>
+expr #2705 -> Option<i64>
+expr #2706 -> Option<i64>
 expr #2708 -> bool
-expr #2709 -> bool
-expr #2711 -> Cell#class3<i64>
+expr #2710 -> i64
 expr #2712 -> i64
-expr #2714 -> i64
-expr #2715 -> i64
-expr #2716 -> i64
-expr #2717 -> ()
-expr #2718 -> ()
-expr #2720 -> Option<i64>
-expr #2722 -> i64
-expr #2723 -> Option<i64>
+expr #2713 -> bool
+expr #2715 -> Cell#class3<bool>
+expr #2716 -> bool
+expr #2717 -> bool
+expr #2719 -> Option<i64>
+expr #2720 -> never
+expr #2721 -> ()
+expr #2723 -> i64
 expr #2725 -> i64
-expr #2727 -> i64
-expr #2728 -> bool
-expr #2730 -> Cell#class3<bool>
-expr #2731 -> bool
-expr #2732 -> bool
-expr #2734 -> Option<i64>
-expr #2735 -> never
-expr #2736 -> ()
-expr #2738 -> Cell#class3<i64>
-expr #2739 -> i64
-expr #2741 -> i64
-expr #2742 -> i64
+expr #2726 -> bool
+expr #2728 -> Cell#class3<bool>
+expr #2729 -> bool
+expr #2730 -> bool
+expr #2732 -> Cell#class3<i64>
+expr #2733 -> i64
+expr #2735 -> i64
+expr #2736 -> i64
+expr #2737 -> i64
+expr #2738 -> ()
+expr #2739 -> ()
+expr #2741 -> Option<i64>
 expr #2743 -> i64
-expr #2745 -> Option<i64>
-expr #2747 -> i64
-expr #2748 -> Option<i64>
-expr #2749 -> Option<i64>
-expr #2750 -> Option<i64>
-expr #2751 -> Option<i64>
-expr #2752 -> Option<i64>
-expr #2753 -> fn() -> Option<i64>
-expr #2754 -> Iter#class4<i64>
-expr #2766 -> bool
-expr #2768 -> isize
-expr #2770 -> isize
-expr #2771 -> isize
-expr #2772 -> isize
-expr #2773 -> Cell#class3<isize>
-expr #2777 -> bool
-expr #2778 -> Cell#class3<bool>
-expr #2782 -> Cell#class3<bool>
-expr #2783 -> bool
-expr #2785 -> Option<isize>
-expr #2786 -> never
-expr #2787 -> ()
-expr #2790 -> Cell#class3<isize>
+expr #2744 -> Option<i64>
+expr #2746 -> i64
+expr #2748 -> i64
+expr #2749 -> bool
+expr #2751 -> Cell#class3<bool>
+expr #2752 -> bool
+expr #2753 -> bool
+expr #2755 -> Option<i64>
+expr #2756 -> never
+expr #2757 -> ()
+expr #2759 -> Cell#class3<i64>
+expr #2760 -> i64
+expr #2762 -> i64
+expr #2763 -> i64
+expr #2764 -> i64
+expr #2766 -> Option<i64>
+expr #2768 -> i64
+expr #2769 -> Option<i64>
+expr #2770 -> Option<i64>
+expr #2771 -> Option<i64>
+expr #2772 -> Option<i64>
+expr #2773 -> Option<i64>
+expr #2774 -> fn() -> Option<i64>
+expr #2775 -> Iter#class4<i64>
+expr #2787 -> bool
+expr #2789 -> isize
 expr #2791 -> isize
-expr #2793 -> bool
-expr #2795 -> bool
-expr #2798 -> isize
-expr #2800 -> isize
-expr #2801 -> bool
+expr #2792 -> isize
+expr #2793 -> isize
+expr #2794 -> Cell#class3<isize>
+expr #2798 -> bool
+expr #2799 -> Cell#class3<bool>
 expr #2803 -> Cell#class3<bool>
 expr #2804 -> bool
-expr #2805 -> bool
-expr #2807 -> Option<isize>
-expr #2808 -> never
-expr #2809 -> ()
-expr #2811 -> isize
-expr #2813 -> isize
+expr #2806 -> Option<isize>
+expr #2807 -> never
+expr #2808 -> ()
+expr #2811 -> Cell#class3<isize>
+expr #2812 -> isize
 expr #2814 -> bool
-expr #2816 -> Cell#class3<bool>
-expr #2817 -> bool
-expr #2818 -> bool
-expr #2820 -> Cell#class3<isize>
+expr #2816 -> bool
+expr #2819 -> isize
 expr #2821 -> isize
-expr #2823 -> isize
-expr #2824 -> isize
-expr #2825 -> isize
-expr #2826 -> ()
-expr #2827 -> ()
-expr #2829 -> Option<isize>
-expr #2831 -> isize
-expr #2832 -> Option<isize>
+expr #2822 -> bool
+expr #2824 -> Cell#class3<bool>
+expr #2825 -> bool
+expr #2826 -> bool
+expr #2828 -> Option<isize>
+expr #2829 -> never
+expr #2830 -> ()
+expr #2832 -> isize
 expr #2834 -> isize
-expr #2836 -> isize
-expr #2837 -> bool
-expr #2839 -> Cell#class3<bool>
-expr #2840 -> bool
-expr #2841 -> bool
-expr #2843 -> Option<isize>
-expr #2844 -> never
-expr #2845 -> ()
-expr #2847 -> Cell#class3<isize>
-expr #2848 -> isize
-expr #2850 -> isize
-expr #2851 -> isize
+expr #2835 -> bool
+expr #2837 -> Cell#class3<bool>
+expr #2838 -> bool
+expr #2839 -> bool
+expr #2841 -> Cell#class3<isize>
+expr #2842 -> isize
+expr #2844 -> isize
+expr #2845 -> isize
+expr #2846 -> isize
+expr #2847 -> ()
+expr #2848 -> ()
+expr #2850 -> Option<isize>
 expr #2852 -> isize
-expr #2854 -> Option<isize>
-expr #2856 -> isize
+expr #2853 -> Option<isize>
+expr #2855 -> isize
 expr #2857 -> isize
-expr #2858 -> isize
-expr #2859 -> Option<isize>
-expr #2860 -> Option<isize>
-expr #2861 -> Option<isize>
-expr #2863 -> bool
-expr #2865 -> isize
-expr #2867 -> isize
-expr #2868 -> bool
-expr #2870 -> Cell#class3<bool>
-expr #2871 -> bool
-expr #2872 -> bool
-expr #2874 -> Option<isize>
-expr #2875 -> never
-expr #2876 -> ()
+expr #2858 -> bool
+expr #2860 -> Cell#class3<bool>
+expr #2861 -> bool
+expr #2862 -> bool
+expr #2864 -> Option<isize>
+expr #2865 -> never
+expr #2866 -> ()
+expr #2868 -> Cell#class3<isize>
+expr #2869 -> isize
+expr #2871 -> isize
+expr #2872 -> isize
+expr #2873 -> isize
+expr #2875 -> Option<isize>
+expr #2877 -> isize
 expr #2878 -> isize
-expr #2880 -> isize
-expr #2881 -> bool
-expr #2883 -> Cell#class3<bool>
+expr #2879 -> isize
+expr #2880 -> Option<isize>
+expr #2881 -> Option<isize>
+expr #2882 -> Option<isize>
 expr #2884 -> bool
-expr #2885 -> bool
-expr #2887 -> Cell#class3<isize>
+expr #2886 -> isize
 expr #2888 -> isize
-expr #2890 -> isize
-expr #2891 -> isize
-expr #2892 -> isize
-expr #2893 -> ()
-expr #2894 -> ()
-expr #2896 -> Option<isize>
-expr #2898 -> isize
-expr #2899 -> Option<isize>
+expr #2889 -> bool
+expr #2891 -> Cell#class3<bool>
+expr #2892 -> bool
+expr #2893 -> bool
+expr #2895 -> Option<isize>
+expr #2896 -> never
+expr #2897 -> ()
+expr #2899 -> isize
 expr #2901 -> isize
-expr #2903 -> isize
-expr #2904 -> bool
-expr #2906 -> Cell#class3<bool>
-expr #2907 -> bool
-expr #2908 -> bool
-expr #2910 -> Option<isize>
-expr #2911 -> never
-expr #2912 -> ()
-expr #2914 -> Cell#class3<isize>
-expr #2915 -> isize
-expr #2917 -> isize
-expr #2918 -> isize
+expr #2902 -> bool
+expr #2904 -> Cell#class3<bool>
+expr #2905 -> bool
+expr #2906 -> bool
+expr #2908 -> Cell#class3<isize>
+expr #2909 -> isize
+expr #2911 -> isize
+expr #2912 -> isize
+expr #2913 -> isize
+expr #2914 -> ()
+expr #2915 -> ()
+expr #2917 -> Option<isize>
 expr #2919 -> isize
-expr #2921 -> Option<isize>
-expr #2923 -> isize
-expr #2924 -> Option<isize>
-expr #2925 -> Option<isize>
-expr #2926 -> Option<isize>
-expr #2927 -> Option<isize>
-expr #2928 -> Option<isize>
-expr #2929 -> fn() -> Option<isize>
-expr #2930 -> Iter#class4<isize>
-expr #2942 -> bool
-expr #2944 -> u8
-expr #2946 -> u8
-expr #2947 -> u8
-expr #2948 -> u8
-expr #2949 -> Cell#class3<u8>
-expr #2953 -> bool
-expr #2954 -> Cell#class3<bool>
-expr #2958 -> Cell#class3<bool>
-expr #2959 -> bool
-expr #2961 -> Option<u8>
-expr #2962 -> never
-expr #2963 -> ()
-expr #2966 -> Cell#class3<u8>
+expr #2920 -> Option<isize>
+expr #2922 -> isize
+expr #2924 -> isize
+expr #2925 -> bool
+expr #2927 -> Cell#class3<bool>
+expr #2928 -> bool
+expr #2929 -> bool
+expr #2931 -> Option<isize>
+expr #2932 -> never
+expr #2933 -> ()
+expr #2935 -> Cell#class3<isize>
+expr #2936 -> isize
+expr #2938 -> isize
+expr #2939 -> isize
+expr #2940 -> isize
+expr #2942 -> Option<isize>
+expr #2944 -> isize
+expr #2945 -> Option<isize>
+expr #2946 -> Option<isize>
+expr #2947 -> Option<isize>
+expr #2948 -> Option<isize>
+expr #2949 -> Option<isize>
+expr #2950 -> fn() -> Option<isize>
+expr #2951 -> Iter#class4<isize>
+expr #2963 -> bool
+expr #2965 -> u8
 expr #2967 -> u8
-expr #2969 -> bool
-expr #2971 -> bool
-expr #2974 -> u8
-expr #2976 -> u8
-expr #2977 -> bool
+expr #2968 -> u8
+expr #2969 -> u8
+expr #2970 -> Cell#class3<u8>
+expr #2974 -> bool
+expr #2975 -> Cell#class3<bool>
 expr #2979 -> Cell#class3<bool>
 expr #2980 -> bool
-expr #2981 -> bool
-expr #2983 -> Option<u8>
-expr #2984 -> never
-expr #2985 -> ()
-expr #2987 -> u8
-expr #2989 -> u8
+expr #2982 -> Option<u8>
+expr #2983 -> never
+expr #2984 -> ()
+expr #2987 -> Cell#class3<u8>
+expr #2988 -> u8
 expr #2990 -> bool
-expr #2992 -> Cell#class3<bool>
-expr #2993 -> bool
-expr #2994 -> bool
-expr #2996 -> Cell#class3<u8>
+expr #2992 -> bool
+expr #2995 -> u8
 expr #2997 -> u8
-expr #2999 -> u8
-expr #3000 -> u8
-expr #3001 -> u8
-expr #3002 -> ()
-expr #3003 -> ()
-expr #3005 -> Option<u8>
-expr #3007 -> u8
-expr #3008 -> Option<u8>
+expr #2998 -> bool
+expr #3000 -> Cell#class3<bool>
+expr #3001 -> bool
+expr #3002 -> bool
+expr #3004 -> Option<u8>
+expr #3005 -> never
+expr #3006 -> ()
+expr #3008 -> u8
 expr #3010 -> u8
-expr #3012 -> u8
-expr #3013 -> bool
-expr #3015 -> Cell#class3<bool>
-expr #3016 -> bool
-expr #3017 -> bool
-expr #3019 -> Option<u8>
-expr #3020 -> never
-expr #3021 -> ()
-expr #3023 -> Cell#class3<u8>
-expr #3024 -> u8
-expr #3026 -> u8
-expr #3027 -> u8
+expr #3011 -> bool
+expr #3013 -> Cell#class3<bool>
+expr #3014 -> bool
+expr #3015 -> bool
+expr #3017 -> Cell#class3<u8>
+expr #3018 -> u8
+expr #3020 -> u8
+expr #3021 -> u8
+expr #3022 -> u8
+expr #3023 -> ()
+expr #3024 -> ()
+expr #3026 -> Option<u8>
 expr #3028 -> u8
-expr #3030 -> Option<u8>
-expr #3032 -> u8
+expr #3029 -> Option<u8>
+expr #3031 -> u8
 expr #3033 -> u8
-expr #3034 -> u8
-expr #3035 -> Option<u8>
-expr #3036 -> Option<u8>
-expr #3037 -> Option<u8>
-expr #3039 -> bool
-expr #3041 -> u8
-expr #3043 -> u8
-expr #3044 -> bool
-expr #3046 -> Cell#class3<bool>
-expr #3047 -> bool
-expr #3048 -> bool
-expr #3050 -> Option<u8>
-expr #3051 -> never
-expr #3052 -> ()
+expr #3034 -> bool
+expr #3036 -> Cell#class3<bool>
+expr #3037 -> bool
+expr #3038 -> bool
+expr #3040 -> Option<u8>
+expr #3041 -> never
+expr #3042 -> ()
+expr #3044 -> Cell#class3<u8>
+expr #3045 -> u8
+expr #3047 -> u8
+expr #3048 -> u8
+expr #3049 -> u8
+expr #3051 -> Option<u8>
+expr #3053 -> u8
 expr #3054 -> u8
-expr #3056 -> u8
-expr #3057 -> bool
-expr #3059 -> Cell#class3<bool>
+expr #3055 -> u8
+expr #3056 -> Option<u8>
+expr #3057 -> Option<u8>
+expr #3058 -> Option<u8>
 expr #3060 -> bool
-expr #3061 -> bool
-expr #3063 -> Cell#class3<u8>
+expr #3062 -> u8
 expr #3064 -> u8
-expr #3066 -> u8
-expr #3067 -> u8
-expr #3068 -> u8
-expr #3069 -> ()
-expr #3070 -> ()
-expr #3072 -> Option<u8>
-expr #3074 -> u8
-expr #3075 -> Option<u8>
+expr #3065 -> bool
+expr #3067 -> Cell#class3<bool>
+expr #3068 -> bool
+expr #3069 -> bool
+expr #3071 -> Option<u8>
+expr #3072 -> never
+expr #3073 -> ()
+expr #3075 -> u8
 expr #3077 -> u8
-expr #3079 -> u8
-expr #3080 -> bool
-expr #3082 -> Cell#class3<bool>
-expr #3083 -> bool
-expr #3084 -> bool
-expr #3086 -> Option<u8>
-expr #3087 -> never
-expr #3088 -> ()
-expr #3090 -> Cell#class3<u8>
-expr #3091 -> u8
-expr #3093 -> u8
-expr #3094 -> u8
+expr #3078 -> bool
+expr #3080 -> Cell#class3<bool>
+expr #3081 -> bool
+expr #3082 -> bool
+expr #3084 -> Cell#class3<u8>
+expr #3085 -> u8
+expr #3087 -> u8
+expr #3088 -> u8
+expr #3089 -> u8
+expr #3090 -> ()
+expr #3091 -> ()
+expr #3093 -> Option<u8>
 expr #3095 -> u8
-expr #3097 -> Option<u8>
-expr #3099 -> u8
-expr #3100 -> Option<u8>
-expr #3101 -> Option<u8>
-expr #3102 -> Option<u8>
-expr #3103 -> Option<u8>
-expr #3104 -> Option<u8>
-expr #3105 -> fn() -> Option<u8>
-expr #3106 -> Iter#class4<u8>
-expr #3118 -> bool
-expr #3120 -> u16
-expr #3122 -> u16
-expr #3123 -> u16
-expr #3124 -> u16
-expr #3125 -> Cell#class3<u16>
-expr #3129 -> bool
-expr #3130 -> Cell#class3<bool>
-expr #3134 -> Cell#class3<bool>
-expr #3135 -> bool
-expr #3137 -> Option<u16>
-expr #3138 -> never
-expr #3139 -> ()
-expr #3142 -> Cell#class3<u16>
+expr #3096 -> Option<u8>
+expr #3098 -> u8
+expr #3100 -> u8
+expr #3101 -> bool
+expr #3103 -> Cell#class3<bool>
+expr #3104 -> bool
+expr #3105 -> bool
+expr #3107 -> Option<u8>
+expr #3108 -> never
+expr #3109 -> ()
+expr #3111 -> Cell#class3<u8>
+expr #3112 -> u8
+expr #3114 -> u8
+expr #3115 -> u8
+expr #3116 -> u8
+expr #3118 -> Option<u8>
+expr #3120 -> u8
+expr #3121 -> Option<u8>
+expr #3122 -> Option<u8>
+expr #3123 -> Option<u8>
+expr #3124 -> Option<u8>
+expr #3125 -> Option<u8>
+expr #3126 -> fn() -> Option<u8>
+expr #3127 -> Iter#class4<u8>
+expr #3139 -> bool
+expr #3141 -> u16
 expr #3143 -> u16
-expr #3145 -> bool
-expr #3147 -> bool
-expr #3150 -> u16
-expr #3152 -> u16
-expr #3153 -> bool
+expr #3144 -> u16
+expr #3145 -> u16
+expr #3146 -> Cell#class3<u16>
+expr #3150 -> bool
+expr #3151 -> Cell#class3<bool>
 expr #3155 -> Cell#class3<bool>
 expr #3156 -> bool
-expr #3157 -> bool
-expr #3159 -> Option<u16>
-expr #3160 -> never
-expr #3161 -> ()
-expr #3163 -> u16
-expr #3165 -> u16
+expr #3158 -> Option<u16>
+expr #3159 -> never
+expr #3160 -> ()
+expr #3163 -> Cell#class3<u16>
+expr #3164 -> u16
 expr #3166 -> bool
-expr #3168 -> Cell#class3<bool>
-expr #3169 -> bool
-expr #3170 -> bool
-expr #3172 -> Cell#class3<u16>
+expr #3168 -> bool
+expr #3171 -> u16
 expr #3173 -> u16
-expr #3175 -> u16
-expr #3176 -> u16
-expr #3177 -> u16
-expr #3178 -> ()
-expr #3179 -> ()
-expr #3181 -> Option<u16>
-expr #3183 -> u16
-expr #3184 -> Option<u16>
+expr #3174 -> bool
+expr #3176 -> Cell#class3<bool>
+expr #3177 -> bool
+expr #3178 -> bool
+expr #3180 -> Option<u16>
+expr #3181 -> never
+expr #3182 -> ()
+expr #3184 -> u16
 expr #3186 -> u16
-expr #3188 -> u16
-expr #3189 -> bool
-expr #3191 -> Cell#class3<bool>
-expr #3192 -> bool
-expr #3193 -> bool
-expr #3195 -> Option<u16>
-expr #3196 -> never
-expr #3197 -> ()
-expr #3199 -> Cell#class3<u16>
-expr #3200 -> u16
-expr #3202 -> u16
-expr #3203 -> u16
+expr #3187 -> bool
+expr #3189 -> Cell#class3<bool>
+expr #3190 -> bool
+expr #3191 -> bool
+expr #3193 -> Cell#class3<u16>
+expr #3194 -> u16
+expr #3196 -> u16
+expr #3197 -> u16
+expr #3198 -> u16
+expr #3199 -> ()
+expr #3200 -> ()
+expr #3202 -> Option<u16>
 expr #3204 -> u16
-expr #3206 -> Option<u16>
-expr #3208 -> u16
+expr #3205 -> Option<u16>
+expr #3207 -> u16
 expr #3209 -> u16
-expr #3210 -> u16
-expr #3211 -> Option<u16>
-expr #3212 -> Option<u16>
-expr #3213 -> Option<u16>
-expr #3215 -> bool
-expr #3217 -> u16
-expr #3219 -> u16
-expr #3220 -> bool
-expr #3222 -> Cell#class3<bool>
-expr #3223 -> bool
-expr #3224 -> bool
-expr #3226 -> Option<u16>
-expr #3227 -> never
-expr #3228 -> ()
+expr #3210 -> bool
+expr #3212 -> Cell#class3<bool>
+expr #3213 -> bool
+expr #3214 -> bool
+expr #3216 -> Option<u16>
+expr #3217 -> never
+expr #3218 -> ()
+expr #3220 -> Cell#class3<u16>
+expr #3221 -> u16
+expr #3223 -> u16
+expr #3224 -> u16
+expr #3225 -> u16
+expr #3227 -> Option<u16>
+expr #3229 -> u16
 expr #3230 -> u16
-expr #3232 -> u16
-expr #3233 -> bool
-expr #3235 -> Cell#class3<bool>
+expr #3231 -> u16
+expr #3232 -> Option<u16>
+expr #3233 -> Option<u16>
+expr #3234 -> Option<u16>
 expr #3236 -> bool
-expr #3237 -> bool
-expr #3239 -> Cell#class3<u16>
+expr #3238 -> u16
 expr #3240 -> u16
-expr #3242 -> u16
-expr #3243 -> u16
-expr #3244 -> u16
-expr #3245 -> ()
-expr #3246 -> ()
-expr #3248 -> Option<u16>
-expr #3250 -> u16
-expr #3251 -> Option<u16>
+expr #3241 -> bool
+expr #3243 -> Cell#class3<bool>
+expr #3244 -> bool
+expr #3245 -> bool
+expr #3247 -> Option<u16>
+expr #3248 -> never
+expr #3249 -> ()
+expr #3251 -> u16
 expr #3253 -> u16
-expr #3255 -> u16
-expr #3256 -> bool
-expr #3258 -> Cell#class3<bool>
-expr #3259 -> bool
-expr #3260 -> bool
-expr #3262 -> Option<u16>
-expr #3263 -> never
-expr #3264 -> ()
-expr #3266 -> Cell#class3<u16>
-expr #3267 -> u16
-expr #3269 -> u16
-expr #3270 -> u16
+expr #3254 -> bool
+expr #3256 -> Cell#class3<bool>
+expr #3257 -> bool
+expr #3258 -> bool
+expr #3260 -> Cell#class3<u16>
+expr #3261 -> u16
+expr #3263 -> u16
+expr #3264 -> u16
+expr #3265 -> u16
+expr #3266 -> ()
+expr #3267 -> ()
+expr #3269 -> Option<u16>
 expr #3271 -> u16
-expr #3273 -> Option<u16>
-expr #3275 -> u16
-expr #3276 -> Option<u16>
-expr #3277 -> Option<u16>
-expr #3278 -> Option<u16>
-expr #3279 -> Option<u16>
-expr #3280 -> Option<u16>
-expr #3281 -> fn() -> Option<u16>
-expr #3282 -> Iter#class4<u16>
-expr #3294 -> bool
-expr #3296 -> u32
-expr #3298 -> u32
-expr #3299 -> u32
-expr #3300 -> u32
-expr #3301 -> Cell#class3<u32>
-expr #3305 -> bool
-expr #3306 -> Cell#class3<bool>
-expr #3310 -> Cell#class3<bool>
-expr #3311 -> bool
-expr #3313 -> Option<u32>
-expr #3314 -> never
-expr #3315 -> ()
-expr #3318 -> Cell#class3<u32>
+expr #3272 -> Option<u16>
+expr #3274 -> u16
+expr #3276 -> u16
+expr #3277 -> bool
+expr #3279 -> Cell#class3<bool>
+expr #3280 -> bool
+expr #3281 -> bool
+expr #3283 -> Option<u16>
+expr #3284 -> never
+expr #3285 -> ()
+expr #3287 -> Cell#class3<u16>
+expr #3288 -> u16
+expr #3290 -> u16
+expr #3291 -> u16
+expr #3292 -> u16
+expr #3294 -> Option<u16>
+expr #3296 -> u16
+expr #3297 -> Option<u16>
+expr #3298 -> Option<u16>
+expr #3299 -> Option<u16>
+expr #3300 -> Option<u16>
+expr #3301 -> Option<u16>
+expr #3302 -> fn() -> Option<u16>
+expr #3303 -> Iter#class4<u16>
+expr #3315 -> bool
+expr #3317 -> u32
 expr #3319 -> u32
-expr #3321 -> bool
-expr #3323 -> bool
-expr #3326 -> u32
-expr #3328 -> u32
-expr #3329 -> bool
+expr #3320 -> u32
+expr #3321 -> u32
+expr #3322 -> Cell#class3<u32>
+expr #3326 -> bool
+expr #3327 -> Cell#class3<bool>
 expr #3331 -> Cell#class3<bool>
 expr #3332 -> bool
-expr #3333 -> bool
-expr #3335 -> Option<u32>
-expr #3336 -> never
-expr #3337 -> ()
-expr #3339 -> u32
-expr #3341 -> u32
+expr #3334 -> Option<u32>
+expr #3335 -> never
+expr #3336 -> ()
+expr #3339 -> Cell#class3<u32>
+expr #3340 -> u32
 expr #3342 -> bool
-expr #3344 -> Cell#class3<bool>
-expr #3345 -> bool
-expr #3346 -> bool
-expr #3348 -> Cell#class3<u32>
+expr #3344 -> bool
+expr #3347 -> u32
 expr #3349 -> u32
-expr #3351 -> u32
-expr #3352 -> u32
-expr #3353 -> u32
-expr #3354 -> ()
-expr #3355 -> ()
-expr #3357 -> Option<u32>
-expr #3359 -> u32
-expr #3360 -> Option<u32>
+expr #3350 -> bool
+expr #3352 -> Cell#class3<bool>
+expr #3353 -> bool
+expr #3354 -> bool
+expr #3356 -> Option<u32>
+expr #3357 -> never
+expr #3358 -> ()
+expr #3360 -> u32
 expr #3362 -> u32
-expr #3364 -> u32
-expr #3365 -> bool
-expr #3367 -> Cell#class3<bool>
-expr #3368 -> bool
-expr #3369 -> bool
-expr #3371 -> Option<u32>
-expr #3372 -> never
-expr #3373 -> ()
-expr #3375 -> Cell#class3<u32>
-expr #3376 -> u32
-expr #3378 -> u32
-expr #3379 -> u32
+expr #3363 -> bool
+expr #3365 -> Cell#class3<bool>
+expr #3366 -> bool
+expr #3367 -> bool
+expr #3369 -> Cell#class3<u32>
+expr #3370 -> u32
+expr #3372 -> u32
+expr #3373 -> u32
+expr #3374 -> u32
+expr #3375 -> ()
+expr #3376 -> ()
+expr #3378 -> Option<u32>
 expr #3380 -> u32
-expr #3382 -> Option<u32>
-expr #3384 -> u32
+expr #3381 -> Option<u32>
+expr #3383 -> u32
 expr #3385 -> u32
-expr #3386 -> u32
-expr #3387 -> Option<u32>
-expr #3388 -> Option<u32>
-expr #3389 -> Option<u32>
-expr #3391 -> bool
-expr #3393 -> u32
-expr #3395 -> u32
-expr #3396 -> bool
-expr #3398 -> Cell#class3<bool>
-expr #3399 -> bool
-expr #3400 -> bool
-expr #3402 -> Option<u32>
-expr #3403 -> never
-expr #3404 -> ()
+expr #3386 -> bool
+expr #3388 -> Cell#class3<bool>
+expr #3389 -> bool
+expr #3390 -> bool
+expr #3392 -> Option<u32>
+expr #3393 -> never
+expr #3394 -> ()
+expr #3396 -> Cell#class3<u32>
+expr #3397 -> u32
+expr #3399 -> u32
+expr #3400 -> u32
+expr #3401 -> u32
+expr #3403 -> Option<u32>
+expr #3405 -> u32
 expr #3406 -> u32
-expr #3408 -> u32
-expr #3409 -> bool
-expr #3411 -> Cell#class3<bool>
+expr #3407 -> u32
+expr #3408 -> Option<u32>
+expr #3409 -> Option<u32>
+expr #3410 -> Option<u32>
 expr #3412 -> bool
-expr #3413 -> bool
-expr #3415 -> Cell#class3<u32>
+expr #3414 -> u32
 expr #3416 -> u32
-expr #3418 -> u32
-expr #3419 -> u32
-expr #3420 -> u32
-expr #3421 -> ()
-expr #3422 -> ()
-expr #3424 -> Option<u32>
-expr #3426 -> u32
-expr #3427 -> Option<u32>
+expr #3417 -> bool
+expr #3419 -> Cell#class3<bool>
+expr #3420 -> bool
+expr #3421 -> bool
+expr #3423 -> Option<u32>
+expr #3424 -> never
+expr #3425 -> ()
+expr #3427 -> u32
 expr #3429 -> u32
-expr #3431 -> u32
-expr #3432 -> bool
-expr #3434 -> Cell#class3<bool>
-expr #3435 -> bool
-expr #3436 -> bool
-expr #3438 -> Option<u32>
-expr #3439 -> never
-expr #3440 -> ()
-expr #3442 -> Cell#class3<u32>
-expr #3443 -> u32
-expr #3445 -> u32
-expr #3446 -> u32
+expr #3430 -> bool
+expr #3432 -> Cell#class3<bool>
+expr #3433 -> bool
+expr #3434 -> bool
+expr #3436 -> Cell#class3<u32>
+expr #3437 -> u32
+expr #3439 -> u32
+expr #3440 -> u32
+expr #3441 -> u32
+expr #3442 -> ()
+expr #3443 -> ()
+expr #3445 -> Option<u32>
 expr #3447 -> u32
-expr #3449 -> Option<u32>
-expr #3451 -> u32
-expr #3452 -> Option<u32>
-expr #3453 -> Option<u32>
-expr #3454 -> Option<u32>
-expr #3455 -> Option<u32>
-expr #3456 -> Option<u32>
-expr #3457 -> fn() -> Option<u32>
-expr #3458 -> Iter#class4<u32>
-expr #3470 -> bool
-expr #3472 -> u64
-expr #3474 -> u64
-expr #3475 -> u64
-expr #3476 -> u64
-expr #3477 -> Cell#class3<u64>
-expr #3481 -> bool
-expr #3482 -> Cell#class3<bool>
-expr #3486 -> Cell#class3<bool>
-expr #3487 -> bool
-expr #3489 -> Option<u64>
-expr #3490 -> never
-expr #3491 -> ()
-expr #3494 -> Cell#class3<u64>
+expr #3448 -> Option<u32>
+expr #3450 -> u32
+expr #3452 -> u32
+expr #3453 -> bool
+expr #3455 -> Cell#class3<bool>
+expr #3456 -> bool
+expr #3457 -> bool
+expr #3459 -> Option<u32>
+expr #3460 -> never
+expr #3461 -> ()
+expr #3463 -> Cell#class3<u32>
+expr #3464 -> u32
+expr #3466 -> u32
+expr #3467 -> u32
+expr #3468 -> u32
+expr #3470 -> Option<u32>
+expr #3472 -> u32
+expr #3473 -> Option<u32>
+expr #3474 -> Option<u32>
+expr #3475 -> Option<u32>
+expr #3476 -> Option<u32>
+expr #3477 -> Option<u32>
+expr #3478 -> fn() -> Option<u32>
+expr #3479 -> Iter#class4<u32>
+expr #3491 -> bool
+expr #3493 -> u64
 expr #3495 -> u64
-expr #3497 -> bool
-expr #3499 -> bool
-expr #3502 -> u64
-expr #3504 -> u64
-expr #3505 -> bool
+expr #3496 -> u64
+expr #3497 -> u64
+expr #3498 -> Cell#class3<u64>
+expr #3502 -> bool
+expr #3503 -> Cell#class3<bool>
 expr #3507 -> Cell#class3<bool>
 expr #3508 -> bool
-expr #3509 -> bool
-expr #3511 -> Option<u64>
-expr #3512 -> never
-expr #3513 -> ()
-expr #3515 -> u64
-expr #3517 -> u64
+expr #3510 -> Option<u64>
+expr #3511 -> never
+expr #3512 -> ()
+expr #3515 -> Cell#class3<u64>
+expr #3516 -> u64
 expr #3518 -> bool
-expr #3520 -> Cell#class3<bool>
-expr #3521 -> bool
-expr #3522 -> bool
-expr #3524 -> Cell#class3<u64>
+expr #3520 -> bool
+expr #3523 -> u64
 expr #3525 -> u64
-expr #3527 -> u64
-expr #3528 -> u64
-expr #3529 -> u64
-expr #3530 -> ()
-expr #3531 -> ()
-expr #3533 -> Option<u64>
-expr #3535 -> u64
-expr #3536 -> Option<u64>
+expr #3526 -> bool
+expr #3528 -> Cell#class3<bool>
+expr #3529 -> bool
+expr #3530 -> bool
+expr #3532 -> Option<u64>
+expr #3533 -> never
+expr #3534 -> ()
+expr #3536 -> u64
 expr #3538 -> u64
-expr #3540 -> u64
-expr #3541 -> bool
-expr #3543 -> Cell#class3<bool>
-expr #3544 -> bool
-expr #3545 -> bool
-expr #3547 -> Option<u64>
-expr #3548 -> never
-expr #3549 -> ()
-expr #3551 -> Cell#class3<u64>
-expr #3552 -> u64
-expr #3554 -> u64
-expr #3555 -> u64
+expr #3539 -> bool
+expr #3541 -> Cell#class3<bool>
+expr #3542 -> bool
+expr #3543 -> bool
+expr #3545 -> Cell#class3<u64>
+expr #3546 -> u64
+expr #3548 -> u64
+expr #3549 -> u64
+expr #3550 -> u64
+expr #3551 -> ()
+expr #3552 -> ()
+expr #3554 -> Option<u64>
 expr #3556 -> u64
-expr #3558 -> Option<u64>
-expr #3560 -> u64
+expr #3557 -> Option<u64>
+expr #3559 -> u64
 expr #3561 -> u64
-expr #3562 -> u64
-expr #3563 -> Option<u64>
-expr #3564 -> Option<u64>
-expr #3565 -> Option<u64>
-expr #3567 -> bool
-expr #3569 -> u64
-expr #3571 -> u64
-expr #3572 -> bool
-expr #3574 -> Cell#class3<bool>
-expr #3575 -> bool
-expr #3576 -> bool
-expr #3578 -> Option<u64>
-expr #3579 -> never
-expr #3580 -> ()
+expr #3562 -> bool
+expr #3564 -> Cell#class3<bool>
+expr #3565 -> bool
+expr #3566 -> bool
+expr #3568 -> Option<u64>
+expr #3569 -> never
+expr #3570 -> ()
+expr #3572 -> Cell#class3<u64>
+expr #3573 -> u64
+expr #3575 -> u64
+expr #3576 -> u64
+expr #3577 -> u64
+expr #3579 -> Option<u64>
+expr #3581 -> u64
 expr #3582 -> u64
-expr #3584 -> u64
-expr #3585 -> bool
-expr #3587 -> Cell#class3<bool>
+expr #3583 -> u64
+expr #3584 -> Option<u64>
+expr #3585 -> Option<u64>
+expr #3586 -> Option<u64>
 expr #3588 -> bool
-expr #3589 -> bool
-expr #3591 -> Cell#class3<u64>
+expr #3590 -> u64
 expr #3592 -> u64
-expr #3594 -> u64
-expr #3595 -> u64
-expr #3596 -> u64
-expr #3597 -> ()
-expr #3598 -> ()
-expr #3600 -> Option<u64>
-expr #3602 -> u64
-expr #3603 -> Option<u64>
+expr #3593 -> bool
+expr #3595 -> Cell#class3<bool>
+expr #3596 -> bool
+expr #3597 -> bool
+expr #3599 -> Option<u64>
+expr #3600 -> never
+expr #3601 -> ()
+expr #3603 -> u64
 expr #3605 -> u64
-expr #3607 -> u64
-expr #3608 -> bool
-expr #3610 -> Cell#class3<bool>
-expr #3611 -> bool
-expr #3612 -> bool
-expr #3614 -> Option<u64>
-expr #3615 -> never
-expr #3616 -> ()
-expr #3618 -> Cell#class3<u64>
-expr #3619 -> u64
-expr #3621 -> u64
-expr #3622 -> u64
+expr #3606 -> bool
+expr #3608 -> Cell#class3<bool>
+expr #3609 -> bool
+expr #3610 -> bool
+expr #3612 -> Cell#class3<u64>
+expr #3613 -> u64
+expr #3615 -> u64
+expr #3616 -> u64
+expr #3617 -> u64
+expr #3618 -> ()
+expr #3619 -> ()
+expr #3621 -> Option<u64>
 expr #3623 -> u64
-expr #3625 -> Option<u64>
-expr #3627 -> u64
-expr #3628 -> Option<u64>
-expr #3629 -> Option<u64>
-expr #3630 -> Option<u64>
-expr #3631 -> Option<u64>
-expr #3632 -> Option<u64>
-expr #3633 -> fn() -> Option<u64>
-expr #3634 -> Iter#class4<u64>
-expr #3646 -> bool
-expr #3648 -> usize
-expr #3650 -> usize
-expr #3651 -> usize
-expr #3652 -> usize
-expr #3653 -> Cell#class3<usize>
-expr #3657 -> bool
-expr #3658 -> Cell#class3<bool>
-expr #3662 -> Cell#class3<bool>
-expr #3663 -> bool
-expr #3665 -> Option<usize>
-expr #3666 -> never
-expr #3667 -> ()
-expr #3670 -> Cell#class3<usize>
+expr #3624 -> Option<u64>
+expr #3626 -> u64
+expr #3628 -> u64
+expr #3629 -> bool
+expr #3631 -> Cell#class3<bool>
+expr #3632 -> bool
+expr #3633 -> bool
+expr #3635 -> Option<u64>
+expr #3636 -> never
+expr #3637 -> ()
+expr #3639 -> Cell#class3<u64>
+expr #3640 -> u64
+expr #3642 -> u64
+expr #3643 -> u64
+expr #3644 -> u64
+expr #3646 -> Option<u64>
+expr #3648 -> u64
+expr #3649 -> Option<u64>
+expr #3650 -> Option<u64>
+expr #3651 -> Option<u64>
+expr #3652 -> Option<u64>
+expr #3653 -> Option<u64>
+expr #3654 -> fn() -> Option<u64>
+expr #3655 -> Iter#class4<u64>
+expr #3667 -> bool
+expr #3669 -> usize
 expr #3671 -> usize
-expr #3673 -> bool
-expr #3675 -> bool
-expr #3678 -> usize
-expr #3680 -> usize
-expr #3681 -> bool
+expr #3672 -> usize
+expr #3673 -> usize
+expr #3674 -> Cell#class3<usize>
+expr #3678 -> bool
+expr #3679 -> Cell#class3<bool>
 expr #3683 -> Cell#class3<bool>
 expr #3684 -> bool
-expr #3685 -> bool
-expr #3687 -> Option<usize>
-expr #3688 -> never
-expr #3689 -> ()
-expr #3691 -> usize
-expr #3693 -> usize
+expr #3686 -> Option<usize>
+expr #3687 -> never
+expr #3688 -> ()
+expr #3691 -> Cell#class3<usize>
+expr #3692 -> usize
 expr #3694 -> bool
-expr #3696 -> Cell#class3<bool>
-expr #3697 -> bool
-expr #3698 -> bool
-expr #3700 -> Cell#class3<usize>
+expr #3696 -> bool
+expr #3699 -> usize
 expr #3701 -> usize
-expr #3703 -> usize
-expr #3704 -> usize
-expr #3705 -> usize
-expr #3706 -> ()
-expr #3707 -> ()
-expr #3709 -> Option<usize>
-expr #3711 -> usize
-expr #3712 -> Option<usize>
+expr #3702 -> bool
+expr #3704 -> Cell#class3<bool>
+expr #3705 -> bool
+expr #3706 -> bool
+expr #3708 -> Option<usize>
+expr #3709 -> never
+expr #3710 -> ()
+expr #3712 -> usize
 expr #3714 -> usize
-expr #3716 -> usize
-expr #3717 -> bool
-expr #3719 -> Cell#class3<bool>
-expr #3720 -> bool
-expr #3721 -> bool
-expr #3723 -> Option<usize>
-expr #3724 -> never
-expr #3725 -> ()
-expr #3727 -> Cell#class3<usize>
-expr #3728 -> usize
-expr #3730 -> usize
-expr #3731 -> usize
+expr #3715 -> bool
+expr #3717 -> Cell#class3<bool>
+expr #3718 -> bool
+expr #3719 -> bool
+expr #3721 -> Cell#class3<usize>
+expr #3722 -> usize
+expr #3724 -> usize
+expr #3725 -> usize
+expr #3726 -> usize
+expr #3727 -> ()
+expr #3728 -> ()
+expr #3730 -> Option<usize>
 expr #3732 -> usize
-expr #3734 -> Option<usize>
-expr #3736 -> usize
+expr #3733 -> Option<usize>
+expr #3735 -> usize
 expr #3737 -> usize
-expr #3738 -> usize
-expr #3739 -> Option<usize>
-expr #3740 -> Option<usize>
-expr #3741 -> Option<usize>
-expr #3743 -> bool
-expr #3745 -> usize
-expr #3747 -> usize
-expr #3748 -> bool
-expr #3750 -> Cell#class3<bool>
-expr #3751 -> bool
-expr #3752 -> bool
-expr #3754 -> Option<usize>
-expr #3755 -> never
-expr #3756 -> ()
+expr #3738 -> bool
+expr #3740 -> Cell#class3<bool>
+expr #3741 -> bool
+expr #3742 -> bool
+expr #3744 -> Option<usize>
+expr #3745 -> never
+expr #3746 -> ()
+expr #3748 -> Cell#class3<usize>
+expr #3749 -> usize
+expr #3751 -> usize
+expr #3752 -> usize
+expr #3753 -> usize
+expr #3755 -> Option<usize>
+expr #3757 -> usize
 expr #3758 -> usize
-expr #3760 -> usize
-expr #3761 -> bool
-expr #3763 -> Cell#class3<bool>
+expr #3759 -> usize
+expr #3760 -> Option<usize>
+expr #3761 -> Option<usize>
+expr #3762 -> Option<usize>
 expr #3764 -> bool
-expr #3765 -> bool
-expr #3767 -> Cell#class3<usize>
+expr #3766 -> usize
 expr #3768 -> usize
-expr #3770 -> usize
-expr #3771 -> usize
-expr #3772 -> usize
-expr #3773 -> ()
-expr #3774 -> ()
-expr #3776 -> Option<usize>
-expr #3778 -> usize
-expr #3779 -> Option<usize>
+expr #3769 -> bool
+expr #3771 -> Cell#class3<bool>
+expr #3772 -> bool
+expr #3773 -> bool
+expr #3775 -> Option<usize>
+expr #3776 -> never
+expr #3777 -> ()
+expr #3779 -> usize
 expr #3781 -> usize
-expr #3783 -> usize
-expr #3784 -> bool
-expr #3786 -> Cell#class3<bool>
-expr #3787 -> bool
-expr #3788 -> bool
-expr #3790 -> Option<usize>
-expr #3791 -> never
-expr #3792 -> ()
-expr #3794 -> Cell#class3<usize>
-expr #3795 -> usize
-expr #3797 -> usize
-expr #3798 -> usize
+expr #3782 -> bool
+expr #3784 -> Cell#class3<bool>
+expr #3785 -> bool
+expr #3786 -> bool
+expr #3788 -> Cell#class3<usize>
+expr #3789 -> usize
+expr #3791 -> usize
+expr #3792 -> usize
+expr #3793 -> usize
+expr #3794 -> ()
+expr #3795 -> ()
+expr #3797 -> Option<usize>
 expr #3799 -> usize
-expr #3801 -> Option<usize>
-expr #3803 -> usize
-expr #3804 -> Option<usize>
-expr #3805 -> Option<usize>
-expr #3806 -> Option<usize>
-expr #3807 -> Option<usize>
-expr #3808 -> Option<usize>
-expr #3809 -> fn() -> Option<usize>
-expr #3810 -> Iter#class4<usize>
+expr #3800 -> Option<usize>
+expr #3802 -> usize
+expr #3804 -> usize
+expr #3805 -> bool
+expr #3807 -> Cell#class3<bool>
+expr #3808 -> bool
+expr #3809 -> bool
+expr #3811 -> Option<usize>
+expr #3812 -> never
+expr #3813 -> ()
+expr #3815 -> Cell#class3<usize>
+expr #3816 -> usize
+expr #3818 -> usize
+expr #3819 -> usize
+expr #3820 -> usize
+expr #3822 -> Option<usize>
+expr #3824 -> usize
+expr #3825 -> Option<usize>
+expr #3826 -> Option<usize>
+expr #3827 -> Option<usize>
+expr #3828 -> Option<usize>
+expr #3829 -> Option<usize>
+expr #3830 -> fn() -> Option<usize>
+expr #3831 -> Iter#class4<usize>
 call_args #537 -> [T#class4.0]
 call_args #542 -> [U#fn29.0]
 call_args #572 -> [T#class4.0]
@@ -2715,42 +2729,43 @@ call_args #1399 -> [K#class5.0, V#class5.1]
 call_args #1414 -> [usize]
 call_args #1446 -> [T#fn55.0]
 call_args #1489 -> [T#fn57.0]
-call_args #1534 -> [T#fn59.0]
-call_args #1548 -> [T#fn60.0]
-call_args #1631 -> [T#fn61.0]
-call_args #1639 -> [T#fn61.0]
-call_args #1802 -> [char]
-call_args #1824 -> [u8]
-call_args #2069 -> [i8]
-call_args #2074 -> [bool]
-call_args #2226 -> [i8]
-call_args #2245 -> [i16]
-call_args #2250 -> [bool]
-call_args #2402 -> [i16]
-call_args #2421 -> [i32]
-call_args #2426 -> [bool]
-call_args #2578 -> [i32]
-call_args #2597 -> [i64]
-call_args #2602 -> [bool]
-call_args #2754 -> [i64]
-call_args #2773 -> [isize]
-call_args #2778 -> [bool]
-call_args #2930 -> [isize]
-call_args #2949 -> [u8]
-call_args #2954 -> [bool]
-call_args #3106 -> [u8]
-call_args #3125 -> [u16]
-call_args #3130 -> [bool]
-call_args #3282 -> [u16]
-call_args #3301 -> [u32]
-call_args #3306 -> [bool]
-call_args #3458 -> [u32]
-call_args #3477 -> [u64]
-call_args #3482 -> [bool]
-call_args #3634 -> [u64]
-call_args #3653 -> [usize]
-call_args #3658 -> [bool]
-call_args #3810 -> [usize]
+call_args #1511 -> [T#fn58.0]
+call_args #1555 -> [T#fn60.0]
+call_args #1569 -> [T#fn61.0]
+call_args #1652 -> [T#fn62.0]
+call_args #1660 -> [T#fn62.0]
+call_args #1823 -> [char]
+call_args #1845 -> [u8]
+call_args #2090 -> [i8]
+call_args #2095 -> [bool]
+call_args #2247 -> [i8]
+call_args #2266 -> [i16]
+call_args #2271 -> [bool]
+call_args #2423 -> [i16]
+call_args #2442 -> [i32]
+call_args #2447 -> [bool]
+call_args #2599 -> [i32]
+call_args #2618 -> [i64]
+call_args #2623 -> [bool]
+call_args #2775 -> [i64]
+call_args #2794 -> [isize]
+call_args #2799 -> [bool]
+call_args #2951 -> [isize]
+call_args #2970 -> [u8]
+call_args #2975 -> [bool]
+call_args #3127 -> [u8]
+call_args #3146 -> [u16]
+call_args #3151 -> [bool]
+call_args #3303 -> [u16]
+call_args #3322 -> [u32]
+call_args #3327 -> [bool]
+call_args #3479 -> [u32]
+call_args #3498 -> [u64]
+call_args #3503 -> [bool]
+call_args #3655 -> [u64]
+call_args #3674 -> [usize]
+call_args #3679 -> [bool]
+call_args #3831 -> [usize]
 builtin_method #95 -> runtime sag_string_is_empty
 builtin_method #141 -> runtime SAG_PTR_IS_NULL
 builtin_method #352 -> runtime SAG_ARRAY_MUT_PTR
@@ -2780,50 +2795,51 @@ builtin_method #1380 -> list len
 builtin_method #1422 -> list len
 builtin_method #1457 -> list len
 builtin_method #1490 -> is_some
-builtin_method #1498 -> list len
-builtin_method #1504 -> list pop
-builtin_method #1508 -> list len
-builtin_method #1516 -> list push
-builtin_method #1552 -> list len
-builtin_method #1576 -> list len
-builtin_method #1612 -> list push
-builtin_method #1620 -> list push
-builtin_method #1655 -> list len
-builtin_method #1662 -> list len
-builtin_method #1688 -> list push
-builtin_method #1699 -> list push
-builtin_method #1711 -> list len
+builtin_method #1505 -> list push
+builtin_method #1519 -> list len
+builtin_method #1525 -> list pop
+builtin_method #1529 -> list len
+builtin_method #1537 -> list push
+builtin_method #1573 -> list len
+builtin_method #1597 -> list len
+builtin_method #1633 -> list push
+builtin_method #1641 -> list push
+builtin_method #1676 -> list len
+builtin_method #1683 -> list len
+builtin_method #1709 -> list push
 builtin_method #1720 -> list push
-builtin_method #1730 -> list len
-builtin_method #1739 -> list push
-builtin_method #1757 -> list len
-builtin_method #1767 -> runtime sag_builder_append
-builtin_method #1776 -> runtime sag_builder_append
-builtin_method #1780 -> runtime sag_builder_to_string
-builtin_method #1791 -> chars
-builtin_method #1796 -> list push
-builtin_method #1813 -> bytes
-builtin_method #1818 -> list push
-builtin_method #1836 -> runtime sag_string_is_empty
-builtin_method #1839 -> chars
-builtin_method #1845 -> list push
-builtin_method #1858 -> find
-builtin_method #1870 -> runtime sag_string_substring_at located
-builtin_method #1871 -> list push
-builtin_method #1880 -> runtime sag_string_len
-builtin_method #1884 -> runtime sag_string_len
-builtin_method #1885 -> runtime sag_string_substring_at located
-builtin_method #1893 -> list push
-builtin_method #1910 -> runtime sag_string_is_empty
-builtin_method #1925 -> list len
-builtin_method #1939 -> list len
-builtin_method #1943 -> runtime sag_string_is_empty
-builtin_method #1950 -> runtime sag_string_ends_with
-builtin_method #1958 -> runtime sag_string_len
-builtin_method #1961 -> runtime sag_string_substring_at located
-builtin_method #1962 -> list push
-builtin_method #1967 -> list push
-builtin_method #2007 -> list push
+builtin_method #1732 -> list len
+builtin_method #1741 -> list push
+builtin_method #1751 -> list len
+builtin_method #1760 -> list push
+builtin_method #1778 -> list len
+builtin_method #1788 -> runtime sag_builder_append
+builtin_method #1797 -> runtime sag_builder_append
+builtin_method #1801 -> runtime sag_builder_to_string
+builtin_method #1812 -> chars
+builtin_method #1817 -> list push
+builtin_method #1834 -> bytes
+builtin_method #1839 -> list push
+builtin_method #1857 -> runtime sag_string_is_empty
+builtin_method #1860 -> chars
+builtin_method #1866 -> list push
+builtin_method #1879 -> find
+builtin_method #1891 -> runtime sag_string_substring_at located
+builtin_method #1892 -> list push
+builtin_method #1901 -> runtime sag_string_len
+builtin_method #1905 -> runtime sag_string_len
+builtin_method #1906 -> runtime sag_string_substring_at located
+builtin_method #1914 -> list push
+builtin_method #1931 -> runtime sag_string_is_empty
+builtin_method #1946 -> list len
+builtin_method #1960 -> list len
+builtin_method #1964 -> runtime sag_string_is_empty
+builtin_method #1971 -> runtime sag_string_ends_with
+builtin_method #1979 -> runtime sag_string_len
+builtin_method #1982 -> runtime sag_string_substring_at located
+builtin_method #1983 -> list push
+builtin_method #1988 -> list push
+builtin_method #2028 -> list push
 method_call #537 -> fn 28
 method_call #603 -> fn 28
 method_call #635 -> fn 28
@@ -2846,7 +2862,7 @@ method_call #1238 -> fn 23
 method_call #1396 -> fn 25
 method_call #1399 -> fn 53
 method_call #1466 -> fn 23
-method_call #1532 -> fn 24
+method_call #1553 -> fn 24
 field_call #524
 --- stderr
 error[E0317]: the struct `Node` contains itself, so its size would be infinite

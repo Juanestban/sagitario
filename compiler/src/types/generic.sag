@@ -258,6 +258,11 @@ pub class Unknowns {
           self.unify(pointee, actual_pointee);
         }
       }
+      TypeKind::Slice { elem, .. } => {
+        if let TypeKind::Slice { elem: actual_elem, .. } = actual.kind {
+          self.unify(elem, actual_elem);
+        }
+      }
       TypeKind::Result { value, error } => {
         if let TypeKind::Result { value: actual_value, error: actual_error } = actual.kind {
           self.unify(value, actual_value);
@@ -340,7 +345,7 @@ fn mentions_unknown(ty: Type, unknowns: Unknowns) -> bool {
     TypeKind::Array { elem, .. } => mentions_unknown(elem, unknowns),
     TypeKind::List(elem) => mentions_unknown(elem, unknowns),
     TypeKind::Option(elem) => mentions_unknown(elem, unknowns),
-    TypeKind::Ptr { pointee, .. } | TypeKind::Ref { pointee, .. } => mentions_unknown(pointee, unknowns),
+    TypeKind::Ptr { pointee, .. } | TypeKind::Ref { pointee, .. } | TypeKind::Slice { elem: pointee, .. } => mentions_unknown(pointee, unknowns),
     TypeKind::Result { value, error } => mentions_unknown(value, unknowns) || mentions_unknown(error, unknowns),
     TypeKind::Function { params, ret } => any_unknown(params, unknowns) || mentions_unknown(ret, unknowns),
     TypeKind::CFn { params, ret, .. } => any_unknown(params, unknowns) || mentions_unknown(ret, unknowns),
@@ -431,6 +436,11 @@ pub fn generic_arg(cx: Checker, arg: Expr, param: Type, fixed: Subst, unknowns: 
     }
   }
 
+  // `&values` lends a slice where one is expected, whatever its elements.
+  if let TypeKind::Slice { .. } = known.kind {
+    hint = Some(known);
+  }
+
   const actual = exprs::expr(cx, arg, hint);
 
   unknowns.unify(pattern, actual);
@@ -439,6 +449,19 @@ pub fn generic_arg(cx: Checker, arg: Expr, param: Type, fixed: Subst, unknowns: 
 
   if !mentions_unknown(expected, unknowns) && !cx.fits(actual, expected) {
     exprs::mismatch(cx, arg.span, expected, actual);
+  }
+}
+
+/// Whether `ty` mentions a type parameter.
+pub fn mentions_params(ty: Type) -> bool {
+  match ty.kind {
+    TypeKind::Param(_) => true,
+    TypeKind::Struct(named) | TypeKind::Enum(named) | TypeKind::Class(named) | TypeKind::Interface(named) => named.args.iter().any((arg) => mentions_params(arg)),
+    TypeKind::Array { elem, .. } | TypeKind::List(elem) | TypeKind::Option(elem) => mentions_params(elem),
+    TypeKind::Ptr { pointee, .. } | TypeKind::Ref { pointee, .. } | TypeKind::Slice { elem: pointee, .. } => mentions_params(pointee),
+    TypeKind::Result { value, error } => mentions_params(value) || mentions_params(error),
+    TypeKind::Function { params, ret } | TypeKind::CFn { params, ret, .. } => params.iter().any((param) => mentions_params(param)) || mentions_params(ret),
+    _ => false,
   }
 }
 

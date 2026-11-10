@@ -457,6 +457,18 @@ fn list_contains<T: Eq>(list: List<T>, value: T) -> bool {
   list_index_of(list, value).is_some()
 }
 
+/// `slice.iter()`: an iterator over a copy of the elements, which may outlive the call that lent
+/// the slice (docs/adr/0079-references-and-borrowing.md, Q494).
+fn slice_iter<T>(slice: &[T]) -> Iter<T> {
+  const copy = new List<T>();
+
+  for value in slice {
+    copy.push(value);
+  }
+
+  list_iter(copy)
+}
+
 /// Rust's `Vec::resize`: removes the elements past `len`, or adds copies of `value` up to it.
 fn list_resize<T>(list: List<T>, len: usize, value: T) {
   while list.len() > len {

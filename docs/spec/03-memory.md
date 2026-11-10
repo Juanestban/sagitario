@@ -218,6 +218,8 @@ println(`${length(&position)}`);
   and never frees memory in use.
 - **Escaping.** A lambda cannot capture a reference parameter, and an `async fn` cannot take one,
   since both outlive the call (`E0339`); copy the value first (`const copy = *v;`).
+- [Slices](02-types.md#slices), `&[T]` and `&mut [T]`, follow the same rules: views of a run of
+  elements of an array, a list or a slice.
 - In C, a `&T` is a `const T *` and a `&mut T` a `T *`, never null: lending costs nothing at run
-  time, except keeping a lent class instance alive. References meet C as raw pointers
+  time, except keeping a lent class instance alive, and counting the slices of a list. References meet C as raw pointers
   ([FFI](10-ffi.md#raw-pointers)).

@@ -1,0 +1,20 @@
+// What a slice allows (docs/adr/0079-references-and-borrowing.md, Q494).
+fn read(values: &[i32]) -> i32 {
+  values[0] = 1; //~ ERROR E0312
+  values.as_mut_ptr(); //~ ERROR E0313
+  values.push(1); //~ ERROR E0316
+  total(&mut values[0..1]); //~ ERROR E0312
+  0
+}
+
+fn total(_values: &mut [i32]) -> i32 {
+  0
+}
+
+fn main() {
+  const fixed = [1, 2, 3];
+
+  total(&mut fixed); //~ ERROR E0312
+  read(fixed[0..2]); //~ ERROR E0310
+  read(&5[0..1]); //~ ERROR E0310
+}

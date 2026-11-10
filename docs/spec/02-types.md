@@ -286,6 +286,55 @@ Rationale: [ADR-0034](../adr/0034-collections-and-iterators.md).
   elements added or removed by the body are seen, and the loop never reads out of bounds.
 - Lists are not compared with `==` and cannot be interpolated.
 
+### Slices
+
+A slice `&[T]` or `&mut [T]` ([ADR-0079](../adr/0079-references-and-borrowing.md), increment 2) is a
+view of a run of elements of an array, a list or another slice, without copying them. Like a
+[reference](03-memory.md#references), it is only the type of a parameter (`[T]` alone is an error,
+`E0339`), and it is passed to one, never stored or returned.
+
+```sag
+fn sum(values: &[i32]) -> i32 {
+  var total = 0;
+  for value in values { total += value; }
+  total
+}
+
+fn double(values: &mut [i32]) {
+  for i in 0..values.len() { values[i] *= 2; }
+}
+
+const list = List::from([1, 2, 3, 4]);
+sum(&list);           // the whole list
+sum(&list[1..3]);     // a range: elements 1 and 2
+double(&mut list);
+```
+
+- **Making one.** Where a slice is expected, `&array`, `&list` and `&slice` lend all the elements,
+  and `&items[a..b]` or `&items[a..=b]` a range of them (`&mut` too). `&[1, 2, 3]` lends a
+  temporary array. Inside a function, `slice[a..b]` is a part of a slice parameter, passed on as a
+  slice of the same kind. A range of an array or a list without `&` is an error (`E0310`). A
+  range out of bounds panics with Rust's messages (`range end index 5 out of range for slice of
+  length 3`, `slice index starts at 3 but ends at 2`).
+- **What it allows.** `len()`, `is_empty()`, `s[i]` checked as for arrays (`index out of
+  bounds`), `for value in s`, `iter()` (an `Iter<T>` over a copy of the elements, which may
+  outlive the call), `as_ptr()` and, through a `&mut [T]`, `as_mut_ptr()` for C. Through a
+  `&mut [T]`, `s[i] = value`, `s[i].field = value`, methods that modify `self` on `s[i]`, and
+  `&mut s[i]` change the viewed elements; through a `&[T]` they are errors (`E0312`, `E0313`).
+- **Mutability.** `&mut array` needs an array that can be modified (a `var` binding, a `&mut`
+  parameter, a `var` field). A list is a reference, so `&mut list` works through any binding, as
+  `list[i] = value` does. `&mut slice` needs a `&mut [T]` slice.
+- **Borrowed lists** (Q495). A list lent as a slice keeps a count of its slices: while one is
+  lent, `push`, `insert`, `pop`, `remove`, `clear`, `resize` and any other change of its length
+  panic (`cannot change the length of a list while it is borrowed`), as Rust's `RefCell` does,
+  since another reference to the list could otherwise move the elements the slice views.
+  Changing elements in place stays allowed. The slice also keeps the list alive until the call
+  returns.
+- The borrow checker treats a slice as a reference ([exclusivity](03-memory.md#references)): two
+  ranges of the same array or list binding are never known to be disjoint, so
+  `f(&mut a[0..2], &a[2..4])` is an error (`E0341`).
+- In C, a slice is a pointer, a length and the list it views, if any (`sag_slice`).
+
 ### Maps (F2)
 
 ```sag
