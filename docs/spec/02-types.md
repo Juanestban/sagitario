@@ -76,7 +76,8 @@ Division by zero, out-of-bounds indexing and every other panic behave the same i
 ## Methods of numbers (G1)
 
 Rationale: [ADR-0076](../adr/0076-std-math-and-methods-of-numbers.md),
-[ADR-0077](../adr/0077-std-math-powers-and-logarithms.md). Besides `equals`,
+[ADR-0077](../adr/0077-std-math-powers-and-logarithms.md),
+[ADR-0080](../adr/0080-std-math-trigonometry.md). Besides `equals`,
 `compare` and `hash` (integers) and `total_compare` (floats), numbers have these methods; their
 arguments have the type of the receiver, unless written otherwise.
 
@@ -99,13 +100,19 @@ arguments have the type of the receiver, unless written otherwise.
 | `ln()`, `log2()`, `log10()`, `log(base)` | | yes | the logarithm (NaN for a negative number, negative infinity for zero); `log(base)` is `ln(x) / ln(base)` |
 | `hypot(y)` | | yes | √(x² + y²), without overflowing in between |
 | `mul_add(a, b)` | | yes | `x * a + b`, rounded once |
+| `sin()`, `cos()`, `tan()` | | yes | in radians; NaN for an infinity |
+| `asin()`, `acos()`, `atan()` | | yes | the inverse, in `[-Ï€/2, Ï€/2]`, `[0, Ï€]` and `[-Ï€/2, Ï€/2]`; NaN outside `[-1, 1]` for `asin` and `acos` |
+| `atan2(x)` | | yes | the angle of the point `(x, y)` with `y` the receiver, in `[-Ï€, Ï€]`, following the signs of zeros (`0.0.atan2(-0.0)` is Ï€) |
+| `sinh()`, `cosh()`, `tanh()` | | yes | the hyperbolic functions |
+| `to_degrees()`, `to_radians()` | | yes | the angle in degrees or in radians |
 
 - `abs()` and `pow()` overflow as arithmetic does: a panic in debug builds, wrapping in release
   builds (the `abs()` of the smallest value of a type is itself). On unsigned integers `abs()`
   and `signum()` do not exist.
 - `sqrt` and `mul_add` are exact to the last bit. The other functions of floats from `cbrt` on
   are those of the system's C library, whose results may differ between systems in the last
-  digit; `powi` computes in `f64`.
+  digit; `powi` computes in `f64`. `math::PI.sin()` is not exactly zero, since `PI` is not exactly
+  Ï€. `to_degrees` and `to_radians` multiply by `180 / Ï€` or `Ï€ / 180`.
 - Methods of a literal need no parentheses unless it is negative: `2.5.floor()`, `(-2.5).abs()`
   (`-2.5.abs()` is `-(2.5.abs())`).
 - [`std::math`](11-standard-library.md#stdmath) has the constants (`math::PI`) and the methods of

@@ -6,7 +6,8 @@ Rationale: [ADR-0037](../adr/0037-standard-library-env-io-process.md),
 [ADR-0047](../adr/0047-channels-and-thread-utilities.md),
 [ADR-0076](../adr/0076-std-math-and-methods-of-numbers.md),
 [ADR-0077](../adr/0077-std-math-powers-and-logarithms.md),
-[ADR-0078](../adr/0078-ffi-without-c-shims.md).
+[ADR-0078](../adr/0078-ffi-without-c-shims.md),
+[ADR-0080](../adr/0080-std-math-trigonometry.md).
 
 The standard library is the set of modules under the path root `std`. A program imports them
 with `use` like its own modules (`use std::io;`, `use std::env::args;`) or names them in full
@@ -134,7 +135,7 @@ current directory unless they have a root. The functions with a `Result` fail wi
 - Names that are not valid UTF-8 are listed by `read_dir` with each ill-formed sequence replaced
   by U+FFFD. On Windows, paths are passed to the system as UTF-16, so any Unicode name works.
 - A path containing a NUL character is an error of kind `InvalidInput`.
-- Not yet: writing bytes (with slices, [ADR-0079](../adr/0079-references-and-borrowing.md)), file metadata (size, times, permissions), removing a
+- Not yet: file metadata (size, times, permissions), removing a
   directory tree, and changing the current directory (F4, since it is process-wide state).
 
 ## `std::math`
@@ -159,12 +160,12 @@ fn main() {
 - For `f32`, convert them: `math::PI as f32`.
 - The functions `abs`, `signum`, `copysign`, `min`, `max`, `clamp`, `lerp`, `floor`, `ceil`,
   `round`, `trunc`, `fract`, `is_nan`, `is_infinite`, `is_finite`, `sqrt`, `cbrt`, `powi`,
-  `powf`, `exp`, `exp2`, `ln`, `log2`, `log10`, `log`, `hypot` and `mul_add` take `f64`s (`powi`
-  an `i32` exponent) and are the
+  `powf`, `exp`, `exp2`, `ln`, `log2`, `log10`, `log`, `hypot`, `mul_add`, `sin`, `cos`, `tan`,
+  `asin`, `acos`, `atan`, `sinh`, `cosh`, `tanh`, `to_degrees` and `to_radians` take `f64`s
+  (`powi` an `i32` exponent) and are the
   [methods of floats](02-types.md#methods-of-numbers-g1) of the same name: `math::lerp(a, b, t)`
-  is `a.lerp(b, t)`. A panic in `math::clamp` reports its place in the standard library.
-- Not yet: trigonometry (`sin`, `cos`, `atan2`...), in the next increment of G1
-  ([ADR-0076](../adr/0076-std-math-and-methods-of-numbers.md), Q453).
+  is `a.lerp(b, t)`. `math::atan2(y, x)` is `y.atan2(x)`, in C's order. A panic in `math::clamp`
+  reports its place in the standard library.
 
 ## `std::mem`
 

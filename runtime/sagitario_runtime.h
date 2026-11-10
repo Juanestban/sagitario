@@ -442,7 +442,7 @@ SAG_INT_METHODS(usize, size_t)
 
 /* F is the suffix of the <math.h> functions of T: `f` for float, nothing for double. `min` and
  * `max` ignore a NaN (fmin, fmax); `round` rounds halves away from zero; `powi` computes in double,
- * where every `i32` exponent is exact; `mul_add` rounds once (fma). */
+ * where every `i32` exponent is exact; `mul_add` rounds once (fma); the receiver of `atan2` is `y`. */
 #define SAG_FLOAT_METHODS(NAME, T, F)                                                                     \
   static inline T sag_##NAME##_abs(T x) {                                                                 \
     return fabs##F(x);                                                                                    \
@@ -527,10 +527,58 @@ SAG_INT_METHODS(usize, size_t)
   }                                                                                                       \
   static inline T sag_##NAME##_mul_add(T x, T a, T b) {                                                   \
     return fma##F(x, a, b);                                                                               \
+  }                                                                                                       \
+  static inline T sag_##NAME##_sin(T x) {                                                                 \
+    return sin##F(x);                                                                                     \
+  }                                                                                                       \
+  static inline T sag_##NAME##_cos(T x) {                                                                 \
+    return cos##F(x);                                                                                     \
+  }                                                                                                       \
+  static inline T sag_##NAME##_tan(T x) {                                                                 \
+    return tan##F(x);                                                                                     \
+  }                                                                                                       \
+  static inline T sag_##NAME##_asin(T x) {                                                                \
+    return asin##F(x);                                                                                    \
+  }                                                                                                       \
+  static inline T sag_##NAME##_acos(T x) {                                                                \
+    return acos##F(x);                                                                                    \
+  }                                                                                                       \
+  static inline T sag_##NAME##_atan(T x) {                                                                \
+    return atan##F(x);                                                                                    \
+  }                                                                                                       \
+  static inline T sag_##NAME##_sinh(T x) {                                                                \
+    return sinh##F(x);                                                                                    \
+  }                                                                                                       \
+  static inline T sag_##NAME##_cosh(T x) {                                                                \
+    return cosh##F(x);                                                                                    \
+  }                                                                                                       \
+  static inline T sag_##NAME##_tanh(T x) {                                                                \
+    return tanh##F(x);                                                                                    \
+  }                                                                                                       \
+  static inline T sag_##NAME##_atan2(T y, T x) {                                                          \
+    return atan2##F(y, x);                                                                                \
   }
 
 SAG_FLOAT_METHODS(f32, float, f)
 SAG_FLOAT_METHODS(f64, double, )
+
+/* Degrees and radians multiply by a constant, as Rust does (docs/adr/0080-std-math-trigonometry.md,
+ * Q503): for f32, the float nearest to 180/pi, and (float)pi / 180. */
+static inline float sag_f32_to_degrees(float x) {
+  return x * 57.2957795130823208767981548141051703f;
+}
+
+static inline float sag_f32_to_radians(float x) {
+  return x * (3.14159265358979323846264338327950288f / 180.0f);
+}
+
+static inline double sag_f64_to_degrees(double x) {
+  return x * (180.0 / 3.14159265358979323846264338327950288);
+}
+
+static inline double sag_f64_to_radians(double x) {
+  return x * (3.14159265358979323846264338327950288 / 180.0);
+}
 
 /* ---- Conversions (`as`) -----------------------------------------------------------------
  * Float to integer saturates and maps NaN to 0; LIMIT is 2^(bits-1) for signed types and 2^bits
