@@ -1,13 +1,15 @@
 //! Semantic tokens (docs/adr/0058-language-server.md): what the names of paths are, which the
 //! grammar cannot tell from their form, as rust-analyzer does: the modules, functions and types
-//! of `use pkg::loader::push_path` and of `diagnostics::render(...)`.
+//! of `use pkg::loader::push_path` and of `diagnostics::render(...)`. Inside the braces of a
+//! format string or a template, as rust-analyzer does in Rust's format strings, also the
+//! variables, parameters, fields and methods, which would otherwise take the color of the string.
 
 use pkg::ast::{Block, Expr, ExprKind, FnDecl, Ident, Item, Module, Path, Pattern, PatternKind, Stmt, TemplatePart, TypeExpr, TypeExprKind, UseTree, UseTreeKind};
 use pkg::lsp::analysis::Analysis;
 use pkg::lsp::json;
 use pkg::lsp::json::{Json, member};
 use pkg::lsp::query;
-use pkg::resolve::{ItemRef, Res, Resolution, StdItem, TypeItem, TypeRes};
+use pkg::resolve::{ItemRef, LocalKind, Res, Resolution, StdItem, TypeItem, TypeRes};
 use pkg::span::Span;
 
 /// The token types, in the order of the legend `initialize` sends.
@@ -19,9 +21,13 @@ const INTERFACE: u32 = 4;
 const STRUCT: u32 = 5;
 const FUNCTION: u32 = 6;
 const ENUM_MEMBER: u32 = 7;
+const VARIABLE: u32 = 8;
+const PARAMETER: u32 = 9;
+const PROPERTY: u32 = 10;
+const METHOD: u32 = 11;
 
 pub fn legend() -> Json {
-  const names = List::from(["namespace", "type", "class", "enum", "interface", "struct", "function", "enumMember"]);
+  const names = List::from(["namespace", "type", "class", "enum", "interface", "struct", "function", "enumMember", "variable", "parameter", "property", "method"]);
   const types: List<Json> = new List();
 
   for name in names {
@@ -68,12 +74,59 @@ class Collector {
   prv const resolution: Resolution;
   prv const module_index: usize;
   pub const tokens: List<Token>;
+  /// The function being walked, whose locals the names refer to.
+  prv var current: Option<u32>;
+  /// How many interpolations of format strings or templates enclose the walk.
+  prv var interpolations: u32;
 
   pub fn new(self, analysis: Analysis, resolution: Resolution, module_index: usize) {
     self.analysis = analysis;
     self.resolution = resolution;
     self.module_index = module_index;
     self.tokens = new List();
+    self.current = None;
+    self.interpolations = 0;
+  }
+
+  /// A single name inside an interpolation: a local binding, as a variable or a parameter.
+  prv fn interpolated_name(self, path: Path, id: u32) {
+    if self.interpolations == 0 || path.segments.len() != 1 {
+      return;
+    }
+
+    const name = match path.segments.first() {
+      Some(found) => found,
+      None => return,
+    };
+
+    match self.resolution.paths.get(id) {
+      Some(Res::Local(local)) => {
+        const function = match self.current {
+          Some(found) => found,
+          None => return,
+        };
+        const kind = match self.resolution.function_locals(function).get(local as usize) {
+          Some(info) => info.kind,
+          None => return,
+        };
+
+        match kind {
+          // `self` keeps the color of its keyword.
+          LocalKind::SelfParam => {}
+          LocalKind::Param => self.add(name, Some(PARAMETER)),
+          _ => self.add(name, Some(VARIABLE)),
+        }
+      }
+      Some(Res::Fn(_)) | Some(Res::Extern(_)) => self.add(name, Some(FUNCTION)),
+      _ => {}
+    }
+  }
+
+  /// A field or method name inside an interpolation.
+  prv fn interpolated_member(self, name: Ident, kind: u32) {
+    if self.interpolations > 0 {
+      self.add(name, Some(kind));
+    }
   }
 
   prv fn add(self, ident: Ident, kind: Option<u32>) {
@@ -306,7 +359,11 @@ class Collector {
       self.type_expr(ret);
     }
 
+    const outer = self.current;
+
+    self.current = self.analysis.function_of(decl.id);
     self.block(decl.body);
+    self.current = outer;
   }
 
   prv fn block(self, block: Block) {
@@ -368,23 +425,34 @@ class Collector {
 
   prv fn expr(self, expr: Expr) {
     match expr.kind {
-      ExprKind::Path(path) => self.value_path(path, expr.id),
+      ExprKind::Path(path) => {
+        self.value_path(path, expr.id);
+        self.interpolated_name(path, expr.id);
+      }
       ExprKind::Template(parts) => {
+        self.interpolations += 1;
+
         for part in parts {
           if let TemplatePart::Expr(inner) = part {
             self.expr(inner);
           }
         }
+
+        self.interpolations -= 1;
       }
       ExprKind::Call { callee, args } => {
         self.expr(callee);
         self.exprs(args);
       }
-      ExprKind::MethodCall { receiver, args, .. } => {
+      ExprKind::MethodCall { receiver, method, args } => {
         self.expr(receiver);
+        self.interpolated_member(method, METHOD);
         self.exprs(args);
       }
-      ExprKind::Field { base, .. } => self.expr(base),
+      ExprKind::Field { base, name } => {
+        self.expr(base);
+        self.interpolated_member(name, PROPERTY);
+      }
       ExprKind::Index { base, index } => {
         self.expr(base);
         self.expr(index);

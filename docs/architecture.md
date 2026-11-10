@@ -350,7 +350,9 @@ keeps the last analysis that reached the type checker for hover, definitions and
 while the code being typed does not compile. `lsp/positions.sag` converts LSP's UTF-16 columns
 to byte offsets, `lsp/query.sag` finds the node under the cursor, `lsp/completion.sag` reads the
 text before the cursor, `lsp/tokens.sag` gives the names of paths their semantic tokens
-([ADR-0059](adr/0059-language-server-paths-and-semantic-tokens.md)), and `lsp/json.sag` parses
+([ADR-0059](adr/0059-language-server-paths-and-semantic-tokens.md)), and inside the
+interpolations of format strings and templates also the bindings, fields and methods, which the
+grammar would leave in the color of the string, and `lsp/json.sag` parses
 and writes JSON. The VS Code extension starts
 it (`editors/vscode/extension.js`).
 
