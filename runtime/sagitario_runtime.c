@@ -1838,7 +1838,8 @@ sag_string sag_fs_read_bytes(sag_string path, int32_t *status) {
   return sag_sb_finish(&sb);
 }
 
-int32_t sag_fs_write(sag_string path, sag_string text, bool append) {
+/* Writes `len` bytes at `data` (NULL when `len` is 0) to the file at `path`. */
+static int32_t sag_fs_write_data(sag_string path, const unsigned char *data, size_t len, bool append) {
 #ifdef _WIN32
   wchar_t *wide = sag_wide(path);
   if (wide == NULL) {
@@ -1852,11 +1853,11 @@ int32_t sag_fs_write(sag_string path, sag_string text, bool append) {
   }
   int32_t code = 0;
   size_t done = 0;
-  while (done < text.len) {
-    size_t left = text.len - done;
+  while (done < len) {
+    size_t left = len - done;
     unsigned long size = left > 0x40000000u ? 0x40000000ul : (unsigned long)left;
     unsigned long written;
-    if (!WriteFile(file, text.ptr + done, size, &written, NULL)) {
+    if (!WriteFile(file, data + done, size, &written, NULL)) {
       code = sag_win_last_errno();
       break;
     }
@@ -1878,7 +1879,7 @@ int32_t sag_fs_write(sag_string path, sag_string text, bool append) {
     return sag_fs_file_error(path, sag_io_errno());
   }
   int32_t code = 0;
-  if (text.len > 0 && fwrite(text.ptr, 1, text.len, file) != text.len) {
+  if (len > 0 && fwrite(data, 1, len, file) != len) {
     code = sag_io_errno();
   }
   if (fclose(file) != 0 && code == 0) {
@@ -1886,6 +1887,14 @@ int32_t sag_fs_write(sag_string path, sag_string text, bool append) {
   }
   return code;
 #endif
+}
+
+int32_t sag_fs_write(sag_string path, sag_string text, bool append) {
+  return sag_fs_write_data(path, (const unsigned char *)text.ptr, text.len, append);
+}
+
+int32_t sag_fs_write_bytes(sag_string path, const uint8_t *data, size_t len) {
+  return sag_fs_write_data(path, data, len, false);
 }
 
 int32_t sag_fs_create_dir(sag_string path) {

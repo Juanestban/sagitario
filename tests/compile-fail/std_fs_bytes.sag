@@ -1,0 +1,11 @@
+// `fs::write_bytes` takes the bytes as a `&[u8]` slice: a list or an array is lent with `&`
+// (docs/adr/0079-references-and-borrowing.md, Q497).
+use std::fs;
+
+fn main() {
+  const list = List::from([1u8, 2]);
+  const wide = [1i32, 2];
+
+  const _list = fs::write_bytes("a.bin", list); //~ ERROR E0300
+  const _wide = fs::write_bytes("a.bin", &wide); //~ ERROR E0300
+}

@@ -761,6 +761,8 @@ void *sag_library_open(sag_string path);
 sag_string sag_library_error(void);
 sag_symbol sag_library_symbol(void *library, sag_string name);
 int32_t sag_fs_write(sag_string path, sag_string text, bool append);
+/* `len` bytes at `data`, which may be NULL when `len` is 0. */
+int32_t sag_fs_write_bytes(sag_string path, const uint8_t *data, size_t len);
 int32_t sag_fs_create_dir(sag_string path);
 int32_t sag_fs_remove_dir(sag_string path);
 int32_t sag_fs_remove_file(sag_string path);

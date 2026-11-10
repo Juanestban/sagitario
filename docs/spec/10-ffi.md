@@ -138,7 +138,8 @@ characters as `u32`.
   as modifying its binding. An element of a list is not a place for them, since the elements move
   when the list grows: use `list.as_mut_ptr()`. Taking an address is safe; using it needs `unsafe`.
 - C fills buffers of lists: `count` with `&raw mut count`, then `list.resize(count, value)` and
-  `list.as_mut_ptr()`. `fs::read` gives the bytes of a file, such as SPIR-V code, as a `List<u8>`.
+  `list.as_mut_ptr()`. `fs::read` gives the bytes of a file, such as SPIR-V code, as a `List<u8>`, and
+  `fs::write_bytes` writes a slice of them.
 - [References](03-memory.md#references) meet C as pointers, as in Rust
   ([ADR-0079](../adr/0079-references-and-borrowing.md), Q496): a `&T` can be passed where a
   `*const T` is expected and a `&mut T` where a `*mut T` is (`frexp(x, &mut exponent)`), and

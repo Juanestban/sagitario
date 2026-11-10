@@ -112,6 +112,7 @@ current directory unless they have a root. The functions with a `Result` fail wi
 | `read_to_string(path) -> Result<String, io::Error>` | The whole file |
 | `read(path) -> Result<List<u8>, io::Error>` | The bytes of the whole file, whatever they are (an image, SPIR-V) |
 | `write(path, text)` | Creates the file, or replaces its contents |
+| `write_bytes(path, bytes: &[u8])` | The same with bytes, from any [slice](02-types.md#slices): `fs::write_bytes(path, &list)` |
 | `append(path, text)` | Adds `text` at the end of the file, creating it if needed |
 | `exists(path) -> bool` | Whether `path` names a file, a directory or anything else |
 | `is_file(path) -> bool`, `is_dir(path) -> bool` | Whether it names a regular file, or a directory |

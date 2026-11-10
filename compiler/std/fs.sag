@@ -9,6 +9,7 @@ extern "C" {
   fn sag_fs_read(path: String, status: *mut i32) -> String;
   fn sag_fs_read_bytes(path: String, status: *mut i32) -> String;
   fn sag_fs_write(path: String, text: String, append: bool) -> i32;
+  fn sag_fs_write_bytes(path: String, data: *const u8, len: usize) -> i32;
   fn sag_fs_create_dir(path: String) -> i32;
   fn sag_fs_remove_dir(path: String) -> i32;
   fn sag_fs_remove_file(path: String) -> i32;
@@ -58,6 +59,14 @@ pub fn read(path: String) -> Result<List<u8>, io::Error> {
 /// Writes `text` to the file at `path`, creating it or replacing its contents.
 pub fn write(path: String, text: String) -> Result<(), io::Error> {
   const code = unsafe { sag_fs_write(path, text, false) };
+
+  if code == 0 { Ok(()) } else { Err(failure(code, `cannot write "${path}"`)) }
+}
+
+/// Writes `bytes` to the file at `path`, creating it or replacing its contents: the counterpart of
+/// `read` (docs/adr/0079-references-and-borrowing.md, Q497).
+pub fn write_bytes(path: String, bytes: &[u8]) -> Result<(), io::Error> {
+  const code = unsafe { sag_fs_write_bytes(path, bytes.as_ptr(), bytes.len()) };
 
   if code == 0 { Ok(()) } else { Err(failure(code, `cannot write "${path}"`)) }
 }

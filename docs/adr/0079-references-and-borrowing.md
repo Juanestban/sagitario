@@ -72,6 +72,11 @@ live while a call does. That form needs no lifetimes and leaves classes as they 
   iterates a copy of the elements, since an iterator may outlive the call; `for value in slice`
   reads them in place. `&mut list` needs no `var` binding, as `list[i] = value` does not. Two
   ranges of the same binding are never disjoint for the borrow checker, as two elements are not.
+- Increment 3 is done: `fs::write_bytes` (`docs/spec/11-standard-library.md#stdfs`). No function of
+  the standard library takes an array or a struct that a reference would stop copying: its
+  collections are lists and its values classes or small structs. The compiler cannot use
+  references until the seed is updated for another reason, since the seed compiles its sources
+  and predates them; its values are also mostly classes and lists, which a call never copies.
 - Q490 for classes and lists: their values are references, so a `&Player` cannot replace the
   instance (`*player = ...` needs `&mut`), while the `var` fields of the instance stay changeable
   through it, as through any `const` binding or parameter (`docs/spec/03-memory.md#class-field-mutability-f2`).
