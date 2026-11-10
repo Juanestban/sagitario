@@ -3,7 +3,7 @@
 //! reported") and the parser recovers at item and statement boundaries.
 
 use pkg::ast::{
-  ArrayLen, BinaryOp, Block, ClassDecl, ConstDecl, EnumDecl, Export, Expr, ExprKind, ExternBlock, ExternFn, FieldDecl, FieldInit, FieldPattern,
+  ArrayLen, BinaryOp, Block, ClassDecl, ConstDecl, Discriminant, EnumDecl, Export, Expr, ExprKind, ExternBlock, ExternFn, FieldDecl, FieldInit, FieldPattern,
   FnDecl, GenericParam, Ident, InterfaceDecl, Item, LambdaParam, LetStmt, MatchArm, Module, Param, Path, Pattern, PatternKind, Stmt,
   StructDecl, TemplatePart, TypeArgs, TypeExpr, TypeExprKind, UnaryOp, UseDecl, UseTree, UseTreeKind, VariantDecl, VariantFieldDecl,
   VariantFields, Visibility,
@@ -67,6 +67,15 @@ enum AttributeTarget {
 struct Applied {
   pub export: Option<Export>;
   pub repr_c: bool;
+  /// The representation of an enum: an integer type, or `C`.
+  pub repr: Option<Ident>;
+}
+
+/// The parameters and result of a function type, and where it ends.
+struct FnTypeSignature {
+  pub params: List<TypeExpr>;
+  pub ret: Option<TypeExpr>;
+  pub end: Span;
 }
 
 /// What an infix token does, with its binding power (higher binds tighter).
@@ -80,6 +89,9 @@ enum InfixKind {
   Range(bool),
   As,
 }
+
+/// The integer types, which an enum may take as its representation.
+const INT_TYPES: String = "i8 i16 i32 i64 isize u8 u16 u32 u64 usize";
 
 const PREC_RANGE: u8 = 1;
 const PREC_OR: u8 = 2;
@@ -148,6 +160,14 @@ fn is_punct(kind: TokenKind, text: String) -> bool {
 fn is_keyword(kind: TokenKind, text: String) -> bool {
   match kind {
     TokenKind::Keyword(found) => found == text,
+    _ => false,
+  }
+}
+
+/// Whether the token is the identifier `word`, a keyword only where the grammar expects it.
+fn is_contextual(kind: TokenKind, word: String) -> bool {
+  match kind {
+    TokenKind::Ident(name) => name == word,
     _ => false,
   }
 }
@@ -481,7 +501,9 @@ class Parser {
     const visibility = self.visibility();
     const kind = self.kind();
 
-    if is_keyword(kind, "fn") || (is_keyword(kind, "async") && is_keyword(self.nth_kind(1), "fn")) {
+    const unsafe_fn = is_keyword(kind, "unsafe") && (is_keyword(self.nth_kind(1), "fn") || is_keyword(self.nth_kind(1), "async"));
+
+    if is_keyword(kind, "fn") || (is_keyword(kind, "async") && is_keyword(self.nth_kind(1), "fn")) || unsafe_fn {
       const decl = self.fn_decl(visibility, start, false)?;
 
       self.apply_attributes(attributes, AttributeTarget::Fn);
@@ -490,17 +512,32 @@ class Parser {
     }
 
     if is_keyword(kind, "struct") {
-      var decl = self.struct_decl(visibility, start)?;
+      var decl = self.struct_decl(visibility, start, false)?;
 
       decl.repr_c = self.apply_attributes(attributes, AttributeTarget::Struct).repr_c;
 
       return Ok(Some(Item::Struct(decl)));
     }
 
-    if is_keyword(kind, "enum") {
-      const decl = self.enum_decl(visibility, start)?;
+    // `union` is a keyword only before the name of a union, as in Rust.
+    if is_contextual(kind, "union") && is_ident(self.nth_kind(1)) {
+      var decl = self.struct_decl(visibility, start, true)?;
 
-      self.apply_attributes(attributes, AttributeTarget::Enum);
+      decl.repr_c = self.apply_attributes(attributes, AttributeTarget::Struct).repr_c;
+
+      if !decl.repr_c {
+        self.diagnostics.push(
+          Diagnostic::error(codes::INVALID_ATTRIBUTE, decl.name.span, "a union needs the C layout").with_help("write `@repr(C)` before the union"),
+        );
+      }
+
+      return Ok(Some(Item::Struct(decl)));
+    }
+
+    if is_keyword(kind, "enum") {
+      var decl = self.enum_decl(visibility, start)?;
+
+      decl.repr = self.apply_attributes(attributes, AttributeTarget::Enum).repr;
 
       return Ok(Some(Item::Enum(decl)));
     }
@@ -514,7 +551,13 @@ class Parser {
     }
 
     if is_keyword(kind, "extern") {
-      return Ok(Some(self.extern_item(visibility, start, attributes)?));
+      return Ok(Some(self.extern_item(visibility, start, attributes, false)?));
+    }
+
+    if is_keyword(kind, "unsafe") && is_keyword(self.nth_kind(1), "extern") {
+      self.advance();
+
+      return Ok(Some(self.extern_item(visibility, start, attributes, true)?));
     }
 
     if is_keyword(kind, "use") {
@@ -605,7 +648,7 @@ class Parser {
   /// Checks the attributes of an item: `@export("symbol")` on an `extern "C" fn`, `@repr(C)` on
   /// a struct. Errors are reported and the attribute is ignored.
   prv fn apply_attributes(self, attributes: List<Attribute>, target: AttributeTarget) -> Applied {
-    var applied = Applied { export: None, repr_c: false };
+    var applied = Applied { export: None, repr_c: false, repr: None };
     const seen: List<String> = new List();
 
     for attribute in attributes {
@@ -661,7 +704,22 @@ class Parser {
           self.attribute_error(attribute.span, "the only representation is `@repr(C)`", None);
         }
       } else if name == "repr" && is_enum {
-        self.diagnostics.push(Diagnostic::error(codes::NOT_IMPLEMENTED, attribute.span, "`@repr(C)` on enums is not implemented yet"));
+        var repr: Option<String> = None;
+
+        if attribute.args.len() == 1 {
+          if let Some(AttributeArg::Name(text)) = attribute.args.first() {
+            if text == "C" || INT_TYPES.split(" ").contains(text) {
+              repr = Some(text);
+            }
+          }
+        }
+
+        match repr {
+          Some(text) => {
+            applied.repr = Some(Ident { name: text, span: attribute.span });
+          }
+          None => self.attribute_error(attribute.span, "the representation of an enum is an integer type, such as `@repr(i32)`, or `@repr(C)`", None),
+        }
       } else if name == "test" || name == "deprecated" {
         self.diagnostics.push(Diagnostic::error(codes::NOT_IMPLEMENTED, attribute.span, "the attribute `@" + name + "` is not implemented yet"));
       } else if name == "export" {
@@ -686,28 +744,27 @@ class Parser {
     self.diagnostics.push(diagnostic);
   }
 
-  /// `extern "C" fn ...` (a function C can call) or `extern "C" { ... }` (C functions to call).
-  prv fn extern_item(self, visibility: Visibility, start: Span, attributes: List<Attribute>) -> Result<Item, ()> {
+  /// `extern "C" fn ...` (a function C can call) or `extern "C" { ... }` (C functions to call);
+  /// `is_unsafe` after `unsafe`, which only a function takes.
+  prv fn extern_item(self, visibility: Visibility, start: Span, attributes: List<Attribute>, is_unsafe: bool) -> Result<Item, ()> {
     self.expect_keyword("extern")?;
-
-    match self.kind() {
-      TokenKind::Str(abi) => {
-        const span = self.advance().span;
-
-        if abi != "C" {
-          self.diagnostics.push(Diagnostic::error(codes::NOT_IMPLEMENTED, span, "the ABI \"" + abi + "\" is not supported; write `extern \"C\"`"));
-        }
-      }
-      _ => return Err(self.unexpected("an ABI string such as `\"C\"`")),
-    }
+    self.abi()?;
 
     if self.at_keyword("fn") || self.at_keyword("async") {
       var decl = self.fn_decl(visibility, start, false)?;
 
       decl.extern_c = true;
+      decl.is_unsafe = is_unsafe;
       decl.export = self.apply_attributes(attributes, AttributeTarget::ExternFn).export;
 
       return Ok(Item::Fn(decl));
+    }
+
+    if is_unsafe {
+      self.diagnostics.push(
+        Diagnostic::error(codes::UNEXPECTED_TOKEN, start, "an `extern` block is not marked `unsafe`")
+          .with_help("remove `unsafe`: calling any function of an `extern` block already needs an `unsafe` block"),
+      );
     }
 
     self.apply_attributes(attributes, AttributeTarget::ExternBlock);
@@ -741,6 +798,22 @@ class Parser {
     const end = self.expect("}")?.span;
 
     Ok(Item::Extern(ExternBlock { functions: functions, span: start.to(end) }))
+  }
+
+  /// The ABI string after `extern`, which must be `"C"`.
+  prv fn abi(self) -> Result<(), ()> {
+    match self.kind() {
+      TokenKind::Str(abi) => {
+        const span = self.advance().span;
+
+        if abi != "C" {
+          self.diagnostics.push(Diagnostic::error(codes::NOT_IMPLEMENTED, span, "the ABI \"" + abi + "\" is not supported; write `extern \"C\"`"));
+        }
+
+        Ok(())
+      }
+      _ => Err(self.unexpected("an ABI string such as `\"C\"`")),
+    }
   }
 
   /// `fn name(params) -> Ret;` inside an `extern "C"` block.
@@ -823,10 +896,15 @@ class Parser {
     Visibility::Public
   }
 
-  prv fn struct_decl(self, visibility: Visibility, start: Span) -> Result<StructDecl, ()> {
-    self.expect_keyword("struct")?;
+  /// A struct, or a union with `is_union` (after its contextual keyword).
+  prv fn struct_decl(self, visibility: Visibility, start: Span, is_union: bool) -> Result<StructDecl, ()> {
+    if is_union {
+      self.advance();
+    } else {
+      self.expect_keyword("struct")?;
+    }
 
-    const name = self.ident("a struct name")?;
+    const name = self.ident(if is_union { "a union name" } else { "a struct name" })?;
     const generics = self.generic_params()?;
     const impls = self.impls()?;
 
@@ -864,8 +942,19 @@ class Parser {
 
     const end = self.expect("}")?.span;
 
+    if is_union {
+      if !generics.is_empty() || !impls.is_empty() {
+        self.not_implemented(name.span, "generic unions and unions implementing interfaces");
+      }
+
+      if let Some(function) = functions.first() {
+        self.not_implemented(function.name.span, "functions of unions");
+      }
+    }
+
     Ok(StructDecl {
       repr_c: false,
+      is_union: is_union,
       visibility: visibility,
       name: name,
       generics: generics,
@@ -1079,7 +1168,7 @@ class Parser {
 
     const end = self.expect("}")?.span;
 
-    Ok(EnumDecl { visibility: visibility, name: name, generics: generics, impls: impls, variants: variants, functions: functions, span: start.to(end) })
+    Ok(EnumDecl { repr: None, visibility: visibility, name: name, generics: generics, impls: impls, variants: variants, functions: functions, span: start.to(end) })
   }
 
   prv fn empty_variant(self, span: Span, name: Ident) {
@@ -1110,7 +1199,7 @@ class Parser {
         self.empty_variant(name.span.to(end), name);
       }
 
-      return Ok(VariantDecl { span: name.span.to(end), name: name, fields: VariantFields::Tuple(types) });
+      return Ok(VariantDecl { span: name.span.to(end), name: name, fields: VariantFields::Tuple(types), discriminant: None });
     }
 
     if self.eat("{") {
@@ -1136,10 +1225,33 @@ class Parser {
         self.empty_variant(name.span.to(end), name);
       }
 
-      return Ok(VariantDecl { span: name.span.to(end), name: name, fields: VariantFields::Named(fields) });
+      return Ok(VariantDecl { span: name.span.to(end), name: name, fields: VariantFields::Named(fields), discriminant: None });
     }
 
-    Ok(VariantDecl { span: name.span, name: name, fields: VariantFields::Unit })
+    // `Name = 7`: an explicit discriminant.
+    if self.eat("=") {
+      const start = self.span();
+      const negative = self.eat("-");
+
+      match self.kind() {
+        TokenKind::Int { value, suffix } => {
+          const end = self.advance().span;
+
+          if suffix.is_some() {
+            self.diagnostics.push(
+              Diagnostic::error(codes::UNEXPECTED_TOKEN, end, "a discriminant has no type suffix").with_help("its type is the representation of the enum"),
+            );
+          }
+
+          const discriminant = Discriminant { value: value, negative: negative, span: start.to(end) };
+
+          return Ok(VariantDecl { span: name.span.to(end), name: name, fields: VariantFields::Unit, discriminant: Some(discriminant) });
+        }
+        _ => return Err(self.unexpected("an integer literal")),
+      }
+    }
+
+    Ok(VariantDecl { span: name.span, name: name, fields: VariantFields::Unit, discriminant: None })
   }
 
   /// Skips a malformed variant: to the next `,` or the `}` closing the enum, at depth zero.
@@ -1200,7 +1312,7 @@ class Parser {
     const is_abstract = self.eat_keyword("abstract");
     const is_override = self.eat_keyword("override");
 
-    if is_abstract || is_override || self.at_keyword("fn") || self.at_keyword("async") {
+    if is_abstract || is_override || self.at_keyword("fn") || self.at_keyword("async") || self.at_keyword("unsafe") {
       var decl = self.method_decl(visibility, start, is_abstract)?;
 
       decl.is_override = is_override;
@@ -1308,7 +1420,18 @@ class Parser {
   /// A function's signature followed by the body `body` describes.
   prv fn signature_then(self, visibility: Visibility, start: Span, in_type: bool, body: Body) -> Result<FnDecl, ()> {
     const id = self.next_id();
+    const unsafe_start = self.span();
+    var is_unsafe = self.eat_keyword("unsafe");
     const is_async = self.eat_keyword("async");
+
+    if is_async && self.at_keyword("unsafe") {
+      self.advance();
+      is_unsafe = true;
+    }
+
+    if is_unsafe && is_async {
+      self.not_implemented(unsafe_start, "`unsafe` `async` functions");
+    }
 
     self.expect_keyword("fn")?;
 
@@ -1396,6 +1519,7 @@ class Parser {
       is_abstract: is_abstract,
       is_override: false,
       is_async: is_async,
+      is_unsafe: is_unsafe,
       name: name,
       generics: generics,
       self_param: self_param,
@@ -1483,29 +1607,23 @@ class Parser {
 
     if is_keyword(kind, "fn") {
       self.advance();
-      self.expect("(")?;
 
-      const params: List<TypeExpr> = new List();
+      const signature = self.fn_type_signature()?;
 
-      while !self.at(")") {
-        params.push(self.type_expr()?);
+      return Ok(new TypeExpr(TypeExprKind::Fn { params: signature.params, ret: signature.ret }, start.to(signature.end)));
+    }
 
-        if !self.eat(",") {
-          break;
-        }
-      }
+    // `extern "C" fn(A) -> R` and `unsafe extern "C" fn(A) -> R`: C function pointers.
+    if is_keyword(kind, "extern") || (is_keyword(kind, "unsafe") && is_keyword(self.nth_kind(1), "extern")) {
+      const is_unsafe = self.eat_keyword("unsafe");
 
-      var end = self.expect(")")?.span;
-      var ret: Option<TypeExpr> = None;
+      self.expect_keyword("extern")?;
+      self.abi()?;
+      self.expect_keyword("fn")?;
 
-      if self.eat("->") {
-        const parsed = self.type_expr()?;
+      const signature = self.fn_type_signature()?;
 
-        end = parsed.span;
-        ret = Some(parsed);
-      }
-
-      return Ok(new TypeExpr(TypeExprKind::Fn { params: params, ret: ret }, start.to(end)));
+      return Ok(new TypeExpr(TypeExprKind::CFn { is_unsafe: is_unsafe, params: signature.params, ret: signature.ret }, start.to(signature.end)));
     }
 
     if is_punct(kind, "*") {
@@ -1529,6 +1647,33 @@ class Parser {
     }
 
     Err(self.unexpected("a type"))
+  }
+
+  /// `(A, B) -> R` after the `fn` of a function type.
+  prv fn fn_type_signature(self) -> Result<FnTypeSignature, ()> {
+    self.expect("(")?;
+
+    const params: List<TypeExpr> = new List();
+
+    while !self.at(")") {
+      params.push(self.type_expr()?);
+
+      if !self.eat(",") {
+        break;
+      }
+    }
+
+    var end = self.expect(")")?.span;
+    var ret: Option<TypeExpr> = None;
+
+    if self.eat("->") {
+      const parsed = self.type_expr()?;
+
+      end = parsed.span;
+      ret = Some(parsed);
+    }
+
+    Ok(FnTypeSignature { params: params, ret: ret, end: end })
   }
 
   /// The `N` of `[T; N]` and `[value; N]`: an integer literal.
@@ -1939,6 +2084,8 @@ class Parser {
       op = UnaryOp::Deref;
     } else if self.at_keyword("await") {
       return self.await_expr();
+    } else if self.at("&") {
+      return self.addr_of();
     } else {
       return self.postfix_expr();
     }
@@ -1948,6 +2095,39 @@ class Parser {
     const span = start.to(operand.span);
 
     Ok(self.expr_node(ExprKind::Unary { op: op, operand: operand }, span))
+  }
+
+  /// `&raw const place` or `&raw mut place` (docs/spec/10-ffi.md#raw-pointers).
+  prv fn addr_of(self) -> Result<Expr, ()> {
+    const start = self.advance().span;
+
+    if !is_contextual(self.kind(), "raw") {
+      self.diagnostics.push(
+        Diagnostic::error(codes::NOT_IMPLEMENTED, start, "references (`&x`) are not implemented yet")
+          .with_help("for the address of a place as a raw pointer, write `&raw const x` or `&raw mut x`"),
+      );
+
+      return Err(());
+    }
+
+    self.advance();
+
+    var mutable = false;
+
+    if self.at_keyword("const") {
+      mutable = false;
+    } else if is_mut(self.kind()) {
+      mutable = true;
+    } else {
+      return Err(self.unexpected("`const` or `mut` after `&raw`"));
+    }
+
+    self.advance();
+
+    const place = self.unary_expr()?;
+    const span = start.to(place.span);
+
+    Ok(self.expr_node(ExprKind::AddrOf { mutable: mutable, place: place }, span))
   }
 
   /// `await operand`: the operand is the chain of postfix operators up to the first `?`, which,

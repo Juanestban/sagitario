@@ -222,6 +222,24 @@ runs the executor until the task of `main` finishes.
   defines a wrapper `sag_ffi_N` for it, plus a function with each exported symbol that calls
   the Sagitario function; exported functions are the only non-`static` ones. A dereference
   goes through `SAG_CHECK_PTR`, which panics on a null pointer.
+- C function pointer types (`extern "C" fn(..)`, [ADR-0078](adr/0078-ffi-without-c-shims.md))
+  become one `typedef R (*sag_pN)(A, B);` per signature, shared by safe and unsafe ones and
+  emitted in both translation units after the declarations of the aggregates. An `extern "C" fn`
+  of the program is the pointer to its function (`Rvalue::CFnValue`), a C function of an `extern`
+  block the pointer to its wrapper `sag_ffi_N` (`Rvalue::ExternFnValue`), and `Callee::Pointer`
+  calls one. `Option` of a function pointer is the pointer itself: `sir::project` turns its tag
+  into `Projection::NonNull` and its field into the place itself, and `None` is `NULL`. Converting
+  a function pointer to or from an address goes through a union in `sag_pN_address` and
+  `sag_pN_from` (which panics on `NULL`), since ISO C11 does not define casts between function and
+  data pointers. A program using one of its `extern "C" fn`s as a value is compiled with
+  `SAG_THREADS`, since C may call it on another thread.
+- A union is a struct whose layout says so (`StructLayout::is_union`): a C `union`, built by
+  `Rvalue::UnionValue` with a designated initializer. An enum with an integer representation
+  (`EnumLayout::repr`) is that integer: its variants are their values, `matching::tag` reads the
+  position of the variant through `sag_eN_index` (which panics on any other value), and
+  `Name::from_raw` checks a value with `sag_eN_valid`. `mem::size_of` and `mem::align_of` are
+  `sizeof` and `_Alignof`, and `mem::zeroed` a helper writing every byte of its type.
+  `&raw const` and `&raw mut` are `Operand::Ref` of their place.
 - Planned (F2): `Option<ClassRef>` as a nullable pointer.
 
 ## Runtime
@@ -248,7 +266,9 @@ compiled with every program:
 - the `String` API (`sag_string_*`; `trim` and `substring` return views sharing the buffer),
   parsing (`sag_parse_*`), ASCII `char` helpers and the ARC `StringBuilder` (`sag_builder_*`),
 - FFI support: the ARC `CString` (`sag_cstring_*`), `sag_string_from_c_at` (lossy UTF-8),
-  `sag_c_char` (C's `char`) and the raw pointer macros (`SAG_PTR_ADD`, `SAG_CHECK_PTR`, ...),
+  `sag_c_char` (C's `char`), the raw pointer macros (`SAG_PTR_ADD`, `SAG_CHECK_PTR`,
+  `SAG_LIST_PTR`, ...), and the dynamic libraries of `std::ffi::Library` (`sag_library_*`, with
+  `LoadLibraryW` or `dlopen`, linked with `-ldl` on Linux and Android),
 - a live-object counter checked at exit when `SAG_LEAK_CHECK` is set (exit code 102),
 - the executor of tasks of each thread (`sag_task_*`, [ADR-0072](adr/0072-async-await-increments.md)):
   the functions ready to resume tasks, first in first out, the timers of `task::sleep`, by

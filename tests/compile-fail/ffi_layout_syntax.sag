@@ -1,0 +1,25 @@
+// The syntax of C layouts (docs/adr/0078-ffi-without-c-shims.md, increment 2).
+union Bare { //~ ERROR E0105
+  pub a: i32;
+}
+
+@repr(C)
+union WithFunctions {
+  pub a: i32;
+
+  pub fn get(self) -> i32 { //~ ERROR E0900
+    0
+  }
+}
+
+@repr(f32) //~ ERROR E0105
+enum Floating {
+  A,
+}
+
+@repr(i32)
+enum Suffixed {
+  A = 1u8, //~ ERROR E0100
+}
+
+fn main() {}

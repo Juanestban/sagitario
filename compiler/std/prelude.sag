@@ -457,6 +457,17 @@ fn list_contains<T: Eq>(list: List<T>, value: T) -> bool {
   list_index_of(list, value).is_some()
 }
 
+/// Rust's `Vec::resize`: removes the elements past `len`, or adds copies of `value` up to it.
+fn list_resize<T>(list: List<T>, len: usize, value: T) {
+  while list.len() > len {
+    list.pop();
+  }
+
+  while list.len() < len {
+    list.push(value);
+  }
+}
+
 fn list_sort<T: Ord>(list: List<T>) {
   list_sort_by(list, (a: T, b: T) => a.compare(b));
 }

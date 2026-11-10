@@ -626,6 +626,11 @@ class Toolchain {
       args.push("-lm");
     }
 
+    // `dlopen` (`std::ffi::Library`) is in libdl before glibc 2.34.
+    if !self.compiler.windows() && !self.compiler.apple() {
+      args.push("-ldl");
+    }
+
     for arg in self.pthread() {
       args.push(arg);
     }

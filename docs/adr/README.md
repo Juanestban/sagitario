@@ -86,8 +86,8 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0075](0075-f8-acceptance.md) | The acceptance of F8 | Accepted |
 | [0076](0076-std-math-and-methods-of-numbers.md) | `std::math` and the methods of numbers | Accepted (refined by 0077) |
 | [0077](0077-std-math-powers-and-logarithms.md) | Powers, roots and logarithms in `std::math` | Accepted |
-| [0078](0078-ffi-without-c-shims.md) | A complete FFI: C libraries without C shims | Proposed |
-| [0079](0079-references-and-borrowing.md) | References and borrowing in parameters | Proposed |
+| [0078](0078-ffi-without-c-shims.md) | A complete FFI: C libraries without C shims | Accepted |
+| [0079](0079-references-and-borrowing.md) | References and borrowing in parameters | Accepted |
 
 ## Template
 

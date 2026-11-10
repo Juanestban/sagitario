@@ -234,6 +234,13 @@ pub fn register_types(lw: Lowering, ty: Type) {
     TypeKind::Array { elem, .. } => register_types(lw, elem),
     TypeKind::List(elem) => register_types(lw, elem),
     TypeKind::Ptr { pointee, .. } => register_types(lw, pointee),
+    TypeKind::CFn { params, ret, .. } => {
+      for param in params {
+        register_types(lw, param);
+      }
+
+      register_types(lw, ret);
+    }
     _ => {}
   }
 }

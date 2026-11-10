@@ -38,6 +38,8 @@ pub enum StdItem {
   CString,
   StringFromC,
   Exit,
+  /// `size_of`, `align_of` or `zeroed` of `std::mem`, by name.
+  Mem(String),
 }
 
 /// A type declared by the program, which can have functions.
@@ -149,6 +151,8 @@ pub enum Res {
   Struct(u32),
   Variant(VariantRef),
   Const(u32),
+  /// `Name::from_raw` of the enum `Name`, which has an integer representation.
+  FromRaw(u32),
 }
 
 /// The declaration a type parameter belongs to.
@@ -671,7 +675,7 @@ fn is_reserved_name(name: String) -> bool {
 }
 
 /// The modules of the standard library (docs/spec/11-standard-library.md).
-pub const STD_MODULES: String = "env ffi fs io path process sync thread time";
+pub const STD_MODULES: String = "env ffi fs io math mem path process sync task thread time";
 
 fn is_numeric_type(name: String) -> bool {
   NUMERIC_TYPES.split(" ").contains(name)
@@ -1578,6 +1582,7 @@ pub class Resolver {
         }
       }
       ExprKind::Unary { operand, .. } => self.expr(operand),
+      ExprKind::AddrOf { place, .. } => self.expr(place),
       ExprKind::Binary { lhs, rhs, .. } => {
         self.expr(lhs);
         self.expr(rhs);
@@ -1891,6 +1896,7 @@ pub class Resolver {
           ItemRef::Const(id) => return Some(Res::Const(id)),
           ItemRef::Std(StdItem::StringFromC) => return Some(Res::Builtin("string_from_c")),
           ItemRef::Std(StdItem::Exit) => return Some(Res::Builtin("exit")),
+          ItemRef::Std(StdItem::Mem(name)) => return Some(Res::Builtin("mem::" + name)),
           ItemRef::Type(type_item) => {
             self.not_a_value(last.name, last.span, type_item);
 
@@ -1962,6 +1968,20 @@ pub class Resolver {
               for position in 0..decl.variants.len() {
                 if decl.variants[position].name.name == member.name {
                   return Some(Res::Variant(VariantRef { owner: EnumKind::User(id), index: position as u32 }));
+                }
+              }
+
+              // The conversion from an integer of an enum with an integer representation, unless
+              // the enum declares its own function with that name.
+              if decl.repr.is_some() && member.name == "from_raw" {
+                var declared = false;
+
+                for function in decl.functions {
+                  declared = declared || function.name.name == "from_raw";
+                }
+
+                if !declared {
+                  return Some(Res::FromRaw(id));
                 }
               }
             }
@@ -2045,6 +2065,7 @@ pub class Resolver {
         ItemRef::Const(id) => return Some(Res::Const(id)),
         ItemRef::Std(StdItem::StringFromC) => return Some(Res::Builtin("string_from_c")),
         ItemRef::Std(StdItem::Exit) => return Some(Res::Builtin("exit")),
+        ItemRef::Std(StdItem::Mem(found)) => return Some(Res::Builtin("mem::" + found)),
         ItemRef::Std(StdItem::CType(_)) | ItemRef::Std(StdItem::CString) => {
           self.error(span, "`" + name + "` is a type, not a value");
 
@@ -2269,6 +2290,21 @@ pub class Resolver {
       return Some(ItemRef::Std(StdItem::CType(name)));
     }
 
+    // The part of `std::ffi` written in Sagitario, such as `Library`.
+    if let Some(root) = self.resolution.std_root {
+      if let Some(info) = self.resolution.module(root) {
+        if let Some(module) = info.children.get("ffi") {
+          if let Some(member_info) = self.resolution.module(module) {
+            if let Some(declared) = member_info.items.get(name) {
+              if let Visibility::Public = declared.visibility {
+                return Some(declared.item);
+              }
+            }
+          }
+        }
+      }
+    }
+
     types.push("CString");
     types.push("string_from_c");
 
@@ -2304,6 +2340,13 @@ pub class Resolver {
     // `exit` never returns, which no function written in Sagitario can declare.
     if info.in_std && info.path.len() == 2 && info.path[0] == "std" && info.path[1] == "process" && name == "exit" {
       return Some(ItemRef::Std(StdItem::Exit));
+    }
+
+    // They take their type as an argument, which no function written in Sagitario can do.
+    if info.in_std && info.path.len() == 2 && info.path[0] == "std" && info.path[1] == "mem" {
+      if name == "size_of" || name == "align_of" || name == "zeroed" {
+        return Some(ItemRef::Std(StdItem::Mem(name)));
+      }
     }
 
     if let Some(declared) = info.items.get(name) {
@@ -2505,6 +2548,15 @@ pub class Resolver {
           self.type_expr(ret);
         }
       }
+      TypeExprKind::CFn { params, ret, .. } => {
+        for param in params {
+          self.type_expr(param);
+        }
+
+        if let Some(ret) = ret {
+          self.type_expr(ret);
+        }
+      }
       TypeExprKind::Generic { path, args } => {
         self.type_path(path);
 
@@ -2610,7 +2662,7 @@ pub class Resolver {
 
   prv fn not_a_type(self, name: String, span: Span, item: ItemRef) {
     const what = match item {
-      ItemRef::Fn(_) | ItemRef::Extern(_) | ItemRef::Std(StdItem::StringFromC) | ItemRef::Std(StdItem::Exit) => "a function",
+      ItemRef::Fn(_) | ItemRef::Extern(_) | ItemRef::Std(StdItem::StringFromC) | ItemRef::Std(StdItem::Exit) | ItemRef::Std(StdItem::Mem(_)) => "a function",
       ItemRef::Module(_) | ItemRef::Std(StdItem::Root) | ItemRef::Std(StdItem::Ffi) => "a module",
       ItemRef::Type(_) | ItemRef::Std(_) => "a type",
       ItemRef::Const(_) => "a constant",

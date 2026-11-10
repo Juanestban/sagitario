@@ -158,6 +158,8 @@ pub struct Export {
 }
 
 pub struct EnumDecl {
+  /// The integer type of `@repr(i32)`, or `C` for `@repr(C)` (docs/spec/10-ffi.md).
+  pub repr: Option<Ident>;
   pub visibility: Visibility;
   pub name: Ident;
   pub generics: List<GenericParam>;
@@ -170,6 +172,15 @@ pub struct EnumDecl {
 pub struct VariantDecl {
   pub name: Ident;
   pub fields: VariantFields;
+  /// `= 7` or `= -1` after a variant of an enum with an integer representation.
+  pub discriminant: Option<Discriminant>;
+  pub span: Span;
+}
+
+/// An explicit discriminant: an integer literal, as decimal digits, with its sign.
+pub struct Discriminant {
+  pub value: String;
+  pub negative: bool;
   pub span: Span;
 }
 
@@ -187,6 +198,8 @@ pub struct VariantFieldDecl {
 
 pub struct StructDecl {
   pub repr_c: bool;
+  /// `union`: its fields share their memory (docs/spec/10-ffi.md).
+  pub is_union: bool;
   pub visibility: Visibility;
   pub name: Ident;
   pub generics: List<GenericParam>;
@@ -215,6 +228,8 @@ pub struct FnDecl {
   pub is_override: bool;
   /// `async fn`: calling it returns a `Task` (docs/spec/12-async.md).
   pub is_async: bool;
+  /// `unsafe fn`: calling it needs `unsafe` (docs/spec/10-ffi.md).
+  pub is_unsafe: bool;
   pub name: Ident;
   pub generics: List<GenericParam>;
   /// The span of `self`, only in methods.
@@ -260,6 +275,8 @@ pub enum TypeExprKind {
   Ptr { mutable: bool, pointee: TypeExpr },
   /// `fn(A, B) -> R`
   Fn { params: List<TypeExpr>, ret: Option<TypeExpr> },
+  /// `extern "C" fn(A, B) -> R`, or `unsafe extern "C" fn(...)`: a C function pointer.
+  CFn { is_unsafe: bool, params: List<TypeExpr>, ret: Option<TypeExpr> },
 }
 
 /// The length of an array type or repeat expression: an integer literal, as decimal digits.
@@ -398,6 +415,8 @@ pub enum ExprKind {
   Unary { op: UnaryOp, operand: Expr },
   Binary { op: BinaryOp, lhs: Expr, rhs: Expr },
   Cast { expr: Expr, ty: TypeExpr },
+  /// `&raw const place` or `&raw mut place`: the address of a place, as a raw pointer.
+  AddrOf { mutable: bool, place: Expr },
   /// `start..end` or `start..=end`
   Range { start: Expr, end: Expr, inclusive: bool },
   /// `expr?`

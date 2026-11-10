@@ -1,6 +1,6 @@
 # 0079. References and borrowing in parameters
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-09
 - Refines: [ADR-0002](0002-arc-memory-model.md), [ADR-0063](0063-distribution-phase-and-roadmap-v2.md)
   (slices and byte buffers in G1 of roadmap v2)

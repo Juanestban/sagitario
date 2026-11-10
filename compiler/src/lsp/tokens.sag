@@ -197,6 +197,15 @@ class Collector {
           self.type_expr(found);
         }
       }
+      TypeExprKind::CFn { params, ret, .. } => {
+        for param in params {
+          self.type_expr(param);
+        }
+
+        if let Some(found) = ret {
+          self.type_expr(found);
+        }
+      }
       TypeExprKind::Unit => {}
     }
   }
@@ -382,6 +391,7 @@ class Collector {
       ExprKind::ArrayLit(elems) => self.exprs(elems),
       ExprKind::ArrayRepeat { value, .. } => self.expr(value),
       ExprKind::Unary { operand, .. } => self.expr(operand),
+      ExprKind::AddrOf { place, .. } => self.expr(place),
       ExprKind::Binary { lhs, rhs, .. } => {
         self.expr(lhs);
         self.expr(rhs);

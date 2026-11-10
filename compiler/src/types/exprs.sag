@@ -308,7 +308,16 @@ fn assign(cx: Checker, target: Expr, op: Option<BinaryOp>, value: Expr) -> Type 
   };
 
   if is_place {
+    // `u.field = value` writes a field of a union, which is safe.
+    if op.is_none() {
+      if let ExprKind::Field { base, .. } = target.kind {
+        cx.union_write = Some(base.id);
+      }
+    }
+
     const target_ty = expr(cx, target, None);
+
+    cx.union_write = None;
 
     classes::check_mutable_place(cx, target, PlaceUse::Assign);
 
@@ -509,6 +518,14 @@ fn other_expr_kind(cx: Checker, value: Expr, expected: Option<Type>) -> Type {
       Some(Res::Local(id)) => local_type(cx, id).unwrap_or(types::error()),
       Some(Res::Fn(id)) => closures::fn_value(cx, value, path, id, expected),
       Some(Res::Const(id)) => cx.typed.const_types.get(id as usize).unwrap_or(types::error()),
+      Some(Res::Extern(id)) if !cx.resolution.is_runtime_extern(cx.package, id) => ffi::extern_value(cx, id),
+      Some(Res::FromRaw(_)) => {
+        cx.diagnostics.push(
+          Diagnostic::error(codes::WRONG_CALL_FORM, value.span, "`from_raw` cannot be used as a value").with_help("wrap the call in a lambda: `(n) => Name::from_raw(n)`"),
+        );
+
+        types::error()
+      }
       Some(Res::Extern(_)) | Some(Res::Builtin(_)) => {
         cx.diagnostics.push(
           Diagnostic::error(codes::WRONG_CALL_FORM, value.span, "C functions and prelude functions cannot be used as values")
@@ -561,6 +578,7 @@ fn other_expr_kind(cx: Checker, value: Expr, expected: Option<Type>) -> Type {
     ExprKind::Unary { op, operand } => unary(cx, value, op, operand, expected),
     ExprKind::Binary { op, lhs, rhs } => binary(cx, op, lhs, rhs, expected),
     ExprKind::Cast { expr: inner, ty } => cast(cx, inner, ty),
+    ExprKind::AddrOf { mutable, place } => ffi::addr_of(cx, mutable, place),
     ExprKind::Range { start, end, .. } => collections::range_value(cx, value, start, end, expected),
     ExprKind::Block(body) => block(cx, body, expected),
     ExprKind::Unsafe(body) => ffi::unsafe_block(cx, value, body, expected),
@@ -887,7 +905,7 @@ fn cast(cx: Checker, inner: Expr, ty: TypeExpr) -> Type {
   const to = cx.type_expr(ty);
   // `0 as *const T` is the null pointer: the literal is a `usize`.
   const to_pointer = match to.kind {
-    TypeKind::Ptr { .. } => true,
+    TypeKind::Ptr { .. } | TypeKind::CFn { .. } => true,
     _ => false,
   };
   const hint = if to_pointer { Some(types::int(IntTy::Usize)) } else { None };
@@ -901,6 +919,23 @@ fn cast(cx: Checker, inner: Expr, ty: TypeExpr) -> Type {
       TypeKind::Ptr { .. } => {
         valid = match to.kind {
           TypeKind::Ptr { .. } | TypeKind::Int(IntTy::Usize) => true,
+          TypeKind::CFn { .. } => {
+            ffi::require_unsafe(cx, inner.span.to(ty.span), "converting a pointer to a C function pointer");
+
+            true
+          }
+          _ => false,
+        };
+      }
+      // A C function pointer is an address; making one from another value is Rust's `transmute`.
+      TypeKind::CFn { .. } => {
+        valid = match to.kind {
+          TypeKind::Ptr { .. } | TypeKind::Int(IntTy::Usize) => true,
+          TypeKind::CFn { .. } => {
+            ffi::require_unsafe(cx, inner.span.to(ty.span), "converting between C function pointer types");
+
+            true
+          }
           _ => false,
         };
       }
@@ -908,6 +943,13 @@ fn cast(cx: Checker, inner: Expr, ty: TypeExpr) -> Type {
         valid = match to.kind {
           TypeKind::Int(_) | TypeKind::Float(_) => true,
           TypeKind::Ptr { .. } => int_ty == IntTy::Usize,
+          TypeKind::CFn { .. } => {
+            if int_ty == IntTy::Usize {
+              ffi::require_unsafe(cx, inner.span.to(ty.span), "converting an address to a C function pointer");
+            }
+
+            int_ty == IntTy::Usize
+          }
           TypeKind::Char => int_ty == IntTy::U8,
           _ => false,
         };
@@ -921,6 +963,18 @@ fn cast(cx: Checker, inner: Expr, ty: TypeExpr) -> Type {
       TypeKind::Bool | TypeKind::Char => {
         valid = match to.kind {
           TypeKind::Int(_) => true,
+          _ => false,
+        };
+      }
+      // The value of a variant of an enum with an integer representation, as Rust's `as`.
+      TypeKind::Enum(named) => {
+        const has_repr = match cx.typed.enums.get(named.id as usize) {
+          Some(def) => def.repr.is_some(),
+          None => false,
+        };
+
+        valid = match to.kind {
+          TypeKind::Int(_) => has_repr,
           _ => false,
         };
       }
@@ -1143,6 +1197,15 @@ fn call(cx: Checker, value: Expr, callee: Expr, args: List<Expr>, expected: Opti
     Some(Res::Extern(id)) => {
       sig = ffi::extern_call_sig(cx, callee, id);
     }
+    Some(Res::FromRaw(id)) => {
+      const enum_ty = cx.type_ref(TypeItem::Enum(id));
+      const repr = match cx.typed.enums.get(id as usize) {
+        Some(def) => def.repr.unwrap_or(IntTy::I32),
+        None => IntTy::I32,
+      };
+
+      sig = Some(FnSig { receiver: None, params: List::from([types::int(repr)]), ret: types::option(enum_ty) });
+    }
     Some(Res::Builtin(name)) => {
       if name == "Error" {
         const ret = match cx.typed.error_types {
@@ -1153,6 +1216,8 @@ fn call(cx: Checker, value: Expr, callee: Expr, args: List<Expr>, expected: Opti
         sig = Some(FnSig { receiver: None, params: List::from([types::string()]), ret: ret });
       } else if name == "List::from" {
         return collections::list_from(cx, value, callee, args, expected);
+      } else if name.starts_with("mem::") {
+        return ffi::mem_call(cx, value, path, name, args, expected);
       } else if name == "include_str" {
         cx.diagnostics.push(
           Diagnostic::error(codes::INVALID_INCLUDE, value.span, "`include_str` can only give the value of a module-level constant")
@@ -1443,6 +1508,17 @@ fn field(cx: Checker, base: Expr, name: Ident) -> Type {
     Some(def) => def,
     None => return types::error(),
   };
+
+  if def.is_union {
+    const writing = match cx.union_write {
+      Some(id) => id == base.id,
+      None => false,
+    };
+
+    if !writing {
+      ffi::require_unsafe(cx, name.span, "reading the field `" + field_name + "` of a union");
+    }
+  }
   var found: Option<types::FieldDef> = None;
 
   for candidate in def.fields {
@@ -1542,7 +1618,7 @@ fn struct_literal(cx: Checker, value: Expr, path: Path, fields: List<FieldInit>,
       return types::error();
     }
   };
-  const def = cx.typed.struct_def(id).unwrap_or(StructDef { name: "", fields: new List() });
+  const def = cx.typed.struct_def(id).unwrap_or(StructDef { name: "", fields: new List(), is_union: false });
   const seen: List<Seen> = new List();
   // The type arguments of a generic struct come from the path, the expected type and the field
   // values.
@@ -1631,6 +1707,18 @@ fn struct_literal(cx: Checker, value: Expr, path: Path, fields: List<FieldInit>,
   }
 
   const shown = types::text(ty);
+
+  // A union holds one of its fields.
+  if def.is_union {
+    if seen.len() != 1 {
+      cx.diagnostics.push(
+        Diagnostic::error(codes::MISSING_FIELDS, path.span, `the literal of the union \`${shown}\` sets ${seen.len()} fields`)
+          .with_note("a union literal sets exactly one field"),
+      );
+    }
+
+    missing.clear();
+  }
 
   if !missing.is_empty() {
     cx.diagnostics.push(

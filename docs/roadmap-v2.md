@@ -32,13 +32,16 @@ roadmap.
 ([ADR-0076](adr/0076-std-math-and-methods-of-numbers.md)), of which 1 and 2 are done: the basic
 methods of floats and integers, the constants, and infinities and NaN in constants; then powers,
 roots and logarithms ([ADR-0077](adr/0077-std-math-powers-and-logarithms.md)). Trigonometry
-follows. Two records, proposed, plan the rest of the FFI and references:
+follows. Two records plan the rest of the FFI and references:
 [ADR-0078](adr/0078-ffi-without-c-shims.md) (function pointers, `unsafe fn`, arrays, unions and
 enums in C layouts, `std::mem`, `&raw`, lists as buffers, `fs::read`, dynamic libraries), so that
 a package wraps a C library such as Vulkan in Sagitario alone, without C files; and
 [ADR-0079](adr/0079-references-and-borrowing.md) (`&T` and `&mut T` in parameters with a borrow
 checker, and slices), which removes copies and reference counting from calls while classes and
-closures keep ARC.
+closures keep ARC. ADR-0078 is done, in five increments: function pointers and `unsafe fn`; C
+layouts (arrays in `@repr(C)` structs, unions, enums with an integer representation, `std::mem`);
+`&raw const`, `&raw mut`, lists as buffers and `fs::read`; `std::ffi::Library`; and the acceptance
+program `tests/run-pass/reference_ffi/`. ADR-0079 follows.
 
 - **Operator overloading** (`a + b` on vectors and matrices), today a deferred decision.
 - **Slices and byte buffers**: views of arrays and lists without copies, and reading and writing

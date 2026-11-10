@@ -545,6 +545,15 @@ fn type_paths(ty: TypeExpr, out: List<Path>) {
         type_paths(ret, out);
       }
     }
+    TypeExprKind::CFn { params, ret, .. } => {
+      for param in params {
+        type_paths(param, out);
+      }
+
+      if let Some(ret) = ret {
+        type_paths(ret, out);
+      }
+    }
   }
 }
 
@@ -964,6 +973,7 @@ fn expr_paths(expr: Expr, out: List<Path>) {
     ExprKind::ArrayRepeat { value, .. } => expr_paths(value, out),
     ExprKind::Try(value) | ExprKind::Await(value) => expr_paths(value, out),
     ExprKind::Unary { operand, .. } => expr_paths(operand, out),
+    ExprKind::AddrOf { place, .. } => expr_paths(place, out),
     ExprKind::New { path, args } => {
       expr_path(path, out);
       exprs_paths(args, out);

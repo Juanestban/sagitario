@@ -1,0 +1,180 @@
+// The reference program of the acceptance of a complete FFI (docs/adr/0078-ffi-without-c-shims.md,
+// Q486), written without any C file: it sorts records with `qsort` and a comparison written in
+// Sagitario, through a pointer to the C library loaded at run time with `Library`; the records are
+// `@repr(C)` structs with a fixed array, a union and an enum with an integer representation, which
+// C copies with `memcpy`; C fills a buffer of a list through `&raw mut` and `as_mut_ptr`; and the
+// bytes of a file written by C come back with `fs::read`. The harness runs it with ASan and UBSan.
+// expect-stdout: loaded the C library
+// expect-stdout: low 1.5 [3, 4, 5]
+// expect-stdout: medium 7 [6, 7, 8]
+// expect-stdout: high 2.25 [0, 1, 2]
+// expect-stdout: copied high 2.25
+// expect-stdout: buffer 16 1 255
+// expect-stdout: file 8 83 0 255
+// expect-stdout: invalid priority 9
+use std::ffi::{c_char, c_int, c_void, CString, Library};
+use std::fs;
+use std::mem;
+
+/// The functions of the C library this program uses, found at run time.
+struct CLibrary {
+  pub qsort: unsafe extern "C" fn(*mut c_void, usize, usize, extern "C" fn(*const c_void, *const c_void) -> c_int);
+  pub memcpy: unsafe extern "C" fn(*mut c_void, *const c_void, usize) -> *mut c_void;
+  pub memset: unsafe extern "C" fn(*mut c_void, c_int, usize) -> *mut c_void;
+  pub fopen: unsafe extern "C" fn(*const c_char, *const c_char) -> *mut c_void;
+  pub fwrite: unsafe extern "C" fn(*const c_void, usize, usize, *mut c_void) -> usize;
+  pub fclose: unsafe extern "C" fn(*mut c_void) -> c_int;
+}
+
+@repr(i32)
+enum Priority {
+  Low = 1,
+  Medium = 5,
+  High = 10,
+}
+
+@repr(C)
+union Weight {
+  pub float: f32;
+  pub int: i32;
+}
+
+@repr(C)
+struct Record {
+  pub priority: Priority;
+  pub is_float: bool;
+  pub weight: Weight;
+  pub values: [u8; 3];
+}
+
+/// Orders records by priority, as `qsort` asks.
+extern "C" fn by_priority(a: *const c_void, b: *const c_void) -> c_int {
+  const x = unsafe { *(a as *const Record) };
+  const y = unsafe { *(b as *const Record) };
+
+  (x.priority as i32) - (y.priority as i32)
+}
+
+fn open_c_library() -> Option<Library> {
+  for name in ["ucrtbase.dll", "msvcrt.dll", "libc.so.6", "libc.so", "/usr/lib/libSystem.B.dylib"] {
+    if let Ok(library) = Library::open(name) {
+      return Some(library);
+    }
+  }
+
+  None
+}
+
+/// The function `name`, which the C library must have.
+fn find(library: Library, name: String) -> unsafe extern "C" fn() {
+  match library.symbol(name) {
+    Some(found) => found,
+    None => panic(`no ${name} in the C library`),
+  }
+}
+
+fn load() -> Option<CLibrary> {
+  const library = open_c_library()?;
+
+  unsafe {
+    Some(CLibrary {
+      qsort: find(library, "qsort") as unsafe extern "C" fn(*mut c_void, usize, usize, extern "C" fn(*const c_void, *const c_void) -> c_int),
+      memcpy: find(library, "memcpy") as unsafe extern "C" fn(*mut c_void, *const c_void, usize) -> *mut c_void,
+      memset: find(library, "memset") as unsafe extern "C" fn(*mut c_void, c_int, usize) -> *mut c_void,
+      fopen: find(library, "fopen") as unsafe extern "C" fn(*const c_char, *const c_char) -> *mut c_void,
+      fwrite: find(library, "fwrite") as unsafe extern "C" fn(*const c_void, usize, usize, *mut c_void) -> usize,
+      fclose: find(library, "fclose") as unsafe extern "C" fn(*mut c_void) -> c_int,
+    })
+  }
+}
+
+fn priority_name(priority: Priority) -> String {
+  match priority {
+    Priority::Low => "low",
+    Priority::Medium => "medium",
+    Priority::High => "high",
+  }
+}
+
+fn weight_text(record: Record) -> String {
+  if record.is_float {
+    const float = unsafe { record.weight.float };
+
+    `${float}`
+  } else {
+    const int = unsafe { record.weight.int };
+
+    `${int}`
+  }
+}
+
+fn describe(record: Record) -> String {
+  `${priority_name(record.priority)} ${weight_text(record)} [${record.values[0]}, ${record.values[1]}, ${record.values[2]}]`
+}
+
+fn main() {
+  const c = match load() {
+    Some(found) => found,
+    None => return println("no C library"),
+  };
+
+  println("loaded the C library");
+
+  var records = [
+    Record { priority: Priority::High, is_float: true, weight: Weight { float: 2.25 }, values: [0, 1, 2] },
+    Record { priority: Priority::Low, is_float: true, weight: Weight { float: 1.5 }, values: [3, 4, 5] },
+    Record { priority: Priority::Medium, is_float: false, weight: Weight { int: 7 }, values: [6, 7, 8] },
+  ];
+
+  unsafe {
+    (c.qsort)(records.as_mut_ptr() as *mut c_void, records.len(), mem::size_of<Record>(), by_priority);
+  }
+
+  for record in records {
+    println(describe(record));
+  }
+
+  var copy = Record { priority: Priority::Low, is_float: false, weight: Weight { int: 0 }, values: [0, 0, 0] };
+
+  unsafe {
+    (c.memcpy)(&raw mut copy as *mut c_void, &raw const records[2] as *const c_void, mem::size_of<Record>());
+  }
+
+  println(`copied ${priority_name(copy.priority)} ${weight_text(copy)}`);
+
+  const buffer: List<u8> = new List();
+
+  buffer.resize(16, 0);
+
+  unsafe {
+    (c.memset)(buffer.as_mut_ptr() as *mut c_void, 1, 15);
+    (c.memset)(&raw mut copy.values[0] as *mut c_void, 255, 1);
+  }
+
+  buffer[15] = copy.values[0];
+
+  println(`buffer ${buffer.len()} ${buffer[0]} ${buffer[15]}`);
+
+  const path = CString::new("records.bin").unwrap();
+  const mode = CString::new("wb").unwrap();
+  const bytes = List::from([83u8, 97, 103, 0, 255, 1, 2, 3]);
+
+  unsafe {
+    const file = (c.fopen)(path.as_ptr(), mode.as_ptr());
+
+    (c.fwrite)(bytes.as_ptr() as *const c_void, 1, bytes.len(), file);
+    (c.fclose)(file);
+  }
+
+  match fs::read("records.bin") {
+    Ok(read) => println(`file ${read.len()} ${read[0]} ${read[3]} ${read[4]}`),
+    Err(error) => println(error.message()),
+  }
+
+  fs::remove_file("records.bin").unwrap();
+
+  match Priority::from_raw(9) {
+    Some(found) => println(priority_name(found)),
+    None => println("invalid priority 9"),
+  }
+}

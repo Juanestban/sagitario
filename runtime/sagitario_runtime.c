@@ -33,6 +33,7 @@
 #ifdef __APPLE__
 #include <sys/sysctl.h>
 #endif
+#include <dlfcn.h>
 #endif
 
 /* ---- Reference counts and thread-local state ------------------------------------------- */
@@ -1672,21 +1673,18 @@ static int32_t sag_fs_file_error(sag_string path, int32_t code) {
   return code != 0 && sag_fs_kind(path) == SAG_FS_DIR ? EISDIR : code;
 }
 
-sag_string sag_fs_read(sag_string path, int32_t *status) {
-  sag_sb sb;
-  sag_sb_init(&sb);
+/* Reads the whole file at `path` into `sb`; 0, or the error code. */
+static int32_t sag_fs_read_all(sag_string path, sag_sb *sb) {
 #ifdef _WIN32
   wchar_t *wide = sag_wide(path);
   if (wide == NULL) {
-    *status = EINVAL;
-    return sag_string_empty();
+    return EINVAL;
   }
   /* GENERIC_READ, sharing everything, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL. */
   void *file = CreateFileW(wide, 0x80000000ul, 7ul, NULL, 3ul, 0x80ul, NULL);
   free(wide);
   if (file == SAG_WIN_INVALID_HANDLE) {
-    *status = sag_fs_file_error(path, sag_win_last_errno());
-    return sag_string_empty();
+    return sag_fs_file_error(path, sag_win_last_errno());
   }
   char chunk[4096];
   unsigned long count;
@@ -1699,39 +1697,58 @@ sag_string sag_fs_read(sag_string path, int32_t *status) {
     if (count == 0) {
       break;
     }
-    sag_sb_push_bytes(&sb, chunk, count);
+    sag_sb_push_bytes(sb, chunk, count);
   }
   CloseHandle(file);
 #else
   char *cpath = sag_cpath(path);
   if (cpath == NULL) {
-    *status = EINVAL;
-    return sag_string_empty();
+    return EINVAL;
   }
   errno = 0;
   FILE *file = fopen(cpath, "rb");
   free(cpath);
   if (file == NULL) {
-    *status = sag_fs_file_error(path, sag_io_errno());
-    return sag_string_empty();
+    return sag_fs_file_error(path, sag_io_errno());
   }
   char chunk[4096];
   size_t count;
   int32_t code = 0;
   while ((count = fread(chunk, 1, sizeof chunk, file)) > 0) {
-    sag_sb_push_bytes(&sb, chunk, count);
+    sag_sb_push_bytes(sb, chunk, count);
   }
   if (ferror(file)) {
     code = sag_fs_file_error(path, sag_io_errno());
   }
   fclose(file);
 #endif
+  return code;
+}
+
+sag_string sag_fs_read(sag_string path, int32_t *status) {
+  sag_sb sb;
+  sag_sb_init(&sb);
+  int32_t code = sag_fs_read_all(path, &sb);
   if (code != 0) {
     free(sb.data);
     *status = code;
     return sag_string_empty();
   }
   return sag_io_finish_read(&sb, status);
+}
+
+/* The bytes of the file at `path`, whatever they are, in a string `std::fs` only reads bytes of. */
+sag_string sag_fs_read_bytes(sag_string path, int32_t *status) {
+  sag_sb sb;
+  sag_sb_init(&sb);
+  int32_t code = sag_fs_read_all(path, &sb);
+  if (code != 0) {
+    free(sb.data);
+    *status = code;
+    return sag_string_empty();
+  }
+  *status = 0;
+  return sag_sb_finish(&sb);
 }
 
 int32_t sag_fs_write(sag_string path, sag_string text, bool append) {
@@ -3429,6 +3446,95 @@ static void sag_task_close_inbox(void) {
   sag_object_release(&inbox->header);
 }
 #endif
+
+/* ---- Dynamic libraries (docs/adr/0078-ffi-without-c-shims.md) --------------------------- */
+
+#ifdef _WIN32
+extern void *SAG_WINAPI LoadLibraryW(const wchar_t *name);
+extern sag_symbol SAG_WINAPI GetProcAddress(void *library, const char *name);
+extern unsigned long SAG_WINAPI GetLastError(void);
+#endif
+
+/* Why the last library of this thread did not load. */
+static SAG_THREAD_LOCAL char sag_library_reason[256];
+
+static void sag_library_set_reason(const char *text) {
+  size_t len = strlen(text);
+  if (len >= sizeof sag_library_reason) {
+    len = sizeof sag_library_reason - 1;
+  }
+  memcpy(sag_library_reason, text, len);
+  sag_library_reason[len] = '\0';
+}
+
+/* A C string with the text of `name`, or NULL if it contains a NUL character. */
+static char *sag_library_c_name(sag_string name) {
+  if (memchr(name.ptr, 0, name.len) != NULL) {
+    return NULL;
+  }
+  char *text = sag_alloc(name.len + 1);
+  memcpy(text, name.ptr, name.len);
+  text[name.len] = 0;
+  return text;
+}
+
+void *sag_library_open(sag_string path) {
+#ifdef _WIN32
+  wchar_t *wide = sag_wide(path);
+  if (wide == NULL) {
+    sag_library_set_reason("the path contains a NUL character");
+    return NULL;
+  }
+  void *library = LoadLibraryW(wide);
+  free(wide);
+  if (library == NULL) {
+    char reason[64];
+    snprintf(reason, sizeof reason, "Windows error %lu", GetLastError());
+    sag_library_set_reason(reason);
+  }
+  return library;
+#else
+  char *cpath = sag_library_c_name(path);
+  if (cpath == NULL) {
+    sag_library_set_reason("the path contains a NUL character");
+    return NULL;
+  }
+  void *library = dlopen(cpath, RTLD_NOW | RTLD_LOCAL);
+  free(cpath);
+  if (library == NULL) {
+    const char *reason = dlerror();
+    sag_library_set_reason(reason != NULL ? reason : "unknown error");
+  }
+  return library;
+#endif
+}
+
+sag_string sag_library_error(void) {
+  sag_sb sb;
+  sag_sb_init(&sb);
+  sag_sb_push_bytes(&sb, sag_library_reason, strlen(sag_library_reason));
+  return sag_sb_finish(&sb);
+}
+
+sag_symbol sag_library_symbol(void *library, sag_string name) {
+  char *cname = sag_library_c_name(name);
+  if (cname == NULL) {
+    return NULL;
+  }
+#ifdef _WIN32
+  sag_symbol symbol = GetProcAddress(library, cname);
+#else
+  /* POSIX guarantees that a data pointer from `dlsym` holds a function's address; ISO C does not
+   * define the cast, so the bits are copied. */
+  void *address = dlsym(library, cname);
+  sag_symbol symbol = NULL;
+  if (address != NULL) {
+    memcpy(&symbol, &address, sizeof symbol);
+  }
+#endif
+  free(cname);
+  return symbol;
+}
 
 /* ---- Program lifecycle ----------------------------------------------------------------- */
 

@@ -220,8 +220,9 @@ enum Shape impl Display {
 - `enum Name impl I1, I2` implements interfaces (F2). Generic enums arrive with generics (F2).
 - Enums are value types; their mutability comes from the binding, as for structs. Copying an
   enum retains the `String`s it holds. An enum cannot contain itself by value.
-- Only enums whose variants carry no data support `==` and `!=`. Enums cannot be converted with
-  `as` or interpolated.
+- Only enums whose variants carry no data support `==` and `!=`. Enums cannot be interpolated,
+  and only those with an integer representation (`@repr(i32)`, for C) are converted with `as`,
+  to integers ([FFI](10-ffi.md#enums-with-an-integer-representation)).
 - Values are inspected with an exhaustive `match` (see [control flow](06-control-flow.md#match)).
 
 ## Arrays and lists
@@ -277,6 +278,8 @@ Rationale: [ADR-0034](../adr/0034-collections-and-iterators.md).
   | `sort()` | `()`: stable, ascending; needs `T: Ord` |
   | `sort_by(f)` | `()`: stable, by `f: fn(T, T) -> Ordering` |
   | `join(sep)` | `String`; only on `List<String>` |
+  | `resize(n, value)` | `()`: removes the elements past `n`, or adds copies of `value` up to `n` (Rust's `Vec::resize`) |
+  | `as_ptr()`, `as_mut_ptr()` | `*const T`, `*mut T` to the first element, for C ([FFI](10-ffi.md#raw-pointers)) |
   | `iter()` and the methods of `Iter<T>` | see [iterators](08-closures.md#iterators) |
 
 - `for x in list` visits the elements by position and reads the length at every step:

@@ -30,6 +30,9 @@ true      unsafe    use       var       weak      where     while     zod
 
 `async` and `await` are those of [`async` functions](12-async.md) (F8).
 
+`union` is a contextual keyword, as in Rust: it declares a [union](10-ffi.md#unions) only before
+the name of one, and is an ordinary name elsewhere.
+
 `let` only appears in `if let` and `while let` (F5,
 [control flow](06-control-flow.md#if-let-and-while-let)); bindings are `const` and `var`.
 
@@ -68,7 +71,8 @@ struct Timespec { pub tv_sec: i64; pub tv_nsec: i64; }
   struct, enum, class, field, method).
 - The set of attributes is **closed**: unknown attributes are a compile error. There are no
   user-defined attributes.
-- MVP attributes: `@export("symbol")` and `@repr(C)` (see [FFI](10-ffi.md)).
+- Attributes: `@export("symbol")`; `@repr(C)` on structs and unions, and `@repr(C)` or an
+  integer type (`@repr(i32)`) on enums (see [FFI](10-ffi.md)).
 - Reserved for later: `@test`, `@deprecated`.
 
 ## Numeric literals (F1)

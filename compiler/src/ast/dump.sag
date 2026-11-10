@@ -122,7 +122,9 @@ class Dumper {
     match item {
       Item::Fn(decl) => self.function("item", decl),
       Item::Struct(decl) => {
-        self.line("item", "Struct", Some(decl.span), None, `${ident(decl.name)} ${visibility(decl.visibility)} repr_c=${decl.repr_c}`);
+        const union_text = if decl.is_union { " union" } else { "" };
+
+        self.line("item", "Struct", Some(decl.span), None, `${ident(decl.name)} ${visibility(decl.visibility)} repr_c=${decl.repr_c}` + union_text);
         self.depth += 1;
         self.generics(decl.generics);
         self.types("impl", decl.impls);
@@ -131,7 +133,12 @@ class Dumper {
         self.depth -= 1;
       }
       Item::Enum(decl) => {
-        self.line("item", "Enum", Some(decl.span), None, ident(decl.name) + " " + visibility(decl.visibility));
+        const repr = match decl.repr {
+          Some(found) => " repr=" + found.name,
+          None => "",
+        };
+
+        self.line("item", "Enum", Some(decl.span), None, ident(decl.name) + " " + visibility(decl.visibility) + repr);
         self.depth += 1;
         self.generics(decl.generics);
         self.types("impl", decl.impls);
@@ -143,7 +150,12 @@ class Dumper {
             VariantFields::Named(_) => "named",
           };
 
-          self.line("variant", "Variant", Some(variant.span), None, ident(variant.name) + " " + shape);
+          const discriminant = match variant.discriminant {
+            Some(found) => " = " + (if found.negative { "-" } else { "" }) + found.value + "@" + span_text(found.span),
+            None => "",
+          };
+
+          self.line("variant", "Variant", Some(variant.span), None, ident(variant.name) + " " + shape + discriminant);
           self.depth += 1;
 
           match variant.fields {
@@ -267,6 +279,10 @@ class Dumper {
       values = values + " export=" + lexer::quote(export.symbol) + "@" + span_text(export.span);
     }
 
+    if decl.is_unsafe {
+      values = values + " unsafe";
+    }
+
     if let Some(span) = decl.self_param {
       values = values + " self@" + span_text(span);
     }
@@ -331,6 +347,17 @@ class Dumper {
       }
       TypeExprKind::Fn { params, ret } => {
         self.line(label, "FnType", Some(ty.span), None, "");
+        self.depth += 1;
+        self.types("param", params);
+
+        if let Some(ret) = ret {
+          self.type_expr("ret", ret);
+        }
+
+        self.depth -= 1;
+      }
+      TypeExprKind::CFn { is_unsafe, params, ret } => {
+        self.line(label, "CFnType", Some(ty.span), None, if is_unsafe { "unsafe" } else { "" });
         self.depth += 1;
         self.types("param", params);
 
@@ -499,6 +526,12 @@ class Dumper {
         self.depth += 1;
         self.expr("lhs", lhs);
         self.expr("rhs", rhs);
+        self.depth -= 1;
+      }
+      ExprKind::AddrOf { mutable, place } => {
+        self.node(label, expr, "AddrOf", if mutable { "mut" } else { "const" });
+        self.depth += 1;
+        self.expr("place", place);
         self.depth -= 1;
       }
       ExprKind::Cast { expr: inner, ty } => {

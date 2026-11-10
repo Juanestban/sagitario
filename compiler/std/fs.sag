@@ -7,6 +7,7 @@ use std::path;
 extern "C" {
   fn sag_fs_kind(path: String) -> i32;
   fn sag_fs_read(path: String, status: *mut i32) -> String;
+  fn sag_fs_read_bytes(path: String, status: *mut i32) -> String;
   fn sag_fs_write(path: String, text: String, append: bool) -> i32;
   fn sag_fs_create_dir(path: String) -> i32;
   fn sag_fs_remove_dir(path: String) -> i32;
@@ -33,6 +34,25 @@ pub fn read_to_string(path: String) -> Result<String, io::Error> {
   const text = unsafe { sag_fs_read(path, status.as_mut_ptr()) };
 
   if status[0] == 0 { Ok(text) } else { Err(failure(status[0], `cannot read "${path}"`)) }
+}
+
+/// The bytes of the file at `path`, such as an image or SPIR-V code.
+pub fn read(path: String) -> Result<List<u8>, io::Error> {
+  var status = [0i32; 1];
+  // The runtime gives the bytes in a string, which is never used as text.
+  const raw = unsafe { sag_fs_read_bytes(path, status.as_mut_ptr()) };
+
+  if status[0] != 0 {
+    return Err(failure(status[0], `cannot read "${path}"`));
+  }
+
+  const bytes: List<u8> = new List();
+
+  for byte in raw.bytes() {
+    bytes.push(byte);
+  }
+
+  Ok(bytes)
 }
 
 /// Writes `text` to the file at `path`, creating it or replacing its contents.

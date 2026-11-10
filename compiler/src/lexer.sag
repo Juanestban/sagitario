@@ -650,7 +650,7 @@ class Lexer {
       '*' => if self.eat('=') { "*=" } else { "*" },
       '/' => if self.eat('=') { "/=" } else { "/" },
       '%' => if self.eat('=') { "%=" } else { "%" },
-      '&' if self.eat('&') => "&&",
+      '&' => if self.eat('&') { "&&" } else { "&" },
       '|' => if self.eat('|') { "||" } else { "|" },
       other => {
         self.error(codes::UNEXPECTED_CHARACTER, start, `unexpected character \`${other}\``);

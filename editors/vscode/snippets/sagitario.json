@@ -123,6 +123,21 @@
     "description": "A struct with the C layout, which can cross the FFI boundary",
     "body": ["@repr(C)", "pub struct ${1:Name} {", "  pub ${2:field}: ${3:i32};$0", "}"]
   },
+  "@repr(C) union": {
+    "prefix": "union",
+    "description": "A union with the C layout: its fields share their memory",
+    "body": ["@repr(C)", "pub union ${1:Name} {", "  pub ${2:field}: ${3:i32};$0", "}"]
+  },
+  "@repr(i32) enum": {
+    "prefix": "reprenum",
+    "description": "An enum laid out as an integer, for C",
+    "body": ["@repr(${1:i32})", "pub enum ${2:Name} {", "  ${3:First} = ${4:0},", "  ${5:Second},$0", "}"]
+  },
+  "extern \"C\" fn type": {
+    "prefix": "cfn",
+    "description": "The type of a C function pointer",
+    "body": ["extern \"C\" fn(${1:i32}) -> ${2:i32}"]
+  },
   "unsafe": {
     "prefix": "unsafe",
     "description": "An unsafe block: calls to C functions and raw pointers",

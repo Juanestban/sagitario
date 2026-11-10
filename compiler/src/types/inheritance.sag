@@ -189,6 +189,14 @@ pub fn check_members(cx: Checker) {
             .with_label(inherited_decl.name.span, "overridden method declared here in `" + owner + "`")
             .with_note("expected `" + expected + "`"),
         );
+      } else if fn_decl.is_unsafe != inherited_decl.is_unsafe {
+        const which = if fn_decl.is_unsafe { "an `unsafe fn` cannot override a safe method" } else { "the override of an `unsafe fn` must be `unsafe` too" };
+
+        cx.diagnostics.push(
+          Diagnostic::error(codes::INVALID_OVERRIDE, name.span, which)
+            .with_label(inherited_decl.name.span, "overridden method declared here in `" + owner + "`")
+            .with_note("a call through the parent class must know whether it needs `unsafe`"),
+        );
       }
     }
   }

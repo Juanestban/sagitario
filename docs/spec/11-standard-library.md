@@ -5,7 +5,8 @@ Rationale: [ADR-0037](../adr/0037-standard-library-env-io-process.md),
 [ADR-0045](../adr/0045-threads-and-send.md), [ADR-0046](../adr/0046-mutex-and-atomics.md),
 [ADR-0047](../adr/0047-channels-and-thread-utilities.md),
 [ADR-0076](../adr/0076-std-math-and-methods-of-numbers.md),
-[ADR-0077](../adr/0077-std-math-powers-and-logarithms.md).
+[ADR-0077](../adr/0077-std-math-powers-and-logarithms.md),
+[ADR-0078](../adr/0078-ffi-without-c-shims.md).
 
 The standard library is the set of modules under the path root `std`. A program imports them
 with `use` like its own modules (`use std::io;`, `use std::env::args;`) or names them in full
@@ -14,11 +15,12 @@ functions it uses.
 
 | Module | Contents | Milestone |
 |---|---|---|
-| `std::ffi` | C types, `CString`, `string_from_c` ([FFI](10-ffi.md)) | F1 |
+| `std::ffi` | C types, `CString`, `string_from_c`, `Library` ([FFI](10-ffi.md)) | F1, G1 |
 | `std::env` | Command-line arguments and environment variables | F3 |
 | `std::io` | Standard input and output with errors as values; `io::Error` | F3 |
 | `std::fs` | Files and directories | F3 |
 | `std::math` | Constants of `f64`, and the methods of floats as functions | G1 |
+| `std::mem` | Sizes and alignments of types, and zeroed values for C | G1 |
 | `std::path` | Joining paths and taking them apart | F3 |
 | `std::process` | `exit`, running programs | F3 |
 | `std::sync` | `Mutex`, atomic values and channels, shared between threads | F4 |
@@ -108,6 +110,7 @@ current directory unless they have a root. The functions with a `Result` fail wi
 | Function | Result |
 |---|---|
 | `read_to_string(path) -> Result<String, io::Error>` | The whole file |
+| `read(path) -> Result<List<u8>, io::Error>` | The bytes of the whole file, whatever they are (an image, SPIR-V) |
 | `write(path, text)` | Creates the file, or replaces its contents |
 | `append(path, text)` | Adds `text` at the end of the file, creating it if needed |
 | `exists(path) -> bool` | Whether `path` names a file, a directory or anything else |
@@ -123,14 +126,14 @@ current directory unless they have a root. The functions with a `Result` fail wi
 
 - The functions without a stated result return `Result<(), io::Error>`.
 - Contents are read and written byte for byte: `\r\n` is never translated. A file that is not
-  valid UTF-8 is an error of kind `InvalidData`.
+  valid UTF-8 is an error of kind `InvalidData` for `read_to_string`, never for `read`.
 - `exists`, `is_file` and `is_dir` return `false` when the path cannot be examined.
 - Using a directory as a file, or a file as a directory, fails the same way on every system:
   messages such as "Is a directory" and "Not a directory", of kind `Other`.
 - Names that are not valid UTF-8 are listed by `read_dir` with each ill-formed sequence replaced
   by U+FFFD. On Windows, paths are passed to the system as UTF-16, so any Unicode name works.
 - A path containing a NUL character is an error of kind `InvalidInput`.
-- Not yet: reading and writing bytes, file metadata (size, times, permissions), removing a
+- Not yet: writing bytes (with slices, [ADR-0079](../adr/0079-references-and-borrowing.md)), file metadata (size, times, permissions), removing a
   directory tree, and changing the current directory (F4, since it is process-wide state).
 
 ## `std::math`
@@ -161,6 +164,27 @@ fn main() {
   is `a.lerp(b, t)`. A panic in `math::clamp` reports its place in the standard library.
 - Not yet: trigonometry (`sin`, `cos`, `atan2`...), in the next increment of G1
   ([ADR-0076](../adr/0076-std-math-and-methods-of-numbers.md), Q453).
+
+## `std::mem`
+
+```sag
+use std::mem;
+
+const size = mem::size_of<Vertex>();
+var properties: PhysicalDeviceProperties = unsafe { mem::zeroed() };
+```
+
+| Function | Result |
+|---|---|
+| `size_of<T>() -> usize` | The size of `T` in bytes, as C's `sizeof` on the target |
+| `align_of<T>() -> usize` | The alignment of `T` in bytes, as C's `_Alignof` |
+| `zeroed<T>() -> T` | A value with every byte zero; needs `unsafe` |
+
+- `size_of` and `align_of` take any type, written as a type argument.
+- `zeroed` takes its type as a type argument or from the expected type. It only makes types valid
+  with every byte zero: numbers, `bool`, raw pointers, `Option` of C function pointers, enums with
+  a variant of value `0`, and `@repr(C)` structs, unions and arrays of them. Other types, such as
+  a C function pointer (never null) or a struct without `@repr(C)`, are errors.
 
 ## `std::path`
 

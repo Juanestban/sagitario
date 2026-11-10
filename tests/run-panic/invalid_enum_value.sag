@@ -1,0 +1,18 @@
+// A value C stores that is no variant of an enum with an integer representation panics when it is
+// matched (docs/adr/0078-ffi-without-c-shims.md, Q479).
+// expect-panic: invalid value 9 for enum Status
+@repr(i32)
+enum Status {
+  Success,
+  Failure,
+}
+
+fn main() {
+  const raw = [9i32];
+  const status = unsafe { *(raw.as_ptr() as *const Status) };
+
+  match status {
+    Status::Success => println("success"),
+    Status::Failure => println("failure"),
+  }
+}

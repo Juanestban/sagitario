@@ -264,6 +264,8 @@ static inline const uint8_t *sag_string_ptr(sag_string s) {
 #define SAG_PTR_ADD(p, n) ((p) + (n))
 #define SAG_ARRAY_PTR(a) ((a).data)
 #define SAG_ARRAY_MUT_PTR(a) ((a).data)
+/* The first element of a list, until its length changes (docs/adr/0078-ffi-without-c-shims.md). */
+#define SAG_LIST_PTR(list) ((void *)((sag_list *)(list))->data)
 #define SAG_CHECK_PTR(p, file, line) ((p) != NULL ? (p) : (sag_null_pointer_at(file, line), (p)))
 
 /* ---- Arrays ------------------------------------------------------------------------------ */
@@ -712,6 +714,14 @@ _Noreturn void sag_process_exit(int32_t code);
 /* Each returns 0 or an error code, or sets `*status` to one. Paths with NUL are EINVAL. */
 int32_t sag_fs_kind(sag_string path);
 sag_string sag_fs_read(sag_string path, int32_t *status);
+sag_string sag_fs_read_bytes(sag_string path, int32_t *status);
+
+/* Dynamic libraries (docs/adr/0078-ffi-without-c-shims.md): a library, never unloaded, or NULL
+ * with the reason in `sag_library_error`; and one of its functions, or NULL. */
+typedef void (*sag_symbol)(void);
+void *sag_library_open(sag_string path);
+sag_string sag_library_error(void);
+sag_symbol sag_library_symbol(void *library, sag_string name);
 int32_t sag_fs_write(sag_string path, sag_string text, bool append);
 int32_t sag_fs_create_dir(sag_string path);
 int32_t sag_fs_remove_dir(sag_string path);

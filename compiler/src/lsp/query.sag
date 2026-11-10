@@ -155,6 +155,15 @@ class Finder {
           self.type_expr(found);
         }
       }
+      TypeExprKind::CFn { params, ret, .. } => {
+        for param in params {
+          self.type_expr(param);
+        }
+
+        if let Some(found) = ret {
+          self.type_expr(found);
+        }
+      }
       TypeExprKind::Unit => {}
     }
   }
@@ -378,6 +387,7 @@ class Finder {
       ExprKind::ArrayLit(elems) => self.exprs(elems),
       ExprKind::ArrayRepeat { value, .. } => self.expr(value),
       ExprKind::Unary { operand, .. } => self.expr(operand),
+      ExprKind::AddrOf { place, .. } => self.expr(place),
       ExprKind::Binary { lhs, rhs, .. } => {
         self.expr(lhs);
         self.expr(rhs);
@@ -850,6 +860,8 @@ fn res_span(package: Package, resolution: Resolution, function: Option<u32>, res
       EnumKind::User(id) => Some(resolution.enum_decl(package, id)?.variants.get(variant.index as usize)?.name.span),
       _ => None,
     },
+    // The enum it converts to.
+    Res::FromRaw(id) => Some(resolution.enum_decl(package, id)?.name.span),
     Res::Builtin(_) => None,
   }
 }

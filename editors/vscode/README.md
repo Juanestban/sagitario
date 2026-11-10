@@ -14,7 +14,8 @@ Support for the [Sagitario](https://github.com/Juanestban/sagitario) programming
 - Commenting with `Ctrl+/`, matching and auto-closing brackets and quotes, and folding.
 - Snippets: `main`, `mainr`, `fn`, `pfn`, `struct`, `class`, `enum`, `interface`, `match`,
   `iflet`, `whilelet`, `for`, `forin`, `if`, `ifelse`, `println` and `use`; and for the FFI,
-  `extern` (a block of C functions), `externfn`, `export`, `reprc`, `unsafe` and `cstring`.
+  `extern` (a block of C functions), `externfn`, `export`, `reprc`, `union`, `reprenum`, `cfn`,
+  `unsafe` and `cstring`.
 
 ## The language server
 

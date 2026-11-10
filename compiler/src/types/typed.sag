@@ -174,6 +174,8 @@ pub class TypedModule {
   pub var zod_calls: Map<u32, bool>;
   /// `value.name(args)` calling a field of a function type, by node id.
   pub var field_calls: Map<u32, bool>;
+  /// The type argument of each call of `mem::size_of`, `mem::align_of` and `mem::zeroed`.
+  pub var mem_types: Map<u32, Type>;
   /// Lists and arrays used as iterators, by node id.
   pub var to_iter: Map<u32, ToIter>;
   /// Ranges used as values, by node id: the prelude function making their iterator.
@@ -201,6 +203,7 @@ pub class TypedModule {
     self.method_calls = new Map<u32, u32>();
     self.zod_calls = new Map<u32, bool>();
     self.field_calls = new Map<u32, bool>();
+    self.mem_types = new Map<u32, Type>();
     self.to_iter = new Map<u32, ToIter>();
     self.ranges = new Map<u32, u32>();
   }
@@ -819,8 +822,9 @@ pub class TypedModule {
     }
 
     match ty.kind {
+      // A C function pointer holds no data, as in Rust.
       TypeKind::Unit | TypeKind::Bool | TypeKind::Char | TypeKind::Int(_) | TypeKind::Float(_) | TypeKind::String | TypeKind::CString | TypeKind::Never
-        | TypeKind::Error => None,
+        | TypeKind::Error | TypeKind::CFn { .. } => None,
       TypeKind::StringBuilder => Some("a `StringBuilder` can be changed through any reference to it"),
       TypeKind::List(_) => Some("a `" + types::text(ty) + "` can be changed through any reference to it"),
       TypeKind::Function { .. } => Some("a function value can capture values that are not `Send`"),

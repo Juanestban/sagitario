@@ -1,6 +1,6 @@
 # 0078. A complete FFI: C libraries without C shims
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-09
 - Refines: [ADR-0026](0026-ffi-details.md) (items out of the MVP, row 11),
   [ADR-0063](0063-distribution-phase-and-roadmap-v2.md) (G1 of roadmap v2)

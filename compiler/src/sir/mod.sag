@@ -127,6 +127,25 @@ pub struct Layouts {
     }
   }
 
+  /// Whether `ty` is a union.
+  pub fn is_union(self, ty: Type) -> bool {
+    match ty.kind {
+      TypeKind::Struct(named) => match self.structs.get(named.id as usize) {
+        Some(layout) => layout.is_union,
+        None => false,
+      },
+      _ => false,
+    }
+  }
+
+  /// The integer type of an enum type with an integer representation.
+  pub fn enum_repr(self, ty: Type) -> Option<IntTy> {
+    match ty.kind {
+      TypeKind::Enum(named) => self.enums.get(named.id as usize)?.repr,
+      _ => None,
+    }
+  }
+
   /// The field types of a struct type, with its type arguments.
   pub fn struct_fields(self, named: NamedRef) -> List<Type> {
     const subst = Subst::of(ParamOwner::Item(TypeItem::Struct(named.id)), named.args);
@@ -146,11 +165,17 @@ pub struct EnumLayout {
   pub name: String;
   /// The field types of each variant.
   pub variants: List<List<Type>>;
+  /// The integer type of an enum with an integer representation, which its values are.
+  pub repr: Option<IntTy>;
+  /// With a representation, the value of each variant.
+  pub values: List<Const>;
 }
 
 pub struct StructLayout {
   pub name: String;
   pub fields: List<Type>;
+  /// A union: its fields share their memory.
+  pub is_union: bool;
 }
 
 pub struct Function {
@@ -184,6 +209,35 @@ pub struct Place {
 
 /// `place` with one more projection, as a new place of type `ty`.
 pub fn project(place: Place, projection: Projection, ty: Type) -> Place {
+  // An `Option` of a C function pointer is the pointer, `NULL` for `None`
+  // (docs/adr/0078-ffi-without-c-shims.md, Q473): its value is the place itself.
+  if is_nullable_pointer(place.ty) {
+    match projection {
+      Projection::Tag => {
+        return project_one(place, Projection::NonNull, ty);
+      }
+      Projection::VariantField { .. } => {
+        return Place { local: place.local, projections: place.projections, ty: ty };
+      }
+      _ => {}
+    }
+  }
+
+  project_one(place, projection, ty)
+}
+
+/// Whether `ty` is an `Option` stored as a C pointer that is `NULL` for `None`.
+pub fn is_nullable_pointer(ty: Type) -> bool {
+  if let TypeKind::Option(inner) = ty.kind {
+    if let TypeKind::CFn { .. } = inner.kind {
+      return true;
+    }
+  }
+
+  false
+}
+
+fn project_one(place: Place, projection: Projection, ty: Type) -> Place {
   const projections: List<Projection> = new List();
 
   for existing in place.projections {
@@ -213,6 +267,11 @@ pub enum Projection {
   ListElem { index: Operand, elem: Type },
   /// The tag of an enum value, as `u32`.
   Tag,
+  /// The tag of an `Option` stored as a nullable pointer: `1` (`Some`) unless it is `NULL`.
+  NonNull,
+  /// The tag of a value of enum `N`, which has an integer representation: the position of the
+  /// variant with that value; any other value panics.
+  EnumIndex(usize),
   /// A field of the given variant of an enum value.
   VariantField { variant: u32, field: usize },
   /// The value a pointer points to; a null pointer panics.
@@ -294,6 +353,20 @@ pub enum Rvalue {
   Closure { function: u32, env: Option<usize>, captures: List<Operand> },
   /// A named function as a value: its wrapper.
   FnValue(u32),
+  /// An `extern "C" fn` of the program as a C function pointer.
+  CFnValue(u32),
+  /// A C function of an `extern` block as a C function pointer: its wrapper.
+  ExternFnValue(u32),
+  /// `mem::size_of<T>()`, as `usize`.
+  SizeOf(Type),
+  /// `mem::align_of<T>()`, as `usize`.
+  AlignOf(Type),
+  /// `mem::zeroed<T>()`: a value of the destination's type with every byte zero.
+  Zeroed,
+  /// A union of the destination's type holding `value` in its field `field`.
+  UnionValue { field: usize, value: Operand },
+  /// Whether the integer is the value of a variant of enum `enum_id`.
+  EnumValid { enum_id: usize, operand: Operand },
   ListNew,
   ListLen(Operand),
   ListPop(Operand),
@@ -323,6 +396,8 @@ pub enum Callee {
   Dyn { path: List<usize>, slot: usize, params: List<Type>, ret: Type },
   /// A C function of an `extern` block.
   Extern(u32),
+  /// The C function pointer given as the first argument.
+  Pointer { params: List<Type>, ret: Type },
   /// A builtin, by name.
   Builtin(String),
   /// A runtime function; `located` ones also receive the source location.
@@ -383,6 +458,7 @@ pub fn type_key(ty: Type) -> String {
     TypeKind::Interface(named) => `i${named.id}` + args_key(named.args),
     TypeKind::Param(param) => "p" + pkg::types::typed::owner_key(param.owner) + `.${param.index}`,
     TypeKind::Function { params, ret } => "fn" + args_key(params) + ">" + type_key(ret),
+    TypeKind::CFn { is_unsafe, params, ret } => (if is_unsafe { "ucfn" } else { "cfn" }) + args_key(params) + ">" + type_key(ret),
     TypeKind::Array { elem, len } => "[" + type_key(elem) + `;${len}]`,
     TypeKind::List(elem) => "L(" + type_key(elem) + ")",
     TypeKind::Option(value) => "O(" + type_key(value) + ")",
@@ -561,7 +637,7 @@ pub fn lower(package: Package, resolution: Resolution, typed: TypedModule, sourc
       fields.push(field.ty);
     }
 
-    structs.push(StructLayout { name: def.name, fields: fields });
+    structs.push(StructLayout { name: def.name, fields: fields, is_union: def.is_union });
   }
 
   const enums: List<EnumLayout> = new List();
@@ -573,7 +649,15 @@ pub fn lower(package: Package, resolution: Resolution, typed: TypedModule, sourc
       variants.push(variant.field_types());
     }
 
-    enums.push(EnumLayout { name: def.name, variants: variants });
+    const values: List<Const> = new List();
+
+    if let Some(repr) = def.repr {
+      for value in def.discriminants {
+        values.push(Const::Int { magnitude: value.magnitude, negative: value.negative, ty: repr });
+      }
+    }
+
+    enums.push(EnumLayout { name: def.name, variants: variants, repr: def.repr, values: values });
   }
 
   const layouts = Layouts { structs: structs, enums: enums };
@@ -1551,7 +1635,11 @@ pub class Lowering {
       ExprKind::Lambda { body, .. } => closures::lambda(self, value, body, ty),
       ExprKind::Path(_) | ExprKind::Zod => match self.resolution.paths.get(value.id) {
         Some(Res::Local(id)) => Ok(Operand::Local(closures::local_id(self, id))),
-        Some(Res::Fn(id)) => Ok(closures::fn_value(self, value, id, ty)),
+        Some(Res::Fn(id)) => match ty.kind {
+          TypeKind::CFn { .. } => Ok(self.new_value(ty, Rvalue::CFnValue(mono::instance(self, id, Subst::empty())))),
+          _ => Ok(closures::fn_value(self, value, id, ty)),
+        },
+        Some(Res::Extern(id)) => Ok(self.new_value(ty, Rvalue::ExternFnValue(id))),
         Some(Res::Variant(variant)) => Ok(matching::variant(self, ty, variant.index, new List())),
         Some(Res::Const(id)) => self.const_operand(id, ty),
         _ => Err("unsupported path operand"),
@@ -1575,6 +1663,11 @@ pub class Lowering {
       ExprKind::ArrayRepeat { value: repeated, .. } => self.array_repeat(ty, repeated),
       ExprKind::Unary { op, operand } => self.unary(value, ty, op, operand),
       ExprKind::Binary { op, lhs, rhs } => self.binary(ty, op, lhs, rhs),
+      ExprKind::AddrOf { place, .. } => {
+        const found = self.base_place(place)?;
+
+        Ok(self.new_value(ty, Rvalue::Use(Operand::Ref(found))))
+      }
       ExprKind::Cast { expr: inner, .. } => {
         const from = self.type_of(inner)?;
         const operand_value = self.expr(inner)?;
@@ -1737,6 +1830,21 @@ pub class Lowering {
     };
     const field_types = self.layouts.struct_fields(owner);
     const operands: List<Option<Operand>> = new List();
+
+    // A union holds the one field its literal sets; its fields hold no references.
+    if self.layouts.is_union(ty) {
+      const init = match fields.first() {
+        Some(found) => found,
+        None => return Err("union literal without a field"),
+      };
+      const index = match self.typed.field_index(owner.id, init.name.name) {
+        Some(index) => index,
+        None => return Err("unknown field in literal"),
+      };
+      const stored = self.operand_as(init.value, field_types.get(index).unwrap_or(types::error()))?;
+
+      return Ok(self.new_value(ty, Rvalue::UnionValue { field: index, value: stored }));
+    }
 
     for _ in field_types {
       operands.push(None);
@@ -2092,6 +2200,35 @@ pub class Lowering {
       Some(Res::Extern(id)) => {
         target = Some(Callee::Extern(id));
       }
+      Some(Res::FromRaw(id)) => {
+        if args.len() != 1 {
+          return Err("`from_raw` without one argument");
+        }
+
+        const repr = match self.layouts.enums.get(id as usize) {
+          Some(layout) => layout.repr.unwrap_or(IntTy::I32),
+          None => IntTy::I32,
+        };
+        const enum_ty = match ty.kind {
+          TypeKind::Option(inner) => inner,
+          _ => return Err("`from_raw` without an `Option` result"),
+        };
+        const raw = self.operand_as(args[0], types::int(repr))?;
+        const valid = self.new_value(types::of(TypeKind::Bool), Rvalue::EnumValid { enum_id: id as usize, operand: raw });
+        const result = self.temp(ty);
+        const converted = self.temp(enum_ty);
+
+        self.emit(Stmt::If {
+          cond: valid,
+          then_body: List::from([
+            Stmt::Assign { dest: converted, value: Rvalue::Cast { from: types::int(repr), to: enum_ty, operand: raw } },
+            Stmt::Assign { dest: result, value: Rvalue::Variant { index: 1, fields: List::from([Operand::Local(converted)]) } },
+          ]),
+          else_body: List::from([Stmt::Assign { dest: result, value: Rvalue::Variant { index: 0, fields: new List() } }]),
+        });
+
+        return Ok(Operand::Local(result));
+      }
       Some(Res::Builtin(name)) => {
         if name == "Error" {
           if args.len() != 1 {
@@ -2111,6 +2248,18 @@ pub class Lowering {
           const code = self.operand_as(args[0], types::int(IntTy::U32))?;
 
           return Ok(strings::char_from_u32(self, ty, code));
+        }
+
+        if name.starts_with("mem::") {
+          const measured = match self.typed.mem_types.get(value.id) {
+            Some(found) => types::substitute(found, self.subst),
+            None => return Err("`" + name + "` without its type"),
+          };
+          mono::register_types(self, measured);
+
+          const rvalue = if name == "mem::size_of" { Rvalue::SizeOf(measured) } else if name == "mem::align_of" { Rvalue::AlignOf(measured) } else { Rvalue::Zeroed };
+
+          return Ok(self.new_value(ty, rvalue));
         }
 
         if name == "CString::new" {
