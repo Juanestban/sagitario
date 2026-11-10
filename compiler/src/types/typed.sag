@@ -20,6 +20,13 @@ pub struct PreludeItems {
   pub iter: Option<u32>;
   pub map: Option<u32>;
   pub send: Option<u32>;
+  /// The interfaces of the operators (docs/adr/0081-operator-overloading.md).
+  pub add: Option<u32>;
+  pub sub: Option<u32>;
+  pub mul: Option<u32>;
+  pub div: Option<u32>;
+  pub rem: Option<u32>;
+  pub neg: Option<u32>;
 }
 
 /// The methods of `List<T>` implemented by the compiler (docs/spec/02-types.md#arrays-and-lists).
@@ -73,6 +80,12 @@ pub enum BuiltinMethod {
 pub struct ToIter {
   pub function: u32;
   pub args: List<Type>;
+}
+
+/// An interface of an operator in the prelude, if it was found.
+struct Operator {
+  pub id: Option<u32>;
+  pub name: String;
 }
 
 /// The interfaces a struct, enum or class implements: those after `impl` in its header, then
@@ -195,7 +208,22 @@ pub class TypedModule {
     self.generics = new Map<String, GenericsEntry>();
     self.error_types = None;
     self.slots = new Map<u32, usize>();
-    self.prelude = PreludeItems { ordering: None, eq: None, ord: None, hash: None, entry: None, iter: None, map: None, send: None };
+    self.prelude = PreludeItems {
+      ordering: None,
+      eq: None,
+      ord: None,
+      hash: None,
+      entry: None,
+      iter: None,
+      map: None,
+      send: None,
+      add: None,
+      sub: None,
+      mul: None,
+      div: None,
+      rem: None,
+      neg: None,
+    };
     self.sync_classes = new List();
     self.const_types = new List();
     self.const_values = new List();
@@ -696,9 +724,47 @@ pub class TypedModule {
     result
   }
 
-  /// The interfaces integers, `bool`, `char` and `String` implement: `Ord` and `Hash`.
+  /// The interfaces integers, `bool`, `char` and `String` implement: `Ord` and `Hash`; and those
+  /// of the operators that numbers and `String` have, with their own type (Q513 of ADR-0081).
   pub fn primitive_impls(self, ty: Type) -> List<NamedRef> {
     const result: List<NamedRef> = new List();
+    var numeric = false;
+    var negatable = false;
+
+    match ty.kind {
+      TypeKind::Int(int_ty) => {
+        numeric = true;
+        negatable = types::is_signed(int_ty);
+      }
+      TypeKind::Float(_) => {
+        numeric = true;
+        negatable = true;
+      }
+      _ => {}
+    }
+
+    const pair = List::from([ty, ty]);
+
+    if numeric {
+      for entry in List::from([Operator { id: self.prelude.add, name: "Add" }, Operator { id: self.prelude.sub, name: "Sub" }, Operator { id: self.prelude.mul, name: "Mul" }, Operator { id: self.prelude.div, name: "Div" }, Operator { id: self.prelude.rem, name: "Rem" }]) {
+        if let Some(id) = entry.id {
+          result.push(NamedRef { id: id, name: entry.name, args: pair });
+        }
+      }
+    }
+
+    if negatable {
+      if let Some(id) = self.prelude.neg {
+        result.push(NamedRef { id: id, name: "Neg", args: List::from([ty]) });
+      }
+    }
+
+    if types::is_string(ty) {
+      if let Some(id) = self.prelude.add {
+        result.push(NamedRef { id: id, name: "Add", args: pair });
+      }
+    }
+
     const primitive = match ty.kind {
       TypeKind::Int(_) | TypeKind::Bool | TypeKind::Char | TypeKind::String => true,
       _ => false,

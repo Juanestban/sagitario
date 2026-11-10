@@ -1,0 +1,128 @@
+// Arithmetic operators through the prelude's interfaces (docs/adr/0081-operator-overloading.md,
+// increment 2): several right operands for one type, `+=` on bindings and fields, operands passed
+// by value, generic code over numbers, strings and structs, classes and interface values.
+// expect-stdout: (4, 7) (2, 3) (2, 4) 13 (-1, -2)
+// expect-stdout: (1.5, 2.5)
+// expect-stdout: (4, 7)
+// expect-stdout: 1 6
+// expect-stdout: 5 3.75 abcd (4, 7)
+// expect-stdout: 42 xyxy (2, 4) -4 -2.5 (-1, -2)
+// expect-stdout: (4, 7)
+// expect-stdout: 1 1.5
+// expect-stdout: a abc abcd
+// expect-stdout: 425 426 435
+struct Vec2 {
+  pub x: f64;
+  pub y: f64;
+}
+
+impl Add<Vec2, Vec2> for Vec2 {
+  fn add(self, other: Vec2) -> Vec2 { Vec2 { x: self.x + other.x, y: self.y + other.y } }
+}
+
+impl Sub<Vec2, Vec2> for Vec2 {
+  fn sub(self, other: Vec2) -> Vec2 { Vec2 { x: self.x - other.x, y: self.y - other.y } }
+}
+
+impl Mul<f64, Vec2> for Vec2 {
+  fn mul(self, k: f64) -> Vec2 { Vec2 { x: self.x * k, y: self.y * k } }
+}
+
+impl Mul<Vec2, f64> for Vec2 {
+  fn mul(self, other: Vec2) -> f64 { self.x * other.x + self.y * other.y }
+}
+
+impl Neg<Vec2> for Vec2 {
+  fn neg(self) -> Vec2 { Vec2 { x: -self.x, y: -self.y } }
+}
+
+struct Counter {
+  pub n: i32;
+}
+
+// A method that modifies `self`: the operator gives it a copy.
+impl Add<i32, Counter> for Counter {
+  fn add(self, k: i32) -> Counter {
+    self.n += k;
+    self
+  }
+}
+
+struct Body {
+  pub pos: Vec2;
+}
+
+fn show(v: Vec2) -> String { f"({v.x}, {v.y})" }
+
+fn sum<T: Add<T, T>>(a: T, b: T) -> T { a + b }
+
+fn twice<T: Add<T, T>>(a: T) -> T {
+  var total = a;
+  total += a;
+  total
+}
+
+fn negate<T: Neg<T>>(a: T) -> T { -a }
+
+struct Name {
+  pub text: String;
+}
+
+impl Add<String, Name> for Name {
+  fn add(self, more: String) -> Name {
+    self.text = self.text + more;
+    self
+  }
+}
+
+class Money impl Add<Money, Money> {
+  pub const cents: i64;
+
+  pub fn new(self, cents: i64) {
+    self.cents = cents;
+  }
+
+  pub fn add(self, other: Money) -> Money {
+    new Money(self.cents + other.cents)
+  }
+}
+
+fn main() {
+  const a = Vec2 { x: 1.0, y: 2.0 };
+  const b = Vec2 { x: 3.0, y: 5.0 };
+
+  println(f"{show(a + b)} {show(b - a)} {show(a * 2.0)} {a * b} {show(-a)}");
+
+  var p = a;
+  p += b;
+  p -= a;
+  p *= 0.5;
+  println(show(p));
+
+  var body = Body { pos: a };
+  body.pos += b;
+  println(show(body.pos));
+
+  const c = Counter { n: 1 };
+  const d = c + 5;
+  println(f"{c.n} {d.n}");
+
+  println(f"{sum(2, 3)} {sum(1.5, 2.25)} {sum("ab", "cd")} {show(sum(a, b))}");
+  println(f"{twice(21)} {twice("xy")} {show(twice(a))} {negate(4)} {negate(2.5)} {show(negate(a))}");
+
+  const adder: Add<Vec2, Vec2> = a;
+  println(show(adder.add(b)));
+  println(f"{7 % 3} {7.5 % 2.0}");
+
+  const n = Name { text: "a" };
+  const m = n + "b" + "c";
+  var o = m;
+  o += "d";
+  println(f"{n.text} {m.text} {o.text}");
+
+  const total = new Money(150) + new Money(275);
+  var wallet = new Money(1);
+  wallet += total;
+  const summed: Add<Money, Money> = wallet;
+  println(f"{total.cents} {wallet.cents} {summed.add(new Money(9)).cents}");
+}

@@ -45,6 +45,38 @@ pub interface Hash extends Eq {
   fn hash(self) -> u64;
 }
 
+/// `a + b` for values of a type other than numbers and `String`, with a right operand of type
+/// `Rhs` and a result of type `Out` (docs/adr/0081-operator-overloading.md). Numbers implement
+/// the arithmetic interfaces with their own type, and `String` implements `Add<String, String>`.
+pub interface Add<Rhs, Out> {
+  fn add(self, other: Rhs) -> Out;
+}
+
+/// `a - b`.
+pub interface Sub<Rhs, Out> {
+  fn sub(self, other: Rhs) -> Out;
+}
+
+/// `a * b`.
+pub interface Mul<Rhs, Out> {
+  fn mul(self, other: Rhs) -> Out;
+}
+
+/// `a / b`.
+pub interface Div<Rhs, Out> {
+  fn div(self, other: Rhs) -> Out;
+}
+
+/// `a % b`.
+pub interface Rem<Rhs, Out> {
+  fn rem(self, other: Rhs) -> Out;
+}
+
+/// `-a`. Signed integers and floats implement it.
+pub interface Neg<Out> {
+  fn neg(self) -> Out;
+}
+
 /// Values that can cross to another thread (docs/spec/05-interfaces-generics.md#send): those
 /// no other thread can change. The compiler infers which types are `Send`; no type names it
 /// after `impl`, and it is only a bound (`T: Send`), not a type.

@@ -166,6 +166,11 @@ runs the executor until the task of `main` finishes.
   interface, `Callee::Dyn` calls an entry). An itable lists thunks calling the type's methods
   (through the vtable when they vary), the interface's default methods, a getter and a setter per
   field, and the itables of the parent interfaces.
+- An arithmetic operator on a type other than a number or a string (`types/operators.sag`) is
+  recorded like a method call of its interface's method (`TypedModule::method_calls` and
+  `call_args` on the expression, or on the target of `+=`), which SIR lowers with the method calls
+  (`method_call_with`, with the receiver's value when `+=` evaluated its place); on numbers and
+  strings reached through a bound, `collections::primitive_operator` emits the operator itself.
 - An `impl Interface for Type` block (`Item::Impl`) registers its methods with the type as their
   owner (`FnInfo::block`, `Resolution::blocks`) but outside the type's own functions, and the
   interface joins the type's `ImplEntry` with the block that implements it. The method of an

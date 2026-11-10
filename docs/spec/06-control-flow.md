@@ -138,12 +138,16 @@ match s {
 | 9 | `..` `..=` | none |
 | 10 | `=` `+=` `-=` `*=` `/=` `%=` | statements, not expressions |
 
-- Operands of binary operators must have identical types (no implicit conversions).
-- Arithmetic applies to integers and floats. Integer overflow panics in debug builds and wraps
+- Operands of binary operators must have identical types (no implicit conversions), except for
+  [operators of other types](05-interfaces-generics.md#operators), whose right operand has the
+  type their implementation names.
+- Arithmetic applies to integers and floats, and to the types that implement the
+  [operator interfaces](05-interfaces-generics.md#operators). Integer overflow panics in debug builds and wraps
   in release builds (see [types](02-types.md#integer-arithmetic)). `/` and `%` by zero always
   panic. `%` is the remainder with the sign of the dividend.
-- Unary `-` applies to signed integers and floats; it is an error on unsigned types. A negative
-  literal such as `-128i8` is a single value and fits its type.
+- Unary `-` applies to signed integers and floats, and to types implementing `Neg`; it is an
+  error on unsigned types. A negative literal such as `-128i8` is a single value and fits its
+  type.
 - `!`, `&&` and `||` apply only to `bool`. There are no bitwise operators in the MVP.
 - `==` and `!=` apply to integers, floats, `char`, `bool` and `String`; `<` `<=` `>` `>=` to
   integers, floats, `char` and `String` (byte-wise lexicographic order). `+` also concatenates

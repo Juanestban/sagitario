@@ -81,3 +81,12 @@ Rust also gives each implementation an associated type, `Output`, for the result
   header), `E0343` (a block whose type or parameters are wrong), `E0344` (an ambiguous name);
   a method of a block outside its interface is `E0329`, as other mismatches of an
   implementation are.
+- Increment 2 (the arithmetic operators) is done: `docs/spec/05-interfaces-generics.md#operators`.
+  An operator is recorded as a call of the interface's method with the instantiation's type
+  arguments, so implementations are found as for any interface method (blocks, the header,
+  itables, bounds), and on numbers and strings reached through a bound it lowers to the operator
+  itself. Besides Q511, an unsuffixed literal on the right picks the one implementation taking a
+  number of its kind; a number on the left of a type with operators is reported with the help of
+  writing it on the right; several implementations of `Neg` make `-a` ambiguous (`E0344`). A
+  method of an operator that modifies `self` gets a copy of the left operand, as operands are
+  values.

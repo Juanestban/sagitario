@@ -44,8 +44,9 @@ layouts (arrays in `@repr(C)` structs, unions, enums with an integer representat
 program `tests/run-pass/reference_ffi/`. ADR-0079 is done, in three increments: `&T` and `&mut T` in
 parameters, with the borrow checker; slices and borrowed lists; and `fs::write_bytes`. Operator
 overloading through interfaces ([ADR-0081](adr/0081-operator-overloading.md)) comes in three
-increments, of which 1 is done: `impl ... for` blocks and several implementations of a generic
-interface; the arithmetic operators, then `==` and `<` through `Eq` and `Ord`, follow.
+increments, of which 1 and 2 are done: `impl ... for` blocks and several implementations of a
+generic interface; the arithmetic operators through `Add`, `Sub`, `Mul`, `Div`, `Rem` and `Neg`.
+`==` and `<` through `Eq` and `Ord`, then the G1 sample of a camera, follow.
 
 - **Operator overloading** (`a + b` on vectors and matrices), today a deferred decision.
 - **Slices and byte buffers**: views of arrays and lists without copies, and reading and writing

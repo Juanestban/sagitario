@@ -1361,6 +1361,23 @@ pub class Lowering {
       _ => false,
     };
 
+    // `a += b` with an operator of the type of `a` is `a = a + b`, the place evaluated once.
+    const by_operator = op.is_some() && self.typed.method_calls.contains_key(target.id);
+
+    if is_place && by_operator {
+      const place = self.place(target)?;
+      const result = self.method_call_with(target, target, List::from([value]), place.ty, Some(Operand::Place(place)), true)?;
+
+      if self.managed(place.ty) {
+        self.emit(Stmt::Retain(result));
+        self.emit(Stmt::ReleasePlace(place));
+      }
+
+      self.emit(Stmt::AssignPlace { dest: place, value: Rvalue::Use(result) });
+
+      return Ok(());
+    }
+
     if is_place {
       const value_ty = self.type_of(value)?;
       const stored = self.expr(value)?;
@@ -1394,6 +1411,20 @@ pub class Lowering {
     };
     const local = closures::local_id(self, id);
     const ty = self.local_type(local);
+
+    if by_operator {
+      const result = self.method_call_with(target, target, List::from([value]), ty, Some(Operand::Local(local)), true)?;
+
+      if self.managed(ty) {
+        self.emit(Stmt::Retain(result));
+        self.emit(Stmt::Release(local));
+      }
+
+      self.emit(Stmt::Assign { dest: local, value: Rvalue::Use(result) });
+
+      return Ok(());
+    }
+
     const stored = self.operand_as(value, ty)?;
     const combined = self.combine(op, ty, Operand::Local(local), stored);
 
@@ -1897,7 +1928,7 @@ pub class Lowering {
       ExprKind::ArrayLit(elems) => self.array_lit(ty, elems),
       ExprKind::ArrayRepeat { value: repeated, .. } => self.array_repeat(ty, repeated),
       ExprKind::Unary { op, operand } => self.unary(value, ty, op, operand),
-      ExprKind::Binary { op, lhs, rhs } => self.binary(ty, op, lhs, rhs),
+      ExprKind::Binary { op, lhs, rhs } => self.binary(value, ty, op, lhs, rhs),
       ExprKind::AddrOf { place, raw, .. } => {
         if let TypeKind::Slice { .. } = ty.kind {
           return self.slice(place, ty);
@@ -2155,6 +2186,10 @@ pub class Lowering {
       return Ok(self.new_value(ty, Rvalue::Use(Operand::Place(place))));
     }
 
+    if op == UnaryOp::Neg && self.typed.method_calls.contains_key(value.id) {
+      return self.method_call_with(value, operand, new List(), ty, None, true);
+    }
+
     // A negated literal is a single constant, so `-128i8` never overflows.
     if op == UnaryOp::Neg {
       match operand.kind {
@@ -2181,7 +2216,12 @@ pub class Lowering {
     Ok(self.new_value(ty, Rvalue::Unary { op: op, ty: operand_ty, operand: operand_value }))
   }
 
-  prv fn binary(self, ty: Type, op: BinaryOp, lhs: Expr, rhs: Expr) -> Result<Operand, String> {
+  prv fn binary(self, value: Expr, ty: Type, op: BinaryOp, lhs: Expr, rhs: Expr) -> Result<Operand, String> {
+    // An operator implemented by the type of `lhs` (docs/adr/0081-operator-overloading.md).
+    if self.typed.method_calls.contains_key(value.id) {
+      return self.method_call_with(value, lhs, List::from([rhs]), ty, None, true);
+    }
+
     if op == BinaryOp::And || op == BinaryOp::Or {
       const result = self.temp(types::of(TypeKind::Bool));
       const left = self.expr(lhs)?;
@@ -2562,6 +2602,12 @@ pub class Lowering {
   }
 
   prv fn method_call(self, value: Expr, receiver: Expr, args: List<Expr>, ty: Type) -> Result<Operand, String> {
+    self.method_call_with(value, receiver, args, ty, None, false)
+  }
+
+  /// A method call; `given` is the receiver's value when it was already evaluated, and an operator
+  /// (`by_value`) passes a copy of it to a method that modifies `self`, as operands are values.
+  prv fn method_call_with(self, value: Expr, receiver: Expr, args: List<Expr>, ty: Type, given: Option<Operand>, by_value: bool) -> Result<Operand, String> {
     const function = match self.typed.method_calls.get(value.id) {
       Some(function) => function,
       None => {
@@ -2578,10 +2624,12 @@ pub class Lowering {
       }
     };
     // A list or array calling a method of `Iter` becomes an iterator first.
-    var converted: Option<Operand> = None;
+    var converted: Option<Operand> = given;
 
-    if let Some(entry) = self.typed.to_iter.get(receiver.id) {
-      converted = Some(collections::iter_of(self, receiver, entry.function, entry.args)?);
+    if converted.is_none() {
+      if let Some(entry) = self.typed.to_iter.get(receiver.id) {
+        converted = Some(collections::iter_of(self, receiver, entry.function, entry.args)?);
+      }
     }
 
     var receiver_ty = types::error();
@@ -2595,8 +2643,14 @@ pub class Lowering {
       }
     }
 
-    if converted.is_none() && collections::is_primitive_method(self, function, receiver_ty) {
-      return collections::primitive_method(self, function, ty, receiver, args);
+    if collections::is_primitive_method(self, function, receiver_ty) {
+      if let Some(lhs) = given {
+        return collections::primitive_operator(self, function, receiver_ty, lhs, args);
+      }
+
+      if converted.is_none() {
+        return collections::primitive_method(self, function, ty, receiver, args);
+      }
     }
 
     const subst = mono::call_subst(self, value.id, function, Some(receiver_ty));
@@ -2649,10 +2703,29 @@ pub class Lowering {
       }
     }
 
-    const receiver_value = match converted {
-      Some(found) => found,
-      None => if by_ref { Operand::Ref(self.base_place(receiver)?) } else { self.expr(receiver)? },
-    };
+    var receiver_value = unit_operand();
+
+    if by_ref && by_value {
+      // The method modifies a copy of the operand.
+      const operand = match converted {
+        Some(found) => found,
+        None => self.expr(receiver)?,
+      };
+      const copy = self.temp(receiver_ty);
+
+      self.store(copy, operand);
+
+      if self.managed(receiver_ty) {
+        self.pending.push(copy);
+      }
+
+      receiver_value = Operand::Ref(local_place(copy, receiver_ty));
+    } else {
+      receiver_value = match converted {
+        Some(found) => found,
+        None => if by_ref { Operand::Ref(self.base_place(receiver)?) } else { self.expr(receiver)? },
+      };
+    }
     const operands = List::from([receiver_value]);
     var index = 0usize;
 

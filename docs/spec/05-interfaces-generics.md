@@ -235,6 +235,51 @@ interface Hash extends Eq {
 - `List::contains`, `List::index_of` and `List::sort` need `Eq` or `Ord`, and the keys of a
   `Map` need `Hash`.
 
+## Operators
+
+Rationale: [ADR-0081](../adr/0081-operator-overloading.md), increment 2. The prelude declares
+one interface per arithmetic operator, whose type arguments are the type of the right operand and
+the type of the result:
+
+```sag
+interface Add<Rhs, Out> { fn add(self, other: Rhs) -> Out; }   // a + b
+interface Sub<Rhs, Out> { fn sub(self, other: Rhs) -> Out; }   // a - b
+interface Mul<Rhs, Out> { fn mul(self, other: Rhs) -> Out; }   // a * b
+interface Div<Rhs, Out> { fn div(self, other: Rhs) -> Out; }   // a / b
+interface Rem<Rhs, Out> { fn rem(self, other: Rhs) -> Out; }   // a % b
+interface Neg<Out> { fn neg(self) -> Out; }                     // -a
+```
+
+```sag
+impl Mul<Mat4, Mat4> for Mat4 { fn mul(self, other: Mat4) -> Mat4 { ... } }
+impl Mul<Vec4, Vec4> for Mat4 { fn mul(self, v: Vec4) -> Vec4 { ... } }
+
+const clip = projection * view * model * position;   // Mat4 * Mat4 * Mat4 * Vec4
+```
+
+- On a struct, enum, class, interface value or type parameter `a`, `a + b` calls the `add` of the
+  implementation of `Add` by the type of `a` whose `Rhs` is the type of `b`, and has the type of
+  its `Out`. Only the type of the left operand is searched: `v * 2.0` can be implemented,
+  `2.0 * v` is an error (`E0310`).
+- When the type of `a` implements the interface once, `b` is checked against its `Rhs`, so an
+  unsuffixed literal takes that type. With several implementations, an unsuffixed literal takes
+  the one implementation of its kind of number, and other operands must have one `Rhs` exactly.
+  An operator without an implementation for the operands is an error (`E0310`) that names the
+  interface to implement, or the right operands the type accepts. `-a` with several
+  implementations of `Neg` is ambiguous (`E0344`).
+- `a += b` (and `-=`, `*=`, `/=`, `%=`) is `a = a + b`, with `a` evaluated once; the `Out` of the
+  implementation must be the type of `a` (`E0310`). There is no `AddAssign`.
+- Operands are evaluated left to right and passed by value: a method of the operator that
+  modifies `self` changes a copy of the left operand.
+- Integers and floats implement the five binary interfaces with their own type as `Rhs` and
+  `Out`, signed integers and floats implement `Neg<Self>`, and `String` implements
+  `Add<String, String>`. Their operators keep their meaning (overflow and division by zero), and
+  generic code uses them through bounds: `fn sum<T: Add<T, T>>(a: T, b: T) -> T { a + b }`
+  works for `i32`, `f64`, `String` and a `Vec2` implementing `Add<Vec2, Vec2>`. As with `Ord`,
+  numbers and strings satisfy these bounds but do not convert to values of the interfaces.
+- `&&`, `||`, `!`, indexing, and comparisons other than through `Eq` and `Ord` are not
+  overloadable.
+
 ## Standard generic types (F2)
 
 `List<T>` (see [lists](02-types.md#lists-f2)), `Map<K, V>` (see [maps](02-types.md#maps-f2)) and

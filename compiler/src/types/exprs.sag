@@ -23,6 +23,7 @@ use pkg::types::generic::Unknowns;
 use pkg::types::inheritance;
 use pkg::types::interfaces;
 use pkg::types::numbers;
+use pkg::types::operators;
 use pkg::types::patterns;
 use pkg::types::send;
 use pkg::types::strings;
@@ -322,11 +323,15 @@ fn assign(cx: Checker, target: Expr, op: Option<BinaryOp>, value: Expr) -> Type 
 
     classes::check_mutable_place(cx, target, PlaceUse::Assign);
 
+    var checked = false;
+
     if let Some(compound) = op {
-      check_compound_operand(cx, target, compound, target_ty);
+      checked = compound_operand(cx, target, compound, target_ty, value);
     }
 
-    expect(cx, value, target_ty);
+    if !checked {
+      expect(cx, value, target_ty);
+    }
     closures::check_closure_cycle(cx, target, value);
 
     const never = match cx.typed.expr_types.get(value.id) {
@@ -384,11 +389,16 @@ fn assign(cx: Checker, target: Expr, op: Option<BinaryOp>, value: Expr) -> Type 
 
   match current {
     Some(ty) => {
+      var checked = false;
+
       if let Some(compound) = op {
-        check_compound_operand(cx, target, compound, ty);
+        checked = compound_operand(cx, target, compound, ty, value);
       }
 
-      expect(cx, value, ty);
+      if !checked {
+        expect(cx, value, ty);
+      }
+
       value_ty = ty;
     }
     None => {
@@ -409,12 +419,22 @@ fn assign(cx: Checker, target: Expr, op: Option<BinaryOp>, value: Expr) -> Type 
   if types::is_never(value_ty) { types::of(TypeKind::Never) } else { types::unit() }
 }
 
-fn check_compound_operand(cx: Checker, target: Expr, op: BinaryOp, ty: Type) {
+/// Checks the target of `target op= value`; with an operator implemented by the target's type, it
+/// also checks `value` and returns `true` (docs/adr/0081-operator-overloading.md, Q512).
+fn compound_operand(cx: Checker, target: Expr, op: BinaryOp, ty: Type, value: Expr) -> bool {
+  if is_arithmetic(op) && operators::is_operator_operand(ty) {
+    operators::compound_call(cx, target, op, ty, value);
+
+    return true;
+  }
+
   const concatenation = types::is_string(ty) && op == BinaryOp::Add;
 
   if !concatenation && !is_numeric(ty) && !types::is_error(ty) {
     cx.error(codes::INVALID_OPERAND, target.span, "cannot apply `" + ast::binary_symbol(op) + "=` to a value of type `" + types::text(ty) + "`");
   }
+
+  false
 }
 
 /// What imposes an expected type, for the label of a mismatch.
@@ -583,7 +603,7 @@ fn other_expr_kind(cx: Checker, value: Expr, expected: Option<Type>) -> Type {
       }
     }
     ExprKind::Unary { op, operand } => unary(cx, value, op, operand, expected),
-    ExprKind::Binary { op, lhs, rhs } => binary(cx, op, lhs, rhs, expected),
+    ExprKind::Binary { op, lhs, rhs } => binary(cx, value, op, lhs, rhs, expected),
     ExprKind::Cast { expr: inner, ty } => cast(cx, inner, ty),
     ExprKind::AddrOf { mutable, place, raw } => if raw { ffi::addr_of(cx, mutable, place) } else { borrow::borrow(cx, mutable, place, expected) },
     ExprKind::Range { start, end, .. } => collections::range_value(cx, value, start, end, expected),
@@ -738,6 +758,10 @@ fn unary(cx: Checker, value: Expr, op: UnaryOp, operand: Expr, expected: Option<
         }
         TypeKind::Float(_) | TypeKind::Error | TypeKind::Never => ty,
         _ => {
+          if operators::is_operator_operand(ty) {
+            return operators::neg_call(cx, value, ty);
+          }
+
           cx.error(codes::INVALID_OPERAND, value.span, "cannot negate a value of type `" + types::text(ty) + "`");
 
           types::error()
@@ -748,7 +772,7 @@ fn unary(cx: Checker, value: Expr, op: UnaryOp, operand: Expr, expected: Option<
 }
 
 /// An unsuffixed numeric literal, possibly negated, whose type comes from context.
-fn is_untyped_literal(value: Expr) -> bool {
+pub fn is_untyped_literal(value: Expr) -> bool {
   match value.kind {
     ExprKind::Int { suffix, .. } => suffix.is_none(),
     ExprKind::Float { suffix, .. } => suffix.is_none(),
@@ -773,6 +797,11 @@ pub fn same_type_operands(cx: Checker, lhs: Expr, rhs: Expr, hint: Option<Type>)
     rhs_ty = expr(cx, rhs, Some(lhs_ty));
   }
 
+  join_operands(cx, lhs, rhs, lhs_ty, rhs_ty, mismatch_on_right)
+}
+
+/// The type both checked operands share, reporting a mismatch.
+fn join_operands(cx: Checker, lhs: Expr, rhs: Expr, lhs_ty: Type, rhs_ty: Type, mismatch_on_right: bool) -> Type {
   if types::is_error(lhs_ty) || types::is_error(rhs_ty) {
     return types::error();
   }
@@ -807,7 +836,18 @@ pub fn same_type_operands(cx: Checker, lhs: Expr, rhs: Expr, hint: Option<Type>)
   types::error()
 }
 
-fn binary(cx: Checker, op: BinaryOp, lhs: Expr, rhs: Expr, expected: Option<Type>) -> Type {
+/// A number or string on the left of an operator that only the right operand's type could have.
+fn right_operator(cx: Checker, span: Span, symbol: String, lhs_ty: Type, rhs_ty: Type) -> Type {
+  cx.diagnostics.push(
+    Diagnostic::error(codes::INVALID_OPERAND, span, "cannot apply `" + symbol + "` to `" + types::text(lhs_ty) + "` and `" + types::text(rhs_ty) + "`")
+      .with_note("an operator is looked up in the type of its left operand")
+      .with_help("write the `" + types::text(rhs_ty) + "` on the left, if its type implements the operator"),
+  );
+
+  types::error()
+}
+
+fn binary(cx: Checker, value: Expr, op: BinaryOp, lhs: Expr, rhs: Expr, expected: Option<Type>) -> Type {
   const bool_ty = types::of(TypeKind::Bool);
 
   if op == BinaryOp::And || op == BinaryOp::Or {
@@ -818,9 +858,40 @@ fn binary(cx: Checker, op: BinaryOp, lhs: Expr, rhs: Expr, expected: Option<Type
   }
 
   const hint = if is_arithmetic(op) { numeric_only(expected) } else { None };
-  const ty = same_type_operands(cx, lhs, rhs, hint);
   const span = lhs.span.to(rhs.span);
   const symbol = ast::binary_symbol(op);
+  var ty = types::error();
+
+  // The left operand's type decides: a type other than a number or a string calls its operator
+  // (docs/adr/0081-operator-overloading.md, Q511).
+  if is_arithmetic(op) && !is_untyped_literal(lhs) {
+    const lhs_ty = expr(cx, lhs, hint);
+
+    if operators::is_operator_operand(lhs_ty) {
+      return operators::binary_call(cx, value, op, lhs, lhs_ty, rhs);
+    }
+
+    const rhs_ty = expr(cx, rhs, Some(lhs_ty));
+
+    if operators::is_operator_operand(rhs_ty) && !types::is_error(lhs_ty) {
+      return right_operator(cx, span, symbol, lhs_ty, rhs_ty);
+    }
+
+    ty = join_operands(cx, lhs, rhs, lhs_ty, rhs_ty, true);
+  } else if is_arithmetic(op) && !is_untyped_literal(rhs) {
+    // `2.0 * v`: the literal cannot take the type of `v`.
+    const rhs_ty = expr(cx, rhs, hint);
+
+    if operators::is_operator_operand(rhs_ty) {
+      const lhs_ty = expr(cx, lhs, None);
+
+      return right_operator(cx, span, symbol, lhs_ty, rhs_ty);
+    }
+
+    ty = join_operands(cx, lhs, rhs, expr(cx, lhs, Some(rhs_ty)), rhs_ty, false);
+  } else {
+    ty = same_type_operands(cx, lhs, rhs, hint);
+  }
 
   if is_arithmetic(op) {
     return match ty.kind {

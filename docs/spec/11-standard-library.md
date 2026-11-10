@@ -387,7 +387,7 @@ Rationale: [ADR-0039](../adr/0039-time-and-commands.md).
 | `SystemTime::now()`, `t.since_unix_epoch()` | The current time, and the time since 1970-01-01 00:00:00 UTC (zero before it) |
 
 - The three types implement `Ord` (and so `Eq`): `a.compare(b)`, and lists of them can be
-  sorted. Without operator overloading, arithmetic and comparisons are methods.
+  sorted. Their arithmetic and comparisons are methods.
 - Creating or adding durations beyond the range of `u64` nanoseconds follows integer overflow
   rules: a panic in debug builds.
 - Calendar dates, time zones and formatting are not part of `std::time`.

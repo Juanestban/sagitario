@@ -189,7 +189,9 @@ const text = builder.to_string();
   integers, `bool`, `char` and `String` also implement: `a.equals(b)`, `a.compare(b)`.
 - Arrays, lists, maps, iterators, interface values and function values cannot be compared with
   `==`.
-- Operator overloading is **post-MVP** (planned through interfaces such as `Add`, `Eq`, `Ord`).
+- [Arithmetic operators](05-interfaces-generics.md#operators) (`+`, `-`, `*`, `/`, `%`, unary
+  `-`) apply to other types through the prelude interfaces `Add`, `Sub`, `Mul`, `Div`, `Rem` and
+  `Neg` ([ADR-0081](../adr/0081-operator-overloading.md)); `==` and `<` on them come next.
 
 ## Enums (F1)
 
