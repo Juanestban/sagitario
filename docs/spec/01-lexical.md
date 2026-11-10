@@ -92,9 +92,15 @@ struct Timespec { pub tv_sec: i64; pub tv_nsec: i64; }
 
 - Booleans: `true`, `false`.
 - Characters: `'a'` (a Unicode scalar value).
-- Strings: `"plain"` is a literal string with no interpolation.
-- Template strings: `` `total = ${expr}` `` interpolates expressions and produces a new `String`.
-- Escapes, valid in `'...'`, `"..."` and `` `...` ``: `\n` `\r` `\t` `\\` `\0` `\"` `\'`
-  `` \` `` `\$`, `\x7F` (ASCII only), `\u{1F600}` (Unicode). `\$` writes a literal `$` in a
+- Strings: `"plain"` is a literal string with no interpolation; its braces are text.
+- Format strings ([ADR-0082](../adr/0082-format-strings.md)): `f"total = {expr}"` interpolates
+  expressions and produces a new `String`. The prefix is `f` immediately followed by `"` (`f "x"`
+  is the name `f` and a string). Each `{...}` holds any expression, which may contain braces and
+  strings; `{{` and `}}` write `{` and `}`, and a `}` that closes nothing or an empty `{}` is an
+  error (`E0007`). There are no format specifiers (`{x:.2}`).
+- Template strings: `` `total = ${expr}` `` interpolates expressions too. They are
+  **deprecated**: they keep compiling with the same meaning, but new code writes format strings.
+- Escapes, valid in `'...'`, `"..."`, `f"..."` and `` `...` ``: `\n` `\r` `\t` `\\` `\0` `\"`
+  `\'` `` \` `` `\$`, `\x7F` (ASCII only), `\u{1F600}` (Unicode). `\$` writes a literal `$` in a
   template string.
 - No raw strings (`r"..."`) in the MVP.

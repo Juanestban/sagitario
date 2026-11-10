@@ -122,8 +122,9 @@ arguments have the type of the receiver, unless written otherwise.
 
 - Always valid UTF-8 and **immutable**.
 - Managed by ARC: copying a `String` value only increments its reference count.
-- `+` and template strings create a new `String`. `StringBuilder` builds strings efficiently.
-- Template strings interpolate any expression with `${expr}`:
+- `+` and format strings create a new `String`. `StringBuilder` builds strings efficiently.
+- Format strings interpolate any expression with `{expr}`: `f"total = {a + b * 2}"`
+  ([lexical rules](01-lexical.md#other-literals-f1)); deprecated template strings do the same with
   `` `total = ${a + b * 2}` ``. Interpolable types and their format:
 
   | Type | Format |

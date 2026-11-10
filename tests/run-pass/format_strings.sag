@@ -1,0 +1,40 @@
+// Format strings `f"..."` (docs/adr/0082-format-strings.md): any expression in `{...}`, braces as
+// `{{` and `}}`, the escapes of plain strings; plain literals keep their braces.
+// expect-stdout: hola mundo
+// expect-stdout: Ada has 3 items, 7 in total
+// expect-stdout: {literal} and {mundo}
+// expect-stdout: nested yes mund0
+// expect-stdout: escapes "mundo"	😀 2.5 -3
+// expect-stdout: inner mundo!
+// expect-stdout: plain {world} same yes
+// expect-stdout: f is a name
+struct User {
+  pub name: String;
+}
+
+fn f(text: String) -> String {
+  text + " is a name"
+}
+
+fn main() {
+  const world = "mundo";
+  const user = User { name: "Ada" };
+  const items = List::from([1, 2, 3]);
+  const ok = true;
+  const ratio = 2.5;
+  const delta = -3;
+
+  println(f"hola {world}");
+  println(f"{user.name} has {items.len()} items, {1 + 2 * 3} in total");
+  println(f"{{literal}} and {{{world}}}");
+  println(f"nested {if ok { "yes" } else { "no" }} {world.replace("o", "0")}");
+  println(f"escapes \"{world}\"\t\u{1F600} {ratio} {delta}");
+  println(f"{f"inner {world}"}!");
+
+  // A template with spaces around the braces of its expression, as format strings allow.
+  const same = `${if ok { "yes" } else { "no" }}`;
+
+  println("plain {world}" + f" same {same}");
+  // `f` followed by a space is a name.
+  println(f ("f"));
+}

@@ -90,6 +90,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0079](0079-references-and-borrowing.md) | References and borrowing in parameters | Accepted |
 | [0080](0080-std-math-trigonometry.md) | Trigonometry in `std::math` | Accepted |
 | [0081](0081-operator-overloading.md) | Operator overloading through interfaces | Accepted |
+| [0082](0082-format-strings.md) | Format strings `f"..."` | Accepted |
 
 ## Template
 

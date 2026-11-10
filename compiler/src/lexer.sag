@@ -23,7 +23,8 @@ pub enum TokenKind {
   Float { text: String, suffix: Option<String> },
   /// A plain string literal with escapes already processed.
   Str(String),
-  /// A template string: literal text alternating with `${...}` interpolations.
+  /// A template string: literal text alternating with `${...}` interpolations; a format string
+  /// `f"...{...}..."` is one too.
   Template(List<TemplatePart>),
   Char(char),
   /// `///` (outer) or `//!` (inner) documentation.
@@ -36,7 +37,7 @@ pub enum TokenKind {
 pub enum TemplatePart {
   /// Literal text with escapes already processed.
   Text(String),
-  /// The tokens of one `${...}` interpolation, ending with `Eof`.
+  /// The tokens of one `${...}` (or `{...}`) interpolation, ending with `Eof`.
   Expr(List<Token>),
 }
 
@@ -111,6 +112,8 @@ class Lexer {
       self.block_comment(start);
     } else if c.is_ascii_digit() {
       self.number(start);
+    } else if c == 'f' && self.at(1, '"') {
+      self.format_string(start);
     } else if c == '_' || unicode::is_alphabetic(c as u32) {
       self.ident(start);
     } else if c == '"' {
@@ -573,7 +576,7 @@ class Lexer {
             text.clear();
           }
 
-          parts.push(TemplatePart::Expr(self.interpolation(start)));
+          parts.push(TemplatePart::Expr(self.interpolation(start, "template string")));
         }
         Some(c) => {
           self.bump();
@@ -589,8 +592,79 @@ class Lexer {
     self.push(TokenKind::Template(parts), start);
   }
 
-  /// Lexes the tokens of a `${...}` interpolation up to its closing `}`, which is consumed.
-  prv fn interpolation(self, template_start: usize) -> List<Token> {
+  /// A format string `f"...{expr}..."` (docs/adr/0082-format-strings.md): the token of a
+  /// template, with the escapes of `"..."` and `{{`, `}}` for braces.
+  prv fn format_string(self, start: usize) {
+    // `f` and `"`.
+    self.pos += 2;
+
+    const parts: List<TemplatePart> = new List();
+    const text = new StringBuilder();
+
+    while true {
+      match self.peek() {
+        None => {
+          self.error(codes::UNTERMINATED_STRING, start, "unterminated format string");
+          break;
+        }
+        Some('"') => {
+          self.bump();
+          break;
+        }
+        Some('\\') => {
+          if let Some(c) = self.escape() {
+            text.append_char(c);
+          }
+        }
+        Some('{') if self.at(1, '{') => {
+          self.pos += 2;
+          text.append_char('{');
+        }
+        Some('}') if self.at(1, '}') => {
+          self.pos += 2;
+          text.append_char('}');
+        }
+        Some('{') => {
+          const brace = self.pos;
+
+          self.bump();
+
+          if !text.is_empty() {
+            parts.push(TemplatePart::Text(text.to_string()));
+            text.clear();
+          }
+
+          const inner = self.interpolation(start, "format string");
+
+          if inner.len() <= 1 {
+            self.error(codes::INVALID_FORMAT_STRING, brace, "empty `{}` in a format string: write an expression inside, or `{{}}` for braces");
+          } else {
+            parts.push(TemplatePart::Expr(inner));
+          }
+        }
+        Some('}') => {
+          const brace = self.pos;
+
+          self.bump();
+          self.error(codes::INVALID_FORMAT_STRING, brace, "unmatched `}` in a format string: write `}}` for a brace");
+        }
+        Some(c) => {
+          self.bump();
+          text.append_char(c);
+        }
+      }
+    }
+
+    if !text.is_empty() {
+      parts.push(TemplatePart::Text(text.to_string()));
+    }
+
+    self.push(TokenKind::Template(parts), start);
+  }
+
+  /// Lexes the tokens of a `${...}` or `{...}` interpolation up to its closing `}`, which is
+  /// consumed; `what` names the literal for errors.
+  prv fn interpolation(self, template_start: usize, what: String) -> List<Token> {
     const outer = self.tokens;
 
     self.tokens = new List<Token>();
@@ -601,7 +675,7 @@ class Lexer {
       const c = match self.peek() {
         Some(c) => c,
         None => {
-          self.error(codes::UNTERMINATED_STRING, template_start, "unterminated interpolation in template string");
+          self.error(codes::UNTERMINATED_STRING, template_start, "unterminated interpolation in " + what);
           break;
         }
       };
@@ -611,7 +685,14 @@ class Lexer {
         break;
       }
 
+      const before = self.tokens.len();
+
       self.step(c);
+
+      // Whitespace and comments add no token: only a new `{` or `}` changes the depth.
+      if self.tokens.len() == before {
+        continue;
+      }
 
       if let Some(last) = self.tokens.last() {
         if let TokenKind::Punct(text) = last.kind {
