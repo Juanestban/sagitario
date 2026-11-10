@@ -1,0 +1,169 @@
+//! Changes the version of Sagitario in every file that says it (CONTRIBUTING.md#releasing), run
+//! from the root of the repository:
+//!
+//!     sag run tools/version.sag -- 0.11.0
+//!
+//! The files are `compiler/src/version.sag`, `compiler/Nova.toml`, the `package.json` and
+//! `package-lock.json` of the VS Code extension, and the sessions of `tests/lsp/`, whose server
+//! says its version. Without a version, it prints the current one.
+
+use std::env;
+use std::fs;
+use std::process;
+
+const USAGE: String = "Usage: sag run tools/version.sag -- [X.Y.Z]";
+
+/// The file that holds the version, read first.
+const VERSION_FILE: String = "compiler/src/version.sag";
+
+/// Where a file says the version: the text before it, and how many times it is there.
+struct Change {
+  pub file: String;
+  pub prefix: String;
+  pub count: usize;
+}
+
+fn changes() -> List<Change> {
+  const changes = List::from([
+    Change { file: VERSION_FILE, prefix: "pub const VERSION: String = \"", count: 1 },
+    Change { file: "compiler/Nova.toml", prefix: "version = \"", count: 1 },
+    Change { file: "editors/vscode/package.json", prefix: "\"version\": \"", count: 1 },
+    // The package itself and its entry under `packages`.
+    Change { file: "editors/vscode/package-lock.json", prefix: "\"version\": \"", count: 2 },
+  ]);
+
+  for name in fs::read_dir("tests/lsp").unwrap_or(new List<String>()) {
+    if name.ends_with(".expected") {
+      changes.push(Change { file: `tests/lsp/${name}`, prefix: "\"serverInfo\":{\"name\":\"sag\",\"version\":\"", count: 1 });
+    }
+  }
+
+  changes
+}
+
+/// Whether `version` is `X.Y.Z`: three decimal numbers without leading zeros.
+fn is_version(version: String) -> bool {
+  const parts = version.split(".");
+
+  if parts.len() != 3 {
+    return false;
+  }
+
+  for part in parts {
+    if part.is_empty() || (part.len() > 1 && part.starts_with("0")) {
+      return false;
+    }
+
+    for c in part.chars() {
+      if !c.is_ascii_digit() {
+        return false;
+      }
+    }
+  }
+
+  true
+}
+
+/// The current version, as `compiler/src/version.sag` says it.
+fn current_version() -> Result<String, String> {
+  const text = read(VERSION_FILE)?;
+  const prefix = "pub const VERSION: String = \"";
+
+  if let Some(start) = text.find(prefix) {
+    const rest = text.substring(start + prefix.len(), text.len());
+
+    if let Some(end) = rest.find("\"") {
+      return Ok(rest.substring(0, end));
+    }
+  }
+
+  Err(`cannot find the version in \`${VERSION_FILE}\``)
+}
+
+fn read(file: String) -> Result<String, String> {
+  match fs::read_to_string(file) {
+    Ok(text) => Ok(text),
+    Err(error) => Err(error.message()),
+  }
+}
+
+/// `text` with the first `change.count` occurrences of `change.prefix` followed by `old` changed
+/// to `next`.
+fn apply(change: Change, text: String, old: String, next: String) -> Result<String, String> {
+  const from = `${change.prefix}${old}"`;
+  const to = `${change.prefix}${next}"`;
+  var done = "";
+  var rest = text;
+
+  for _ in 0..change.count {
+    match rest.find(from) {
+      Some(start) => {
+        done = done + rest.substring(0, start) + to;
+        rest = rest.substring(start + from.len(), rest.len());
+      }
+      None => return Err(`\`${change.file}\` does not say the version ${old} where expected (${change.prefix}...)`),
+    }
+  }
+
+  Ok(done + rest)
+}
+
+fn run(next: String) -> Result<String, String> {
+  const old = current_version()?;
+
+  if old == next {
+    return Ok(`the version is already ${next}`);
+  }
+
+  // Every file is checked before any is written, so a failure changes nothing.
+  const files = new List<String>();
+  const texts = new List<String>();
+
+  for change in changes() {
+    const text = read(change.file)?;
+
+    files.push(change.file);
+    texts.push(apply(change, text, old, next)?);
+  }
+
+  for index in 0..files.len() {
+    if let Err(error) = fs::write(files[index], texts[index]) {
+      return Err(error.message());
+    }
+  }
+
+  Ok(`${old} -> ${next} in ${files.len()} files; now rebuild \`sag\`, run the harness, commit and push the tag v${next}`)
+}
+
+fn main() {
+  const args = env::args();
+
+  if !fs::is_file(VERSION_FILE) {
+    eprintln("error: run it from the root of the repository");
+    process::exit(2);
+  }
+
+  if args.len() == 1 {
+    match current_version() {
+      Ok(version) => println(version),
+      Err(message) => {
+        eprintln(`error: ${message}`);
+        process::exit(1);
+      }
+    }
+    return;
+  }
+
+  if args.len() != 2 || !is_version(args[1]) {
+    eprintln(`error: expected a version X.Y.Z\n\n${USAGE}`);
+    process::exit(2);
+  }
+
+  match run(args[1]) {
+    Ok(message) => println(message),
+    Err(message) => {
+      eprintln(`error: ${message}`);
+      process::exit(1);
+    }
+  }
+}
