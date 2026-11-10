@@ -445,6 +445,11 @@ fn document_symbols(analysis: Analysis, module: Module) -> List<Json> {
           found.push(symbol(analysis, function.name.name, FUNCTION, function.span, function.name.span, new List()));
         }
       }
+      Item::Impl(block) => {
+        for function in block.functions {
+          found.push(symbol(analysis, function.name.name, METHOD, function.span, function.name.span, new List()));
+        }
+      }
     }
   }
 

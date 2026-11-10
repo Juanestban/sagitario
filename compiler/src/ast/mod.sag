@@ -102,6 +102,19 @@ pub enum Item {
   Interface(InterfaceDecl),
   Extern(ExternBlock),
   Const(ConstDecl),
+  Impl(ImplBlock),
+}
+
+/// `impl<T> Interface<A> for Type<T> { methods }`: the methods of one interface for one type,
+/// declared in the module of the type (docs/adr/0081-operator-overloading.md, Q507).
+pub struct ImplBlock {
+  pub generics: List<GenericParam>;
+  /// The interface, with its type arguments.
+  pub implemented: TypeExpr;
+  pub target: TypeExpr;
+  /// Public, as the members of an interface are.
+  pub functions: List<FnDecl>;
+  pub span: Span;
 }
 
 /// `const NAME: Type = value;` at module level.

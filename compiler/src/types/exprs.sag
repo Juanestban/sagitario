@@ -10,7 +10,7 @@ use pkg::diagnostics::codes;
 use pkg::resolve::{EnumKind, LocalKind, ParamOwner, Res, TypeItem, VariantRef};
 use pkg::span::Span;
 use pkg::ast::TargetInfo;
-use pkg::types::{Checker, FloatTy, FnSig, IntTy, LoopCx, LoopKind, ParamRef, Receiver, SELF_PARAM, StructDef, Subst, Type, TypeKind, VariantDef};
+use pkg::types::{Checker, FloatTy, FnSig, IntTy, LoopCx, LoopKind, NamedRef, ParamRef, Receiver, SELF_PARAM, StructDef, Subst, Type, TypeKind, VariantDef};
 use pkg::types;
 use pkg::types::classes;
 use pkg::types::borrow;
@@ -26,7 +26,7 @@ use pkg::types::numbers;
 use pkg::types::patterns;
 use pkg::types::send;
 use pkg::types::strings;
-use pkg::types::typed::BuiltinMethod;
+use pkg::types::typed::{BuiltinMethod, item_key};
 
 /// The signature of a builtin, by its name.
 pub fn builtin_sig(name: String, target: TargetInfo) -> FnSig {
@@ -1287,6 +1287,79 @@ pub fn check_args(cx: Checker, span: Span, what: String, params: List<Type>, val
   }
 }
 
+/// The methods named `name` of the blocks of a struct, enum or class and of its ancestor classes.
+fn block_methods(cx: Checker, owner: TypeItem, name: String) -> List<u32> {
+  const owners: List<TypeItem> = new List();
+
+  match owner {
+    TypeItem::Class(id) => {
+      for class_id in cx.typed.class_chain(id) {
+        owners.push(TypeItem::Class(class_id));
+      }
+    }
+    TypeItem::Interface(_) => return new List(),
+    other => owners.push(other),
+  }
+
+  const found: List<u32> = new List();
+
+  for item in owners {
+    for block in cx.resolution.type_blocks(item) {
+      if let Some(info) = cx.resolution.blocks.get(block as usize) {
+        for function in info.functions {
+          if let Some(decl) = cx.resolution.fn_decl(cx.package, function) {
+            if decl.name.name == name {
+              found.push(function);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  found
+}
+
+/// The interface a block implements, with its type arguments.
+pub fn block_interface(cx: Checker, block: u32) -> Option<NamedRef> {
+  const info = cx.resolution.blocks.get(block as usize)?;
+  const entry = cx.typed.impls.get(item_key(info.target))?;
+
+  for index in 0..entry.interfaces.len() {
+    if let Some(Some(found)) = entry.blocks.get(index) {
+      if found == block {
+        return Some(entry.interfaces[index]);
+      }
+    }
+  }
+
+  None
+}
+
+/// A method name that several implementations give the type.
+fn ambiguous_method(cx: Checker, method: Ident, receiver_ty: Type, own: Option<u32>, in_blocks: List<u32>) {
+  const type_name = types::text(receiver_ty);
+  const shown: List<String> = new List();
+
+  if own.is_some() {
+    shown.push("`" + type_name + "`");
+  }
+
+  for function in in_blocks {
+    if let Some(block) = cx.resolution.block_of(function) {
+      if let Some(implemented) = block_interface(cx, block) {
+        shown.push("`impl " + types::text(types::interface_type(implemented)) + " for " + type_name + "`");
+      }
+    }
+  }
+
+  cx.diagnostics.push(
+    Diagnostic::error(codes::AMBIGUOUS_METHOD, method.span, "`" + type_name + "` has several methods `" + method.name + "`")
+      .with_note("`" + method.name + "` is declared in " + shown.join(", "))
+      .with_help("call it through a type parameter or a value of the interface you mean"),
+  );
+}
+
 fn method_call(cx: Checker, value: Expr, receiver: Expr, method: Ident, args: List<Expr>) -> Type {
   if let ExprKind::Zod = receiver.kind {
     return inheritance::zod_call(cx, value, receiver, method, args);
@@ -1393,9 +1466,54 @@ fn method_call(cx: Checker, value: Expr, receiver: Expr, method: Ident, args: Li
     _ => cx.resolution.type_function(cx.package, owner, name),
   };
 
-  // A default method of an interface the type implements.
+  // A method of an `impl ... for` block, called by a name no other method of the type has
+  // (docs/adr/0081-operator-overloading.md, Q509).
+  const in_blocks = block_methods(cx, owner, name);
+
+  if !in_blocks.is_empty() {
+    if found.is_some() || in_blocks.len() > 1 {
+      ambiguous_method(cx, method, receiver_ty, found, in_blocks);
+      unchecked_args(cx, args);
+
+      return types::error();
+    }
+
+    found = in_blocks.first();
+  }
+
+  // A default method of an interface the type implements, once: with two instantiations, which
+  // one is meant is not known.
   if found.is_none() {
     found = interfaces::default_method(cx, owner, name);
+
+    if let Some(default) = found {
+      if let Some(TypeItem::Interface(interface_id)) = cx.resolution.owner(default) {
+        const instantiations: List<NamedRef> = new List();
+
+        for implemented in cx.typed.implemented_refs(receiver_ty) {
+          if implemented.id == interface_id {
+            instantiations.push(implemented);
+          }
+        }
+
+        if instantiations.len() > 1 {
+          const shown: List<String> = new List();
+
+          for implemented in instantiations {
+            shown.push("`" + types::text(types::interface_type(implemented)) + "`");
+          }
+
+          cx.diagnostics.push(
+            Diagnostic::error(codes::AMBIGUOUS_METHOD, method.span, "`" + name + "` is a default method of " + shown.join(" and "))
+              .with_note("`" + types::text(receiver_ty) + "` implements the interface more than once")
+              .with_help("call it through a type parameter or a value of the interface you mean"),
+          );
+          unchecked_args(cx, args);
+
+          return types::error();
+        }
+      }
+    }
   }
 
   var resolved: Option<u32> = None;

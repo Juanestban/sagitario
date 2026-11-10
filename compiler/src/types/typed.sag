@@ -75,10 +75,13 @@ pub struct ToIter {
   pub args: List<Type>;
 }
 
-/// The interfaces a struct, enum or class declares with `impl`.
+/// The interfaces a struct, enum or class implements: those after `impl` in its header, then
+/// those of its `impl ... for` blocks (docs/adr/0081-operator-overloading.md).
 pub struct ImplEntry {
   pub item: TypeItem;
   pub interfaces: List<NamedRef>;
+  /// For each interface, the block implementing it, or `None` for the header.
+  pub blocks: List<Option<u32>>;
 }
 
 /// The type parameters of a generic declaration.
@@ -714,6 +717,66 @@ pub class TypedModule {
     }
 
     result
+  }
+
+  /// The method `name` of the `impl ... for` block of `ty` (or of an ancestor class) that
+  /// implements `interface_ref` or a descendant of it, with these type arguments; `None` when the
+  /// header implements it, whose methods are the type's own.
+  pub fn block_method(self, resolution: Resolution, package: Package, ty: Type, interface_ref: NamedRef, name: String) -> Option<u32> {
+    // The type, or the class and its ancestors, with their type arguments.
+    const owners: List<TypeItem> = new List();
+    const owner_args: List<List<Type>> = new List();
+
+    match ty.kind {
+      TypeKind::Struct(named) => {
+        owners.push(TypeItem::Struct(named.id));
+        owner_args.push(named.args);
+      }
+      TypeKind::Enum(named) => {
+        owners.push(TypeItem::Enum(named.id));
+        owner_args.push(named.args);
+      }
+      TypeKind::Class(named) => {
+        for ancestor in self.class_ancestors(named) {
+          owners.push(TypeItem::Class(ancestor.id));
+          owner_args.push(ancestor.args);
+        }
+      }
+      _ => return None,
+    }
+
+    for position in 0..owners.len() {
+      const item = owners[position];
+      const entry = match self.impls.get(item_key(item)) {
+        Some(found) => found,
+        None => continue,
+      };
+      const subst = Subst::of(ParamOwner::Item(item), owner_args[position]);
+
+      for index in 0..entry.interfaces.len() {
+        const block = match entry.blocks.get(index) {
+          Some(Some(found)) => found,
+          _ => continue,
+        };
+        const implemented = types::substitute_ref(entry.interfaces[index], subst);
+
+        if !types::contains_ref(self.interface_ancestor_refs(implemented), interface_ref) {
+          continue;
+        }
+
+        if let Some(info) = resolution.blocks.get(block as usize) {
+          for function in info.functions {
+            if let Some(decl) = resolution.fn_decl(package, function) {
+              if decl.name.name == name {
+                return Some(function);
+              }
+            }
+          }
+        }
+      }
+    }
+
+    None
   }
 
   /// Whether values of `ty` implement `interface` (with the same type arguments). The compiler

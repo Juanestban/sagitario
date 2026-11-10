@@ -5,7 +5,7 @@
 //! `u32` indices; maps by node id are `Map<u32, ...>`.
 
 use pkg::ast::{
-  Block, ClassDecl, ConstDecl, EnumDecl, Expr, ExprKind, ExternFn, FnDecl, GenericParam, Ident, InterfaceDecl, Item, LambdaParam, Module, Package,
+  Block, ClassDecl, ConstDecl, EnumDecl, Expr, ExprKind, ExternFn, FnDecl, GenericParam, Ident, ImplBlock, InterfaceDecl, Item, LambdaParam, Module, Package,
   Path, Pattern, PatternKind, Stmt, StructDecl, TemplatePart, TypeExpr, TypeExprKind, VariantFields, Visibility,
 };
 use pkg::diagnostics;
@@ -237,6 +237,17 @@ pub struct FnInfo {
   pub item: usize;
   pub member: Option<usize>;
   pub owner: Option<TypeItem>;
+  /// The `impl ... for` block declaring the method, if any.
+  pub block: Option<u32>;
+}
+
+/// An `impl Interface for Type` block (docs/adr/0081-operator-overloading.md, Q507): the type it
+/// implements the interface for, and its methods.
+pub struct BlockInfo {
+  pub module: usize;
+  pub item: usize;
+  pub target: TypeItem;
+  pub functions: List<u32>;
 }
 
 pub struct ConstInfo {
@@ -270,6 +281,7 @@ pub class Resolution {
   pub const enums: List<TypeInfo>;
   pub const classes: List<TypeInfo>;
   pub const interfaces: List<TypeInfo>;
+  pub const blocks: List<BlockInfo>;
   pub const consts: List<ConstInfo>;
   pub var prelude: Option<u32>;
   pub var std_root: Option<u32>;
@@ -291,6 +303,7 @@ pub class Resolution {
     self.enums = new List();
     self.classes = new List();
     self.interfaces = new List();
+    self.blocks = new List();
     self.consts = new List();
     self.prelude = None;
     self.std_root = None;
@@ -320,8 +333,39 @@ pub class Resolution {
         Item::Enum(decl) => decl.functions.get(member),
         Item::Class(decl) => decl.functions.get(member),
         Item::Interface(decl) => decl.functions.get(member),
+        Item::Impl(decl) => decl.functions.get(member),
         _ => None,
       },
+    }
+  }
+
+  pub fn block_decl(self, package: Package, id: u32) -> Option<ImplBlock> {
+    const info = self.blocks.get(id as usize)?;
+
+    match item_at(package, info.module, info.item)? {
+      Item::Impl(decl) => Some(decl),
+      _ => None,
+    }
+  }
+
+  /// The `impl ... for` blocks of a struct, enum or class, in declaration order.
+  pub fn type_blocks(self, item: TypeItem) -> List<u32> {
+    const found: List<u32> = new List();
+
+    for index in 0..self.blocks.len() {
+      if same_type_item(self.blocks[index].target, item) {
+        found.push(index as u32);
+      }
+    }
+
+    found
+  }
+
+  /// The block declaring a function, if any.
+  pub fn block_of(self, id: u32) -> Option<u32> {
+    match self.functions.get(id as usize) {
+      Some(info) => info.block,
+      None => None,
     }
   }
 
@@ -844,6 +888,22 @@ pub fn resolve(package: Package, diagnostics: Diagnostics) -> Resolution {
     merge_type_paths(resolution, resolver);
   }
 
+  for index in 0..resolution.blocks.len() {
+    const info = resolution.blocks[index];
+    const block = match resolution.block_decl(package, index as u32) {
+      Some(found) => found,
+      None => continue,
+    };
+    const resolver = new Resolver(package, resolution, module_of(module_ids, info.module), Some(info.target), diagnostics);
+
+    resolver.enter_block_generics(info.target, block.generics);
+    resolver.type_expr(block.implemented);
+    resolver.type_expr(block.target);
+    check_block_generics(resolution, package, info.target, block, diagnostics);
+    merge_used(used, resolver.used);
+    merge_type_paths(resolution, resolver);
+  }
+
   for pending in declarations {
     const resolver = new Resolver(package, resolution, module_of(module_ids, pending.module), pending.owner, diagnostics);
 
@@ -902,6 +962,14 @@ pub fn resolve(package: Package, diagnostics: Diagnostics) -> Resolution {
     };
     const info = resolution.functions[index];
     const resolver = new Resolver(package, resolution, module_of(module_ids, info.module), info.owner, diagnostics);
+
+    if let Some(block_id) = info.block {
+      if let Some(block) = resolution.block_decl(package, block_id) {
+        if let Some(target) = info.owner {
+          resolver.enter_block_generics(target, block.generics);
+        }
+      }
+    }
 
     resolver.enter_generics(ParamOwner::Fn(id), decl.generics);
 
@@ -966,6 +1034,34 @@ pub fn resolve(package: Package, diagnostics: Diagnostics) -> Resolution {
   resolution
 }
 
+/// The parameters of a block are those of its type: as many, without bounds, since a block
+/// cannot implement an interface only for some arguments of the type (Q507).
+fn check_block_generics(resolution: Resolution, package: Package, target: TypeItem, block: ImplBlock, diagnostics: Diagnostics) {
+  const expected = resolution.generics(package, ParamOwner::Item(target)).len();
+  const name = resolution.type_name(package, target);
+
+  for param in block.generics {
+    if let Some(bound) = param.bounds.first() {
+      diagnostics.push(
+        Diagnostic::error(codes::INVALID_IMPL_BLOCK, bound.span, "the type parameters of an `impl ... for` block take no bounds")
+          .with_note("they are those of `" + name + "`, with its bounds"),
+      );
+    }
+  }
+
+  if block.generics.len() != expected {
+    diagnostics.push(
+      Diagnostic::error(codes::INVALID_IMPL_BLOCK, block.target.span, "`" + name + "` has " + count_text(expected, "type parameter") + ", but the block declares " + `${block.generics.len()}`)
+        .with_help("write them after `impl` and after the type, in order: `impl<T> Interface for " + name + "<T>`"),
+    );
+  }
+}
+
+/// `1 type parameter`, `2 type parameters`.
+fn count_text(count: usize, noun: String) -> String {
+  `${count} ` + noun + (if count == 1 { "" } else { "s" })
+}
+
 /// Types to resolve in the context of one declaration.
 struct Pending {
   pub owner: Option<TypeItem>;
@@ -1012,7 +1108,7 @@ fn declare_items(resolution: Resolution, source: usize, node: u32, module: Modul
       Item::Fn(decl) => {
         const id = resolution.functions.len() as u32;
 
-        resolution.functions.push(FnInfo { module: source, item: index, member: None, owner: None });
+        resolution.functions.push(FnInfo { module: source, item: index, member: None, owner: None, block: None });
         names.push(Named { name: decl.name, item: ItemRef::Fn(id), visibility: decl.visibility });
       }
       Item::Extern(block) => {
@@ -1119,12 +1215,83 @@ fn declare_items(resolution: Resolution, source: usize, node: u32, module: Modul
         resolution.consts.push(ConstInfo { module: source, item: index });
         names.push(Named { name: decl.name, item: ItemRef::Const(id), visibility: decl.visibility });
       }
+      // Declared below, once the module's types are.
+      Item::Impl(_) => {}
     }
 
     for named in names {
       declare_item(resolution, node, named.name, named.item, named.visibility, diagnostics);
     }
   }
+
+  for index in 0..module.items.len() {
+    if let Item::Impl(block) = module.items[index] {
+      declare_block(resolution, source, node, index, block, diagnostics);
+    }
+  }
+}
+
+/// Registers an `impl ... for` block and its methods, whose type must be a struct, enum or class
+/// declared in the same module (docs/adr/0081-operator-overloading.md, Q507).
+fn declare_block(resolution: Resolution, source: usize, node: u32, index: usize, block: ImplBlock, diagnostics: Diagnostics) {
+  const path = match block.target.kind {
+    TypeExprKind::Path(found) => found,
+    TypeExprKind::Generic { path, .. } => path,
+    _ => {
+      invalid_block_target(block.target.span, "this type", diagnostics);
+
+      return;
+    }
+  };
+  const name = match path.segments.first() {
+    Some(first) => first.name,
+    None => return,
+  };
+  var target: Option<TypeItem> = None;
+
+  if path.segments.len() == 1 {
+    if let Some(info) = resolution.module(node) {
+      if let Some(declared) = info.items.get(name) {
+        match declared.item {
+          ItemRef::Type(TypeItem::Struct(id)) => {
+            target = Some(TypeItem::Struct(id));
+          }
+          ItemRef::Type(TypeItem::Enum(id)) => {
+            target = Some(TypeItem::Enum(id));
+          }
+          ItemRef::Type(TypeItem::Class(id)) => {
+            target = Some(TypeItem::Class(id));
+          }
+          _ => {}
+        }
+      }
+    }
+  }
+
+  const owner = match target {
+    Some(found) => found,
+    None => {
+      invalid_block_target(block.target.span, "`" + name + "`", diagnostics);
+
+      return;
+    }
+  };
+  const id = resolution.blocks.len() as u32;
+  const functions: List<u32> = new List();
+
+  for member in 0..block.functions.len() {
+    functions.push(resolution.functions.len() as u32);
+    resolution.functions.push(FnInfo { module: source, item: index, member: Some(member), owner: Some(owner), block: Some(id) });
+  }
+
+  resolution.blocks.push(BlockInfo { module: source, item: index, target: owner, functions: functions });
+}
+
+fn invalid_block_target(span: Span, what: String, diagnostics: Diagnostics) {
+  diagnostics.push(
+    Diagnostic::error(codes::INVALID_IMPL_BLOCK, span, "an `impl ... for` block needs a struct, enum or class of its own module, not " + what)
+      .with_note("a type implements interfaces where it is declared, as its methods are"),
+  );
 }
 
 /// A module-level name to declare.
@@ -1174,7 +1341,7 @@ fn register_functions(resolution: Resolution, source: usize, item: usize, count:
 
   for member in 0..count {
     functions.push(resolution.functions.len() as u32);
-    resolution.functions.push(FnInfo { module: source, item: item, member: Some(member), owner: Some(owner) });
+    resolution.functions.push(FnInfo { module: source, item: item, member: Some(member), owner: Some(owner), block: None });
   }
 
   functions
@@ -1281,6 +1448,13 @@ pub class Resolver {
     if let Some(item) = owner {
       self.enter_generics(ParamOwner::Item(item), resolution.generics(package, ParamOwner::Item(item)));
     }
+  }
+
+  /// The type parameters of an `impl ... for` block, which are those of its type `target` under
+  /// the block's names, in place of the type's own.
+  pub fn enter_block_generics(self, target: TypeItem, params: List<GenericParam>) {
+    self.generics.clear();
+    self.enter_generics(ParamOwner::Item(target), params);
   }
 
   /// Brings the type parameters of a declaration into scope.

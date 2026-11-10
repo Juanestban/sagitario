@@ -166,6 +166,11 @@ runs the executor until the task of `main` finishes.
   interface, `Callee::Dyn` calls an entry). An itable lists thunks calling the type's methods
   (through the vtable when they vary), the interface's default methods, a getter and a setter per
   field, and the itables of the parent interfaces.
+- An `impl Interface for Type` block (`Item::Impl`) registers its methods with the type as their
+  owner (`FnInfo::block`, `Resolution::blocks`) but outside the type's own functions, and the
+  interface joins the type's `ImplEntry` with the block that implements it. The method of an
+  instantiation of an interface is found by `TypedModule::block_method`, which `method_for` (the
+  itables and calls on known types) tries before the type's methods by name.
 - Generics are monomorphized while lowering: generic functions, methods of generic types and
   interface methods are templates, instantiated on demand from a worklist with the type
   arguments the checker recorded (`TypedModule::call_args`), and every type of an instance is

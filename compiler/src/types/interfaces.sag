@@ -2,10 +2,11 @@
 //! the types that implement them and interfaces used as types. The port of the declarations part
 //! of `sagitario_types::interfaces`.
 
-use pkg::ast::{Ident, TypeExpr};
+use pkg::ast::{Ident, ImplBlock, TypeExpr};
 use pkg::diagnostics::Diagnostic;
 use pkg::diagnostics::codes;
 use pkg::resolve::{ParamOwner, TypeItem};
+use pkg::span::Span;
 use pkg::types::{Checker, FieldDef, FnSig, InterfaceDef, NamedRef, SpanInterface, Subst, Type, TypeKind};
 use pkg::types;
 use pkg::types::generic;
@@ -306,19 +307,94 @@ fn collect_impls(cx: Checker) {
     cx.owner = Some(entry.item);
 
     const implemented: List<NamedRef> = new List();
+    const blocks: List<Option<u32>> = new List();
+    const spans: List<Span> = new List();
 
     for ty in entry.types {
       if let Some(interface_ref) = supertype_interface(cx, ty) {
+        check_new_impl(cx, entry.item, implemented, blocks, interface_ref, None, ty.span);
         implemented.push(interface_ref);
+        blocks.push(None);
+        spans.push(ty.span);
+      }
+    }
+
+    for block_id in cx.resolution.type_blocks(entry.item) {
+      const block = match cx.resolution.block_decl(cx.package, block_id) {
+        Some(found_block) => found_block,
+        None => continue,
+      };
+
+      check_block_target(cx, entry.item, block);
+
+      if let Some(interface_ref) = supertype_interface(cx, block.implemented) {
+        check_new_impl(cx, entry.item, implemented, blocks, interface_ref, Some(block_id), block.implemented.span);
+        implemented.push(interface_ref);
+        blocks.push(Some(block_id));
+        spans.push(block.implemented.span);
       }
     }
 
     if !implemented.is_empty() {
-      cx.typed.impls.insert(item_key(entry.item), ImplEntry { item: entry.item, interfaces: implemented });
+      cx.typed.impls.insert(item_key(entry.item), ImplEntry { item: entry.item, interfaces: implemented, blocks: blocks });
     }
   }
 
   cx.owner = None;
+}
+
+/// A type implements each instantiation of an interface once; its header names each interface
+/// once, the other instantiations going in blocks (docs/adr/0081-operator-overloading.md, Q508).
+fn check_new_impl(cx: Checker, item: TypeItem, implemented: List<NamedRef>, blocks: List<Option<u32>>, interface_ref: NamedRef, block: Option<u32>, span: Span) {
+  const type_name = cx.resolution.type_name(cx.package, item);
+  const shown = types::text(types::interface_type(interface_ref));
+
+  for index in 0..implemented.len() {
+    const previous = implemented[index];
+
+    if previous.id != interface_ref.id {
+      continue;
+    }
+
+    if types::same_ref(previous, interface_ref) {
+      cx.error(codes::DUPLICATE_IMPL, span, "`" + type_name + "` already implements `" + shown + "`");
+
+      return;
+    }
+
+    const both_in_header = block.is_none() && match blocks.get(index) {
+      Some(None) => true,
+      _ => false,
+    };
+
+    if both_in_header {
+      cx.diagnostics.push(
+        Diagnostic::error(codes::DUPLICATE_IMPL, span, "the header of `" + type_name + "` names the interface `" + previous.name + "` twice")
+          .with_help("implement `" + shown + "` in a block: `impl " + shown + " for " + type_name + " { ... }`"),
+      );
+
+      return;
+    }
+  }
+}
+
+/// The type after `for` is the type with the block's parameters, in order: `Vec2<T>` (Q507).
+fn check_block_target(cx: Checker, item: TypeItem, block: ImplBlock) {
+  const expected = cx.type_ref(item);
+
+  if cx.generic_count(ParamOwner::Item(item)) != block.generics.len() {
+    // Reported by the resolver.
+    return;
+  }
+
+  const written = cx.type_expr(block.target);
+
+  if !types::is_error(written) && !types::same_type(written, expected) {
+    cx.diagnostics.push(
+      Diagnostic::error(codes::INVALID_IMPL_BLOCK, block.target.span, "an `impl ... for` block implements an interface for all of `" + types::text(expected) + "`")
+        .with_note("write the block's type parameters after the type, in order, as in `impl<T> Interface for Box<T>`"),
+    );
+  }
 }
 
 /// Every type implements the fields and methods of its interfaces.
@@ -348,23 +424,73 @@ fn check_implementations(cx: Checker) {
     // A class checks what it declares itself; what it inherits was checked in its ancestors,
     // except that a concrete class must end up with every required method.
     const own: List<NamedRef> = new List();
+    const own_blocks: List<Option<u32>> = new List();
 
     if let Some(entry) = cx.typed.impls.get(item_key(item)) {
-      for interface_ref in entry.interfaces {
-        for ancestor in cx.typed.interface_ancestor_refs(interface_ref) {
+      for index in 0..entry.interfaces.len() {
+        for ancestor in cx.typed.interface_ancestor_refs(entry.interfaces[index]) {
           own.push(ancestor);
+          own_blocks.push(entry.blocks.get(index).unwrap_or(None));
         }
       }
     }
 
     for interface_ref in implemented {
-      const is_own = types::contains_ref(own, interface_ref);
+      var is_own = false;
+      var block: Option<u32> = None;
+
+      for index in 0..own.len() {
+        if !is_own && types::same_ref(own[index], interface_ref) {
+          is_own = true;
+          block = own_blocks[index];
+        }
+      }
 
       if is_own {
         check_fields(cx, item, interface_ref);
       }
 
-      check_methods(cx, item, interface_ref, is_own);
+      check_methods(cx, item, interface_ref, is_own, block);
+    }
+  }
+
+  check_block_members(cx);
+}
+
+/// Each method of a block is a method of its interface or of one of its parents.
+fn check_block_members(cx: Checker) {
+  for index in 0..cx.resolution.blocks.len() {
+    const block = match cx.resolution.block_decl(cx.package, index as u32) {
+      Some(found) => found,
+      None => continue,
+    };
+    const entry = match cx.typed.impls.get(item_key(cx.resolution.blocks[index].target)) {
+      Some(found) => found,
+      None => continue,
+    };
+    var implemented: Option<NamedRef> = None;
+
+    for position in 0..entry.interfaces.len() {
+      if let Some(Some(block_id)) = entry.blocks.get(position) {
+        if block_id == index as u32 {
+          implemented = Some(entry.interfaces[position]);
+        }
+      }
+    }
+
+    const interface_ref = match implemented {
+      Some(found) => found,
+      None => continue,
+    };
+    const shown = types::text(types::interface_type(interface_ref));
+
+    for function in block.functions {
+      if cx.typed.interface_method(interface_ref.id, function.name.name, cx.resolution, cx.package).is_none() {
+        cx.diagnostics.push(
+          Diagnostic::error(codes::INVALID_IMPL, function.name.span, "`" + function.name.name + "` is not a method of `" + shown + "`")
+            .with_note("an `impl ... for` block holds only the methods of its interface; declare other methods in the type"),
+        );
+      }
     }
   }
 }
@@ -471,14 +597,22 @@ fn check_fields(cx: Checker, item: TypeItem, interface_ref: NamedRef) {
 }
 
 /// The type's implementation of each method of the interface: public, with the same signature,
-/// or the interface's default. `own` is set when the type names the interface itself.
-fn check_methods(cx: Checker, item: TypeItem, interface_ref: NamedRef, own: bool) {
+/// or the interface's default. `own` is set when the type names the interface itself, in its
+/// header or in `block`.
+fn check_methods(cx: Checker, item: TypeItem, interface_ref: NamedRef, own: bool, block: Option<u32>) {
   const type_ident = match type_name_of(cx, item) {
     Some(name) => name,
     None => return,
   };
   const type_name = type_ident.name;
-  const span = type_ident.span;
+  // A missing method of a block is reported at the block.
+  const span = match block {
+    Some(block_id) => match cx.resolution.block_decl(cx.package, block_id) {
+      Some(found) => found.implemented.span,
+      None => type_ident.span,
+    },
+    None => type_ident.span,
+  };
   const methods = match cx.typed.interface_def(interface_ref.id) {
     Some(def) => def.methods,
     None => new List(),
@@ -504,10 +638,30 @@ fn check_methods(cx: Checker, item: TypeItem, interface_ref: NamedRef, own: bool
       None => continue,
     };
     const name = decl.name.name;
-    const candidate = match item {
-      TypeItem::Class(id) => inheritance::class_method(cx, id, name),
-      _ => cx.resolution.type_function(cx.package, item, name),
-    };
+    var candidate: Option<u32> = None;
+
+    if let Some(block_id) = block {
+      if let Some(info) = cx.resolution.blocks.get(block_id as usize) {
+        for function in info.functions {
+          if let Some(found_decl) = cx.resolution.fn_decl(cx.package, function) {
+            if candidate.is_none() && found_decl.name.name == name {
+              candidate = Some(function);
+            }
+          }
+        }
+      }
+    } else {
+      // An inherited block of an ancestor class, or else the type's own methods.
+      candidate = cx.typed.block_method(cx.resolution, cx.package, self_ty, interface_ref, name);
+
+      if candidate.is_none() {
+        candidate = match item {
+          TypeItem::Class(id) => inheritance::class_method(cx, id, name),
+          _ => cx.resolution.type_function(cx.package, item, name),
+        };
+      }
+    }
+
     var found: Option<u32> = None;
 
     if let Some(function) = candidate {
@@ -523,7 +677,7 @@ fn check_methods(cx: Checker, item: TypeItem, interface_ref: NamedRef, own: bool
           cx.diagnostics.push(
             Diagnostic::error(codes::INVALID_IMPL, span, "`" + type_name + "` does not implement the method `" + name + "` of `" + interface_name + "`")
               .with_label(decl.name.span, "required here")
-              .with_help("add `pub fn " + name + "(...)`"),
+              .with_help(if block.is_some() { "add `fn " + name + "(...)` to the block" } else { "add `pub fn " + name + "(...)`" }),
           );
         }
 

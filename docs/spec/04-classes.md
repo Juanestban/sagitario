@@ -144,5 +144,6 @@ class Person {
 ## Interfaces on classes
 
 `class Dog extends Animal impl Named, Display { ... }`: `extends` names at most one class;
-`impl` names one or more interfaces separated by commas. See
-[interfaces](05-interfaces-generics.md).
+`impl` names one or more interfaces separated by commas. A class can also implement interfaces
+in [`impl ... for` blocks](05-interfaces-generics.md#impl--for-blocks), which its subclasses
+inherit. See [interfaces](05-interfaces-generics.md).

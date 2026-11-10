@@ -55,6 +55,51 @@ interface Clone {
 - In a default method, `self` has type `Self`: the implementing type, bounded by the interface,
   whose fields and methods it reaches. Default methods are compiled for each implementing type.
 
+### `impl ... for` blocks
+
+Rationale: [ADR-0081](../adr/0081-operator-overloading.md), increment 1. Besides its header, a
+type implements an interface in a block at module level, as in Rust. Each block holds the methods
+of one interface, so a type can implement a generic interface several times, with different type
+arguments:
+
+```sag
+interface Scale<By, Out> {
+  fn scale(self, by: By) -> Out;
+}
+
+struct Vec2 {
+  pub x: f64;
+  pub y: f64;
+}
+
+impl Scale<f64, Vec2> for Vec2 {
+  fn scale(self, by: f64) -> Vec2 { Vec2 { x: self.x * by, y: self.y * by } }
+}
+
+impl Scale<Vec2, Vec2> for Vec2 {
+  fn scale(self, by: Vec2) -> Vec2 { Vec2 { x: self.x * by.x, y: self.y * by.y } }
+}
+```
+
+- A block is written in the module that declares its type, a struct, enum or class (`E0343`).
+  Neither the block nor its methods take `pub` or `prv`: the methods are public, and they reach
+  the private members of the type as its own methods do.
+- A block holds the methods of its interface and of the interface's parents, and nothing else
+  (`E0329`); methods with a default may be left out. The fields of the interface are fields of the
+  type, as for the header.
+- A generic type writes its parameters after `impl` and after the type, in order and without
+  bounds, which are the type's: `impl<T> Named for Box<T>` (`E0343`). The names may differ from
+  the type's. A block cannot implement an interface only for some arguments (`Box<i32>`).
+- The header names each interface once; another instantiation of a generic interface goes in a
+  block. Implementing the same instantiation twice, in the header or in blocks, is an error
+  (`E0342`).
+- A method of a block is reached through a value of the interface, through a type parameter
+  bounded by it, and by name when the type has no other method of that name
+  (`v.scale(2.0)` above is ambiguous, `E0344`). A default method of an interface the type
+  implements twice is ambiguous by name too.
+- A subclass inherits the blocks of its classes. Their methods are not virtual: a subclass does
+  not override them.
+
 ## Interfaces as types
 
 An interface can be used as a type (`const shapes: [Shape; 2] = [square, circle];`). Such values
@@ -127,8 +172,9 @@ Rationale: [ADR-0032](../adr/0032-generics.md).
   `Hash`, and no other interface.
 - In a call, a lambda argument whose parameter types are known infers type parameters from its
   result: `iter.map(n => n * 2)` infers the `U` of `map<U>(f: fn(T) -> U)`.
-- Generic interfaces (`interface Source<T>`) are implemented once per type and, instantiated,
-  can be types (`Source<i32>`). Generic classes extend and are extended with arguments
+- Generic interfaces (`interface Source<T>`) can be implemented several times by one type, with
+  different arguments, in [`impl ... for` blocks](#impl--for-blocks), and, instantiated, can be
+  types (`Source<i32>`). Generic classes extend and are extended with arguments
   (`class IntBox extends Box<i32>`). There is no variance: `Box<Dog>` is not a `Box<Animal>`.
 - Methods with their own type parameters cannot be overridden or be abstract.
 - Generics are **monomorphized**: each concrete instantiation produces its own specialized

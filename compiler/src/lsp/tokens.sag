@@ -285,6 +285,14 @@ class Collector {
           self.type_expr(decl.ty);
           self.expr(decl.value);
         }
+        Item::Impl(block) => {
+          self.type_expr(block.implemented);
+          self.type_expr(block.target);
+
+          for function in block.functions {
+            self.function(function);
+          }
+        }
       }
     }
   }

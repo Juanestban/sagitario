@@ -1,0 +1,89 @@
+// The rules of `impl ... for` blocks and of several implementations of one generic interface
+// (docs/adr/0081-operator-overloading.md, Q507-Q509).
+interface Scale<By, Out> {
+  fn scale(self, by: By) -> Out;
+}
+
+interface Named {
+  fn name(self) -> String;
+
+  fn quoted(self) -> String {
+    "<" + self.name() + ">"
+  }
+}
+
+interface Labeled<T> {
+  fn label(self) -> String;
+
+  fn shout(self) -> String {
+    self.label()
+  }
+}
+
+// The header names each interface once; another instantiation goes in a block.
+struct Vec2 impl Scale<i32, Vec2>, Scale<f64, Vec2> { //~ ERROR E0342
+  pub x: f64;
+
+  pub fn scale(self, _by: i32) -> Vec2 { self }
+}
+
+impl Scale<f64, Vec2> for Vec2 { //~ ERROR E0342
+  fn scale(self, _by: f64) -> Vec2 { self }
+}
+
+impl Named for Vec2 {
+  fn name(self) -> String { "v" }
+  fn extra(self) -> i32 { 1 } //~ ERROR E0329
+}
+
+impl Labeled<i32> for Vec2 {
+  fn label(self) -> String { "i32" }
+}
+
+impl Labeled<bool> for Vec2 {
+  fn label(self) -> String { "bool" }
+}
+
+struct Box<T> {
+  pub value: T;
+}
+
+impl<T: Named> Named for Box<T> { //~ ERROR E0343
+  fn name(self) -> String { "b" }
+}
+
+impl Scale<i32, i32> for Box<i32> { //~ ERROR E0343
+  fn scale(self, by: i32) -> i32 { by }
+}
+
+impl<T> Labeled<T> for Box<i32> { //~ ERROR E0343
+  fn label(self) -> String { "b" }
+}
+
+impl Named for Missing { //~ ERROR E0343
+  fn name(self) -> String { "m" }
+}
+
+impl Named for Named { //~ ERROR E0343
+  fn name(self) -> String { "m" }
+}
+
+struct Plain {
+  pub x: i32;
+}
+
+impl Named for Plain { //~ ERROR E0329
+  fn quoted(self) -> String { "p" }
+}
+
+impl Plain for Plain { //~ ERROR E0329
+  fn name(self) -> String { "p" }
+}
+
+fn main() {
+  const v = Vec2 { x: 1.0 };
+  const _scaled = v.scale(1); //~ ERROR E0344
+  const _label = v.label(); //~ ERROR E0344
+  const _shout = v.shout(); //~ ERROR E0344
+  const _name = v.name();
+}

@@ -450,6 +450,17 @@ fn functions_of(resolution: Resolution, item: TypeItem) -> List<u32> {
   }
 }
 
+/// The methods of the `impl ... for` blocks of a type (docs/adr/0081-operator-overloading.md).
+fn add_block_functions(found: List<u32>, resolution: Resolution, item: TypeItem) {
+  for block in resolution.type_blocks(item) {
+    if let Some(info) = resolution.blocks.get(block as usize) {
+      for function in info.functions {
+        found.push(function);
+      }
+    }
+  }
+}
+
 // ---- Members ----------------------------------------------------------------------------------
 
 /// The members after `receiver.`, where the `.` is at `dot` of the characters before the cursor.
@@ -572,17 +583,23 @@ fn methods_of(typed: TypedModule, resolution: Resolution, ty: Type) -> List<u32>
       for function in functions_of(resolution, TypeItem::Struct(named.id)) {
         found.push(function);
       }
+
+      add_block_functions(found, resolution, TypeItem::Struct(named.id));
     }
     TypeKind::Enum(named) => {
       for function in functions_of(resolution, TypeItem::Enum(named.id)) {
         found.push(function);
       }
+
+      add_block_functions(found, resolution, TypeItem::Enum(named.id));
     }
     TypeKind::Class(named) => {
       for class_id in typed.class_chain(named.id) {
         for function in functions_of(resolution, TypeItem::Class(class_id)) {
           found.push(function);
         }
+
+        add_block_functions(found, resolution, TypeItem::Class(class_id));
       }
     }
     TypeKind::Interface(named) => {

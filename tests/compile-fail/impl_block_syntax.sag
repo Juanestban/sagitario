@@ -1,0 +1,15 @@
+// An `impl ... for` block and its methods take no visibility: they are public, as the members of
+// an interface are (docs/adr/0081-operator-overloading.md, Q507).
+interface Named {
+  fn name(self) -> String;
+}
+
+struct Point {
+  pub x: i32;
+}
+
+pub impl Named for Point { //~ ERROR E0100
+  pub fn name(self) -> String { "point" } //~ ERROR E0100
+}
+
+fn main() {}

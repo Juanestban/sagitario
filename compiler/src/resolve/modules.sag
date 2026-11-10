@@ -446,7 +446,7 @@ pub fn report_private_interfaces(resolution: Resolution, package: Package, diagn
             }
           }
         }
-        Item::Const(_) => {}
+        Item::Const(_) | Item::Impl(_) => {}
       }
 
       for check in checks {
@@ -823,6 +823,20 @@ fn item_paths(module: Module) -> List<Path> {
       Item::Const(decl) => {
         type_paths(decl.ty, paths);
         expr_paths(decl.value, paths);
+      }
+      Item::Impl(block) => {
+        for param in block.generics {
+          for bound in param.bounds {
+            type_paths(bound, paths);
+          }
+        }
+
+        type_paths(block.implemented, paths);
+        type_paths(block.target, paths);
+
+        for function in block.functions {
+          fn_paths(function, paths);
+        }
       }
     }
   }

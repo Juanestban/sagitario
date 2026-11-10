@@ -4,7 +4,7 @@
 
 use pkg::ast::{
   ArrayLen, BinaryOp, Block, ClassDecl, ConstDecl, Discriminant, EnumDecl, Export, Expr, ExprKind, ExternBlock, ExternFn, FieldDecl, FieldInit, FieldPattern,
-  FnDecl, GenericParam, Ident, InterfaceDecl, Item, LambdaParam, LetStmt, MatchArm, Module, Param, Path, Pattern, PatternKind, Stmt,
+  FnDecl, GenericParam, Ident, ImplBlock, InterfaceDecl, Item, LambdaParam, LetStmt, MatchArm, Module, Param, Path, Pattern, PatternKind, Stmt,
   StructDecl, TemplatePart, TypeArgs, TypeExpr, TypeExprKind, UnaryOp, UseDecl, UseTree, UseTreeKind, VariantDecl, VariantFieldDecl,
   VariantFields, Visibility,
 };
@@ -61,6 +61,7 @@ enum AttributeTarget {
   ExternBlock,
   Member,
   Const,
+  Impl,
 }
 
 /// What the attributes of an item set.
@@ -583,7 +584,75 @@ class Parser {
       return Ok(Some(Item::Const(decl)));
     }
 
+    if is_keyword(kind, "impl") {
+      match visibility {
+        Visibility::Module => {}
+        _ => {
+          self.diagnostics.push(
+            Diagnostic::error(codes::UNEXPECTED_TOKEN, start, "an `impl` block takes no visibility: its methods are public, as the interface's are")
+              .with_help("remove `pub` or `prv`"),
+          );
+        }
+      }
+
+      const decl = self.impl_block(start)?;
+
+      self.apply_attributes(attributes, AttributeTarget::Impl);
+
+      return Ok(Some(Item::Impl(decl)));
+    }
+
     Err(self.unexpected("an item"))
+  }
+
+  /// `impl<T> Interface<A> for Type<T> { methods }` (docs/adr/0081-operator-overloading.md,
+  /// Q507): methods without `pub` or `prv`, which are public.
+  prv fn impl_block(self, start: Span) -> Result<ImplBlock, ()> {
+    self.expect_keyword("impl")?;
+
+    const generics = self.generic_params()?;
+    const implemented = self.type_expr()?;
+
+    self.expect_keyword("for")?;
+
+    const target = self.type_expr()?;
+
+    self.where_clause(generics)?;
+    self.expect("{")?;
+
+    const functions: List<FnDecl> = new List();
+
+    while !self.at("}") && !self.at_eof() {
+      const before = self.pos;
+      const member_start = self.span();
+
+      if self.at_keyword("pub") || self.at_keyword("prv") {
+        const span = self.advance().span;
+
+        self.diagnostics.push(
+          Diagnostic::error(codes::UNEXPECTED_TOKEN, span, "the methods of an `impl` block take no visibility: they are public, as the interface's are")
+            .with_help("remove `pub` or `prv`"),
+        );
+      }
+
+      if self.at_keyword("fn") || self.at_keyword("async") || self.at_keyword("unsafe") {
+        match self.fn_decl(Visibility::Public, member_start, true) {
+          Ok(function) => functions.push(function),
+          Err(_) => self.skip_member(),
+        }
+      } else {
+        self.unexpected("a method of the interface");
+        self.skip_member();
+      }
+
+      if self.pos == before {
+        self.advance();
+      }
+    }
+
+    const end = self.expect("}")?.span;
+
+    Ok(ImplBlock { generics: generics, implemented: implemented, target: target, functions: functions, span: start.to(end) })
   }
 
   /// `const NAME: Type = value;` at module level; the type is required.

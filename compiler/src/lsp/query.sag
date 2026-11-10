@@ -252,6 +252,14 @@ class Finder {
         self.type_expr(decl.ty);
         self.expr(decl.value);
       }
+      Item::Impl(block) => {
+        self.type_expr(block.implemented);
+        self.type_expr(block.target);
+
+        for function in block.functions {
+          self.function(function);
+        }
+      }
     }
   }
 
@@ -666,7 +674,7 @@ fn declaration_text(analysis: Analysis, module: Module, ident: Ident) -> Option<
           });
         }
       }
-      Item::Extern(_) => {}
+      Item::Extern(_) | Item::Impl(_) => {}
     }
   }
 

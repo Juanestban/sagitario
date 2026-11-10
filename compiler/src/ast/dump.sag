@@ -225,6 +225,15 @@ class Dumper {
         self.expr("value", decl.value);
         self.depth -= 1;
       }
+      Item::Impl(block) => {
+        self.line("item", "Impl", Some(block.span), None, "");
+        self.depth += 1;
+        self.generics(block.generics);
+        self.type_expr("interface", block.implemented);
+        self.type_expr("for", block.target);
+        self.functions(block.functions);
+        self.depth -= 1;
+      }
     }
   }
 

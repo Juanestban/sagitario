@@ -1,6 +1,6 @@
 # 0081. Operator overloading through interfaces
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-10
 - Refines: [ADR-0013](0013-primitive-semantics.md) (decision 6, no operator overloading in the
   MVP), [ADR-0017](0017-resolution-of-open-questions-q1-q11.md) (Q7b, per-interface blocks),
@@ -31,7 +31,7 @@ Rust also gives each implementation an associated type, `Output`, for the result
 
 | # | Topic | Decision |
 |---|---|---|
-| Q507 | Interface blocks | Besides its header (`struct P impl I`), a type implements an interface in a block at module level, `impl I for T { ... }`, as in Rust, in the module that declares `T`. The block holds the methods of `I` and nothing else, without `pub` (they are public, as an interface's members are); they reach the private members of `T` as its own methods do. Fields of `I` stay members of `T`. A generic type writes its parameters on the block: `impl<T: Add<T, T>> Add<Vec2<T>, Vec2<T>> for Vec2<T>`. |
+| Q507 | Interface blocks | Besides its header (`struct P impl I`), a type implements an interface in a block at module level, `impl I for T { ... }`, as in Rust, in the module that declares `T`. The block holds the methods of `I` and nothing else, without `pub` (they are public, as an interface's members are); they reach the private members of `T` as its own methods do. Fields of `I` stay members of `T`. A generic type writes its parameters on the block, in order and without bounds, which are the type's: `impl<T> Add<Vec2<T>, Vec2<T>> for Vec2<T>`. |
 | Q508 | Several implementations | A type may implement a generic interface several times with different type arguments (`Mul<Mat4, Mat4>` and `Mul<Vec4, Vec4>`), each in its own block; implementing the same instantiation twice is an error. The header still names each interface once, so a second instantiation is written as a block. Subclasses inherit the blocks of their parents, as they inherit interfaces. |
 | Q509 | Calling block methods | A method of a block is called by name when the type has one method of that name (`m.mul(v)`), and is otherwise ambiguous: an error that lists the implementations and suggests the operator. Through an interface value or a bound, the method of that instantiation is called. There is no qualified call syntax (`<Mat4 as Mul<Vec4, Vec4>>::mul`) yet. |
 | Q510 | The interfaces | The prelude gains `Add<Rhs, Out>`, `Sub<Rhs, Out>`, `Mul<Rhs, Out>`, `Div<Rhs, Out>` and `Rem<Rhs, Out>`, each with one method (`fn add(self, other: Rhs) -> Out`, `sub`, `mul`, `div`, `rem`), and `Neg<Out>` with `fn neg(self) -> Out`. The result is the second type argument, not an associated type: `impl Mul<Vec4, Vec4> for Mat4`. |
@@ -68,3 +68,16 @@ Rust also gives each implementation an associated type, `Output`, for the result
   own record.
 - The compiler gains blocks in the parser and the resolver, several implementations per
   interface in the checker and in dispatch, and the lowering of operators to calls.
+
+## Implementation notes
+
+- Increment 1 (interface blocks and several implementations) is done:
+  `docs/spec/05-interfaces-generics.md#impl--for-blocks`. The parameters of a block carry no
+  bounds of their own: the type's apply, since a block for only some arguments of a type would be
+  a conditional implementation, which Q507 does not plan. A block also holds the methods of the
+  parents of its interface. The methods of a block are not virtual, so a subclass does not
+  override them. A default method of an interface implemented twice is ambiguous by name, as
+  methods are (Q509). Codes: `E0342` (the same instantiation twice, or one interface twice in a
+  header), `E0343` (a block whose type or parameters are wrong), `E0344` (an ambiguous name);
+  a method of a block outside its interface is `E0329`, as other mismatches of an
+  implementation are.
