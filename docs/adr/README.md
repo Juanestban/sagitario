@@ -89,6 +89,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0078](0078-ffi-without-c-shims.md) | A complete FFI: C libraries without C shims | Accepted |
 | [0079](0079-references-and-borrowing.md) | References and borrowing in parameters | Accepted |
 | [0080](0080-std-math-trigonometry.md) | Trigonometry in `std::math` | Accepted |
+| [0081](0081-operator-overloading.md) | Operator overloading through interfaces | Proposed |
 
 ## Template
 
