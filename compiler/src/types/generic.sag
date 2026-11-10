@@ -253,6 +253,11 @@ pub class Unknowns {
           self.unify(pointee, actual_pointee);
         }
       }
+      TypeKind::Ref { pointee, .. } => {
+        if let TypeKind::Ref { pointee: actual_pointee, .. } = actual.kind {
+          self.unify(pointee, actual_pointee);
+        }
+      }
       TypeKind::Result { value, error } => {
         if let TypeKind::Result { value: actual_value, error: actual_error } = actual.kind {
           self.unify(value, actual_value);
@@ -335,7 +340,7 @@ fn mentions_unknown(ty: Type, unknowns: Unknowns) -> bool {
     TypeKind::Array { elem, .. } => mentions_unknown(elem, unknowns),
     TypeKind::List(elem) => mentions_unknown(elem, unknowns),
     TypeKind::Option(elem) => mentions_unknown(elem, unknowns),
-    TypeKind::Ptr { pointee, .. } => mentions_unknown(pointee, unknowns),
+    TypeKind::Ptr { pointee, .. } | TypeKind::Ref { pointee, .. } => mentions_unknown(pointee, unknowns),
     TypeKind::Result { value, error } => mentions_unknown(value, unknowns) || mentions_unknown(error, unknowns),
     TypeKind::Function { params, ret } => any_unknown(params, unknowns) || mentions_unknown(ret, unknowns),
     TypeKind::CFn { params, ret, .. } => any_unknown(params, unknowns) || mentions_unknown(ret, unknowns),

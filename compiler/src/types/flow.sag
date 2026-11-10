@@ -706,7 +706,7 @@ class Flow {
       }
       ExprKind::Unary { operand, .. } => self.expr(operand),
       // Taking the address of a binding reads it: it must be assigned. A `*mut` one may change it.
-      ExprKind::AddrOf { mutable, place } => {
+      ExprKind::AddrOf { mutable, place, .. } => {
         self.expr(place);
 
         if mutable {

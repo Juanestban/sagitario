@@ -390,6 +390,7 @@ pub fn ty(value: Type) -> String {
     TypeKind::Option(inner) => "Option<" + ty(inner) + ">",
     TypeKind::Result { value: ok, error } => "Result<" + ty(ok) + ", " + ty(error) + ">",
     TypeKind::Ptr { mutable, pointee } => (if mutable { "*mut " } else { "*const " }) + ty(pointee),
+    TypeKind::Ref { mutable, pointee } => (if mutable { "&mut " } else { "&" }) + ty(pointee),
     _ => types::text(value),
   }
 }

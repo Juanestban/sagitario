@@ -105,8 +105,9 @@ and each symbol is defined once.
 
 ## FFI-safe types
 
-Integers, floats, `bool`, raw pointers, C function pointers (also in an `Option`), `@repr(C)`
-structs and unions, and enums with an integer representation. Fields of `@repr(C)` structs and
+Integers, floats, `bool`, raw pointers, references to FFI-safe types (non-null pointers for C),
+C function pointers (also in an `Option`), `@repr(C)` structs and unions, and enums with an
+integer representation. Fields of `@repr(C)` structs and
 unions may also be fixed arrays of these (`[c_char; 256]`), laid out as C's `T name[N]`; an array
 is never a parameter or a result, since C passes a pointer to its first element instead. `String`, `char`, enums, arrays
 and other structs cannot cross the boundary: strings travel as `CString` pointers, and
@@ -127,6 +128,7 @@ characters as `u32`.
 | `array.as_ptr()`, `array.as_mut_ptr()` | Pointer to the first element; `as_mut_ptr` needs a `var` place | |
 | `list.as_ptr()`, `list.as_mut_ptr()` | Pointer to the first element of a list, valid until its length changes | |
 | `&raw const place`, `&raw mut place` | The address of a place, as `*const T` or `*mut T` | |
+| `reference as *const T` | A reference parameter as a raw pointer (`&mut T` also as `*mut T`) | |
 
 - A `*mut T` can be used where a `*const T` is expected.
 - A pointer cannot point to a type holding `String`s or other ARC references.
@@ -137,7 +139,12 @@ characters as `u32`.
   when the list grows: use `list.as_mut_ptr()`. Taking an address is safe; using it needs `unsafe`.
 - C fills buffers of lists: `count` with `&raw mut count`, then `list.resize(count, value)` and
   `list.as_mut_ptr()`. `fs::read` gives the bytes of a file, such as SPIR-V code, as a `List<u8>`.
-- `&x` alone (a reference) is not implemented yet ([ADR-0079](../adr/0079-references-and-borrowing.md)).
+- [References](03-memory.md#references) meet C as pointers, as in Rust
+  ([ADR-0079](../adr/0079-references-and-borrowing.md), Q496): a `&T` can be passed where a
+  `*const T` is expected and a `&mut T` where a `*mut T` is (`frexp(x, &mut exponent)`), and
+  `v as *const T` converts a reference parameter. In an `extern "C" fn`, an `extern` block or a C
+  function pointer type, a reference parameter is a pointer C must never pass as null:
+  `extern "C" fn compare(a: &i32, b: &i32) -> c_int` can be given to `qsort`.
 
 ## `unsafe`
 

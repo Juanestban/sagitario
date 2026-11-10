@@ -1,0 +1,41 @@
+// A place lent with `&mut` cannot be reached by another argument of the same call
+// (docs/adr/0079-references-and-borrowing.md, Q492).
+struct Vec2 {
+  pub x: i32;
+  pub y: i32;
+
+  pub fn add(self, other: &Vec2) {
+    self.x += other.x;
+  }
+}
+
+struct Pair {
+  pub first: Vec2;
+  pub second: Vec2;
+}
+
+fn both(_a: &mut Vec2, _b: &Vec2) {}
+
+fn by_value(_a: &mut Vec2, _b: Vec2) {}
+
+fn cells(_a: &mut i32, _b: &i32) {}
+
+fn twice(_a: &mut i32, _b: &mut i32) {}
+
+fn pass_on(v: &mut Vec2) {
+  both(v, v); //~ ERROR E0341
+}
+
+fn main() {
+  var a = Vec2 { x: 1, y: 2 };
+  var pair = Pair { first: a, second: a };
+  var grid = [1, 2, 3];
+
+  both(&mut a, &a); //~ ERROR E0341
+  by_value(&mut pair.first, pair.first); //~ ERROR E0341
+  both(&mut pair.first, &pair.second);
+  cells(&mut grid[0], &grid[1]); //~ ERROR E0341
+  twice(&mut a.x, &mut a.x); //~ ERROR E0341
+  a.add(&a); //~ ERROR E0341
+  pass_on(&mut a);
+}

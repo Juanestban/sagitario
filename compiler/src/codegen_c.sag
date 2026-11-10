@@ -423,7 +423,7 @@ class Generator {
         return self.visit_instance(ty, done, order);
       }
       TypeKind::Array { .. } | TypeKind::Result { .. } => return self.visit_instance(ty, done, order),
-      TypeKind::Ptr { pointee, .. } => {
+      TypeKind::Ptr { pointee, .. } | TypeKind::Ref { pointee, .. } => {
         self.pointees.push(pointee);
 
         return;
@@ -1251,7 +1251,7 @@ class Generator {
       TypeKind::CFn { .. } => `sag_p${self.fn_pointer_index(ty)}`,
       TypeKind::CString => "sag_cstring",
       TypeKind::CVoid => "void",
-      TypeKind::Ptr { mutable, pointee } => self.c_type(pointee) + (if mutable { "" } else { " const" }) + "*",
+      TypeKind::Ptr { mutable, pointee } | TypeKind::Ref { mutable, pointee } => self.c_type(pointee) + (if mutable { "" } else { " const" }) + "*",
     }
   }
 
@@ -1491,7 +1491,7 @@ class Generator {
     }
 
     match ty.kind {
-      TypeKind::Ptr { pointee, .. } => self.ffi_types(pointee, false, declared, defined),
+      TypeKind::Ptr { pointee, .. } | TypeKind::Ref { pointee, .. } => self.ffi_types(pointee, false, declared, defined),
       TypeKind::Struct(_) | TypeKind::Enum(_) | TypeKind::Array { .. } | TypeKind::Option(_) | TypeKind::Result { .. } => {
         const name = self.c_type(ty);
 
@@ -1743,6 +1743,9 @@ class Generator {
         }
         Projection::Deref => {
           out = "(*SAG_CHECK_PTR(" + out + ", __FILE__, __LINE__))";
+        }
+        Projection::Borrowed => {
+          out = "(*" + out + ")";
         }
       }
     }
@@ -2115,7 +2118,7 @@ class Generator {
         const text = self.operand(operand);
 
         match from.kind {
-          TypeKind::Ptr { .. } => match to.kind {
+          TypeKind::Ptr { .. } | TypeKind::Ref { .. } => match to.kind {
             TypeKind::Ptr { .. } => return "((" + self.c_type(to) + ")" + text + ")",
             TypeKind::Int(int_ty) => return "((" + int_c_type(int_ty) + ")(uintptr_t)" + text + ")",
             TypeKind::CFn { .. } => return self.converted_fn_pointer(to) + "_from((void *)" + text + ", __FILE__, __LINE__)",

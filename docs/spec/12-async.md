@@ -29,7 +29,9 @@ async fn main() {
   that has not finished, or until its end; it then returns the task.
 - The task keeps its parameters until it finishes: the caller may release its own references
   earlier.
-- An `async fn` cannot be `extern "C"` or `@export`, nor an initializer `new` (`E0337`).
+- An `async fn` cannot be `extern "C"` or `@export`, nor an initializer `new` (`E0337`). It
+  cannot take references (`&T`, `&mut T`), since its body runs after the call returns (`E0339`,
+  [references](03-memory.md#references)).
 - Functions of a module, generic functions, and methods of classes, structs, enums and interfaces,
   also `abstract`, `override`, static and default ones, may be `async`. Lambdas cannot.
 - An `async fn` returning `T` has the type of a function returning `Task<T>`: used as a value, an

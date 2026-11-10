@@ -1,0 +1,60 @@
+// Lending with `&` and `&mut`, and changing values through references
+// (docs/adr/0079-references-and-borrowing.md, Q489 to Q491 and Q493).
+struct Vec2 {
+  pub x: i32;
+  pub y: i32;
+
+  pub fn translate(self, by: i32) {
+    self.x += by;
+  }
+}
+
+class Player {
+  pub var name: String;
+  pub var health: i32;
+
+  pub fn new(self, name: String) {
+    self.name = name;
+    self.health = 1;
+  }
+}
+
+fn read(v: &Vec2) -> i32 {
+  v.x
+}
+
+fn change(v: &mut Vec2) {
+  v.x = 1;
+}
+
+fn length(text: &String) -> usize {
+  text.len()
+}
+
+fn through_shared(v: &Vec2) {
+  v.x = 2; //~ ERROR E0312
+  *v = Vec2 { x: 0, y: 0 }; //~ ERROR E0312
+  v.translate(1); //~ ERROR E0313
+  change(&mut v); //~ ERROR E0312
+  const _f = () => v.x; //~ ERROR E0339
+}
+
+async fn later(_v: &i32) -> i32 { //~ ERROR E0339
+  1
+}
+
+fn main() {
+  const fixed = Vec2 { x: 1, y: 2 };
+
+  change(&mut fixed); //~ ERROR E0312
+  change(&mut Vec2 { x: 1, y: 2 }); //~ ERROR E0340
+
+  const list = List::from([Vec2 { x: 1, y: 2 }]);
+
+  read(&list[0]); //~ ERROR E0340
+
+  const player = new Player("Ada");
+
+  length(&player.name); //~ ERROR E0340
+  read(&5); //~ ERROR E0300
+}

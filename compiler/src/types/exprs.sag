@@ -13,6 +13,7 @@ use pkg::ast::TargetInfo;
 use pkg::types::{Checker, FloatTy, FnSig, IntTy, LoopCx, LoopKind, ParamRef, Receiver, SELF_PARAM, StructDef, Subst, Type, TypeKind, VariantDef};
 use pkg::types;
 use pkg::types::classes;
+use pkg::types::borrow;
 use pkg::types::classes::PlaceUse;
 use pkg::types::closures;
 use pkg::types::collections;
@@ -515,7 +516,13 @@ fn other_expr_kind(cx: Checker, value: Expr, expected: Option<Type>) -> Type {
     }
     ExprKind::Path(path) => match cx.resolution.paths.get(value.id) {
       // An unassigned binding without a known type is reported by the flow analysis.
-      Some(Res::Local(id)) => local_type(cx, id).unwrap_or(types::error()),
+      Some(Res::Local(id)) => {
+        const ty = local_type(cx, id).unwrap_or(types::error());
+
+        borrow::check_reference_use(cx, value, id, ty);
+
+        ty
+      }
       Some(Res::Fn(id)) => closures::fn_value(cx, value, path, id, expected),
       Some(Res::Const(id)) => cx.typed.const_types.get(id as usize).unwrap_or(types::error()),
       Some(Res::Extern(id)) if !cx.resolution.is_runtime_extern(cx.package, id) => ffi::extern_value(cx, id),
@@ -578,7 +585,7 @@ fn other_expr_kind(cx: Checker, value: Expr, expected: Option<Type>) -> Type {
     ExprKind::Unary { op, operand } => unary(cx, value, op, operand, expected),
     ExprKind::Binary { op, lhs, rhs } => binary(cx, op, lhs, rhs, expected),
     ExprKind::Cast { expr: inner, ty } => cast(cx, inner, ty),
-    ExprKind::AddrOf { mutable, place } => ffi::addr_of(cx, mutable, place),
+    ExprKind::AddrOf { mutable, place, raw } => if raw { ffi::addr_of(cx, mutable, place) } else { borrow::borrow(cx, mutable, place, expected) },
     ExprKind::Range { start, end, .. } => collections::range_value(cx, value, start, end, expected),
     ExprKind::Block(body) => block(cx, body, expected),
     ExprKind::Unsafe(body) => ffi::unsafe_block(cx, value, body, expected),
@@ -916,6 +923,13 @@ fn cast(cx: Checker, inner: Expr, ty: TypeExpr) -> Type {
     valid = true;
   } else {
     match from.kind {
+      // `&T as *const T` and `&mut T as *mut T`, as in Rust (docs/adr/0079-references-and-borrowing.md, Q496).
+      TypeKind::Ref { mutable, pointee } => {
+        valid = match to.kind {
+          TypeKind::Ptr { mutable: to_mutable, pointee: to_pointee } => (mutable || !to_mutable) && types::same_type(pointee, to_pointee),
+          _ => false,
+        };
+      }
       TypeKind::Ptr { .. } => {
         valid = match to.kind {
           TypeKind::Ptr { .. } | TypeKind::Int(IntTy::Usize) => true,
@@ -1278,7 +1292,7 @@ fn method_call(cx: Checker, value: Expr, receiver: Expr, method: Ident, args: Li
     return inheritance::zod_call(cx, value, receiver, method, args);
   }
 
-  const receiver_ty = expr(cx, receiver, None);
+  const receiver_ty = borrow::deref_base(cx, receiver);
   const name = method.name;
 
   if let Some(ty) = ffi::ffi_method(cx, value, receiver, receiver_ty, method, args) {
@@ -1483,7 +1497,7 @@ fn resolve_same(a: TypeItem, b: TypeItem) -> bool {
 }
 
 fn field(cx: Checker, base: Expr, name: Ident) -> Type {
-  const base_ty = expr(cx, base, None);
+  const base_ty = borrow::deref_base(cx, base);
   const field_name = name.name;
 
   if let TypeKind::Class(class_ref) = base_ty.kind {
@@ -1567,7 +1581,7 @@ fn field(cx: Checker, base: Expr, name: Ident) -> Type {
 }
 
 fn index(cx: Checker, base: Expr, position: Expr) -> Type {
-  const base_ty = expr(cx, base, None);
+  const base_ty = borrow::deref_base(cx, base);
 
   expect(cx, position, types::int(IntTy::Usize));
 
@@ -2118,6 +2132,8 @@ fn builtin_method(cx: Checker, value: Expr, receiver_ty: Type, method: Ident, ar
 /// `value?` (docs/spec/07-errors.md#the--operator).
 /// What an `async fn` cannot be (docs/spec/12-async.md#async-fn).
 fn check_async_fn(cx: Checker, decl: FnDecl) {
+  borrow::check_async_params(cx, decl);
+
   if decl.extern_c || decl.export.is_some() {
     cx.diagnostics.push(
       Diagnostic::error(codes::INVALID_ASYNC, decl.name.span, "an `async fn` cannot be called from C")

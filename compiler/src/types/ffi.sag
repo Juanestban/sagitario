@@ -146,6 +146,8 @@ fn ffi_safe_in(cx: Checker, ty: Type, in_field: bool) -> bool {
   match ty.kind {
     TypeKind::Int(_) | TypeKind::Float(_) | TypeKind::Bool | TypeKind::Ptr { .. } | TypeKind::CFn { .. } | TypeKind::Error | TypeKind::Never => true,
     TypeKind::Option(inner) => is_c_fn(inner),
+    // A non-null pointer for C (docs/adr/0079-references-and-borrowing.md, Q496).
+    TypeKind::Ref { pointee, .. } => !in_field && !is_managed(cx, pointee, new List()) && ffi_safe_in(cx, pointee, true),
     // Laid out as C's `T name[N]` (docs/adr/0078-ffi-without-c-shims.md, Q477); only fields
     // hold arrays, since C passes a pointer for an array parameter.
     TypeKind::Array { elem, .. } => in_field && ffi_safe_in(cx, elem, false),
@@ -694,9 +696,11 @@ pub fn deref(cx: Checker, value: Expr, operand: Expr) -> Type {
 
       pointee
     }
+    // A reference is never null: reading it is safe (docs/adr/0079-references-and-borrowing.md).
+    TypeKind::Ref { pointee, .. } => pointee,
     TypeKind::Error | TypeKind::Never => types::error(),
     _ => {
-      cx.error(codes::INVALID_OPERAND, value.span, "cannot dereference a value of type `" + types::text(ty) + "`; only raw pointers can be");
+      cx.error(codes::INVALID_OPERAND, value.span, "cannot dereference a value of type `" + types::text(ty) + "`; only references and raw pointers can be");
 
       types::error()
     }
@@ -713,16 +717,27 @@ pub fn deref_pointer(place: Expr) -> Option<Expr> {
   }
 }
 
-/// Writing through a pointer needs a `*mut` one.
+/// Writing through a pointer needs a `*mut` one, and through a reference a `&mut` one.
 pub fn check_pointer_write(cx: Checker, place: Expr, pointer: Expr) {
   if let Some(ty) = cx.typed.expr_types.get(pointer.id) {
-    if let TypeKind::Ptr { mutable, .. } = ty.kind {
-      if !mutable {
-        cx.diagnostics.push(
-          Diagnostic::error(codes::IMMUTABLE_PLACE, place.span, "cannot modify a value through a `*const` pointer")
-            .with_help("use a `*mut` pointer, for example with `as *mut T`"),
-        );
+    match ty.kind {
+      TypeKind::Ptr { mutable, .. } => {
+        if !mutable {
+          cx.diagnostics.push(
+            Diagnostic::error(codes::IMMUTABLE_PLACE, place.span, "cannot modify a value through a `*const` pointer")
+              .with_help("use a `*mut` pointer, for example with `as *mut T`"),
+          );
+        }
       }
+      TypeKind::Ref { mutable, pointee } => {
+        if !mutable {
+          cx.diagnostics.push(
+            Diagnostic::error(codes::IMMUTABLE_PLACE, place.span, "cannot modify a value through a `&` reference")
+              .with_help("take a `&mut " + types::text(pointee) + "` parameter, and lend it with `&mut`"),
+          );
+        }
+      }
+      _ => {}
     }
   }
 }

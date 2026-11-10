@@ -345,6 +345,12 @@ class Dumper {
         self.type_expr("pointee", pointee);
         self.depth -= 1;
       }
+      TypeExprKind::Ref { mutable, pointee } => {
+        self.line(label, "RefType", Some(ty.span), None, `mutable=${mutable}`);
+        self.depth += 1;
+        self.type_expr("pointee", pointee);
+        self.depth -= 1;
+      }
       TypeExprKind::Fn { params, ret } => {
         self.line(label, "FnType", Some(ty.span), None, "");
         self.depth += 1;
@@ -528,8 +534,8 @@ class Dumper {
         self.expr("rhs", rhs);
         self.depth -= 1;
       }
-      ExprKind::AddrOf { mutable, place } => {
-        self.node(label, expr, "AddrOf", if mutable { "mut" } else { "const" });
+      ExprKind::AddrOf { mutable, place, raw } => {
+        self.node(label, expr, if raw { "AddrOf" } else { "Borrow" }, if mutable { "mut" } else { "const" });
         self.depth += 1;
         self.expr("place", place);
         self.depth -= 1;

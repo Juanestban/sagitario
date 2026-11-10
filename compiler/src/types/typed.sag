@@ -829,6 +829,7 @@ pub class TypedModule {
       TypeKind::List(_) => Some("a `" + types::text(ty) + "` can be changed through any reference to it"),
       TypeKind::Function { .. } => Some("a function value can capture values that are not `Send`"),
       TypeKind::Ptr { .. } | TypeKind::CVoid => Some("raw pointers are not `Send`"),
+      TypeKind::Ref { .. } => Some("references live while a call does"),
       TypeKind::Interface(interface_ref) => {
         if let Some(send) = self.prelude.send {
           if send == interface_ref.id {

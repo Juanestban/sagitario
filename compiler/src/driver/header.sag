@@ -146,7 +146,7 @@ class Header {
   /// Visits the structs `ty` needs, defining the `@repr(C)` ones held by value or pointed to.
   pub fn visit(self, ty: Type) {
     match ty.kind {
-      TypeKind::Ptr { pointee, .. } => self.visit(pointee),
+      TypeKind::Ptr { pointee, .. } | TypeKind::Ref { pointee, .. } => self.visit(pointee),
       TypeKind::Option(inner) => self.visit(inner),
       TypeKind::Array { elem, .. } => self.visit(elem),
       TypeKind::CFn { params, ret, .. } => {
@@ -268,10 +268,10 @@ class Header {
       TypeKind::CFn { .. } => {
         base = self.fn_pointer_name(ty);
       }
-      TypeKind::Ptr { mutable, pointee } => {
+      TypeKind::Ptr { mutable, pointee } | TypeKind::Ref { mutable, pointee } => {
         const inner_written: Option<TypeExpr> = match written {
           Some(found) => match found.kind {
-            TypeExprKind::Ptr { pointee: inner, .. } => Some(inner),
+            TypeExprKind::Ptr { pointee: inner, .. } | TypeExprKind::Ref { pointee: inner, .. } => Some(inner),
             _ => None,
           },
           None => None,

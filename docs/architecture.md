@@ -39,7 +39,8 @@ compiler/           the compiler and Nova, written in Sagitario (compiler/Nova.t
   src/loader.sag          reads the entry file and the modules, dependencies and std it reaches
   src/resolve/            module tree, `use`, name resolution, visibility
   src/types/              type checking, local inference, generics, inheritance, interfaces,
-                          flow analysis, `Send` and the check of `thread::spawn` (send.sag)
+                          flow analysis, `Send` and the check of `thread::spawn` (send.sag), and
+                          references with the borrow checker (borrow.sag)
   src/sir/                SIR definition + lowering from the typed AST + retain/release insertion
   src/codegen_c.sag       SIR → C11 text
   src/driver/             orchestrates the pipeline, embeds the runtime, invokes the C compiler;
@@ -91,6 +92,16 @@ modify the receiver they borrow from. Fields of class instances are places behin
 managed value from one takes an owned copy, and an instance reached through another place is
 retained for the statement. `new C(args)` allocates the instance (`Alloc`) and calls the
 initializer on it.
+
+References ([ADR-0079](adr/0079-references-and-borrowing.md)) are C pointers. The type checker
+gives a reference parameter used as the base of a field, an element or a method call the type
+of the value it refers to (`borrow::deref_base`); SIR then reads that path as the place behind the
+pointer (`Projection::Borrowed`, `(*lN)`), and passes it on as the pointer itself when its type
+is still a reference. `&value` lowers to `Operand::Ref` of the place, or of a temporary; a class
+instance a lent field is reached through gets an owned copy for the statement. `borrow.sag` holds
+the operators, and the borrow checker, a pass over each function after the type checker (skipped
+when it reported errors): where references may appear, and the exclusivity of `&mut` among the
+arguments of a call.
 
 SIR is the place for ARC optimizations and the boundary behind which other backends (LLVM)
 could be added.

@@ -1,5 +1,13 @@
-// References are not implemented yet (docs/adr/0079-references-and-borrowing.md).
-fn main() {
-  const x = 1;
-  const _y = &x; //~ ERROR E0900
+// References are only the types of parameters (docs/adr/0079-references-and-borrowing.md, Q488).
+struct Holder {
+  pub value: &i32; //~ ERROR E0339
 }
+
+fn first(items: List<&i32>) -> &i32 { //~ ERROR E0339, ERROR E0339
+  const x: &i32 = 1; //~ ERROR E0339
+  x
+}
+
+fn nested(_x: &&i32) {} //~ ERROR E0339
+
+fn main() {}

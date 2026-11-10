@@ -64,3 +64,14 @@ live while a call does. That form needs no lifetimes and leaves classes as they 
 - Classes, lists and closures behave as before; code that does not write `&` does not change.
 - The compiler gains reference and slice types, a borrow checker pass, and the borrow count of
   lists in the runtime.
+
+## Implementation notes
+
+- Increment 1 (references in parameters and the borrow checker) is done: `docs/spec/03-memory.md#references`.
+- Q490 for classes and lists: their values are references, so a `&Player` cannot replace the
+  instance (`*player = ...` needs `&mut`), while the `var` fields of the instance stay changeable
+  through it, as through any `const` binding or parameter (`docs/spec/03-memory.md#class-field-mutability-f2`).
+- Q492: the arguments of a method that modifies `self` are copied before the call (ADR-0028), so
+  passing a part of the receiver by value to it is not a conflict; lending one with `&` is.
+- Q496: a reference parameter also converts with `as` to the raw pointer type of its pointee, as
+  in Rust (`v as *const T`).

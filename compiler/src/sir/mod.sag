@@ -254,6 +254,21 @@ pub fn local_place(local: u32, ty: Type) -> Place {
   Place { local: local, projections: new List(), ty: ty }
 }
 
+/// The value a reference in `local` refers to, as a place.
+pub fn referred_place(local: u32, reference: Type) -> Place {
+  match reference.kind {
+    TypeKind::Ref { pointee, .. } => project_one(local_place(local, reference), Projection::Borrowed, pointee),
+    _ => local_place(local, reference),
+  }
+}
+
+pub fn is_reference(ty: Type) -> bool {
+  match ty.kind {
+    TypeKind::Ref { .. } => true,
+    _ => false,
+  }
+}
+
 pub enum Projection {
   /// The field at this position of a struct.
   Field(usize),
@@ -276,6 +291,8 @@ pub enum Projection {
   VariantField { variant: u32, field: usize },
   /// The value a pointer points to; a null pointer panics.
   Deref,
+  /// The value a reference parameter refers to, never null.
+  Borrowed,
 }
 
 pub enum Stmt {
@@ -464,6 +481,7 @@ pub fn type_key(ty: Type) -> String {
     TypeKind::Option(value) => "O(" + type_key(value) + ")",
     TypeKind::Result { value, error } => "R(" + type_key(value) + "," + type_key(error) + ")",
     TypeKind::Ptr { mutable, pointee } => (if mutable { "*m" } else { "*c" }) + "(" + type_key(pointee) + ")",
+    TypeKind::Ref { mutable, pointee } => (if mutable { "&m" } else { "&c" }) + "(" + type_key(pointee) + ")",
     _ => types::text(ty),
   }
 }
@@ -1402,7 +1420,16 @@ pub class Lowering {
 
     match value.kind {
       ExprKind::Path(_) => match self.resolution.paths.get(value.id) {
-        Some(Res::Local(id)) => Ok(local_place(closures::local_id(self, id), ty)),
+        Some(Res::Local(id)) => {
+          const local = closures::local_id(self, id);
+          const local_ty = self.local_type(local);
+
+          if is_reference(local_ty) {
+            return Ok(referred_place(local, local_ty));
+          }
+
+          Ok(local_place(local, ty))
+        }
         _ => Err("place of unsupported path"),
       },
       ExprKind::Field { base, name } => {
@@ -1458,7 +1485,7 @@ pub class Lowering {
         const pointer = self.expr(operand)?;
         const place = self.operand_place(pointer, pointer_ty)?;
 
-        Ok(project(place, Projection::Deref, ty))
+        Ok(project(place, if is_reference(pointer_ty) { Projection::Borrowed } else { Projection::Deref }, ty))
       }
       _ => {
         const computed = self.expr(value)?;
@@ -1495,6 +1522,100 @@ pub class Lowering {
     }
 
     false
+  }
+
+  /// `&value` or `&mut place` (docs/adr/0079-references-and-borrowing.md): the address of the
+  /// place, or of a temporary that lives until the statement ends. A class instance the place is
+  /// reached through is kept alive while it is lent (Q491).
+  prv fn borrow(self, operand: Expr) -> Result<Operand, String> {
+    if let Some(place) = self.lent_place(operand)? {
+      return Ok(Operand::Ref(place));
+    }
+
+    const ty = self.type_of(operand)?;
+    const value = self.expr(operand)?;
+
+    match self.owned_copy(ty, value) {
+      Operand::Local(local) => Ok(Operand::Ref(local_place(local, ty))),
+      other => match self.new_value(ty, Rvalue::Use(other)) {
+        Operand::Local(local) => Ok(Operand::Ref(local_place(local, ty))),
+        _ => Err("borrowed temporary without a local"),
+      },
+    }
+  }
+
+  /// The place a borrow lends, or `None` for a temporary value.
+  prv fn lent_place(self, value: Expr) -> Result<Option<Place>, String> {
+    match value.kind {
+      ExprKind::Path(_) => match self.resolution.paths.get(value.id) {
+        Some(Res::Local(_)) => Ok(Some(self.place(value)?)),
+        _ => Ok(None),
+      },
+      ExprKind::Field { base, .. } => {
+        const base_ty = self.type_of(base)?;
+        const ty = self.type_of(value)?;
+
+        match base_ty.kind {
+          TypeKind::Class(_) => {
+            const object = self.expr(base)?;
+            // The instance gets a reference of its own, released after the call.
+            const kept = match self.owned_copy(base_ty, object) {
+              Operand::Local(local) => local_place(local, base_ty),
+              other => self.operand_place(other, base_ty)?,
+            };
+
+            Ok(Some(project(kept, self.field_projection(value)?, ty)))
+          }
+          TypeKind::Struct(_) => match self.lent_place(base)? {
+            Some(place) => Ok(Some(project(place, self.field_projection(value)?, ty))),
+            None => Ok(None),
+          },
+          _ => Ok(None),
+        }
+      }
+      ExprKind::Index { base, index } => {
+        const base_ty = self.type_of(base)?;
+        const len = match base_ty.kind {
+          TypeKind::Array { len, .. } => len,
+          _ => return Ok(None),
+        };
+
+        match self.lent_place(base)? {
+          Some(place) => {
+            const position = self.expr(index)?;
+
+            Ok(Some(project(place, Projection::Index { index: position, len: len }, self.type_of(value)?)))
+          }
+          None => Ok(None),
+        }
+      }
+      ExprKind::Unary { op, .. } => if op == UnaryOp::Deref { Ok(Some(self.place(value)?)) } else { Ok(None) },
+      _ => Ok(None),
+    }
+  }
+
+  /// The projection of the field `value` from its base.
+  prv fn field_projection(self, value: Expr) -> Result<Projection, String> {
+    const base = match value.kind {
+      ExprKind::Field { base, .. } => base,
+      _ => return Err("field projection of an expression that is not a field"),
+    };
+    const name = match value.kind {
+      ExprKind::Field { name, .. } => name.name,
+      _ => "",
+    };
+
+    match self.type_of(base)?.kind {
+      TypeKind::Struct(owner) => match self.typed.field_index(owner.id, name) {
+        Some(index) => Ok(Projection::Field(index)),
+        None => Err("unknown field `" + name + "`"),
+      },
+      TypeKind::Class(owner) => match self.typed.class_field_type(owner, name) {
+        Some(found) => Ok(Projection::ClassField { class_id: mono::class_instance(self, found.ancestor), index: found.index }),
+        None => Err("unknown field `" + name + "`"),
+      },
+      _ => Err("field of a value that is not a struct or a class instance"),
+    }
   }
 
   /// The place of a field as stored, without loading a `weak` one.
@@ -1634,7 +1755,18 @@ pub class Lowering {
       ExprKind::Unit => Ok(unit_operand()),
       ExprKind::Lambda { body, .. } => closures::lambda(self, value, body, ty),
       ExprKind::Path(_) | ExprKind::Zod => match self.resolution.paths.get(value.id) {
-        Some(Res::Local(id)) => Ok(Operand::Local(closures::local_id(self, id))),
+        Some(Res::Local(id)) => {
+          const local = closures::local_id(self, id);
+          const local_ty = self.local_type(local);
+
+          // A reference parameter used as the base of a field or a method call is the value it
+          // refers to; passed on, it is the reference.
+          if is_reference(local_ty) && !is_reference(ty) {
+            return Ok(Operand::Place(referred_place(local, local_ty)));
+          }
+
+          Ok(Operand::Local(local))
+        }
         Some(Res::Fn(id)) => match ty.kind {
           TypeKind::CFn { .. } => Ok(self.new_value(ty, Rvalue::CFnValue(mono::instance(self, id, Subst::empty())))),
           _ => Ok(closures::fn_value(self, value, id, ty)),
@@ -1663,7 +1795,11 @@ pub class Lowering {
       ExprKind::ArrayRepeat { value: repeated, .. } => self.array_repeat(ty, repeated),
       ExprKind::Unary { op, operand } => self.unary(value, ty, op, operand),
       ExprKind::Binary { op, lhs, rhs } => self.binary(ty, op, lhs, rhs),
-      ExprKind::AddrOf { place, .. } => {
+      ExprKind::AddrOf { place, raw, .. } => {
+        if !raw {
+          return self.borrow(place);
+        }
+
         const found = self.base_place(place)?;
 
         Ok(self.new_value(ty, Rvalue::Use(Operand::Ref(found))))
@@ -1900,6 +2036,11 @@ pub class Lowering {
   }
 
   prv fn unary(self, value: Expr, ty: Type, op: UnaryOp, operand: Expr) -> Result<Operand, String> {
+    if op == UnaryOp::Deref && is_reference(self.type_of(operand)?) {
+      // Reading what a reference refers to borrows it, as reading a binding does.
+      return Ok(Operand::Place(self.place(value)?));
+    }
+
     if op == UnaryOp::Deref {
       // The pointee is never managed: its value is copied now.
       const place = self.place(value)?;

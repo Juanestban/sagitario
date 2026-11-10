@@ -1,0 +1,24 @@
+// A reference is only passed to a parameter of a reference type, dereferenced or used through its
+// fields and methods (docs/adr/0079-references-and-borrowing.md, Q488).
+struct Vec2 {
+  pub x: i32;
+  pub y: i32;
+}
+
+fn identity<T>(value: T) -> T {
+  value
+}
+
+fn keep(v: &Vec2) -> i32 {
+  const _copy = v; //~ ERROR E0339
+  const _wrapped = Some(v); //~ ERROR E0339
+  identity(v); //~ ERROR E0339
+  v.x
+}
+
+fn main() {
+  const a = Vec2 { x: 1, y: 2 };
+  const _r = &a; //~ ERROR E0339
+
+  keep(&a);
+}

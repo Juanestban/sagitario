@@ -11,6 +11,7 @@ use pkg::diagnostics::codes;
 use pkg::resolve::{ParamOwner, Resolution, TypeItem, TypeRes};
 use pkg::resolve;
 use pkg::span::Span;
+use pkg::types::borrow;
 use pkg::types::classes;
 use pkg::types::collections;
 use pkg::types::consts;
@@ -152,6 +153,9 @@ pub enum TypeKind {
   Option(Type),
   Result { value: Type, error: Type },
   Ptr { mutable: bool, pointee: Type },
+  /// `&T` or `&mut T`: a reference, only the type of a parameter
+  /// (docs/adr/0079-references-and-borrowing.md).
+  Ref { mutable: bool, pointee: Type },
   CVoid,
   CString,
   /// The type of expressions that never produce a value.
@@ -324,6 +328,10 @@ pub fn same_type(a: Type, b: Type) -> bool {
       TypeKind::Ptr { mutable: other_mutable, pointee: other_pointee } => mutable == other_mutable && same_type(pointee, other_pointee),
       _ => false,
     },
+    TypeKind::Ref { mutable, pointee } => match b.kind {
+      TypeKind::Ref { mutable: other_mutable, pointee: other_pointee } => mutable == other_mutable && same_type(pointee, other_pointee),
+      _ => false,
+    },
     _ => tag(a) == tag(b),
   }
 }
@@ -360,6 +368,22 @@ pub fn plain_fits(actual: Type, expected: Type) -> bool {
     }
   }
 
+  // A `&mut T` can be used as a `&T`, and a reference as a raw pointer to C, as in Rust
+  // (docs/adr/0079-references-and-borrowing.md, Q489 and Q496).
+  var reference = false;
+
+  if let TypeKind::Ref { mutable, pointee } = actual.kind {
+    match expected.kind {
+      TypeKind::Ref { mutable: expected_mutable, pointee: expected_pointee } => {
+        reference = mutable && !expected_mutable && same_type(pointee, expected_pointee);
+      }
+      TypeKind::Ptr { mutable: expected_mutable, pointee: expected_pointee } => {
+        reference = (mutable || !expected_mutable) && same_type(pointee, expected_pointee);
+      }
+      _ => {}
+    }
+  }
+
   // An `extern "C" fn` can be used as an `unsafe extern "C" fn`, as in Rust.
   var unsafe_fn = false;
 
@@ -369,7 +393,7 @@ pub fn plain_fits(actual: Type, expected: Type) -> bool {
     }
   }
 
-  same_type(actual, expected) || const_pointer || unsafe_fn || is_never(actual) || is_error(actual) || is_error(expected)
+  same_type(actual, expected) || const_pointer || reference || unsafe_fn || is_never(actual) || is_error(actual) || is_error(expected)
 }
 
 fn generic_text(name: String, args: List<Type>) -> String {
@@ -420,6 +444,7 @@ pub fn text(ty: Type) -> String {
     TypeKind::Result { value, error } => "Result<" + text(value) + ", " + text(error) + ">",
     TypeKind::StringBuilder => "StringBuilder",
     TypeKind::Ptr { mutable, pointee } => (if mutable { "*mut " } else { "*const " }) + text(pointee),
+    TypeKind::Ref { mutable, pointee } => (if mutable { "&mut " } else { "&" }) + text(pointee),
     TypeKind::CVoid => "c_void",
     TypeKind::CString => "CString",
     TypeKind::Never => "never",
@@ -572,6 +597,7 @@ pub fn substitute(ty: Type, subst: Subst) -> Type {
     TypeKind::Option(value) => of(TypeKind::Option(substitute(value, subst))),
     TypeKind::Result { value, error } => of(TypeKind::Result { value: substitute(value, subst), error: substitute(error, subst) }),
     TypeKind::Ptr { mutable, pointee } => of(TypeKind::Ptr { mutable: mutable, pointee: substitute(pointee, subst) }),
+    TypeKind::Ref { mutable, pointee } => of(TypeKind::Ref { mutable: mutable, pointee: substitute(pointee, subst) }),
     TypeKind::Function { params, ret } => of(TypeKind::Function { params: substitute_all(params, subst), ret: substitute(ret, subst) }),
     TypeKind::CFn { is_unsafe, params, ret } => of(TypeKind::CFn { is_unsafe: is_unsafe, params: substitute_all(params, subst), ret: substitute(ret, subst) }),
     _ => ty,
@@ -592,7 +618,7 @@ pub fn depth(ty: Type) -> usize {
     TypeKind::Array { elem, .. } => 1 + depth(elem),
     TypeKind::List(elem) => 1 + depth(elem),
     TypeKind::Option(elem) => 1 + depth(elem),
-    TypeKind::Ptr { pointee, .. } => 1 + depth(pointee),
+    TypeKind::Ptr { pointee, .. } | TypeKind::Ref { pointee, .. } => 1 + depth(pointee),
     TypeKind::Result { value, error } => {
       const a = depth(value);
       const b = depth(error);
@@ -640,7 +666,7 @@ pub fn has_self(ty: Type) -> bool {
     TypeKind::Array { elem, .. } => has_self(elem),
     TypeKind::List(elem) => has_self(elem),
     TypeKind::Option(elem) => has_self(elem),
-    TypeKind::Ptr { pointee, .. } => has_self(pointee),
+    TypeKind::Ptr { pointee, .. } | TypeKind::Ref { pointee, .. } => has_self(pointee),
     TypeKind::Result { value, error } => has_self(value) || has_self(error),
     TypeKind::Function { params, ret } => any_has_self(params) || has_self(ret),
     TypeKind::CFn { params, ret, .. } => any_has_self(params) || has_self(ret),
@@ -926,6 +952,16 @@ pub fn check_until(package: Package, resolution: Resolution, diagnostics: Diagno
   // The bounds of the types written inside function bodies.
   generic::check_type_bounds(checker);
   send::check_send_types(checker);
+
+  // The borrow checker needs the types and which methods modify `self`; after type errors, it
+  // would only repeat them.
+  if !diagnostics.has_errors() {
+    for index in 0..resolution.functions.len() {
+      if let Some(decl) = resolution.fn_decl(package, index as u32) {
+        borrow::check_function(checker, index as u32, decl);
+      }
+    }
+  }
 
   const typed = checker.typed;
 
@@ -1503,6 +1539,7 @@ pub class Checker {
   pub fn type_expr_at(self, ty: TypeExpr, behind_pointer: bool) -> Type {
     match ty.kind {
       TypeExprKind::Ptr { mutable, pointee } => ffi::pointer_type(self, mutable, pointee),
+      TypeExprKind::Ref { mutable, pointee } => of(TypeKind::Ref { mutable: mutable, pointee: self.type_expr(pointee) }),
       TypeExprKind::Fn { params, ret } => {
         const types: List<Type> = new List();
 

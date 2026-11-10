@@ -273,6 +273,8 @@ pub enum TypeExprKind {
   Array { elem: TypeExpr, len: ArrayLen },
   /// `*const T` or `*mut T`
   Ptr { mutable: bool, pointee: TypeExpr },
+  /// `&T` or `&mut T`, only the type of a parameter.
+  Ref { mutable: bool, pointee: TypeExpr },
   /// `fn(A, B) -> R`
   Fn { params: List<TypeExpr>, ret: Option<TypeExpr> },
   /// `extern "C" fn(A, B) -> R`, or `unsafe extern "C" fn(...)`: a C function pointer.
@@ -415,8 +417,9 @@ pub enum ExprKind {
   Unary { op: UnaryOp, operand: Expr },
   Binary { op: BinaryOp, lhs: Expr, rhs: Expr },
   Cast { expr: Expr, ty: TypeExpr },
-  /// `&raw const place` or `&raw mut place`: the address of a place, as a raw pointer.
-  AddrOf { mutable: bool, place: Expr },
+  /// `&raw const place` or `&raw mut place` (`raw`): the address of a place, as a raw pointer;
+  /// otherwise `&value` or `&mut place`, a reference lent to a parameter.
+  AddrOf { mutable: bool, place: Expr, raw: bool },
   /// `start..end` or `start..=end`
   Range { start: Expr, end: Expr, inclusive: bool },
   /// `expr?`

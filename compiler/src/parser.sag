@@ -860,7 +860,7 @@ class Parser {
 
       self.expect(":")?;
 
-      const ty = self.type_expr()?;
+      const ty = self.param_type()?;
 
       params.push(Param { span: param_name.span.to(ty.span), name: param_name, ty: ty });
 
@@ -1552,9 +1552,68 @@ class Parser {
     self.ident(expected)
   }
 
+  /// The type of a parameter: a type, `&T` or `&mut T` (docs/spec/03-memory.md#references).
+  prv fn param_type(self) -> Result<TypeExpr, ()> {
+    if self.at("&") || self.at("&&") {
+      return self.ref_type();
+    }
+
+    self.type_expr()
+  }
+
+  /// `&T` or `&mut T`; `&&T` is a reference to a reference, which is an error.
+  prv fn ref_type(self) -> Result<TypeExpr, ()> {
+    const doubled = self.at("&&");
+    const start = self.advance().span;
+
+    if doubled {
+      const inner = self.ref_type_rest(start)?;
+
+      self.invalid_reference(inner.span);
+
+      return Ok(new TypeExpr(TypeExprKind::Ref { mutable: false, pointee: inner }, start.to(inner.span)));
+    }
+
+    self.ref_type_rest(start)
+  }
+
+  /// `T` or `mut T` after a `&`.
+  prv fn ref_type_rest(self, start: Span) -> Result<TypeExpr, ()> {
+    const mutable = is_mut(self.kind());
+
+    if mutable {
+      self.advance();
+    }
+
+    const pointee = self.type_expr()?;
+
+    Ok(new TypeExpr(TypeExprKind::Ref { mutable: mutable, pointee: pointee }, start.to(pointee.span)))
+  }
+
+  prv fn invalid_reference(self, span: Span) {
+    self.diagnostics.push(
+      Diagnostic::error(codes::INVALID_REFERENCE, span, "a reference can only be the type of a parameter")
+        .with_note("references live while a call does: fields, results, bindings and type arguments cannot hold them")
+        .with_help("store the value itself, or a class instance to share it"),
+    );
+  }
+
   prv fn type_expr(self) -> Result<TypeExpr, ()> {
     const start = self.span();
     const kind = self.kind();
+
+    // References only live while a call does, so they are only the types of parameters
+    // (docs/adr/0079-references-and-borrowing.md, Q488); the type after `&` is kept to go on.
+    if is_punct(kind, "&") || is_punct(kind, "&&") {
+      const parsed = self.ref_type()?;
+
+      self.invalid_reference(parsed.span);
+
+      return match parsed.kind {
+        TypeExprKind::Ref { pointee, .. } => Ok(pointee),
+        _ => Ok(parsed),
+      };
+    }
 
     if is_punct(kind, "(") && is_punct(self.nth_kind(1), ")") {
       self.advance();
@@ -1656,7 +1715,7 @@ class Parser {
     const params: List<TypeExpr> = new List();
 
     while !self.at(")") {
-      params.push(self.type_expr()?);
+      params.push(self.param_type()?);
 
       if !self.eat(",") {
         break;
@@ -2097,17 +2156,24 @@ class Parser {
     Ok(self.expr_node(ExprKind::Unary { op: op, operand: operand }, span))
   }
 
-  /// `&raw const place` or `&raw mut place` (docs/spec/10-ffi.md#raw-pointers).
+  /// `&raw const place` or `&raw mut place` (docs/spec/10-ffi.md#raw-pointers); otherwise
+  /// `&value` or `&mut place`, a reference (docs/spec/03-memory.md#references).
   prv fn addr_of(self) -> Result<Expr, ()> {
     const start = self.advance().span;
+    const after_raw = self.nth_kind(1);
 
-    if !is_contextual(self.kind(), "raw") {
-      self.diagnostics.push(
-        Diagnostic::error(codes::NOT_IMPLEMENTED, start, "references (`&x`) are not implemented yet")
-          .with_help("for the address of a place as a raw pointer, write `&raw const x` or `&raw mut x`"),
-      );
+    // `&raw` alone borrows a binding named `raw`.
+    if !is_contextual(self.kind(), "raw") || !(is_keyword(after_raw, "const") || is_mut(after_raw)) {
+      const mutable = is_mut(self.kind());
 
-      return Err(());
+      if mutable {
+        self.advance();
+      }
+
+      const operand = self.unary_expr()?;
+      const span = start.to(operand.span);
+
+      return Ok(self.expr_node(ExprKind::AddrOf { mutable: mutable, place: operand, raw: false }, span));
     }
 
     self.advance();
@@ -2127,7 +2193,7 @@ class Parser {
     const place = self.unary_expr()?;
     const span = start.to(place.span);
 
-    Ok(self.expr_node(ExprKind::AddrOf { mutable: mutable, place: place }, span))
+    Ok(self.expr_node(ExprKind::AddrOf { mutable: mutable, place: place, raw: true }, span))
   }
 
   /// `await operand`: the operand is the chain of postfix operators up to the first `?`, which,
@@ -2272,7 +2338,7 @@ class Parser {
 
       while !self.at(")") {
         const name = self.ident("a parameter name")?;
-        const ty: Option<TypeExpr> = if self.eat(":") { Some(self.type_expr()?) } else { None };
+        const ty: Option<TypeExpr> = if self.eat(":") { Some(self.param_type()?) } else { None };
         const param_span = match ty {
           Some(ty) => name.span.to(ty.span),
           None => name.span,

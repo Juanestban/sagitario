@@ -41,7 +41,9 @@ checker, and slices), which removes copies and reference counting from calls whi
 closures keep ARC. ADR-0078 is done, in five increments: function pointers and `unsafe fn`; C
 layouts (arrays in `@repr(C)` structs, unions, enums with an integer representation, `std::mem`);
 `&raw const`, `&raw mut`, lists as buffers and `fs::read`; `std::ffi::Library`; and the acceptance
-program `tests/run-pass/reference_ffi/`. ADR-0079 follows.
+program `tests/run-pass/reference_ffi/`. ADR-0079 comes in three increments, of which 1 is done:
+`&T` and `&mut T` in parameters, with the borrow checker; slices and borrowed lists follow, then
+`fs::write_bytes`.
 
 - **Operator overloading** (`a + b` on vectors and matrices), today a deferred decision.
 - **Slices and byte buffers**: views of arrays and lists without copies, and reading and writing
