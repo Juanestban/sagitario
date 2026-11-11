@@ -47,7 +47,7 @@ const OPTION_METHODS: String = "is_some is_none unwrap expect unwrap_or map and_
 const RESULT_METHODS: String = "is_ok is_err unwrap expect unwrap_or unwrap_err map map_err and_then unwrap_or_else";
 const BUILDER_METHODS: String = "append append_char len is_empty clear to_string";
 /// The attributes (docs/spec/01-lexical.md#attributes-f1), with what they are written as.
-const ATTRIBUTES: String = "export repr";
+const ATTRIBUTES: String = "export repr thread_local";
 /// The representations of `@repr(...)`: `C` for structs, unions and enums, an integer type for
 /// enums.
 const REPRESENTATIONS: String = "C i8 i16 i32 i64 isize u8 u16 u32 u64 usize";
@@ -264,8 +264,10 @@ fn attributes(items: Items) {
   for name in ATTRIBUTES.split(" ") {
     if name == "export" {
       items.add_snippet(name, KEYWORD, "@export(\"symbol\"): the C symbol of an `extern \"C\"` function", "export(\"${1:symbol}\")");
-    } else {
+    } else if name == "repr" {
       items.add_snippet(name, KEYWORD, "@repr(C) on structs, unions and enums, or an integer type on enums", "repr(${1:C})");
+    } else {
+      items.add_snippet(name, KEYWORD, "@thread_local on a `static var`: one value per thread", "thread_local");
     }
   }
 }

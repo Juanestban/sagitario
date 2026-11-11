@@ -556,7 +556,8 @@ fn other_expr_kind(cx: Checker, value: Expr, expected: Option<Type>) -> Type {
       Some(Res::Const(id)) => cx.typed.const_types.get(id as usize).unwrap_or(types::error()),
       Some(Res::Static(id)) => {
         if let Some(decl) = cx.resolution.static_decl(cx.package, id) {
-          if decl.mutable {
+          // Another thread cannot reach a `@thread_local` one (Q529).
+          if decl.mutable && !decl.thread_local {
             ffi::require_unsafe(cx, value.span, "using the `static var` `" + decl.name.name + "`");
           }
         }

@@ -52,12 +52,14 @@ pub struct Program {
 /// A `static`: its storage, reached through `sag_static_N(file, line)`, which gives its address.
 /// The function `init` computes the value on the first use, unless the compiler computed it
 /// (`value`): then the storage starts with it and keeps no state, except in a `static var` of a
-/// reference-counted type, whose later values the program releases at exit.
+/// reference-counted type, whose later values the program releases at exit. A `thread_local`
+/// one has storage and state per thread, and each thread releases its value when it ends.
 pub struct StaticDef {
   pub name: String;
   pub ty: Type;
   pub init: u32;
   pub mutable: bool;
+  pub thread_local: bool;
   pub value: Option<Const>;
 }
 
@@ -864,7 +866,7 @@ pub fn lower(package: Package, resolution: Resolution, typed: TypedModule, sourc
       value = Some(const_of(found, ty)?);
     }
 
-    statics.push(StaticDef { name: decl.name.name, ty: ty, init: resolution.statics[index].init, mutable: decl.mutable, value: value });
+    statics.push(StaticDef { name: decl.name.name, ty: ty, init: resolution.statics[index].init, mutable: decl.mutable, thread_local: decl.thread_local, value: value });
   }
 
   Ok(Program {

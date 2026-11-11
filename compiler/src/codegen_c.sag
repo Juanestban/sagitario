@@ -1343,11 +1343,13 @@ class Generator {
       const value = `sag_static_value_${index}`;
       const head = "static " + ty + " *" + static_getter(index as u32) + "(const char *file, int line) {\n";
       const managed = self.layouts.is_managed(def.ty);
+      // One storage per thread (Q529).
+      const storage = if def.thread_local { "static _Thread_local " } else { "static " };
 
       if let Some(start) = def.value {
         // Its later values must be released at exit, which needs the state.
         if !(def.mutable && managed) {
-          self.out.append("static " + ty + " " + value + " = " + static_initializer(start) + ";\n");
+          self.out.append(storage + ty + " " + value + " = " + static_initializer(start) + ";\n");
           self.out.append(head + "  (void)file;\n  (void)line;\n  return &" + value + ";\n}\n\n");
           continue;
         }
@@ -1356,14 +1358,25 @@ class Generator {
       const state = `sag_static_state_${index}`;
       var release = "NULL";
 
-      self.out.append("static " + ty + " " + value + ";\n");
-      self.out.append("static sag_static_state " + state + ";\n");
+      self.out.append(storage + ty + " " + value + ";\n");
 
       if managed {
         release = `sag_static_release_${index}`;
         self.out.append("static void " + release + "(void) {\n  " + self.arc_call("release", def.ty, value) + ";\n}\n");
       }
 
+      // Only its thread computes it: a stage alone, without locks.
+      if def.thread_local {
+        self.out.append("static _Thread_local int " + state + ";\n" + head);
+        self.out.append("  if (" + state + " != 2 && sag_static_local_begin(&" + state + ", " + c_string_literal(def.name) + ", file, line)) {\n");
+        self.out.append("    " + value + " = " + fn_name(def.init) + "();\n");
+        self.out.append("    sag_static_local_end(&" + state + ", " + release + ");\n");
+        self.out.append("  }\n");
+        self.out.append("  return &" + value + ";\n}\n\n");
+        continue;
+      }
+
+      self.out.append("static sag_static_state " + state + ";\n");
       self.out.append(head);
       self.out.append("  if (!sag_static_ready(&" + state + ") && sag_static_begin(&" + state + ", " + c_string_literal(def.name) + ", file, line)) {\n");
       self.out.append("    " + value + " = " + fn_name(def.init) + "();\n");

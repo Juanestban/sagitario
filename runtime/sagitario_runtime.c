@@ -3073,9 +3073,12 @@ static void sag_threads_release(void) {
   atomic_flag_clear_explicit(&sag_threads_lock, memory_order_release);
 }
 
+static void sag_static_locals_finish(void);
+
 static void sag_thread_run(sag_thread *thread) {
   ((void (*)(sag_object *))thread->body.fn)(thread->body.env);
   sag_fnval_release(thread->body);
+  sag_static_locals_finish();
   sag_task_shutdown();
   sag_drop_free();
   sag_count_dec(&sag_threads_running);
@@ -3738,6 +3741,46 @@ void sag_static_end(sag_static_state *state, void (*release)(void)) {
 #endif
 }
 
+/* The functions releasing the values of the `@thread_local` statics of this thread, in order. */
+static SAG_THREAD_LOCAL void (**sag_static_locals)(void) = NULL;
+static SAG_THREAD_LOCAL size_t sag_static_locals_len = 0;
+static SAG_THREAD_LOCAL size_t sag_static_locals_cap = 0;
+
+bool sag_static_local_begin(int *stage, const char *name, const char *file, int line) {
+  if (*stage == 1) {
+    sag_static_cycle(name, file, line);
+  }
+  *stage = 1;
+  return true;
+}
+
+void sag_static_local_end(int *stage, void (*release)(void)) {
+  if (release != NULL) {
+    if (sag_static_locals_len == sag_static_locals_cap) {
+      size_t grown = sag_static_locals_cap == 0 ? 8 : sag_static_locals_cap * 2;
+      void (**moved)(void) = realloc(sag_static_locals, grown * sizeof *moved);
+      if (moved == NULL) {
+        sag_panic("out of memory");
+      }
+      sag_static_locals = moved;
+      sag_static_locals_cap = grown;
+    }
+    sag_static_locals[sag_static_locals_len++] = release;
+  }
+  *stage = 2;
+}
+
+/* Releases the values of the `@thread_local` statics of the calling thread, the last computed
+ * first, when it ends (Q529). */
+static void sag_static_locals_finish(void) {
+  while (sag_static_locals_len > 0) {
+    sag_static_locals[--sag_static_locals_len]();
+  }
+  free(sag_static_locals);
+  sag_static_locals = NULL;
+  sag_static_locals_cap = 0;
+}
+
 /* Releases the values of the statics, the last computed first, so that the leak check does not
  * count them (Q532). Only once no other thread runs. */
 static void sag_statics_finish(void) {
@@ -3776,6 +3819,8 @@ int sag_rt_finish(void) {
     sag_panic("failed printing to stdout");
   }
   sag_task_shutdown();
+  /* The main thread's `@thread_local` statics end with it. */
+  sag_static_locals_finish();
   bool leak_check = getenv("SAG_LEAK_CHECK") != NULL;
   if (leak_check && sag_count_get(&sag_threads_running) == 0) {
     sag_statics_finish();

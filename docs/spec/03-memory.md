@@ -133,7 +133,29 @@ extern "C" fn by_value(a: &i32, b: &i32) -> c_int {
 }
 ```
 
-- `@thread_local static var` comes later ([ADR-0083](../adr/0083-global-state.md), Q529).
+- `@thread_local static var NAME: Type = value;` gives each thread its own value, as Rust's
+  `thread_local!`: it is computed on the first use in each thread, as a static's is in the
+  program, and read, assigned and changed without `unsafe`, since no other thread sees it. Its
+  type needs not be `Send`. A `var` takes the role of Rust's `Cell` and `RefCell`.
+- A thread's value is released when the thread ends, and the main thread's when the program
+  ends. A thread that C started, outside `std::thread`, does not release its values.
+- `&NAME` and `&mut NAME` of a `@thread_local static var`, or of a part of one, are errors
+  (`E0340`): any function the thread calls could change it while lent. Its methods are called
+  on it in place: `SCRATCH.push(x)`. `&raw const NAME` gives the address of the calling thread's
+  value.
+- `@thread_local` applies only to `static var` (`E0105`): a `static` never changes, so one
+  value serves every thread.
+
+```sag
+/// One per thread, used without locks.
+@thread_local
+static var SCRATCH: List<f32> = new List();
+
+fn frame() {
+  SCRATCH.clear();
+  SCRATCH.push(0.5);
+}
+```
 
 ## Struct mutability (F1)
 

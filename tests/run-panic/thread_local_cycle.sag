@@ -1,0 +1,13 @@
+// A `@thread_local static var` that needs its own value to be computed panics, naming it, as a
+// static does (docs/adr/0083-global-state.md, Q527 and Q529).
+// expect-panic: the static `FIRST` was used while its value was being computed
+@thread_local
+static var FIRST: i32 = second();
+
+fn second() -> i32 {
+  FIRST + 1
+}
+
+fn main() {
+  println(f"{FIRST}");
+}

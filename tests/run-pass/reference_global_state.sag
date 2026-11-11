@@ -1,0 +1,116 @@
+// The acceptance of global state (docs/adr/0083-global-state.md): workers render frames on several
+// threads and count them in a `static` atomic, each keeps its scratch list in a
+// `@thread_local static var`, and C's `qsort`, whose comparison takes no context, counts its calls
+// in a `static var`. It passes with ThreadSanitizer and with the leak check. The number of
+// comparisons depends on the C library, so only whether there were some is printed.
+// sanitize: thread
+// expect-stdout: config: 4 workers, 3 frames each, title "demo"
+// expect-stdout: worker 1: 3 frames, scratch peak 3, depth 3
+// expect-stdout: worker 2: 3 frames, scratch peak 6, depth 6
+// expect-stdout: worker 3: 3 frames, scratch peak 9, depth 9
+// expect-stdout: worker 4: 3 frames, scratch peak 12, depth 12
+// expect-stdout: 12 frames in total, 5 scratch lists, log "####"
+// expect-stdout: sorted 1 2 3 5 8 9, compared true
+// expect-stdout: main scratch untouched: 0
+use std::ffi::{c_int, c_void};
+use std::sync::{AtomicI64, Mutex};
+use std::thread;
+
+extern "C" {
+  fn qsort(base: *mut c_void, count: usize, size: usize, compare: extern "C" fn(&i32, &i32) -> c_int);
+}
+
+/// Read by every thread: computed once, on its first use.
+struct Config {
+  pub workers: i32;
+  pub frames: i32;
+  pub title: String;
+}
+
+static CONFIG: Config = load_config();
+
+/// Shared by every thread through their own methods.
+static FRAMES: AtomicI64 = new AtomicI64(0);
+static SCRATCH_LISTS: AtomicI64 = new AtomicI64(0);
+static LOG: Mutex<String> = new Mutex("");
+
+/// One per thread, used without locks.
+@thread_local
+static var SCRATCH: List<i32> = new_scratch();
+
+/// Reached from a C callback, which takes no context: `unsafe`.
+static var COMPARISONS: i32 = 0;
+
+fn load_config() -> Config {
+  Config { workers: 4, frames: 3, title: "demo" }
+}
+
+fn new_scratch() -> List<i32> {
+  SCRATCH_LISTS.fetch_add(1);
+  new List()
+}
+
+/// One frame: its draw calls go to the thread's scratch list.
+fn frame(worker: i32) {
+  SCRATCH.clear();
+
+  for call in 0..worker * CONFIG.frames {
+    SCRATCH.push(call);
+  }
+
+  FRAMES.fetch_add(1);
+}
+
+fn worker(index: i32) -> String {
+  var peak = 0;
+
+  for _ in 0..CONFIG.frames {
+    frame(index);
+    peak = peak.max(SCRATCH.len() as i32);
+  }
+
+  LOG.update((text) => text + "#");
+  f"worker {index}: {CONFIG.frames} frames, scratch peak {peak}, depth {SCRATCH.len()}"
+}
+
+extern "C" fn by_value(a: &i32, b: &i32) -> c_int {
+  unsafe { COMPARISONS += 1; }
+  *a - *b
+}
+
+fn main() {
+  println(f"config: {CONFIG.workers} workers, {CONFIG.frames} frames each, title \"{CONFIG.title}\"");
+
+  const handles = new List<thread::JoinHandle<String>>();
+
+  for index in 1..CONFIG.workers + 1 {
+    handles.push(thread::spawn(() => worker(index)));
+  }
+
+  // Joined in order, while the others run.
+  for handle in handles {
+    println(handle.join());
+  }
+
+  // The main thread creates its own list on first use.
+  const main_scratch = SCRATCH.len();
+
+  println(f"{FRAMES.load()} frames in total, {SCRATCH_LISTS.load()} scratch lists, log \"{LOG.get()}\"");
+
+  const depths = List::from([5, 3, 9, 1, 8, 2]);
+
+  unsafe {
+    qsort(depths.as_mut_ptr() as *mut c_void, depths.len(), 4, by_value);
+  }
+
+  var sorted = "";
+
+  for depth in depths {
+    sorted = sorted + f" {depth}";
+  }
+
+  const compared = unsafe { COMPARISONS } > 0;
+
+  println(f"sorted{sorted}, compared {compared}");
+  println(f"main scratch untouched: {main_scratch}");
+}

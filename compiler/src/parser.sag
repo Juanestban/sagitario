@@ -71,6 +71,8 @@ struct Applied {
   pub repr_c: bool;
   /// The representation of an enum: an integer type, or `C`.
   pub repr: Option<Ident>;
+  /// `@thread_local` on a static.
+  pub thread_local: Option<Span>;
 }
 
 /// The parameters and result of a function type, and where it ends.
@@ -586,9 +588,20 @@ class Parser {
     }
 
     if is_keyword(kind, "static") {
-      const decl = self.static_decl(visibility, start)?;
+      var decl = self.static_decl(visibility, start)?;
 
-      self.apply_attributes(attributes, AttributeTarget::Static);
+      // An immutable value per thread is a `static` or a `const` (docs/adr/0083-global-state.md, Q529).
+      if let Some(span) = self.apply_attributes(attributes, AttributeTarget::Static).thread_local {
+        if decl.mutable {
+          decl.thread_local = true;
+        } else {
+          self.attribute_error(
+            span,
+            "`@thread_local` applies to `static var`",
+            Some("a `static` never changes, so one value serves every thread; write `static var` for one value per thread"),
+          );
+        }
+      }
 
       return Ok(Some(Item::Static(decl)));
     }
@@ -736,7 +749,7 @@ class Parser {
       span: start.to(end),
     };
 
-    Ok(StaticDecl { visibility: visibility, mutable: mutable, name: name, ty: ty, init: init, span: start.to(end) })
+    Ok(StaticDecl { visibility: visibility, mutable: mutable, thread_local: false, name: name, ty: ty, init: init, span: start.to(end) })
   }
 
   /// `@name` or `@name(arg, ...)` before an item; the arguments are string literals or names.
@@ -777,7 +790,7 @@ class Parser {
   /// Checks the attributes of an item: `@export("symbol")` on an `extern "C" fn`, `@repr(C)` on
   /// a struct. Errors are reported and the attribute is ignored.
   prv fn apply_attributes(self, attributes: List<Attribute>, target: AttributeTarget) -> Applied {
-    var applied = Applied { export: None, repr_c: false, repr: None };
+    var applied = Applied { export: None, repr_c: false, repr: None, thread_local: None };
     const seen: List<String> = new List();
 
     for attribute in attributes {
@@ -800,6 +813,10 @@ class Parser {
       };
       const is_enum = match target {
         AttributeTarget::Enum => true,
+        _ => false,
+      };
+      const is_static = match target {
+        AttributeTarget::Static => true,
         _ => false,
       };
 
@@ -849,14 +866,26 @@ class Parser {
           }
           None => self.attribute_error(attribute.span, "the representation of an enum is an integer type, such as `@repr(i32)`, or `@repr(C)`", None),
         }
+      } else if name == "thread_local" && is_static {
+        if attribute.args.is_empty() {
+          applied.thread_local = Some(attribute.span);
+        } else {
+          self.attribute_error(attribute.span, "`@thread_local` takes no arguments", None);
+        }
       } else if name == "test" || name == "deprecated" {
         self.diagnostics.push(Diagnostic::error(codes::NOT_IMPLEMENTED, attribute.span, "the attribute `@" + name + "` is not implemented yet"));
       } else if name == "export" {
         self.attribute_error(attribute.span, "`@export` applies to `extern \"C\"` functions", Some("write `@export(\"name\") extern \"C\" fn ...`"));
       } else if name == "repr" {
         self.attribute_error(attribute.span, "`@repr(C)` applies to structs", None);
+      } else if name == "thread_local" {
+        self.attribute_error(attribute.span, "`@thread_local` applies to `static var`", None);
       } else {
-        self.attribute_error(attribute.span, "unknown attribute `@" + name + "`", Some("the attributes are `@export(\"symbol\")` and `@repr(C)`"));
+        self.attribute_error(
+          attribute.span,
+          "unknown attribute `@" + name + "`",
+          Some("the attributes are `@export(\"symbol\")`, `@repr(C)` and `@thread_local`"),
+        );
       }
     }
 

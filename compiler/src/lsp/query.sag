@@ -687,8 +687,8 @@ fn declaration_text(analysis: Analysis, module: Module, ident: Ident) -> Option<
   None
 }
 
-/// `const NAME: Type` for a module-level constant of this module.
-/// `static NAME: Type`, or `static var ...`.
+/// `static NAME: Type`, `static var ...` or `@thread_local static var ...` for a static of this
+/// module.
 fn static_text(analysis: Analysis, name: String) -> String {
   if let Some(package) = analysis.package {
     if let Some(resolution) = analysis.resolution {
@@ -865,7 +865,11 @@ pub fn item_text(analysis: Analysis, item: ItemRef) -> Option<String> {
     ItemRef::Static(id) => {
       const decl = resolution.static_decl(analysis.package?, id)?;
       const ty = analysis.typed?.static_type(resolution, id)?;
-      const keyword = if decl.mutable { "static var " } else { "static " };
+      var keyword = if decl.mutable { "static var " } else { "static " };
+
+      if decl.thread_local {
+        keyword = "@thread_local " + keyword;
+      }
 
       Some(keyword + decl.name.name + ": " + types::text(ty))
     }

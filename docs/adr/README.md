@@ -92,6 +92,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0081](0081-operator-overloading.md) | Operator overloading through interfaces | Accepted |
 | [0082](0082-format-strings.md) | Format strings `f"..."` | Accepted |
 | [0083](0083-global-state.md) | Global state: `static`, `static var` and `@thread_local` | Accepted |
+| [0084](0084-a-complete-language-and-the-engine-apart.md) | Roadmap v2: a complete language, with the game engine as a project apart | Proposed |
 
 ## Template
 

@@ -200,7 +200,10 @@ runs the executor until the task of `main` finishes.
   `Generator::statics` writes with the storage and state of the static: it computes the value on
   the first use (`sag_static_begin` and `sag_static_end` in the runtime, which make other threads
   wait). A static the compiler computes from constants (`TypedModule::static_values`) starts its
-  storage with the value. The runtime releases the values at exit for the leak check.
+  storage with the value. The runtime releases the values at exit for the leak check. A
+  `@thread_local` one (`StaticDef::thread_local`) has `_Thread_local` storage and stage, computed
+  without locks (`sag_static_local_begin`, `sag_static_local_end`); each thread releases its
+  values when it ends (`sag_thread_run`), and the main thread at exit.
 - A program can span several packages (`Package::packages`): the one being compiled, then its
   dependencies, each with its own module tree (`Module::package`, `Resolution::package_roots`).
   The driver loads each dependency's root module and the modules its paths reach

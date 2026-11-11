@@ -47,9 +47,10 @@ overloading through interfaces ([ADR-0081](adr/0081-operator-overloading.md)) is
 increments: `impl ... for` blocks and several implementations of a generic interface; the
 arithmetic operators through `Add`, `Sub`, `Mul`, `Div`, `Rem` and `Neg`; and `==` and `<` through
 `Eq` and `Ord`. The acceptance program `tests/run-pass/g1_acceptance/` passes. Global state
-([ADR-0083](adr/0083-global-state.md)) comes in three increments, of which two are done:
-`static`, one `Send` value for the program computed on its first use; and `static var`, a
-mutable global used in `unsafe`. `@thread_local static var` follows. Memory for frames and binding generation remain.
+([ADR-0083](adr/0083-global-state.md)) is done, in three increments: `static`, one `Send`
+value for the program computed on its first use; `static var`, a mutable global used in
+`unsafe`; and `@thread_local static var`, one value per thread, with the acceptance program
+`tests/run-pass/reference_global_state.sag`. Memory for frames and binding generation remain.
 
 - **Operator overloading** (`a + b` on vectors and matrices), today a deferred decision.
 - **Slices and byte buffers**: views of arrays and lists without copies, and reading and writing

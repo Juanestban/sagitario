@@ -141,3 +141,13 @@ fn frame() {
   `static var` copies it, since it may change during the statement. As in Rust, taking the
   address of a static with `&raw` is safe. Changing a part of a `static`, or calling a method that
   modifies `self` on it, is an error (`E0312`, `E0313`), which increment 1 missed.
+- Increment 3 (`@thread_local`) is done: the tests `tests/run-pass/thread_local.sag`,
+  `tests/run-panic/thread_local_cycle.sag`, `tests/compile-fail/thread_local_errors.sag` and
+  `thread_local_syntax.sag`, and the acceptance program `tests/run-pass/reference_global_state.sag`.
+  Its storage and stage are C11's `_Thread_local`, with no lock (`sag_static_local_begin` and
+  `sag_static_local_end`); each thread keeps the functions releasing its values and runs them when
+  it ends (`sag_thread_run`), and the main thread at exit (`sag_rt_finish`). A thread C started
+  runs none, as it keeps the rest of the runtime's state per thread. `&raw const NAME` is allowed,
+  as on a `static var`, and gives the address of the calling thread's value. A method of a class
+  instance held in one keeps `self` alive if it replaces the static, as with a field of a class.
+

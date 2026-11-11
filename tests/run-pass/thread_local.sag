@@ -1,0 +1,96 @@
+// `@thread_local static var` (docs/adr/0083-global-state.md, Q529): one value per thread,
+// created on its first use in that thread and used without `unsafe`, since no other thread sees
+// it. Each thread fills its own list and counter; the main thread's are untouched by theirs, and
+// each thread's values are released when it ends.
+// sanitize: thread
+// expect-stdout: main: 1 created, 3 items, total 6, calls 3
+// expect-stdout: threads: 4 sums 10 20 30 40, created 5
+// expect-stdout: main again: 3 items, calls 4, label main!
+// expect-stdout: label replaced, holder 7
+use std::sync::AtomicI64;
+use std::thread;
+
+static CREATED: AtomicI64 = new AtomicI64(0);
+
+@thread_local
+static var SCRATCH: List<i32> = new_scratch();
+
+/// Computed by the compiler: each thread starts with 0.
+@thread_local
+static var CALLS: i32 = 0;
+
+@thread_local
+static var LABEL: String = "main";
+
+class Holder {
+  pub var value: i32;
+
+  pub fn new(self, value: i32) {
+    self.value = value;
+  }
+
+  /// Replaces the holder while one of its methods runs: the instance stays alive until the
+  /// statement ends.
+  pub fn replace_and_read(self) -> i32 {
+    HOLDER = new Holder(0);
+    self.value
+  }
+}
+
+@thread_local
+static var HOLDER: Holder = new Holder(7);
+
+fn new_scratch() -> List<i32> {
+  CREATED.fetch_add(1);
+  new List()
+}
+
+fn record(value: i32) {
+  CALLS += 1;
+  SCRATCH.push(value);
+}
+
+fn total() -> i32 {
+  var sum = 0;
+
+  for value in SCRATCH {
+    sum += value;
+  }
+
+  sum
+}
+
+fn main() {
+  record(1);
+  record(2);
+  record(3);
+  println(f"main: {CREATED.load()} created, {SCRATCH.len()} items, total {total()}, calls {CALLS}");
+
+  const handles = new List<thread::JoinHandle<i32>>();
+
+  for index in 1..5 {
+    handles.push(thread::spawn(() => {
+      for _ in 0..index {
+        record(10);
+      }
+
+      LABEL = f"thread {index}";
+      total()
+    }));
+  }
+
+  var sums = "";
+
+  for handle in handles {
+    sums = sums + f" {handle.join()}";
+  }
+
+  println(f"threads: {CREATED.load() - 1} sums{sums}, created {CREATED.load()}");
+
+  CALLS += 1;
+  LABEL = LABEL + "!";
+  println(f"main again: {SCRATCH.len()} items, calls {CALLS}, label {LABEL}");
+
+  LABEL = "replaced";
+  println(f"label {LABEL}, holder {HOLDER.replace_and_read()}");
+}

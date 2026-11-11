@@ -927,6 +927,10 @@ static inline bool sag_static_ready(sag_static_state *state) {
 bool sag_static_begin(sag_static_state *state, const char *name, const char *file, int line);
 /* Marks the value stored; `release`, if not NULL, releases it at exit for the leak check. */
 void sag_static_end(sag_static_state *state, void (*release)(void));
+/* The same for a `@thread_local static var`, whose `stage` belongs to the calling thread: no
+ * other thread waits, and `release`, if not NULL, releases this thread's value when it ends. */
+bool sag_static_local_begin(int *stage, const char *name, const char *file, int line);
+void sag_static_local_end(int *stage, void (*release)(void));
 
 /* ---- Program lifecycle ----------------------------------------------------------------- */
 

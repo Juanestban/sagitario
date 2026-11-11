@@ -240,7 +240,7 @@ fn main() -> Result<(), String> {
 | Area            | What there is                                                                                     | Spec |
 |-----------------|---------------------------------------------------------------------------------------------------|------|
 | Types           | integers with checked overflow, `f32`/`f64`, `String`, arrays, `List`, `Map`, slices, `Option`, `Result` | [02](docs/spec/02-types.md) |
-| Memory          | value structs, classes with ARC, `weak` references, `const`/`var`, `&T` and `&mut T` with a borrow checker | [03](docs/spec/03-memory.md) |
+| Memory          | value structs, classes with ARC, `weak` references, `const`/`var`, `&T` and `&mut T` with a borrow checker, `static` and `@thread_local` globals | [03](docs/spec/03-memory.md) |
 | Classes         | constructors, inheritance, `abstract`, `override`, visibility (`pub`, `prv`)                       | [04](docs/spec/04-classes.md) |
 | Interfaces      | generics with bounds, default methods, `impl ... for` blocks, operators, `Eq`/`Ord`/`Hash`         | [05](docs/spec/05-interfaces-generics.md) |
 | Control flow    | exhaustive `match`, `if let`, `while let`, ranges, `f"..."` strings              | [06](docs/spec/06-control-flow.md) |
@@ -285,7 +285,7 @@ needs an ADR before it is implemented.
 
 **The language**
 
-- [ ] Mutable globals and static fields, or a sanctioned alternative
+- [x] Global state: `static`, `static var` in `unsafe`, and `@thread_local static var`
 - [ ] Arenas or pools for many short-lived values, without one reference count each
 - [ ] Derived `Eq`, `Ord` and `Hash` (today they are written by hand)
 - [ ] A `Display` interface for interpolating user types in `f"..."`
