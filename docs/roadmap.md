@@ -257,8 +257,10 @@ signed in F7.
   error with `?` after `await`, and orders timers by their deadlines; it passes with
   ThreadSanitizer on Linux and macOS, and with the leak check. `async` lambdas, cancellation, a
   multi-threaded executor and asynchronous I/O are left for later.
-- **Roadmap v2:** a game engine written in Sagitario, with the language and library features it
-  needs ([roadmap-v2.md](roadmap-v2.md)).
+- **Roadmap v2:** a complete language: the standard library and the core of the runtime in
+  Sagitario, a standard library as complete as Rust's, and binding generation
+  ([roadmap-v2.md](roadmap-v2.md), [ADR-0084](adr/0084-a-complete-language-and-the-engine-apart.md)).
+  The game engine is a project apart ([engine-roadmap.md](engine-roadmap.md)).
 
 ## Deferred decisions
 

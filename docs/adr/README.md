@@ -71,7 +71,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0060](0060-driver-parity-for-nova.md) | The pivot without Rust, and the driver for Nova | Accepted (refined by 0064, 0066, 0067) |
 | [0061](0061-terminals.md) | Terminals: `io::is_terminal` and colored diagnostics in `sagc` | Accepted |
 | [0062](0062-language-server-std-sources-and-lone-files.md) | The language server on the standard library and on lone files | Accepted (Q338 refined by 0067) |
-| [0063](0063-distribution-phase-and-roadmap-v2.md) | Distribution as phase F7, and the roadmap v2 of a game engine | Accepted (refined by 0068 and 0076) |
+| [0063](0063-distribution-phase-and-roadmap-v2.md) | Distribution as phase F7, and the roadmap v2 of a game engine | Accepted (refined by 0068 and 0076; Q342 superseded by 0084) |
 | [0064](0064-nova-in-sagitario.md) | Nova in Sagitario | Accepted (refined by 0066) |
 | [0065](0065-module-directories.md) | Modules with submodules in `mod.sag` | Accepted |
 | [0066](0066-test-harness-in-sagitario.md) | The test harness in Sagitario | Accepted |
@@ -92,7 +92,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0081](0081-operator-overloading.md) | Operator overloading through interfaces | Accepted |
 | [0082](0082-format-strings.md) | Format strings `f"..."` | Accepted |
 | [0083](0083-global-state.md) | Global state: `static`, `static var` and `@thread_local` | Accepted |
-| [0084](0084-a-complete-language-and-the-engine-apart.md) | Roadmap v2: a complete language, with the game engine as a project apart | Proposed |
+| [0084](0084-a-complete-language-and-the-engine-apart.md) | Roadmap v2: a complete language, with the game engine as a project apart | Accepted |
 
 ## Template
 

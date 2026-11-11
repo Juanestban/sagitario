@@ -1,6 +1,6 @@
 # 0084. Roadmap v2: a complete language, with the game engine as a project apart
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-11
 - Supersedes: Q342 of [ADR-0063](0063-distribution-phase-and-roadmap-v2.md) (the roadmap v2 of a
   game engine)

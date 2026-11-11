@@ -1,10 +1,12 @@
-# Roadmap v2: a game engine in Sagitario
+# Roadmap v2: a complete language
 
-Rationale: [ADR-0063](adr/0063-distribution-phase-and-roadmap-v2.md). The first roadmap
-([roadmap.md](roadmap.md)) builds the language and its tools; this one builds, on them, what a
-complete game engine needs: windows and input on every system, graphics through OpenGL and
-Vulkan, audio, physics, networking, assets and an editor. Its phases are named `G1`, `G2`... to
-keep them apart from the language's `F` phases.
+Rationale: [ADR-0084](adr/0084-a-complete-language-and-the-engine-apart.md), which replaces the
+roadmap of a game engine of [ADR-0063](adr/0063-distribution-phase-and-roadmap-v2.md). The first
+roadmap ([roadmap.md](roadmap.md)) builds the language and its tools; this one makes it a complete
+general-purpose language: a standard library as complete as Rust's, written in Sagitario, the
+core of the runtime in Sagitario too, and C libraries usable with little effort. Its phases are
+named `S1`, `S2`... to keep them apart from the language's `F` phases; G1 is the phase this
+roadmap started with, when it planned a game engine.
 
 Each phase is planned with its own decision table and records when it starts, as the language's
 phases are. What follows are its goals, its acceptance and the questions to settle; nothing here
@@ -12,23 +14,23 @@ changes the language until a record does.
 
 ## Principles
 
-- **The engine is Sagitario packages**, built and shared with Nova: `engine-math`,
-  `engine-window`, `engine-gpu`... A game depends on the ones it uses.
-- **C libraries through the FFI where they are the standard way to the system**: Vulkan, OpenGL,
-  the windowing APIs of each system. Whether to write the rest in Sagitario or bind a C library
-  (SDL, GLFW, miniaudio, stb, Box2D) is decided per phase: binding is faster, writing it proves
-  and improves the language.
-- **Desktop first** (Windows, Linux, macOS), then Android and iOS, whose targets the compiler
-  already has (docs/nova.md#targets). Consoles are out of scope.
-- **Every phase ends in a runnable sample** in the repository, checked by CI where a GPU is not
-  needed.
+- **A general-purpose language.** A feature enters the language or its standard library only if
+  a general-purpose language would have it, with Rust's std as the reference; what only one kind
+  of program needs is a Nova package (Q537).
+- **The game engine is a project apart**, written in Sagitario: its plan is in
+  [engine-roadmap.md](engine-roadmap.md) until its repository exists (Q538).
+- **Sagitario over the C library of each system**, as Rust's std is over libc and the Win32 API:
+  hand-written C is replaced, not added to. C stays only as the language of the generated code
+  and the system's C library.
+- **Every phase passes the harness on every platform of CI**, and the bootstrap keeps its fixed
+  point.
 
-## G1: Language and library prerequisites
+## G1: Language prerequisites (closed)
 
-What engines need from the language, much of it among the deferred decisions of the first
+What a game engine needed from the language, much of it among the deferred decisions of the first
 roadmap.
 
-**Status:** in progress. `std::math` is done, in three increments
+**Status:** done and closed. `std::math` is done, in three increments
 ([ADR-0076](adr/0076-std-math-and-methods-of-numbers.md)): the basic methods of floats and
 integers, the constants, and infinities and NaN in constants; powers, roots and logarithms
 ([ADR-0077](adr/0077-std-math-powers-and-logarithms.md)); and trigonometry
@@ -50,116 +52,73 @@ arithmetic operators through `Add`, `Sub`, `Mul`, `Div`, `Rem` and `Neg`; and `=
 ([ADR-0083](adr/0083-global-state.md)) is done, in three increments: `static`, one `Send`
 value for the program computed on its first use; `static var`, a mutable global used in
 `unsafe`; and `@thread_local static var`, one value per thread, with the acceptance program
-`tests/run-pass/reference_global_state.sag`. Memory for frames and binding generation remain.
-
-- **Operator overloading** (`a + b` on vectors and matrices), today a deferred decision.
-- **Slices and byte buffers**: views of arrays and lists without copies, and reading and writing
-  bytes (`fs` reads only UTF-8 text today).
-- **C function pointers in the FFI**: OpenGL and Vulkan are reached through function pointers
-  loaded at run time (`vkGetInstanceProcAddr`, `wglGetProcAddress`).
-- **Loading dynamic libraries** at run time (`dlopen`, `LoadLibrary`), for the Vulkan loader and
-  OpenGL.
-- **`std::math`**: `sqrt`, `sin`, `cos`, `tan`, `atan2`, `pow`, `floor`, `abs`, `min`, `max`,
-  `clamp`, `lerp`, for `f32` and `f64`.
-- **Memory for frames**: arenas or pools for the many short-lived values of a frame, without one
-  reference count each; `@repr(C)` enums and unions for C structures.
-- **Global state**: mutable globals or a sanctioned alternative (today a deferred decision).
-- **Binding generation**: a tool that writes Sagitario declarations from C headers or from
-  `vk.xml`, today a deferred decision.
 
 **Acceptance:** a program computes and prints the matrices of a camera with operators, reads a
 binary file into a byte buffer, and calls a C function through a pointer loaded from a dynamic
-library.
+library: `tests/run-pass/g1_acceptance/`, which passes.
 
-## G2: Windows, input and time (`engine-window`)
+## S1: The standard library in Sagitario
 
-- Creating windows and running their event loop: Win32 on Windows, Wayland and X11 on Linux,
-  Cocoa on macOS (through the C API of the Objective-C runtime).
-- Keyboard, mouse, text input, gamepads; resizing, full screen and high-DPI scaling.
-- A frame clock with fixed and variable time steps.
-- Question: native APIs per system, or SDL3 or GLFW through the FFI first. Recommended: SDL3 or
-  GLFW to get to graphics sooner, native backends later.
+The standard library half of the runtime, about 2,000 lines of `runtime/sagitario_runtime.c`, is
+rewritten in Sagitario over the C library and the system API through `extern "C"`, without C
+shims (Q541).
 
-**Acceptance:** a window on each desktop system reports keyboard, mouse and gamepad events and
-its size, at a steady frame rate.
+- One module per increment: `std::env`, `std::io`, `std::process` with `Command`, `std::fs`,
+  `std::path`, `std::time`, `std::thread`, `std::sync` and dynamic libraries.
+- The C API of each system (POSIX on Linux, macOS, Android and iOS; Win32 on Windows) declared in
+  Sagitario, chosen by target.
+- A module's C is deleted from the runtime once its Sagitario version passes the harness on every
+  platform of CI.
+- What the FFI lacks for a module is added to the language by that module's record.
+- Question: the order of the modules, and how a module chooses its system API by target.
+  Recommended: a small module first, `std::time` or `std::env`, whose record fixes the pattern.
 
-## G3: Graphics (`engine-gpu`)
+**Acceptance:** the runtime keeps no standard-library code: `runtime/sagitario_runtime.c` holds only
+the core, and every module of `std` is Sagitario code, with the harness and the bootstrap passing on
+every platform of CI.
 
-- **OpenGL** (3.3 core or 4.x): loading its functions, buffers, textures, shaders, framebuffers.
-- **Vulkan**: instance, devices, swapchain, command buffers, synchronization, memory allocation,
-  pipelines, descriptor sets; macOS through MoltenVK.
-- **Shaders**: GLSL compiled to SPIR-V by the existing tools (`glslangValidator`, `shaderc`)
-  from Nova builds.
-- **A render interface** over both backends, so the engine draws without knowing which one runs.
-- Question: Metal on Apple systems directly, or MoltenVK only. Recommended: MoltenVK first.
+## S2: A complete standard library
 
-**Acceptance:** the same sample draws a textured, lit, rotating model at the frame rate of the
-display with OpenGL and with Vulkan on Windows, Linux and macOS.
+The standard library a general-purpose language needs, with Rust's std as the reference (Q542).
 
-## G4: Engine core (`engine-core`, `engine-math`, `engine-assets`)
+- An audit first, `docs/std-audit.md`, which compares each module of Rust's std with Sagitario
+  and records what exists, what is missing, and what is out of scope with the reason. The modules
+  are collections, `fmt`, `io`, `net`, `sync`, `thread`, `time`, `fs`, `path`, `env`, `process`,
+  `hash`, `cmp`, `iter`, strings and characters, numbers, `mem`, `ptr`, `ffi` and `os`.
+- Each gap is filled by a record of its own.
+- The crates most Rust programs use (`serde`, `regex`, `rand`, `chrono`) are Nova packages, not
+  the standard library.
 
-- **Math**: vectors, matrices, quaternions, transforms, bounding volumes, frustum culling.
-- **Entities**: an entity-component-system, with scenes and a hierarchy of transforms.
-- **Assets**: images (PNG, JPEG), models (glTF 2.0), fonts (TrueType), with a cache, loading on
-  other threads, and reloading when files change.
-- **Rendering**: 2D sprites with batching, text, cameras, lights, materials, then physically
-  based rendering and shadows.
-- Question: decoders written in Sagitario, or C libraries (stb_image, cgltf, stb_truetype)
-  through the FFI. Recommended: C libraries first, Sagitario ones where they test the language.
+**Acceptance:** every row of the audit is done or out of scope with its reason.
 
-**Acceptance:** a 2D sample (sprites, text, a tile map) and a 3D sample (a glTF scene with
-lights and a moving camera) built from scenes and entities.
+## S3: The core in Sagitario
 
-## G5: Audio (`engine-audio`)
+The core of the runtime, about 1,800 lines, is rewritten in Sagitario (Q543): reference counting,
+`String`, `List`, slices, hashing, panics, `async` tasks, statics and the life cycle of the
+program.
 
-- Output devices: WASAPI on Windows, PulseAudio and ALSA on Linux, Core Audio on macOS.
-- Mixing voices with volume, panning and pitch; streaming music.
-- Decoding WAV, Ogg Vorbis and MP3.
-- Question: native backends, or miniaudio through the FFI. Recommended: miniaudio first.
+- A low-level layer in the compiler, as Rust's `core` and its lang items: intrinsics for atomics,
+  allocation and thread-local storage, and code without reference counting.
+- Its record is written after S1, with what S1 teaches.
+- Question: how the bootstrap builds a compiler whose own runtime is Sagitario code, and which
+  checks keep a fault in the core from breaking the compiler.
 
-**Acceptance:** a sample plays music and positional sound effects without gaps on the three
-desktop systems.
+**Acceptance:** the runtime is Sagitario code. What stays C is the generated code and the system's C
+library; anything else is listed in S3's record with its reason.
 
-## G6: Physics (`engine-physics`)
+## S4: Binding generation
 
-- Collision detection: shapes, broad phase, narrow phase, ray casts.
-- Rigid bodies in 2D and 3D: integration, contacts, joints, sleeping.
-- Question: written in Sagitario, or Box2D (C) and Jolt (C++, behind a C interface) through the
-  FFI.
+A Nova tool that writes Sagitario declarations from C headers, as Rust's `bindgen` does (Q544):
+`extern "C"` blocks, `@repr(C)` structs, unions and enums, and function pointers.
 
-**Acceptance:** stacks of boxes and a ragdoll settle and react to the player at a fixed time
-step, the same on every system.
+- Question: its inputs (C headers, through a parser of the part of C that headers use, or
+  descriptions such as Vulkan's `vk.xml`), the translation of macros, opaque types and
+  callbacks, and its command.
 
-## G7: Networking (`std::net`, `engine-net`)
+**Acceptance:** bindings generated from the headers of a real C library are used by a program in
+the harness without being edited by hand.
 
-- **`std::net`**: TCP and UDP sockets, addresses, name resolution, with errors as values; with
-  `async` (F8) or with threads.
-- **HTTP and TLS**, for downloading assets and calling services (also used by
-  `nova update self`, which may start with `curl`).
-- **Game networking**: messages over UDP with reliable and unreliable channels, ordering,
-  fragmentation, connection and timeouts; client-server with prediction and reconciliation;
-  serialization of game state.
+## Order
 
-**Acceptance:** two instances of a sample play together over the network, on the same machine
-and on two machines, through packet loss and latency.
-
-## G8: Tools (`engine-editor`)
-
-- An immediate-mode user interface for tools (written in Sagitario, or Dear ImGui through
-  `cimgui`).
-- A scene editor: placing entities, editing components, saving scenes, playing in the editor.
-- Profiling of frames (CPU and GPU times) and memory.
-- An asset pipeline in Nova: shaders compiled, textures compressed, assets packed for release.
-
-**Acceptance:** a level of the 3D sample is built and played from the editor, and a release
-build packs its assets.
-
-## G9: Shipping games
-
-- Packaging a game for each desktop system, with its assets and the libraries it needs, using
-  the releases of F7.
-- Android and iOS: the window, input, audio and graphics layers on mobile, and their packaging
-  (APK, Xcode project).
-
-**Acceptance:** a sample game is installed and played on Windows, Linux, macOS, Android and
-iOS from packages the build makes.
+S1 first, since it removes C right away and uses the FFI against real C libraries; the audit of
+S2 follows; filling its gaps can interleave with S3 and S4, which come in that order (Q545).
