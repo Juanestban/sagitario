@@ -128,4 +128,12 @@ extern "C" {
   of `tests/types` and `tests/codegen` include the new modules; the C dumps, built for
   `x86_64-linux-android`, show the Unix branch of `std::sys`. The desktop Linux and macOS
   branches have no cross-compilation target, so CI runs them.
+- `std::env` is done, the second module of S1. `std::sys` reads the arguments and the
+  variables of each system. On Unix, the runtime's core passes what C's `main` received to
+  `sag_env_init`, exported by `std::env`, which keeps them in `static var`s of `std::sys`, as
+  Rust's `lang_start` gives them to its `std`. `getenv` reads a variable. On Windows, `std::sys`
+  splits `GetCommandLineW` with the rules of Microsoft's C runtime and reads
+  `GetEnvironmentVariableW`, converting between UTF-16 and UTF-8 with U+FFFD for unpaired
+  surrogates. The runtime keeps `sag_sb_push_utf16`, which `std::fs` still uses. `std::env` is in
+  `CORE_STD`. A library, which has no `main`, sees no arguments on Unix, as before.
 

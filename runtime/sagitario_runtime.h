@@ -773,10 +773,9 @@ SAG_FROM_UINTMAX(usize, size_t)
 #define SAG_IO_KIND_UNEXPECTED_EOF 5
 #define SAG_IO_KIND_OTHER 6
 
-size_t sag_env_arg_count(void);
-/* Arguments and variables that are not valid UTF-8 get each bad sequence replaced by U+FFFD. */
-sag_string sag_env_arg(size_t index);
-sag_string sag_env_var(sag_string name, bool *found);
+/* Gives `std::env`, written in Sagitario, what C's `main` received: the arguments on Unix
+ * (docs/adr/0085-conditional-compilation-and-std-time.md, Q552). */
+void sag_env_init(int argc, const char *const *argv);
 /* Writes to stdout (stream 1) or stderr (2); returns 0 or an error code. */
 int32_t sag_io_write(int32_t stream, sag_string text, bool newline);
 int32_t sag_io_flush(void);

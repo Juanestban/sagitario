@@ -111,37 +111,40 @@ static void sag_release_t6(const sag_t6 *value) {
   for (size_t sag_k = 0; sag_k < 3; sag_k++) { sag_string_release(value->data[sag_k]); }
 }
 
-int32_t* sag_ffi_8(void);
-int32_t sag_ffi_9(int32_t a0, sag_s4* a1);
-int32_t sag_ffi_10(sag_s4 const* a0, sag_s4* a1);
+int32_t* sag_ffi_11(void);
+int32_t sag_ffi_12(int32_t a0, sag_s4* a1);
+int32_t sag_ffi_13(sag_s4 const* a0, sag_s4* a1);
+int8_t const* sag_ffi_14(int8_t const* a0);
 static int32_t sag_fn_2(sag_s0 l0);
 static sag_string sag_fn_6(sag_dyn l0, sag_string l1);
 static sag_fnval sag_fn_7(int64_t l0);
 static sag_t0 sag_fn_8(sag_object * l0);
 static void sag_fn_9(void);
 static void sag_fn_10(sag_t0 l0);
-static int64_t sag_fn_131(sag_object *l0, int64_t l1);
-static int64_t sag_fn_132(sag_object *l0, int64_t l1);
-static sag_string sag_fn_133(sag_s0 l0);
-static void sag_fn_134(sag_object * l0);
-static void sag_fn_135(sag_object * l0, sag_t3 l1);
-static sag_t4 sag_fn_136(sag_object * l0);
-static sag_object * sag_fn_137(sag_object * l0, size_t l1);
-static sag_object * sag_fn_138(uint8_t l0, uint8_t l1, bool l2, bool l3);
-static sag_t5 sag_fn_139(sag_object * l0);
-uint64_t sag_fn_140(void);
-void sag_fn_141(uint64_t l0);
-static void sag_fn_142(uint64_t l0);
-static sag_s4 sag_fn_143(uint64_t l0, uint64_t l1);
-static int32_t sag_fn_144(void);
-static uint64_t sag_fn_145(void);
-static uint64_t sag_fn_146(int32_t l0);
-static uint64_t sag_fn_147(sag_s4 l0);
-static void sag_fn_148(sag_object * l0, uint8_t l1);
-static void sag_fn_149(sag_object * l0, bool l1);
-static void sag_fn_150(sag_object * l0, sag_fnval l1);
-static sag_t5 sag_fn_151(sag_object *l0);
-static sag_t5 sag_fn_152(sag_object *l0);
+static int64_t sag_fn_139(sag_object *l0, int64_t l1);
+static int64_t sag_fn_140(sag_object *l0, int64_t l1);
+static sag_string sag_fn_141(sag_s0 l0);
+static void sag_fn_142(sag_object * l0);
+static void sag_fn_143(sag_object * l0, sag_t3 l1);
+static sag_t4 sag_fn_144(sag_object * l0);
+static sag_object * sag_fn_145(sag_object * l0, size_t l1);
+static sag_object * sag_fn_146(uint8_t l0, uint8_t l1, bool l2, bool l3);
+static sag_t5 sag_fn_147(sag_object * l0);
+void sag_fn_148(int32_t l0, int8_t const* const* l1);
+uint64_t sag_fn_149(void);
+void sag_fn_150(uint64_t l0);
+static void sag_fn_151(uint64_t l0);
+static sag_s4 sag_fn_152(uint64_t l0, uint64_t l1);
+static int32_t sag_fn_153(void);
+static uint64_t sag_fn_154(void);
+static uint64_t sag_fn_155(int32_t l0);
+static uint64_t sag_fn_156(sag_s4 l0);
+static void sag_fn_157(int32_t l0, int8_t const* const* l1);
+static void sag_fn_158(sag_object * l0, uint8_t l1);
+static void sag_fn_159(sag_object * l0, bool l1);
+static void sag_fn_160(sag_object * l0, sag_fnval l1);
+static sag_t5 sag_fn_161(sag_object *l0);
+static sag_t5 sag_fn_162(sag_object *l0);
 
 static void sag_elem_release_0(void *element) { sag_string_release((*(sag_string *)element)); }
 static void sag_elem_release_1(void *element) { sag_release_t3(&(*(sag_t3 *)element)); }
@@ -203,7 +206,7 @@ static sag_dyn sag_todyn_0(sag_s0 value) {
   sag_object_init((sag_object *)box, sag_drop_b0, NULL);
   return (sag_dyn){(sag_object *)box, &sag_it_0};
 }
-static sag_string sag_th_1_0(sag_dyn self) { return sag_fn_133(((sag_b0 *)self.object)->value); }
+static sag_string sag_th_1_0(sag_dyn self) { return sag_fn_141(((sag_b0 *)self.object)->value); }
 static sag_string sag_th_1_1(sag_dyn self) { sag_string value = ((sag_b0 *)self.object)->value.f0; sag_string_retain(value); return value; }
 static void sag_th_1_2(sag_dyn self, sag_string value) { sag_string_retain(value); sag_string_release(((sag_b0 *)self.object)->value.f0); ((sag_b0 *)self.object)->value.f0 = value; }
 static const sag_method sag_itm_1[] = { (sag_method)sag_th_1_0, (sag_method)sag_th_1_1, (sag_method)sag_th_1_2 };
@@ -236,6 +239,20 @@ static void sag_drop_env3(sag_object *object) {
   sag_env3 *env = (sag_env3 *)object;
   sag_object_release(env->c0);
   sag_object_release(env->c2);
+}
+
+static int32_t sag_static_value_0 = ((int32_t)0ull);
+static int32_t *sag_static_0(const char *file, int line) {
+  (void)file;
+  (void)line;
+  return &sag_static_value_0;
+}
+
+static size_t sag_static_value_1 = ((size_t)0ull);
+static size_t *sag_static_1(const char *file, int line) {
+  (void)file;
+  (void)line;
+  return &sag_static_value_1;
 }
 
 static int32_t sag_fn_2(sag_s0 l0) {
@@ -276,7 +293,7 @@ static sag_fnval sag_fn_7(int64_t l0) {
     sag_env0 *sag_closure = sag_object_alloc(sizeof(sag_env0));
     sag_closure->c0 = l0;
     sag_object_init((sag_object *)sag_closure, sag_drop_env0, NULL);
-    l5 = (sag_fnval){(sag_method)sag_fn_131, (sag_object *)sag_closure};
+    l5 = (sag_fnval){(sag_method)sag_fn_139, (sag_object *)sag_closure};
   }
   sag_fnval_retain(l5);
   l2 = l5;
@@ -288,7 +305,7 @@ static sag_fnval sag_fn_7(int64_t l0) {
     sag_fnval_retain(sag_closure->c0);
     sag_closure->c1 = l0;
     sag_object_init((sag_object *)sag_closure, sag_drop_env1, NULL);
-    l6 = (sag_fnval){(sag_method)sag_fn_132, (sag_object *)sag_closure};
+    l6 = (sag_fnval){(sag_method)sag_fn_140, (sag_object *)sag_closure};
   }
   sag_fnval_retain(l6);
   l4 = l6;
@@ -463,7 +480,7 @@ static void sag_fn_9(void) {
   sag_string_release(l10);
 #line 70 "tests/codegen/lowering.sag"
   l14 = sag_new_c0();
-  sag_fn_134(l14);
+  sag_fn_142(l14);
   sag_object_retain(l14);
   l2 = l14;
   sag_object_release(l14);
@@ -475,16 +492,16 @@ static void sag_fn_9(void) {
   l16 = sag_list_from(sizeof(sag_string), sag_elem_release_0, l15.data, 2);
   sag_object_retain(l16);
   l17 = (sag_t3){.tag = 1u, .u.v1 = {l16}};
-  sag_fn_135(l2, l17);
+  sag_fn_143(l2, l17);
   sag_release_t3(&l17);
   sag_object_release(l16);
   sag_release_t2(&l15);
 #line 73 "tests/codegen/lowering.sag"
   l18 = (sag_t3){.tag = 0u};
-  sag_fn_135(l2, l18);
+  sag_fn_143(l2, l18);
   sag_release_t3(&l18);
 #line 75 "tests/codegen/lowering.sag"
-  l19 = sag_fn_136(l2);
+  l19 = sag_fn_144(l2);
   l20 = false;
   l21 = (!l20);
   if (l21) {
@@ -561,12 +578,12 @@ static void sag_fn_9(void) {
   sag_string_retain(sag_string_from_static("", 0));
   l4 = sag_string_from_static("", 0);
 #line 85 "tests/codegen/lowering.sag"
-  l38 = sag_fn_138(((uint8_t)250ull), ((uint8_t)255ull), true, true);
-  l39 = sag_fn_137(l38, ((size_t)2ull));
+  l38 = sag_fn_146(((uint8_t)250ull), ((uint8_t)255ull), true, true);
+  l39 = sag_fn_145(l38, ((size_t)2ull));
   sag_object_retain(l39);
   l40 = l39;
   for (;;) {
-    l41 = sag_fn_139(l40);
+    l41 = sag_fn_147(l40);
     l42 = (l41.tag == ((uint32_t)1ull));
     if (l42) {
     }
@@ -698,7 +715,7 @@ static void sag_fn_10(sag_t0 l0) {
   }
 }
 
-static int64_t sag_fn_131(sag_object *l0, int64_t l1) {
+static int64_t sag_fn_139(sag_object *l0, int64_t l1) {
   int64_t l2 = 0;
   int64_t l3 = 0;
   int64_t l4 = 0;
@@ -712,7 +729,7 @@ static int64_t sag_fn_131(sag_object *l0, int64_t l1) {
   return l3;
 }
 
-static int64_t sag_fn_132(sag_object *l0, int64_t l1) {
+static int64_t sag_fn_140(sag_object *l0, int64_t l1) {
   sag_fnval l2 = {0};
   int64_t l3 = 0;
   int64_t l4 = 0;
@@ -733,7 +750,7 @@ static int64_t sag_fn_132(sag_object *l0, int64_t l1) {
   return l4;
 }
 
-static sag_string sag_fn_133(sag_s0 l0) {
+static sag_string sag_fn_141(sag_s0 l0) {
   sag_string l1 = {0};
   sag_string l2 = {0};
 #line 10 "tests/codegen/lowering.sag"
@@ -750,7 +767,7 @@ static sag_string sag_fn_133(sag_s0 l0) {
   return l1;
 }
 
-static void sag_fn_134(sag_object * l0) {
+static void sag_fn_142(sag_object * l0) {
   sag_object * l1 = 0;
   l0->vtable = NULL;
 #line 31 "tests/codegen/lowering.sag"
@@ -761,7 +778,7 @@ static void sag_fn_134(sag_object * l0) {
   sag_object_release(l1);
 }
 
-static void sag_fn_135(sag_object * l0, sag_t3 l1) {
+static void sag_fn_143(sag_object * l0, sag_t3 l1) {
   sag_object * l2 = 0;
   sag_t3 l3 = {0};
 #line 35 "tests/codegen/lowering.sag"
@@ -775,7 +792,7 @@ static void sag_fn_135(sag_object * l0, sag_t3 l1) {
   sag_object_release(l2);
 }
 
-static sag_t4 sag_fn_136(sag_object * l0) {
+static sag_t4 sag_fn_144(sag_object * l0) {
   sag_t4 l1 = {0};
   sag_object * l2 = 0;
   size_t l3 = 0;
@@ -833,7 +850,7 @@ static sag_t4 sag_fn_136(sag_object * l0) {
   return l1;
 }
 
-static sag_object * sag_fn_137(sag_object * l0, size_t l1) {
+static sag_object * sag_fn_145(sag_object * l0, size_t l1) {
   sag_object * l2 = 0;
   sag_object * l3 = 0;
   size_t l4 = 0;
@@ -854,7 +871,7 @@ static sag_object * sag_fn_137(sag_object * l0, size_t l1) {
   l2 = l0;
 #line 177 "<prelude>"
   l7 = sag_new_c3();
-  sag_fn_149(l7, false);
+  sag_fn_159(l7, false);
   sag_object_retain(l7);
   l3 = l7;
   sag_object_release(l7);
@@ -868,9 +885,9 @@ static sag_object * sag_fn_137(sag_object * l0, size_t l1) {
     sag_closure->c2 = l2;
     sag_object_retain(sag_closure->c2);
     sag_object_init((sag_object *)sag_closure, sag_drop_env3, NULL);
-    l9 = (sag_fnval){(sag_method)sag_fn_152, (sag_object *)sag_closure};
+    l9 = (sag_fnval){(sag_method)sag_fn_162, (sag_object *)sag_closure};
   }
-  sag_fn_150(l8, l9);
+  sag_fn_160(l8, l9);
   sag_object_retain(l8);
   l5 = l8;
   sag_fnval_release(l9);
@@ -880,7 +897,7 @@ static sag_object * sag_fn_137(sag_object * l0, size_t l1) {
   return l5;
 }
 
-static sag_object * sag_fn_138(uint8_t l0, uint8_t l1, bool l2, bool l3) {
+static sag_object * sag_fn_146(uint8_t l0, uint8_t l1, bool l2, bool l3) {
   sag_object * l4 = 0;
   sag_object * l5 = 0;
   uint8_t l6 = 0;
@@ -902,13 +919,13 @@ static sag_object * sag_fn_138(uint8_t l0, uint8_t l1, bool l2, bool l3) {
     l10 = l0;
     l9 = l10;
   }
-  sag_fn_148(l8, l9);
+  sag_fn_158(l8, l9);
   sag_object_retain(l8);
   l4 = l8;
   sag_object_release(l8);
 #line 963 "<prelude>"
   l11 = sag_new_c3();
-  sag_fn_149(l11, false);
+  sag_fn_159(l11, false);
   sag_object_retain(l11);
   l5 = l11;
   sag_object_release(l11);
@@ -925,9 +942,9 @@ static sag_object * sag_fn_138(uint8_t l0, uint8_t l1, bool l2, bool l3) {
     sag_closure->c4 = l0;
     sag_closure->c5 = l1;
     sag_object_init((sag_object *)sag_closure, sag_drop_env2, NULL);
-    l13 = (sag_fnval){(sag_method)sag_fn_151, (sag_object *)sag_closure};
+    l13 = (sag_fnval){(sag_method)sag_fn_161, (sag_object *)sag_closure};
   }
-  sag_fn_150(l12, l13);
+  sag_fn_160(l12, l13);
   sag_object_retain(l12);
   l7 = l12;
   sag_fnval_release(l13);
@@ -937,7 +954,7 @@ static sag_object * sag_fn_138(uint8_t l0, uint8_t l1, bool l2, bool l3) {
   return l7;
 }
 
-static sag_t5 sag_fn_139(sag_object * l0) {
+static sag_t5 sag_fn_147(sag_object * l0) {
   sag_t5 l1 = {0};
   sag_fnval l2 = {0};
   sag_t5 l3 = {0};
@@ -950,21 +967,26 @@ static sag_t5 sag_fn_139(sag_object * l0) {
   return l1;
 }
 
-uint64_t sag_fn_140(void) {
+void sag_fn_148(int32_t l0, int8_t const* const* l1) {
+#line 12 "<std::env>"
+  sag_fn_157(l0, l1);
+}
+
+uint64_t sag_fn_149(void) {
   uint64_t l0 = 0;
   uint64_t l1 = 0;
 #line 11 "<std::time>"
-  l1 = sag_fn_145();
+  l1 = sag_fn_154();
   l0 = l1;
   return l0;
 }
 
-void sag_fn_141(uint64_t l0) {
+void sag_fn_150(uint64_t l0) {
 #line 16 "<std::time>"
-  sag_fn_142(l0);
+  sag_fn_151(l0);
 }
 
-static void sag_fn_142(uint64_t l0) {
+static void sag_fn_151(uint64_t l0) {
   sag_s4 l1 = {0};
   sag_s4 l2 = {0};
   uint64_t l3 = 0;
@@ -976,43 +998,43 @@ static void sag_fn_142(uint64_t l0) {
   bool l9 = 0;
   int32_t l10 = 0;
   bool l11 = 0;
-#line 174 "<std::sys>"
-#line 174 "<std::sys>"
+#line 175 "<std::sys>"
+#line 175 "<std::sys>"
   l3 = sag_div_u64_at(l0, ((uint64_t)1000000000ull), __FILE__, __LINE__);
-#line 174 "<std::sys>"
+#line 175 "<std::sys>"
   l4 = sag_rem_u64_at(l0, ((uint64_t)1000000000ull), __FILE__, __LINE__);
-  l5 = sag_fn_143(l3, l4);
+  l5 = sag_fn_152(l3, l4);
   l1 = l5;
-#line 176 "<std::sys>"
-  for (;;) {
 #line 177 "<std::sys>"
+  for (;;) {
+#line 178 "<std::sys>"
     l2 = l1;
-#line 179 "<std::sys>"
-#line 179 "<std::sys>"
-    l8 = sag_ffi_10((&l2), (&l1));
+#line 180 "<std::sys>"
+#line 180 "<std::sys>"
+    l8 = sag_ffi_13((&l2), (&l1));
     l7 = l8;
     l9 = (l7 == ((int32_t)0ull));
     if (l9) {
       l6 = true;
     }
     else {
-      l10 = sag_fn_144();
+      l10 = sag_fn_153();
       l11 = (l10 != ((int32_t)4ull));
       l6 = l11;
     }
     if (l6) {
-#line 180 "<std::sys>"
+#line 181 "<std::sys>"
       return;
     }
   }
 }
 
-static sag_s4 sag_fn_143(uint64_t l0, uint64_t l1) {
+static sag_s4 sag_fn_152(uint64_t l0, uint64_t l1) {
   sag_s4 l2 = {0};
   int64_t l3 = 0;
   int64_t l4 = 0;
   sag_s4 l5 = {0};
-#line 57 "<std::sys>"
+#line 58 "<std::sys>"
   l3 = ((int64_t)l0);
   l4 = ((int64_t)l1);
   l5 = (sag_s4){l3, l4};
@@ -1020,31 +1042,31 @@ static sag_s4 sag_fn_143(uint64_t l0, uint64_t l1) {
   return l2;
 }
 
-static int32_t sag_fn_144(void) {
+static int32_t sag_fn_153(void) {
   int32_t l0 = 0;
   int32_t l1 = 0;
   int32_t* l2 = 0;
   int32_t l3 = 0;
-#line 35 "<std::sys>"
-#line 35 "<std::sys>"
-  l2 = sag_ffi_8();
-#line 35 "<std::sys>"
+#line 36 "<std::sys>"
+#line 36 "<std::sys>"
+  l2 = sag_ffi_11();
+#line 36 "<std::sys>"
   l3 = (*SAG_CHECK_PTR(l2, __FILE__, __LINE__));
   l1 = l3;
   l0 = l1;
   return l0;
 }
 
-static uint64_t sag_fn_145(void) {
+static uint64_t sag_fn_154(void) {
   uint64_t l0 = 0;
   uint64_t l1 = 0;
-#line 117 "<std::sys>"
-  l1 = sag_fn_146(((int32_t)1ull));
+#line 118 "<std::sys>"
+  l1 = sag_fn_155(((int32_t)1ull));
   l0 = l1;
   return l0;
 }
 
-static uint64_t sag_fn_146(int32_t l0) {
+static uint64_t sag_fn_155(int32_t l0) {
   sag_s4 l1 = {0};
   uint64_t l2 = 0;
   sag_s4 l3 = {0};
@@ -1052,25 +1074,25 @@ static uint64_t sag_fn_146(int32_t l0) {
   int32_t l5 = 0;
   bool l6 = 0;
   uint64_t l7 = 0;
-#line 128 "<std::sys>"
-  l3 = sag_fn_143(((uint64_t)0ull), ((uint64_t)0ull));
+#line 129 "<std::sys>"
+  l3 = sag_fn_152(((uint64_t)0ull), ((uint64_t)0ull));
   l1 = l3;
-#line 130 "<std::sys>"
-#line 130 "<std::sys>"
-  l5 = sag_ffi_9(l0, (&l1));
+#line 131 "<std::sys>"
+#line 131 "<std::sys>"
+  l5 = sag_ffi_12(l0, (&l1));
   l4 = l5;
   l6 = (l4 != ((int32_t)0ull));
   if (l6) {
-#line 131 "<std::sys>"
+#line 132 "<std::sys>"
     return ((uint64_t)0ull);
   }
-#line 134 "<std::sys>"
-  l7 = sag_fn_147(l1);
+#line 135 "<std::sys>"
+  l7 = sag_fn_156(l1);
   l2 = l7;
   return l2;
 }
 
-static uint64_t sag_fn_147(sag_s4 l0) {
+static uint64_t sag_fn_156(sag_s4 l0) {
   uint64_t l1 = 0;
   int64_t l2 = 0;
   bool l3 = 0;
@@ -1082,22 +1104,22 @@ static uint64_t sag_fn_147(sag_s4 l0) {
   int64_t l9 = 0;
   uint64_t l10 = 0;
   uint64_t l11 = 0;
-#line 62 "<std::sys>"
+#line 63 "<std::sys>"
   l2 = l0.f0;
   l3 = (l2 < ((int64_t)0ull));
   if (l3) {
-#line 62 "<std::sys>"
+#line 63 "<std::sys>"
     l4 = ((uint64_t)0ull);
   }
   else {
-#line 62 "<std::sys>"
+#line 63 "<std::sys>"
     l6 = l0.f0;
     l7 = ((uint64_t)l6);
-#line 62 "<std::sys>"
+#line 63 "<std::sys>"
     l8 = sag_mul_u64_at(l7, ((uint64_t)1000000000ull), __FILE__, __LINE__);
     l9 = l0.f1;
     l10 = ((uint64_t)l9);
-#line 62 "<std::sys>"
+#line 63 "<std::sys>"
     l11 = sag_add_u64_at(l8, l10, __FILE__, __LINE__);
     l5 = l11;
     l4 = l5;
@@ -1106,19 +1128,35 @@ static uint64_t sag_fn_147(sag_s4 l0) {
   return l1;
 }
 
-static void sag_fn_148(sag_object * l0, uint8_t l1) {
+static void sag_fn_157(int32_t l0, int8_t const* const* l1) {
+  int32_t* l2 = 0;
+  size_t l3 = 0;
+  size_t* l4 = 0;
+#line 217 "<std::sys>"
+#line 218 "<std::sys>"
+#line 218 "<std::sys>"
+  l2 = sag_static_0(__FILE__, __LINE__);
+  (*l2) = l0;
+#line 219 "<std::sys>"
+  l3 = ((size_t)(uintptr_t)l1);
+#line 219 "<std::sys>"
+  l4 = sag_static_1(__FILE__, __LINE__);
+  (*l4) = l3;
+}
+
+static void sag_fn_158(sag_object * l0, uint8_t l1) {
   l0->vtable = NULL;
 #line 96 "<prelude>"
   ((sag_c2 *)l0)->f0 = l1;
 }
 
-static void sag_fn_149(sag_object * l0, bool l1) {
+static void sag_fn_159(sag_object * l0, bool l1) {
   l0->vtable = NULL;
 #line 96 "<prelude>"
   ((sag_c3 *)l0)->f0 = l1;
 }
 
-static void sag_fn_150(sag_object * l0, sag_fnval l1) {
+static void sag_fn_160(sag_object * l0, sag_fnval l1) {
   l0->vtable = NULL;
 #line 107 "<prelude>"
   sag_fnval_retain(l1);
@@ -1126,7 +1164,7 @@ static void sag_fn_150(sag_object * l0, sag_fnval l1) {
   ((sag_c1 *)l0)->f0 = l1;
 }
 
-static sag_t5 sag_fn_151(sag_object *l0) {
+static sag_t5 sag_fn_161(sag_object *l0) {
   sag_object * l1 = 0;
   sag_object * l2 = 0;
   bool l3 = 0;
@@ -1298,7 +1336,7 @@ static sag_t5 sag_fn_151(sag_object *l0) {
   return l8;
 }
 
-static sag_t5 sag_fn_152(sag_object *l0) {
+static sag_t5 sag_fn_162(sag_object *l0) {
   sag_object * l1 = 0;
   size_t l2 = 0;
   sag_object * l3 = 0;
@@ -1326,7 +1364,7 @@ static sag_t5 sag_fn_152(sag_object *l0) {
     for (size_t sag_i4 = l8; sag_i4 < l9; sag_i4 = (size_t)(sag_i4 + 1)) {
       l4 = sag_i4;
 #line 182 "<prelude>"
-      l10 = sag_fn_139(l3);
+      l10 = sag_fn_147(l3);
       l11 = (l10.tag == ((uint32_t)0ull));
       if (l11) {
 #line 183 "<prelude>"
@@ -1340,7 +1378,7 @@ static sag_t5 sag_fn_152(sag_object *l0) {
 #line 188 "<prelude>"
   ((sag_c3 *)l1)->f0 = true;
 #line 189 "<prelude>"
-  l13 = sag_fn_139(l3);
+  l13 = sag_fn_147(l3);
   l6 = l13;
   l5 = l6;
   sag_object_release(l3);
@@ -1363,17 +1401,23 @@ typedef struct sag_s4 sag_s4;
 typedef void (*sag_p0)(void);
 
 extern int32_t* __errno(void);
-int32_t* sag_ffi_8(void) { return __errno(); }
+int32_t* sag_ffi_11(void) { return __errno(); }
 
 extern int32_t clock_gettime(int32_t a0, sag_s4* a1);
-int32_t sag_ffi_9(int32_t a0, sag_s4* a1) { return clock_gettime(a0, a1); }
+int32_t sag_ffi_12(int32_t a0, sag_s4* a1) { return clock_gettime(a0, a1); }
 
 extern int32_t nanosleep(sag_s4 const* a0, sag_s4* a1);
-int32_t sag_ffi_10(sag_s4 const* a0, sag_s4* a1) { return nanosleep(a0, a1); }
+int32_t sag_ffi_13(sag_s4 const* a0, sag_s4* a1) { return nanosleep(a0, a1); }
 
-uint64_t sag_fn_140(void);
-uint64_t sag_time_monotonic(void) { return sag_fn_140(); }
+extern int8_t const* getenv(int8_t const* a0);
+int8_t const* sag_ffi_14(int8_t const* a0) { return getenv(a0); }
 
-void sag_fn_141(uint64_t l0);
-void sag_time_sleep(uint64_t a0) { sag_fn_141(a0); }
+void sag_fn_148(int32_t l0, int8_t const* const* l1);
+void sag_env_init(int32_t a0, int8_t const* const* a1) { sag_fn_148(a0, a1); }
+
+uint64_t sag_fn_149(void);
+uint64_t sag_time_monotonic(void) { return sag_fn_149(); }
+
+void sag_fn_150(uint64_t l0);
+void sag_time_sleep(uint64_t a0) { sag_fn_150(a0); }
 --- stderr

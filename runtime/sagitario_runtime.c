@@ -1251,21 +1251,18 @@ static bool sag_utf8_valid(const uint8_t *bytes, size_t len) {
   return true;
 }
 
-/* ---- Standard library: std::env, std::io, std::process --------------------------------- */
+/* ---- Standard library: std::io, std::process ------------------------------------------- */
 
 #ifdef _WIN32
 #include <wchar.h>
 
-/* Windows passes arguments and the environment as UTF-16, which the CRT's `argv` and `getenv`
- * convert to the ANSI code page. These kernel32 functions are declared here because
- * <windows.h> is not strict C11. */
+/* Windows passes file names and the environment as UTF-16. Its kernel32 functions are declared
+ * here because <windows.h> is not strict C11. */
 #if defined(_M_IX86) || defined(__i386__)
 #define SAG_WINAPI __stdcall
 #else
 #define SAG_WINAPI
 #endif
-extern wchar_t *SAG_WINAPI GetCommandLineW(void);
-extern unsigned long SAG_WINAPI GetEnvironmentVariableW(const wchar_t *name, wchar_t *buffer, unsigned long size);
 
 /* Appends UTF-16 code units as UTF-8; unpaired surrogates become U+FFFD. */
 static void sag_sb_push_utf16(sag_sb *sb, const wchar_t *units, size_t len) {
@@ -1281,158 +1278,7 @@ static void sag_sb_push_utf16(sag_sb *sb, const wchar_t *units, size_t len) {
   }
 }
 
-/* The arguments as UTF-8, split from the command line with the rules of the C runtime. They
- * are plain bytes, not strings, so they are not counted as live objects. */
-static sag_sb *sag_win_args = NULL;
-static size_t sag_win_arg_count = 0;
-
-static void sag_win_add_arg(const wchar_t *units, size_t len) {
-  sag_sb *grown = realloc(sag_win_args, (sag_win_arg_count + 1) * sizeof(sag_sb));
-  if (grown == NULL) {
-    sag_panic("out of memory");
-  }
-  sag_win_args = grown;
-  sag_sb_init(&sag_win_args[sag_win_arg_count]);
-  sag_sb_push_utf16(&sag_win_args[sag_win_arg_count], units, len);
-  sag_win_arg_count++;
-}
-
-static void sag_win_parse_args(void) {
-  const wchar_t *p = GetCommandLineW();
-  wchar_t *arg = sag_alloc((wcslen(p) + 1) * sizeof(wchar_t));
-  size_t len = 0;
-  /* The program name ends at the first space, or at the closing quote; backslashes are kept. */
-  if (*p == L'"') {
-    p++;
-    while (*p != 0 && *p != L'"') {
-      arg[len++] = *p++;
-    }
-    if (*p == L'"') {
-      p++;
-    }
-  } else {
-    while (*p != 0 && *p != L' ' && *p != L'\t') {
-      arg[len++] = *p++;
-    }
-  }
-  sag_win_add_arg(arg, len);
-  for (;;) {
-    while (*p == L' ' || *p == L'\t') {
-      p++;
-    }
-    if (*p == 0) {
-      break;
-    }
-    bool quoted = false;
-    len = 0;
-    while (*p != 0 && (quoted || (*p != L' ' && *p != L'\t'))) {
-      if (*p == L'\\') {
-        size_t slashes = 0;
-        while (*p == L'\\') {
-          slashes++;
-          p++;
-        }
-        /* 2n backslashes and a quote: n backslashes, and the quote delimits. 2n + 1: n
-         * backslashes and a literal quote. Backslashes elsewhere are literal. */
-        size_t kept = *p == L'"' ? slashes / 2 : slashes;
-        for (size_t i = 0; i < kept; i++) {
-          arg[len++] = L'\\';
-        }
-        if (*p == L'"' && slashes % 2 == 1) {
-          arg[len++] = *p++;
-        }
-      } else if (*p == L'"') {
-        if (quoted && p[1] == L'"') {
-          arg[len++] = L'"';
-          p += 2;
-        } else {
-          quoted = !quoted;
-          p++;
-        }
-      } else {
-        arg[len++] = *p++;
-      }
-    }
-    sag_win_add_arg(arg, len);
-  }
-  free(arg);
-}
-#else
-static int sag_argc = 0;
-static char **sag_argv = NULL;
 #endif
-
-size_t sag_env_arg_count(void) {
-#ifdef _WIN32
-  if (sag_win_args == NULL) {
-    sag_win_parse_args();
-  }
-  return sag_win_arg_count;
-#else
-  return sag_argc > 0 ? (size_t)sag_argc : 0;
-#endif
-}
-
-sag_string sag_env_arg(size_t index) {
-  if (index >= sag_env_arg_count()) {
-    return sag_string_empty();
-  }
-#ifdef _WIN32
-  return sag_string_from_bytes_lossy(sag_win_args[index].data, sag_win_args[index].len);
-#else
-  return sag_string_from_bytes_lossy((const uint8_t *)sag_argv[index], strlen(sag_argv[index]));
-#endif
-}
-
-sag_string sag_env_var(sag_string name, bool *found) {
-  *found = false;
-  if (name.len == 0 || memchr(name.ptr, '=', name.len) != NULL || memchr(name.ptr, 0, name.len) != NULL) {
-    return sag_string_empty();
-  }
-#ifdef _WIN32
-  wchar_t *wide = sag_alloc((name.len + 1) * sizeof(wchar_t));
-  size_t len = 0;
-  size_t index = 0;
-  while (index < name.len) {
-    uint32_t c = sag_utf8_next(name, &index);
-    if (c >= 0x10000) {
-      wide[len++] = (wchar_t)(0xD800 + ((c - 0x10000) >> 10));
-      wide[len++] = (wchar_t)(0xDC00 + ((c - 0x10000) & 0x3FF));
-    } else {
-      wide[len++] = (wchar_t)c;
-    }
-  }
-  wide[len] = 0;
-  /* Without a buffer, the size needed including the terminator; 0 when the variable is unset. */
-  unsigned long size = GetEnvironmentVariableW(wide, NULL, 0);
-  sag_string result = sag_string_empty();
-  if (size > 0) {
-    wchar_t *value = sag_alloc((size_t)size * sizeof(wchar_t));
-    unsigned long written = GetEnvironmentVariableW(wide, value, size);
-    if (written < size) {
-      sag_sb sb;
-      sag_sb_init(&sb);
-      sag_sb_push_utf16(&sb, value, written);
-      result = sag_sb_finish(&sb);
-      *found = true;
-    }
-    free(value);
-  }
-  free(wide);
-  return result;
-#else
-  char *copy = sag_alloc(name.len + 1);
-  memcpy(copy, name.ptr, name.len);
-  copy[name.len] = 0;
-  const char *value = getenv(copy);
-  free(copy);
-  if (value == NULL) {
-    return sag_string_empty();
-  }
-  *found = true;
-  return sag_string_from_bytes_lossy((const uint8_t *)value, strlen(value));
-#endif
-}
 
 /* The code of the last failed C library call: its `errno`, or an unknown I/O error. */
 static int32_t sag_io_errno(void) {
@@ -3737,15 +3583,11 @@ extern int _setmode(int fd, int mode);
 
 void sag_rt_init(int argc, char **argv) {
 #ifdef _WIN32
-  (void)argc;
-  (void)argv;
   _setmode(0, SAG_O_BINARY);
   _setmode(1, SAG_O_BINARY);
   _setmode(2, SAG_O_BINARY);
-#else
-  sag_argc = argc;
-  sag_argv = argv;
 #endif
+  sag_env_init(argc, (const char *const *)argv);
 }
 
 int sag_rt_finish(void) {
