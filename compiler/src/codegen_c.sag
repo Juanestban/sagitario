@@ -7,7 +7,7 @@ use pkg::ast::{BinaryOp, UnaryOp};
 use pkg::ast;
 use pkg::sir::{
   Callee, ClassInstance, Const, ExternDecl, FieldAt, Function, ItableEntry, Layouts, Operand, PanicMessage, Place, Program, Projection, Rvalue, SliceSource, Stmt,
-  TemplatePiece, static_getter, type_key,
+  TemplatePiece, extern_static_getter, static_getter, type_key,
 };
 use pkg::types::{FloatTy, IntTy, NamedRef, Type, TypeKind};
 use pkg::types;
@@ -20,6 +20,9 @@ pub struct GeneratedC {
   pub program: String;
   /// The calls into C and the exported functions, compiled apart; `None` without FFI.
   pub ffi: Option<String>;
+  /// The calls into C of the standard library, compiled apart from the program's, whose
+  /// declarations of the same C functions may have other types; `None` without them.
+  pub std_ffi: Option<String>;
   /// Whether the program uses `std::thread` or `std::sync`.
   pub threads: bool;
 }
@@ -101,7 +104,7 @@ pub fn generate(program: Program) -> GeneratedC {
 
   const text = head + generator.long_string_definitions() + generator.fn_pointer_conversions() + generator.zeroed_definitions() + generator.out.to_string();
 
-  GeneratedC { program: text, ffi: generator.ffi_unit(program), threads: threads }
+  GeneratedC { program: text, ffi: generator.ffi_unit(program, false), std_ffi: generator.ffi_unit(program, true), threads: threads }
 }
 
 /// Exported functions are called from the FFI translation unit; the others stay private.
@@ -1346,6 +1349,15 @@ class Generator {
       // One storage per thread (Q529).
       const storage = if def.thread_local { "static _Thread_local " } else { "static " };
 
+      // C's own storage (docs/adr/0086-c-globals-and-std-io.md, Q562).
+      if def.extern_c {
+        const address = extern_static_getter(index as u32);
+
+        self.out.append(ty + " *" + address + "(void);\n");
+        self.out.append(head + "  (void)file;\n  (void)line;\n  return " + address + "();\n}\n\n");
+        continue;
+      }
+
       if let Some(start) = def.value {
         // Its later values must be released at exit, which needs the state.
         if !(def.mutable && managed) {
@@ -1413,26 +1425,37 @@ class Generator {
     parts.join(", ")
   }
 
-  /// The FFI translation unit: a wrapper per C function the program calls, and a function with
-  /// the exported symbol per `extern "C" fn`.
-  pub fn ffi_unit(self, program: Program) -> Option<String> {
+  /// A FFI translation unit: a wrapper per C function called and a getter per C global, of the
+  /// standard library (`std`) or of the program, which also has a function with the exported
+  /// symbol per `extern "C" fn`.
+  pub fn ffi_unit(self, program: Program, std: bool) -> Option<String> {
     const exports: List<u32> = new List();
 
-    for index in 0..program.functions.len() {
-      if program.functions[index].export.is_some() {
-        exports.push(index as u32);
+    if !std {
+      for index in 0..program.functions.len() {
+        if program.functions[index].export.is_some() {
+          exports.push(index as u32);
+        }
       }
     }
 
     const externs: List<usize> = new List();
 
     for index in 0..program.externs.len() {
-      if !program.externs[index].runtime {
+      if !program.externs[index].runtime && program.externs[index].in_std == std {
         externs.push(index);
       }
     }
 
-    if externs.is_empty() && exports.is_empty() {
+    const globals: List<usize> = new List();
+
+    for index in 0..program.statics.len() {
+      if program.statics[index].extern_c && program.statics[index].in_std == std {
+        globals.push(index);
+      }
+    }
+
+    if externs.is_empty() && exports.is_empty() && globals.is_empty() {
       return None;
     }
 
@@ -1459,6 +1482,10 @@ class Generator {
       }
 
       self.ffi_types(function.ret, true, declared, defined);
+    }
+
+    for index in globals {
+      self.ffi_types(program.statics[index].ty, true, declared, defined);
     }
 
     const out = new StringBuilder();
@@ -1533,6 +1560,14 @@ class Generator {
 
       out.append("\n" + self.signature(id, function) + ";\n");
       out.append(self.return_type(function.ret) + " " + function.export.unwrap_or("") + "(" + self.c_params(params) + ") { " + body + " }\n");
+    }
+
+    for index in globals {
+      const def = program.statics[index];
+      const ty = self.c_type(def.ty);
+
+      out.append("\nextern " + ty + " " + def.name + ";\n");
+      out.append(ty + " *" + extern_static_getter(index as u32) + "(void) { return &" + def.name + "; }\n");
     }
 
     Some(out.to_string())

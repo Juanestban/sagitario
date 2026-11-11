@@ -30,6 +30,7 @@ pub fn tests() -> List<Test> {
     support::test("builds_a_library_that_c_programs_use", builds_a_library_that_c_programs_use),
     support::test("builds_only_the_chosen_library_outputs", builds_only_the_chosen_library_outputs),
     support::test("links_c_sources_and_libraries_into_programs", links_c_sources_and_libraries),
+    support::test("reads_and_writes_the_globals_of_c", reads_and_writes_the_globals_of_c),
     support::test("cross_compiles_libraries_and_programs_for_android", cross_compiles_for_android),
     support::test("checks_integer_sizes_for_the_target", checks_integer_sizes_for_the_target),
     support::test("builds_libraries_for_ios_on_macos_only", builds_libraries_for_ios_on_macos_only),
@@ -715,6 +716,58 @@ fn links_c_sources_and_libraries(cx: Context) -> Result<(), String> {
   const broken = nova_fails(cx, app, List::from(["build"]), 1)?;
 
   expect_contains("nova build", broken.stderr, "cannot compile the C source")
+}
+
+/// C's global variables (docs/adr/0086-c-globals-and-std-io.md): a program reads and writes those
+/// of its own C source, a number, a pointer and a struct, and C sees what it wrote.
+fn reads_and_writes_the_globals_of_c(cx: Context) -> Result<(), String> {
+  const temp = cx.temp_dir("nova")?;
+  const app = path::join(temp, "globals");
+  const source = List::from([
+    "use std::ffi::{c_char, c_int, string_from_c};",
+    "",
+    "@repr(C)",
+    "struct Point {",
+    "  pub x: c_int;",
+    "  pub y: c_int;",
+    "}",
+    "",
+    "extern \"C\" {",
+    "  static var c_counter: c_int;",
+    "  static c_name: *const c_char;",
+    "  static var c_origin: Point;",
+    "  fn c_read_counter() -> c_int;",
+    "}",
+    "",
+    "fn main() {",
+    "  const before = unsafe { c_counter };",
+    "",
+    "  unsafe {",
+    "    c_counter += 10;",
+    "    c_origin.x = 30;",
+    "  }",
+    "",
+    "  const counter = &raw const c_counter;",
+    "  const read = unsafe { c_read_counter() };",
+    "  const through = unsafe { *counter };",
+    "  const name = unsafe { string_from_c(c_name) };",
+    "  const origin = unsafe { c_origin };",
+    "",
+    "  println(f\"{before} {read} {through}\");",
+    "  println(f\"{name} {origin.x} {origin.y}\");",
+    "}",
+    "",
+  ]);
+
+  package(app, `${manifest("globals", no_pairs())}\n[link]\nsources = ["c/globals.c"]\n`, List::from([pair("main.sag", source.join("\n"))]))?;
+  support::write_file(
+    under(app, List::from(["c", "globals.c"])),
+    "struct point { int x; int y; };\n\nint c_counter = 5;\nconst char *c_name = \"hola\";\nstruct point c_origin = {3, 4};\n\nint c_read_counter(void) {\n  return c_counter;\n}\n",
+  )?;
+
+  const run = nova(cx, app, List::from(["run"]))?;
+
+  support::expect_equal(`nova run (stderr: ${run.stderr})`, run.stdout, "5 15 15\nhola 30 4\n")
 }
 
 // ---- Other targets ------------------------------------------------------------------------------

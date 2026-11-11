@@ -1251,7 +1251,7 @@ static bool sag_utf8_valid(const uint8_t *bytes, size_t len) {
   return true;
 }
 
-/* ---- Standard library: std::io, std::process ------------------------------------------- */
+/* ---- Standard library: the errors of std::fs, and std::process ---------------------------- */
 
 #ifdef _WIN32
 #include <wchar.h>
@@ -1285,21 +1285,7 @@ static int32_t sag_io_errno(void) {
   return errno > 0 ? (int32_t)errno : SAG_IO_UNKNOWN;
 }
 
-int32_t sag_io_write(int32_t stream, sag_string text, bool newline) {
-  FILE *file = stream == 2 ? stderr : stdout;
-  errno = 0;
-  if ((text.len > 0 && fwrite(text.ptr, 1, text.len, file) != text.len) || (newline && fputc('\n', file) == EOF)) {
-    return sag_io_errno();
-  }
-  return 0;
-}
-
-int32_t sag_io_flush(void) {
-  errno = 0;
-  return fflush(stdout) == 0 ? 0 : sag_io_errno();
-}
-
-/* Makes the bytes read from stdin a string, or reports that they are not UTF-8. */
+/* Makes the bytes read a string, or reports that they are not UTF-8. */
 static sag_string sag_io_finish_read(sag_sb *sb, int32_t *status) {
   if (!sag_utf8_valid(sb->data, sb->len)) {
     free(sb->data);
@@ -1309,144 +1295,6 @@ static sag_string sag_io_finish_read(sag_sb *sb, int32_t *status) {
   }
   *status = 0;
   return sag_sb_finish(sb);
-}
-
-sag_string sag_io_read_line(int32_t *status) {
-  sag_sb sb;
-  sag_sb_init(&sb);
-  bool any = false;
-  int c;
-  errno = 0;
-  while ((c = getc(stdin)) != EOF) {
-    any = true;
-    if (c == '\n') {
-      break;
-    }
-    char byte = (char)c;
-    sag_sb_push_bytes(&sb, &byte, 1);
-  }
-  if (c == EOF && ferror(stdin)) {
-    *status = sag_io_errno();
-    clearerr(stdin);
-    free(sb.data);
-    return sag_string_empty();
-  }
-  if (!any) {
-    *status = SAG_IO_END;
-    return sag_string_empty();
-  }
-  if (sb.len > 0 && sb.data[sb.len - 1] == '\r') {
-    sb.len--;
-  }
-  return sag_io_finish_read(&sb, status);
-}
-
-sag_string sag_io_read_all(int32_t *status) {
-  sag_sb sb;
-  sag_sb_init(&sb);
-  char chunk[4096];
-  size_t count;
-  errno = 0;
-  while ((count = fread(chunk, 1, sizeof chunk, stdin)) > 0) {
-    sag_sb_push_bytes(&sb, chunk, count);
-  }
-  if (ferror(stdin)) {
-    *status = sag_io_errno();
-    clearerr(stdin);
-    free(sb.data);
-    return sag_string_empty();
-  }
-  return sag_io_finish_read(&sb, status);
-}
-
-/* A console on Windows, which has a console mode: the CRT's `_isatty` also says yes for `NUL` and
- * other character devices. `isatty` is from <unistd.h> elsewhere, which is not strict C11. */
-#ifdef _WIN32
-extern void *SAG_WINAPI GetStdHandle(unsigned long std_handle);
-extern int SAG_WINAPI GetConsoleMode(void *console, unsigned long *mode);
-#else
-extern int isatty(int fd);
-#endif
-
-bool sag_io_is_terminal(int32_t stream) {
-  if (stream < 0 || stream > 2) {
-    return false;
-  }
-#ifdef _WIN32
-  /* STD_INPUT_HANDLE, STD_OUTPUT_HANDLE and STD_ERROR_HANDLE are -10, -11 and -12. */
-  unsigned long mode = 0;
-  void *handle = GetStdHandle((unsigned long)(-10 - stream));
-  return handle != NULL && handle != (void *)(intptr_t)-1 && GetConsoleMode(handle, &mode) != 0;
-#else
-  return isatty((int)stream) != 0;
-#endif
-}
-
-/* Exactly `count` bytes of stdin; the bytes read are lost when the input ends first. */
-sag_string sag_io_read_exact(size_t count, int32_t *status) {
-  sag_sb sb;
-  sag_sb_init(&sb);
-  char chunk[4096];
-  size_t left = count;
-  errno = 0;
-  while (left > 0) {
-    size_t read = fread(chunk, 1, left < sizeof chunk ? left : sizeof chunk, stdin);
-    if (read == 0) {
-      break;
-    }
-    sag_sb_push_bytes(&sb, chunk, read);
-    left -= read;
-  }
-  if (left > 0) {
-    *status = ferror(stdin) ? sag_io_errno() : SAG_IO_UNEXPECTED_EOF;
-    clearerr(stdin);
-    free(sb.data);
-    return sag_string_empty();
-  }
-  return sag_io_finish_read(&sb, status);
-}
-
-int32_t sag_io_error_kind(int32_t code) {
-  if (code == SAG_IO_INVALID_DATA) {
-    return SAG_IO_KIND_INVALID_DATA;
-  }
-  if (code == SAG_IO_UNEXPECTED_EOF) {
-    return SAG_IO_KIND_UNEXPECTED_EOF;
-  }
-  /* Only EDOM, EILSEQ and ERANGE are standard C; the others exist on every supported system. */
-#ifdef ENOENT
-  if (code == ENOENT) {
-    return SAG_IO_KIND_NOT_FOUND;
-  }
-#endif
-#if defined(EACCES) && defined(EPERM)
-  if (code == EACCES || code == EPERM) {
-    return SAG_IO_KIND_PERMISSION_DENIED;
-  }
-#endif
-#ifdef EEXIST
-  if (code == EEXIST) {
-    return SAG_IO_KIND_ALREADY_EXISTS;
-  }
-#endif
-#ifdef EINVAL
-  if (code == EINVAL) {
-    return SAG_IO_KIND_INVALID_INPUT;
-  }
-#endif
-  return SAG_IO_KIND_OTHER;
-}
-
-sag_string sag_io_error_message(int32_t code) {
-  const char *message = "input/output error";
-  if (code == SAG_IO_INVALID_DATA) {
-    message = "stream did not contain valid UTF-8";
-  } else if (code == SAG_IO_UNEXPECTED_EOF) {
-    message = "failed to fill whole buffer";
-  } else if (code > 0) {
-    message = strerror((int)code);
-  }
-  return sag_string_from_bytes_lossy((const uint8_t *)message, strlen(message));
 }
 
 _Noreturn void sag_process_exit(int32_t code) {

@@ -3,25 +3,53 @@
 
 use std::io;
 use std::io::ErrorKind;
+use std::sys;
 
-extern "C" {
-  fn sag_io_error_kind(code: i32) -> i32;
-  fn sag_io_error_message(code: i32) -> String;
+/// The codes of failures that have no `errno` value, as the runtime's `SAG_IO_INVALID_DATA`,
+/// `SAG_IO_UNKNOWN` and `SAG_IO_UNEXPECTED_EOF`.
+const INVALID_DATA: i32 = -2;
+const UNKNOWN: i32 = -3;
+const UNEXPECTED_EOF: i32 = -4;
+
+/// The code of the last failed call to the C library: its `errno`, or an unknown error.
+fn last_error() -> i32 {
+  const code = sys::errno();
+
+  if code > 0 { code } else { UNKNOWN }
 }
 
-/// The error with this runtime code (an `errno` value, or one of the runtime's own codes),
-/// described as `context: system message`, or by the system message alone without a context.
+/// The error with this code (an `errno` value, or one of the codes above), described as
+/// `context: system message`, or by the system message alone without a context. The values of
+/// `errno` are the same on every supported system.
 fn os_error(code: i32, context: String) -> io::Error {
-  const kind = match unsafe { sag_io_error_kind(code) } {
-    0 => ErrorKind::NotFound,
-    1 => ErrorKind::PermissionDenied,
-    2 => ErrorKind::AlreadyExists,
-    3 => ErrorKind::InvalidInput,
-    4 => ErrorKind::InvalidData,
-    5 => ErrorKind::UnexpectedEof,
-    _ => ErrorKind::Other,
+  const kind = if code == INVALID_DATA {
+    ErrorKind::InvalidData
+  } else if code == UNEXPECTED_EOF {
+    ErrorKind::UnexpectedEof
+  } else if code == 2 {
+    // ENOENT
+    ErrorKind::NotFound
+  } else if code == 1 || code == 13 {
+    // EPERM, EACCES
+    ErrorKind::PermissionDenied
+  } else if code == 17 {
+    // EEXIST
+    ErrorKind::AlreadyExists
+  } else if code == 22 {
+    // EINVAL
+    ErrorKind::InvalidInput
+  } else {
+    ErrorKind::Other
   };
-  const message = unsafe { sag_io_error_message(code) };
+  const message = if code == INVALID_DATA {
+    "stream did not contain valid UTF-8"
+  } else if code == UNEXPECTED_EOF {
+    "failed to fill whole buffer"
+  } else if code > 0 {
+    sys::error_message(code)
+  } else {
+    "input/output error"
+  };
 
   if context.is_empty() { new io::Error(kind, message) } else { new io::Error(kind, `${context}: ${message}`) }
 }

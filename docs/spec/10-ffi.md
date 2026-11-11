@@ -96,9 +96,35 @@ const half = unsafe { halve(10) };
 - `unsafe async fn` and `unsafe` blocks of C functions (`unsafe extern "C" { }`) are not
   supported.
 
+## C globals
+
+Rationale: [ADR-0086](../adr/0086-c-globals-and-std-io.md).
+
+```sag
+extern "C" {
+  static c_name: *const c_char;
+  static var c_counter: c_int;
+}
+
+const name = unsafe { string_from_c(c_name) };
+
+unsafe { c_counter += 1; }
+```
+
+- An `extern "C"` block may declare C's global variables: `static NAME: T;` and
+  `static var NAME: T;`, each `pub` or not and with its own `@cfg`. The name is the C symbol, and
+  C defines the value: writing `= value` is an error (`E0100`).
+- As in Rust, reading a C global or calling its methods happens only inside `unsafe` (`E0323`),
+  since C may change it at any time, from any thread. A `static var` may also be assigned there,
+  as a whole or by its fields; assigning, or changing a part of, a `static` is an error (`E0307`,
+  `E0312`).
+- Its type is FFI-safe (`E0322`).
+- `&NAME` and `&mut NAME` are errors (`E0340`). `&raw const NAME` gives the address of any C
+  global, and `&raw mut NAME` that of a `static var`; taking an address is safe.
+
 ## C symbols
 
-A symbol (the name of an imported function, or an exported one) must be an ASCII C
+A symbol (the name of an imported function or C global, or an exported function) must be an ASCII C
 identifier. It cannot be a C keyword, `main`, a name reserved by C (starting with `__` or with
 `_` and an uppercase letter), a name starting with `sag_` (the runtime's) or ending in `_t`,
 and each symbol is defined once.

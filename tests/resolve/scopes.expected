@@ -17,15 +17,18 @@ module 1 path=std std=true package=0 root=- source=1 parent=-
   child io -> 5
   child sys -> 6
   child time -> 3
-  item os_error -> fn 10 module 1:523..531
-  item sag_io_error_kind -> extern 0 module 1:246..263
-  item sag_io_error_message -> extern 1 module 1:288..308
+  item INVALID_DATA -> const 2 module 1:392..404
+  item UNEXPECTED_EOF -> const 4 module 1:447..461
+  item UNKNOWN -> const 3 module 1:422..429
+  item last_error -> fn 10 module 1:566..576
+  item os_error -> fn 11 module 1:900..908
   import ErrorKind -> enum 1 1:216..225
   import io -> module 5 1:199..201
+  import sys -> module 6 1:236..239
 module 2 path=std::env std=true package=0 root=- source=2 parent=1
-  item args -> fn 12 pub 2:729..733
-  item core_init -> fn 11 module 2:484..493
-  item variable -> fn 13 pub 2:915..923
+  item args -> fn 13 pub 2:729..733
+  item core_init -> fn 12 module 2:484..493
+  item variable -> fn 14 pub 2:915..923
   import c_char -> std c_char 2:179..185
   import c_int -> std c_int 2:187..192
   import sys -> module 6 2:204..207
@@ -33,61 +36,78 @@ module 3 path=std::time std=true package=0 root=- source=3 parent=1
   item Duration -> struct 1 pub 3:781..789
   item Instant -> struct 2 pub 3:2430..2437
   item SystemTime -> struct 3 pub 3:3194..3204
-  item core_monotonic -> fn 14 module 3:481..495
-  item core_sleep -> fn 15 module 3:575..585
-  item sleep -> fn 39 pub 3:3720..3725
+  item core_monotonic -> fn 15 module 3:481..495
+  item core_sleep -> fn 16 module 3:575..585
+  item sleep -> fn 40 pub 3:3720..3725
   import sys -> module 6 3:196..199
 module 4 path=std::ffi std=true package=0 root=- source=4 parent=1
   item Library -> class 2 pub 4:611..618
-  item sag_library_error -> extern 3 module 4:303..320
-  item sag_library_open -> extern 2 module 4:251..267
-  item sag_library_symbol -> extern 4 module 4:339..357
+  item sag_library_error -> extern 1 module 4:303..320
+  item sag_library_open -> extern 0 module 4:251..267
+  item sag_library_symbol -> extern 2 module 4:339..357
   import c_void -> std c_void 4:224..230
 module 5 path=std::io std=true package=0 root=- source=5 parent=1
-  item Error -> class 3 pub 5:1251..1256
-  item ErrorKind -> enum 1 pub 5:541..550
-  item Stream -> enum 2 pub 5:771..777
-  item done -> fn 48 module 5:1761..1765
-  item eprint -> fn 51 pub 5:2171..2177
-  item eprintln -> fn 52 pub 5:2316..2324
-  item error_from -> fn 47 module 5:1616..1626
-  item flush -> fn 53 pub 5:2467..2472
-  item is_terminal -> fn 43 pub 5:964..975
-  item print -> fn 49 pub 5:1896..1901
-  item println -> fn 50 pub 5:2040..2047
-  item read_exact -> fn 55 pub 5:3273..3283
-  item read_line -> fn 54 pub 5:2695..2704
-  item read_to_string -> fn 56 pub 5:3586..3600
-  item sag_io_flush -> extern 6 module 5:251..263
-  item sag_io_is_terminal -> extern 10 module 5:446..464
-  item sag_io_read_all -> extern 8 module 5:330..345
-  item sag_io_read_exact -> extern 9 module 5:380..397
-  item sag_io_read_line -> extern 7 module 5:279..295
-  item sag_io_write -> extern 5 module 5:183..195
+  item Error -> class 3 pub 5:1061..1066
+  item ErrorKind -> enum 1 pub 5:364..373
+  item Stream -> enum 2 pub 5:594..600
+  item eprint -> fn 52 pub 5:2282..2288
+  item eprintln -> fn 53 pub 5:2403..2411
+  item error_from -> fn 48 module 5:1418..1428
+  item flush -> fn 54 pub 5:2530..2535
+  item is_terminal -> fn 44 pub 5:787..798
+  item print -> fn 50 pub 5:2055..2060
+  item println -> fn 51 pub 5:2175..2182
+  item read_error -> fn 55 module 5:2771..2781
+  item read_exact -> fn 57 pub 5:3938..3948
+  item read_line -> fn 56 pub 5:3069..3078
+  item read_to_string -> fn 58 pub 5:4630..4644
+  item text_of -> fn 59 module 5:5192..5199
+  item utf8 -> fn 60 module 5:5479..5483
+  item write -> fn 49 module 5:1555..1560
+  import c_void -> std c_void 5:290..296
+  import sys -> module 6 5:307..310
 module 6 path=std::sys std=true package=0 root=- source=6 parent=1
-  item ARGC -> static 0 module 6:5612..5616
-  item ARGV -> static 1 module 6:5652..5656
-  item CLOCK_MONOTONIC -> const 4 module 6:2531..2546
-  item CLOCK_REALTIME -> const 3 module 6:2443..2457
-  item EINTR -> const 2 module 6:1218..1223
-  item Timespec -> struct 4 pub 6:1510..1518
-  item __errno -> extern 11 module 6:584..591
-  item args -> fn 67 pub 6:6149..6153
-  item clock -> fn 62 module 6:3535..3540
-  item clock_gettime -> extern 12 module 6:2674..2687
-  item errno -> fn 57 pub 6:998..1003
-  item getenv -> extern 14 module 6:5699..5705
-  item monotonic_nanos -> fn 60 pub 6:3310..3325
-  item nanosleep -> extern 13 module 6:2737..2746
-  item set_args -> fn 66 pub 6:5766..5774
-  item sleep_nanos -> fn 63 pub 6:4613..4624
-  item system_nanos -> fn 61 pub 6:3470..3482
-  item variable -> fn 68 pub 6:6632..6640
-  import CString -> std CString 6:331..338
-  import c_char -> std c_char 6:289..295
-  import c_int -> std c_int 6:268..273
-  import c_long -> std c_long 6:323..329
-  import string_from_c -> std string_from_c 6:340..353
+  item ARGC -> static 0 module 6:6139..6143
+  item ARGV -> static 1 module 6:6179..6183
+  item CLOCK_MONOTONIC -> const 7 module 6:3058..3073
+  item CLOCK_REALTIME -> const 6 module 6:2970..2984
+  item EINTR -> const 5 module 6:1745..1750
+  item Timespec -> struct 4 pub 6:2037..2045
+  item __errno -> extern 3 module 6:580..587
+  item args -> fn 74 pub 6:6676..6680
+  item clear_errno -> fn 63 pub 6:1376..1387
+  item clearerr -> extern 14 pub 6:12761..12769
+  item clock -> fn 69 module 6:4062..4067
+  item clock_gettime -> extern 5 module 6:3201..3214
+  item errno -> fn 62 pub 6:1321..1326
+  item errno_place -> fn 61 module 6:1001..1012
+  item error_message -> fn 64 pub 6:1587..1600
+  item ferror -> extern 13 pub 6:12714..12720
+  item fflush -> extern 10 pub 6:12534..12540
+  item fputc -> extern 9 pub 6:12478..12483
+  item fread -> extern 12 pub 6:12626..12631
+  item fwrite -> extern 8 pub 6:12387..12393
+  item getc -> extern 11 pub 6:12581..12585
+  item getenv -> extern 7 module 6:6226..6232
+  item is_terminal -> fn 80 pub 6:13476..13487
+  item isatty -> extern 15 module 6:13372..13378
+  item monotonic_nanos -> fn 67 pub 6:3837..3852
+  item nanosleep -> extern 6 module 6:3264..3273
+  item set_args -> fn 73 pub 6:6293..6301
+  item sleep_nanos -> fn 70 pub 6:5140..5151
+  item stderr -> static 4 module 6:12098..12104
+  item stdin -> static 2 module 6:12039..12044
+  item stdout -> static 3 module 6:12068..12074
+  item stream -> fn 79 pub 6:12930..12936
+  item strerror -> extern 4 module 6:1446..1454
+  item system_nanos -> fn 68 pub 6:3997..4009
+  item variable -> fn 75 pub 6:7159..7167
+  import CString -> std CString 6:342..349
+  import c_char -> std c_char 6:269..275
+  import c_int -> std c_int 6:277..282
+  import c_long -> std c_long 6:334..340
+  import c_void -> std c_void 6:284..290
+  import string_from_c -> std string_from_c 6:292..305
 module 7 path=std::prelude std=false package=0 root=- source=7 parent=-
   item Add -> interface 4 pub 7:1720..1723
   item Cell -> class 5 module 7:2656..2660
@@ -107,30 +127,30 @@ module 7 path=std::prelude std=false package=0 root=- source=7 parent=-
   item Send -> interface 10 pub 7:2467..2471
   item Sub -> interface 5 pub 7:1801..1804
   item Task -> class 8 pub 7:15323..15327
-  item list_contains -> fn 112 module 7:11291..11304
-  item list_index_of -> fn 111 module 7:11110..11123
-  item list_iter -> fn 110 module 7:10866..10875
-  item list_join -> fn 118 module 7:13137..13146
-  item list_resize -> fn 114 module 7:11795..11806
-  item list_sort -> fn 115 module 7:11956..11965
-  item list_sort_by -> fn 116 module 7:12074..12086
-  item merge_sort -> fn 117 module 7:12259..12269
-  item range_i16 -> fn 129 module 7:17256..17265
-  item range_i32 -> fn 130 module 7:18313..18322
-  item range_i64 -> fn 131 module 7:19370..19379
-  item range_i8 -> fn 128 module 7:16205..16213
-  item range_isize -> fn 132 module 7:20427..20438
-  item range_u16 -> fn 134 module 7:22547..22556
-  item range_u32 -> fn 135 module 7:23604..23613
-  item range_u64 -> fn 136 module 7:24661..24670
-  item range_u8 -> fn 133 module 7:21496..21504
-  item range_usize -> fn 137 module 7:25718..25729
-  item sag_task_schedule -> extern 15 module 7:14962..14979
-  item slice_iter -> fn 113 module 7:11555..11565
-  item string_bytes -> fn 120 module 7:13621..13633
-  item string_chars -> fn 119 module 7:13431..13443
-  item string_lines -> fn 122 module 7:14494..14506
-  item string_split -> fn 121 module 7:13880..13892
+  item list_contains -> fn 124 module 7:11291..11304
+  item list_index_of -> fn 123 module 7:11110..11123
+  item list_iter -> fn 122 module 7:10866..10875
+  item list_join -> fn 130 module 7:13137..13146
+  item list_resize -> fn 126 module 7:11795..11806
+  item list_sort -> fn 127 module 7:11956..11965
+  item list_sort_by -> fn 128 module 7:12074..12086
+  item merge_sort -> fn 129 module 7:12259..12269
+  item range_i16 -> fn 141 module 7:17256..17265
+  item range_i32 -> fn 142 module 7:18313..18322
+  item range_i64 -> fn 143 module 7:19370..19379
+  item range_i8 -> fn 140 module 7:16205..16213
+  item range_isize -> fn 144 module 7:20427..20438
+  item range_u16 -> fn 146 module 7:22547..22556
+  item range_u32 -> fn 147 module 7:23604..23613
+  item range_u64 -> fn 148 module 7:24661..24670
+  item range_u8 -> fn 145 module 7:21496..21504
+  item range_usize -> fn 149 module 7:25718..25729
+  item sag_task_schedule -> extern 16 module 7:14962..14979
+  item slice_iter -> fn 125 module 7:11555..11565
+  item string_bytes -> fn 132 module 7:13621..13633
+  item string_chars -> fn 131 module 7:13431..13443
+  item string_lines -> fn 134 module 7:14494..14506
+  item string_split -> fn 133 module 7:13880..13892
 fn 0 module=0 item=2 member=0 owner=enum 0
 fn 1 module=0 item=2 member=1 owner=enum 0
 fn 2 module=0 item=3 member=0 owner=struct 0
@@ -141,185 +161,201 @@ fn 6 module=0 item=5 member=0 owner=class 1
 fn 7 module=0 item=5 member=1 owner=class 1
 fn 8 module=0 item=6 member=- owner=-
 fn 9 module=0 item=7 member=- owner=-
-fn 10 module=1 item=1 member=- owner=-
-fn 11 module=2 item=0 member=- owner=-
-fn 12 module=2 item=1 member=- owner=-
-fn 13 module=2 item=2 member=- owner=-
-fn 14 module=3 item=0 member=- owner=-
-fn 15 module=3 item=1 member=- owner=-
-fn 16 module=3 item=2 member=0 owner=struct 1
-fn 17 module=3 item=2 member=1 owner=struct 1
-fn 18 module=3 item=2 member=2 owner=struct 1
-fn 19 module=3 item=2 member=3 owner=struct 1
-fn 20 module=3 item=2 member=4 owner=struct 1
-fn 21 module=3 item=2 member=5 owner=struct 1
-fn 22 module=3 item=2 member=6 owner=struct 1
-fn 23 module=3 item=2 member=7 owner=struct 1
-fn 24 module=3 item=2 member=8 owner=struct 1
-fn 25 module=3 item=2 member=9 owner=struct 1
-fn 26 module=3 item=2 member=10 owner=struct 1
-fn 27 module=3 item=2 member=11 owner=struct 1
-fn 28 module=3 item=2 member=12 owner=struct 1
-fn 29 module=3 item=2 member=13 owner=struct 1
-fn 30 module=3 item=3 member=0 owner=struct 2
-fn 31 module=3 item=3 member=1 owner=struct 2
-fn 32 module=3 item=3 member=2 owner=struct 2
-fn 33 module=3 item=3 member=3 owner=struct 2
-fn 34 module=3 item=3 member=4 owner=struct 2
-fn 35 module=3 item=4 member=0 owner=struct 3
-fn 36 module=3 item=4 member=1 owner=struct 3
-fn 37 module=3 item=4 member=2 owner=struct 3
-fn 38 module=3 item=4 member=3 owner=struct 3
-fn 39 module=3 item=5 member=- owner=-
-fn 40 module=4 item=1 member=0 owner=class 2
-fn 41 module=4 item=1 member=1 owner=class 2
-fn 42 module=4 item=1 member=2 owner=class 2
-fn 43 module=5 item=3 member=- owner=-
-fn 44 module=5 item=4 member=0 owner=class 3
-fn 45 module=5 item=4 member=1 owner=class 3
-fn 46 module=5 item=4 member=2 owner=class 3
-fn 47 module=5 item=5 member=- owner=-
-fn 48 module=5 item=6 member=- owner=-
-fn 49 module=5 item=7 member=- owner=-
-fn 50 module=5 item=8 member=- owner=-
-fn 51 module=5 item=9 member=- owner=-
-fn 52 module=5 item=10 member=- owner=-
-fn 53 module=5 item=11 member=- owner=-
-fn 54 module=5 item=12 member=- owner=-
-fn 55 module=5 item=13 member=- owner=-
-fn 56 module=5 item=14 member=- owner=-
-fn 57 module=6 item=1 member=- owner=-
-fn 58 module=6 item=3 member=0 owner=struct 4
-fn 59 module=6 item=3 member=1 owner=struct 4
-fn 60 module=6 item=7 member=- owner=-
-fn 61 module=6 item=8 member=- owner=-
-fn 62 module=6 item=9 member=- owner=-
-fn 63 module=6 item=10 member=- owner=-
-fn 64 module=6 item=11 member=- owner=-
-fn 65 module=6 item=12 member=- owner=-
-fn 66 module=6 item=14 member=- owner=-
-fn 67 module=6 item=15 member=- owner=-
-fn 68 module=6 item=16 member=- owner=-
-fn 69 module=7 item=0 member=0 owner=interface 0
-fn 70 module=7 item=1 member=0 owner=class 4
-fn 71 module=7 item=1 member=1 owner=class 4
-fn 72 module=7 item=3 member=0 owner=interface 1
-fn 73 module=7 item=4 member=0 owner=interface 2
-fn 74 module=7 item=5 member=0 owner=interface 3
-fn 75 module=7 item=6 member=0 owner=interface 4
-fn 76 module=7 item=7 member=0 owner=interface 5
-fn 77 module=7 item=8 member=0 owner=interface 6
-fn 78 module=7 item=9 member=0 owner=interface 7
-fn 79 module=7 item=10 member=0 owner=interface 8
-fn 80 module=7 item=11 member=0 owner=interface 9
-fn 81 module=7 item=14 member=0 owner=class 5
-fn 82 module=7 item=15 member=0 owner=class 6
-fn 83 module=7 item=15 member=1 owner=class 6
-fn 84 module=7 item=15 member=2 owner=class 6
-fn 85 module=7 item=15 member=3 owner=class 6
-fn 86 module=7 item=15 member=4 owner=class 6
-fn 87 module=7 item=15 member=5 owner=class 6
-fn 88 module=7 item=15 member=6 owner=class 6
-fn 89 module=7 item=15 member=7 owner=class 6
-fn 90 module=7 item=15 member=8 owner=class 6
-fn 91 module=7 item=15 member=9 owner=class 6
-fn 92 module=7 item=15 member=10 owner=class 6
-fn 93 module=7 item=15 member=11 owner=class 6
-fn 94 module=7 item=15 member=12 owner=class 6
-fn 95 module=7 item=15 member=13 owner=class 6
-fn 96 module=7 item=16 member=0 owner=class 7
-fn 97 module=7 item=16 member=1 owner=class 7
-fn 98 module=7 item=16 member=2 owner=class 7
-fn 99 module=7 item=16 member=3 owner=class 7
-fn 100 module=7 item=16 member=4 owner=class 7
-fn 101 module=7 item=16 member=5 owner=class 7
-fn 102 module=7 item=16 member=6 owner=class 7
-fn 103 module=7 item=16 member=7 owner=class 7
-fn 104 module=7 item=16 member=8 owner=class 7
-fn 105 module=7 item=16 member=9 owner=class 7
-fn 106 module=7 item=16 member=10 owner=class 7
-fn 107 module=7 item=16 member=11 owner=class 7
-fn 108 module=7 item=16 member=12 owner=class 7
-fn 109 module=7 item=16 member=13 owner=class 7
-fn 110 module=7 item=17 member=- owner=-
-fn 111 module=7 item=18 member=- owner=-
-fn 112 module=7 item=19 member=- owner=-
-fn 113 module=7 item=20 member=- owner=-
-fn 114 module=7 item=21 member=- owner=-
-fn 115 module=7 item=22 member=- owner=-
-fn 116 module=7 item=23 member=- owner=-
-fn 117 module=7 item=24 member=- owner=-
-fn 118 module=7 item=25 member=- owner=-
-fn 119 module=7 item=26 member=- owner=-
-fn 120 module=7 item=27 member=- owner=-
-fn 121 module=7 item=28 member=- owner=-
-fn 122 module=7 item=29 member=- owner=-
-fn 123 module=7 item=31 member=0 owner=class 8
-fn 124 module=7 item=31 member=1 owner=class 8
-fn 125 module=7 item=31 member=2 owner=class 8
-fn 126 module=7 item=31 member=3 owner=class 8
-fn 127 module=7 item=31 member=4 owner=class 8
-fn 128 module=7 item=32 member=- owner=-
-fn 129 module=7 item=33 member=- owner=-
-fn 130 module=7 item=34 member=- owner=-
-fn 131 module=7 item=35 member=- owner=-
-fn 132 module=7 item=36 member=- owner=-
-fn 133 module=7 item=37 member=- owner=-
-fn 134 module=7 item=38 member=- owner=-
-fn 135 module=7 item=39 member=- owner=-
-fn 136 module=7 item=40 member=- owner=-
-fn 137 module=7 item=41 member=- owner=-
+fn 10 module=1 item=3 member=- owner=-
+fn 11 module=1 item=4 member=- owner=-
+fn 12 module=2 item=0 member=- owner=-
+fn 13 module=2 item=1 member=- owner=-
+fn 14 module=2 item=2 member=- owner=-
+fn 15 module=3 item=0 member=- owner=-
+fn 16 module=3 item=1 member=- owner=-
+fn 17 module=3 item=2 member=0 owner=struct 1
+fn 18 module=3 item=2 member=1 owner=struct 1
+fn 19 module=3 item=2 member=2 owner=struct 1
+fn 20 module=3 item=2 member=3 owner=struct 1
+fn 21 module=3 item=2 member=4 owner=struct 1
+fn 22 module=3 item=2 member=5 owner=struct 1
+fn 23 module=3 item=2 member=6 owner=struct 1
+fn 24 module=3 item=2 member=7 owner=struct 1
+fn 25 module=3 item=2 member=8 owner=struct 1
+fn 26 module=3 item=2 member=9 owner=struct 1
+fn 27 module=3 item=2 member=10 owner=struct 1
+fn 28 module=3 item=2 member=11 owner=struct 1
+fn 29 module=3 item=2 member=12 owner=struct 1
+fn 30 module=3 item=2 member=13 owner=struct 1
+fn 31 module=3 item=3 member=0 owner=struct 2
+fn 32 module=3 item=3 member=1 owner=struct 2
+fn 33 module=3 item=3 member=2 owner=struct 2
+fn 34 module=3 item=3 member=3 owner=struct 2
+fn 35 module=3 item=3 member=4 owner=struct 2
+fn 36 module=3 item=4 member=0 owner=struct 3
+fn 37 module=3 item=4 member=1 owner=struct 3
+fn 38 module=3 item=4 member=2 owner=struct 3
+fn 39 module=3 item=4 member=3 owner=struct 3
+fn 40 module=3 item=5 member=- owner=-
+fn 41 module=4 item=1 member=0 owner=class 2
+fn 42 module=4 item=1 member=1 owner=class 2
+fn 43 module=4 item=1 member=2 owner=class 2
+fn 44 module=5 item=2 member=- owner=-
+fn 45 module=5 item=3 member=0 owner=class 3
+fn 46 module=5 item=3 member=1 owner=class 3
+fn 47 module=5 item=3 member=2 owner=class 3
+fn 48 module=5 item=4 member=- owner=-
+fn 49 module=5 item=5 member=- owner=-
+fn 50 module=5 item=6 member=- owner=-
+fn 51 module=5 item=7 member=- owner=-
+fn 52 module=5 item=8 member=- owner=-
+fn 53 module=5 item=9 member=- owner=-
+fn 54 module=5 item=10 member=- owner=-
+fn 55 module=5 item=11 member=- owner=-
+fn 56 module=5 item=12 member=- owner=-
+fn 57 module=5 item=13 member=- owner=-
+fn 58 module=5 item=14 member=- owner=-
+fn 59 module=5 item=15 member=- owner=-
+fn 60 module=5 item=16 member=- owner=-
+fn 61 module=6 item=1 member=- owner=-
+fn 62 module=6 item=2 member=- owner=-
+fn 63 module=6 item=3 member=- owner=-
+fn 64 module=6 item=5 member=- owner=-
+fn 65 module=6 item=7 member=0 owner=struct 4
+fn 66 module=6 item=7 member=1 owner=struct 4
+fn 67 module=6 item=11 member=- owner=-
+fn 68 module=6 item=12 member=- owner=-
+fn 69 module=6 item=13 member=- owner=-
+fn 70 module=6 item=14 member=- owner=-
+fn 71 module=6 item=15 member=- owner=-
+fn 72 module=6 item=16 member=- owner=-
+fn 73 module=6 item=18 member=- owner=-
+fn 74 module=6 item=19 member=- owner=-
+fn 75 module=6 item=20 member=- owner=-
+fn 76 module=6 item=22 member=- owner=-
+fn 77 module=6 item=23 member=- owner=-
+fn 78 module=6 item=24 member=- owner=-
+fn 79 module=6 item=26 member=- owner=-
+fn 80 module=6 item=28 member=- owner=-
+fn 81 module=7 item=0 member=0 owner=interface 0
+fn 82 module=7 item=1 member=0 owner=class 4
+fn 83 module=7 item=1 member=1 owner=class 4
+fn 84 module=7 item=3 member=0 owner=interface 1
+fn 85 module=7 item=4 member=0 owner=interface 2
+fn 86 module=7 item=5 member=0 owner=interface 3
+fn 87 module=7 item=6 member=0 owner=interface 4
+fn 88 module=7 item=7 member=0 owner=interface 5
+fn 89 module=7 item=8 member=0 owner=interface 6
+fn 90 module=7 item=9 member=0 owner=interface 7
+fn 91 module=7 item=10 member=0 owner=interface 8
+fn 92 module=7 item=11 member=0 owner=interface 9
+fn 93 module=7 item=14 member=0 owner=class 5
+fn 94 module=7 item=15 member=0 owner=class 6
+fn 95 module=7 item=15 member=1 owner=class 6
+fn 96 module=7 item=15 member=2 owner=class 6
+fn 97 module=7 item=15 member=3 owner=class 6
+fn 98 module=7 item=15 member=4 owner=class 6
+fn 99 module=7 item=15 member=5 owner=class 6
+fn 100 module=7 item=15 member=6 owner=class 6
+fn 101 module=7 item=15 member=7 owner=class 6
+fn 102 module=7 item=15 member=8 owner=class 6
+fn 103 module=7 item=15 member=9 owner=class 6
+fn 104 module=7 item=15 member=10 owner=class 6
+fn 105 module=7 item=15 member=11 owner=class 6
+fn 106 module=7 item=15 member=12 owner=class 6
+fn 107 module=7 item=15 member=13 owner=class 6
+fn 108 module=7 item=16 member=0 owner=class 7
+fn 109 module=7 item=16 member=1 owner=class 7
+fn 110 module=7 item=16 member=2 owner=class 7
+fn 111 module=7 item=16 member=3 owner=class 7
+fn 112 module=7 item=16 member=4 owner=class 7
+fn 113 module=7 item=16 member=5 owner=class 7
+fn 114 module=7 item=16 member=6 owner=class 7
+fn 115 module=7 item=16 member=7 owner=class 7
+fn 116 module=7 item=16 member=8 owner=class 7
+fn 117 module=7 item=16 member=9 owner=class 7
+fn 118 module=7 item=16 member=10 owner=class 7
+fn 119 module=7 item=16 member=11 owner=class 7
+fn 120 module=7 item=16 member=12 owner=class 7
+fn 121 module=7 item=16 member=13 owner=class 7
+fn 122 module=7 item=17 member=- owner=-
+fn 123 module=7 item=18 member=- owner=-
+fn 124 module=7 item=19 member=- owner=-
+fn 125 module=7 item=20 member=- owner=-
+fn 126 module=7 item=21 member=- owner=-
+fn 127 module=7 item=22 member=- owner=-
+fn 128 module=7 item=23 member=- owner=-
+fn 129 module=7 item=24 member=- owner=-
+fn 130 module=7 item=25 member=- owner=-
+fn 131 module=7 item=26 member=- owner=-
+fn 132 module=7 item=27 member=- owner=-
+fn 133 module=7 item=28 member=- owner=-
+fn 134 module=7 item=29 member=- owner=-
+fn 135 module=7 item=31 member=0 owner=class 8
+fn 136 module=7 item=31 member=1 owner=class 8
+fn 137 module=7 item=31 member=2 owner=class 8
+fn 138 module=7 item=31 member=3 owner=class 8
+fn 139 module=7 item=31 member=4 owner=class 8
+fn 140 module=7 item=32 member=- owner=-
+fn 141 module=7 item=33 member=- owner=-
+fn 142 module=7 item=34 member=- owner=-
+fn 143 module=7 item=35 member=- owner=-
+fn 144 module=7 item=36 member=- owner=-
+fn 145 module=7 item=37 member=- owner=-
+fn 146 module=7 item=38 member=- owner=-
+fn 147 module=7 item=39 member=- owner=-
+fn 148 module=7 item=40 member=- owner=-
+fn 149 module=7 item=41 member=- owner=-
 struct 0 module=0 item=3 functions=2,3
-struct 1 module=3 item=2 functions=16,17,18,19,20,21,22,23,24,25,26,27,28,29
-struct 2 module=3 item=3 functions=30,31,32,33,34
-struct 3 module=3 item=4 functions=35,36,37,38
-struct 4 module=6 item=3 functions=58,59
+struct 1 module=3 item=2 functions=17,18,19,20,21,22,23,24,25,26,27,28,29,30
+struct 2 module=3 item=3 functions=31,32,33,34,35
+struct 3 module=3 item=4 functions=36,37,38,39
+struct 4 module=6 item=7 functions=65,66
 struct 5 module=7 item=13 functions=-
 enum 0 module=0 item=2 functions=0,1
-enum 1 module=5 item=1 functions=-
-enum 2 module=5 item=2 functions=-
+enum 1 module=5 item=0 functions=-
+enum 2 module=5 item=1 functions=-
 enum 3 module=7 item=2 functions=-
 class 0 module=0 item=4 functions=4,5
 class 1 module=0 item=5 functions=6,7
-class 2 module=4 item=1 functions=40,41,42
-class 3 module=5 item=4 functions=44,45,46
-class 4 module=7 item=1 functions=70,71
-class 5 module=7 item=14 functions=81
-class 6 module=7 item=15 functions=82,83,84,85,86,87,88,89,90,91,92,93,94,95
-class 7 module=7 item=16 functions=96,97,98,99,100,101,102,103,104,105,106,107,108,109
-class 8 module=7 item=31 functions=123,124,125,126,127
-interface 0 module=7 item=0 functions=69
-interface 1 module=7 item=3 functions=72
-interface 2 module=7 item=4 functions=73
-interface 3 module=7 item=5 functions=74
-interface 4 module=7 item=6 functions=75
-interface 5 module=7 item=7 functions=76
-interface 6 module=7 item=8 functions=77
-interface 7 module=7 item=9 functions=78
-interface 8 module=7 item=10 functions=79
-interface 9 module=7 item=11 functions=80
+class 2 module=4 item=1 functions=41,42,43
+class 3 module=5 item=3 functions=45,46,47
+class 4 module=7 item=1 functions=82,83
+class 5 module=7 item=14 functions=93
+class 6 module=7 item=15 functions=94,95,96,97,98,99,100,101,102,103,104,105,106,107
+class 7 module=7 item=16 functions=108,109,110,111,112,113,114,115,116,117,118,119,120,121
+class 8 module=7 item=31 functions=135,136,137,138,139
+interface 0 module=7 item=0 functions=81
+interface 1 module=7 item=3 functions=84
+interface 2 module=7 item=4 functions=85
+interface 3 module=7 item=5 functions=86
+interface 4 module=7 item=6 functions=87
+interface 5 module=7 item=7 functions=88
+interface 6 module=7 item=8 functions=89
+interface 7 module=7 item=9 functions=90
+interface 8 module=7 item=10 functions=91
+interface 9 module=7 item=11 functions=92
 interface 10 module=7 item=12 functions=-
 const 0 module=0 item=0
 const 1 module=0 item=1
-const 2 module=6 item=2
-const 3 module=6 item=4
-const 4 module=6 item=5
-extern 0 module=1 item=0 member=0
-extern 1 module=1 item=0 member=1
-extern 2 module=4 item=0 member=0
-extern 3 module=4 item=0 member=1
-extern 4 module=4 item=0 member=2
-extern 5 module=5 item=0 member=0
-extern 6 module=5 item=0 member=1
-extern 7 module=5 item=0 member=2
-extern 8 module=5 item=0 member=3
-extern 9 module=5 item=0 member=4
-extern 10 module=5 item=0 member=5
-extern 11 module=6 item=0 member=0
-extern 12 module=6 item=6 member=0
-extern 13 module=6 item=6 member=1
-extern 14 module=6 item=13 member=0
-extern 15 module=7 item=30 member=0
+const 2 module=1 item=0
+const 3 module=1 item=1
+const 4 module=1 item=2
+const 5 module=6 item=6
+const 6 module=6 item=8
+const 7 module=6 item=9
+extern 0 module=4 item=0 member=0
+extern 1 module=4 item=0 member=1
+extern 2 module=4 item=0 member=2
+extern 3 module=6 item=0 member=0
+extern 4 module=6 item=4 member=0
+extern 5 module=6 item=10 member=0
+extern 6 module=6 item=10 member=1
+extern 7 module=6 item=17 member=0
+extern 8 module=6 item=25 member=0
+extern 9 module=6 item=25 member=1
+extern 10 module=6 item=25 member=2
+extern 11 module=6 item=25 member=3
+extern 12 module=6 item=25 member=4
+extern 13 module=6 item=25 member=5
+extern 14 module=6 item=25 member=6
+extern 15 module=6 item=27 member=0
+extern 16 module=7 item=30 member=0
 prelude 7
 std_root 1
 package_roots 0
@@ -363,261 +399,301 @@ locals 9
   local 16 v param 0:1644..1645
   local 17 sum const 0:1624..1627
 locals 10
-  local 0 code param 1:532..536
-  local 1 context param 1:543..550
-  local 2 kind const 1:583..587
-  local 3 message const 1:878..885
+  local 0 code const 1:596..600
 locals 11
+  local 0 code param 1:909..913
+  local 1 context param 1:920..927
+  local 2 kind const 1:960..964
+  local 3 message const 1:1419..1426
+locals 12
   local 0 argc param 2:494..498
   local 1 argv param 2:507..511
-locals 12
 locals 13
-  local 0 name param 2:924..928
 locals 14
+  local 0 name param 2:924..928
 locals 15
-  local 0 nanos param 3:586..591
 locals 16
-  local 0 secs param 3:839..843
+  local 0 nanos param 3:586..591
 locals 17
-  local 0 millis param 3:935..941
+  local 0 secs param 3:839..843
 locals 18
-  local 0 micros param 3:1031..1037
+  local 0 millis param 3:935..941
 locals 19
-  local 0 nanos param 3:1122..1127
+  local 0 micros param 3:1031..1037
 locals 20
-  local 0 self self 3:1266..1270
+  local 0 nanos param 3:1122..1127
 locals 21
-  local 0 self self 3:1336..1340
+  local 0 self self 3:1266..1270
 locals 22
-  local 0 self self 3:1402..1406
+  local 0 self self 3:1336..1340
 locals 23
-  local 0 self self 3:1463..1467
+  local 0 self self 3:1402..1406
 locals 24
-  local 0 self self 3:1558..1562
+  local 0 self self 3:1463..1467
 locals 25
+  local 0 self self 3:1558..1562
+locals 26
   local 0 self self 3:1632..1636
   local 1 other param 3:1638..1643
-locals 26
+locals 27
   local 0 self self 3:1803..1807
   local 1 other param 3:1809..1814
-locals 27
+locals 28
   local 0 self self 3:2019..2023
   local 1 factor param 3:2025..2031
-locals 28
+locals 29
   local 0 self self 3:2117..2121
   local 1 other param 3:2123..2128
-locals 29
+locals 30
   local 0 self self 3:2202..2206
   local 1 other param 3:2208..2213
-locals 30
 locals 31
-  local 0 self self 3:2599..2603
 locals 32
+  local 0 self self 3:2599..2603
+locals 33
   local 0 self self 3:2766..2770
   local 1 earlier param 3:2772..2779
-locals 33
+locals 34
   local 0 self self 3:2945..2949
   local 1 other param 3:2951..2956
-locals 34
+locals 35
   local 0 self self 3:3029..3033
   local 1 other param 3:3035..3040
-locals 35
 locals 36
-  local 0 self self 3:3418..3422
 locals 37
+  local 0 self self 3:3418..3422
+locals 38
   local 0 self self 3:3496..3500
   local 1 other param 3:3502..3507
-locals 38
+locals 39
   local 0 self self 3:3583..3587
   local 1 other param 3:3589..3594
-locals 39
-  local 0 duration param 3:3726..3734
 locals 40
+  local 0 duration param 3:3726..3734
+locals 41
   local 0 self self 4:668..672
   local 1 handle param 4:674..680
-locals 41
+locals 42
   local 0 path param 4:892..896
   local 1 handle const 4:945..951
   local 2 reason const 4:1028..1034
-locals 42
+locals 43
   local 0 self self 4:1301..1305
   local 1 name param 4:1307..1311
-locals 43
-  local 0 stream param 5:976..982
-  local 1 fd const 5:1010..1012
 locals 44
-  local 0 self self 5:1359..1363
-  local 1 kind param 5:1365..1369
-  local 2 message param 5:1382..1389
+  local 0 stream param 5:799..805
+  local 1 fd const 5:833..835
 locals 45
-  local 0 self self 5:1473..1477
+  local 0 self self 5:1169..1173
+  local 1 kind param 5:1175..1179
+  local 2 message param 5:1192..1199
 locals 46
-  local 0 self self 5:1536..1540
+  local 0 self self 5:1283..1287
 locals 47
-  local 0 code param 5:1627..1631
+  local 0 self self 5:1346..1350
 locals 48
-  local 0 code param 5:1766..1770
+  local 0 code param 5:1429..1433
 locals 49
-  local 0 text param 5:1902..1906
+  local 0 index param 5:1561..1566
+  local 1 text param 5:1573..1577
+  local 2 newline param 5:1587..1594
+  local 3 stream const 5:1633..1639
+  local 4 len const 5:1670..1673
 locals 50
-  local 0 text param 5:2048..2052
+  local 0 text param 5:2061..2065
 locals 51
-  local 0 text param 5:2178..2182
+  local 0 text param 5:2183..2187
 locals 52
-  local 0 text param 5:2325..2329
+  local 0 text param 5:2289..2293
 locals 53
+  local 0 text param 5:2412..2416
 locals 54
-  local 0 status var 5:2748..2754
-  local 1 line const 5:2776..2780
 locals 55
-  local 0 count param 5:3284..3289
-  local 1 status var 5:3331..3337
-  local 2 text const 5:3359..3363
+  local 0 stream param 5:2782..2788
+  local 1 code const 5:2822..2826
 locals 56
-  local 0 status var 5:3636..3642
-  local 1 text const 5:3664..3668
+  local 0 stream const 5:3124..3130
+  local 1 line const 5:3157..3161
+  local 2 any var 5:3186..3189
+  local 3 c var 5:3205..3206
 locals 57
+  local 0 count param 5:3949..3954
+  local 1 stream const 5:3998..4004
+  local 2 data const 5:4031..4035
+  local 3 filled var 5:4060..4066
+  local 4 read const 5:4161..4165
 locals 58
-  local 0 secs param 6:1576..1580
-  local 1 nanos param 6:1587..1592
+  local 0 stream const 5:4682..4688
+  local 1 data const 5:4715..4719
+  local 2 start const 5:4781..4786
+  local 3 read const 5:4847..4851
 locals 59
-  local 0 self self 6:1760..1764
+  local 0 bytes param 5:5200..5205
+  local 1 text pattern 5:5272..5276
 locals 60
+  local 0 bytes param 5:5484..5489
+  local 1 text const 5:5526..5530
+  local 2 len const 5:5562..5565
+  local 3 index var 5:5587..5592
+  local 4 first const 5:5636..5641
+  local 5 code var 5:5673..5677
+  local 6 extra var 5:5695..5700
+  local 7 least var 5:5719..5724
+  local 8 offset for 5:6197..6203
+  local 9 next const 5:6234..6238
 locals 61
 locals 62
-  local 0 id param 6:3541..3543
-  local 1 now var 6:3567..3570
 locals 63
-  local 0 nanos param 6:4625..4630
-  local 1 left var 6:4645..4649
-  local 2 asked const 6:4732..4737
 locals 64
+  local 0 code param 6:1601..1605
 locals 65
+  local 0 secs param 6:2103..2107
+  local 1 nanos param 6:2114..2119
 locals 66
-  local 0 argc param 6:5775..5779
-  local 1 argv param 6:5788..5792
+  local 0 self self 6:2287..2291
 locals 67
-  local 0 args const 6:6182..6186
-  local 1 count const 6:6217..6222
-  local 2 argv const 6:6250..6254
-  local 3 index for 6:6363..6368
-  local 4 arg const 6:6402..6405
 locals 68
-  local 0 name param 6:6641..6645
-  local 1 found pattern 6:6726..6731
-  local 2 c_name const 6:6683..6689
-  local 3 value const 6:6783..6788
 locals 69
-  local 0 self self 7:505..509
+  local 0 id param 6:4068..4070
+  local 1 now var 6:4094..4097
 locals 70
+  local 0 nanos param 6:5152..5157
+  local 1 left var 6:5172..5176
+  local 2 asked const 6:5259..5264
+locals 71
+locals 72
+locals 73
+  local 0 argc param 6:6302..6306
+  local 1 argv param 6:6315..6319
+locals 74
+  local 0 args const 6:6709..6713
+  local 1 count const 6:6744..6749
+  local 2 argv const 6:6777..6781
+  local 3 index for 6:6890..6895
+  local 4 arg const 6:6929..6932
+locals 75
+  local 0 name param 6:7168..7172
+  local 1 found pattern 6:7253..7258
+  local 2 c_name const 6:7210..7216
+  local 3 value const 6:7310..7315
+locals 76
+locals 77
+locals 78
+locals 79
+  local 0 index param 6:12937..12942
+locals 80
+  local 0 index param 6:13488..13493
+locals 81
+  local 0 self self 7:505..509
+locals 82
   local 0 self self 7:637..641
   local 1 text param 7:643..647
-locals 71
+locals 83
   local 0 self self 7:703..707
-locals 72
+locals 84
   local 0 self self 7:1031..1035
   local 1 other param 7:1037..1042
-locals 73
+locals 85
   local 0 self self 7:1189..1193
   local 1 other param 7:1195..1200
-locals 74
+locals 86
   local 0 self self 7:1400..1404
-locals 75
+locals 87
   local 0 self self 7:1745..1749
   local 1 other param 7:1751..1756
-locals 76
+locals 88
   local 0 self self 7:1826..1830
   local 1 other param 7:1832..1837
-locals 77
+locals 89
   local 0 self self 7:1907..1911
   local 1 other param 7:1913..1918
-locals 78
+locals 90
   local 0 self self 7:1988..1992
   local 1 other param 7:1994..1999
-locals 79
+locals 91
   local 0 self self 7:2069..2073
   local 1 other param 7:2075..2080
-locals 80
+locals 92
   local 0 self self 7:2183..2187
-locals 81
+locals 93
   local 0 self self 7:2700..2704
   local 1 value param 7:2706..2711
-locals 82
+locals 94
   local 0 self self 7:3012..3016
   local 1 step param 7:3018..3022
-locals 83
+locals 95
   local 0 self self 7:3150..3154
-locals 84
+locals 96
   local 0 self self 7:3208..3212
   local 1 f param 7:3214..3215
   local 2 source const 7:3252..3258
-locals 85
+locals 97
   local 0 self self 7:3333..3337
   local 1 keep param 7:3339..3343
   local 2 source const 7:3383..3389
   local 3 value for 7:3433..3438
-locals 86
+locals 98
   local 0 self self 7:3594..3598
   local 1 count param 7:3600..3605
   local 2 source const 7:3637..3643
   local 3 taken const 7:3662..3667
-locals 87
+locals 99
   local 0 self self 7:3889..3893
   local 1 count param 7:3895..3900
   local 2 source const 7:3932..3938
   local 3 skipped const 7:3957..3964
   local 4 _ for 7:4084..4085
-locals 88
+locals 100
   local 0 self self 7:4315..4319
   local 1 step param 7:4321..4325
   local 2 source const 7:4444..4450
   local 3 started const 7:4469..4476
   local 4 _ for 7:4564..4565
-locals 89
+locals 101
   local 0 self self 7:4795..4799
   local 1 list const 7:4824..4828
   local 2 value for 7:4855..4860
-locals 90
+locals 102
   local 0 self self 7:4976..4980
   local 1 count var 7:5001..5006
   local 2 _ for 7:5028..5029
-locals 91
+locals 103
   local 0 self self 7:5165..5169
   local 1 init param 7:5171..5175
   local 2 f param 7:5180..5181
   local 3 result var 7:5213..5219
   local 4 value for 7:5237..5242
-locals 92
+locals 104
   local 0 self self 7:5327..5331
   local 1 f param 7:5333..5334
   local 2 value for 7:5353..5358
-locals 93
+locals 105
   local 0 self self 7:5476..5480
   local 1 test param 7:5482..5486
   local 2 value for 7:5521..5526
-locals 94
+locals 106
   local 0 self self 7:5702..5706
   local 1 test param 7:5708..5712
   local 2 value for 7:5747..5752
-locals 95
+locals 107
   local 0 self self 7:5897..5901
   local 1 test param 7:5903..5907
   local 2 value for 7:5947..5952
-locals 96
+locals 108
   local 0 self self 7:6677..6681
-locals 97
+locals 109
   local 0 self self 7:6826..6830
-locals 98
+locals 110
   local 0 self self 7:6881..6885
-locals 99
+locals 111
   local 0 self self 7:6971..6975
   local 1 key param 7:6977..6980
   local 2 slot pattern 7:7041..7045
   local 3 entry param 7:7092..7097
-locals 100
+locals 112
   local 0 self self 7:7168..7172
   local 1 key param 7:7174..7177
-locals 101
+locals 113
   local 0 self self 7:7329..7333
   local 1 key param 7:7335..7338
   local 2 value param 7:7343..7348
@@ -625,40 +701,40 @@ locals 101
   local 4 index const 7:7434..7439
   local 5 previous const 7:7483..7491
   local 6 entry param 7:7603..7608
-locals 102
+locals 114
   local 0 self self 7:7998..8002
   local 1 key param 7:8004..8007
   local 2 slot pattern 7:8068..8072
   local 3 index const 7:8093..8098
   local 4 previous const 7:8142..8150
   local 5 entry param 7:8284..8289
-locals 103
+locals 115
   local 0 self self 7:8360..8364
-locals 104
+locals 116
   local 0 self self 7:8596..8600
   local 1 map const 7:8635..8638
   local 2 next const 7:8657..8661
   local 3 entry const 7:8776..8781
-locals 105
+locals 117
   local 0 self self 7:8943..8947
   local 1 entry param 7:8985..8990
-locals 106
+locals 118
   local 0 self self 7:9026..9030
   local 1 entry param 7:9068..9073
-locals 107
+locals 119
   local 0 self self 7:9142..9146
   local 1 key param 7:9148..9151
   local 2 capacity const 7:9185..9193
   local 3 slot var 7:9272..9276
   local 4 index const 7:9344..9349
   local 5 entry pattern 7:9504..9509
-locals 108
+locals 120
   local 0 self self 7:9809..9813
   local 1 hash param 7:9815..9819
   local 2 index param 7:9826..9831
   local 3 capacity const 7:9852..9860
   local 4 slot var 7:9889..9893
-locals 109
+locals 121
   local 0 self self 7:10150..10154
   local 1 live const 7:10168..10172
   local 2 entry for 7:10217..10222
@@ -667,35 +743,35 @@ locals 109
   local 5 _ for 7:10453..10454
   local 6 index for 7:10585..10590
   local 7 entry pattern 7:10649..10654
-locals 110
+locals 122
   local 0 list param 7:10879..10883
   local 1 next const 7:10915..10919
   local 2 value const 7:11035..11040
-locals 111
+locals 123
   local 0 list param 7:11131..11135
   local 1 value param 7:11146..11151
   local 2 index for 7:11181..11186
-locals 112
+locals 124
   local 0 list param 7:11312..11316
   local 1 value param 7:11327..11332
-locals 113
+locals 125
   local 0 slice param 7:11569..11574
   local 1 copy const 7:11603..11607
   local 2 value for 7:11632..11637
-locals 114
+locals 126
   local 0 list param 7:11810..11814
   local 1 len param 7:11825..11828
   local 2 value param 7:11837..11842
-locals 115
+locals 127
   local 0 list param 7:11974..11978
   local 1 a param 7:12013..12014
   local 2 b param 7:12019..12020
-locals 116
+locals 128
   local 0 list param 7:12090..12094
   local 1 compare param 7:12105..12112
   local 2 sorted const 7:12146..12152
   local 3 index for 7:12189..12194
-locals 117
+locals 129
   local 0 items param 7:12273..12278
   local 1 compare param 7:12289..12296
   local 2 count const 7:12341..12346
@@ -707,47 +783,47 @@ locals 117
   local 8 merged const 7:12673..12679
   local 9 i var 7:12703..12704
   local 10 j var 7:12723..12724
-locals 118
+locals 130
   local 0 list param 7:13147..13151
   local 1 separator param 7:13167..13176
   local 2 builder const 7:13206..13213
   local 3 index for 7:13244..13249
-locals 119
+locals 131
   local 0 text param 7:13444..13448
   local 1 chars const 7:13482..13487
   local 2 c for 7:13515..13516
-locals 120
+locals 132
   local 0 text param 7:13634..13638
   local 1 bytes const 7:13670..13675
   local 2 b for 7:13701..13702
-locals 121
+locals 133
   local 0 text param 7:13893..13897
   local 1 separator param 7:13907..13916
   local 2 parts const 7:13952..13957
   local 3 c for 7:14017..14018
   local 4 rest var 7:14099..14103
   local 5 index pattern 7:14166..14171
-locals 122
+locals 134
   local 0 text param 7:14507..14511
   local 1 lines const 7:14547..14552
   local 2 parts const 7:14630..14635
   local 3 index for 7:14671..14676
   local 4 line const 7:14707..14711
-locals 123
+locals 135
   local 0 self self 7:15407..15411
-locals 124
+locals 136
   local 0 self self 7:15492..15496
-locals 125
+locals 137
   local 0 self self 7:15652..15656
   local 1 resume param 7:15658..15664
-locals 126
+locals 138
   local 0 self self 7:15835..15839
   local 1 value param 7:15841..15846
   local 2 resume for 7:15893..15899
-locals 127
+locals 139
   local 0 self self 7:16074..16078
   local 1 value pattern 7:16122..16127
-locals 128
+locals 140
   local 0 start param 7:16214..16219
   local 1 end param 7:16225..16228
   local 2 inclusive param 7:16234..16243
@@ -755,7 +831,7 @@ locals 128
   local 4 cursor const 7:16288..16294
   local 5 done const 7:16354..16358
   local 6 value const 7:16464..16469
-locals 129
+locals 141
   local 0 start param 7:17266..17271
   local 1 end param 7:17278..17281
   local 2 inclusive param 7:17288..17297
@@ -763,7 +839,7 @@ locals 129
   local 4 cursor const 7:17343..17349
   local 5 done const 7:17410..17414
   local 6 value const 7:17521..17526
-locals 130
+locals 142
   local 0 start param 7:18323..18328
   local 1 end param 7:18335..18338
   local 2 inclusive param 7:18345..18354
@@ -771,7 +847,7 @@ locals 130
   local 4 cursor const 7:18400..18406
   local 5 done const 7:18467..18471
   local 6 value const 7:18578..18583
-locals 131
+locals 143
   local 0 start param 7:19380..19385
   local 1 end param 7:19392..19395
   local 2 inclusive param 7:19402..19411
@@ -779,7 +855,7 @@ locals 131
   local 4 cursor const 7:19457..19463
   local 5 done const 7:19524..19528
   local 6 value const 7:19635..19640
-locals 132
+locals 144
   local 0 start param 7:20439..20444
   local 1 end param 7:20453..20456
   local 2 inclusive param 7:20465..20474
@@ -787,7 +863,7 @@ locals 132
   local 4 cursor const 7:20522..20528
   local 5 done const 7:20591..20595
   local 6 value const 7:20704..20709
-locals 133
+locals 145
   local 0 start param 7:21505..21510
   local 1 end param 7:21516..21519
   local 2 inclusive param 7:21525..21534
@@ -795,7 +871,7 @@ locals 133
   local 4 cursor const 7:21579..21585
   local 5 done const 7:21645..21649
   local 6 value const 7:21755..21760
-locals 134
+locals 146
   local 0 start param 7:22557..22562
   local 1 end param 7:22569..22572
   local 2 inclusive param 7:22579..22588
@@ -803,7 +879,7 @@ locals 134
   local 4 cursor const 7:22634..22640
   local 5 done const 7:22701..22705
   local 6 value const 7:22812..22817
-locals 135
+locals 147
   local 0 start param 7:23614..23619
   local 1 end param 7:23626..23629
   local 2 inclusive param 7:23636..23645
@@ -811,7 +887,7 @@ locals 135
   local 4 cursor const 7:23691..23697
   local 5 done const 7:23758..23762
   local 6 value const 7:23869..23874
-locals 136
+locals 148
   local 0 start param 7:24671..24676
   local 1 end param 7:24683..24686
   local 2 inclusive param 7:24693..24702
@@ -819,7 +895,7 @@ locals 136
   local 4 cursor const 7:24748..24754
   local 5 done const 7:24815..24819
   local 6 value const 7:24926..24931
-locals 137
+locals 149
   local 0 start param 7:25730..25735
   local 1 end param 7:25744..25747
   local 2 inclusive param 7:25756..25765
@@ -881,1062 +957,1222 @@ path #232 -> local 17
 path #234 -> local 15
 path #237 -> fn 0
 path #241 -> fn 2
-path #256 -> extern 0
-path #258 -> local 0
-path #264 -> variant enum 1 0
-path #268 -> variant enum 1 1
-path #272 -> variant enum 1 2
-path #276 -> variant enum 1 3
-path #280 -> variant enum 1 4
-path #284 -> variant enum 1 5
-path #288 -> variant enum 1 6
-path #292 -> extern 1
-path #294 -> local 0
-path #298 -> local 1
-path #302 -> local 2
-path #304 -> local 3
-path #308 -> local 2
-path #310 -> local 1
-path #312 -> local 3
-path #321 -> fn 66
-path #323 -> local 0
-path #325 -> local 1
-path #331 -> fn 67
-path #338 -> local 0
-path #341 -> local 0
-path #346 -> local 0
-path #351 -> variant Option 0
-path #355 -> fn 68
-path #357 -> local 0
-path #362 -> fn 60
-path #367 -> fn 63
-path #369 -> local 0
-path #378 -> local 0
-path #381 -> struct 1
-path #387 -> local 0
-path #390 -> struct 1
+path #259 -> fn 62
+path #262 -> local 0
+path #266 -> local 0
+path #268 -> const 3
+path #277 -> local 0
+path #279 -> const 2
+path #282 -> variant enum 1 4
+path #284 -> local 0
+path #286 -> const 4
+path #289 -> variant enum 1 5
+path #291 -> local 0
+path #295 -> variant enum 1 0
+path #297 -> local 0
+path #301 -> local 0
+path #306 -> variant enum 1 1
+path #308 -> local 0
+path #312 -> variant enum 1 2
+path #314 -> local 0
+path #318 -> variant enum 1 3
+path #320 -> variant enum 1 6
+path #330 -> local 0
+path #332 -> const 2
+path #336 -> local 0
+path #338 -> const 4
+path #342 -> local 0
+path #346 -> fn 64
+path #348 -> local 0
+path #356 -> local 1
+path #360 -> local 2
+path #362 -> local 3
+path #366 -> local 2
+path #368 -> local 1
+path #370 -> local 3
+path #379 -> fn 73
+path #381 -> local 0
+path #383 -> local 1
+path #389 -> fn 74
 path #396 -> local 0
-path #399 -> struct 1
-path #405 -> local 0
-path #406 -> struct 1
-path #410 -> local 0
-path #417 -> local 0
-path #424 -> local 0
-path #431 -> local 0
+path #399 -> local 0
+path #404 -> local 0
+path #409 -> variant Option 0
+path #413 -> fn 75
+path #415 -> local 0
+path #420 -> fn 67
+path #425 -> fn 70
+path #427 -> local 0
 path #436 -> local 0
-path #447 -> local 0
-path #450 -> local 1
-path #453 -> struct 1
-path #458 -> local 1
-path #461 -> local 0
-path #465 -> builtin panic
-path #471 -> local 0
-path #474 -> local 1
-path #477 -> struct 1
-path #483 -> local 0
-path #486 -> local 1
-path #488 -> struct 1
-path #493 -> local 0
-path #496 -> local 1
-path #503 -> local 0
-path #506 -> local 1
-path #515 -> fn 60
-path #517 -> struct 2
-path #521 -> fn 30
-path #524 -> local 0
-path #530 -> local 1
-path #533 -> local 0
-path #537 -> fn 19
-path #541 -> fn 19
-path #543 -> local 0
-path #546 -> local 1
-path #556 -> local 0
-path #559 -> local 1
-path #566 -> local 0
-path #569 -> local 1
-path #578 -> fn 61
-path #580 -> struct 3
-path #584 -> fn 19
-path #586 -> local 0
-path #593 -> local 0
-path #596 -> local 1
-path #603 -> local 0
-path #606 -> local 1
-path #612 -> fn 63
+path #439 -> struct 1
+path #445 -> local 0
+path #448 -> struct 1
+path #454 -> local 0
+path #457 -> struct 1
+path #463 -> local 0
+path #464 -> struct 1
+path #468 -> local 0
+path #475 -> local 0
+path #482 -> local 0
+path #489 -> local 0
+path #494 -> local 0
+path #505 -> local 0
+path #508 -> local 1
+path #511 -> struct 1
+path #516 -> local 1
+path #519 -> local 0
+path #523 -> builtin panic
+path #529 -> local 0
+path #532 -> local 1
+path #535 -> struct 1
+path #541 -> local 0
+path #544 -> local 1
+path #546 -> struct 1
+path #551 -> local 0
+path #554 -> local 1
+path #561 -> local 0
+path #564 -> local 1
+path #573 -> fn 67
+path #575 -> struct 2
+path #579 -> fn 31
+path #582 -> local 0
+path #588 -> local 1
+path #591 -> local 0
+path #595 -> fn 20
+path #599 -> fn 20
+path #601 -> local 0
+path #604 -> local 1
 path #614 -> local 0
-path #627 -> local 0
-path #630 -> local 1
-path #638 -> extern 2
-path #640 -> local 0
-path #644 -> local 1
-path #648 -> extern 3
-path #652 -> variant Result 1
-path #654 -> local 0
-path #656 -> local 2
-path #662 -> variant Result 0
-path #665 -> local 1
-path #672 -> extern 4
-path #674 -> local 0
-path #677 -> local 1
-path #699 -> local 0
-path #701 -> variant enum 2 0
-path #704 -> variant enum 2 1
-path #707 -> variant enum 2 2
-path #711 -> extern 10
-path #713 -> local 1
-path #723 -> local 0
-path #726 -> local 1
-path #728 -> local 0
-path #731 -> local 2
-path #735 -> local 0
-path #740 -> local 0
-path #746 -> fn 10
-path #748 -> local 0
-path #756 -> local 0
-path #760 -> variant Result 0
-path #764 -> variant Result 1
-path #766 -> fn 47
-path #768 -> local 0
-path #778 -> fn 48
-path #780 -> extern 5
+path #617 -> local 1
+path #624 -> local 0
+path #627 -> local 1
+path #636 -> fn 68
+path #638 -> struct 3
+path #642 -> fn 20
+path #644 -> local 0
+path #651 -> local 0
+path #654 -> local 1
+path #661 -> local 0
+path #664 -> local 1
+path #670 -> fn 70
+path #672 -> local 0
+path #685 -> local 0
+path #688 -> local 1
+path #696 -> extern 0
+path #698 -> local 0
+path #702 -> local 1
+path #706 -> extern 1
+path #710 -> variant Result 1
+path #712 -> local 0
+path #714 -> local 2
+path #720 -> variant Result 0
+path #723 -> local 1
+path #730 -> extern 2
+path #732 -> local 0
+path #735 -> local 1
+path #743 -> local 0
+path #745 -> variant enum 2 0
+path #748 -> variant enum 2 1
+path #751 -> variant enum 2 2
+path #755 -> fn 80
+path #757 -> local 1
+path #766 -> local 0
+path #769 -> local 1
+path #771 -> local 0
+path #774 -> local 2
+path #778 -> local 0
 path #783 -> local 0
-path #793 -> fn 48
-path #795 -> extern 5
-path #798 -> local 0
-path #808 -> fn 48
-path #810 -> extern 5
-path #813 -> local 0
-path #823 -> fn 48
-path #825 -> extern 5
-path #828 -> local 0
-path #837 -> fn 48
-path #839 -> extern 6
-path #853 -> extern 7
-path #855 -> local 0
-path #860 -> local 0
-path #866 -> variant Result 0
-path #868 -> variant Option 1
-path #870 -> local 1
-path #874 -> local 0
-path #881 -> variant Result 0
-path #883 -> variant Option 0
-path #886 -> variant Result 1
-path #888 -> fn 47
+path #789 -> fn 11
+path #791 -> local 0
+path #802 -> fn 79
+path #804 -> local 0
+path #808 -> local 1
+path #811 -> fn 63
+path #814 -> local 4
+path #818 -> extern 8
+path #820 -> local 1
+path #824 -> local 4
+path #826 -> local 3
+path #830 -> local 4
+path #834 -> variant Result 1
+path #836 -> fn 48
+path #838 -> fn 10
+path #845 -> local 2
+path #847 -> extern 9
+path #850 -> local 3
+path #857 -> variant Result 1
+path #859 -> fn 48
+path #861 -> fn 10
+path #868 -> variant Result 0
+path #876 -> fn 49
+path #879 -> local 0
+path #887 -> fn 49
 path #890 -> local 0
-path #908 -> extern 9
-path #910 -> local 0
-path #912 -> local 1
-path #917 -> local 1
-path #923 -> variant Result 0
-path #925 -> local 2
-path #928 -> variant Result 1
-path #930 -> fn 47
-path #932 -> local 1
-path #948 -> extern 8
-path #950 -> local 0
-path #955 -> local 0
-path #961 -> variant Result 0
-path #963 -> local 1
-path #966 -> variant Result 1
-path #968 -> fn 47
-path #970 -> local 0
-path #990 -> extern 11
-path #1011 -> local 0
-path #1015 -> local 1
-path #1018 -> struct 4
-path #1022 -> local 0
-path #1028 -> local 0
-path #1035 -> local 0
-path #1111 -> fn 62
-path #1113 -> const 4
-path #1118 -> fn 62
-path #1120 -> const 3
-path #1127 -> fn 58
-path #1132 -> extern 12
-path #1134 -> local 0
-path #1136 -> local 1
-path #1146 -> local 1
-path #1257 -> fn 58
-path #1259 -> local 0
-path #1263 -> local 0
-path #1269 -> local 1
-path #1271 -> extern 13
-path #1273 -> local 2
-path #1276 -> local 1
-path #1283 -> fn 57
-path #1286 -> const 2
-path #1349 -> static 0
-path #1351 -> local 0
-path #1353 -> static 1
-path #1355 -> local 1
-path #1371 -> static 0
-path #1375 -> static 1
-path #1380 -> local 2
-path #1383 -> local 1
-path #1388 -> local 0
-path #1393 -> local 1
-path #1399 -> local 2
-path #1401 -> local 3
-path #1406 -> local 4
-path #1411 -> local 0
-path #1413 -> builtin string_from_c
-path #1415 -> local 4
-path #1421 -> local 0
-path #1428 -> builtin CString::new
-path #1430 -> local 0
-path #1435 -> variant Result 0
-path #1437 -> local 1
-path #1441 -> variant Result 1
-path #1443 -> variant Option 0
-path #1448 -> extern 14
-path #1450 -> local 2
-path #1455 -> local 3
-path #1458 -> variant Option 0
-path #1460 -> variant Option 1
-path #1462 -> builtin string_from_c
-path #1464 -> local 3
-path #2123 -> local 0
-path #2126 -> local 1
-path #2130 -> local 0
-path #2165 -> local 0
-path #2168 -> local 1
-path #2175 -> local 0
-path #2178 -> local 1
-path #2183 -> local 0
-path #2192 -> local 0
-path #2196 -> local 2
-path #2199 -> local 1
-path #2210 -> local 0
-path #2214 -> local 2
-path #2216 -> local 1
-path #2218 -> local 3
-path #2221 -> variant Option 1
-path #2223 -> local 3
-path #2229 -> variant Option 0
-path #2239 -> local 0
-path #2248 -> local 3
-path #2251 -> local 1
-path #2254 -> variant Option 0
-path #2258 -> local 3
-path #2262 -> local 2
-path #2273 -> local 0
-path #2282 -> local 3
-path #2286 -> local 3
-path #2291 -> local 1
-path #2294 -> local 2
-path #2298 -> variant Option 0
-path #2304 -> local 2
-path #2314 -> local 1
-path #2318 -> builtin panic
-path #2324 -> local 0
-path #2333 -> local 3
-path #2337 -> local 1
-path #2340 -> local 2
-path #2344 -> variant Option 0
-path #2350 -> local 3
-path #2354 -> local 2
-path #2367 -> local 0
-path #2369 -> local 1
-path #2371 -> local 2
-path #2375 -> local 1
-path #2382 -> local 0
-path #2384 -> local 1
-path #2388 -> local 1
-path #2397 -> local 1
-path #2399 -> local 0
-path #2401 -> local 3
-path #2403 -> local 2
-path #2405 -> local 3
-path #2407 -> local 4
-path #2411 -> local 3
-path #2415 -> local 0
-path #2417 -> local 1
-path #2419 -> local 2
-path #2427 -> local 0
-path #2429 -> local 1
-path #2431 -> local 2
-path #2443 -> local 0
-path #2445 -> local 1
-path #2447 -> local 2
-path #2461 -> local 0
-path #2463 -> local 1
-path #2465 -> local 2
-path #2468 -> variant Option 1
-path #2470 -> local 2
-path #2476 -> variant Option 0
-path #2489 -> local 0
-path #2498 -> local 0
-path #2504 -> local 0
-path #2508 -> local 0
-path #2514 -> local 0
-path #2519 -> local 0
-path #2528 -> local 0
-path #2530 -> local 1
-path #2535 -> variant Option 1
-path #2537 -> local 0
-path #2540 -> local 0
-path #2543 -> local 2
-path #2549 -> local 3
-path #2554 -> variant Option 0
-path #2556 -> variant Option 0
-path #2562 -> local 0
-path #2564 -> local 1
-path #2573 -> local 0
-path #2575 -> local 1
-path #2580 -> variant Option 1
-path #2583 -> local 0
-path #2586 -> local 3
-path #2592 -> local 0
-path #2595 -> local 4
-path #2598 -> local 0
-path #2601 -> local 4
-path #2604 -> variant Option 1
-path #2607 -> local 1
-path #2609 -> local 2
-path #2610 -> struct 5
-path #2613 -> local 5
-path #2615 -> local 6
-path #2621 -> variant Option 0
-path #2623 -> local 0
-path #2630 -> local 0
-path #2637 -> local 0
-path #2641 -> local 0
-path #2643 -> local 1
-path #2646 -> local 0
-path #2651 -> local 0
-path #2654 -> variant Option 1
-path #2657 -> local 1
-path #2659 -> local 2
-path #2660 -> struct 5
-path #2664 -> local 0
-path #2668 -> local 0
-path #2672 -> variant Option 0
-path #2680 -> local 0
-path #2682 -> local 1
-path #2687 -> variant Option 1
-path #2690 -> local 0
-path #2693 -> local 2
-path #2699 -> local 0
-path #2702 -> local 3
-path #2705 -> local 0
-path #2708 -> local 3
-path #2711 -> variant Option 0
-path #2713 -> local 0
-path #2716 -> local 2
-path #2721 -> local 0
-path #2725 -> local 4
-path #2727 -> local 5
-path #2733 -> variant Option 0
-path #2735 -> variant Option 0
-path #2739 -> local 0
-path #2748 -> local 0
-path #2754 -> local 0
-path #2758 -> local 0
-path #2768 -> local 0
-path #2779 -> local 2
-path #2782 -> local 1
-path #2788 -> local 1
-path #2791 -> local 2
-path #2795 -> local 2
-path #2799 -> local 3
-path #2802 -> local 3
-path #2807 -> variant Option 0
-path #2815 -> local 0
-path #2818 -> local 1
-path #2826 -> local 0
-path #2829 -> local 1
-path #2839 -> local 0
-path #2843 -> local 2
-path #2847 -> variant Option 0
-path #2852 -> local 1
-path #2855 -> local 2
-path #2863 -> local 0
-path #2866 -> local 3
-path #2869 -> local 4
-path #2874 -> variant Option 0
-path #2878 -> local 4
-path #2882 -> local 0
-path #2885 -> local 4
-path #2892 -> variant Option 1
-path #2894 -> local 5
-path #2897 -> local 1
-path #2900 -> variant Option 1
-path #2902 -> local 3
-path #2908 -> variant Option 0
-path #2913 -> local 3
-path #2915 -> local 3
-path #2919 -> local 2
-path #2927 -> local 0
-path #2932 -> local 1
-path #2934 -> local 3
-path #2941 -> local 0
-path #2944 -> local 4
-path #2950 -> local 4
-path #2952 -> local 4
-path #2956 -> local 3
-path #2960 -> local 0
-path #2963 -> local 4
-path #2966 -> local 2
-path #2978 -> local 0
-path #2981 -> local 2
-path #2984 -> local 1
-path #2986 -> local 2
-path #2994 -> local 3
-path #2996 -> local 1
+path #898 -> fn 49
+path #901 -> local 0
+path #909 -> fn 49
+path #912 -> local 0
+path #919 -> fn 63
+path #922 -> extern 10
+path #924 -> fn 79
+path #932 -> variant Result 0
+path #936 -> variant Result 1
+path #938 -> fn 48
+path #940 -> fn 10
+path #951 -> fn 10
+path #954 -> extern 14
+path #956 -> local 0
+path #960 -> fn 48
+path #962 -> local 1
+path #971 -> fn 79
+path #983 -> fn 63
+path #986 -> local 3
+path #988 -> extern 11
+path #990 -> local 0
+path #994 -> local 3
+path #1000 -> local 2
+path #1003 -> local 3
+path #1009 -> local 1
+path #1011 -> local 3
+path #1017 -> local 3
+path #1021 -> extern 13
+path #1023 -> local 0
+path #1030 -> variant Result 1
+path #1032 -> fn 55
+path #1034 -> local 0
+path #1040 -> local 2
+path #1043 -> variant Result 0
+path #1045 -> variant Option 0
+path #1050 -> local 1
+path #1054 -> local 1
+path #1056 -> local 1
+path #1065 -> local 1
+path #1067 -> local 1
+path #1075 -> variant Result 0
+path #1077 -> variant Option 1
+path #1079 -> fn 59
+path #1081 -> local 1
+path #1094 -> fn 79
+path #1104 -> local 2
+path #1106 -> local 0
+path #1110 -> fn 63
+path #1114 -> local 3
+path #1116 -> local 0
+path #1120 -> extern 12
+path #1122 -> local 2
+path #1125 -> local 3
+path #1129 -> local 0
+path #1131 -> local 3
+path #1134 -> local 1
+path #1138 -> local 4
+path #1144 -> local 3
+path #1146 -> local 4
+path #1150 -> local 3
+path #1152 -> local 0
+path #1155 -> extern 13
+path #1157 -> local 1
+path #1163 -> variant Result 1
+path #1165 -> fn 55
+path #1167 -> local 1
+path #1173 -> extern 14
+path #1175 -> local 1
+path #1179 -> variant Result 1
+path #1181 -> fn 48
+path #1183 -> const 4
+path #1189 -> fn 59
+path #1191 -> local 2
+path #1200 -> fn 79
+path #1208 -> fn 63
+path #1212 -> local 1
+path #1215 -> local 1
+path #1217 -> local 2
+path #1224 -> extern 12
+path #1226 -> local 1
+path #1229 -> local 2
+path #1234 -> local 0
+path #1238 -> local 1
+path #1240 -> local 2
+path #1242 -> local 3
+path #1247 -> local 3
+path #1254 -> extern 13
+path #1256 -> local 0
+path #1262 -> variant Result 1
+path #1264 -> fn 55
+path #1266 -> local 0
+path #1272 -> fn 59
+path #1274 -> local 1
+path #1283 -> fn 60
+path #1285 -> local 0
+path #1290 -> variant Option 1
+path #1292 -> variant Result 0
+path #1294 -> local 1
+path #1297 -> variant Option 0
+path #1299 -> variant Result 1
+path #1301 -> fn 48
+path #1303 -> const 2
+path #1316 -> local 0
+path #1322 -> local 3
+path #1324 -> local 2
+path #1328 -> local 0
+path #1330 -> local 3
+path #1336 -> local 4
+path #1342 -> local 4
+path #1346 -> local 4
+path #1351 -> local 5
+path #1353 -> local 4
+path #1357 -> local 6
+path #1360 -> local 7
+path #1363 -> local 4
+path #1367 -> local 4
+path #1372 -> local 5
+path #1374 -> local 4
+path #1378 -> local 6
+path #1381 -> local 7
+path #1384 -> local 4
+path #1388 -> local 4
+path #1393 -> local 5
+path #1395 -> local 4
+path #1399 -> local 6
+path #1402 -> local 7
+path #1405 -> local 4
+path #1409 -> variant Option 0
+path #1416 -> local 3
+path #1418 -> local 6
+path #1421 -> local 2
+path #1424 -> local 6
+path #1429 -> variant Option 0
+path #1434 -> local 6
+path #1440 -> local 0
+path #1442 -> local 3
+path #1444 -> local 8
+path #1450 -> local 9
+path #1454 -> local 9
+path #1459 -> variant Option 0
+path #1463 -> local 5
+path #1465 -> local 5
+path #1469 -> local 9
+path #1476 -> local 5
+path #1478 -> local 7
+path #1481 -> local 5
+path #1485 -> local 5
+path #1491 -> local 5
+path #1496 -> variant Option 0
+path #1500 -> local 1
+path #1502 -> builtin char::from_u32
+path #1504 -> local 5
+path #1509 -> local 3
+path #1511 -> local 6
+path #1516 -> variant Option 1
+path #1518 -> local 1
+path #1534 -> extern 3
+path #1552 -> fn 61
+path #1558 -> fn 61
+path #1569 -> builtin string_from_c
+path #1571 -> extern 4
+path #1573 -> local 0
+path #1587 -> local 0
+path #1591 -> local 1
+path #1594 -> struct 4
+path #1598 -> local 0
+path #1604 -> local 0
+path #1611 -> local 0
+path #1687 -> fn 69
+path #1689 -> const 7
+path #1694 -> fn 69
+path #1696 -> const 6
+path #1703 -> fn 65
+path #1708 -> extern 5
+path #1710 -> local 0
+path #1712 -> local 1
+path #1722 -> local 1
+path #1833 -> fn 65
+path #1835 -> local 0
+path #1839 -> local 0
+path #1845 -> local 1
+path #1847 -> extern 6
+path #1849 -> local 2
+path #1852 -> local 1
+path #1859 -> fn 62
+path #1862 -> const 5
+path #1925 -> static 0
+path #1927 -> local 0
+path #1929 -> static 1
+path #1931 -> local 1
+path #1947 -> static 0
+path #1951 -> static 1
+path #1956 -> local 2
+path #1959 -> local 1
+path #1964 -> local 0
+path #1969 -> local 1
+path #1975 -> local 2
+path #1977 -> local 3
+path #1982 -> local 4
+path #1987 -> local 0
+path #1989 -> builtin string_from_c
+path #1991 -> local 4
+path #1997 -> local 0
+path #2004 -> builtin CString::new
+path #2006 -> local 0
+path #2011 -> variant Result 0
+path #2013 -> local 1
+path #2017 -> variant Result 1
+path #2019 -> variant Option 0
+path #2024 -> extern 7
+path #2026 -> local 2
+path #2031 -> local 3
+path #2034 -> variant Option 0
+path #2036 -> variant Option 1
+path #2038 -> builtin string_from_c
+path #2040 -> local 3
+path #2730 -> local 0
+path #2734 -> static 2
+path #2736 -> local 0
+path #2740 -> static 3
+path #2742 -> static 4
+path #2785 -> extern 15
+path #2787 -> local 0
+path #2845 -> local 0
+path #2848 -> local 1
+path #2852 -> local 0
+path #2887 -> local 0
+path #2890 -> local 1
+path #2897 -> local 0
+path #2900 -> local 1
+path #2905 -> local 0
+path #2914 -> local 0
+path #2918 -> local 2
+path #2921 -> local 1
+path #2932 -> local 0
+path #2936 -> local 2
+path #2938 -> local 1
+path #2940 -> local 3
+path #2943 -> variant Option 1
+path #2945 -> local 3
+path #2951 -> variant Option 0
+path #2961 -> local 0
+path #2970 -> local 3
+path #2973 -> local 1
+path #2976 -> variant Option 0
+path #2980 -> local 3
+path #2984 -> local 2
+path #2995 -> local 0
 path #3004 -> local 3
-path #3013 -> local 3
-path #3016 -> local 4
-path #3022 -> local 0
-path #3025 -> local 1
-path #3027 -> local 0
-path #3030 -> local 4
-path #3032 -> local 0
-path #3035 -> local 1
-path #3039 -> local 1
-path #3043 -> local 1
-path #3045 -> local 6
-path #3050 -> variant Option 1
-path #3052 -> local 0
-path #3054 -> local 7
-path #3058 -> local 6
-path #3061 -> variant Option 0
-path #3078 -> local 1
-path #3081 -> local 0
-path #3085 -> variant Option 0
-path #3090 -> local 0
-path #3092 -> local 1
-path #3096 -> local 1
-path #3100 -> variant Option 1
-path #3102 -> local 2
-path #3116 -> local 0
-path #3120 -> local 0
-path #3122 -> local 2
-path #3125 -> local 1
-path #3128 -> variant Option 1
-path #3130 -> local 2
-path #3136 -> variant Option 0
-path #3144 -> fn 111
-path #3146 -> local 0
-path #3148 -> local 1
-path #3160 -> local 0
-path #3162 -> local 1
-path #3164 -> local 2
-path #3168 -> fn 110
-path #3170 -> local 1
-path #3178 -> local 0
-path #3181 -> local 1
-path #3184 -> local 0
-path #3188 -> local 0
-path #3191 -> local 1
-path #3194 -> local 0
-path #3196 -> local 2
-path #3204 -> fn 116
-path #3206 -> local 0
-path #3210 -> local 1
-path #3212 -> local 2
-path #3224 -> fn 117
+path #3008 -> local 3
+path #3013 -> local 1
+path #3016 -> local 2
+path #3020 -> variant Option 0
+path #3026 -> local 2
+path #3036 -> local 1
+path #3040 -> builtin panic
+path #3046 -> local 0
+path #3055 -> local 3
+path #3059 -> local 1
+path #3062 -> local 2
+path #3066 -> variant Option 0
+path #3072 -> local 3
+path #3076 -> local 2
+path #3089 -> local 0
+path #3091 -> local 1
+path #3093 -> local 2
+path #3097 -> local 1
+path #3104 -> local 0
+path #3106 -> local 1
+path #3110 -> local 1
+path #3119 -> local 1
+path #3121 -> local 0
+path #3123 -> local 3
+path #3125 -> local 2
+path #3127 -> local 3
+path #3129 -> local 4
+path #3133 -> local 3
+path #3137 -> local 0
+path #3139 -> local 1
+path #3141 -> local 2
+path #3149 -> local 0
+path #3151 -> local 1
+path #3153 -> local 2
+path #3165 -> local 0
+path #3167 -> local 1
+path #3169 -> local 2
+path #3183 -> local 0
+path #3185 -> local 1
+path #3187 -> local 2
+path #3190 -> variant Option 1
+path #3192 -> local 2
+path #3198 -> variant Option 0
+path #3211 -> local 0
+path #3220 -> local 0
 path #3226 -> local 0
-path #3228 -> local 1
-path #3232 -> local 2
+path #3230 -> local 0
 path #3236 -> local 0
-path #3238 -> local 3
-path #3241 -> local 2
-path #3243 -> local 3
-path #3256 -> local 0
-path #3259 -> local 2
-path #3263 -> local 0
-path #3276 -> local 2
-path #3280 -> local 5
-path #3282 -> local 2
-path #3287 -> local 3
-path #3289 -> local 0
-path #3291 -> local 5
-path #3295 -> local 4
-path #3297 -> local 0
-path #3299 -> local 5
-path #3307 -> fn 117
-path #3309 -> local 3
-path #3311 -> local 1
-path #3315 -> fn 117
+path #3241 -> local 0
+path #3250 -> local 0
+path #3252 -> local 1
+path #3257 -> variant Option 1
+path #3259 -> local 0
+path #3262 -> local 0
+path #3265 -> local 2
+path #3271 -> local 3
+path #3276 -> variant Option 0
+path #3278 -> variant Option 0
+path #3284 -> local 0
+path #3286 -> local 1
+path #3295 -> local 0
+path #3297 -> local 1
+path #3302 -> variant Option 1
+path #3305 -> local 0
+path #3308 -> local 3
+path #3314 -> local 0
 path #3317 -> local 4
-path #3319 -> local 1
-path #3333 -> local 9
-path #3335 -> local 6
-path #3340 -> local 10
-path #3342 -> local 7
-path #3347 -> local 1
-path #3349 -> local 7
-path #3351 -> local 10
-path #3354 -> local 6
-path #3356 -> local 9
-path #3360 -> variant enum 3 0
-path #3363 -> local 8
-path #3365 -> local 7
-path #3367 -> local 10
-path #3371 -> local 10
-path #3374 -> local 8
-path #3376 -> local 6
-path #3378 -> local 9
-path #3382 -> local 9
-path #3389 -> local 9
-path #3391 -> local 6
-path #3395 -> local 8
-path #3397 -> local 6
-path #3399 -> local 9
-path #3403 -> local 9
-path #3408 -> local 10
-path #3410 -> local 7
-path #3414 -> local 8
-path #3416 -> local 7
-path #3418 -> local 10
-path #3422 -> local 10
-path #3426 -> local 8
-path #3437 -> local 0
-path #3441 -> local 3
-path #3445 -> local 2
-path #3447 -> local 1
-path #3451 -> local 2
-path #3453 -> local 0
-path #3455 -> local 3
-path #3460 -> local 2
-path #3471 -> local 0
-path #3474 -> local 1
-path #3476 -> local 2
-path #3480 -> fn 110
-path #3482 -> local 1
-path #3493 -> local 0
-path #3496 -> local 1
-path #3498 -> local 2
-path #3502 -> fn 110
+path #3320 -> local 0
+path #3323 -> local 4
+path #3326 -> variant Option 1
+path #3329 -> local 1
+path #3331 -> local 2
+path #3332 -> struct 5
+path #3335 -> local 5
+path #3337 -> local 6
+path #3343 -> variant Option 0
+path #3345 -> local 0
+path #3352 -> local 0
+path #3359 -> local 0
+path #3363 -> local 0
+path #3365 -> local 1
+path #3368 -> local 0
+path #3373 -> local 0
+path #3376 -> variant Option 1
+path #3379 -> local 1
+path #3381 -> local 2
+path #3382 -> struct 5
+path #3386 -> local 0
+path #3390 -> local 0
+path #3394 -> variant Option 0
+path #3402 -> local 0
+path #3404 -> local 1
+path #3409 -> variant Option 1
+path #3412 -> local 0
+path #3415 -> local 2
+path #3421 -> local 0
+path #3424 -> local 3
+path #3427 -> local 0
+path #3430 -> local 3
+path #3433 -> variant Option 0
+path #3435 -> local 0
+path #3438 -> local 2
+path #3443 -> local 0
+path #3447 -> local 4
+path #3449 -> local 5
+path #3455 -> variant Option 0
+path #3457 -> variant Option 0
+path #3461 -> local 0
+path #3470 -> local 0
+path #3476 -> local 0
+path #3480 -> local 0
+path #3490 -> local 0
+path #3501 -> local 2
 path #3504 -> local 1
-path #3516 -> local 1
-path #3519 -> local 0
-path #3522 -> local 2
+path #3510 -> local 1
+path #3513 -> local 2
+path #3517 -> local 2
+path #3521 -> local 3
 path #3524 -> local 3
-path #3529 -> local 2
-path #3534 -> local 0
-path #3536 -> local 4
-path #3538 -> local 1
-path #3543 -> variant Option 1
-path #3545 -> local 2
-path #3547 -> local 4
-path #3550 -> local 5
-path #3554 -> local 4
-path #3556 -> local 4
-path #3558 -> local 5
-path #3560 -> local 1
-path #3564 -> local 4
+path #3529 -> variant Option 0
+path #3537 -> local 0
+path #3540 -> local 1
+path #3548 -> local 0
+path #3551 -> local 1
+path #3561 -> local 0
+path #3565 -> local 2
 path #3569 -> variant Option 0
-path #3571 -> local 2
-path #3573 -> local 4
-path #3576 -> local 2
-path #3590 -> local 0
-path #3593 -> local 1
-path #3598 -> fn 121
-path #3600 -> local 0
-path #3605 -> local 2
-path #3610 -> local 2
-path #3612 -> local 3
-path #3615 -> local 3
-path #3619 -> local 2
-path #3623 -> local 4
-path #3629 -> local 4
-path #3633 -> local 1
-path #3635 -> local 4
-path #3638 -> local 4
-path #3645 -> local 1
-path #3647 -> local 4
-path #3653 -> local 1
-path #3659 -> local 0
-path #3662 -> variant Option 0
-path #3664 -> local 0
-path #3671 -> local 0
-path #3676 -> variant Option 1
-path #3679 -> variant Option 0
-path #3684 -> local 0
-path #3687 -> local 1
-path #3692 -> local 0
-path #3695 -> variant Option 1
-path #3697 -> local 1
+path #3574 -> local 1
+path #3577 -> local 2
+path #3585 -> local 0
+path #3588 -> local 3
+path #3591 -> local 4
+path #3596 -> variant Option 0
+path #3600 -> local 4
+path #3604 -> local 0
+path #3607 -> local 4
+path #3614 -> variant Option 1
+path #3616 -> local 5
+path #3619 -> local 1
+path #3622 -> variant Option 1
+path #3624 -> local 3
+path #3630 -> variant Option 0
+path #3635 -> local 3
+path #3637 -> local 3
+path #3641 -> local 2
+path #3649 -> local 0
+path #3654 -> local 1
+path #3656 -> local 3
+path #3663 -> local 0
+path #3666 -> local 4
+path #3672 -> local 4
+path #3674 -> local 4
+path #3678 -> local 3
+path #3682 -> local 0
+path #3685 -> local 4
+path #3688 -> local 2
 path #3700 -> local 0
-path #3703 -> extern 15
-path #3705 -> local 2
-path #3710 -> local 0
-path #3717 -> local 0
-path #3722 -> variant Option 1
-path #3724 -> local 1
-path #3726 -> variant Option 0
-path #3728 -> builtin panic
-path #3743 -> local 3
-path #3745 -> local 1
-path #3747 -> local 0
-path #3759 -> local 5
-path #3762 -> variant Option 0
-path #3767 -> local 4
-path #3770 -> local 3
-path #3772 -> local 2
-path #3775 -> local 6
-path #3777 -> local 0
-path #3780 -> local 5
-path #3784 -> variant Option 0
-path #3788 -> local 6
-path #3790 -> local 0
-path #3793 -> local 5
-path #3797 -> local 4
-path #3800 -> local 6
-path #3806 -> variant Option 1
-path #3808 -> local 6
-path #3811 -> local 6
-path #3813 -> local 0
-path #3816 -> local 5
-path #3820 -> variant Option 0
-path #3824 -> local 4
-path #3827 -> local 6
-path #3831 -> variant Option 1
-path #3833 -> local 6
-path #3840 -> local 2
-path #3842 -> local 6
-path #3844 -> local 1
-path #3847 -> local 5
-path #3851 -> variant Option 0
-path #3855 -> local 6
-path #3857 -> local 1
-path #3860 -> local 5
-path #3864 -> local 4
-path #3867 -> local 6
-path #3873 -> variant Option 1
-path #3875 -> local 6
-path #3878 -> local 6
-path #3880 -> local 1
-path #3883 -> local 5
-path #3887 -> variant Option 0
-path #3891 -> local 4
-path #3894 -> local 6
-path #3898 -> variant Option 1
-path #3900 -> local 6
-path #3919 -> local 3
-path #3921 -> local 1
-path #3923 -> local 0
-path #3935 -> local 5
-path #3938 -> variant Option 0
-path #3943 -> local 4
-path #3946 -> local 3
-path #3948 -> local 2
-path #3951 -> local 6
-path #3953 -> local 0
-path #3956 -> local 5
-path #3960 -> variant Option 0
-path #3964 -> local 6
-path #3966 -> local 0
-path #3969 -> local 5
-path #3973 -> local 4
-path #3976 -> local 6
-path #3982 -> variant Option 1
-path #3984 -> local 6
-path #3987 -> local 6
-path #3989 -> local 0
-path #3992 -> local 5
-path #3996 -> variant Option 0
-path #4000 -> local 4
-path #4003 -> local 6
-path #4007 -> variant Option 1
-path #4009 -> local 6
-path #4016 -> local 2
-path #4018 -> local 6
-path #4020 -> local 1
-path #4023 -> local 5
-path #4027 -> variant Option 0
-path #4031 -> local 6
+path #3703 -> local 2
+path #3706 -> local 1
+path #3708 -> local 2
+path #3716 -> local 3
+path #3718 -> local 1
+path #3726 -> local 3
+path #3735 -> local 3
+path #3738 -> local 4
+path #3744 -> local 0
+path #3747 -> local 1
+path #3749 -> local 0
+path #3752 -> local 4
+path #3754 -> local 0
+path #3757 -> local 1
+path #3761 -> local 1
+path #3765 -> local 1
+path #3767 -> local 6
+path #3772 -> variant Option 1
+path #3774 -> local 0
+path #3776 -> local 7
+path #3780 -> local 6
+path #3783 -> variant Option 0
+path #3800 -> local 1
+path #3803 -> local 0
+path #3807 -> variant Option 0
+path #3812 -> local 0
+path #3814 -> local 1
+path #3818 -> local 1
+path #3822 -> variant Option 1
+path #3824 -> local 2
+path #3838 -> local 0
+path #3842 -> local 0
+path #3844 -> local 2
+path #3847 -> local 1
+path #3850 -> variant Option 1
+path #3852 -> local 2
+path #3858 -> variant Option 0
+path #3866 -> fn 123
+path #3868 -> local 0
+path #3870 -> local 1
+path #3882 -> local 0
+path #3884 -> local 1
+path #3886 -> local 2
+path #3890 -> fn 122
+path #3892 -> local 1
+path #3900 -> local 0
+path #3903 -> local 1
+path #3906 -> local 0
+path #3910 -> local 0
+path #3913 -> local 1
+path #3916 -> local 0
+path #3918 -> local 2
+path #3926 -> fn 128
+path #3928 -> local 0
+path #3932 -> local 1
+path #3934 -> local 2
+path #3946 -> fn 129
+path #3948 -> local 0
+path #3950 -> local 1
+path #3954 -> local 2
+path #3958 -> local 0
+path #3960 -> local 3
+path #3963 -> local 2
+path #3965 -> local 3
+path #3978 -> local 0
+path #3981 -> local 2
+path #3985 -> local 0
+path #3998 -> local 2
+path #4002 -> local 5
+path #4004 -> local 2
+path #4009 -> local 3
+path #4011 -> local 0
+path #4013 -> local 5
+path #4017 -> local 4
+path #4019 -> local 0
+path #4021 -> local 5
+path #4029 -> fn 129
+path #4031 -> local 3
 path #4033 -> local 1
-path #4036 -> local 5
-path #4040 -> local 4
-path #4043 -> local 6
-path #4049 -> variant Option 1
-path #4051 -> local 6
-path #4054 -> local 6
-path #4056 -> local 1
-path #4059 -> local 5
-path #4063 -> variant Option 0
-path #4067 -> local 4
-path #4070 -> local 6
-path #4074 -> variant Option 1
+path #4037 -> fn 129
+path #4039 -> local 4
+path #4041 -> local 1
+path #4055 -> local 9
+path #4057 -> local 6
+path #4062 -> local 10
+path #4064 -> local 7
+path #4069 -> local 1
+path #4071 -> local 7
+path #4073 -> local 10
 path #4076 -> local 6
-path #4095 -> local 3
-path #4097 -> local 1
-path #4099 -> local 0
-path #4111 -> local 5
-path #4114 -> variant Option 0
-path #4119 -> local 4
-path #4122 -> local 3
-path #4124 -> local 2
-path #4127 -> local 6
-path #4129 -> local 0
-path #4132 -> local 5
-path #4136 -> variant Option 0
-path #4140 -> local 6
-path #4142 -> local 0
-path #4145 -> local 5
-path #4149 -> local 4
-path #4152 -> local 6
-path #4158 -> variant Option 1
-path #4160 -> local 6
-path #4163 -> local 6
-path #4165 -> local 0
-path #4168 -> local 5
-path #4172 -> variant Option 0
-path #4176 -> local 4
-path #4179 -> local 6
-path #4183 -> variant Option 1
-path #4185 -> local 6
-path #4192 -> local 2
-path #4194 -> local 6
+path #4078 -> local 9
+path #4082 -> variant enum 3 0
+path #4085 -> local 8
+path #4087 -> local 7
+path #4089 -> local 10
+path #4093 -> local 10
+path #4096 -> local 8
+path #4098 -> local 6
+path #4100 -> local 9
+path #4104 -> local 9
+path #4111 -> local 9
+path #4113 -> local 6
+path #4117 -> local 8
+path #4119 -> local 6
+path #4121 -> local 9
+path #4125 -> local 9
+path #4130 -> local 10
+path #4132 -> local 7
+path #4136 -> local 8
+path #4138 -> local 7
+path #4140 -> local 10
+path #4144 -> local 10
+path #4148 -> local 8
+path #4159 -> local 0
+path #4163 -> local 3
+path #4167 -> local 2
+path #4169 -> local 1
+path #4173 -> local 2
+path #4175 -> local 0
+path #4177 -> local 3
+path #4182 -> local 2
+path #4193 -> local 0
 path #4196 -> local 1
-path #4199 -> local 5
-path #4203 -> variant Option 0
-path #4207 -> local 6
-path #4209 -> local 1
-path #4212 -> local 5
-path #4216 -> local 4
-path #4219 -> local 6
-path #4225 -> variant Option 1
-path #4227 -> local 6
-path #4230 -> local 6
-path #4232 -> local 1
-path #4235 -> local 5
-path #4239 -> variant Option 0
-path #4243 -> local 4
-path #4246 -> local 6
-path #4250 -> variant Option 1
-path #4252 -> local 6
-path #4271 -> local 3
-path #4273 -> local 1
-path #4275 -> local 0
-path #4287 -> local 5
-path #4290 -> variant Option 0
+path #4198 -> local 2
+path #4202 -> fn 122
+path #4204 -> local 1
+path #4215 -> local 0
+path #4218 -> local 1
+path #4220 -> local 2
+path #4224 -> fn 122
+path #4226 -> local 1
+path #4238 -> local 1
+path #4241 -> local 0
+path #4244 -> local 2
+path #4246 -> local 3
+path #4251 -> local 2
+path #4256 -> local 0
+path #4258 -> local 4
+path #4260 -> local 1
+path #4265 -> variant Option 1
+path #4267 -> local 2
+path #4269 -> local 4
+path #4272 -> local 5
+path #4276 -> local 4
+path #4278 -> local 4
+path #4280 -> local 5
+path #4282 -> local 1
+path #4286 -> local 4
+path #4291 -> variant Option 0
+path #4293 -> local 2
 path #4295 -> local 4
-path #4298 -> local 3
-path #4300 -> local 2
-path #4303 -> local 6
-path #4305 -> local 0
-path #4308 -> local 5
-path #4312 -> variant Option 0
-path #4316 -> local 6
-path #4318 -> local 0
-path #4321 -> local 5
-path #4325 -> local 4
-path #4328 -> local 6
-path #4334 -> variant Option 1
-path #4336 -> local 6
-path #4339 -> local 6
-path #4341 -> local 0
-path #4344 -> local 5
-path #4348 -> variant Option 0
-path #4352 -> local 4
-path #4355 -> local 6
-path #4359 -> variant Option 1
-path #4361 -> local 6
-path #4368 -> local 2
-path #4370 -> local 6
-path #4372 -> local 1
-path #4375 -> local 5
-path #4379 -> variant Option 0
-path #4383 -> local 6
-path #4385 -> local 1
-path #4388 -> local 5
-path #4392 -> local 4
-path #4395 -> local 6
-path #4401 -> variant Option 1
-path #4403 -> local 6
-path #4406 -> local 6
-path #4408 -> local 1
-path #4411 -> local 5
-path #4415 -> variant Option 0
-path #4419 -> local 4
-path #4422 -> local 6
-path #4426 -> variant Option 1
-path #4428 -> local 6
-path #4447 -> local 3
-path #4449 -> local 1
-path #4451 -> local 0
-path #4463 -> local 5
-path #4466 -> variant Option 0
-path #4471 -> local 4
-path #4474 -> local 3
-path #4476 -> local 2
-path #4479 -> local 6
-path #4481 -> local 0
-path #4484 -> local 5
-path #4488 -> variant Option 0
-path #4492 -> local 6
-path #4494 -> local 0
-path #4497 -> local 5
-path #4501 -> local 4
-path #4504 -> local 6
-path #4510 -> variant Option 1
-path #4512 -> local 6
-path #4515 -> local 6
-path #4517 -> local 0
-path #4520 -> local 5
-path #4524 -> variant Option 0
-path #4528 -> local 4
-path #4531 -> local 6
-path #4535 -> variant Option 1
-path #4537 -> local 6
-path #4544 -> local 2
-path #4546 -> local 6
-path #4548 -> local 1
-path #4551 -> local 5
-path #4555 -> variant Option 0
-path #4559 -> local 6
-path #4561 -> local 1
-path #4564 -> local 5
-path #4568 -> local 4
-path #4571 -> local 6
-path #4577 -> variant Option 1
-path #4579 -> local 6
-path #4582 -> local 6
-path #4584 -> local 1
-path #4587 -> local 5
-path #4591 -> variant Option 0
-path #4595 -> local 4
-path #4598 -> local 6
-path #4602 -> variant Option 1
-path #4604 -> local 6
-path #4623 -> local 3
-path #4625 -> local 1
-path #4627 -> local 0
-path #4639 -> local 5
-path #4642 -> variant Option 0
-path #4647 -> local 4
-path #4650 -> local 3
-path #4652 -> local 2
-path #4655 -> local 6
-path #4657 -> local 0
-path #4660 -> local 5
-path #4664 -> variant Option 0
-path #4668 -> local 6
-path #4670 -> local 0
-path #4673 -> local 5
-path #4677 -> local 4
-path #4680 -> local 6
-path #4686 -> variant Option 1
-path #4688 -> local 6
-path #4691 -> local 6
-path #4693 -> local 0
-path #4696 -> local 5
-path #4700 -> variant Option 0
-path #4704 -> local 4
-path #4707 -> local 6
-path #4711 -> variant Option 1
-path #4713 -> local 6
-path #4720 -> local 2
-path #4722 -> local 6
-path #4724 -> local 1
-path #4727 -> local 5
-path #4731 -> variant Option 0
-path #4735 -> local 6
-path #4737 -> local 1
-path #4740 -> local 5
-path #4744 -> local 4
-path #4747 -> local 6
-path #4753 -> variant Option 1
-path #4755 -> local 6
-path #4758 -> local 6
-path #4760 -> local 1
-path #4763 -> local 5
-path #4767 -> variant Option 0
-path #4771 -> local 4
-path #4774 -> local 6
-path #4778 -> variant Option 1
-path #4780 -> local 6
-path #4799 -> local 3
-path #4801 -> local 1
-path #4803 -> local 0
-path #4815 -> local 5
-path #4818 -> variant Option 0
-path #4823 -> local 4
-path #4826 -> local 3
-path #4828 -> local 2
-path #4831 -> local 6
-path #4833 -> local 0
-path #4836 -> local 5
-path #4840 -> variant Option 0
-path #4844 -> local 6
-path #4846 -> local 0
-path #4849 -> local 5
-path #4853 -> local 4
-path #4856 -> local 6
-path #4862 -> variant Option 1
-path #4864 -> local 6
-path #4867 -> local 6
-path #4869 -> local 0
-path #4872 -> local 5
-path #4876 -> variant Option 0
-path #4880 -> local 4
-path #4883 -> local 6
-path #4887 -> variant Option 1
-path #4889 -> local 6
-path #4896 -> local 2
-path #4898 -> local 6
-path #4900 -> local 1
-path #4903 -> local 5
-path #4907 -> variant Option 0
-path #4911 -> local 6
-path #4913 -> local 1
-path #4916 -> local 5
-path #4920 -> local 4
-path #4923 -> local 6
-path #4929 -> variant Option 1
-path #4931 -> local 6
-path #4934 -> local 6
-path #4936 -> local 1
-path #4939 -> local 5
-path #4943 -> variant Option 0
-path #4947 -> local 4
-path #4950 -> local 6
-path #4954 -> variant Option 1
-path #4956 -> local 6
-path #4975 -> local 3
-path #4977 -> local 1
-path #4979 -> local 0
-path #4991 -> local 5
-path #4994 -> variant Option 0
-path #4999 -> local 4
-path #5002 -> local 3
-path #5004 -> local 2
-path #5007 -> local 6
-path #5009 -> local 0
-path #5012 -> local 5
-path #5016 -> variant Option 0
-path #5020 -> local 6
-path #5022 -> local 0
-path #5025 -> local 5
-path #5029 -> local 4
-path #5032 -> local 6
-path #5038 -> variant Option 1
-path #5040 -> local 6
-path #5043 -> local 6
-path #5045 -> local 0
-path #5048 -> local 5
-path #5052 -> variant Option 0
-path #5056 -> local 4
-path #5059 -> local 6
-path #5063 -> variant Option 1
-path #5065 -> local 6
-path #5072 -> local 2
-path #5074 -> local 6
-path #5076 -> local 1
-path #5079 -> local 5
-path #5083 -> variant Option 0
-path #5087 -> local 6
-path #5089 -> local 1
-path #5092 -> local 5
-path #5096 -> local 4
-path #5099 -> local 6
-path #5105 -> variant Option 1
-path #5107 -> local 6
-path #5110 -> local 6
-path #5112 -> local 1
-path #5115 -> local 5
-path #5119 -> variant Option 0
-path #5123 -> local 4
-path #5126 -> local 6
-path #5130 -> variant Option 1
-path #5132 -> local 6
-path #5151 -> local 3
-path #5153 -> local 1
-path #5155 -> local 0
-path #5167 -> local 5
-path #5170 -> variant Option 0
-path #5175 -> local 4
-path #5178 -> local 3
-path #5180 -> local 2
-path #5183 -> local 6
-path #5185 -> local 0
-path #5188 -> local 5
-path #5192 -> variant Option 0
-path #5196 -> local 6
-path #5198 -> local 0
-path #5201 -> local 5
-path #5205 -> local 4
-path #5208 -> local 6
-path #5214 -> variant Option 1
-path #5216 -> local 6
-path #5219 -> local 6
-path #5221 -> local 0
-path #5224 -> local 5
-path #5228 -> variant Option 0
-path #5232 -> local 4
-path #5235 -> local 6
-path #5239 -> variant Option 1
-path #5241 -> local 6
-path #5248 -> local 2
-path #5250 -> local 6
-path #5252 -> local 1
-path #5255 -> local 5
-path #5259 -> variant Option 0
-path #5263 -> local 6
-path #5265 -> local 1
-path #5268 -> local 5
-path #5272 -> local 4
-path #5275 -> local 6
-path #5281 -> variant Option 1
-path #5283 -> local 6
-path #5286 -> local 6
-path #5288 -> local 1
-path #5291 -> local 5
-path #5295 -> variant Option 0
-path #5299 -> local 4
-path #5302 -> local 6
-path #5306 -> variant Option 1
-path #5308 -> local 6
-path #5327 -> local 3
-path #5329 -> local 1
-path #5331 -> local 0
-path #5343 -> local 5
-path #5346 -> variant Option 0
-path #5351 -> local 4
-path #5354 -> local 3
-path #5356 -> local 2
-path #5359 -> local 6
-path #5361 -> local 0
-path #5364 -> local 5
-path #5368 -> variant Option 0
-path #5372 -> local 6
-path #5374 -> local 0
-path #5377 -> local 5
-path #5381 -> local 4
-path #5384 -> local 6
-path #5390 -> variant Option 1
-path #5392 -> local 6
-path #5395 -> local 6
-path #5397 -> local 0
-path #5400 -> local 5
-path #5404 -> variant Option 0
-path #5408 -> local 4
-path #5411 -> local 6
-path #5415 -> variant Option 1
-path #5417 -> local 6
-path #5424 -> local 2
-path #5426 -> local 6
-path #5428 -> local 1
-path #5431 -> local 5
-path #5435 -> variant Option 0
-path #5439 -> local 6
-path #5441 -> local 1
-path #5444 -> local 5
-path #5448 -> local 4
-path #5451 -> local 6
-path #5457 -> variant Option 1
-path #5459 -> local 6
-path #5462 -> local 6
-path #5464 -> local 1
-path #5467 -> local 5
-path #5471 -> variant Option 0
-path #5475 -> local 4
-path #5478 -> local 6
-path #5482 -> variant Option 1
-path #5484 -> local 6
+path #4298 -> local 2
+path #4312 -> local 0
+path #4315 -> local 1
+path #4320 -> fn 133
+path #4322 -> local 0
+path #4327 -> local 2
+path #4332 -> local 2
+path #4334 -> local 3
+path #4337 -> local 3
+path #4341 -> local 2
+path #4345 -> local 4
+path #4351 -> local 4
+path #4355 -> local 1
+path #4357 -> local 4
+path #4360 -> local 4
+path #4367 -> local 1
+path #4369 -> local 4
+path #4375 -> local 1
+path #4381 -> local 0
+path #4384 -> variant Option 0
+path #4386 -> local 0
+path #4393 -> local 0
+path #4398 -> variant Option 1
+path #4401 -> variant Option 0
+path #4406 -> local 0
+path #4409 -> local 1
+path #4414 -> local 0
+path #4417 -> variant Option 1
+path #4419 -> local 1
+path #4422 -> local 0
+path #4425 -> extern 16
+path #4427 -> local 2
+path #4432 -> local 0
+path #4439 -> local 0
+path #4444 -> variant Option 1
+path #4446 -> local 1
+path #4448 -> variant Option 0
+path #4450 -> builtin panic
+path #4465 -> local 3
+path #4467 -> local 1
+path #4469 -> local 0
+path #4481 -> local 5
+path #4484 -> variant Option 0
+path #4489 -> local 4
+path #4492 -> local 3
+path #4494 -> local 2
+path #4497 -> local 6
+path #4499 -> local 0
+path #4502 -> local 5
+path #4506 -> variant Option 0
+path #4510 -> local 6
+path #4512 -> local 0
+path #4515 -> local 5
+path #4519 -> local 4
+path #4522 -> local 6
+path #4528 -> variant Option 1
+path #4530 -> local 6
+path #4533 -> local 6
+path #4535 -> local 0
+path #4538 -> local 5
+path #4542 -> variant Option 0
+path #4546 -> local 4
+path #4549 -> local 6
+path #4553 -> variant Option 1
+path #4555 -> local 6
+path #4562 -> local 2
+path #4564 -> local 6
+path #4566 -> local 1
+path #4569 -> local 5
+path #4573 -> variant Option 0
+path #4577 -> local 6
+path #4579 -> local 1
+path #4582 -> local 5
+path #4586 -> local 4
+path #4589 -> local 6
+path #4595 -> variant Option 1
+path #4597 -> local 6
+path #4600 -> local 6
+path #4602 -> local 1
+path #4605 -> local 5
+path #4609 -> variant Option 0
+path #4613 -> local 4
+path #4616 -> local 6
+path #4620 -> variant Option 1
+path #4622 -> local 6
+path #4641 -> local 3
+path #4643 -> local 1
+path #4645 -> local 0
+path #4657 -> local 5
+path #4660 -> variant Option 0
+path #4665 -> local 4
+path #4668 -> local 3
+path #4670 -> local 2
+path #4673 -> local 6
+path #4675 -> local 0
+path #4678 -> local 5
+path #4682 -> variant Option 0
+path #4686 -> local 6
+path #4688 -> local 0
+path #4691 -> local 5
+path #4695 -> local 4
+path #4698 -> local 6
+path #4704 -> variant Option 1
+path #4706 -> local 6
+path #4709 -> local 6
+path #4711 -> local 0
+path #4714 -> local 5
+path #4718 -> variant Option 0
+path #4722 -> local 4
+path #4725 -> local 6
+path #4729 -> variant Option 1
+path #4731 -> local 6
+path #4738 -> local 2
+path #4740 -> local 6
+path #4742 -> local 1
+path #4745 -> local 5
+path #4749 -> variant Option 0
+path #4753 -> local 6
+path #4755 -> local 1
+path #4758 -> local 5
+path #4762 -> local 4
+path #4765 -> local 6
+path #4771 -> variant Option 1
+path #4773 -> local 6
+path #4776 -> local 6
+path #4778 -> local 1
+path #4781 -> local 5
+path #4785 -> variant Option 0
+path #4789 -> local 4
+path #4792 -> local 6
+path #4796 -> variant Option 1
+path #4798 -> local 6
+path #4817 -> local 3
+path #4819 -> local 1
+path #4821 -> local 0
+path #4833 -> local 5
+path #4836 -> variant Option 0
+path #4841 -> local 4
+path #4844 -> local 3
+path #4846 -> local 2
+path #4849 -> local 6
+path #4851 -> local 0
+path #4854 -> local 5
+path #4858 -> variant Option 0
+path #4862 -> local 6
+path #4864 -> local 0
+path #4867 -> local 5
+path #4871 -> local 4
+path #4874 -> local 6
+path #4880 -> variant Option 1
+path #4882 -> local 6
+path #4885 -> local 6
+path #4887 -> local 0
+path #4890 -> local 5
+path #4894 -> variant Option 0
+path #4898 -> local 4
+path #4901 -> local 6
+path #4905 -> variant Option 1
+path #4907 -> local 6
+path #4914 -> local 2
+path #4916 -> local 6
+path #4918 -> local 1
+path #4921 -> local 5
+path #4925 -> variant Option 0
+path #4929 -> local 6
+path #4931 -> local 1
+path #4934 -> local 5
+path #4938 -> local 4
+path #4941 -> local 6
+path #4947 -> variant Option 1
+path #4949 -> local 6
+path #4952 -> local 6
+path #4954 -> local 1
+path #4957 -> local 5
+path #4961 -> variant Option 0
+path #4965 -> local 4
+path #4968 -> local 6
+path #4972 -> variant Option 1
+path #4974 -> local 6
+path #4993 -> local 3
+path #4995 -> local 1
+path #4997 -> local 0
+path #5009 -> local 5
+path #5012 -> variant Option 0
+path #5017 -> local 4
+path #5020 -> local 3
+path #5022 -> local 2
+path #5025 -> local 6
+path #5027 -> local 0
+path #5030 -> local 5
+path #5034 -> variant Option 0
+path #5038 -> local 6
+path #5040 -> local 0
+path #5043 -> local 5
+path #5047 -> local 4
+path #5050 -> local 6
+path #5056 -> variant Option 1
+path #5058 -> local 6
+path #5061 -> local 6
+path #5063 -> local 0
+path #5066 -> local 5
+path #5070 -> variant Option 0
+path #5074 -> local 4
+path #5077 -> local 6
+path #5081 -> variant Option 1
+path #5083 -> local 6
+path #5090 -> local 2
+path #5092 -> local 6
+path #5094 -> local 1
+path #5097 -> local 5
+path #5101 -> variant Option 0
+path #5105 -> local 6
+path #5107 -> local 1
+path #5110 -> local 5
+path #5114 -> local 4
+path #5117 -> local 6
+path #5123 -> variant Option 1
+path #5125 -> local 6
+path #5128 -> local 6
+path #5130 -> local 1
+path #5133 -> local 5
+path #5137 -> variant Option 0
+path #5141 -> local 4
+path #5144 -> local 6
+path #5148 -> variant Option 1
+path #5150 -> local 6
+path #5169 -> local 3
+path #5171 -> local 1
+path #5173 -> local 0
+path #5185 -> local 5
+path #5188 -> variant Option 0
+path #5193 -> local 4
+path #5196 -> local 3
+path #5198 -> local 2
+path #5201 -> local 6
+path #5203 -> local 0
+path #5206 -> local 5
+path #5210 -> variant Option 0
+path #5214 -> local 6
+path #5216 -> local 0
+path #5219 -> local 5
+path #5223 -> local 4
+path #5226 -> local 6
+path #5232 -> variant Option 1
+path #5234 -> local 6
+path #5237 -> local 6
+path #5239 -> local 0
+path #5242 -> local 5
+path #5246 -> variant Option 0
+path #5250 -> local 4
+path #5253 -> local 6
+path #5257 -> variant Option 1
+path #5259 -> local 6
+path #5266 -> local 2
+path #5268 -> local 6
+path #5270 -> local 1
+path #5273 -> local 5
+path #5277 -> variant Option 0
+path #5281 -> local 6
+path #5283 -> local 1
+path #5286 -> local 5
+path #5290 -> local 4
+path #5293 -> local 6
+path #5299 -> variant Option 1
+path #5301 -> local 6
+path #5304 -> local 6
+path #5306 -> local 1
+path #5309 -> local 5
+path #5313 -> variant Option 0
+path #5317 -> local 4
+path #5320 -> local 6
+path #5324 -> variant Option 1
+path #5326 -> local 6
+path #5345 -> local 3
+path #5347 -> local 1
+path #5349 -> local 0
+path #5361 -> local 5
+path #5364 -> variant Option 0
+path #5369 -> local 4
+path #5372 -> local 3
+path #5374 -> local 2
+path #5377 -> local 6
+path #5379 -> local 0
+path #5382 -> local 5
+path #5386 -> variant Option 0
+path #5390 -> local 6
+path #5392 -> local 0
+path #5395 -> local 5
+path #5399 -> local 4
+path #5402 -> local 6
+path #5408 -> variant Option 1
+path #5410 -> local 6
+path #5413 -> local 6
+path #5415 -> local 0
+path #5418 -> local 5
+path #5422 -> variant Option 0
+path #5426 -> local 4
+path #5429 -> local 6
+path #5433 -> variant Option 1
+path #5435 -> local 6
+path #5442 -> local 2
+path #5444 -> local 6
+path #5446 -> local 1
+path #5449 -> local 5
+path #5453 -> variant Option 0
+path #5457 -> local 6
+path #5459 -> local 1
+path #5462 -> local 5
+path #5466 -> local 4
+path #5469 -> local 6
+path #5475 -> variant Option 1
+path #5477 -> local 6
+path #5480 -> local 6
+path #5482 -> local 1
+path #5485 -> local 5
+path #5489 -> variant Option 0
+path #5493 -> local 4
+path #5496 -> local 6
+path #5500 -> variant Option 1
+path #5502 -> local 6
+path #5521 -> local 3
+path #5523 -> local 1
+path #5525 -> local 0
+path #5537 -> local 5
+path #5540 -> variant Option 0
+path #5545 -> local 4
+path #5548 -> local 3
+path #5550 -> local 2
+path #5553 -> local 6
+path #5555 -> local 0
+path #5558 -> local 5
+path #5562 -> variant Option 0
+path #5566 -> local 6
+path #5568 -> local 0
+path #5571 -> local 5
+path #5575 -> local 4
+path #5578 -> local 6
+path #5584 -> variant Option 1
+path #5586 -> local 6
+path #5589 -> local 6
+path #5591 -> local 0
+path #5594 -> local 5
+path #5598 -> variant Option 0
+path #5602 -> local 4
+path #5605 -> local 6
+path #5609 -> variant Option 1
+path #5611 -> local 6
+path #5618 -> local 2
+path #5620 -> local 6
+path #5622 -> local 1
+path #5625 -> local 5
+path #5629 -> variant Option 0
+path #5633 -> local 6
+path #5635 -> local 1
+path #5638 -> local 5
+path #5642 -> local 4
+path #5645 -> local 6
+path #5651 -> variant Option 1
+path #5653 -> local 6
+path #5656 -> local 6
+path #5658 -> local 1
+path #5661 -> local 5
+path #5665 -> variant Option 0
+path #5669 -> local 4
+path #5672 -> local 6
+path #5676 -> variant Option 1
+path #5678 -> local 6
+path #5697 -> local 3
+path #5699 -> local 1
+path #5701 -> local 0
+path #5713 -> local 5
+path #5716 -> variant Option 0
+path #5721 -> local 4
+path #5724 -> local 3
+path #5726 -> local 2
+path #5729 -> local 6
+path #5731 -> local 0
+path #5734 -> local 5
+path #5738 -> variant Option 0
+path #5742 -> local 6
+path #5744 -> local 0
+path #5747 -> local 5
+path #5751 -> local 4
+path #5754 -> local 6
+path #5760 -> variant Option 1
+path #5762 -> local 6
+path #5765 -> local 6
+path #5767 -> local 0
+path #5770 -> local 5
+path #5774 -> variant Option 0
+path #5778 -> local 4
+path #5781 -> local 6
+path #5785 -> variant Option 1
+path #5787 -> local 6
+path #5794 -> local 2
+path #5796 -> local 6
+path #5798 -> local 1
+path #5801 -> local 5
+path #5805 -> variant Option 0
+path #5809 -> local 6
+path #5811 -> local 1
+path #5814 -> local 5
+path #5818 -> local 4
+path #5821 -> local 6
+path #5827 -> variant Option 1
+path #5829 -> local 6
+path #5832 -> local 6
+path #5834 -> local 1
+path #5837 -> local 5
+path #5841 -> variant Option 0
+path #5845 -> local 4
+path #5848 -> local 6
+path #5852 -> variant Option 1
+path #5854 -> local 6
+path #5873 -> local 3
+path #5875 -> local 1
+path #5877 -> local 0
+path #5889 -> local 5
+path #5892 -> variant Option 0
+path #5897 -> local 4
+path #5900 -> local 3
+path #5902 -> local 2
+path #5905 -> local 6
+path #5907 -> local 0
+path #5910 -> local 5
+path #5914 -> variant Option 0
+path #5918 -> local 6
+path #5920 -> local 0
+path #5923 -> local 5
+path #5927 -> local 4
+path #5930 -> local 6
+path #5936 -> variant Option 1
+path #5938 -> local 6
+path #5941 -> local 6
+path #5943 -> local 0
+path #5946 -> local 5
+path #5950 -> variant Option 0
+path #5954 -> local 4
+path #5957 -> local 6
+path #5961 -> variant Option 1
+path #5963 -> local 6
+path #5970 -> local 2
+path #5972 -> local 6
+path #5974 -> local 1
+path #5977 -> local 5
+path #5981 -> variant Option 0
+path #5985 -> local 6
+path #5987 -> local 1
+path #5990 -> local 5
+path #5994 -> local 4
+path #5997 -> local 6
+path #6003 -> variant Option 1
+path #6005 -> local 6
+path #6008 -> local 6
+path #6010 -> local 1
+path #6013 -> local 5
+path #6017 -> variant Option 0
+path #6021 -> local 4
+path #6024 -> local 6
+path #6028 -> variant Option 1
+path #6030 -> local 6
+path #6049 -> local 3
+path #6051 -> local 1
+path #6053 -> local 0
+path #6065 -> local 5
+path #6068 -> variant Option 0
+path #6073 -> local 4
+path #6076 -> local 3
+path #6078 -> local 2
+path #6081 -> local 6
+path #6083 -> local 0
+path #6086 -> local 5
+path #6090 -> variant Option 0
+path #6094 -> local 6
+path #6096 -> local 0
+path #6099 -> local 5
+path #6103 -> local 4
+path #6106 -> local 6
+path #6112 -> variant Option 1
+path #6114 -> local 6
+path #6117 -> local 6
+path #6119 -> local 0
+path #6122 -> local 5
+path #6126 -> variant Option 0
+path #6130 -> local 4
+path #6133 -> local 6
+path #6137 -> variant Option 1
+path #6139 -> local 6
+path #6146 -> local 2
+path #6148 -> local 6
+path #6150 -> local 1
+path #6153 -> local 5
+path #6157 -> variant Option 0
+path #6161 -> local 6
+path #6163 -> local 1
+path #6166 -> local 5
+path #6170 -> local 4
+path #6173 -> local 6
+path #6179 -> variant Option 1
+path #6181 -> local 6
+path #6184 -> local 6
+path #6186 -> local 1
+path #6189 -> local 5
+path #6193 -> variant Option 0
+path #6197 -> local 4
+path #6200 -> local 6
+path #6204 -> variant Option 1
+path #6206 -> local 6
 type_path #0 -> builtin
 type_path #2 -> builtin
 type_path #7 -> param enum 0 0
@@ -1967,528 +2203,565 @@ type_path #209 -> ctype c_int
 type_path #212 -> class 0
 type_path #213 -> class 1
 type_path #246 -> builtin
-type_path #247 -> builtin
-type_path #248 -> builtin
 type_path #249 -> builtin
-type_path #251 -> builtin
 type_path #252 -> builtin
-type_path #253 -> class 3
-type_path #300 -> class 3
-type_path #306 -> class 3
-type_path #318 -> ctype c_int
-type_path #319 -> ctype c_char
-type_path #328 -> builtin
-type_path #329 -> builtin
-type_path #334 -> builtin
-type_path #335 -> builtin
-type_path #336 -> builtin
-type_path #360 -> builtin
-type_path #365 -> builtin
-type_path #371 -> interface 2
-type_path #372 -> builtin
-type_path #374 -> builtin
-type_path #375 -> struct 1
-type_path #383 -> builtin
-type_path #384 -> struct 1
+type_path #256 -> builtin
+type_path #272 -> builtin
+type_path #273 -> builtin
+type_path #274 -> class 3
+type_path #358 -> class 3
+type_path #364 -> class 3
+type_path #376 -> ctype c_int
+type_path #377 -> ctype c_char
+type_path #386 -> builtin
+type_path #387 -> builtin
 type_path #392 -> builtin
-type_path #393 -> struct 1
-type_path #401 -> builtin
-type_path #402 -> struct 1
-type_path #408 -> builtin
-type_path #415 -> builtin
-type_path #422 -> builtin
-type_path #429 -> builtin
-type_path #434 -> builtin
-type_path #438 -> builtin
-type_path #443 -> struct 1
-type_path #444 -> struct 1
-type_path #455 -> struct 1
-type_path #456 -> struct 1
-type_path #479 -> builtin
-type_path #480 -> struct 1
-type_path #490 -> struct 1
-type_path #491 -> builtin
-type_path #500 -> struct 1
-type_path #501 -> enum 3
-type_path #509 -> interface 2
-type_path #510 -> builtin
-type_path #512 -> struct 2
-type_path #519 -> struct 1
-type_path #527 -> struct 2
-type_path #528 -> struct 1
-type_path #553 -> struct 2
-type_path #554 -> builtin
-type_path #563 -> struct 2
-type_path #564 -> enum 3
-type_path #572 -> interface 2
-type_path #573 -> builtin
-type_path #575 -> struct 3
-type_path #582 -> struct 1
-type_path #590 -> struct 3
-type_path #591 -> builtin
-type_path #600 -> struct 3
-type_path #601 -> enum 3
-type_path #610 -> struct 1
-type_path #617 -> builtin
-type_path #618 -> ctype c_void
-type_path #619 -> builtin
-type_path #620 -> ctype c_void
-type_path #621 -> builtin
-type_path #622 -> builtin
-type_path #623 -> ctype c_void
-type_path #625 -> ctype c_void
-type_path #632 -> builtin
-type_path #633 -> builtin
-type_path #634 -> class 2
-type_path #635 -> builtin
-type_path #663 -> class 2
-type_path #669 -> builtin
-type_path #670 -> builtin
+type_path #393 -> builtin
+type_path #394 -> builtin
+type_path #418 -> builtin
+type_path #423 -> builtin
+type_path #429 -> interface 2
+type_path #430 -> builtin
+type_path #432 -> builtin
+type_path #433 -> struct 1
+type_path #441 -> builtin
+type_path #442 -> struct 1
+type_path #450 -> builtin
+type_path #451 -> struct 1
+type_path #459 -> builtin
+type_path #460 -> struct 1
+type_path #466 -> builtin
+type_path #473 -> builtin
+type_path #480 -> builtin
+type_path #487 -> builtin
+type_path #492 -> builtin
+type_path #496 -> builtin
+type_path #501 -> struct 1
+type_path #502 -> struct 1
+type_path #513 -> struct 1
+type_path #514 -> struct 1
+type_path #537 -> builtin
+type_path #538 -> struct 1
+type_path #548 -> struct 1
+type_path #549 -> builtin
+type_path #558 -> struct 1
+type_path #559 -> enum 3
+type_path #567 -> interface 2
+type_path #568 -> builtin
+type_path #570 -> struct 2
+type_path #577 -> struct 1
+type_path #585 -> struct 2
+type_path #586 -> struct 1
+type_path #611 -> struct 2
+type_path #612 -> builtin
+type_path #621 -> struct 2
+type_path #622 -> enum 3
+type_path #630 -> interface 2
+type_path #631 -> builtin
+type_path #633 -> struct 3
+type_path #640 -> struct 1
+type_path #648 -> struct 3
+type_path #649 -> builtin
+type_path #658 -> struct 3
+type_path #659 -> enum 3
+type_path #668 -> struct 1
+type_path #675 -> builtin
+type_path #676 -> ctype c_void
+type_path #677 -> builtin
+type_path #678 -> ctype c_void
+type_path #679 -> builtin
 type_path #680 -> builtin
-type_path #681 -> builtin
-type_path #682 -> builtin
-type_path #683 -> builtin
-type_path #684 -> builtin
-type_path #685 -> builtin
-type_path #686 -> builtin
-type_path #687 -> builtin
-type_path #688 -> builtin
-type_path #689 -> builtin
+type_path #681 -> ctype c_void
+type_path #683 -> ctype c_void
 type_path #690 -> builtin
 type_path #691 -> builtin
-type_path #692 -> builtin
+type_path #692 -> class 2
 type_path #693 -> builtin
-type_path #695 -> enum 2
-type_path #696 -> builtin
-type_path #716 -> interface 0
-type_path #717 -> enum 1
-type_path #718 -> builtin
-type_path #720 -> enum 1
-type_path #721 -> builtin
-type_path #733 -> enum 1
-type_path #738 -> builtin
-type_path #743 -> builtin
-type_path #744 -> class 3
-type_path #752 -> builtin
-type_path #753 -> builtin
-type_path #754 -> class 3
-type_path #774 -> builtin
-type_path #775 -> builtin
-type_path #776 -> class 3
-type_path #789 -> builtin
-type_path #790 -> builtin
-type_path #791 -> class 3
-type_path #804 -> builtin
-type_path #805 -> builtin
-type_path #806 -> class 3
-type_path #819 -> builtin
-type_path #820 -> builtin
-type_path #821 -> class 3
-type_path #834 -> builtin
-type_path #835 -> class 3
-type_path #844 -> builtin
-type_path #845 -> builtin
-type_path #846 -> builtin
-type_path #847 -> class 3
-type_path #899 -> builtin
-type_path #900 -> builtin
-type_path #901 -> builtin
-type_path #902 -> class 3
-type_path #940 -> builtin
-type_path #941 -> builtin
-type_path #942 -> class 3
-type_path #978 -> ctype c_int
-type_path #988 -> builtin
-type_path #1001 -> builtin
-type_path #1003 -> builtin
-type_path #1004 -> ctype c_long
-type_path #1006 -> builtin
-type_path #1007 -> builtin
-type_path #1008 -> struct 4
+type_path #721 -> class 2
+type_path #727 -> builtin
+type_path #728 -> builtin
+type_path #739 -> enum 2
+type_path #740 -> builtin
+type_path #759 -> interface 0
+type_path #760 -> enum 1
+type_path #761 -> builtin
+type_path #763 -> enum 1
+type_path #764 -> builtin
+type_path #776 -> enum 1
+type_path #781 -> builtin
+type_path #786 -> builtin
+type_path #787 -> class 3
+type_path #795 -> builtin
+type_path #796 -> builtin
+type_path #797 -> builtin
+type_path #798 -> builtin
+type_path #799 -> class 3
+type_path #872 -> builtin
+type_path #873 -> builtin
+type_path #874 -> class 3
+type_path #883 -> builtin
+type_path #884 -> builtin
+type_path #885 -> class 3
+type_path #894 -> builtin
+type_path #895 -> builtin
+type_path #896 -> class 3
+type_path #905 -> builtin
+type_path #906 -> builtin
+type_path #907 -> class 3
+type_path #916 -> builtin
+type_path #917 -> class 3
+type_path #947 -> ctype c_void
+type_path #948 -> class 3
+type_path #965 -> builtin
+type_path #966 -> builtin
+type_path #967 -> builtin
+type_path #968 -> class 3
+type_path #976 -> builtin
 type_path #1012 -> builtin
-type_path #1016 -> ctype c_long
-type_path #1020 -> builtin
-type_path #1030 -> builtin
-type_path #1037 -> builtin
-type_path #1088 -> ctype c_int
-type_path #1090 -> ctype c_int
-type_path #1094 -> ctype c_int
-type_path #1095 -> struct 4
-type_path #1096 -> ctype c_int
-type_path #1097 -> struct 4
-type_path #1098 -> struct 4
-type_path #1099 -> ctype c_int
-type_path #1109 -> builtin
-type_path #1116 -> builtin
-type_path #1123 -> ctype c_int
-type_path #1124 -> builtin
-type_path #1254 -> builtin
-type_path #1337 -> ctype c_int
-type_path #1340 -> builtin
-type_path #1343 -> ctype c_char
-type_path #1344 -> ctype c_char
-type_path #1346 -> ctype c_int
-type_path #1347 -> ctype c_char
-type_path #1356 -> builtin
-type_path #1363 -> builtin
-type_path #1364 -> builtin
-type_path #1367 -> builtin
-type_path #1377 -> ctype c_char
-type_path #1394 -> builtin
-type_path #1423 -> builtin
-type_path #1424 -> builtin
-type_path #1425 -> builtin
-type_path #2117 -> builtin
-type_path #2118 -> interface 0
-type_path #2119 -> builtin
-type_path #2121 -> builtin
-type_path #2128 -> builtin
-type_path #2133 -> builtin
-type_path #2134 -> builtin
-type_path #2135 -> interface 1
-type_path #2137 -> builtin
-type_path #2138 -> enum 3
-type_path #2139 -> interface 1
-type_path #2141 -> builtin
-type_path #2143 -> param interface 4 0
-type_path #2144 -> param interface 4 1
-type_path #2146 -> param interface 5 0
-type_path #2147 -> param interface 5 1
-type_path #2149 -> param interface 6 0
-type_path #2150 -> param interface 6 1
-type_path #2152 -> param interface 7 0
-type_path #2153 -> param interface 7 1
-type_path #2155 -> param interface 8 0
-type_path #2156 -> param interface 8 1
-type_path #2158 -> param interface 9 0
-type_path #2159 -> param struct 5 0
-type_path #2160 -> param struct 5 1
-type_path #2161 -> param class 5 0
-type_path #2163 -> param class 5 0
-type_path #2169 -> builtin
-type_path #2170 -> param class 6 0
-type_path #2172 -> builtin
-type_path #2173 -> param class 6 0
-type_path #2180 -> builtin
-type_path #2181 -> param class 6 0
-type_path #2186 -> param class 6 0
-type_path #2187 -> param fn 84 0
-type_path #2188 -> class 6
-type_path #2189 -> param fn 84 0
-type_path #2193 -> class 6
-type_path #2194 -> param fn 84 0
-type_path #2204 -> param class 6 0
-type_path #2205 -> builtin
-type_path #2206 -> class 6
-type_path #2207 -> param class 6 0
-type_path #2211 -> class 6
-type_path #2212 -> param class 6 0
-type_path #2234 -> builtin
-type_path #2235 -> class 6
-type_path #2236 -> param class 6 0
-type_path #2241 -> class 5
-type_path #2242 -> builtin
-type_path #2245 -> class 6
-type_path #2246 -> param class 6 0
-type_path #2268 -> builtin
-type_path #2269 -> class 6
-type_path #2270 -> param class 6 0
-type_path #2275 -> class 5
-type_path #2276 -> builtin
-type_path #2279 -> class 6
-type_path #2280 -> param class 6 0
-type_path #2310 -> builtin
-type_path #2311 -> class 6
-type_path #2312 -> param class 6 0
-type_path #2326 -> class 5
-type_path #2327 -> builtin
-type_path #2330 -> class 6
-type_path #2331 -> param class 6 0
-type_path #2360 -> builtin
-type_path #2361 -> param class 6 0
-type_path #2364 -> param class 6 0
-type_path #2377 -> builtin
-type_path #2379 -> builtin
-type_path #2390 -> param fn 91 0
-type_path #2391 -> param fn 91 0
-type_path #2392 -> param class 6 0
-type_path #2393 -> param fn 91 0
-type_path #2394 -> param fn 91 0
-type_path #2413 -> param class 6 0
-type_path #2423 -> param class 6 0
-type_path #2424 -> builtin
-type_path #2425 -> builtin
-type_path #2439 -> param class 6 0
-type_path #2440 -> builtin
-type_path #2441 -> builtin
-type_path #2456 -> param class 6 0
-type_path #2457 -> builtin
-type_path #2458 -> builtin
-type_path #2459 -> param class 6 0
-type_path #2477 -> interface 3
-type_path #2478 -> builtin
-type_path #2479 -> builtin
-type_path #2480 -> struct 5
-type_path #2481 -> param class 7 0
-type_path #2482 -> param class 7 1
-type_path #2483 -> builtin
-type_path #2484 -> builtin
-type_path #2485 -> builtin
-type_path #2486 -> builtin
-type_path #2492 -> builtin
-type_path #2493 -> struct 5
-type_path #2494 -> param class 7 0
-type_path #2495 -> param class 7 1
-type_path #2501 -> builtin
-type_path #2512 -> builtin
-type_path #2517 -> builtin
-type_path #2524 -> param class 7 0
-type_path #2525 -> builtin
-type_path #2526 -> param class 7 1
-type_path #2545 -> builtin
-type_path #2559 -> param class 7 0
-type_path #2560 -> builtin
-type_path #2568 -> param class 7 0
-type_path #2569 -> param class 7 1
-type_path #2570 -> builtin
-type_path #2571 -> param class 7 1
-type_path #2588 -> builtin
-type_path #2676 -> param class 7 0
-type_path #2677 -> builtin
-type_path #2678 -> param class 7 1
-type_path #2695 -> builtin
-type_path #2742 -> builtin
-type_path #2743 -> struct 5
-type_path #2744 -> param class 7 0
-type_path #2745 -> param class 7 1
-type_path #2751 -> builtin
-type_path #2762 -> class 6
-type_path #2763 -> struct 5
-type_path #2764 -> param class 7 0
-type_path #2765 -> param class 7 1
-type_path #2770 -> class 5
-type_path #2771 -> builtin
-type_path #2774 -> class 6
-type_path #2775 -> struct 5
-type_path #2776 -> param class 7 0
-type_path #2777 -> param class 7 1
-type_path #2812 -> class 6
-type_path #2813 -> param class 7 0
-type_path #2823 -> class 6
-type_path #2824 -> param class 7 1
-type_path #2834 -> param class 7 0
-type_path #2835 -> builtin
-type_path #2836 -> builtin
+type_path #1088 -> builtin
+type_path #1089 -> builtin
+type_path #1090 -> builtin
+type_path #1091 -> class 3
+type_path #1099 -> builtin
+type_path #1195 -> builtin
+type_path #1196 -> builtin
+type_path #1197 -> class 3
+type_path #1205 -> builtin
+type_path #1278 -> builtin
+type_path #1279 -> builtin
+type_path #1280 -> builtin
+type_path #1281 -> class 3
+type_path #1308 -> builtin
+type_path #1309 -> builtin
+type_path #1310 -> builtin
+type_path #1332 -> builtin
+type_path #1447 -> builtin
+type_path #1522 -> ctype c_int
+type_path #1532 -> ctype c_int
+type_path #1550 -> builtin
+type_path #1563 -> ctype c_int
+type_path #1564 -> ctype c_char
+type_path #1566 -> builtin
+type_path #1567 -> builtin
+type_path #1577 -> builtin
+type_path #1579 -> builtin
+type_path #1580 -> ctype c_long
+type_path #1582 -> builtin
+type_path #1583 -> builtin
+type_path #1584 -> struct 4
+type_path #1588 -> builtin
+type_path #1592 -> ctype c_long
+type_path #1596 -> builtin
+type_path #1606 -> builtin
+type_path #1613 -> builtin
+type_path #1664 -> ctype c_int
+type_path #1666 -> ctype c_int
+type_path #1670 -> ctype c_int
+type_path #1671 -> struct 4
+type_path #1672 -> ctype c_int
+type_path #1673 -> struct 4
+type_path #1674 -> struct 4
+type_path #1675 -> ctype c_int
+type_path #1685 -> builtin
+type_path #1692 -> builtin
+type_path #1699 -> ctype c_int
+type_path #1700 -> builtin
+type_path #1830 -> builtin
+type_path #1913 -> ctype c_int
+type_path #1916 -> builtin
+type_path #1919 -> ctype c_char
+type_path #1920 -> ctype c_char
+type_path #1922 -> ctype c_int
+type_path #1923 -> ctype c_char
+type_path #1932 -> builtin
+type_path #1939 -> builtin
+type_path #1940 -> builtin
+type_path #1943 -> builtin
+type_path #1953 -> ctype c_char
+type_path #1970 -> builtin
+type_path #1999 -> builtin
+type_path #2000 -> builtin
+type_path #2001 -> builtin
+type_path #2692 -> ctype c_void
+type_path #2694 -> ctype c_void
+type_path #2696 -> ctype c_void
+type_path #2706 -> builtin
+type_path #2707 -> builtin
+type_path #2708 -> builtin
+type_path #2709 -> ctype c_void
+type_path #2710 -> builtin
+type_path #2711 -> ctype c_int
+type_path #2712 -> ctype c_void
+type_path #2713 -> ctype c_int
+type_path #2714 -> ctype c_void
+type_path #2715 -> ctype c_int
+type_path #2716 -> ctype c_void
+type_path #2717 -> ctype c_int
+type_path #2718 -> builtin
+type_path #2719 -> builtin
+type_path #2720 -> builtin
+type_path #2721 -> ctype c_void
+type_path #2722 -> builtin
+type_path #2723 -> ctype c_void
+type_path #2724 -> ctype c_int
+type_path #2725 -> ctype c_void
+type_path #2727 -> builtin
+type_path #2728 -> ctype c_void
+type_path #2779 -> ctype c_int
+type_path #2780 -> ctype c_int
+type_path #2782 -> builtin
+type_path #2783 -> builtin
+type_path #2839 -> builtin
+type_path #2840 -> interface 0
+type_path #2841 -> builtin
+type_path #2843 -> builtin
+type_path #2850 -> builtin
+type_path #2855 -> builtin
 type_path #2856 -> builtin
+type_path #2857 -> interface 1
 type_path #2859 -> builtin
-type_path #2886 -> builtin
-type_path #2923 -> builtin
-type_path #2924 -> builtin
-type_path #2935 -> builtin
-type_path #2938 -> builtin
-type_path #2967 -> builtin
-type_path #2972 -> builtin
-type_path #2973 -> struct 5
-type_path #2974 -> param class 7 0
-type_path #2975 -> param class 7 1
-type_path #2991 -> builtin
-type_path #3009 -> builtin
-type_path #3066 -> builtin
-type_path #3067 -> param fn 110 0
-type_path #3068 -> class 6
-type_path #3069 -> param fn 110 0
-type_path #3071 -> class 5
-type_path #3072 -> builtin
-type_path #3075 -> class 6
-type_path #3076 -> param fn 110 0
-type_path #3108 -> interface 1
-type_path #3109 -> builtin
-type_path #3110 -> param fn 111 0
-type_path #3111 -> param fn 111 0
-type_path #3112 -> builtin
-type_path #3113 -> builtin
-type_path #3138 -> interface 1
-type_path #3139 -> builtin
-type_path #3140 -> param fn 112 0
-type_path #3141 -> param fn 112 0
-type_path #3142 -> builtin
-type_path #3152 -> param fn 113 0
-type_path #3153 -> class 6
-type_path #3154 -> param fn 113 0
-type_path #3157 -> param fn 113 0
-type_path #3173 -> builtin
-type_path #3174 -> param fn 114 0
-type_path #3175 -> builtin
-type_path #3176 -> param fn 114 0
-type_path #3200 -> interface 2
+type_path #2860 -> enum 3
+type_path #2861 -> interface 1
+type_path #2863 -> builtin
+type_path #2865 -> param interface 4 0
+type_path #2866 -> param interface 4 1
+type_path #2868 -> param interface 5 0
+type_path #2869 -> param interface 5 1
+type_path #2871 -> param interface 6 0
+type_path #2872 -> param interface 6 1
+type_path #2874 -> param interface 7 0
+type_path #2875 -> param interface 7 1
+type_path #2877 -> param interface 8 0
+type_path #2878 -> param interface 8 1
+type_path #2880 -> param interface 9 0
+type_path #2881 -> param struct 5 0
+type_path #2882 -> param struct 5 1
+type_path #2883 -> param class 5 0
+type_path #2885 -> param class 5 0
+type_path #2891 -> builtin
+type_path #2892 -> param class 6 0
+type_path #2894 -> builtin
+type_path #2895 -> param class 6 0
+type_path #2902 -> builtin
+type_path #2903 -> param class 6 0
+type_path #2908 -> param class 6 0
+type_path #2909 -> param fn 96 0
+type_path #2910 -> class 6
+type_path #2911 -> param fn 96 0
+type_path #2915 -> class 6
+type_path #2916 -> param fn 96 0
+type_path #2926 -> param class 6 0
+type_path #2927 -> builtin
+type_path #2928 -> class 6
+type_path #2929 -> param class 6 0
+type_path #2933 -> class 6
+type_path #2934 -> param class 6 0
+type_path #2956 -> builtin
+type_path #2957 -> class 6
+type_path #2958 -> param class 6 0
+type_path #2963 -> class 5
+type_path #2964 -> builtin
+type_path #2967 -> class 6
+type_path #2968 -> param class 6 0
+type_path #2990 -> builtin
+type_path #2991 -> class 6
+type_path #2992 -> param class 6 0
+type_path #2997 -> class 5
+type_path #2998 -> builtin
+type_path #3001 -> class 6
+type_path #3002 -> param class 6 0
+type_path #3032 -> builtin
+type_path #3033 -> class 6
+type_path #3034 -> param class 6 0
+type_path #3048 -> class 5
+type_path #3049 -> builtin
+type_path #3052 -> class 6
+type_path #3053 -> param class 6 0
+type_path #3082 -> builtin
+type_path #3083 -> param class 6 0
+type_path #3086 -> param class 6 0
+type_path #3099 -> builtin
+type_path #3101 -> builtin
+type_path #3112 -> param fn 103 0
+type_path #3113 -> param fn 103 0
+type_path #3114 -> param class 6 0
+type_path #3115 -> param fn 103 0
+type_path #3116 -> param fn 103 0
+type_path #3135 -> param class 6 0
+type_path #3145 -> param class 6 0
+type_path #3146 -> builtin
+type_path #3147 -> builtin
+type_path #3161 -> param class 6 0
+type_path #3162 -> builtin
+type_path #3163 -> builtin
+type_path #3178 -> param class 6 0
+type_path #3179 -> builtin
+type_path #3180 -> builtin
+type_path #3181 -> param class 6 0
+type_path #3199 -> interface 3
+type_path #3200 -> builtin
 type_path #3201 -> builtin
-type_path #3202 -> param fn 115 0
-type_path #3207 -> param fn 115 0
-type_path #3208 -> param fn 115 0
-type_path #3217 -> builtin
-type_path #3218 -> param fn 116 0
-type_path #3219 -> param fn 116 0
-type_path #3220 -> param fn 116 0
-type_path #3221 -> enum 3
+type_path #3202 -> struct 5
+type_path #3203 -> param class 7 0
+type_path #3204 -> param class 7 1
+type_path #3205 -> builtin
+type_path #3206 -> builtin
+type_path #3207 -> builtin
+type_path #3208 -> builtin
+type_path #3214 -> builtin
+type_path #3215 -> struct 5
+type_path #3216 -> param class 7 0
+type_path #3217 -> param class 7 1
+type_path #3223 -> builtin
+type_path #3234 -> builtin
+type_path #3239 -> builtin
+type_path #3246 -> param class 7 0
 type_path #3247 -> builtin
-type_path #3248 -> param fn 117 0
-type_path #3249 -> param fn 117 0
-type_path #3250 -> param fn 117 0
-type_path #3251 -> enum 3
-type_path #3252 -> builtin
-type_path #3253 -> param fn 117 0
-type_path #3268 -> param fn 117 0
-type_path #3272 -> param fn 117 0
-type_path #3323 -> param fn 117 0
-type_path #3326 -> builtin
-type_path #3329 -> builtin
-type_path #3428 -> builtin
-type_path #3429 -> builtin
-type_path #3430 -> builtin
-type_path #3431 -> builtin
-type_path #3463 -> builtin
-type_path #3464 -> class 6
-type_path #3465 -> builtin
-type_path #3468 -> builtin
-type_path #3485 -> builtin
-type_path #3486 -> class 6
-type_path #3487 -> builtin
-type_path #3490 -> builtin
-type_path #3507 -> builtin
-type_path #3508 -> builtin
-type_path #3509 -> builtin
-type_path #3510 -> builtin
-type_path #3513 -> builtin
-type_path #3582 -> builtin
-type_path #3583 -> builtin
-type_path #3584 -> builtin
-type_path #3587 -> builtin
-type_path #3654 -> builtin
-type_path #3655 -> param class 8 0
-type_path #3656 -> builtin
-type_path #3669 -> builtin
-type_path #3690 -> param class 8 0
-type_path #3715 -> param class 8 0
-type_path #3733 -> builtin
-type_path #3734 -> builtin
-type_path #3735 -> builtin
-type_path #3736 -> builtin
-type_path #3737 -> class 6
-type_path #3738 -> builtin
-type_path #3740 -> class 5
-type_path #3741 -> builtin
-type_path #3752 -> class 5
-type_path #3753 -> builtin
-type_path #3756 -> class 6
-type_path #3757 -> builtin
-type_path #3909 -> builtin
-type_path #3910 -> builtin
-type_path #3911 -> builtin
-type_path #3912 -> builtin
-type_path #3913 -> class 6
-type_path #3914 -> builtin
-type_path #3916 -> class 5
-type_path #3917 -> builtin
-type_path #3928 -> class 5
-type_path #3929 -> builtin
-type_path #3932 -> class 6
-type_path #3933 -> builtin
-type_path #4085 -> builtin
-type_path #4086 -> builtin
-type_path #4087 -> builtin
-type_path #4088 -> builtin
-type_path #4089 -> class 6
-type_path #4090 -> builtin
-type_path #4092 -> class 5
-type_path #4093 -> builtin
-type_path #4104 -> class 5
-type_path #4105 -> builtin
-type_path #4108 -> class 6
-type_path #4109 -> builtin
-type_path #4261 -> builtin
-type_path #4262 -> builtin
-type_path #4263 -> builtin
-type_path #4264 -> builtin
-type_path #4265 -> class 6
-type_path #4266 -> builtin
-type_path #4268 -> class 5
-type_path #4269 -> builtin
-type_path #4280 -> class 5
-type_path #4281 -> builtin
-type_path #4284 -> class 6
-type_path #4285 -> builtin
-type_path #4437 -> builtin
-type_path #4438 -> builtin
-type_path #4439 -> builtin
-type_path #4440 -> builtin
-type_path #4441 -> class 6
-type_path #4442 -> builtin
-type_path #4444 -> class 5
-type_path #4445 -> builtin
-type_path #4456 -> class 5
+type_path #3248 -> param class 7 1
+type_path #3267 -> builtin
+type_path #3281 -> param class 7 0
+type_path #3282 -> builtin
+type_path #3290 -> param class 7 0
+type_path #3291 -> param class 7 1
+type_path #3292 -> builtin
+type_path #3293 -> param class 7 1
+type_path #3310 -> builtin
+type_path #3398 -> param class 7 0
+type_path #3399 -> builtin
+type_path #3400 -> param class 7 1
+type_path #3417 -> builtin
+type_path #3464 -> builtin
+type_path #3465 -> struct 5
+type_path #3466 -> param class 7 0
+type_path #3467 -> param class 7 1
+type_path #3473 -> builtin
+type_path #3484 -> class 6
+type_path #3485 -> struct 5
+type_path #3486 -> param class 7 0
+type_path #3487 -> param class 7 1
+type_path #3492 -> class 5
+type_path #3493 -> builtin
+type_path #3496 -> class 6
+type_path #3497 -> struct 5
+type_path #3498 -> param class 7 0
+type_path #3499 -> param class 7 1
+type_path #3534 -> class 6
+type_path #3535 -> param class 7 0
+type_path #3545 -> class 6
+type_path #3546 -> param class 7 1
+type_path #3556 -> param class 7 0
+type_path #3557 -> builtin
+type_path #3558 -> builtin
+type_path #3578 -> builtin
+type_path #3581 -> builtin
+type_path #3608 -> builtin
+type_path #3645 -> builtin
+type_path #3646 -> builtin
+type_path #3657 -> builtin
+type_path #3660 -> builtin
+type_path #3689 -> builtin
+type_path #3694 -> builtin
+type_path #3695 -> struct 5
+type_path #3696 -> param class 7 0
+type_path #3697 -> param class 7 1
+type_path #3713 -> builtin
+type_path #3731 -> builtin
+type_path #3788 -> builtin
+type_path #3789 -> param fn 122 0
+type_path #3790 -> class 6
+type_path #3791 -> param fn 122 0
+type_path #3793 -> class 5
+type_path #3794 -> builtin
+type_path #3797 -> class 6
+type_path #3798 -> param fn 122 0
+type_path #3830 -> interface 1
+type_path #3831 -> builtin
+type_path #3832 -> param fn 123 0
+type_path #3833 -> param fn 123 0
+type_path #3834 -> builtin
+type_path #3835 -> builtin
+type_path #3860 -> interface 1
+type_path #3861 -> builtin
+type_path #3862 -> param fn 124 0
+type_path #3863 -> param fn 124 0
+type_path #3864 -> builtin
+type_path #3874 -> param fn 125 0
+type_path #3875 -> class 6
+type_path #3876 -> param fn 125 0
+type_path #3879 -> param fn 125 0
+type_path #3895 -> builtin
+type_path #3896 -> param fn 126 0
+type_path #3897 -> builtin
+type_path #3898 -> param fn 126 0
+type_path #3922 -> interface 2
+type_path #3923 -> builtin
+type_path #3924 -> param fn 127 0
+type_path #3929 -> param fn 127 0
+type_path #3930 -> param fn 127 0
+type_path #3939 -> builtin
+type_path #3940 -> param fn 128 0
+type_path #3941 -> param fn 128 0
+type_path #3942 -> param fn 128 0
+type_path #3943 -> enum 3
+type_path #3969 -> builtin
+type_path #3970 -> param fn 129 0
+type_path #3971 -> param fn 129 0
+type_path #3972 -> param fn 129 0
+type_path #3973 -> enum 3
+type_path #3974 -> builtin
+type_path #3975 -> param fn 129 0
+type_path #3990 -> param fn 129 0
+type_path #3994 -> param fn 129 0
+type_path #4045 -> param fn 129 0
+type_path #4048 -> builtin
+type_path #4051 -> builtin
+type_path #4150 -> builtin
+type_path #4151 -> builtin
+type_path #4152 -> builtin
+type_path #4153 -> builtin
+type_path #4185 -> builtin
+type_path #4186 -> class 6
+type_path #4187 -> builtin
+type_path #4190 -> builtin
+type_path #4207 -> builtin
+type_path #4208 -> class 6
+type_path #4209 -> builtin
+type_path #4212 -> builtin
+type_path #4229 -> builtin
+type_path #4230 -> builtin
+type_path #4231 -> builtin
+type_path #4232 -> builtin
+type_path #4235 -> builtin
+type_path #4304 -> builtin
+type_path #4305 -> builtin
+type_path #4306 -> builtin
+type_path #4309 -> builtin
+type_path #4376 -> builtin
+type_path #4377 -> param class 8 0
+type_path #4378 -> builtin
+type_path #4391 -> builtin
+type_path #4412 -> param class 8 0
+type_path #4437 -> param class 8 0
+type_path #4455 -> builtin
+type_path #4456 -> builtin
 type_path #4457 -> builtin
-type_path #4460 -> class 6
-type_path #4461 -> builtin
-type_path #4613 -> builtin
-type_path #4614 -> builtin
-type_path #4615 -> builtin
-type_path #4616 -> builtin
-type_path #4617 -> class 6
-type_path #4618 -> builtin
-type_path #4620 -> class 5
-type_path #4621 -> builtin
-type_path #4632 -> class 5
+type_path #4458 -> builtin
+type_path #4459 -> class 6
+type_path #4460 -> builtin
+type_path #4462 -> class 5
+type_path #4463 -> builtin
+type_path #4474 -> class 5
+type_path #4475 -> builtin
+type_path #4478 -> class 6
+type_path #4479 -> builtin
+type_path #4631 -> builtin
+type_path #4632 -> builtin
 type_path #4633 -> builtin
-type_path #4636 -> class 6
-type_path #4637 -> builtin
-type_path #4789 -> builtin
-type_path #4790 -> builtin
-type_path #4791 -> builtin
-type_path #4792 -> builtin
-type_path #4793 -> class 6
-type_path #4794 -> builtin
-type_path #4796 -> class 5
-type_path #4797 -> builtin
-type_path #4808 -> class 5
+type_path #4634 -> builtin
+type_path #4635 -> class 6
+type_path #4636 -> builtin
+type_path #4638 -> class 5
+type_path #4639 -> builtin
+type_path #4650 -> class 5
+type_path #4651 -> builtin
+type_path #4654 -> class 6
+type_path #4655 -> builtin
+type_path #4807 -> builtin
+type_path #4808 -> builtin
 type_path #4809 -> builtin
-type_path #4812 -> class 6
-type_path #4813 -> builtin
-type_path #4965 -> builtin
-type_path #4966 -> builtin
-type_path #4967 -> builtin
-type_path #4968 -> builtin
-type_path #4969 -> class 6
-type_path #4970 -> builtin
-type_path #4972 -> class 5
-type_path #4973 -> builtin
-type_path #4984 -> class 5
+type_path #4810 -> builtin
+type_path #4811 -> class 6
+type_path #4812 -> builtin
+type_path #4814 -> class 5
+type_path #4815 -> builtin
+type_path #4826 -> class 5
+type_path #4827 -> builtin
+type_path #4830 -> class 6
+type_path #4831 -> builtin
+type_path #4983 -> builtin
+type_path #4984 -> builtin
 type_path #4985 -> builtin
-type_path #4988 -> class 6
-type_path #4989 -> builtin
-type_path #5141 -> builtin
-type_path #5142 -> builtin
-type_path #5143 -> builtin
-type_path #5144 -> builtin
-type_path #5145 -> class 6
-type_path #5146 -> builtin
-type_path #5148 -> class 5
-type_path #5149 -> builtin
-type_path #5160 -> class 5
+type_path #4986 -> builtin
+type_path #4987 -> class 6
+type_path #4988 -> builtin
+type_path #4990 -> class 5
+type_path #4991 -> builtin
+type_path #5002 -> class 5
+type_path #5003 -> builtin
+type_path #5006 -> class 6
+type_path #5007 -> builtin
+type_path #5159 -> builtin
+type_path #5160 -> builtin
 type_path #5161 -> builtin
-type_path #5164 -> class 6
-type_path #5165 -> builtin
-type_path #5317 -> builtin
-type_path #5318 -> builtin
-type_path #5319 -> builtin
-type_path #5320 -> builtin
-type_path #5321 -> class 6
-type_path #5322 -> builtin
-type_path #5324 -> class 5
-type_path #5325 -> builtin
-type_path #5336 -> class 5
+type_path #5162 -> builtin
+type_path #5163 -> class 6
+type_path #5164 -> builtin
+type_path #5166 -> class 5
+type_path #5167 -> builtin
+type_path #5178 -> class 5
+type_path #5179 -> builtin
+type_path #5182 -> class 6
+type_path #5183 -> builtin
+type_path #5335 -> builtin
+type_path #5336 -> builtin
 type_path #5337 -> builtin
-type_path #5340 -> class 6
-type_path #5341 -> builtin
+type_path #5338 -> builtin
+type_path #5339 -> class 6
+type_path #5340 -> builtin
+type_path #5342 -> class 5
+type_path #5343 -> builtin
+type_path #5354 -> class 5
+type_path #5355 -> builtin
+type_path #5358 -> class 6
+type_path #5359 -> builtin
+type_path #5511 -> builtin
+type_path #5512 -> builtin
+type_path #5513 -> builtin
+type_path #5514 -> builtin
+type_path #5515 -> class 6
+type_path #5516 -> builtin
+type_path #5518 -> class 5
+type_path #5519 -> builtin
+type_path #5530 -> class 5
+type_path #5531 -> builtin
+type_path #5534 -> class 6
+type_path #5535 -> builtin
+type_path #5687 -> builtin
+type_path #5688 -> builtin
+type_path #5689 -> builtin
+type_path #5690 -> builtin
+type_path #5691 -> class 6
+type_path #5692 -> builtin
+type_path #5694 -> class 5
+type_path #5695 -> builtin
+type_path #5706 -> class 5
+type_path #5707 -> builtin
+type_path #5710 -> class 6
+type_path #5711 -> builtin
+type_path #5863 -> builtin
+type_path #5864 -> builtin
+type_path #5865 -> builtin
+type_path #5866 -> builtin
+type_path #5867 -> class 6
+type_path #5868 -> builtin
+type_path #5870 -> class 5
+type_path #5871 -> builtin
+type_path #5882 -> class 5
+type_path #5883 -> builtin
+type_path #5886 -> class 6
+type_path #5887 -> builtin
+type_path #6039 -> builtin
+type_path #6040 -> builtin
+type_path #6041 -> builtin
+type_path #6042 -> builtin
+type_path #6043 -> class 6
+type_path #6044 -> builtin
+type_path #6046 -> class 5
+type_path #6047 -> builtin
+type_path #6058 -> class 5
+type_path #6059 -> builtin
+type_path #6062 -> class 6
+type_path #6063 -> builtin
 binding #81 -> local 0
 binding #83 -> local 1
 binding #88 -> local 2
@@ -2505,158 +2778,178 @@ binding #203 -> local 13
 binding #208 -> local 14
 binding #211 -> local 15
 binding #216 -> local 17
-binding #254 -> local 2
-binding #290 -> local 3
-binding #636 -> local 1
-binding #646 -> local 2
-binding #697 -> local 1
-binding #848 -> local 0
-binding #851 -> local 1
-binding #903 -> local 1
-binding #906 -> local 2
-binding #943 -> local 0
-binding #946 -> local 1
-binding #1125 -> local 1
-binding #1255 -> local 1
-binding #1267 -> local 2
-binding #1365 -> local 0
-binding #1369 -> local 1
-binding #1373 -> local 2
-binding #1397 -> local 4
-binding #1419 -> local 3
-binding #1426 -> local 2
-binding #1434 -> local 1
-binding #1446 -> local 3
-binding #2190 -> local 2
-binding #2208 -> local 2
-binding #2227 -> local 3
-binding #2237 -> local 2
-binding #2240 -> local 3
-binding #2271 -> local 2
-binding #2274 -> local 3
-binding #2301 -> local 4
-binding #2322 -> local 2
-binding #2325 -> local 3
-binding #2347 -> local 4
-binding #2362 -> local 1
-binding #2373 -> local 2
-binding #2378 -> local 1
-binding #2386 -> local 2
-binding #2395 -> local 3
-binding #2409 -> local 4
-binding #2421 -> local 2
-binding #2436 -> local 2
-binding #2453 -> local 2
-binding #2474 -> local 2
-binding #2534 -> local 2
-binding #2579 -> local 3
-binding #2581 -> local 4
-binding #2590 -> local 5
-binding #2686 -> local 2
-binding #2688 -> local 3
-binding #2697 -> local 4
-binding #2766 -> local 1
-binding #2769 -> local 2
-binding #2786 -> local 3
-binding #2837 -> local 2
-binding #2850 -> local 3
-binding #2861 -> local 4
-binding #2891 -> local 5
-binding #2925 -> local 3
-binding #2930 -> local 4
-binding #2970 -> local 1
-binding #2989 -> local 2
-binding #2990 -> local 3
-binding #3007 -> local 4
-binding #3020 -> local 5
-binding #3049 -> local 7
-binding #3064 -> local 6
-binding #3070 -> local 1
-binding #3088 -> local 2
-binding #3134 -> local 2
-binding #3155 -> local 1
-binding #3166 -> local 2
-binding #3222 -> local 2
-binding #3245 -> local 3
-binding #3254 -> local 2
-binding #3266 -> local 3
-binding #3270 -> local 4
-binding #3304 -> local 5
-binding #3305 -> local 6
-binding #3313 -> local 7
-binding #3321 -> local 8
-binding #3325 -> local 9
-binding #3328 -> local 10
-binding #3432 -> local 2
-binding #3458 -> local 3
-binding #3466 -> local 1
-binding #3478 -> local 2
+binding #257 -> local 0
+binding #275 -> local 2
+binding #328 -> local 3
+binding #694 -> local 1
+binding #704 -> local 2
+binding #741 -> local 1
+binding #800 -> local 3
+binding #806 -> local 4
+binding #949 -> local 1
+binding #969 -> local 0
+binding #974 -> local 1
+binding #978 -> local 2
+binding #980 -> local 3
+binding #1092 -> local 1
+binding #1097 -> local 2
+binding #1101 -> local 3
+binding #1118 -> local 4
+binding #1198 -> local 0
+binding #1203 -> local 1
+binding #1210 -> local 2
+binding #1222 -> local 3
+binding #1289 -> local 1
+binding #1311 -> local 1
+binding #1314 -> local 2
+binding #1318 -> local 3
+binding #1326 -> local 4
+binding #1334 -> local 5
+binding #1337 -> local 6
+binding #1339 -> local 7
+binding #1438 -> local 9
+binding #1473 -> local 8
+binding #1701 -> local 1
+binding #1831 -> local 1
+binding #1843 -> local 2
+binding #1941 -> local 0
+binding #1945 -> local 1
+binding #1949 -> local 2
+binding #1973 -> local 4
+binding #1995 -> local 3
+binding #2002 -> local 2
+binding #2010 -> local 1
+binding #2022 -> local 3
+binding #2912 -> local 2
+binding #2930 -> local 2
+binding #2949 -> local 3
+binding #2959 -> local 2
+binding #2962 -> local 3
+binding #2993 -> local 2
+binding #2996 -> local 3
+binding #3023 -> local 4
+binding #3044 -> local 2
+binding #3047 -> local 3
+binding #3069 -> local 4
+binding #3084 -> local 1
+binding #3095 -> local 2
+binding #3100 -> local 1
+binding #3108 -> local 2
+binding #3117 -> local 3
+binding #3131 -> local 4
+binding #3143 -> local 2
+binding #3158 -> local 2
+binding #3175 -> local 2
+binding #3196 -> local 2
+binding #3256 -> local 2
+binding #3301 -> local 3
+binding #3303 -> local 4
+binding #3312 -> local 5
+binding #3408 -> local 2
+binding #3410 -> local 3
+binding #3419 -> local 4
 binding #3488 -> local 1
-binding #3500 -> local 2
-binding #3511 -> local 2
-binding #3527 -> local 3
-binding #3532 -> local 4
-binding #3542 -> local 5
-binding #3585 -> local 1
-binding #3596 -> local 2
-binding #3608 -> local 4
-binding #3651 -> local 3
-binding #3708 -> local 2
-binding #3721 -> local 1
-binding #3739 -> local 4
-binding #3751 -> local 5
-binding #3765 -> local 6
-binding #3915 -> local 4
-binding #3927 -> local 5
-binding #3941 -> local 6
-binding #4091 -> local 4
-binding #4103 -> local 5
-binding #4117 -> local 6
-binding #4267 -> local 4
-binding #4279 -> local 5
-binding #4293 -> local 6
-binding #4443 -> local 4
-binding #4455 -> local 5
-binding #4469 -> local 6
-binding #4619 -> local 4
-binding #4631 -> local 5
-binding #4645 -> local 6
-binding #4795 -> local 4
-binding #4807 -> local 5
-binding #4821 -> local 6
-binding #4971 -> local 4
-binding #4983 -> local 5
-binding #4997 -> local 6
-binding #5147 -> local 4
-binding #5159 -> local 5
-binding #5173 -> local 6
-binding #5323 -> local 4
-binding #5335 -> local 5
-binding #5349 -> local 6
+binding #3491 -> local 2
+binding #3508 -> local 3
+binding #3559 -> local 2
+binding #3572 -> local 3
+binding #3583 -> local 4
+binding #3613 -> local 5
+binding #3647 -> local 3
+binding #3652 -> local 4
+binding #3692 -> local 1
+binding #3711 -> local 2
+binding #3712 -> local 3
+binding #3729 -> local 4
+binding #3742 -> local 5
+binding #3771 -> local 7
+binding #3786 -> local 6
+binding #3792 -> local 1
+binding #3810 -> local 2
+binding #3856 -> local 2
+binding #3877 -> local 1
+binding #3888 -> local 2
+binding #3944 -> local 2
+binding #3967 -> local 3
+binding #3976 -> local 2
+binding #3988 -> local 3
+binding #3992 -> local 4
+binding #4026 -> local 5
+binding #4027 -> local 6
+binding #4035 -> local 7
+binding #4043 -> local 8
+binding #4047 -> local 9
+binding #4050 -> local 10
+binding #4154 -> local 2
+binding #4180 -> local 3
+binding #4188 -> local 1
+binding #4200 -> local 2
+binding #4210 -> local 1
+binding #4222 -> local 2
+binding #4233 -> local 2
+binding #4249 -> local 3
+binding #4254 -> local 4
+binding #4264 -> local 5
+binding #4307 -> local 1
+binding #4318 -> local 2
+binding #4330 -> local 4
+binding #4373 -> local 3
+binding #4430 -> local 2
+binding #4443 -> local 1
+binding #4461 -> local 4
+binding #4473 -> local 5
+binding #4487 -> local 6
+binding #4637 -> local 4
+binding #4649 -> local 5
+binding #4663 -> local 6
+binding #4813 -> local 4
+binding #4825 -> local 5
+binding #4839 -> local 6
+binding #4989 -> local 4
+binding #5001 -> local 5
+binding #5015 -> local 6
+binding #5165 -> local 4
+binding #5177 -> local 5
+binding #5191 -> local 6
+binding #5341 -> local 4
+binding #5353 -> local 5
+binding #5367 -> local 6
+binding #5517 -> local 4
+binding #5529 -> local 5
+binding #5543 -> local 6
+binding #5693 -> local 4
+binding #5705 -> local 5
+binding #5719 -> local 6
+binding #5869 -> local 4
+binding #5881 -> local 5
+binding #5895 -> local 6
+binding #6045 -> local 4
+binding #6057 -> local 5
+binding #6071 -> local 6
 lambda #109 params=5 first=5 end=6 captures=4,3,1
 lambda #116 params=4 first=4 end=7 captures=3,1,2
 lambda #225 params=16 first=16 end=17 captures=-
-lambda #2201 params=- first=3 end=3 captures=2,1
-lambda #2231 params=- first=3 end=4 captures=2,1
-lambda #2265 params=- first=4 end=4 captures=3,1,2
-lambda #2307 params=- first=4 end=5 captures=3,1,2
-lambda #2357 params=- first=4 end=5 captures=3,1,2
-lambda #2551 params=3 first=3 end=4 captures=-
-lambda #2617 params=6 first=6 end=7 captures=-
-lambda #2729 params=5 first=5 end=6 captures=-
-lambda #2809 params=- first=3 end=4 captures=2,1
-lambda #2820 params=1 first=1 end=2 captures=-
-lambda #2831 params=1 first=1 end=2 captures=-
-lambda #3105 params=- first=2 end=3 captures=1,0
-lambda #3214 params=1,2 first=1 end=3 captures=-
-lambda #3906 params=- first=6 end=7 captures=5,4,3,2,0,1
-lambda #4082 params=- first=6 end=7 captures=5,4,3,2,0,1
-lambda #4258 params=- first=6 end=7 captures=5,4,3,2,0,1
-lambda #4434 params=- first=6 end=7 captures=5,4,3,2,0,1
-lambda #4610 params=- first=6 end=7 captures=5,4,3,2,0,1
-lambda #4786 params=- first=6 end=7 captures=5,4,3,2,0,1
-lambda #4962 params=- first=6 end=7 captures=5,4,3,2,0,1
-lambda #5138 params=- first=6 end=7 captures=5,4,3,2,0,1
-lambda #5314 params=- first=6 end=7 captures=5,4,3,2,0,1
-lambda #5490 params=- first=6 end=7 captures=5,4,3,2,0,1
+lambda #2923 params=- first=3 end=3 captures=2,1
+lambda #2953 params=- first=3 end=4 captures=2,1
+lambda #2987 params=- first=4 end=4 captures=3,1,2
+lambda #3029 params=- first=4 end=5 captures=3,1,2
+lambda #3079 params=- first=4 end=5 captures=3,1,2
+lambda #3273 params=3 first=3 end=4 captures=-
+lambda #3339 params=6 first=6 end=7 captures=-
+lambda #3451 params=5 first=5 end=6 captures=-
+lambda #3531 params=- first=3 end=4 captures=2,1
+lambda #3542 params=1 first=1 end=2 captures=-
+lambda #3553 params=1 first=1 end=2 captures=-
+lambda #3827 params=- first=2 end=3 captures=1,0
+lambda #3936 params=1,2 first=1 end=3 captures=-
+lambda #4628 params=- first=6 end=7 captures=5,4,3,2,0,1
+lambda #4804 params=- first=6 end=7 captures=5,4,3,2,0,1
+lambda #4980 params=- first=6 end=7 captures=5,4,3,2,0,1
+lambda #5156 params=- first=6 end=7 captures=5,4,3,2,0,1
+lambda #5332 params=- first=6 end=7 captures=5,4,3,2,0,1
+lambda #5508 params=- first=6 end=7 captures=5,4,3,2,0,1
+lambda #5684 params=- first=6 end=7 captures=5,4,3,2,0,1
+lambda #5860 params=- first=6 end=7 captures=5,4,3,2,0,1
+lambda #6036 params=- first=6 end=7 captures=5,4,3,2,0,1
+lambda #6212 params=- first=6 end=7 captures=5,4,3,2,0,1
 --- stderr

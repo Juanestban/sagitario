@@ -757,36 +757,15 @@ SAG_FROM_UINTMAX(usize, size_t)
  * Declared in Sagitario by the standard library modules (docs/spec/11-standard-library.md).
  * They borrow their string arguments and return new references. */
 
-/* Codes of I/O errors: `errno` values are positive, the runtime's own are negative. */
+/* Codes of I/O errors: `errno` values are positive, the runtime's own are negative, as `std`
+ * reads them (`os_error`, docs/adr/0086-c-globals-and-std-io.md). */
 #define SAG_IO_INVALID_DATA (-2)
 #define SAG_IO_UNKNOWN (-3)
-/* The input ended before the bytes `read_exact` asked for. */
 #define SAG_IO_UNEXPECTED_EOF (-4)
-/* The status of a read at the end of the input. */
-#define SAG_IO_END (-1)
-/* Indices of the variants of `std::io::ErrorKind`. */
-#define SAG_IO_KIND_NOT_FOUND 0
-#define SAG_IO_KIND_PERMISSION_DENIED 1
-#define SAG_IO_KIND_ALREADY_EXISTS 2
-#define SAG_IO_KIND_INVALID_INPUT 3
-#define SAG_IO_KIND_INVALID_DATA 4
-#define SAG_IO_KIND_UNEXPECTED_EOF 5
-#define SAG_IO_KIND_OTHER 6
 
 /* Gives `std::env`, written in Sagitario, what C's `main` received: the arguments on Unix
  * (docs/adr/0085-conditional-compilation-and-std-time.md, Q552). */
 void sag_env_init(int argc, const char *const *argv);
-/* Writes to stdout (stream 1) or stderr (2); returns 0 or an error code. */
-int32_t sag_io_write(int32_t stream, sag_string text, bool newline);
-int32_t sag_io_flush(void);
-/* `*status` becomes 0, SAG_IO_END or an error code. */
-sag_string sag_io_read_line(int32_t *status);
-sag_string sag_io_read_all(int32_t *status);
-sag_string sag_io_read_exact(size_t count, int32_t *status);
-/* Whether stdin (0), stdout (1) or stderr (2) is a terminal. */
-bool sag_io_is_terminal(int32_t stream);
-int32_t sag_io_error_kind(int32_t code);
-sag_string sag_io_error_message(int32_t code);
 /* Flushes output and ends the program without running pending releases. */
 _Noreturn void sag_process_exit(int32_t code);
 

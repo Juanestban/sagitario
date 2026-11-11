@@ -38,6 +38,7 @@ const RUNTIME_SOURCE: String = include_str("../../../runtime/sagitario_runtime.c
 
 /// The line separating the two translation units in `--dump=c`.
 const C_DUMP_FFI_MARKER: String = "/* ---- sag_ffi.c ---- */\n";
+const C_DUMP_STD_FFI_MARKER: String = "/* ---- sag_std_ffi.c ---- */\n";
 
 /// The stack every executable reserves on Windows, the default of Linux and macOS: programs, and
 /// the compiler itself, recurse as deeply on every system (docs/adr/0055-driver-and-cli-port.md).
@@ -346,6 +347,10 @@ fn dump_c(options: CompileOptions) -> i32 {
 
         if let Some(ffi) = generated.ffi {
           print(C_DUMP_FFI_MARKER + ffi);
+        }
+
+        if let Some(ffi) = generated.std_ffi {
+          print(C_DUMP_STD_FFI_MARKER + ffi);
         }
       }
 
@@ -695,6 +700,7 @@ fn write_generated(generated: GeneratedC, dir: String) -> Result<List<String>, i
   const program_c = push_path(dir, "program.c");
   const runtime_c = push_path(dir, "sagitario_runtime.c");
   const ffi_c = push_path(dir, "sag_ffi.c");
+  const std_ffi_c = push_path(dir, "sag_std_ffi.c");
   const runtime = if generated.threads { "#define SAG_THREADS 1\n" + RUNTIME_SOURCE } else { RUNTIME_SOURCE };
   var written = fs::write(program_c, generated.program);
 
@@ -712,6 +718,12 @@ fn write_generated(generated: GeneratedC, dir: String) -> Result<List<String>, i
     }
   }
 
+  if written.is_ok() {
+    if let Some(ffi) = generated.std_ffi {
+      written = fs::write(std_ffi_c, ffi);
+    }
+  }
+
   if let Err(error) = written {
     eprintln(`error: cannot write generated C to \`${dir}\`: ${error.message()}`);
     return Err(EXIT_FAILURE);
@@ -721,6 +733,10 @@ fn write_generated(generated: GeneratedC, dir: String) -> Result<List<String>, i
 
   if generated.ffi.is_some() {
     files.push(ffi_c);
+  }
+
+  if generated.std_ffi.is_some() {
+    files.push(std_ffi_c);
   }
 
   Ok(files)
@@ -734,11 +750,21 @@ fn emit_c(generated: GeneratedC, base: String) -> Result<(), i32> {
     Some(parent) => push_path(parent, stem + "_ffi.c"),
     None => stem + "_ffi.c",
   };
+  const std_ffi_path = match path::parent(c_path) {
+    Some(parent) => push_path(parent, stem + "_std_ffi.c"),
+    None => stem + "_std_ffi.c",
+  };
   var written = fs::write(c_path, generated.program);
 
   if written.is_ok() {
     if let Some(ffi) = generated.ffi {
       written = fs::write(ffi_path, ffi);
+    }
+  }
+
+  if written.is_ok() {
+    if let Some(ffi) = generated.std_ffi {
+      written = fs::write(std_ffi_path, ffi);
     }
   }
 

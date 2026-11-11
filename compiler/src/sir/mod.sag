@@ -61,6 +61,16 @@ pub struct StaticDef {
   pub mutable: bool;
   pub thread_local: bool;
   pub value: Option<Const>;
+  /// A global variable of C, `name`, whose address the FFI unit gives
+  /// (docs/adr/0086-c-globals-and-std-io.md, Q562).
+  pub extern_c: bool;
+  /// Of the standard library, as `ExternDecl::in_std`.
+  pub in_std: bool;
+}
+
+/// The function of the FFI unit giving the address of the C global of the static `id`.
+pub fn extern_static_getter(id: u32) -> String {
+  `sag_ffi_static_${id}`
 }
 
 /// The value of a module-level constant, or of a static computed from constants, of type `ty`.
@@ -101,6 +111,9 @@ pub struct ExternDecl {
   pub ret: Type;
   /// A function of the runtime, declared by its header and called directly.
   pub runtime: bool;
+  /// Declared by the standard library, whose C declarations go to a unit of their own, so that
+  /// they never meet the program's of the same function (docs/adr/0086-c-globals-and-std-io.md).
+  pub in_std: bool;
 }
 
 /// The fields of the program's structs and enums, with type parameters in generic ones.
@@ -861,7 +874,12 @@ pub fn lower(package: Package, resolution: Resolution, typed: TypedModule, sourc
       None => return Err("no signature for the C function `" + decl.name.name + "`"),
     };
 
-    externs.push(ExternDecl { symbol: decl.name.name, params: sig.params, ret: sig.ret, runtime: resolution.is_runtime_extern(package, id) });
+    const in_std = match resolution.externs.get(id as usize) {
+      Some(info) => resolution.is_std_source(info.module),
+      None => false,
+    };
+
+    externs.push(ExternDecl { symbol: decl.name.name, params: sig.params, ret: sig.ret, runtime: resolution.is_runtime_extern(package, id), in_std: in_std });
   }
 
   const statics: List<StaticDef> = new List();
@@ -882,7 +900,7 @@ pub fn lower(package: Package, resolution: Resolution, typed: TypedModule, sourc
       value = Some(const_of(found, ty)?);
     }
 
-    statics.push(StaticDef { name: decl.name.name, ty: ty, init: resolution.statics[index].init, mutable: decl.mutable, thread_local: decl.thread_local, value: value });
+    statics.push(StaticDef { name: decl.name.name, ty: ty, init: resolution.statics[index].init, mutable: decl.mutable, thread_local: decl.thread_local, value: value, extern_c: decl.extern_c, in_std: resolution.is_std_source(resolution.statics[index].module) });
   }
 
   Ok(Program {

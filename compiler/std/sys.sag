@@ -2,10 +2,9 @@
 //! differs by system, as Rust's `std/src/sys` (docs/adr/0085-conditional-compilation-and-std-time.md,
 //! Q551). Only the modules of `std` can name it.
 
-use std::ffi::c_int;
-use std::ffi::c_char;
+use std::ffi::{c_char, c_int, c_void, string_from_c};
 @cfg(unix)
-use std::ffi::{c_long, CString, string_from_c};
+use std::ffi::{c_long, CString};
 
 // ---- errno ------------------------------------------------------------------------------------
 
@@ -24,21 +23,49 @@ extern "C" {
   fn __error() -> *mut c_int;
 }
 
-/// The error of the last call to the C library that failed in this thread: C's `errno`, which is
-/// a macro reaching a function whose name changes with the C library.
+@cfg(windows)
+extern "C" {
+  fn _errno() -> *mut c_int;
+}
+
+/// Where C's `errno` is for this thread: a macro reaching a function whose name changes with the
+/// C library.
 @cfg(target_os = "linux")
-pub fn errno() -> i32 {
-  unsafe { *__errno_location() }
+fn errno_place() -> *mut c_int {
+  unsafe { __errno_location() }
 }
 
 @cfg(target_os = "android")
-pub fn errno() -> i32 {
-  unsafe { *__errno() }
+fn errno_place() -> *mut c_int {
+  unsafe { __errno() }
 }
 
 @cfg(any(target_os = "macos", target_os = "ios"))
+fn errno_place() -> *mut c_int {
+  unsafe { __error() }
+}
+
+@cfg(windows)
+fn errno_place() -> *mut c_int {
+  unsafe { _errno() }
+}
+
+/// The error of the last call to the C library that failed in this thread.
 pub fn errno() -> i32 {
-  unsafe { *__error() }
+  unsafe { *errno_place() }
+}
+
+pub fn clear_errno() {
+  unsafe { *errno_place() = 0; }
+}
+
+extern "C" {
+  fn strerror(code: c_int) -> *const c_char;
+}
+
+/// The C library's description of the `errno` value `code`; invalid UTF-8 becomes U+FFFD.
+pub fn error_message(code: i32) -> String {
+  unsafe { string_from_c(strerror(code)) }
 }
 
 /// A call interrupted by a signal, on every Unix system.
@@ -439,3 +466,85 @@ pub fn to_utf16(text: String) -> List<u16> {
   units.push(0);
   units
 }
+
+// ---- The standard streams ---------------------------------------------------------------------
+
+/// C's streams, through which the runtime's core prints too, so that both write in order and the
+/// C library locks them for threads (docs/adr/0086-c-globals-and-std-io.md, Q564).
+@cfg(any(target_os = "linux", target_os = "android"))
+extern "C" {
+  static stdin: *mut c_void;
+  static stdout: *mut c_void;
+  static stderr: *mut c_void;
+}
+
+@cfg(any(target_os = "macos", target_os = "ios"))
+extern "C" {
+  static __stdinp: *mut c_void;
+  static __stdoutp: *mut c_void;
+  static __stderrp: *mut c_void;
+}
+
+@cfg(windows)
+extern "C" {
+  fn __acrt_iob_func(index: u32) -> *mut c_void;
+}
+
+extern "C" {
+  pub fn fwrite(data: *const u8, size: usize, count: usize, stream: *mut c_void) -> usize;
+  pub fn fputc(c: c_int, stream: *mut c_void) -> c_int;
+  pub fn fflush(stream: *mut c_void) -> c_int;
+  pub fn getc(stream: *mut c_void) -> c_int;
+  pub fn fread(data: *mut u8, size: usize, count: usize, stream: *mut c_void) -> usize;
+  pub fn ferror(stream: *mut c_void) -> c_int;
+  pub fn clearerr(stream: *mut c_void);
+}
+
+/// C's `FILE *` of a standard stream: 0 is stdin, 1 stdout and 2 stderr.
+@cfg(any(target_os = "linux", target_os = "android"))
+pub fn stream(index: i32) -> *mut c_void {
+  unsafe { if index == 0 { stdin } else if index == 1 { stdout } else { stderr } }
+}
+
+@cfg(any(target_os = "macos", target_os = "ios"))
+pub fn stream(index: i32) -> *mut c_void {
+  unsafe { if index == 0 { __stdinp } else if index == 1 { __stdoutp } else { __stderrp } }
+}
+
+@cfg(windows)
+pub fn stream(index: i32) -> *mut c_void {
+  unsafe { __acrt_iob_func(index as u32) }
+}
+
+@cfg(unix)
+extern "C" {
+  fn isatty(fd: c_int) -> c_int;
+}
+
+/// Whether the standard stream `index` is a terminal.
+@cfg(unix)
+pub fn is_terminal(index: i32) -> bool {
+  (unsafe { isatty(index) }) != 0
+}
+
+@cfg(windows)
+extern "C" {
+  fn GetStdHandle(which: u32) -> *mut c_void;
+  fn GetConsoleMode(console: *mut c_void, mode: *mut u32) -> c_int;
+}
+
+/// A console, which has a console mode: the C library's `_isatty` also says yes for `NUL` and
+/// other character devices.
+@cfg(windows)
+pub fn is_terminal(index: i32) -> bool {
+  // STD_INPUT_HANDLE, STD_OUTPUT_HANDLE and STD_ERROR_HANDLE are -10, -11 and -12.
+  const handle = unsafe { GetStdHandle((-10 - index) as u32) };
+  var mode = 0u32;
+
+  if handle.is_null() || handle as usize == 0xFFFF_FFFF_FFFF_FFFF {
+    return false;
+  }
+
+  (unsafe { GetConsoleMode(handle, &mut mode) }) != 0
+}
+

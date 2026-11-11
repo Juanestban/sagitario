@@ -362,7 +362,9 @@ Anything expressible in Sagitario belongs in `compiler/std/` instead.
   `compiler/std/sys.sag` (`std::sys`, which only `std` can name) declares the C API of each system
   with `@cfg`, and the modules of `std` call it instead of functions of the runtime. A function
   that the runtime's core still calls keeps its C name with `@export`. Its module is in
-  `loader::CORE_STD`, which every program loads, and `mono::require` makes its instance.
+  `loader::CORE_STD`, which every program loads, and `mono::require` makes its instance. The C
+  declarations of the standard library are compiled in `sag_std_ffi.c`, apart from the program's
+  `sag_ffi.c`, so that both may declare the same C function with other types.
 
 ## Language server
 

@@ -261,6 +261,8 @@ class Parser {
   prv var in_guard: bool;
   /// Whether the type being parsed may be a slice `[T]`: right after the `&` of a parameter's type.
   prv var slice_allowed: bool;
+  /// The C globals of the `extern` block being parsed, which become items of the module.
+  prv var extern_statics: List<Item>;
 
   pub fn new(self, file: u32, tokens: List<Token>, ids: Ids, target: TargetInfo, diagnostics: Diagnostics) {
     // Documentation comments are not processed in the MVP (docs/spec/01-lexical.md).
@@ -287,6 +289,7 @@ class Parser {
     self.no_struct_literal = false;
     self.in_guard = false;
     self.slice_allowed = false;
+    self.extern_statics = new List();
   }
 
   prv fn current(self) -> Token {
@@ -416,7 +419,13 @@ class Parser {
               Ok(Some(item)) => {
                 if kept {
                   items.push(item);
+
+                  for global in self.extern_statics {
+                    items.push(global);
+                  }
                 }
+
+                self.extern_statics = new List();
               }
               Ok(None) => {}
               Err(_) => self.skip_item(),
@@ -778,7 +787,7 @@ class Parser {
       span: start.to(end),
     };
 
-    Ok(StaticDecl { visibility: visibility, mutable: mutable, thread_local: false, name: name, ty: ty, init: init, span: start.to(end) })
+    Ok(StaticDecl { visibility: visibility, mutable: mutable, thread_local: false, extern_c: false, name: name, ty: ty, init: init, span: start.to(end) })
   }
 
   /// `@name` or `@name(arg, ...)` before an item; the arguments are string literals or names.
@@ -1084,6 +1093,51 @@ class Parser {
     Ok(Item::Extern(ExternBlock { functions: functions, span: start.to(end) }))
   }
 
+  /// `static NAME: T;` or `static var NAME: T;` inside an `extern "C"` block: a global variable of
+  /// C (docs/adr/0086-c-globals-and-std-io.md, Q557). Its function has no body, which nothing
+  /// checks or calls: it is marked abstract, as a method without a body is.
+  prv fn extern_static(self, visibility: Visibility, start: Span) -> Result<StaticDecl, ()> {
+    self.expect_keyword("static")?;
+
+    const mutable = self.eat_keyword("var");
+    const name = self.ident("the name of a C global")?;
+
+    self.expect(":")?;
+
+    const ty = self.type_expr()?;
+
+    if self.at("=") {
+      self.diagnostics.push(
+        Diagnostic::error(codes::UNEXPECTED_TOKEN, self.span(), "a C global has no value in Sagitario")
+          .with_help("C defines its value; end the declaration with `;`"),
+      );
+
+      return Err(());
+    }
+
+    const end = self.expect(";")?.span;
+    const span = start.to(end);
+    const init = FnDecl {
+      id: self.next_id(),
+      extern_c: false,
+      export: None,
+      visibility: Visibility::Module,
+      is_abstract: true,
+      is_override: false,
+      is_async: false,
+      is_unsafe: false,
+      name: name,
+      generics: new List(),
+      self_param: None,
+      params: new List(),
+      return_type: Some(ty),
+      body: Block { stmts: new List(), tail: None, span: span },
+      span: span,
+    };
+
+    Ok(StaticDecl { visibility: visibility, mutable: mutable, thread_local: false, extern_c: true, name: name, ty: ty, init: init, span: span })
+  }
+
   /// The ABI string after `extern`, which must be `"C"`.
   prv fn abi(self) -> Result<(), ()> {
     match self.kind() {
@@ -1100,11 +1154,24 @@ class Parser {
     }
   }
 
-  /// `fn name(params) -> Ret;` inside an `extern "C"` block, or `None` if its `@cfg` does not hold.
+  /// `fn name(params) -> Ret;` inside an `extern "C"` block, or `None` if its `@cfg` does not hold
+  /// or it is a C global, which goes to `extern_statics`.
   prv fn extern_fn(self) -> Result<Option<ExternFn>, ()> {
     const start = self.span();
     const attributes = self.attributes()?;
     const visibility = self.visibility();
+
+    if self.at_keyword("static") {
+      const global = self.extern_static(visibility, start)?;
+
+      self.apply_attributes(attributes, AttributeTarget::ExternBlockFn);
+
+      if self.cfg_holds(attributes) {
+        self.extern_statics.push(Item::Static(global));
+      }
+
+      return Ok(None);
+    }
 
     self.expect_keyword("fn")?;
 

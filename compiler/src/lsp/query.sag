@@ -871,6 +871,10 @@ pub fn item_text(analysis: Analysis, item: ItemRef) -> Option<String> {
         keyword = "@thread_local " + keyword;
       }
 
+      if decl.extern_c {
+        keyword = "extern " + keyword;
+      }
+
       Some(keyword + decl.name.name + ": " + types::text(ty))
     }
     ItemRef::Extern(id) => Some("extern fn " + resolution.extern_decl(analysis.package?, id)?.name.name),

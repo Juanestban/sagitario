@@ -203,7 +203,8 @@ pub fn check_statics(cx: Checker) {
       None => continue,
     };
 
-    if decl.mutable || types::is_error(ty) {
+    // A C global is reached only in `unsafe` (docs/adr/0086-c-globals-and-std-io.md, Q558).
+    if decl.mutable || decl.extern_c || types::is_error(ty) {
       continue;
     }
 

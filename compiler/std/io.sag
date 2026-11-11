@@ -1,14 +1,9 @@
 //! `std::io`: standard input and output with errors as values, and the error type of every
-//! input or output operation (docs/spec/11-standard-library.md#stdio).
+//! input or output operation (docs/spec/11-standard-library.md#stdio), on C's streams in
+//! `std::sys`, which the prelude's printing shares (docs/adr/0086-c-globals-and-std-io.md).
 
-extern "C" {
-  fn sag_io_write(stream: i32, text: String, newline: bool) -> i32;
-  fn sag_io_flush() -> i32;
-  fn sag_io_read_line(status: *mut i32) -> String;
-  fn sag_io_read_all(status: *mut i32) -> String;
-  fn sag_io_read_exact(count: usize, status: *mut i32) -> String;
-  fn sag_io_is_terminal(stream: i32) -> bool;
-}
+use std::ffi::c_void;
+use std::sys;
 
 /// What kind of failure an I/O error is.
 pub enum ErrorKind {
@@ -38,7 +33,7 @@ pub fn is_terminal(stream: Stream) -> bool {
     Stream::Stderr => 2,
   };
 
-  unsafe { sag_io_is_terminal(fd) }
+  sys::is_terminal(fd)
 }
 
 /// The error of an input or output operation: its kind and the operating system's message.
@@ -60,71 +55,227 @@ pub class Error impl std::prelude::Error {
   }
 }
 
-/// The error with this runtime code.
+/// The error with this code.
 fn error_from(code: i32) -> Error {
   super::os_error(code, "")
 }
 
-/// The result of an operation that returned this runtime code, 0 on success.
-fn done(code: i32) -> Result<(), Error> {
-  if code == 0 { Ok(()) } else { Err(error_from(code)) }
+/// Writes `text` and maybe a newline to the standard stream `index`.
+fn write(index: i32, text: String, newline: bool) -> Result<(), Error> {
+  const stream = sys::stream(index);
+  const len = text.len();
+
+  sys::clear_errno();
+
+  if len > 0 && unsafe { sys::fwrite(text.as_ptr(), 1, len, stream) } != len {
+    return Err(error_from(super::last_error()));
+  }
+
+  // `\n`, which `fputc` returns unless it fails.
+  if newline && unsafe { sys::fputc(10, stream) } != 10 {
+    return Err(error_from(super::last_error()));
+  }
+
+  Ok(())
 }
 
 /// Writes `text` to stdout.
 pub fn print(text: String) -> Result<(), Error> {
-  done(unsafe { sag_io_write(1, text, false) })
+  write(1, text, false)
 }
 
 /// Writes `text` and a newline to stdout.
 pub fn println(text: String) -> Result<(), Error> {
-  done(unsafe { sag_io_write(1, text, true) })
+  write(1, text, true)
 }
 
 /// Writes `text` to stderr.
 pub fn eprint(text: String) -> Result<(), Error> {
-  done(unsafe { sag_io_write(2, text, false) })
+  write(2, text, false)
 }
 
 /// Writes `text` and a newline to stderr.
 pub fn eprintln(text: String) -> Result<(), Error> {
-  done(unsafe { sag_io_write(2, text, true) })
+  write(2, text, true)
 }
 
 /// Writes out what stdout holds in its buffer.
 pub fn flush() -> Result<(), Error> {
-  done(unsafe { sag_io_flush() })
+  sys::clear_errno();
+
+  if unsafe { sys::fflush(sys::stream(1)) } == 0 { Ok(()) } else { Err(error_from(super::last_error())) }
+}
+
+/// The error of a failed read of stdin, which is ready for the next read.
+fn read_error(stream: *mut c_void) -> Error {
+  const code = super::last_error();
+
+  unsafe { sys::clearerr(stream); }
+  error_from(code)
 }
 
 /// The next line of stdin without its `\n` or `\r\n`, or `None` at the end of the input. Input
 /// that is not UTF-8 is an error of kind `InvalidData`.
 pub fn read_line() -> Result<Option<String>, Error> {
-  var status = [0i32; 1];
-  const line = unsafe { sag_io_read_line(status.as_mut_ptr()) };
+  const stream = sys::stream(0);
+  const line = new List<u8>();
+  var any = false;
+  var c = 0;
 
-  if status[0] == 0 {
-    Ok(Some(line))
-  } else if status[0] == -1 {
-    // The end of the input (`SAG_IO_END` in the runtime).
-    Ok(None)
-  } else {
-    Err(error_from(status[0]))
+  sys::clear_errno();
+
+  loop {
+    c = unsafe { sys::getc(stream) };
+
+    // `EOF`, a negative value.
+    if c < 0 {
+      break;
+    }
+
+    any = true;
+
+    if c == 10 {
+      break;
+    }
+
+    line.push(c as u8);
   }
+
+  if c < 0 && unsafe { sys::ferror(stream) } != 0 {
+    return Err(read_error(stream));
+  }
+
+  if !any {
+    return Ok(None);
+  }
+
+  if !line.is_empty() && line[line.len() - 1] == 13 {
+    line.resize(line.len() - 1, 0);
+  }
+
+  Ok(Some(text_of(&line)?))
 }
 
 /// Exactly `count` bytes of stdin, such as a message whose length is known. An input that ends
 /// before is an error of kind `UnexpectedEof`, and bytes that are not UTF-8 one of kind
 /// `InvalidData`; the bytes read are lost either way.
 pub fn read_exact(count: usize) -> Result<String, Error> {
-  var status = [0i32; 1];
-  const text = unsafe { sag_io_read_exact(count, status.as_mut_ptr()) };
+  const stream = sys::stream(0);
+  const data = new List<u8>();
+  var filled = 0usize;
 
-  if status[0] == 0 { Ok(text) } else { Err(error_from(status[0])) }
+  data.resize(count, 0);
+  sys::clear_errno();
+
+  while filled < count {
+    const read = unsafe { sys::fread(data.as_mut_ptr().add(filled), 1, count - filled, stream) };
+
+    if read == 0 {
+      break;
+    }
+
+    filled += read;
+  }
+
+  if filled < count {
+    if unsafe { sys::ferror(stream) } != 0 {
+      return Err(read_error(stream));
+    }
+
+    unsafe { sys::clearerr(stream); }
+
+    return Err(error_from(super::UNEXPECTED_EOF));
+  }
+
+  text_of(&data)
 }
 
 /// The rest of stdin. Input that is not UTF-8 is an error of kind `InvalidData`.
 pub fn read_to_string() -> Result<String, Error> {
-  var status = [0i32; 1];
-  const text = unsafe { sag_io_read_all(status.as_mut_ptr()) };
+  const stream = sys::stream(0);
+  const data = new List<u8>();
 
-  if status[0] == 0 { Ok(text) } else { Err(error_from(status[0])) }
+  sys::clear_errno();
+
+  loop {
+    const start = data.len();
+
+    data.resize(start + 4096, 0);
+
+    const read = unsafe { sys::fread(data.as_mut_ptr().add(start), 1, 4096, stream) };
+
+    data.resize(start + read, 0);
+
+    if read == 0 {
+      break;
+    }
+  }
+
+  if unsafe { sys::ferror(stream) } != 0 {
+    return Err(read_error(stream));
+  }
+
+  text_of(&data)
+}
+
+/// `bytes` as a string, or an error of kind `InvalidData` if they are not UTF-8.
+fn text_of(bytes: &[u8]) -> Result<String, Error> {
+  match utf8(bytes) {
+    Some(text) => Ok(text),
+    None => Err(error_from(super::INVALID_DATA)),
+  }
+}
+
+/// The text of `bytes`, or `None` if they are not valid UTF-8: no overlong forms, surrogates or
+/// code points past U+10FFFF.
+fn utf8(bytes: &[u8]) -> Option<String> {
+  const text = new StringBuilder();
+  const len = bytes.len();
+  var index = 0usize;
+
+  while index < len {
+    const first = bytes[index] as u32;
+    var code = first;
+    var extra = 0usize;
+    var least = 0u32;
+
+    if first >= 0xC2 && first <= 0xDF {
+      code = first - 0xC0;
+      extra = 1;
+      least = 0x80;
+    } else if first >= 0xE0 && first <= 0xEF {
+      code = first - 0xE0;
+      extra = 2;
+      least = 0x800;
+    } else if first >= 0xF0 && first <= 0xF4 {
+      code = first - 0xF0;
+      extra = 3;
+      least = 0x10000;
+    } else if first >= 0x80 {
+      return None;
+    }
+
+    if index + extra >= len && extra > 0 {
+      return None;
+    }
+
+    for offset in 1..extra + 1 {
+      const next = bytes[index + offset] as u32;
+
+      if next < 0x80 || next > 0xBF {
+        return None;
+      }
+
+      code = code * 64 + (next - 0x80);
+    }
+
+    if code < least || (code >= 0xD800 && code <= 0xDFFF) || code > 0x10FFFF {
+      return None;
+    }
+
+    text.append_char(char::from_u32(code)?);
+    index += extra + 1;
+  }
+
+  Some(text.to_string())
 }

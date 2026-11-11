@@ -150,4 +150,6 @@ fn frame() {
   runs none, as it keeps the rest of the runtime's state per thread. `&raw const NAME` is allowed,
   as on a `static var`, and gives the address of the calling thread's value. A method of a class
   instance held in one keeps `self` alive if it replaces the static, as with a field of a class.
+- C's globals (`extern "C" { static errno: c_int; }`), deferred by Q534, are decided and done by
+  [ADR-0086](0086-c-globals-and-std-io.md). `@export` on a static stays deferred.
 

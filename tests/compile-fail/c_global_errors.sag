@@ -1,0 +1,29 @@
+// The rules of C's globals (docs/adr/0086-c-globals-and-std-io.md, Q558-Q561): used only in
+// `unsafe`, assigned only when declared `static var`, never lent, of FFI-safe types, and named by
+// a valid C symbol.
+use std::ffi::c_int;
+
+extern "C" {
+  static fixed: c_int;
+  static var counter: c_int;
+  static text: String; //~ ERROR E0322
+  static var __reserved: c_int; //~ ERROR E0208
+}
+
+fn read(value: &c_int) -> c_int {
+  *value
+}
+
+fn main() {
+  const copy = counter; //~ ERROR E0323
+
+  unsafe {
+    fixed = 1; //~ ERROR E0307
+    counter = copy + fixed;
+  }
+
+  const lent = unsafe { read(&counter) }; //~ ERROR E0340
+  const address = &raw mut fixed; //~ ERROR E0312
+
+  println(f"{lent} {address.is_null()}");
+}

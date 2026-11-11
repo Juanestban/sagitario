@@ -244,6 +244,27 @@ pub fn extern_sigs(cx: Checker) {
   }
 }
 
+/// The types of the C globals (docs/adr/0086-c-globals-and-std-io.md, Q559).
+pub fn check_extern_statics(cx: Checker) {
+  for index in 0..cx.resolution.statics.len() {
+    const id = index as u32;
+    const decl = match cx.resolution.static_decl(cx.package, id) {
+      Some(decl) => decl,
+      None => continue,
+    };
+
+    if !decl.extern_c {
+      continue;
+    }
+
+    if let Some(ty) = cx.typed.static_type(cx.resolution, id) {
+      if !types::is_error(ty) && !ffi_safe(cx, ty) {
+        not_ffi_safe(cx, decl.ty.span, ty, "the C global `" + decl.name.name + "`");
+      }
+    }
+  }
+}
+
 /// `extern "C" fn`: a function with the C ABI, which C can call.
 pub fn check_exported(cx: Checker, decl: FnDecl, sig: FnSig) {
   const params: List<TypeExpr> = new List();
@@ -321,6 +342,15 @@ pub fn check_symbols(cx: Checker) {
     found.push(Symbol { span: decl.name.span, sig: cx.typed.extern_sig(id), in_std: cx.resolution.is_std_source(cx.resolution.externs[index].module) });
   }
 
+  for index in 0..cx.resolution.statics.len() {
+    if let Some(decl) = cx.resolution.static_decl(cx.package, index as u32) {
+      if decl.extern_c {
+        names.push(decl.name.name);
+        found.push(Symbol { span: decl.name.span, sig: None, in_std: cx.resolution.is_std_source(cx.resolution.statics[index].module) });
+      }
+    }
+  }
+
   for index in 0..cx.resolution.functions.len() {
     const decl = match cx.resolution.fn_decl(cx.package, index as u32) {
       Some(decl) => decl,
@@ -359,7 +389,10 @@ pub fn check_symbols(cx: Checker) {
       continue;
     }
 
-    if let Some(previous) = symbols.get(symbol) {
+    // The standard library's C declarations are compiled apart from the program's.
+    const key = if entry.in_std { "std:" + symbol } else { symbol };
+
+    if let Some(previous) = symbols.get(key) {
       var message = "first used here";
 
       if let Some(sig) = entry.sig {
@@ -380,7 +413,7 @@ pub fn check_symbols(cx: Checker) {
       continue;
     }
 
-    symbols.insert(symbol, entry);
+    symbols.insert(key, entry);
   }
 }
 

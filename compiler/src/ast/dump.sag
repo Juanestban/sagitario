@@ -228,8 +228,9 @@ class Dumper {
       Item::Static(decl) => {
         const mutable_text = if decl.mutable { " var" } else { "" };
         const thread_local_text = if decl.thread_local { " thread_local" } else { "" };
+        const extern_text = if decl.extern_c { " extern" } else { "" };
 
-        self.line("item", "Static", Some(decl.span), None, ident(decl.name) + " " + visibility(decl.visibility) + mutable_text + thread_local_text);
+        self.line("item", "Static", Some(decl.span), None, ident(decl.name) + " " + visibility(decl.visibility) + mutable_text + thread_local_text + extern_text);
         self.depth += 1;
         self.type_expr("ty", decl.ty);
 

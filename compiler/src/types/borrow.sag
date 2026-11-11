@@ -166,7 +166,11 @@ pub fn borrow(cx: Checker, mutable: bool, operand: Expr, expected: Option<Type>)
     const name = decl.name.name;
     var diagnostic = Diagnostic::error(codes::INVALID_BORROW, operand.span, "cannot lend the `static var` `" + name + "` with `" + symbol + "`");
 
-    if decl.thread_local {
+    if decl.extern_c {
+      diagnostic = Diagnostic::error(codes::INVALID_BORROW, operand.span, "cannot lend the C global `" + name + "` with `" + symbol + "`")
+        .with_note("C could change it while it is lent")
+        .with_help("copy its value in `unsafe`, or take a pointer with `&raw const`");
+    } else if decl.thread_local {
       diagnostic = diagnostic
         .with_note("the code it is lent to could change it, since every function of the thread reaches it")
         .with_help("copy its value, or call its methods on `" + name + "` itself");
@@ -928,7 +932,7 @@ fn overlap(a: List<Step>, b: List<Step>) -> bool {
   true
 }
 
-/// The `static var` that `place` is, or is a part of.
+/// The `static var` or C global that `place` is, or is a part of.
 fn static_var_root(cx: Checker, place: Expr) -> Option<StaticDecl> {
   match place.kind {
     ExprKind::Field { base, .. } | ExprKind::Index { base, .. } => static_var_root(cx, base),
@@ -936,7 +940,7 @@ fn static_var_root(cx: Checker, place: Expr) -> Option<StaticDecl> {
       Some(Res::Static(id)) => {
         const decl = cx.resolution.static_decl(cx.package, id)?;
 
-        if decl.mutable { Some(decl) } else { None }
+        if decl.mutable || decl.extern_c { Some(decl) } else { None }
       }
       _ => None,
     },
