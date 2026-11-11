@@ -423,6 +423,15 @@ functions, constants and structs, and the reading of `errno`. Only the modules o
 it; for a program it does not exist (`E0200`)
 ([ADR-0085](../adr/0085-conditional-compilation-and-std-time.md), Q551).
 
+`std::sys::Atomic<T>`, provided by the compiler, holds a `bool` or an integer that threads read
+and change at once; the atomics of `std::sync` are written on it. It is only the type of a
+`const` field of a class, set once in the class's initializer with `Atomic::new(value)` and then
+used through its methods: `load`, `store`, `swap`, `compare_exchange` and, on integers,
+`fetch_add` and `fetch_sub`, all sequentially consistent and wrapping around at the type's
+limits. Another `T` is an error (`E0318`), and so is any other place or use (`E0339`). Its C is an
+`_Atomic` field, and a program holding one is compiled as one using threads
+([ADR-0087](../adr/0087-atomic-storage-and-std-sync.md)).
+
 `std::process::exit` is provided by the compiler, since no function written in Sagitario can
 declare that it never returns. The compiler also checks the arguments of `thread::spawn`,
 `JoinHandle::spawn` and `task::spawn_blocking` where code outside the standard library calls them.

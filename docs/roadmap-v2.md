@@ -63,12 +63,14 @@ The standard library half of the runtime, about 2,000 lines of `runtime/sagitari
 rewritten in Sagitario over the C library and the system API through `extern "C"`, without C
 shims (Q541).
 
-**Status:** in progress. [ADR-0085](adr/0085-conditional-compilation-and-std-time.md) fixes the
-pattern and the order of the modules. Conditional compilation with `@cfg` is done, and
-`std::time`, `std::env`, `std::path`, `std::io`, `std::fs`, `std::process` with `Command` and
-dynamic libraries (`std::ffi::Library`) are written on the system API in `std::sys`, without C;
-`std::io` needed C's global variables in the FFI ([ADR-0086](adr/0086-c-globals-and-std-io.md)).
-`std::thread` and `std::sync` follow.
+**Status:** done. [ADR-0085](adr/0085-conditional-compilation-and-std-time.md) fixed the
+pattern and the order of the modules, with conditional compilation by `@cfg`. Every module of the
+standard library is written on the system API in `std::sys`, without C: `std::time`, `std::env`,
+`std::path`, `std::io`, `std::fs`, `std::process` with `Command`, dynamic libraries
+(`std::ffi::Library`), `std::sync` and `std::thread`. `std::io` needed C's global variables in the
+FFI ([ADR-0086](adr/0086-c-globals-and-std-io.md)), and `std::sync` an atomic type the compiler
+provides to `std` ([ADR-0087](adr/0087-atomic-storage-and-std-sync.md)). What each thread does
+when it starts and ends stays in the runtime's core, which S3 moves.
 
 - One module per increment: `std::env`, `std::io`, `std::process` with `Command`, `std::fs`,
   `std::path`, `std::time`, `std::thread`, `std::sync` and dynamic libraries.

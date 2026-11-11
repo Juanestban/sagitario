@@ -4,10 +4,6 @@
 #if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
 #define _POSIX_C_SOURCE 200809L
 #endif
-/* Apple's headers hide `sysctlbyname` under strict POSIX. */
-#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
-#define _DARWIN_C_SOURCE
-#endif
 
 #include "sagitario_runtime.h"
 
@@ -23,9 +19,6 @@
 #include <unistd.h>
 #ifdef SAG_THREADS
 #include <pthread.h>
-#endif
-#ifdef __APPLE__
-#include <sys/sysctl.h>
 #endif
 #endif
 
@@ -1252,14 +1245,6 @@ _Noreturn void sag_process_exit(int32_t code) {
   _Exit((int)code);
 }
 
-/* ---- Windows handles, for the threads -------------------------------------------------- */
-
-#ifdef _WIN32
-/* kernel32 declarations, with the Windows types spelled out: BOOL is `int`, DWORD
- * `unsigned long` and HANDLE `void *`. */
-extern int SAG_WINAPI CloseHandle(void *handle);
-#endif
-
 /* ---- Tasks (docs/spec/12-async.md) ----------------------------------------------------- */
 
 typedef struct sag_task_timer_entry {
@@ -1452,10 +1437,12 @@ void sag_task_shutdown(void) {
 static sag_count sag_threads_running;
 
 #ifdef SAG_THREADS
-/* A thread started by `sag_thread_start`. Every thread not yet joined is in the list
- * `sag_threads`, so that a thread nobody joins is not reported as leaked memory. */
+/* A thread of `std::thread`, which `std::sys` starts and joins with the system's API
+ * (docs/adr/0087-atomic-storage-and-std-sync.md, Q571). Every thread not yet joined is in the
+ * list `sag_threads`, so that a thread nobody joins is not reported as leaked memory. */
 typedef struct sag_thread {
   sag_fnval body;
+  /* The system's thread, for the threads the core starts itself (`sag_core_thread_start`). */
 #ifdef _WIN32
   void *handle;
 #else
@@ -1478,34 +1465,7 @@ static void sag_threads_release(void) {
 
 static void sag_static_locals_finish(void);
 
-static void sag_thread_run(sag_thread *thread) {
-  ((void (*)(sag_object *))thread->body.fn)(thread->body.env);
-  sag_fnval_release(thread->body);
-  sag_static_locals_finish();
-  sag_task_shutdown();
-  sag_drop_free();
-  sag_count_dec(&sag_threads_running);
-}
-
-#ifdef _WIN32
-extern void *SAG_WINAPI CreateThread(void *attributes, size_t stack_size, unsigned long(SAG_WINAPI *start)(void *), void *parameter, unsigned long flags,
-                                     unsigned long *thread_id);
-extern unsigned long SAG_WINAPI WaitForSingleObject(void *handle, unsigned long milliseconds);
-
-#define SAG_WIN_INFINITE 0xFFFFFFFFul
-
-static unsigned long SAG_WINAPI sag_thread_main(void *thread) {
-  sag_thread_run(thread);
-  return 0;
-}
-#else
-static void *sag_thread_main(void *thread) {
-  sag_thread_run(thread);
-  return NULL;
-}
-#endif
-
-void *sag_thread_start(sag_fnval body) {
+void *sag_thread_prepare(sag_fnval body) {
   sag_thread *thread = sag_alloc(sizeof(sag_thread));
   thread->body = body;
   sag_fnval_retain(body);
@@ -1514,26 +1474,21 @@ void *sag_thread_start(sag_fnval body) {
   thread->next = sag_threads;
   sag_threads = thread;
   sag_threads_release();
-#ifdef _WIN32
-  thread->handle = CreateThread(NULL, 0, sag_thread_main, thread, 0, NULL);
-  bool started = thread->handle != NULL;
-#else
-  bool started = pthread_create(&thread->id, NULL, sag_thread_main, thread) == 0;
-#endif
-  if (!started) {
-    sag_panic("failed to spawn a thread");
-  }
   return thread;
 }
 
-void sag_thread_join(void *pointer) {
+void sag_thread_run(void *pointer) {
   sag_thread *thread = pointer;
-#ifdef _WIN32
-  WaitForSingleObject(thread->handle, SAG_WIN_INFINITE);
-  CloseHandle(thread->handle);
-#else
-  pthread_join(thread->id, NULL);
-#endif
+  ((void (*)(sag_object *))thread->body.fn)(thread->body.env);
+  sag_fnval_release(thread->body);
+  sag_static_locals_finish();
+  sag_task_shutdown();
+  sag_drop_free();
+  sag_count_dec(&sag_threads_running);
+}
+
+void sag_thread_finish(void *pointer) {
+  sag_thread *thread = pointer;
   sag_threads_acquire();
   for (sag_thread **link = &sag_threads; *link != NULL; link = &(*link)->next) {
     if (*link == thread) {
@@ -1546,26 +1501,50 @@ void sag_thread_join(void *pointer) {
 }
 
 #ifdef _WIN32
-extern unsigned long SAG_WINAPI GetActiveProcessorCount(unsigned short group);
+extern void *SAG_WINAPI CreateThread(void *attributes, size_t stack_size, unsigned long(SAG_WINAPI *start)(void *), void *parameter, unsigned long flags,
+                                     unsigned long *thread_id);
+extern unsigned long SAG_WINAPI WaitForSingleObject(void *handle, unsigned long milliseconds);
+extern int SAG_WINAPI CloseHandle(void *handle);
+
+static unsigned long SAG_WINAPI sag_core_thread_main(void *thread) {
+  sag_thread_run(thread);
+  return 0;
+}
+#else
+static void *sag_core_thread_main(void *thread) {
+  sag_thread_run(thread);
+  return NULL;
+}
 #endif
 
-size_t sag_thread_available_parallelism(void) {
-#if defined(_WIN32)
-  /* All processor groups. */
-  unsigned long count = GetActiveProcessorCount(0xFFFF);
-#elif defined(__APPLE__)
-  int count = 0;
-  size_t size = sizeof count;
-  if (sysctlbyname("hw.logicalcpu", &count, &size, NULL, 0) != 0) {
-    count = 0;
-  }
+/* A thread of the core, for the jobs of `task::spawn_blocking`, which stays C with the executor
+ * until S3; panics if the system cannot start one. */
+static void *sag_core_thread_start(sag_fnval body) {
+  sag_thread *thread = sag_thread_prepare(body);
+#ifdef _WIN32
+  thread->handle = CreateThread(NULL, 0, sag_core_thread_main, thread, 0, NULL);
+  bool started = thread->handle != NULL;
 #else
-  long count = sysconf(_SC_NPROCESSORS_ONLN);
+  bool started = pthread_create(&thread->id, NULL, sag_core_thread_main, thread) == 0;
 #endif
-  return count > 0 ? (size_t)count : 1;
+  if (!started) {
+    sag_panic("failed to spawn a thread");
+  }
+  return thread;
 }
 
-/* ---- Standard library: std::sync ------------------------------------------------------- */
+static void sag_core_thread_join(void *pointer) {
+  sag_thread *thread = pointer;
+#ifdef _WIN32
+  WaitForSingleObject(thread->handle, 0xFFFFFFFFul);
+  CloseHandle(thread->handle);
+#else
+  pthread_join(thread->id, NULL);
+#endif
+  sag_thread_finish(thread);
+}
+
+/* ---- Locks of the core ------------------------------------------------------------------- */
 
 #ifdef _WIN32
 extern void SAG_WINAPI InitializeSRWLock(void **lock);
@@ -1574,171 +1553,12 @@ extern void SAG_WINAPI ReleaseSRWLockExclusive(void **lock);
 extern void SAG_WINAPI InitializeConditionVariable(void **condition);
 extern int SAG_WINAPI SleepConditionVariableSRW(void **condition, void **lock, unsigned long milliseconds, unsigned long flags);
 extern void SAG_WINAPI WakeAllConditionVariable(void **condition);
+
+#define SAG_WIN_INFINITE 0xFFFFFFFFul
 #endif
 
 /* Its address identifies the running thread. */
 static SAG_THREAD_LOCAL char sag_thread_marker;
-
-static void sag_sync_handle_called(sag_object *object) {
-  (void)object;
-  sag_panic("internal error: a runtime handle of std::sync was called");
-}
-
-static sag_fnval sag_sync_handle(sag_object *object) {
-  sag_fnval handle;
-  handle.fn = (sag_method)sag_sync_handle_called;
-  handle.env = object;
-  return handle;
-}
-
-typedef struct sag_mutex {
-  sag_object header;
-  /* The address of the marker of the thread holding the lock, or 0. */
-  atomic_uintptr_t owner;
-#ifdef _WIN32
-  void *lock;
-  void *condition;
-#else
-  pthread_mutex_t lock;
-  pthread_cond_t condition;
-#endif
-} sag_mutex;
-
-static void sag_mutex_drop(sag_object *object) {
-#ifdef _WIN32
-  (void)object;
-#else
-  pthread_cond_destroy(&((sag_mutex *)object)->condition);
-  pthread_mutex_destroy(&((sag_mutex *)object)->lock);
-#endif
-}
-
-sag_fnval sag_sync_mutex_new(void) {
-  sag_mutex *mutex = sag_object_alloc(sizeof(sag_mutex));
-  atomic_init(&mutex->owner, 0);
-#ifdef _WIN32
-  InitializeSRWLock(&mutex->lock);
-  InitializeConditionVariable(&mutex->condition);
-#else
-  if (pthread_mutex_init(&mutex->lock, NULL) != 0 || pthread_cond_init(&mutex->condition, NULL) != 0) {
-    sag_panic("failed to create a mutex");
-  }
-#endif
-  sag_object_init(&mutex->header, sag_mutex_drop, NULL);
-  return sag_sync_handle(&mutex->header);
-}
-
-void sag_sync_mutex_lock(sag_fnval handle) {
-  sag_mutex *mutex = (sag_mutex *)handle.env;
-  uintptr_t self = (uintptr_t)&sag_thread_marker;
-  if (atomic_load(&mutex->owner) == self) {
-    sag_panic("a thread locked a `Mutex` it already holds: the function given to `update` must not use the same mutex");
-  }
-#ifdef _WIN32
-  AcquireSRWLockExclusive(&mutex->lock);
-#else
-  pthread_mutex_lock(&mutex->lock);
-#endif
-  atomic_store(&mutex->owner, self);
-}
-
-void sag_sync_mutex_unlock(sag_fnval handle) {
-  sag_mutex *mutex = (sag_mutex *)handle.env;
-  atomic_store(&mutex->owner, 0);
-#ifdef _WIN32
-  ReleaseSRWLockExclusive(&mutex->lock);
-#else
-  pthread_mutex_unlock(&mutex->lock);
-#endif
-}
-
-void sag_sync_mutex_wait(sag_fnval handle) {
-  sag_mutex *mutex = (sag_mutex *)handle.env;
-  atomic_store(&mutex->owner, 0);
-#ifdef _WIN32
-  SleepConditionVariableSRW(&mutex->condition, &mutex->lock, SAG_WIN_INFINITE, 0);
-#else
-  pthread_cond_wait(&mutex->condition, &mutex->lock);
-#endif
-  atomic_store(&mutex->owner, (uintptr_t)&sag_thread_marker);
-}
-
-void sag_sync_mutex_notify_all(sag_fnval handle) {
-  sag_mutex *mutex = (sag_mutex *)handle.env;
-#ifdef _WIN32
-  WakeAllConditionVariable(&mutex->condition);
-#else
-  pthread_cond_broadcast(&mutex->condition);
-#endif
-}
-
-typedef struct sag_atomic_cell {
-  sag_object header;
-  _Atomic uint64_t value;
-} sag_atomic_cell;
-
-static void sag_atomic_cell_drop(sag_object *object) {
-  (void)object;
-}
-
-static _Atomic uint64_t *sag_atomic_value(sag_fnval handle) {
-  return &((sag_atomic_cell *)handle.env)->value;
-}
-
-sag_fnval sag_sync_atomic_new(uint64_t value) {
-  sag_atomic_cell *cell = sag_object_alloc(sizeof(sag_atomic_cell));
-  atomic_init(&cell->value, value);
-  sag_object_init(&cell->header, sag_atomic_cell_drop, NULL);
-  return sag_sync_handle(&cell->header);
-}
-
-uint64_t sag_sync_atomic_load(sag_fnval cell) {
-  return atomic_load(sag_atomic_value(cell));
-}
-
-void sag_sync_atomic_store(sag_fnval cell, uint64_t value) {
-  atomic_store(sag_atomic_value(cell), value);
-}
-
-uint64_t sag_sync_atomic_swap(sag_fnval cell, uint64_t value) {
-  return atomic_exchange(sag_atomic_value(cell), value);
-}
-
-/* `value` reduced to `bits` bits, then sign-extended or zero-extended back to 64. */
-static uint64_t sag_atomic_canonical(uint64_t value, uint32_t bits, bool is_signed) {
-  if (bits == 0) {
-    bits = (uint32_t)(sizeof(size_t) * CHAR_BIT);
-  }
-  if (bits >= 64) {
-    return value;
-  }
-  uint64_t mask = (UINT64_C(1) << bits) - 1;
-  value &= mask;
-  if (is_signed && (value >> (bits - 1)) != 0) {
-    value |= ~mask;
-  }
-  return value;
-}
-
-uint64_t sag_sync_atomic_add(sag_fnval cell, uint64_t delta, bool subtract, uint32_t bits, bool is_signed) {
-  _Atomic uint64_t *value = sag_atomic_value(cell);
-  uint64_t previous = atomic_load(value);
-  for (;;) {
-    uint64_t next = sag_atomic_canonical(subtract ? previous - delta : previous + delta, bits, is_signed);
-    if (atomic_compare_exchange_weak(value, &previous, next)) {
-      return previous;
-    }
-  }
-}
-
-bool sag_sync_atomic_compare_exchange(sag_fnval cell, uint64_t expected, uint64_t desired, uint64_t *actual) {
-  uint64_t current = expected;
-  if (atomic_compare_exchange_strong(sag_atomic_value(cell), &current, desired)) {
-    return true;
-  }
-  *actual = current;
-  return false;
-}
 
 /* ---- Tasks across threads (docs/adr/0073-spawn-blocking.md) ----------------------------- */
 
@@ -1876,7 +1696,7 @@ void sag_task_spawn_blocking(sag_fnval body, sag_fnval done) {
   run.fn = (sag_method)sag_task_job_run;
   run.env = &job->header;
   /* The thread holds its own reference while it runs. */
-  job->thread = sag_thread_start(run);
+  job->thread = sag_core_thread_start(run);
   sag_object_release(&job->header);
   sag_task_jobs++;
 }
@@ -1894,7 +1714,7 @@ static void sag_task_drain(void) {
   sag_inbox_unlock(inbox);
   while (job != NULL) {
     sag_task_job *next = job->next;
-    sag_thread_join(job->thread);
+    sag_core_thread_join(job->thread);
     sag_task_jobs--;
     sag_task_schedule(job->done);
     sag_object_release(&job->header);
@@ -1946,7 +1766,7 @@ static void sag_task_close_inbox(void) {
   sag_inbox_unlock(inbox);
   while (job != NULL) {
     sag_task_job *next = job->next;
-    sag_thread_join(job->thread);
+    sag_core_thread_join(job->thread);
     sag_object_release(&job->header);
     job = next;
   }

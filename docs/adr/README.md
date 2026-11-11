@@ -95,6 +95,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0084](0084-a-complete-language-and-the-engine-apart.md) | Roadmap v2: a complete language, with the game engine as a project apart | Accepted |
 | [0085](0085-conditional-compilation-and-std-time.md) | Conditional compilation with `@cfg`, and `std::time` in Sagitario (S1) | Accepted |
 | [0086](0086-c-globals-and-std-io.md) | C's global variables in the FFI, and `std::io` in Sagitario (S1) | Accepted |
+| [0087](0087-atomic-storage-and-std-sync.md) | Atomic storage for the standard library, and `std::sync` and `std::thread` in Sagitario (S1) | Accepted |
 
 ## Template
 
