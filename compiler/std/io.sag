@@ -220,62 +220,8 @@ pub fn read_to_string() -> Result<String, Error> {
 
 /// `bytes` as a string, or an error of kind `InvalidData` if they are not UTF-8.
 fn text_of(bytes: &[u8]) -> Result<String, Error> {
-  match utf8(bytes) {
+  match super::utf8(bytes) {
     Some(text) => Ok(text),
     None => Err(error_from(super::INVALID_DATA)),
   }
-}
-
-/// The text of `bytes`, or `None` if they are not valid UTF-8: no overlong forms, surrogates or
-/// code points past U+10FFFF.
-fn utf8(bytes: &[u8]) -> Option<String> {
-  const text = new StringBuilder();
-  const len = bytes.len();
-  var index = 0usize;
-
-  while index < len {
-    const first = bytes[index] as u32;
-    var code = first;
-    var extra = 0usize;
-    var least = 0u32;
-
-    if first >= 0xC2 && first <= 0xDF {
-      code = first - 0xC0;
-      extra = 1;
-      least = 0x80;
-    } else if first >= 0xE0 && first <= 0xEF {
-      code = first - 0xE0;
-      extra = 2;
-      least = 0x800;
-    } else if first >= 0xF0 && first <= 0xF4 {
-      code = first - 0xF0;
-      extra = 3;
-      least = 0x10000;
-    } else if first >= 0x80 {
-      return None;
-    }
-
-    if index + extra >= len && extra > 0 {
-      return None;
-    }
-
-    for offset in 1..extra + 1 {
-      const next = bytes[index + offset] as u32;
-
-      if next < 0x80 || next > 0xBF {
-        return None;
-      }
-
-      code = code * 64 + (next - 0x80);
-    }
-
-    if code < least || (code >= 0xD800 && code <= 0xDFFF) || code > 0x10FFFF {
-      return None;
-    }
-
-    text.append_char(char::from_u32(code)?);
-    index += extra + 1;
-  }
-
-  Some(text.to_string())
 }

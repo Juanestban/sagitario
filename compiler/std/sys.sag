@@ -548,3 +548,632 @@ pub fn is_terminal(index: i32) -> bool {
   (unsafe { GetConsoleMode(handle, &mut mode) }) != 0
 }
 
+// ---- Files and directories --------------------------------------------------------------------
+
+/// `errno` values that `std::fs` reports itself. They are the same on every supported system,
+/// except `ENOTEMPTY`.
+pub const ENOENT: i32 = 2;
+pub const ENOTDIR: i32 = 20;
+pub const EISDIR: i32 = 21;
+pub const EINVAL: i32 = 22;
+
+@cfg(any(target_os = "linux", target_os = "android"))
+pub const ENOTEMPTY: i32 = 39;
+@cfg(any(target_os = "macos", target_os = "ios"))
+pub const ENOTEMPTY: i32 = 66;
+@cfg(windows)
+pub const ENOTEMPTY: i32 = 41;
+
+/// What a path names, as `std::fs` asks it.
+pub const KIND_MISSING: i32 = 0;
+pub const KIND_FILE: i32 = 1;
+pub const KIND_DIR: i32 = 2;
+pub const KIND_OTHER: i32 = 3;
+
+@cfg(unix)
+const EEXIST: i32 = 17;
+@cfg(unix)
+const ERANGE: i32 = 34;
+
+@cfg(unix)
+extern "C" {
+  fn fopen(path: *const c_char, mode: *const c_char) -> *mut c_void;
+  fn fclose(file: *mut c_void) -> c_int;
+  fn mkdir(path: *const c_char, mode: u32) -> c_int;
+  fn rmdir(path: *const c_char) -> c_int;
+  fn unlink(path: *const c_char) -> c_int;
+  fn rename(from: *const c_char, to: *const c_char) -> c_int;
+  fn getcwd(buffer: *mut c_char, size: usize) -> *mut c_char;
+  fn opendir(path: *const c_char) -> *mut c_void;
+  fn readdir(dir: *mut c_void) -> *const u8;
+  fn closedir(dir: *mut c_void) -> c_int;
+  fn stat(path: *const c_char, info: *mut StatBuffer) -> c_int;
+}
+
+/// Room for C's `struct stat` on every system, read at the offset of its `st_mode`. On macOS for
+/// Intel, `stat` and `readdir` are the symbols of 32-bit inodes, which Apple still exports: the
+/// 64-bit ones are named `stat$INODE64` and `readdir$INODE64`, which C cannot name.
+@cfg(unix)
+@repr(C)
+struct StatBuffer {
+  pub words: [u64; 32];
+}
+
+/// Where `st_mode` is in `struct stat`, and how many bytes it has.
+@cfg(all(any(target_os = "linux", target_os = "android"), target_arch = "x86_64"))
+const MODE_OFFSET: usize = 24;
+@cfg(all(any(target_os = "linux", target_os = "android"), not(target_arch = "x86_64")))
+const MODE_OFFSET: usize = 16;
+@cfg(any(target_os = "ios", all(target_os = "macos", target_arch = "aarch64")))
+const MODE_OFFSET: usize = 4;
+@cfg(all(target_os = "macos", target_arch = "x86_64"))
+const MODE_OFFSET: usize = 8;
+
+@cfg(any(target_os = "linux", target_os = "android"))
+const MODE_BYTES: usize = 4;
+@cfg(any(target_os = "macos", target_os = "ios"))
+const MODE_BYTES: usize = 2;
+
+/// Where `d_name` is in `struct dirent`.
+@cfg(any(target_os = "linux", target_os = "android"))
+const NAME_OFFSET: usize = 19;
+@cfg(any(target_os = "ios", all(target_os = "macos", target_arch = "aarch64")))
+const NAME_OFFSET: usize = 21;
+@cfg(all(target_os = "macos", target_arch = "x86_64"))
+const NAME_OFFSET: usize = 8;
+
+/// `path` as a C string, or `None` if it holds a NUL.
+@cfg(unix)
+fn c_path(path: String) -> Option<CString> {
+  match CString::new(path) {
+    Ok(found) => Some(found),
+    Err(_) => None,
+  }
+}
+
+/// The code of the last failed call of the C library.
+@cfg(unix)
+fn failure() -> i32 {
+  super::last_error()
+}
+
+@cfg(unix)
+pub fn path_kind(path: String) -> i32 {
+  const name = match c_path(path) {
+    Some(found) => found,
+    None => return KIND_MISSING,
+  };
+  var info = StatBuffer { words: [0u64; 32] };
+
+  if unsafe { stat(name.as_ptr(), &mut info) } != 0 {
+    return KIND_MISSING;
+  }
+
+  const at = unsafe { (&raw const info as *const u8).add(MODE_OFFSET) };
+  const mode = if MODE_BYTES == 2 { (unsafe { *(at as *const u16) }) as u32 } else { unsafe { *(at as *const u32) } };
+  // The type is the fourth octal digit from the end: `S_IFDIR` is 0o040000, `S_IFREG` 0o100000.
+  const file_type = mode / 4096 % 16;
+
+  if file_type == 4 {
+    KIND_DIR
+  } else if file_type == 8 {
+    KIND_FILE
+  } else {
+    KIND_OTHER
+  }
+}
+
+/// The bytes of the file at `path`, or the code of the failure.
+@cfg(unix)
+pub fn read_file(path: String) -> Result<List<u8>, i32> {
+  const name = match c_path(path) {
+    Some(found) => found,
+    None => return Err(EINVAL),
+  };
+  const mode = CString::new("rb").unwrap();
+
+  clear_errno();
+
+  const file = unsafe { fopen(name.as_ptr(), mode.as_ptr()) };
+
+  if file.is_null() {
+    return Err(failure());
+  }
+
+  const data = new List<u8>();
+
+  loop {
+    const start = data.len();
+
+    data.resize(start + 4096, 0);
+
+    const read = unsafe { fread(data.as_mut_ptr().add(start), 1, 4096, file) };
+
+    data.resize(start + read, 0);
+
+    if read == 0 {
+      break;
+    }
+  }
+
+  const failed = unsafe { ferror(file) } != 0;
+  const code = if failed { failure() } else { 0 };
+
+  unsafe { fclose(file); }
+
+  if failed { Err(code) } else { Ok(data) }
+}
+
+/// Writes `len` bytes at `data` to the file at `path`, creating it, replacing it or appending.
+@cfg(unix)
+pub fn write_file(path: String, data: *const u8, len: usize, append: bool) -> i32 {
+  const name = match c_path(path) {
+    Some(found) => found,
+    None => return EINVAL,
+  };
+  const mode = CString::new(if append { "ab" } else { "wb" }).unwrap();
+
+  clear_errno();
+
+  const file = unsafe { fopen(name.as_ptr(), mode.as_ptr()) };
+
+  if file.is_null() {
+    return failure();
+  }
+
+  var code = 0;
+
+  if len > 0 && unsafe { fwrite(data, 1, len, file) } != len {
+    code = failure();
+  }
+
+  if unsafe { fclose(file) } != 0 && code == 0 {
+    code = failure();
+  }
+
+  code
+}
+
+@cfg(unix)
+pub fn create_dir(path: String) -> i32 {
+  const name = match c_path(path) {
+    Some(found) => found,
+    None => return EINVAL,
+  };
+
+  clear_errno();
+
+  // 0o777, less the umask.
+  if unsafe { mkdir(name.as_ptr(), 511) } == 0 { 0 } else { failure() }
+}
+
+@cfg(unix)
+pub fn remove_dir(path: String) -> i32 {
+  const name = match c_path(path) {
+    Some(found) => found,
+    None => return EINVAL,
+  };
+
+  clear_errno();
+
+  const code = if unsafe { rmdir(name.as_ptr()) } == 0 { 0 } else { failure() };
+
+  // Some systems report a directory that is not empty as `EEXIST`.
+  if code == EEXIST { ENOTEMPTY } else { code }
+}
+
+@cfg(unix)
+pub fn remove_file(path: String) -> i32 {
+  const name = match c_path(path) {
+    Some(found) => found,
+    None => return EINVAL,
+  };
+
+  clear_errno();
+
+  if unsafe { unlink(name.as_ptr()) } == 0 { 0 } else { failure() }
+}
+
+@cfg(unix)
+pub fn rename_path(from: String, to: String) -> i32 {
+  const source = match c_path(from) {
+    Some(found) => found,
+    None => return EINVAL,
+  };
+  const target = match c_path(to) {
+    Some(found) => found,
+    None => return EINVAL,
+  };
+
+  clear_errno();
+
+  if unsafe { rename(source.as_ptr(), target.as_ptr()) } == 0 { 0 } else { failure() }
+}
+
+/// Copies the bytes of the file `from` to `to`, which is created or replaced.
+@cfg(unix)
+pub fn copy_file(from: String, to: String) -> i32 {
+  match read_file(from) {
+    Ok(data) => write_file(to, data.as_ptr(), data.len(), false),
+    Err(code) => code,
+  }
+}
+
+/// The names in the directory `path`, without `.` and `..`; invalid UTF-8 becomes U+FFFD.
+@cfg(unix)
+pub fn read_dir(path: String) -> Result<List<String>, i32> {
+  const name = match c_path(path) {
+    Some(found) => found,
+    None => return Err(EINVAL),
+  };
+
+  clear_errno();
+
+  const dir = unsafe { opendir(name.as_ptr()) };
+
+  if dir.is_null() {
+    return Err(failure());
+  }
+
+  const names = new List<String>();
+
+  loop {
+    const entry = unsafe { readdir(dir) };
+
+    if entry.is_null() {
+      break;
+    }
+
+    const text = unsafe { string_from_c(entry.add(NAME_OFFSET) as *const c_char) };
+
+    if text != "." && text != ".." {
+      names.push(text);
+    }
+  }
+
+  unsafe { closedir(dir); }
+  Ok(names)
+}
+
+@cfg(unix)
+pub fn current_dir() -> Result<String, i32> {
+  var size = 256usize;
+
+  loop {
+    const buffer = new List<u8>();
+
+    buffer.resize(size, 0);
+    clear_errno();
+
+    const found = unsafe { getcwd(buffer.as_mut_ptr() as *mut c_char, size) };
+
+    if !found.is_null() {
+      return Ok(unsafe { string_from_c(found as *const c_char) });
+    }
+
+    if errno() != ERANGE {
+      return Err(failure());
+    }
+
+    size *= 2;
+  }
+}
+
+/// `WIN32_FIND_DATAW`.
+@cfg(windows)
+@repr(C)
+struct FindData {
+  pub attributes: u32;
+  pub created: FileTime;
+  pub accessed: FileTime;
+  pub written: FileTime;
+  pub size_high: u32;
+  pub size_low: u32;
+  pub reserved0: u32;
+  pub reserved1: u32;
+  pub name: [u16; 260];
+  pub alternate_name: [u16; 14];
+}
+
+@cfg(windows)
+extern "C" {
+  fn CreateFileW(name: *const u16, access: u32, share: u32, security: *mut c_void, disposition: u32, flags: u32, template_file: *mut c_void) -> *mut c_void;
+  fn ReadFile(file: *mut c_void, buffer: *mut u8, size: u32, read: *mut u32, overlapped: *mut c_void) -> c_int;
+  fn WriteFile(file: *mut c_void, buffer: *const u8, size: u32, written: *mut u32, overlapped: *mut c_void) -> c_int;
+  fn CloseHandle(handle: *mut c_void) -> c_int;
+  fn GetFileAttributesW(name: *const u16) -> u32;
+  fn CreateDirectoryW(name: *const u16, security: *mut c_void) -> c_int;
+  fn RemoveDirectoryW(name: *const u16) -> c_int;
+  fn DeleteFileW(name: *const u16) -> c_int;
+  fn MoveFileExW(from: *const u16, to: *const u16, flags: u32) -> c_int;
+  fn CopyFileW(from: *const u16, to: *const u16, fail_if_exists: c_int) -> c_int;
+  fn FindFirstFileW(pattern: *const u16, data: *mut FindData) -> *mut c_void;
+  fn FindNextFileW(find: *mut c_void, data: *mut FindData) -> c_int;
+  fn FindClose(find: *mut c_void) -> c_int;
+  fn GetCurrentDirectoryW(size: u32, buffer: *mut u16) -> u32;
+  fn GetLastError() -> u32;
+}
+
+/// `INVALID_HANDLE_VALUE`, -1.
+@cfg(windows)
+fn invalid(handle: *mut c_void) -> bool {
+  handle as usize == 0xFFFF_FFFF_FFFF_FFFF
+}
+
+/// The `errno` value of the last Windows error, so that kinds and messages match other systems.
+@cfg(windows)
+fn failure() -> i32 {
+  const error = unsafe { GetLastError() };
+
+  if error == 2 || error == 3 || error == 15 || error == 161 {
+    // ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, ERROR_INVALID_DRIVE, ERROR_BAD_PATHNAME.
+    ENOENT
+  } else if error == 5 || error == 32 || error == 33 {
+    // ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION: EACCES.
+    13
+  } else if error == 80 || error == 183 {
+    // ERROR_FILE_EXISTS, ERROR_ALREADY_EXISTS: EEXIST.
+    17
+  } else if error == 87 || error == 123 {
+    // ERROR_INVALID_PARAMETER, ERROR_INVALID_NAME.
+    EINVAL
+  } else if error == 145 {
+    // ERROR_DIR_NOT_EMPTY.
+    ENOTEMPTY
+  } else if error == 267 {
+    // ERROR_DIRECTORY.
+    ENOTDIR
+  } else if error == 8 || error == 14 {
+    // ERROR_NOT_ENOUGH_MEMORY, ERROR_OUTOFMEMORY: ENOMEM.
+    12
+  } else if error == 39 || error == 112 {
+    // ERROR_HANDLE_DISK_FULL, ERROR_DISK_FULL: ENOSPC.
+    28
+  } else {
+    super::UNKNOWN
+  }
+}
+
+/// `path` as NUL-terminated UTF-16, or `None` if it holds a NUL.
+@cfg(windows)
+fn wide_path(path: String) -> Option<List<u16>> {
+  if path.contains("\0") { None } else { Some(to_utf16(path)) }
+}
+
+@cfg(windows)
+pub fn path_kind(path: String) -> i32 {
+  const name = match wide_path(path) {
+    Some(found) => found,
+    None => return KIND_MISSING,
+  };
+  const attributes = unsafe { GetFileAttributesW(name.as_ptr()) };
+
+  // INVALID_FILE_ATTRIBUTES, and FILE_ATTRIBUTE_DIRECTORY (0x10).
+  if attributes == 0xFFFF_FFFF {
+    KIND_MISSING
+  } else if attributes / 16 % 2 == 1 {
+    KIND_DIR
+  } else {
+    KIND_FILE
+  }
+}
+
+@cfg(windows)
+pub fn read_file(path: String) -> Result<List<u8>, i32> {
+  const name = match wide_path(path) {
+    Some(found) => found,
+    None => return Err(EINVAL),
+  };
+  // GENERIC_READ, sharing everything, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL.
+  const file = unsafe { CreateFileW(name.as_ptr(), 0x8000_0000, 7, 0 as *mut c_void, 3, 0x80, 0 as *mut c_void) };
+
+  if invalid(file) {
+    return Err(failure());
+  }
+
+  const data = new List<u8>();
+  var code = 0;
+
+  loop {
+    const start = data.len();
+    var read = 0u32;
+
+    data.resize(start + 4096, 0);
+
+    const done = unsafe { ReadFile(file, data.as_mut_ptr().add(start), 4096, &mut read, 0 as *mut c_void) } != 0;
+
+    data.resize(start + read as usize, 0);
+
+    if !done {
+      code = failure();
+      break;
+    }
+
+    if read == 0 {
+      break;
+    }
+  }
+
+  unsafe { CloseHandle(file); }
+
+  if code == 0 { Ok(data) } else { Err(code) }
+}
+
+@cfg(windows)
+pub fn write_file(path: String, data: *const u8, len: usize, append: bool) -> i32 {
+  const name = match wide_path(path) {
+    Some(found) => found,
+    None => return EINVAL,
+  };
+  // FILE_APPEND_DATA with OPEN_ALWAYS, or GENERIC_WRITE with CREATE_ALWAYS.
+  const access = if append { 0x4u32 } else { 0x4000_0000u32 };
+  const disposition = if append { 4u32 } else { 2u32 };
+  const file = unsafe { CreateFileW(name.as_ptr(), access, 7, 0 as *mut c_void, disposition, 0x80, 0 as *mut c_void) };
+
+  if invalid(file) {
+    return failure();
+  }
+
+  var code = 0;
+  var done = 0usize;
+
+  while done < len {
+    const left = len - done;
+    const size = if left > 0x4000_0000 { 0x4000_0000u32 } else { left as u32 };
+    var written = 0u32;
+
+    if unsafe { WriteFile(file, data.add(done), size, &mut written, 0 as *mut c_void) } == 0 {
+      code = failure();
+      break;
+    }
+
+    done += written as usize;
+  }
+
+  if unsafe { CloseHandle(file) } == 0 && code == 0 {
+    code = failure();
+  }
+
+  code
+}
+
+@cfg(windows)
+pub fn create_dir(path: String) -> i32 {
+  const name = match wide_path(path) {
+    Some(found) => found,
+    None => return EINVAL,
+  };
+
+  if unsafe { CreateDirectoryW(name.as_ptr(), 0 as *mut c_void) } != 0 { 0 } else { failure() }
+}
+
+@cfg(windows)
+pub fn remove_dir(path: String) -> i32 {
+  const name = match wide_path(path) {
+    Some(found) => found,
+    None => return EINVAL,
+  };
+
+  if unsafe { RemoveDirectoryW(name.as_ptr()) } != 0 { 0 } else { failure() }
+}
+
+@cfg(windows)
+pub fn remove_file(path: String) -> i32 {
+  const name = match wide_path(path) {
+    Some(found) => found,
+    None => return EINVAL,
+  };
+
+  if unsafe { DeleteFileW(name.as_ptr()) } != 0 { 0 } else { failure() }
+}
+
+/// Replaces the target, as POSIX does: MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED.
+@cfg(windows)
+pub fn rename_path(from: String, to: String) -> i32 {
+  const source = match wide_path(from) {
+    Some(found) => found,
+    None => return EINVAL,
+  };
+  const target = match wide_path(to) {
+    Some(found) => found,
+    None => return EINVAL,
+  };
+
+  if unsafe { MoveFileExW(source.as_ptr(), target.as_ptr(), 3) } != 0 { 0 } else { failure() }
+}
+
+@cfg(windows)
+pub fn copy_file(from: String, to: String) -> i32 {
+  const source = match wide_path(from) {
+    Some(found) => found,
+    None => return EINVAL,
+  };
+  const target = match wide_path(to) {
+    Some(found) => found,
+    None => return EINVAL,
+  };
+
+  if unsafe { CopyFileW(source.as_ptr(), target.as_ptr(), 0) } != 0 { 0 } else { failure() }
+}
+
+@cfg(windows)
+pub fn read_dir(path: String) -> Result<List<String>, i32> {
+  if path.is_empty() {
+    return Err(ENOENT);
+  }
+
+  // `path\*`, without doubling a trailing separator.
+  const pattern = if path.ends_with("\\") || path.ends_with("/") { path + "*" } else { path + "\\*" };
+  const name = match wide_path(pattern) {
+    Some(found) => found,
+    None => return Err(EINVAL),
+  };
+  var data = FindData {
+    attributes: 0,
+    created: FileTime { low: 0, high: 0 },
+    accessed: FileTime { low: 0, high: 0 },
+    written: FileTime { low: 0, high: 0 },
+    size_high: 0,
+    size_low: 0,
+    reserved0: 0,
+    reserved1: 0,
+    name: [0u16; 260],
+    alternate_name: [0u16; 14],
+  };
+  const find = unsafe { FindFirstFileW(name.as_ptr(), &mut data) };
+
+  if invalid(find) {
+    return Err(failure());
+  }
+
+  const names = new List<String>();
+
+  loop {
+    const units = new List<u16>();
+    var at = 0usize;
+
+    while at < 260 && data.name[at] != 0 {
+      units.push(data.name[at]);
+      at += 1;
+    }
+
+    const text = from_utf16_lossy(&units);
+
+    if text != "." && text != ".." {
+      names.push(text);
+    }
+
+    if unsafe { FindNextFileW(find, &mut data) } == 0 {
+      break;
+    }
+  }
+
+  unsafe { FindClose(find); }
+  Ok(names)
+}
+
+@cfg(windows)
+pub fn current_dir() -> Result<String, i32> {
+  // Without a buffer, the size it needs with its terminator.
+  const size = unsafe { GetCurrentDirectoryW(0, 0 as *mut u16) };
+
+  if size == 0 {
+    return Err(failure());
+  }
+
+  const buffer = new List<u16>();
+
+  buffer.resize(size as usize, 0);
+
+  const len = unsafe { GetCurrentDirectoryW(size, buffer.as_mut_ptr()) };
+
+  if len == 0 {
+    return Err(failure());
+  }
+
+  if len >= size {
+    return Err(super::UNKNOWN);
+  }
+
+  Ok(from_utf16_lossy(&buffer[0..len as usize]))
+}

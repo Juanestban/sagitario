@@ -769,16 +769,7 @@ void sag_env_init(int argc, const char *const *argv);
 /* Flushes output and ends the program without running pending releases. */
 _Noreturn void sag_process_exit(int32_t code);
 
-/* What a path names, for std::fs; errors count as missing. */
-#define SAG_FS_MISSING 0
-#define SAG_FS_FILE 1
-#define SAG_FS_DIR 2
-#define SAG_FS_OTHER 3
 
-/* Each returns 0 or an error code, or sets `*status` to one. Paths with NUL are EINVAL. */
-int32_t sag_fs_kind(sag_string path);
-sag_string sag_fs_read(sag_string path, int32_t *status);
-sag_string sag_fs_read_bytes(sag_string path, int32_t *status);
 
 /* Dynamic libraries (docs/adr/0078-ffi-without-c-shims.md): a library, never unloaded, or NULL
  * with the reason in `sag_library_error`; and one of its functions, or NULL. */
@@ -786,18 +777,6 @@ typedef void (*sag_symbol)(void);
 void *sag_library_open(sag_string path);
 sag_string sag_library_error(void);
 sag_symbol sag_library_symbol(void *library, sag_string name);
-int32_t sag_fs_write(sag_string path, sag_string text, bool append);
-/* `len` bytes at `data`, which may be NULL when `len` is 0. */
-int32_t sag_fs_write_bytes(sag_string path, const uint8_t *data, size_t len);
-int32_t sag_fs_create_dir(sag_string path);
-int32_t sag_fs_remove_dir(sag_string path);
-int32_t sag_fs_remove_file(sag_string path);
-/* Replaces the target if it exists, on every system. */
-int32_t sag_fs_rename(sag_string from, sag_string to);
-int32_t sag_fs_copy(sag_string from, sag_string to);
-/* The names in a directory, without `.` and `..`, separated by NUL characters. */
-sag_string sag_fs_read_dir(sag_string path, int32_t *status);
-sag_string sag_fs_current_dir(int32_t *status);
 /* Nanoseconds of a monotonic clock, and sleeping at least `nanos` nanoseconds: written in
  * Sagitario in `std::time`, which every program compiles, for the timers of the core
  * (docs/adr/0085-conditional-compilation-and-std-time.md, Q552). */

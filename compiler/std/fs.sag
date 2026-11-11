@@ -3,62 +3,55 @@
 
 use std::io;
 use std::path;
+use std::sys;
 
-extern "C" {
-  fn sag_fs_kind(path: String) -> i32;
-  fn sag_fs_read(path: String, status: *mut i32) -> String;
-  fn sag_fs_read_bytes(path: String, status: *mut i32) -> String;
-  fn sag_fs_write(path: String, text: String, append: bool) -> i32;
-  fn sag_fs_write_bytes(path: String, data: *const u8, len: usize) -> i32;
-  fn sag_fs_create_dir(path: String) -> i32;
-  fn sag_fs_remove_dir(path: String) -> i32;
-  fn sag_fs_remove_file(path: String) -> i32;
-  fn sag_fs_rename(from: String, to: String) -> i32;
-  fn sag_fs_copy(from: String, to: String) -> i32;
-  fn sag_fs_read_dir(path: String, status: *mut i32) -> String;
-  fn sag_fs_current_dir(status: *mut i32) -> String;
-}
-
-/// The error with this runtime code, described as `action: system message`.
+/// The error with this code, described as `action: system message`.
 fn failure(code: i32, action: String) -> io::Error {
   super::os_error(code, action)
 }
 
 /// What `path` names: 0 nothing (or an error), 1 a file, 2 a directory, 3 something else.
 fn kind_of(path: String) -> i32 {
-  unsafe { sag_fs_kind(path) }
+  sys::path_kind(path)
+}
+
+/// Systems report a directory used as a file differently; they all become `EISDIR`.
+fn file_code(path: String, code: i32) -> i32 {
+  if code != 0 && kind_of(path) == sys::KIND_DIR { sys::EISDIR } else { code }
+}
+
+/// The bytes of the file at `path`, or the code of the failure.
+fn read_bytes(path: String) -> Result<List<u8>, i32> {
+  match sys::read_file(path) {
+    Ok(data) => Ok(data),
+    Err(code) => Err(file_code(path, code)),
+  }
 }
 
 /// The whole file at `path`. A file that is not UTF-8 is an error of kind `InvalidData`.
 pub fn read_to_string(path: String) -> Result<String, io::Error> {
-  var status = [0i32; 1];
-  const text = unsafe { sag_fs_read(path, status.as_mut_ptr()) };
+  const data = match read_bytes(path) {
+    Ok(found) => found,
+    Err(code) => return Err(failure(code, `cannot read "${path}"`)),
+  };
 
-  if status[0] == 0 { Ok(text) } else { Err(failure(status[0], `cannot read "${path}"`)) }
+  match super::utf8(&data) {
+    Some(text) => Ok(text),
+    None => Err(failure(super::INVALID_DATA, `cannot read "${path}"`)),
+  }
 }
 
 /// The bytes of the file at `path`, such as an image or SPIR-V code.
 pub fn read(path: String) -> Result<List<u8>, io::Error> {
-  var status = [0i32; 1];
-  // The runtime gives the bytes in a string, which is never used as text.
-  const raw = unsafe { sag_fs_read_bytes(path, status.as_mut_ptr()) };
-
-  if status[0] != 0 {
-    return Err(failure(status[0], `cannot read "${path}"`));
+  match read_bytes(path) {
+    Ok(data) => Ok(data),
+    Err(code) => Err(failure(code, `cannot read "${path}"`)),
   }
-
-  const bytes: List<u8> = new List();
-
-  for byte in raw.bytes() {
-    bytes.push(byte);
-  }
-
-  Ok(bytes)
 }
 
 /// Writes `text` to the file at `path`, creating it or replacing its contents.
 pub fn write(path: String, text: String) -> Result<(), io::Error> {
-  const code = unsafe { sag_fs_write(path, text, false) };
+  const code = file_code(path, sys::write_file(path, text.as_ptr(), text.len(), false));
 
   if code == 0 { Ok(()) } else { Err(failure(code, `cannot write "${path}"`)) }
 }
@@ -66,14 +59,14 @@ pub fn write(path: String, text: String) -> Result<(), io::Error> {
 /// Writes `bytes` to the file at `path`, creating it or replacing its contents: the counterpart of
 /// `read` (docs/adr/0079-references-and-borrowing.md, Q497).
 pub fn write_bytes(path: String, bytes: &[u8]) -> Result<(), io::Error> {
-  const code = unsafe { sag_fs_write_bytes(path, bytes.as_ptr(), bytes.len()) };
+  const code = file_code(path, sys::write_file(path, bytes.as_ptr(), bytes.len(), false));
 
   if code == 0 { Ok(()) } else { Err(failure(code, `cannot write "${path}"`)) }
 }
 
 /// Writes `text` at the end of the file at `path`, creating it if needed.
 pub fn append(path: String, text: String) -> Result<(), io::Error> {
-  const code = unsafe { sag_fs_write(path, text, true) };
+  const code = file_code(path, sys::write_file(path, text.as_ptr(), text.len(), true));
 
   if code == 0 { Ok(()) } else { Err(failure(code, `cannot append to "${path}"`)) }
 }
@@ -93,7 +86,7 @@ pub fn is_dir(path: String) -> bool {
 
 /// Creates the directory `path`; its parent must exist.
 pub fn create_dir(path: String) -> Result<(), io::Error> {
-  const code = unsafe { sag_fs_create_dir(path) };
+  const code = sys::create_dir(path);
 
   if code == 0 { Ok(()) } else { Err(failure(code, `cannot create directory "${path}"`)) }
 }
@@ -120,28 +113,28 @@ pub fn create_dir_all(path: String) -> Result<(), io::Error> {
 
 /// Removes the directory `path`, which must be empty.
 pub fn remove_dir(path: String) -> Result<(), io::Error> {
-  const code = unsafe { sag_fs_remove_dir(path) };
+  const code = sys::remove_dir(path);
 
   if code == 0 { Ok(()) } else { Err(failure(code, `cannot remove directory "${path}"`)) }
 }
 
 /// Removes the file at `path`.
 pub fn remove_file(path: String) -> Result<(), io::Error> {
-  const code = unsafe { sag_fs_remove_file(path) };
+  const code = file_code(path, sys::remove_file(path));
 
   if code == 0 { Ok(()) } else { Err(failure(code, `cannot remove "${path}"`)) }
 }
 
 /// Moves `from` to `to`, replacing `to` if it is a file that exists.
 pub fn rename(from: String, to: String) -> Result<(), io::Error> {
-  const code = unsafe { sag_fs_rename(from, to) };
+  const code = sys::rename_path(from, to);
 
   if code == 0 { Ok(()) } else { Err(failure(code, `cannot rename "${from}" to "${to}"`)) }
 }
 
 /// Copies the file `from` to `to`, replacing `to` if it exists.
 pub fn copy(from: String, to: String) -> Result<(), io::Error> {
-  const code = unsafe { sag_fs_copy(from, to) };
+  const code = if kind_of(from) == sys::KIND_DIR { sys::EISDIR } else { sys::copy_file(from, to) };
 
   if code == 0 { Ok(()) } else { Err(failure(code, `cannot copy "${from}" to "${to}"`)) }
 }
@@ -149,28 +142,21 @@ pub fn copy(from: String, to: String) -> Result<(), io::Error> {
 /// The names of the entries of the directory `path`, without `.` and `..`, sorted by their
 /// bytes.
 pub fn read_dir(path: String) -> Result<List<String>, io::Error> {
-  var status = [0i32; 1];
-  const text = unsafe { sag_fs_read_dir(path, status.as_mut_ptr()) };
+  const found: Result<List<String>, i32> = if kind_of(path) == sys::KIND_FILE { Err(sys::ENOTDIR) } else { sys::read_dir(path) };
 
-  if status[0] != 0 {
-    return Err(failure(status[0], `cannot read directory "${path}"`));
+  match found {
+    Ok(names) => {
+      names.sort();
+      Ok(names)
+    }
+    Err(code) => Err(failure(code, `cannot read directory "${path}"`)),
   }
-
-  if text.is_empty() {
-    return Ok(new List<String>());
-  }
-
-  // The runtime separates the names with NUL, which no file name contains.
-  const names = text.split("\0");
-  names.sort();
-
-  Ok(names)
 }
 
 /// The current working directory, as an absolute path.
 pub fn current_dir() -> Result<String, io::Error> {
-  var status = [0i32; 1];
-  const dir = unsafe { sag_fs_current_dir(status.as_mut_ptr()) };
-
-  if status[0] == 0 { Ok(dir) } else { Err(failure(status[0], "cannot get the current directory")) }
+  match sys::current_dir() {
+    Ok(dir) => Ok(dir),
+    Err(code) => Err(failure(code, "cannot get the current directory")),
+  }
 }

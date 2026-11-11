@@ -138,4 +138,14 @@ extern "C" {
   `CORE_STD`. A library, which has no `main`, sees no arguments on Unix, as before.
 - `std::path` is done, the third module of S1: it only asked the runtime whether paths follow
   the rules of Windows (`sag_path_windows`), which `@cfg` now answers.
+- `std::fs` is done, the fifth module of S1 (after `std::io`, ADR-0086), and about 510 lines of C
+  are deleted. `std::sys` reads, writes, creates, removes, renames, copies and lists files with
+  `fopen`, `mkdir`, `rmdir`, `unlink`, `rename`, `opendir`, `readdir`, `stat` and `getcwd` on
+  Unix, and with the `...W` functions of kernel32 on Windows, mapping Windows errors to `errno`
+  values. `struct stat` and `struct dirent` are read through a buffer, at the offsets of
+  `st_mode` and `d_name` of each system and processor, as Rust's `libc` crate declares them. On
+  macOS for Intel, the symbols of 32-bit inodes are used: Apple still exports them, and the
+  64-bit ones (`stat$INODE64`) cannot be named in C. Only the release's CI runs macOS for Intel.
+  `ENOTEMPTY` differs by system (39, 66, 41). UTF-8 is checked by `std` itself (`super::utf8`).
+  The runtime keeps the UTF-16 paths and `errno` helpers that `std::process` still uses.
 
