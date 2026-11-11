@@ -5,7 +5,7 @@
 use pkg::ast::{
   ArrayLen, BinaryOp, Block, ClassDecl, ConstDecl, StaticDecl, Discriminant, EnumDecl, Export, Expr, ExprKind, ExternBlock, ExternFn, FieldDecl, FieldInit, FieldPattern,
   FnDecl, GenericParam, Ident, ImplBlock, InterfaceDecl, Item, LambdaParam, LetStmt, MatchArm, Module, Param, Path, Pattern, PatternKind, Stmt,
-  StructDecl, TargetInfo, TemplatePart, TypeArgs, TypeExpr, TypeExprKind, UnaryOp, UseDecl, UseTree, UseTreeKind, VariantDecl, VariantFieldDecl,
+  StructDecl, TargetInfo, FormatSpec, TemplatePart, TypeArgs, TypeExpr, TypeExprKind, UnaryOp, UseDecl, UseTree, UseTreeKind, VariantDecl, VariantFieldDecl,
   VariantFields, Visibility,
 };
 use pkg::cfg;
@@ -3360,12 +3360,104 @@ class Parser {
   }
 
   /// Parses each `${...}` interpolation with a sub-parser that shares node ids and diagnostics.
+  /// A format specifier, `[[fill]align][+][#][0][width][.precision][type]`, whose text starts at
+  /// byte `start` of the file (docs/adr/0089-display-debug-and-format-specifiers.md, Q585).
+  prv fn format_spec(self, text: String, start: usize) -> Result<FormatSpec, ()> {
+    const span = Span::new(self.eof.span.file, start as u32, (start + text.len()) as u32);
+    const chars = text.chars().collect();
+    const none: Option<u64> = None;
+    var spec = FormatSpec { fill: ' ', align: 0, plus: false, alternate: false, zero: false, width: none, precision: none, kind: "", span: span };
+    var at = 0usize;
+
+    if chars.len() >= 2 && alignment(chars[1]) > 0 {
+      spec.fill = chars[0];
+      spec.align = alignment(chars[1]);
+      at = 2;
+    } else if chars.len() >= 1 && alignment(chars[0]) > 0 {
+      spec.align = alignment(chars[0]);
+      at = 1;
+    }
+
+    if at < chars.len() && chars[at] == '+' {
+      spec.plus = true;
+      at += 1;
+    }
+
+    if at < chars.len() && chars[at] == '#' {
+      spec.alternate = true;
+      at += 1;
+    }
+
+    if at < chars.len() && chars[at] == '0' {
+      spec.zero = true;
+      at += 1;
+    }
+
+    var width = 0u64;
+    var has_width = false;
+
+    while at < chars.len() && chars[at].is_ascii_digit() && width < 100000 {
+      width = width * 10 + chars[at].to_digit(10).unwrap_or(0) as u64;
+      has_width = true;
+      at += 1;
+    }
+
+    if has_width {
+      spec.width = Some(width);
+    }
+
+    if at < chars.len() && chars[at] == '.' {
+      at += 1;
+
+      var precision = 0u64;
+      var digits = 0usize;
+
+      while at < chars.len() && chars[at].is_ascii_digit() && precision < 100000 {
+        precision = precision * 10 + chars[at].to_digit(10).unwrap_or(0) as u64;
+        digits += 1;
+        at += 1;
+      }
+
+      if digits == 0 {
+        return Err(self.spec_error(span, text, "a `.` needs the digits of the precision after it, as in `{x:.2}`"));
+      }
+
+      spec.precision = Some(precision);
+    }
+
+    const kind = text.substring(byte_offset(chars, at), text.len());
+
+    if !List::from(["", "?", "x", "X", "o", "b", "e", "E"]).contains(kind) {
+      return Err(self.spec_error(span, text, "unknown format `" + kind + "`: the types are `?`, `x`, `X`, `o`, `b`, `e` and `E`"));
+    }
+
+    spec.kind = kind;
+    Ok(spec)
+  }
+
+  prv fn spec_error(self, span: Span, text: String, message: String) {
+    self.diagnostics.push(
+      Diagnostic::error(codes::INVALID_FORMAT_STRING, span, "invalid format specifier `" + text + "`: " + message)
+        .with_note("a specifier is `[[fill]align][+][#][0][width][.precision][type]`, as in Rust: `{x:>8.2}`, `{n:#x}`, `{v:?}`"),
+    );
+  }
+
   prv fn template_parts(self, parts: List<lexer::TemplatePart>) -> Result<List<TemplatePart>, ()> {
     const result: List<TemplatePart> = new List();
 
     for part in parts {
       match part {
         lexer::TemplatePart::Text(text) => result.push(TemplatePart::Text(text)),
+        // The specifier of the expression just before it.
+        lexer::TemplatePart::Spec { text, start } => {
+          const spec = self.format_spec(text, start)?;
+
+          match result.pop() {
+            Some(TemplatePart::Expr(expr)) => result.push(TemplatePart::Formatted { expr: expr, spec: spec }),
+            Some(other) => result.push(other),
+            None => {}
+          }
+        }
         lexer::TemplatePart::Expr(tokens) => {
           const sub = new Parser(self.eof.span.file, tokens, self.ids, self.target, self.diagnostics);
 
@@ -3399,4 +3491,20 @@ fn is_mut(kind: TokenKind) -> bool {
     TokenKind::Ident(name) => name == "mut",
     _ => false,
   }
+}
+
+/// The alignment a character of a specifier names: 1 for `<`, 2 for `^`, 3 for `>`, 0 otherwise.
+fn alignment(c: char) -> u32 {
+  if c == '<' { 1 } else if c == '^' { 2 } else if c == '>' { 3 } else { 0 }
+}
+
+/// The byte offset of character `index` of `chars`.
+fn byte_offset(chars: List<char>, index: usize) -> usize {
+  var offset = 0usize;
+
+  for at in 0..index {
+    offset += `${chars[at]}`.len();
+  }
+
+  offset
 }

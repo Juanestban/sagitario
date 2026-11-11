@@ -3,7 +3,7 @@
 //! reference parameter through its fields and methods, and the borrow checker, a pass over each
 //! function once its types are known.
 
-use pkg::ast::{Block, Expr, ExprKind, FnDecl, Ident, StaticDecl, Stmt, TemplatePart, TypeExprKind, UnaryOp};
+use pkg::ast::{Block, Expr, ExprKind, FnDecl, Ident, StaticDecl, Stmt, TypeExprKind, UnaryOp};
 use pkg::diagnostics::Diagnostic;
 use pkg::diagnostics::codes;
 use pkg::resolve::Res;
@@ -572,7 +572,7 @@ class Walker {
         | ExprKind::Zod | ExprKind::Continue => {}
       ExprKind::Template(parts) => {
         for part in parts {
-          if let TemplatePart::Expr(inner) = part {
+          if let Some(inner) = part.expr() {
             self.expr(inner);
           }
         }

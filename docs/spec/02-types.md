@@ -158,6 +158,25 @@ arguments have the type of the receiver, unless written otherwise.
   can a type parameter bounded by it or a `Display` value. Numbers, `bool`, `char` and `String`
   implement it with the formats above (`5.to_string()` is `"5"`). Interpolating any other value
   is an error (`E0306`). Lists, maps, options and results do not implement it.
+- A format specifier after a `:` shapes the text, with Rust's mini-language
+  `[[fill]align][+][#][0][width][.precision][type]`
+  ([ADR-0089](../adr/0089-display-debug-and-format-specifiers.md)):
+
+  | Specifier | Meaning | Example |
+  |---|---|---|
+  | `width` | At least that many characters, filled with spaces: numbers align right, text left | `f"[{42:5}]"` is `[   42]`, `f"[{"Ada":5}]"` is `[Ada  ]` |
+  | `<`, `^`, `>` | Left, centered (an odd fill goes right) or right, after an optional fill character | `{name:*^7}` is `**Ada**` |
+  | `+` | The sign of every number | `{5:+}` is `+5` |
+  | `0` | Zeros after the sign and prefix of a number, without an alignment | `{-42:05}` is `-0042` |
+  | `.precision` | That many decimals of a float, rounded to the nearest; the first characters of a text | `{3.14159:.2}` is `3.14`, `{"Ada":.2}` is `Ad` |
+  | `x`, `X`, `o`, `b` | An integer in hexadecimal, octal or binary; negative numbers show their two's complement bits | `{255:x}` is `ff`, `{-1i8:x}` is `ff` |
+  | `#` | With `x`, `X`, `o`, `b`: the prefix `0x`, `0o`, `0b` | `{255:#06x}` is `0x00ff` |
+  | `e`, `E` | A float in scientific notation | `{1500.0:e}` is `1.5e3`, `{1500.0:.2e}` is `1.50e3` |
+
+  Width and alignment apply to the text of any interpolated value, `Display` types included. A
+  specifier that does not fit its value (`x` on a float, a precision on an integer, `+` or `0` on
+  text, `#` without a base) or is not valid is an error (`E0007`). The widths and precisions are
+  literal numbers.
 - Byte indexing (`s[i]`) is not allowed; use `s.chars()` or `s.bytes()`.
 - `a + b` creates a new `String`; `s += t` is `s = s + t`. `==`, `!=`, `<`, `<=`, `>`, `>=`
   compare the bytes lexicographically.

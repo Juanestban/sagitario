@@ -33,6 +33,9 @@ The sources say 0.25.0.
 - `Display`, a prelude interface with `to_string()`: format strings interpolate the structs,
   enums and classes implementing it, and numbers, `bool`, `char` and `String` have
   `to_string()` ([ADR-0089](docs/adr/0089-display-debug-and-format-specifiers.md)).
+- Format specifiers, Rust's mini-language after a `:` in the braces of a format string:
+  width, fill and alignment, `+`, zero padding, precision, and `x`, `X`, `o`, `b`, `e`, `E`
+  (`f"{price:>8.2}"`, `f"{mask:#06x}"`).
 - An audit of the standard library against Rust's ([`docs/std-audit.md`](docs/std-audit.md)), the
   plan of S2, with a suite of benchmarks against Rust, C, C#, JavaScript and Python.
 - The language server completes `@cfg` conditions, attributes and their representations, and

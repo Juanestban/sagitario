@@ -6,9 +6,9 @@
 //! Places are values: a place derived from another copies its projections, since lists are
 //! references in Sagitario and SIR already emitted must not change.
 
-use pkg::ast::{BinaryOp, Block, Expr, ExprKind, FieldInit, FnDecl, Ident, Package, Stmt as AstStmt, TemplatePart, UnaryOp};
+use pkg::ast::{BinaryOp, Block, Expr, ExprKind, FieldInit, FnDecl, FormatSpec, Ident, Package, Stmt as AstStmt, TemplatePart, UnaryOp};
 use pkg::diagnostics::{Diagnostic, Diagnostics};
-use pkg::resolve::{ParamOwner, Res, Resolution, TypeItem};
+use pkg::resolve::{ItemRef, ParamOwner, Res, Resolution, TypeItem};
 use pkg::span::{SourceMap, Span};
 use pkg::sir::closures;
 use pkg::sir::collections;
@@ -305,6 +305,17 @@ fn project_one(place: Place, projection: Projection, ty: Type) -> Place {
 }
 
 /// A local as a place.
+/// The width in bits of an integer type.
+fn int_bits(int_ty: IntTy, pointer_width: u32) -> u64 {
+  match int_ty {
+    IntTy::I8 | IntTy::U8 => 8,
+    IntTy::I16 | IntTy::U16 => 16,
+    IntTy::I32 | IntTy::U32 => 32,
+    IntTy::I64 | IntTy::U64 => 64,
+    IntTy::Isize | IntTy::Usize => pointer_width as u64,
+  }
+}
+
 /// An id no expression has.
 const NO_EXPR: u32 = 4294967295;
 
@@ -2208,6 +2219,89 @@ pub class Lowering {
     Ok(self.call(callee, List::from([value]), types::string()))
   }
 
+  /// A function of the root of `std`, which every program loads, as an instance.
+  prv fn std_function(self, name: String) -> Result<u32, String> {
+    const root = match self.resolution.std_root {
+      Some(found) => found,
+      None => return Err("the standard library is not loaded"),
+    };
+    const info = match self.resolution.module(root) {
+      Some(found) => found,
+      None => return Err("the standard library is not loaded"),
+    };
+
+    match info.items.get(name) {
+      Some(declared) => match declared.item {
+        ItemRef::Fn(id) => Ok(mono::instance(self, id, Subst::empty())),
+        _ => Err("`std::" + name + "` is not a function"),
+      },
+      None => Err("`std::" + name + "` is missing"),
+    }
+  }
+
+  /// `{value:spec}`: the text the functions of `std` give it
+  /// (docs/adr/0089-display-debug-and-format-specifiers.md, Q585–Q587).
+  prv fn formatted(self, value: Operand, ty: Type, spec: FormatSpec) -> Result<Operand, String> {
+    var flags = 0u64;
+
+    if spec.plus {
+      flags += 1;
+    }
+
+    if spec.alternate {
+      flags += 2;
+    }
+
+    if spec.zero {
+      flags += 4;
+    }
+
+    const kind = if spec.kind.is_empty() { ' ' } else { spec.kind.chars().collect()[0] };
+    const width = int_operand(spec.width.unwrap_or(0), false, IntTy::Usize);
+    const precision = match spec.precision {
+      Some(found) => int_operand(found, false, IntTy::I64),
+      None => int_operand(1, true, IntTy::I64),
+    };
+    const fill = Operand::Const(Const::Char(spec.fill));
+    const align = int_operand(spec.align as u64, false, IntTy::U32);
+    const flag_bits = int_operand(flags, false, IntTy::U32);
+    const kind_char = Operand::Const(Const::Char(kind));
+    const string = types::string();
+
+    match ty.kind {
+      TypeKind::Int(int_ty) => {
+        if types::is_signed(int_ty) {
+          const wide = types::int(IntTy::I64);
+          const signed = if types::same_type(ty, wide) { value } else { self.new_value(wide, Rvalue::Cast { from: ty, to: wide, operand: value }) };
+          const width_bits = int_operand(int_bits(int_ty, self.package.target.pointer_width), false, IntTy::U32);
+          const function = self.std_function("format_signed")?;
+
+          return Ok(self.call(Callee::Fn(function), List::from([signed, width_bits, fill, align, flag_bits, width, kind_char]), string));
+        }
+
+        const wide = types::int(IntTy::U64);
+        const unsigned = if types::same_type(ty, wide) { value } else { self.new_value(wide, Rvalue::Cast { from: ty, to: wide, operand: value }) };
+        const function = self.std_function("format_unsigned")?;
+
+        Ok(self.call(Callee::Fn(function), List::from([unsigned, fill, align, flag_bits, width, kind_char]), string))
+      }
+      TypeKind::Float(float_ty) => {
+        const wide = types::of(TypeKind::Float(FloatTy::F64));
+        const double = if float_ty == FloatTy::F64 { value } else { self.new_value(wide, Rvalue::Cast { from: ty, to: wide, operand: value }) };
+        const function = self.std_function("format_float")?;
+        const is_f32 = Operand::Const(Const::Bool(float_ty == FloatTy::F32));
+
+        Ok(self.call(Callee::Fn(function), List::from([double, is_f32, fill, align, flag_bits, width, precision, kind_char]), string))
+      }
+      _ => {
+        const text = self.display(value, ty)?;
+        const function = self.std_function("format_text")?;
+
+        Ok(self.call(Callee::Fn(function), List::from([text, fill, align, width, precision]), string))
+      }
+    }
+  }
+
   prv fn template(self, ty: Type, parts: List<TemplatePart>) -> Result<Operand, String> {
     const pieces: List<TemplatePiece> = new List();
 
@@ -2219,6 +2313,12 @@ pub class Lowering {
           const part_value = self.expr(inner)?;
 
           pieces.push(TemplatePiece::Value { ty: string_or(part_ty), value: self.display(part_value, part_ty)? });
+        }
+        TemplatePart::Formatted { expr: inner, spec } => {
+          const part_ty = self.type_of(inner)?;
+          const part_value = self.expr(inner)?;
+
+          pieces.push(TemplatePiece::Value { ty: types::string(), value: self.formatted(part_value, part_ty, spec)? });
         }
       }
     }

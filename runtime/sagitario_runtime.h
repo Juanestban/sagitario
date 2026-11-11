@@ -1025,6 +1025,11 @@ SAG_FROM_UINTMAX(usize, size_t)
  * Declared in Sagitario by the standard library modules (docs/spec/11-standard-library.md).
  * They borrow their string arguments and return new references. */
 
+/* The digits of `|value|` for a format specifier (docs/adr/0089-display-debug-and-format-specifiers.md):
+ * with `precision` decimals (all that read back as the same value when it is negative), or in
+ * scientific notation as Rust writes it (`1.5e3`, `E` when `upper`); `NaN` and `inf` as they are.
+ * `std` adds the sign. */
+sag_string sag_float_format(double value, int32_t precision, bool scientific, bool upper, bool is_f32);
 /* Gives `std::env`, written in Sagitario, what C's `main` received: the arguments on Unix
  * (docs/adr/0085-conditional-compilation-and-std-time.md, Q552). */
 void sag_env_init(int argc, const char *const *argv);

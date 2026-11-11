@@ -2,7 +2,7 @@
 //! (docs/spec/02-types.md, 06-control-flow.md). The port of the expression checking of
 //! `sagitario_types` (its `lib.rs`), as functions taking the checker.
 
-use pkg::ast::{BinaryOp, Block, Expr, ExprKind, FieldInit, FnDecl, Ident, Path, Stmt, TemplatePart, TypeExpr, UnaryOp};
+use pkg::ast::{BinaryOp, Block, Expr, ExprKind, FieldInit, FnDecl, FormatSpec, Ident, Path, Stmt, TemplatePart, TypeExpr, UnaryOp};
 use pkg::ast;
 use pkg::diagnostics;
 use pkg::diagnostics::Diagnostic;
@@ -588,6 +588,50 @@ pub fn expr(cx: Checker, value: Expr, expected: Option<Type>) -> Type {
   ty
 }
 
+/// Whether the specifier fits the type of the value it formats
+/// (docs/adr/0089-display-debug-and-format-specifiers.md, Q587).
+fn check_spec(cx: Checker, spec: FormatSpec, ty: Type) {
+  var int_value = false;
+  var float_value = false;
+
+  match ty.kind {
+    TypeKind::Int(_) => {
+      int_value = true;
+    }
+    TypeKind::Float(_) => {
+      float_value = true;
+    }
+    TypeKind::Error | TypeKind::Never => return,
+    _ => {}
+  }
+
+  const kind = spec.kind;
+  const what = "`" + types::text(ty) + "`";
+  var problem: Option<String> = None;
+
+  if kind == "?" {
+    cx.error(codes::NOT_IMPLEMENTED, spec.span, "the debug form `{x:?}` is not implemented yet (docs/adr/0089-display-debug-and-format-specifiers.md, increment 3)");
+
+    return;
+  }
+
+  if (kind == "x" || kind == "X" || kind == "o" || kind == "b") && !int_value {
+    problem = Some("the format `" + kind + "` writes integers, not " + what);
+  } else if (kind == "e" || kind == "E") && !float_value {
+    problem = Some("the format `" + kind + "` writes floats, not " + what);
+  } else if spec.precision.is_some() && int_value {
+    problem = Some("an integer has no precision; it applies to floats and text");
+  } else if (spec.plus || spec.zero) && !int_value && !float_value {
+    problem = Some("`+` and `0` apply to numbers, not " + what);
+  } else if spec.alternate && !(kind == "x" || kind == "X" || kind == "o" || kind == "b") {
+    problem = Some("`#` goes with `x`, `X`, `o` or `b`, which it gives their prefix");
+  }
+
+  if let Some(message) = problem {
+    cx.error(codes::INVALID_FORMAT_STRING, spec.span, message);
+  }
+}
+
 /// An expression of an `Atomic` type used as it may be: as the receiver of a method, or as the
 /// field it initializes.
 fn atomic_used(cx: Checker, value: Expr) {
@@ -711,8 +755,12 @@ fn other_expr_kind(cx: Checker, value: Expr, expected: Option<Type>) -> Type {
     }
     ExprKind::Template(parts) => {
       for part in parts {
-        if let TemplatePart::Expr(inner) = part {
+        if let Some(inner) = part.expr() {
           const ty = expr(cx, inner, None);
+
+          if let TemplatePart::Formatted { spec, .. } = part {
+            check_spec(cx, spec, ty);
+          }
 
           if !cx.typed.displayable(ty) {
             cx.diagnostics.push(

@@ -6,7 +6,7 @@
 //! the body repeats, and the second pass starts from that state. Lists are references in
 //! Sagitario, so every state Rust clones is copied here with `copy_state`.
 
-use pkg::ast::{BinaryOp, Block, Expr, ExprKind, FnDecl, Pattern, PatternKind, Stmt, TemplatePart, UnaryOp};
+use pkg::ast::{BinaryOp, Block, Expr, ExprKind, FnDecl, Pattern, PatternKind, Stmt, UnaryOp};
 use pkg::diagnostics::{Diagnostic, Diagnostics};
 use pkg::diagnostics::codes;
 use pkg::resolve::{LambdaInfo, LocalInfo, LocalKind, Res, Resolution};
@@ -699,7 +699,7 @@ class Flow {
       }
       ExprKind::Template(parts) => {
         for part in parts {
-          if let TemplatePart::Expr(inner) = part {
+          if let Some(inner) = part.expr() {
             self.expr(inner);
           }
         }

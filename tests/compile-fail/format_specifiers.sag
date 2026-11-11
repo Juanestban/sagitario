@@ -1,0 +1,18 @@
+// Format specifiers that do not fit their value, or are not valid
+// (docs/adr/0089-display-debug-and-format-specifiers.md, Q585 and Q587).
+struct Point {
+  pub x: i32;
+}
+
+fn main() {
+  const n = 5;
+  const x = 2.5;
+  const name = "Ada";
+  println(f"{x:x}"); //~ ERROR E0007
+  println(f"{n:e}"); //~ ERROR E0007
+  println(f"{n:.2}"); //~ ERROR E0007
+  println(f"{name:+}"); //~ ERROR E0007
+  println(f"{name:05}"); //~ ERROR E0007
+  println(f"{x:#}"); //~ ERROR E0007
+  println(f"{Point { x: 1 }:>5}"); //~ ERROR E0306
+}

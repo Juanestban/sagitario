@@ -479,6 +479,20 @@ class Dumper {
           match part {
             TemplatePart::Text(text) => self.line("part", "Text", None, None, lexer::quote(text)),
             TemplatePart::Expr(inner) => self.expr("part", inner),
+            TemplatePart::Formatted { expr, spec } => {
+              self.expr("part", expr);
+              const precision = match spec.precision {
+                Some(found) => `${found}`,
+                None => "none",
+              };
+              const width = match spec.width {
+                Some(found) => `${found}`,
+                None => "none",
+              };
+              const values = `fill=${lexer::quote(`${spec.fill}`)} align=${spec.align} plus=${spec.plus} alternate=${spec.alternate} zero=${spec.zero} width=${width} precision=${precision} kind=${lexer::quote(spec.kind)}`;
+
+              self.line("spec", "FormatSpec", Some(spec.span), None, values);
+            }
           }
         }
 

@@ -12,7 +12,7 @@ Support for the [Sagitario](https://github.com/Juanestban/sagitario) programming
   in Rust's, it also colors the variables, parameters, fields, methods and functions.
 - Syntax highlighting of `.sag` files: keywords, types, operators (the bitwise ones and shifts
   too), numbers with their suffixes, characters,
-  strings, format strings `f"...{expr}..."` and template strings with their interpolations,
+  strings, format strings `f"...{expr}..."` with their specifiers (`{x:>8.2}`) and template strings with their interpolations,
   whose expressions are highlighted as code and whose braces as punctuation, nested block
   comments, documentation comments and attributes.
 - An icon for `.sag` files in the explorer and the tabs.

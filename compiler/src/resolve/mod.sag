@@ -6,7 +6,7 @@
 
 use pkg::ast::{
   Block, ClassDecl, ConstDecl, StaticDecl, EnumDecl, Expr, ExprKind, ExternFn, FnDecl, GenericParam, Ident, ImplBlock, InterfaceDecl, Item, LambdaParam, Module, Package,
-  Path, Pattern, PatternKind, Stmt, StructDecl, TemplatePart, TypeExpr, TypeExprKind, VariantFields, Visibility,
+  Path, Pattern, PatternKind, Stmt, StructDecl, TypeExpr, TypeExprKind, VariantFields, Visibility,
 };
 use pkg::diagnostics;
 use pkg::diagnostics::{Diagnostic, Diagnostics};
@@ -1801,7 +1801,7 @@ pub class Resolver {
       }
       ExprKind::Template(parts) => {
         for part in parts {
-          if let TemplatePart::Expr(inner) = part {
+          if let Some(inner) = part.expr() {
             self.expr(inner);
           }
         }

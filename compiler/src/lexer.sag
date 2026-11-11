@@ -39,6 +39,16 @@ pub enum TemplatePart {
   Text(String),
   /// The tokens of one `${...}` (or `{...}`) interpolation, ending with `Eof`.
   Expr(List<Token>),
+  /// The text after the `:` of a `{expr:spec}` in a format string, which follows its `Expr`, and
+  /// the offset where it starts (docs/adr/0089-display-debug-and-format-specifiers.md, Q585).
+  Spec { text: String, start: usize },
+}
+
+/// The tokens of an interpolation, and its specifier.
+struct Interpolated {
+  pub tokens: List<Token>;
+  pub spec: Option<String>;
+  pub spec_start: usize;
 }
 
 /// Whether `text` is a keyword (docs/spec/01-lexical.md#keywords-f1f2-f8).
@@ -576,7 +586,7 @@ class Lexer {
             text.clear();
           }
 
-          parts.push(TemplatePart::Expr(self.interpolation(start, "template string")));
+          parts.push(TemplatePart::Expr(self.interpolation(start, "template string", false).tokens));
         }
         Some(c) => {
           self.bump();
@@ -634,12 +644,16 @@ class Lexer {
             text.clear();
           }
 
-          const inner = self.interpolation(start, "format string");
+          const inner = self.interpolation(start, "format string", true);
 
-          if inner.len() <= 1 {
+          if inner.tokens.len() <= 1 {
             self.error(codes::INVALID_FORMAT_STRING, brace, "empty `{}` in a format string: write an expression inside, or `{{}}` for braces");
           } else {
-            parts.push(TemplatePart::Expr(inner));
+            parts.push(TemplatePart::Expr(inner.tokens));
+
+            if let Some(spec) = inner.spec {
+              parts.push(TemplatePart::Spec { text: spec, start: inner.spec_start });
+            }
           }
         }
         Some('}') => {
@@ -663,13 +677,18 @@ class Lexer {
   }
 
   /// Lexes the tokens of a `${...}` or `{...}` interpolation up to its closing `}`, which is
-  /// consumed; `what` names the literal for errors.
-  prv fn interpolation(self, template_start: usize, what: String) -> List<Token> {
+  /// consumed; `what` names the literal for errors. In a format string (`formats`), a `:` outside
+  /// parentheses, brackets and braces that is not part of `::` starts a specifier, whose text
+  /// runs to the `}`.
+  prv fn interpolation(self, template_start: usize, what: String, formats: bool) -> Interpolated {
     const outer = self.tokens;
 
     self.tokens = new List<Token>();
 
     var depth = 0usize;
+    var nesting = 0usize;
+    var spec: Option<String> = None;
+    var spec_start = 0usize;
 
     while true {
       const c = match self.peek() {
@@ -685,11 +704,39 @@ class Lexer {
         break;
       }
 
+      if formats && c == ':' && nesting == 0 && !self.at(1, ':') {
+        self.bump();
+        spec_start = self.pos;
+
+        const text = new StringBuilder();
+
+        while true {
+          match self.peek() {
+            None => {
+              self.error(codes::UNTERMINATED_STRING, template_start, "unterminated interpolation in " + what);
+              break;
+            }
+            Some('}') => {
+              self.bump();
+              break;
+            }
+            Some(other) => {
+              self.bump();
+              text.append_char(other);
+            }
+          }
+        }
+
+        spec = Some(text.to_string());
+        break;
+      }
+
       const before = self.tokens.len();
 
       self.step(c);
 
-      // Whitespace and comments add no token: only a new `{` or `}` changes the depth.
+      // Whitespace and comments add no token: only a new `{` or `}` changes the depth, and the
+      // brackets the nesting in which a `:` is not a specifier.
       if self.tokens.len() == before {
         continue;
       }
@@ -700,6 +747,12 @@ class Lexer {
             depth += 1;
           } else if text == "}" && depth > 0 {
             depth -= 1;
+          }
+
+          if text == "{" || text == "(" || text == "[" {
+            nesting += 1;
+          } else if (text == "}" || text == ")" || text == "]") && nesting > 0 {
+            nesting -= 1;
           }
         }
       }
@@ -712,7 +765,7 @@ class Lexer {
     const inner = self.tokens;
 
     self.tokens = outer;
-    inner
+    Interpolated { tokens: inner, spec: spec, spec_start: spec_start }
   }
 
   prv fn punctuation(self, start: usize, c: char) {
@@ -907,6 +960,7 @@ fn dump_into(tokens: List<Token>, depth: usize, out: StringBuilder) {
             out.append(`${indent}  expr\n`);
             dump_into(inner, depth + 2, out);
           }
+          TemplatePart::Spec { text, start } => out.append(`${indent}  spec ${start} ${quote(text)}\n`),
         }
       }
     }

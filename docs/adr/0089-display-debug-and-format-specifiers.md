@@ -92,3 +92,13 @@ fn main() {
   of a primitive is the interpolation of it alone. `sag lsp` completes `to_string` on primitives,
   and the snippet `impldisplay` writes a block. Tests: `tests/run-pass/display.sag` (structs,
   enums, classes, nested values, a bounded type parameter, a `Display` value and primitives).
+- Increment 2 (the specifiers) is done. The lexer ends the expression of a `{...}` of a format
+  string at its first `:` outside brackets that is not part of `::`, and gives the rest as a
+  `Spec` part; the parser reads it into an `ast::FormatSpec` of a `TemplatePart::Formatted`, the
+  type checker matches it to the value (`exprs::check_spec`), and SIR calls private functions of
+  the root of `std`, written in Sagitario, which every program loads (`format_signed`,
+  `format_unsigned`, `format_float`, `format_text`). Only the digits of floats come from the
+  runtime's core (`sag_float_format`), on C's `%.*f` and `%.*e`. `?` is reported as not
+  implemented (`E0900`) until increment 3. The grammar of the editor colors the specifier.
+  Tests: `tests/run-pass/format_specifiers.sag`, `tests/compile-fail/format_specifiers.sag` and
+  `format_specifier_syntax.sag`.

@@ -101,7 +101,10 @@ struct Timespec { pub tv_sec: i64; pub tv_nsec: i64; }
   expressions and produces a new `String`. The prefix is `f` immediately followed by `"` (`f "x"`
   is the name `f` and a string). Each `{...}` holds any expression, which may contain braces and
   strings; `{{` and `}}` write `{` and `}`, and a `}` that closes nothing or an empty `{}` is an
-  error (`E0007`). There are no format specifiers (`{x:.2}`).
+  error (`E0007`). A format specifier may follow the expression after a `:`, `{x:>8.2}`
+  ([ADR-0089](../adr/0089-display-debug-and-format-specifiers.md)): the first `:` outside
+  parentheses, brackets, braces and strings that is not part of `::`, so `{a::b}` names a path.
+  Template strings have no specifiers.
 - Template strings: `` `total = ${expr}` `` interpolates expressions too. They are
   **deprecated**: they keep compiling with the same meaning, but new code writes format strings.
 - Escapes, valid in `'...'`, `"..."`, `f"..."` and `` `...` ``: `\n` `\r` `\t` `\\` `\0` `\"`

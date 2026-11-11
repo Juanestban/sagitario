@@ -5,6 +5,10 @@ use std::io;
 use std::io::ErrorKind;
 use std::sys;
 
+extern "C" {
+  fn sag_float_format(value: f64, precision: i32, scientific: bool, upper: bool, is_f32: bool) -> String;
+}
+
 /// The codes of failures that have no `errno` value, which are negative.
 const INVALID_DATA: i32 = -2;
 const UNKNOWN: i32 = -3;
@@ -149,4 +153,142 @@ fn utf8_lossy(bytes: &[u8]) -> String {
   }
 
   text.to_string()
+}
+
+// ---- Format specifiers (docs/adr/0089-display-debug-and-format-specifiers.md) -----------------
+//
+// The C a format string compiles to calls these for each `{expr:spec}`, with the parts of the
+// specifier: `align` is 0 without one, 1 for `<`, 2 for `^` and 3 for `>`; `flags` holds `+`
+// (1), `#` (2) and `0` (4); `precision` is -1 without one; `kind` is `' '` without a type.
+
+const PLUS: u32 = 1;
+const ALTERNATE: u32 = 2;
+const ZERO: u32 = 4;
+
+/// `text` filled with `fill` to `width` characters, on the side `align` says.
+fn pad(text: String, fill: char, align: u32, width: usize) -> String {
+  const count = text.chars().count();
+
+  if count >= width {
+    return text;
+  }
+
+  const missing = width - count;
+  const before = if align == 1 { 0usize } else if align == 2 { missing / 2 } else { missing };
+  const out = new StringBuilder();
+
+  for _ in 0..before {
+    out.append_char(fill);
+  }
+
+  out.append(text);
+
+  for _ in 0..missing - before {
+    out.append_char(fill);
+  }
+
+  out.to_string()
+}
+
+/// The digits of `value` in `base`.
+fn digits(value: u64, base: u64, upper: bool) -> String {
+  if value == 0 {
+    return "0";
+  }
+
+  const symbols = (if upper { "0123456789ABCDEF" } else { "0123456789abcdef" }).bytes().collect();
+  const found: List<u8> = new List();
+  var rest = value;
+
+  while rest > 0 {
+    found.push(symbols[(rest % base) as usize]);
+    rest = rest / base;
+  }
+
+  const out = new StringBuilder();
+  var index = found.len();
+
+  while index > 0 {
+    index -= 1;
+    out.append_char(found[index] as char);
+  }
+
+  out.to_string()
+}
+
+/// A number from its digits: its sign and prefix, zeros after them with `0`, then the fill.
+fn pad_number(text: String, negative: bool, prefix: String, fill: char, align: u32, flags: u32, width: usize) -> String {
+  const sign = if negative { "-" } else if flags & PLUS != 0 { "+" } else { "" };
+  const body = sign + prefix + text;
+
+  if flags & ZERO != 0 && align == 0 {
+    const count = body.chars().count();
+
+    if count < width {
+      return sign + prefix + "0".repeat(width - count) + text;
+    }
+
+    return body;
+  }
+
+  pad(body, fill, if align == 0 { 3 } else { align }, width)
+}
+
+/// An unsigned integer, or the bits of a signed one, in the base of `kind`.
+fn format_unsigned(value: u64, fill: char, align: u32, flags: u32, width: usize, kind: char) -> String {
+  const base = if kind == 'x' || kind == 'X' { 16u64 } else if kind == 'o' { 8u64 } else if kind == 'b' { 2u64 } else { 10u64 };
+  var prefix = "";
+
+  if flags & ALTERNATE != 0 {
+    prefix = if base == 16 { "0x" } else if base == 8 { "0o" } else if base == 2 { "0b" } else { "" };
+  }
+
+  pad_number(digits(value, base, kind == 'X'), false, prefix, fill, align, flags, width)
+}
+
+/// A signed integer of `bits` bits: in decimal with its sign, or its two's complement bits in
+/// another base, as Rust writes them.
+fn format_signed(value: i64, bits: u32, fill: char, align: u32, flags: u32, width: usize, kind: char) -> String {
+  if kind == ' ' {
+    const negative = value < 0;
+    const magnitude = if negative { ((-(value + 1)) as u64) + 1 } else { value as u64 };
+
+    return pad_number(digits(magnitude, 10, false), negative, "", fill, align, flags, width);
+  }
+
+  const mask = if bits >= 64 { u64::MAX } else { (1u64 << bits) - 1 };
+
+  format_unsigned((value as u64) & mask, fill, align, flags, width, kind)
+}
+
+/// A float: its digits from the runtime's core, with `precision` decimals or in scientific
+/// notation for `e` and `E`.
+fn format_float(value: f64, is_f32: bool, fill: char, align: u32, flags: u32, width: usize, precision: i64, kind: char) -> String {
+  const nan = value != value;
+  const negative = !nan && 1.0.copysign(value) < 0.0;
+  const text = unsafe { sag_float_format(value, precision as i32, kind == 'e' || kind == 'E', kind == 'E', is_f32) };
+
+  pad_number(text, negative, "", fill, align, flags, width)
+}
+
+/// Any other text, cut after `precision` characters.
+fn format_text(text: String, fill: char, align: u32, width: usize, precision: i64) -> String {
+  var shown = text;
+
+  if precision >= 0 && text.chars().count() > precision as usize {
+    const out = new StringBuilder();
+    var count = 0usize;
+
+    for c in text.chars() {
+      if count < precision as usize {
+        out.append_char(c);
+      }
+
+      count += 1;
+    }
+
+    shown = out.to_string();
+  }
+
+  pad(shown, fill, if align == 0 { 1 } else { align }, width)
 }

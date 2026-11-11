@@ -286,6 +286,66 @@ static void sag_push_float(sag_sb *sb, double value, int max_digits, bool is_f32
   }
 }
 
+sag_string sag_float_format(double value, int32_t precision, bool scientific, bool upper, bool is_f32) {
+  sag_sb sb;
+  sag_sb_init(&sb);
+  if (value != value) {
+    sag_sb_push_bytes(&sb, "NaN", 3);
+    return sag_sb_finish(&sb);
+  }
+  double magnitude = fabs(value);
+  if (isinf(magnitude)) {
+    sag_sb_push_bytes(&sb, "inf", 3);
+    return sag_sb_finish(&sb);
+  }
+  if (!scientific) {
+    if (precision < 0) {
+      sag_push_float(&sb, magnitude, is_f32 ? 9 : 17, is_f32);
+    } else {
+      /* C rounds the exact value to the nearest, as Rust does. */
+      int count = snprintf(NULL, 0, "%.*f", (int)precision, magnitude);
+      char *text = sag_alloc((size_t)count + 1);
+      snprintf(text, (size_t)count + 1, "%.*f", (int)precision, magnitude);
+      sag_sb_push_bytes(&sb, text, (size_t)count);
+      free(text);
+    }
+    return sag_sb_finish(&sb);
+  }
+  /* Scientific: the fewest digits that read back as the value, or `precision` decimals. */
+  char text[512];
+  if (precision < 0) {
+    int max_digits = is_f32 ? 9 : 17;
+    for (int digits = 1; digits <= max_digits; digits++) {
+      snprintf(text, sizeof text, "%.*e", digits - 1, magnitude);
+      double back = strtod(text, NULL);
+      if (is_f32 ? (float)back == (float)magnitude : back == magnitude) {
+        break;
+      }
+    }
+  } else {
+    snprintf(text, sizeof text, "%.*e", precision > 400 ? 400 : (int)precision, magnitude);
+  }
+  /* `text` looks like "1.2340e+02": the mantissa, without trailing zeros unless a precision
+   * asks for them, then `e` and the exponent without `+` or leading zeros. */
+  char *mark = strchr(text, 'e');
+  size_t mantissa = mark != NULL ? (size_t)(mark - text) : strlen(text);
+  if (precision < 0 && memchr(text, '.', mantissa) != NULL) {
+    while (mantissa > 0 && text[mantissa - 1] == '0') {
+      mantissa--;
+    }
+    if (mantissa > 0 && text[mantissa - 1] == '.') {
+      mantissa--;
+    }
+  }
+  sag_sb_push_bytes(&sb, text, mantissa);
+  sag_sb_push_bytes(&sb, upper ? "E" : "e", 1);
+  long exponent = mark != NULL ? strtol(mark + 1, NULL, 10) : 0;
+  char digits[32];
+  int written = snprintf(digits, sizeof digits, "%ld", exponent);
+  sag_sb_push_bytes(&sb, digits, (size_t)written);
+  return sag_sb_finish(&sb);
+}
+
 void sag_sb_push_f64(sag_sb *sb, double value) {
   sag_push_float(sb, value, 17, false);
 }

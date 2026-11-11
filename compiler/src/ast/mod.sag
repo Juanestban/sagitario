@@ -568,4 +568,31 @@ pub struct FieldInit {
 pub enum TemplatePart {
   Text(String),
   Expr(Expr),
+  /// `{expr:spec}` in a format string (docs/adr/0089-display-debug-and-format-specifiers.md).
+  Formatted { expr: Expr, spec: FormatSpec },
+
+  /// The interpolated expression, of either form.
+  pub fn expr(self) -> Option<Expr> {
+    match self {
+      TemplatePart::Text(_) => None,
+      TemplatePart::Expr(inner) => Some(inner),
+      TemplatePart::Formatted { expr, .. } => Some(expr),
+    }
+  }
+}
+
+/// A format specifier, Rust's `[[fill]align][+][#][0][width][.precision][type]`
+/// (docs/adr/0089-display-debug-and-format-specifiers.md, Q585).
+pub struct FormatSpec {
+  pub fill: char;
+  /// 0 without an alignment, 1 for `<`, 2 for `^`, 3 for `>`.
+  pub align: u32;
+  pub plus: bool;
+  pub alternate: bool;
+  pub zero: bool;
+  pub width: Option<u64>;
+  pub precision: Option<u64>;
+  /// `""`, `"?"`, `"x"`, `"X"`, `"o"`, `"b"`, `"e"` or `"E"`.
+  pub kind: String;
+  pub span: Span;
 }

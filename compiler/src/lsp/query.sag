@@ -1,7 +1,7 @@
 //! What is under the cursor: the innermost expression, type or binding at an offset of a module,
 //! its type for hover, and where it is declared (docs/adr/0058-language-server.md).
 
-use pkg::ast::{Block, Expr, ExprKind, FnDecl, Ident, Item, Module, Package, Path, Pattern, PatternKind, Stmt, TemplatePart, TypeExpr, TypeExprKind, UseTree, UseTreeKind};
+use pkg::ast::{Block, Expr, ExprKind, FnDecl, Ident, Item, Module, Package, Path, Pattern, PatternKind, Stmt, TypeExpr, TypeExprKind, UseTree, UseTreeKind};
 use pkg::lsp::analysis::Analysis;
 use pkg::resolve::{EnumKind, ItemRef, Res, Resolution, TypeItem, TypeRes};
 use pkg::span::Span;
@@ -368,7 +368,7 @@ class Finder {
       ExprKind::Path(path) => self.path_prefix(path),
       ExprKind::Template(parts) => {
         for part in parts {
-          if let TemplatePart::Expr(inner) = part {
+          if let Some(inner) = part.expr() {
             self.expr(inner);
           }
         }

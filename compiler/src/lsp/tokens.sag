@@ -4,7 +4,7 @@
 //! format string or a template, as rust-analyzer does in Rust's format strings, also the
 //! variables, parameters, fields and methods, which would otherwise take the color of the string.
 
-use pkg::ast::{Block, Expr, ExprKind, FnDecl, Ident, Item, Module, Path, Pattern, PatternKind, Stmt, TemplatePart, TypeExpr, TypeExprKind, UseTree, UseTreeKind};
+use pkg::ast::{Block, Expr, ExprKind, FnDecl, Ident, Item, Module, Path, Pattern, PatternKind, Stmt, TypeExpr, TypeExprKind, UseTree, UseTreeKind};
 use pkg::lsp::analysis::Analysis;
 use pkg::lsp::json;
 use pkg::lsp::json::{Json, member};
@@ -434,7 +434,7 @@ class Collector {
         self.interpolations += 1;
 
         for part in parts {
-          if let TemplatePart::Expr(inner) = part {
+          if let Some(inner) = part.expr() {
             self.expr(inner);
           }
         }

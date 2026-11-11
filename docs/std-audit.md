@@ -61,7 +61,7 @@ The audit of the library found gaps of the language itself, which the library ne
 | `String`, `&str` | `String` (immutable, ARC; `trim` and `substring` share the buffer) | 🟡 | Has `len`, `is_empty`, `contains`, `starts_with`, `ends_with`, `find`, the `trim`s, ASCII case, `replace`, `repeat`, `substring`, `split`, `lines`, `chars`, `bytes`, `parse_*`. Missing: `rfind`, `split_whitespace`, `splitn`, `rsplit`, `split_once`, `strip_prefix`, `strip_suffix`, `char_indices`, `to_uppercase`/`to_lowercase` of Unicode, `matches`, `replacen`, `pad`, `char_count`, `from_utf8` (public; `std` has it privately), `from_utf8_lossy`, `from_utf16` |
 | `String` (growable) | `StringBuilder` | 🟡 | Missing: `insert`, `truncate`, `pop`, `capacity` |
 | `char` | `char` | 🟡 | Has ASCII classification, `to_digit`, `char::from_u32`. Missing: Unicode `is_alphabetic`, `is_numeric`, `is_whitespace`, `is_uppercase`, `to_uppercase`, `len_utf8`, `char::from_digit` |
-| `format!`, `fmt` | format strings `f"{expr}"` | 🟡 | Interpolate numbers, `bool`, `char` and `String`. Missing: `Display` for user types, `Debug` printing of any value, width, precision, alignment and radix (`{:>8.2}`, `{:x}`) |
+| `format!`, `fmt` | format strings `f"{expr}"` | 🟡 | `Display` and the specifiers (width, alignment, precision, radix) are done (ADR-0089, increments 1 and 2). Missing: the debug form `{:?}` (increment 3), and widths and precisions given at run time (`{:>width$}`) |
 
 ### Numbers (`num`, `f32`, `f64`, integer modules)
 

@@ -3,7 +3,7 @@
 //! `sagitario_resolve::modules`.
 
 use pkg::ast::{
-  Block, Expr, ExprKind, FnDecl, Ident, Item, Module, Package, Path, Pattern, PatternKind, Stmt, TemplatePart, TypeExpr, TypeExprKind, UseTree,
+  Block, Expr, ExprKind, FnDecl, Ident, Item, Module, Package, Path, Pattern, PatternKind, Stmt, TypeExpr, TypeExprKind, UseTree,
   UseTreeKind, VariantFields, Visibility,
 };
 use pkg::diagnostics::{Diagnostic, Diagnostics};
@@ -1013,7 +1013,7 @@ fn expr_paths(expr: Expr, out: List<Path>) {
     }
     ExprKind::Template(parts) => {
       for part in parts {
-        if let TemplatePart::Expr(inner) = part {
+        if let Some(inner) = part.expr() {
           expr_paths(inner, out);
         }
       }
