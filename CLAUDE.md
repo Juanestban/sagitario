@@ -27,3 +27,10 @@ a seed of the C it generates for itself (`bootstrap/`).
   it). Update the seed (`--update-seed`) only when the compiler needs something the seed cannot
   compile, or when the driver it carries must change.
 - Do not loosen checks (warnings, sanitizers, expected dumps, skipped tests) to make code pass.
+- Keep the VS Code extension in step with the language. A change that adds syntax, a keyword, a
+  token, an attribute or a standard-library API also updates, in the same change, what the
+  editor offers for it: the grammar (`editors/vscode/syntaxes/`), the snippets
+  (`editors/vscode/snippets/`), the completion and semantic tokens of `sag lsp`
+  (`compiler/src/lsp/completion.sag`, `tokens.sag`), their sessions in `tests/lsp/`, and the
+  feature list of `editors/vscode/README.md`. `sag run tools/vscode.sag` installs the result in
+  the local VS Code.

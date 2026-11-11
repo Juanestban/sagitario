@@ -292,7 +292,8 @@ class Server {
       }
     }
 
-    const items = completion::complete(found, module, module_index, document.text, offset);
+    const trigger = json::as_str(json::at(params, List::from(["context", "triggerCharacter"])));
+    const items = completion::complete(found, module, module_index, document.text, offset, trigger);
 
     json::object(List::from([member("isIncomplete", Json::Bool(false)), member("items", items)]))
   }
@@ -355,7 +356,7 @@ fn initialize_result() -> Json {
     member("change", json::int(1)),
     member("save", json::object(List::from([member("includeText", Json::Bool(false))]))),
   ]));
-  const completion_options = json::object(List::from([member("triggerCharacters", Json::Array(List::from([json::str("."), json::str(":")])))]));
+  const completion_options = json::object(List::from([member("triggerCharacters", Json::Array(List::from([json::str("."), json::str(":"), json::str("@"), json::str("(")])))]));
   const capabilities = json::object(List::from([
     member("positionEncoding", json::str("utf-16")),
     member("textDocumentSync", sync),

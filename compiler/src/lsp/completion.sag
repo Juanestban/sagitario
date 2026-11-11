@@ -1,6 +1,7 @@
 //! Completion (docs/adr/0058-language-server.md). The text around the cursor tells what is being
-//! written, since code being typed rarely compiles: a member after `.`, an item after `::`, or a
-//! name. Types come from the last analysis of the document that reached the type checker.
+//! written, since code being typed rarely compiles: a member after `.`, an item after `::`, an
+//! attribute after `@` and its argument after `@repr(`, or a name. Types come from the last
+//! analysis of the document that reached the type checker.
 
 use pkg::ast::Module;
 use pkg::lsp::analysis::Analysis;
@@ -27,7 +28,7 @@ const ENUM_MEMBER: i64 = 20;
 const CONSTANT: i64 = 21;
 const STRUCT: i64 = 22;
 
-const KEYWORDS: String = "abstract as async await break class const continue else enum extends extern false fn for if impl in interface let loop match new override pkg prv pub return self Self struct super true unsafe use var weak where while zod";
+const KEYWORDS: String = "abstract as async await break class const continue else enum extends extern false fn for if impl in interface let loop match new override pkg prv pub return self Self struct super true union unsafe use var weak where while zod";
 
 const BUILTINS: String = "print println eprintln panic include_str";
 
@@ -45,6 +46,11 @@ const POINTER_METHODS: String = "is_null add";
 const OPTION_METHODS: String = "is_some is_none unwrap expect unwrap_or map and_then unwrap_or_else filter";
 const RESULT_METHODS: String = "is_ok is_err unwrap expect unwrap_or unwrap_err map map_err and_then unwrap_or_else";
 const BUILDER_METHODS: String = "append append_char len is_empty clear to_string";
+/// The attributes (docs/spec/01-lexical.md#attributes-f1), with what they are written as.
+const ATTRIBUTES: String = "export repr";
+/// The representations of `@repr(...)`: `C` for structs, unions and enums, an integer type for
+/// enums.
+const REPRESENTATIONS: String = "C i8 i16 i32 i64 isize u8 u16 u32 u64 usize";
 const CHAR_METHODS: String = "is_ascii_digit is_ascii_alphabetic is_ascii_alphanumeric is_ascii_whitespace is_ascii_uppercase is_ascii_lowercase to_ascii_uppercase to_ascii_lowercase to_digit";
 
 /// The completion items, without repeated labels.
@@ -71,6 +77,22 @@ class Items {
     }
 
     self.list.push(json::object(members));
+  }
+
+  /// An item inserted as a snippet (LSP's `InsertTextFormat.Snippet`), such as `repr(${1:C})`.
+  pub fn add_snippet(self, label: String, kind: i64, detail: String, snippet: String) {
+    if self.seen.contains_key(label) {
+      return;
+    }
+
+    self.seen.insert(label, true);
+    self.list.push(json::object(List::from([
+      member("label", json::str(label)),
+      member("kind", json::int(kind)),
+      member("detail", json::str(detail)),
+      member("insertText", json::str(snippet)),
+      member("insertTextFormat", json::int(2)),
+    ])));
   }
 
   pub fn add_words(self, words: String, kind: i64) {
@@ -186,7 +208,8 @@ fn path_chain(chars: List<char>, end: usize) -> List<String> {
 }
 
 /// The completion items at `offset` of `text`, the document of `module` in `analysis`.
-pub fn complete(analysis: Option<Analysis>, module: Option<Module>, module_index: Option<usize>, text: String, offset: u32) -> Json {
+/// `trigger` is the character whose typing asked for the completion, if one did.
+pub fn complete(analysis: Option<Analysis>, module: Option<Module>, module_index: Option<usize>, text: String, offset: u32, trigger: Option<String>) -> Json {
   const items = new Items();
   const chars = before(text, offset);
   var start = chars.len();
@@ -197,6 +220,23 @@ pub fn complete(analysis: Option<Analysis>, module: Option<Module>, module_index
 
   const separator = if start > 0 { chars.get(start - 1).unwrap_or(' ') } else { ' ' };
   const double_colon = separator == ':' && start >= 2 && chars.get(start - 2).unwrap_or(' ') == ':';
+
+  if separator == '@' {
+    attributes(items);
+    return Json::Array(items.list);
+  }
+
+  if separator == '(' && start >= 1 && attribute_before(chars, start - 1) == "repr" {
+    items.add_words(REPRESENTATIONS, ENUM_MEMBER);
+    return Json::Array(items.list);
+  }
+
+  // `(` asks only for the argument of an attribute: in a call, the names would cover the code.
+  if let Some(character) = trigger {
+    if character == "(" || character == "@" {
+      return Json::Array(items.list);
+    }
+  }
 
   if let Some(found) = analysis {
     if separator == '.' {
@@ -216,6 +256,39 @@ pub fn complete(analysis: Option<Analysis>, module: Option<Module>, module_index
   items.add_words(KEYWORDS, KEYWORD);
   items.add_words(BUILTINS, FUNCTION);
   Json::Array(items.list)
+}
+
+// ---- Attributes -------------------------------------------------------------------------------
+
+fn attributes(items: Items) {
+  for name in ATTRIBUTES.split(" ") {
+    if name == "export" {
+      items.add_snippet(name, KEYWORD, "@export(\"symbol\"): the C symbol of an `extern \"C\"` function", "export(\"${1:symbol}\")");
+    } else {
+      items.add_snippet(name, KEYWORD, "@repr(C) on structs, unions and enums, or an integer type on enums", "repr(${1:C})");
+    }
+  }
+}
+
+/// The name of the attribute written as `@name` right before the `(` at `paren`, or `""`.
+fn attribute_before(chars: List<char>, paren: usize) -> String {
+  var start = paren;
+
+  while start > 0 && is_name_char(chars.get(start - 1).unwrap_or(' ')) {
+    start -= 1;
+  }
+
+  if start == 0 || chars.get(start - 1).unwrap_or(' ') != '@' {
+    return "";
+  }
+
+  const name = new StringBuilder();
+
+  for index in start..paren {
+    name.append_char(chars.get(index).unwrap_or(' '));
+  }
+
+  name.to_string()
 }
 
 // ---- Names ------------------------------------------------------------------------------------
@@ -239,6 +312,8 @@ fn item_kind(item: ItemRef) -> i64 {
 fn item_detail(analysis: Analysis, item: ItemRef) -> String {
   match item {
     ItemRef::Fn(id) => query::signature(analysis, id).unwrap_or(""),
+    // Module-level constants, the globals of a program, with their types.
+    ItemRef::Const(_) => query::item_text(analysis, item).unwrap_or(""),
     _ => "",
   }
 }

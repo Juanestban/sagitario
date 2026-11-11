@@ -4,8 +4,9 @@ Support for the [Sagitario](https://github.com/Juanestban/sagitario) programming
 
 - The language server (`sag lsp`): the errors and warnings of `sag check` while typing, the type
   of what is under the cursor, go to definition (`F12` or `Ctrl+Click`, also on the modules of
-  `use` and of paths), completion of members after `.`, of items after `::`, of names and of
-  types, the outline of a document (`Ctrl+Shift+O`), and the colors of modules, functions and
+  `use` and of paths), completion of members after `.`, of items after `::`, of attributes after
+  `@` and of their representations after `@repr(`, of names (module-level constants with their
+  types) and of types, the outline of a document (`Ctrl+Shift+O`), and the colors of modules, functions and
   types in paths (semantic tokens). Inside the braces of format strings, as rust-analyzer does
   in Rust's, it also colors the variables, parameters, fields, methods and functions.
 - Syntax highlighting of `.sag` files: keywords, types, numbers with their suffixes, characters,
@@ -14,10 +15,12 @@ Support for the [Sagitario](https://github.com/Juanestban/sagitario) programming
   comments, documentation comments and attributes.
 - An icon for `.sag` files in the explorer and the tabs.
 - Commenting with `Ctrl+/`, matching and auto-closing brackets and quotes, and folding.
-- Snippets: `main`, `mainr`, `fn`, `pfn`, `struct`, `class`, `enum`, `interface`, `match`,
-  `iflet`, `whilelet`, `for`, `forin`, `if`, `ifelse`, `println` and `use`; and for the FFI,
-  `extern` (a block of C functions), `externfn`, `export`, `reprc`, `union`, `reprenum`, `cfn`,
-  `unsafe` and `cstring`.
+- Snippets: `main`, `mainr`, `asyncmain`, `asyncfn`, `fn`, `pfn`, `struct`, `class`, `enum`,
+  `interface`, `implfor`, `match`, `iflet`, `whilelet`, `for`, `forin`, `if`, `ifelse`, `println`,
+  `fstr` (a format string) and `use`; for operators, `impleq`, `implord`, `implop` (`+`, `-`, `*`,
+  `/`, `%`) and `implneg`; and for the FFI, `extern` (a block of C functions), `externfn`,
+  `export`, `reprc`, `union`, `reprenum`, `cfn`, `unsafe`, `cstring` and `library` (a function
+  loaded from a dynamic library).
 
 ## The language server
 
