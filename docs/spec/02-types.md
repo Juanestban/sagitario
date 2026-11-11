@@ -150,8 +150,14 @@ arguments have the type of the receiver, unless written otherwise.
   | `char` | the character |
   | `String` | as is |
 
-  User-defined types (structs, enums, classes) cannot be interpolated until a `Display`
-  interface exists (post-MVP).
+  | types implementing `Display` | the text of their `to_string()` |
+
+  `Display` is a prelude interface, `fn to_string(self) -> String`
+  ([ADR-0089](../adr/0089-display-debug-and-format-specifiers.md)): a struct, enum or class
+  implementing it, in its body or in an `impl Display for T` block, can be interpolated, and so
+  can a type parameter bounded by it or a `Display` value. Numbers, `bool`, `char` and `String`
+  implement it with the formats above (`5.to_string()` is `"5"`). Interpolating any other value
+  is an error (`E0306`). Lists, maps, options and results do not implement it.
 - Byte indexing (`s[i]`) is not allowed; use `s.chars()` or `s.bytes()`.
 - `a + b` creates a new `String`; `s += t` is `s = s + t`. `==`, `!=`, `<`, `<=`, `>`, `>=`
   compare the bytes lexicographically.

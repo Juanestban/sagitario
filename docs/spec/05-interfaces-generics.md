@@ -131,8 +131,9 @@ interface Error {
   `return Err(Error("file not found"));` in a function returning `Result<T, Error>`.
 - `Result<T, E>` admits any error type, `String` included, but `String` does not implement
   `Error`. See [errors](07-errors.md#the--operator) for how `?` converts errors.
-- Post-MVP: `source()` for error chains, backtraces, and a separate `Display` interface
-  designed together with interpolation of user types.
+- `Display` is a separate prelude interface, for the text of a value
+  ([ADR-0089](../adr/0089-display-debug-and-format-specifiers.md)); `Error` does not extend it.
+- Post-MVP: `source()` for error chains and backtraces.
 
 ## Generics
 

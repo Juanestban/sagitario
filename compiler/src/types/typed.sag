@@ -20,6 +20,8 @@ pub struct PreludeItems {
   pub iter: Option<u32>;
   pub map: Option<u32>;
   pub send: Option<u32>;
+  /// `Display` (docs/adr/0089-display-debug-and-format-specifiers.md).
+  pub display: Option<u32>;
   /// The interfaces of the operators (docs/adr/0081-operator-overloading.md).
   pub add: Option<u32>;
   pub sub: Option<u32>;
@@ -225,6 +227,7 @@ pub class TypedModule {
       iter: None,
       map: None,
       send: None,
+      display: None,
       add: None,
       sub: None,
       mul: None,
@@ -754,6 +757,16 @@ pub class TypedModule {
 
     const pair = List::from([ty, ty]);
 
+    // Numbers, `bool`, `char` and `String` have the text format strings give them.
+    match ty.kind {
+      TypeKind::Int(_) | TypeKind::Float(_) | TypeKind::Bool | TypeKind::Char | TypeKind::String => {
+        if let Some(id) = self.prelude.display {
+          result.push(NamedRef { id: id, name: "Display", args: new List() });
+        }
+      }
+      _ => {}
+    }
+
     if numeric {
       for entry in List::from([Operator { id: self.prelude.add, name: "Add" }, Operator { id: self.prelude.sub, name: "Sub" }, Operator { id: self.prelude.mul, name: "Mul" }, Operator { id: self.prelude.div, name: "Div" }, Operator { id: self.prelude.rem, name: "Rem" }]) {
         if let Some(id) = entry.id {
@@ -852,6 +865,25 @@ pub class TypedModule {
     }
 
     None
+  }
+
+  /// The method `to_string` of `Display`, if the prelude has it.
+  pub fn display_method(self) -> Option<u32> {
+    const id = self.prelude.display?;
+
+    self.interface_def(id)?.methods.first()
+  }
+
+  /// Whether values of `ty` can be interpolated: numbers, `bool`, `char`, `String`, and types
+  /// implementing `Display` (docs/adr/0089-display-debug-and-format-specifiers.md, Q583).
+  pub fn displayable(self, ty: Type) -> bool {
+    match ty.kind {
+      TypeKind::Int(_) | TypeKind::Float(_) | TypeKind::Bool | TypeKind::Char | TypeKind::String | TypeKind::Never | TypeKind::Error => true,
+      _ => match self.prelude.display {
+        Some(id) => self.implements(ty, NamedRef { id: id, name: "Display", args: new List() }),
+        None => false,
+      },
+    }
   }
 
   /// Whether values of `ty` implement `interface` (with the same type arguments). The compiler

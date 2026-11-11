@@ -805,6 +805,12 @@ fn members(items: Items, analysis: Analysis, reference: Type) {
     items.add(found.name, METHOD, numbers::signature(found));
   }
 
+  // `Display` of numbers, `bool`, `char` and `String` (docs/adr/0089-display-debug-and-format-specifiers.md).
+  match ty.kind {
+    TypeKind::Int(_) | TypeKind::Float(_) | TypeKind::Bool | TypeKind::Char | TypeKind::String => items.add("to_string", METHOD, "fn to_string(self) -> String"),
+    _ => {}
+  }
+
   const builtin = match ty.kind {
     TypeKind::String => STRING_METHODS,
     TypeKind::StringBuilder => BUILDER_METHODS,

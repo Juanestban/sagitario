@@ -45,6 +45,13 @@ pub interface Hash extends Eq {
   fn hash(self) -> u64;
 }
 
+/// Values with a text for people: a format string interpolates them, `f"{value}"`, with this text
+/// (docs/adr/0089-display-debug-and-format-specifiers.md). Numbers, `bool`, `char` and `String`
+/// implement it.
+pub interface Display {
+  fn to_string(self) -> String;
+}
+
 /// `a + b` for values of a type other than numbers and `String`, with a right operand of type
 /// `Rhs` and a result of type `Out` (docs/adr/0081-operator-overloading.md). Numbers implement
 /// the arithmetic interfaces with their own type, and `String` implements `Add<String, String>`.

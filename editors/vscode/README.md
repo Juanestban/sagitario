@@ -19,7 +19,7 @@ Support for the [Sagitario](https://github.com/Juanestban/sagitario) programming
 - Commenting with `Ctrl+/`, matching and auto-closing brackets and quotes, and folding.
 - Snippets: `main`, `mainr`, `asyncmain`, `asyncfn`, `fn`, `pfn`, `static`, `staticvar`,
   `threadlocal`, `cfg`, `struct`, `class`, `enum`, `interface`, `implfor`, `match`, `iflet`, `whilelet`, `for`,
-  `forin`, `if`, `ifelse`, `println`, `fstr` (a format string) and `use`; for operators, `impleq`, `implord`, `implop` (`+`, `-`, `*`,
+  `forin`, `if`, `ifelse`, `println`, `fstr` (a format string) and `use`; for operators and text, `impleq`, `implord`, `impldisplay`, `implop` (`+`, `-`, `*`,
   `/`, `%`) and `implneg`; and for the FFI, `extern` (a block of C functions), `externstatic` (a global variable of C), `externfn`,
   `export`, `reprc`, `union`, `reprenum`, `cfn`, `unsafe`, `cstring` and `library` (a function
   loaded from a dynamic library).

@@ -4,7 +4,7 @@
 
 use pkg::ast::{BinaryOp, Block, Expr, ExprKind, UnaryOp};
 use pkg::resolve::{ParamOwner, Res, TypeItem};
-use pkg::sir::{Callee, Lowering, Operand, Place, Projection, Rvalue, Stmt, bool_operand, int_operand, local_place, project, unit_operand};
+use pkg::sir::{Callee, Lowering, Operand, Place, Projection, Rvalue, Stmt, TemplatePiece, bool_operand, int_operand, local_place, project, unit_operand};
 use pkg::sir::matching;
 use pkg::sir::mono;
 use pkg::types::{FloatTy, IntTy, Subst, Type, TypeKind};
@@ -390,6 +390,14 @@ fn is_primitive(ty: Type) -> bool {
   }
 }
 
+/// Whether `function` is `to_string` of `Display`.
+fn is_display(lw: Lowering, function: u32) -> bool {
+  match lw.resolution.owner(function) {
+    Some(TypeItem::Interface(id)) => same_option(id, lw.typed.prelude.display),
+    _ => false,
+  }
+}
+
 fn same_option(id: u32, found: Option<u32>) -> bool {
   match found {
     Some(other) => other == id,
@@ -407,6 +415,14 @@ pub fn is_primitive_method(lw: Lowering, function: u32, receiver_ty: Type) -> bo
 
   if numeric && operator_of(lw, function).is_some() {
     return true;
+  }
+
+  // `to_string` of numbers, `bool`, `char` and `String` is their interpolation.
+  if is_display(lw, function) {
+    return match receiver_ty.kind {
+      TypeKind::Float(_) => true,
+      _ => is_primitive(receiver_ty),
+    };
   }
 
   if !is_primitive(receiver_ty) {
@@ -468,6 +484,10 @@ pub fn primitive_operator(lw: Lowering, function: u32, receiver_ty: Type, lhs: O
 pub fn primitive_method(lw: Lowering, function: u32, ty: Type, receiver: Expr, args: List<Expr>) -> Result<Operand, String> {
   const receiver_ty = lw.type_of(receiver)?;
   const lhs = lw.expr(receiver)?;
+
+  if is_display(lw, function) {
+    return Ok(lw.new_value(types::string(), Rvalue::Template(List::from([TemplatePiece::Value { ty: receiver_ty, value: lhs }]))));
+  }
 
   if operator_of(lw, function).is_some() {
     return primitive_operator(lw, function, receiver_ty, lhs, args);

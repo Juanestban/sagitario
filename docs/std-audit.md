@@ -34,7 +34,7 @@ The audit of the library found gaps of the language itself, which the library ne
 |---|---|---|
 | No bitwise operators (`&`, `\|`, `^`, `!` on integers, `<<`, `>>`) | Hashing, flags, bit sets, UTF-8 and parsing are written with `*`, `/` and `%`, slower and harder to read; `BitAnd`... cannot be implemented | ✅ [ADR-0088](adr/0088-bitwise-operators-and-integer-methods.md), increment 1; the interfaces `BitAnd`... are still missing |
 | `wrapping_*`, `checked_*` and `saturating_*` are promised by spec 2 ("Integer arithmetic") but not implemented | Code that must not panic on overflow in debug builds cannot say so | ✅ [ADR-0088](adr/0088-bitwise-operators-and-integer-methods.md), increment 2 |
-| No `Display`: user types cannot be interpolated or turned into text (spec 2, "post-MVP") | No `to_string()`, no formatting of user types | ❌ with `fmt` below |
+| No `Display`: user types cannot be interpolated or turned into text (spec 2, "post-MVP") | No `to_string()`, no formatting of user types | ✅ [ADR-0089](adr/0089-display-debug-and-format-specifiers.md), increment 1 |
 | No conversion interfaces (`From`, `Into`, `TryFrom`) nor `Default` | Conversions are named functions; `?` converts errors only to `Error` | ❌ a record of its own |
 | `@cfg` is not allowed on fields | Classes of `std::sys` that differ by system are written twice whole | 🟡 a small record, when it hurts |
 

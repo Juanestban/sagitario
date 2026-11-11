@@ -58,6 +58,7 @@ pub fn prelude_items(cx: Checker) {
     iter: prelude_class(cx, "Iter"),
     map: prelude_class(cx, "Map"),
     send: prelude_interface(cx, "Send"),
+    display: prelude_interface(cx, "Display"),
     add: prelude_interface(cx, "Add"),
     sub: prelude_interface(cx, "Sub"),
     mul: prelude_interface(cx, "Mul"),
@@ -349,6 +350,19 @@ fn iter_shorthand(cx: Checker, value: Expr, receiver: Expr, elem: Type, method: 
 /// floats; `None` for other methods.
 pub fn primitive_method(cx: Checker, value: Expr, receiver_ty: Type, method: Ident, args: List<Expr>) -> Option<Type> {
   const name = method.name;
+  const displayable = match receiver_ty.kind {
+    TypeKind::Int(_) | TypeKind::Float(_) | TypeKind::Bool | TypeKind::Char | TypeKind::String => true,
+    _ => false,
+  };
+
+  // `5.to_string()`: the text a format string gives (docs/adr/0089-display-debug-and-format-specifiers.md).
+  if displayable && name == "to_string" {
+    const function = cx.typed.display_method()?;
+
+    cx.typed.method_calls.insert(value.id, function);
+
+    return Some(generic::generic_method_call(cx, value, receiver_ty, function, args));
+  }
 
   if let TypeKind::Float(_) = receiver_ty.kind {
     if name == "total_compare" {

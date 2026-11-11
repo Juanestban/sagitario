@@ -713,15 +713,12 @@ fn other_expr_kind(cx: Checker, value: Expr, expected: Option<Type>) -> Type {
       for part in parts {
         if let TemplatePart::Expr(inner) = part {
           const ty = expr(cx, inner, None);
-          const interpolable = match ty.kind {
-            TypeKind::Int(_) | TypeKind::Float(_) | TypeKind::Bool | TypeKind::Char | TypeKind::String | TypeKind::Never | TypeKind::Error => true,
-            _ => false,
-          };
 
-          if !interpolable {
+          if !cx.typed.displayable(ty) {
             cx.diagnostics.push(
               Diagnostic::error(codes::NOT_INTERPOLABLE, inner.span, "a value of type `" + types::text(ty) + "` cannot be interpolated")
-                .with_note("integers, floats, `bool`, `char` and `String` can be interpolated; interpolate the fields instead"),
+                .with_note("numbers, `bool`, `char`, `String` and the types implementing `Display` can be interpolated")
+                .with_help("implement `Display` for it (`fn to_string(self) -> String`), or interpolate its fields"),
             );
           }
         }

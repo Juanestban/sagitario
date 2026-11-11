@@ -97,6 +97,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0086](0086-c-globals-and-std-io.md) | C's global variables in the FFI, and `std::io` in Sagitario (S1) | Accepted |
 | [0087](0087-atomic-storage-and-std-sync.md) | Atomic storage for the standard library, and `std::sync` and `std::thread` in Sagitario (S1) | Accepted |
 | [0088](0088-bitwise-operators-and-integer-methods.md) | Bitwise operators, shifts and the integer methods of spec 2 (S2) | Accepted |
+| [0089](0089-display-debug-and-format-specifiers.md) | `Display`, the debug form of values, and format specifiers (S2) | Accepted |
 
 ## Template
 

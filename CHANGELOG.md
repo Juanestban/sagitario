@@ -30,6 +30,9 @@ The sources say 0.25.0.
   `saturating_*`, with `count_ones`, `leading_zeros`, `trailing_zeros`, `rotate_left`,
   `rotate_right`, `swap_bytes` and `is_power_of_two`; and `i32::MIN`, `i32::MAX` and those of
   every integer type.
+- `Display`, a prelude interface with `to_string()`: format strings interpolate the structs,
+  enums and classes implementing it, and numbers, `bool`, `char` and `String` have
+  `to_string()` ([ADR-0089](docs/adr/0089-display-debug-and-format-specifiers.md)).
 - An audit of the standard library against Rust's ([`docs/std-audit.md`](docs/std-audit.md)), the
   plan of S2, with a suite of benchmarks against Rust, C, C#, JavaScript and Python.
 - The language server completes `@cfg` conditions, attributes and their representations, and

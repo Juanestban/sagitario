@@ -305,6 +305,18 @@ fn project_one(place: Place, projection: Projection, ty: Type) -> Place {
 }
 
 /// A local as a place.
+/// An id no expression has.
+const NO_EXPR: u32 = 4294967295;
+
+/// The type of an interpolated piece: a value that is not a number, `bool`, `char` or `String` is
+/// interpolated as the `String` of its `to_string()`.
+fn string_or(ty: Type) -> Type {
+  match ty.kind {
+    TypeKind::Int(_) | TypeKind::Float(_) | TypeKind::Bool | TypeKind::Char | TypeKind::String | TypeKind::Never | TypeKind::Error => ty,
+    _ => types::string(),
+  }
+}
+
 fn is_shift_assignment(op: Option<BinaryOp>) -> bool {
   match op {
     Some(found) => found == BinaryOp::Shl || found == BinaryOp::Shr,
@@ -2175,6 +2187,27 @@ pub class Lowering {
     Ok(self.new_value(ty, Rvalue::Use(Operand::Place(place))))
   }
 
+  /// A value to interpolate: itself when the C can write it, else its `to_string()` of `Display`
+  /// (docs/adr/0089-display-debug-and-format-specifiers.md, Q583).
+  prv fn display(self, value: Operand, ty: Type) -> Result<Operand, String> {
+    match ty.kind {
+      TypeKind::Int(_) | TypeKind::Float(_) | TypeKind::Bool | TypeKind::Char | TypeKind::String | TypeKind::Never | TypeKind::Error => return Ok(value),
+      _ => {}
+    }
+
+    const function = match self.typed.display_method() {
+      Some(found) => found,
+      None => return Err("an interpolated value without `Display`"),
+    };
+    const callee = match ty.kind {
+      TypeKind::Interface(interface_ref) => interfaces::dyn_method(self, interface_ref, function)?,
+      // No expression has this id, so the call has no type arguments of its own.
+      _ => interfaces::concrete_interface_call(self, NO_EXPR, function, ty).callee,
+    };
+
+    Ok(self.call(callee, List::from([value]), types::string()))
+  }
+
   prv fn template(self, ty: Type, parts: List<TemplatePart>) -> Result<Operand, String> {
     const pieces: List<TemplatePiece> = new List();
 
@@ -2185,7 +2218,7 @@ pub class Lowering {
           const part_ty = self.type_of(inner)?;
           const part_value = self.expr(inner)?;
 
-          pieces.push(TemplatePiece::Value { ty: part_ty, value: part_value });
+          pieces.push(TemplatePiece::Value { ty: string_or(part_ty), value: self.display(part_value, part_ty)? });
         }
       }
     }
