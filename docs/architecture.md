@@ -195,12 +195,12 @@ runs the executor until the task of `main` finishes.
 - A `static` ([ADR-0083](adr/0083-global-state.md)) carries a function without parameters that
   computes its value (`StaticDecl::init`), registered in `Resolution::functions` without a name,
   so the resolver, the type checker and SIR treat it as any function; `Resolution::statics` and
-  `TypedModule::static_type` give its type. Reading it calls `sag_static_N(file, line)`
-  (`Callee::Runtime`), which `Generator::statics` writes with the storage and state of the static:
-  it computes the value on the first use (`sag_static_begin` and `sag_static_end` in the runtime,
-  which make other threads wait) and returns it with a reference. A static computed from
-  constants calls its function at each use. The runtime releases the values at exit for the leak
-  check.
+  `TypedModule::static_type` give its type. Its place is its storage, reached through the address
+  `sag_static_N(file, line)` returns (`Callee::Runtime`, then `Projection::Borrowed`), which
+  `Generator::statics` writes with the storage and state of the static: it computes the value on
+  the first use (`sag_static_begin` and `sag_static_end` in the runtime, which make other threads
+  wait). A static the compiler computes from constants (`TypedModule::static_values`) starts its
+  storage with the value. The runtime releases the values at exit for the leak check.
 - A program can span several packages (`Package::packages`): the one being compiled, then its
   dependencies, each with its own module tree (`Module::package`, `Resolution::package_roots`).
   The driver loads each dependency's root module and the modules its paths reach

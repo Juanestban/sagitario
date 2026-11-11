@@ -752,3 +752,52 @@ fn unary_symbol(op: UnaryOp) -> String {
     UnaryOp::Deref => "*",
   }
 }
+
+/// The value of each static of a primitive type or `String` whose initializer is a constant
+/// expression (docs/adr/0083-global-state.md, Q527). A value the compiler cannot compute is left
+/// to the program, which computes it on the first use; what made it fail is not reported.
+pub fn static_values(cx: Checker) {
+  for index in 0..cx.resolution.statics.len() {
+    const id = index as u32;
+    var value: Option<ConstValue> = None;
+
+    if let Some(decl) = cx.resolution.static_decl(cx.package, id) {
+      if let Some(ty) = cx.typed.static_type(cx.resolution, id) {
+        if let Some(init) = decl.value() {
+          const module = cx.resolution.statics[index].module;
+          const primitive = match ty.kind {
+            TypeKind::Int(_) | TypeKind::Float(_) | TypeKind::Bool | TypeKind::Char | TypeKind::String => true,
+            _ => false,
+          };
+
+          if primitive && is_constant_expr(cx, init) {
+            const reported = cx.diagnostics.len();
+
+            value = const_expr(cx, init, ty, module);
+
+            if value.is_none() {
+              cx.diagnostics.truncate(reported);
+            }
+          }
+        }
+      }
+    }
+
+    cx.typed.static_values.push(value);
+  }
+}
+
+/// Whether `value` is made of literals and constants, with operators and casts.
+fn is_constant_expr(cx: Checker, value: Expr) -> bool {
+  match value.kind {
+    ExprKind::Int { .. } | ExprKind::Float { .. } | ExprKind::Bool(_) | ExprKind::Char(_) | ExprKind::Str(_) => true,
+    ExprKind::Path(_) => match cx.resolution.paths.get(value.id) {
+      Some(Res::Const(_)) => true,
+      _ => false,
+    },
+    ExprKind::Unary { operand, .. } => is_constant_expr(cx, operand),
+    ExprKind::Binary { lhs, rhs, .. } => is_constant_expr(cx, lhs) && is_constant_expr(cx, rhs),
+    ExprKind::Cast { expr, .. } => is_constant_expr(cx, expr),
+    _ => false,
+  }
+}

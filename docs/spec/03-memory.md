@@ -100,17 +100,40 @@ fn frame() {
   ([`Send`](05-interfaces-generics.md#send-f4)): primitives, `String`, structs and enums of `Send`
   values, classes whose fields are all `const` and `Send`, `Mutex<T>`, the atomics and `Channel<T>`.
   A `List`, a `Map` or a class with `var` fields is an error (`E0332`).
-- A static cannot be assigned (`E0307`). Its value changes only through its own methods, such as
+- A static cannot be assigned (`E0307`), nor its fields, nor can a method that modifies `self`
+  be called on it (`E0312`, `E0313`). Its value changes only through its own methods, such as
   those of an atomic or a `Mutex`: `FRAMES.fetch_add(1)`.
 - The value is any expression, computed **on the first use** of the static, exactly once even
   when several threads reach it at once: the others wait for it. A static that needs its own value
   while it is being computed, directly or through other statics or functions, panics naming it. A
   static computed from literals and constants, of a primitive type or `String`, keeps no state.
 - Reading a static gives its value, as reading a `const` binding does: a struct is copied, and a
-  class instance or `Mutex` is the same object every time. `&NAME` lends it.
+  class instance or `Mutex` is the same object every time. `&NAME` lends it, and `&raw const NAME`
+  gives its address, which is the same for the whole program.
 - Its value lives until the program ends and is never released while it runs.
 - A static is not a constant: a module-level `const` cannot use one (`E0334`).
-- `static var` comes later ([ADR-0083](../adr/0083-global-state.md), Q528 and Q529).
+- `static var NAME: Type = value;` is a mutable global, as Rust's `static mut`: every thread
+  and C can reach it at once, and the compiler cannot tell, so reading it, assigning it
+  (`NAME = value`, `NAME += 1`) and changing its parts or calling its methods happen only inside
+  `unsafe` (`E0323`). Its type needs not be `Send`. Its value is computed as a static's.
+- As in Rust 2024, `&NAME` and `&mut NAME` of a `static var`, or of a part of one, are errors
+  (`E0340`): it could change while lent. Copy its value in `unsafe`, or take its address with
+  `&raw const NAME` or `&raw mut NAME`, which is safe; using the pointer is not
+  ([raw pointers](10-ffi.md#raw-pointers)).
+
+```sag
+use std::ffi::c_int;
+
+static var COMPARISONS: i32 = 0;
+
+/// Called by C's `qsort`, which passes no context.
+extern "C" fn by_value(a: &i32, b: &i32) -> c_int {
+  unsafe { COMPARISONS += 1; }
+  *a - *b
+}
+```
+
+- `@thread_local static var` comes later ([ADR-0083](../adr/0083-global-state.md), Q529).
 
 ## Struct mutability (F1)
 

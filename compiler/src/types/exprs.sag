@@ -356,9 +356,7 @@ fn assign(cx: Checker, target: Expr, op: Option<BinaryOp>, value: Expr) -> Type 
     Some(id) => id,
     None => {
       if let Some(Res::Static(found)) = cx.resolution.paths.get(target.id) {
-        static_assignment(cx, target, found);
-
-        return expr(cx, value, None);
+        return static_assignment(cx, target, found, op, value);
       }
 
       // An unresolved name was already reported.
@@ -556,7 +554,15 @@ fn other_expr_kind(cx: Checker, value: Expr, expected: Option<Type>) -> Type {
       }
       Some(Res::Fn(id)) => closures::fn_value(cx, value, path, id, expected),
       Some(Res::Const(id)) => cx.typed.const_types.get(id as usize).unwrap_or(types::error()),
-      Some(Res::Static(id)) => cx.typed.static_type(cx.resolution, id).unwrap_or(types::error()),
+      Some(Res::Static(id)) => {
+        if let Some(decl) = cx.resolution.static_decl(cx.package, id) {
+          if decl.mutable {
+            ffi::require_unsafe(cx, value.span, "using the `static var` `" + decl.name.name + "`");
+          }
+        }
+
+        cx.typed.static_type(cx.resolution, id).unwrap_or(types::error())
+      }
       Some(Res::Extern(id)) if !cx.resolution.is_runtime_extern(cx.package, id) => ffi::extern_value(cx, id),
       Some(Res::FromRaw(_)) => {
         cx.diagnostics.push(
@@ -2532,15 +2538,34 @@ fn float_literal_type(suffix: Option<String>, expected: Option<Type>) -> Type {
   types::of(TypeKind::Float(FloatTy::F64))
 }
 
-/// `NAME = value` on a `static`, which holds one value for the program
-/// (docs/adr/0083-global-state.md, Q526).
-fn static_assignment(cx: Checker, target: Expr, id: u32) {
-  var diagnostic = Diagnostic::error(codes::INVALID_ASSIGNMENT_TARGET, target.span, "cannot assign to a `static`")
-    .with_help("change its value through its methods, such as those of a `Mutex` or an atomic");
+/// `NAME = value` and `NAME += value` on a static: a `static var` in `unsafe` (Q528), never a
+/// `static`, which holds one value for the program (Q526).
+fn static_assignment(cx: Checker, target: Expr, id: u32, op: Option<BinaryOp>, value: Expr) -> Type {
+  const decl = match cx.resolution.static_decl(cx.package, id) {
+    Some(found) => found,
+    None => return expr(cx, value, None),
+  };
 
-  if let Some(decl) = cx.resolution.static_decl(cx.package, id) {
-    diagnostic = diagnostic.with_label(decl.name.span, "declared with `static` here");
+  if !decl.mutable {
+    cx.diagnostics.push(
+      Diagnostic::error(codes::INVALID_ASSIGNMENT_TARGET, target.span, "cannot assign to a `static`")
+        .with_label(decl.name.span, "declared with `static` here")
+        .with_help("change its value through its methods, such as those of a `Mutex` or an atomic, or declare it `static var`"),
+    );
+
+    return expr(cx, value, None);
   }
 
-  cx.diagnostics.push(diagnostic);
+  const target_ty = expr(cx, target, None);
+  var checked = false;
+
+  if let Some(compound) = op {
+    checked = compound_operand(cx, target, compound, target_ty, value);
+  }
+
+  if !checked {
+    expect(cx, value, target_ty);
+  }
+
+  types::unit()
 }

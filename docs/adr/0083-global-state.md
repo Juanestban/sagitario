@@ -131,3 +131,13 @@ fn frame() {
   on the first use and returns it with a reference (`codegen_c.sag`, `Generator::statics`), and the
   runtime waits for a value another thread computes (`sag_static_begin`, `sag_static_end`).
   `static var` is reported as not implemented yet (`E0900`).
+- Increment 2 (`static var`) is done: the tests `tests/run-pass/static_var.sag` and
+  `tests/compile-fail/static_var_errors.sag`. Every static now has storage, and
+  `sag_static_N(file, line)` gives its address, through which SIR reads, assigns and changes it in
+  place; a static whose value the compiler computes from constants (`consts::static_values`,
+  `TypedModule::static_values`) starts its storage with it and keeps no state, except a
+  `static var` of a reference-counted type, whose later values the program releases at exit.
+  Reading a `static` borrows its storage, as reading a `const` binding does; reading a
+  `static var` copies it, since it may change during the statement. As in Rust, taking the
+  address of a static with `&raw` is safe. Changing a part of a `static`, or calling a method that
+  modifies `self` on it, is an error (`E0312`, `E0313`), which increment 1 missed.

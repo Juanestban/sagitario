@@ -1,0 +1,58 @@
+// `static var` (docs/adr/0083-global-state.md, Q528): a mutable global, read and written only in
+// `unsafe`. A C callback, which takes no context, counts its calls in one; strings, lists and
+// structs in others are replaced, grown and changed in place, and `&raw mut` gives its address.
+// expect-stdout: 1 9, compared true
+// expect-stdout: start then built, replaced, 2, (3, 5), 100
+use std::ffi::{c_int, c_void};
+
+extern "C" {
+  fn qsort(base: *mut c_void, count: usize, size: usize, compare: extern "C" fn(&i32, &i32) -> c_int);
+}
+
+static var COMPARISONS: i32 = 0;
+static var NAME: String = "start";
+static var LATER: String = build();
+static var NUMBERS: List<i32> = new List();
+
+struct Pos {
+  pub x: i32;
+  pub y: i32;
+
+  pub fn shift(self, by: i32) {
+    self.x += by;
+  }
+}
+
+static var CURSOR: Pos = Pos { x: 0, y: 0 };
+
+fn build() -> String {
+  "built"
+}
+
+extern "C" fn by_value(a: &i32, b: &i32) -> c_int {
+  unsafe { COMPARISONS += 1; }
+  *a - *b
+}
+
+fn main() {
+  const values = List::from([5, 3, 9, 1, 7]);
+
+  unsafe { qsort(values.as_mut_ptr() as *mut c_void, values.len(), 4, by_value) };
+  println(f"{values[0]} {values[4]}, compared {unsafe { COMPARISONS } > 0}");
+
+  unsafe {
+    NAME = NAME + " then " + LATER;
+    LATER = "replaced";
+    NUMBERS.push(4);
+    NUMBERS.push(2);
+    CURSOR.y = 5;
+    CURSOR.shift(3);
+  }
+
+  const pointer = &raw mut COMPARISONS;
+
+  unsafe {
+    *pointer = 100;
+    println(f"{NAME}, {LATER}, {NUMBERS.len()}, ({CURSOR.x}, {CURSOR.y}), {COMPARISONS}");
+  }
+}

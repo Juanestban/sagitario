@@ -151,8 +151,10 @@ characters as `u32`.
 
 - `unsafe { ... }` is a block expression; inside it the program may call C functions,
   dereference raw pointers, offset them with `add` and read C strings.
-- Calling an `unsafe fn` or an `unsafe extern "C" fn` pointer, and the conversions of function
-  pointers above, are unsafe operations too.
+- Calling an `unsafe fn` or an `unsafe extern "C" fn` pointer, the conversions of function
+  pointers above, and using a [`static var`](03-memory.md#global-state-g1), are unsafe
+  operations too. A `static var` is how a callback that C calls without a context keeps state,
+  and `&raw mut NAME` passes one to C.
 - An `unsafe` block without any of these operations is a warning.
 - Manual retain/release of class references is only possible inside `unsafe` (F2).
 

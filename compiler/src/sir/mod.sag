@@ -49,17 +49,37 @@ pub struct Program {
   pub statics: List<StaticDef>;
 }
 
-/// A `static`: its value is computed by the function `init` on the first use, read through
-/// `sag_static_N(file, line)`; a `constant` one is computed by `init` at each use, without a
-/// state, since its initializer is a constant expression of a primitive type or `String`.
+/// A `static`: its storage, reached through `sag_static_N(file, line)`, which gives its address.
+/// The function `init` computes the value on the first use, unless the compiler computed it
+/// (`value`): then the storage starts with it and keeps no state, except in a `static var` of a
+/// reference-counted type, whose later values the program releases at exit.
 pub struct StaticDef {
   pub name: String;
   pub ty: Type;
   pub init: u32;
-  pub constant: bool;
+  pub mutable: bool;
+  pub value: Option<Const>;
 }
 
-/// The C function reading the static `id`.
+/// The value of a module-level constant, or of a static computed from constants, of type `ty`.
+pub fn const_of(value: ConstValue, ty: Type) -> Result<Const, String> {
+  match value {
+    ConstValue::Bool(found) => Ok(Const::Bool(found)),
+    ConstValue::Char(found) => Ok(Const::Char(found)),
+    ConstValue::Str(found) => Ok(Const::Str(found)),
+    ConstValue::Int(found) => match ty.kind {
+      TypeKind::Int(int_ty) => Ok(Const::Int { magnitude: found.magnitude, negative: found.negative, ty: int_ty }),
+      _ => Err("integer constant typed as " + types::text(ty)),
+    },
+    // `Display` writes the shortest text that reads back as the same value (ADR-0054).
+    ConstValue::Float(found) => match ty.kind {
+      TypeKind::Float(float_ty) => Ok(Const::Float { text: `${found}`, ty: float_ty }),
+      _ => Err("float constant typed as " + types::text(ty)),
+    },
+  }
+}
+
+/// The C function giving the address of the static `id`.
 pub fn static_getter(id: u32) -> String {
   `sag_static_${id}`
 }
@@ -838,12 +858,13 @@ pub fn lower(package: Package, resolution: Resolution, typed: TypedModule, sourc
       Some(found) => found,
       None => return Err("no type for the static `" + decl.name.name + "`"),
     };
-    const constant = match decl.value() {
-      Some(value) => is_constant_static(resolution, ty, value),
-      None => false,
-    };
+    var value: Option<Const> = None;
 
-    statics.push(StaticDef { name: decl.name.name, ty: ty, init: resolution.statics[index].init, constant: constant });
+    if let Some(Some(found)) = typed.static_values.get(index) {
+      value = Some(const_of(found, ty)?);
+    }
+
+    statics.push(StaticDef { name: decl.name.name, ty: ty, init: resolution.statics[index].init, mutable: decl.mutable, value: value });
   }
 
   Ok(Program {
@@ -862,29 +883,6 @@ pub fn lower(package: Package, resolution: Resolution, typed: TypedModule, sourc
   })
 }
 
-/// Whether a static of type `ty` initialized with `value` can be computed at each use: a
-/// primitive or a `String` computed from literals and constants, with operators and casts
-/// (docs/adr/0083-global-state.md, Q527).
-fn is_constant_static(resolution: Resolution, ty: Type, value: Expr) -> bool {
-  match ty.kind {
-    TypeKind::Int(_) | TypeKind::Float(_) | TypeKind::Bool | TypeKind::Char | TypeKind::String => is_constant_expr(resolution, value),
-    _ => false,
-  }
-}
-
-fn is_constant_expr(resolution: Resolution, value: Expr) -> bool {
-  match value.kind {
-    ExprKind::Int { .. } | ExprKind::Float { .. } | ExprKind::Bool(_) | ExprKind::Char(_) | ExprKind::Str(_) => true,
-    ExprKind::Path(_) => match resolution.paths.get(value.id) {
-      Some(Res::Const(_)) => true,
-      _ => false,
-    },
-    ExprKind::Unary { operand, .. } => is_constant_expr(resolution, operand),
-    ExprKind::Binary { lhs, rhs, .. } => is_constant_expr(resolution, lhs) && is_constant_expr(resolution, rhs),
-    ExprKind::Cast { expr, .. } => is_constant_expr(resolution, expr),
-    _ => false,
-  }
-}
 
 /// How the C `main` gets the message of an error that `main` returns, when it is not a `String`.
 fn main_error_of(entry: u32, cx: Context) -> Option<MainError> {
@@ -1420,6 +1418,11 @@ pub class Lowering {
     const is_place = match target.kind {
       ExprKind::Field { .. } | ExprKind::Index { .. } => true,
       ExprKind::Unary { op: unary_op, .. } => unary_op == UnaryOp::Deref,
+      // A `static var` (docs/adr/0083-global-state.md, Q528).
+      ExprKind::Path(_) => match self.resolution.paths.get(target.id) {
+        Some(Res::Static(_)) => true,
+        _ => false,
+      },
       _ => false,
     };
 
@@ -1545,11 +1548,15 @@ pub class Lowering {
 
           Ok(local_place(local, ty))
         }
-        // The value of a static, held by a temporary for the statement.
-        Some(Res::Static(_)) => {
-          const read = self.expr(value)?;
+        // The storage of a static, through its address.
+        Some(Res::Static(id)) => {
+          const reference = types::of(TypeKind::Ref { mutable: true, pointee: ty });
+          const address = self.call(Callee::Runtime { function: static_getter(id), located: true }, new List(), reference);
 
-          self.operand_place(read, ty)
+          match address {
+            Operand::Local(local) => Ok(referred_place(local, reference)),
+            _ => Err("the address of a static is not a local"),
+          }
         }
         _ => Err("place of unsupported path"),
       },
@@ -1863,6 +1870,13 @@ pub class Lowering {
     Ok(project(place, chosen, ty))
   }
 
+  pub fn static_is_mutable(self, id: u32) -> bool {
+    match self.resolution.static_decl(self.package, id) {
+      Some(decl) => decl.mutable,
+      None => false,
+    }
+  }
+
   pub fn base_place(self, base: Expr) -> Result<Place, String> {
     const is_place = match base.kind {
       ExprKind::Path(_) | ExprKind::Field { .. } | ExprKind::Index { .. } => true,
@@ -1899,20 +1913,7 @@ pub class Lowering {
       _ => return Err(`constant ${id} without a value`),
     };
 
-    match value {
-      ConstValue::Bool(found) => Ok(Operand::Const(Const::Bool(found))),
-      ConstValue::Char(found) => Ok(Operand::Const(Const::Char(found))),
-      ConstValue::Str(found) => Ok(Operand::Const(Const::Str(found))),
-      ConstValue::Int(found) => match ty.kind {
-        TypeKind::Int(int_ty) => Ok(int_operand(found.magnitude, found.negative, int_ty)),
-        _ => Err("integer constant typed as " + types::text(ty)),
-      },
-      // `Display` writes the shortest text that reads back as the same value (ADR-0054).
-      ConstValue::Float(found) => match ty.kind {
-        TypeKind::Float(float_ty) => Ok(Operand::Const(Const::Float { text: `${found}`, ty: float_ty })),
-        _ => Err("float constant typed as " + types::text(ty)),
-      },
-    }
+    Ok(Operand::Const(const_of(value, ty)?))
   }
 
   /// Lowers an expression to an operand. Values of managed types that are newly created are
@@ -1969,8 +1970,21 @@ pub class Lowering {
         Some(Res::Extern(id)) => Ok(self.new_value(ty, Rvalue::ExternFnValue(id))),
         Some(Res::Variant(variant)) => Ok(matching::variant(self, ty, variant.index, new List())),
         Some(Res::Const(id)) => self.const_operand(id, ty),
-        // An owned value, as a call returns.
-        Some(Res::Static(id)) => Ok(self.call(Callee::Runtime { function: static_getter(id), located: true }, new List(), ty)),
+        Some(Res::Static(id)) => {
+          const place = self.place(value)?;
+
+          if !self.static_is_mutable(id) {
+            // It never changes: read in place, as a `const` binding.
+            return Ok(Operand::Place(place));
+          }
+
+          // Another thread, or C, may change it during the statement.
+          if self.managed(ty) {
+            return Ok(self.owned_copy(ty, Operand::Place(place)));
+          }
+
+          Ok(self.new_value(ty, Rvalue::Use(Operand::Place(place))))
+        }
         _ => Err("unsupported path operand"),
       },
       ExprKind::Try(inner) => matching::try_expr(self, inner),

@@ -696,13 +696,7 @@ class Parser {
   prv fn static_decl(self, visibility: Visibility, start: Span) -> Result<StaticDecl, ()> {
     self.expect_keyword("static")?;
 
-    const mutable = self.at_keyword("var");
-
-    if mutable {
-      const span = self.advance().span;
-
-      self.diagnostics.push(Diagnostic::error(codes::NOT_IMPLEMENTED, start.to(span), "`static var` is not implemented yet"));
-    }
+    const mutable = self.eat_keyword("var");
 
     const name = self.ident("a static name")?;
 
@@ -2125,7 +2119,7 @@ class Parser {
       return Err(self.unexpected("a statement"));
     }
 
-    const expr = self.expr()?;
+    const expr = self.stmt_expr()?;
 
     if let Some(assignment) = assignment_op(self.kind()) {
       self.advance();
@@ -2233,8 +2227,50 @@ class Parser {
     Ok(CallArgs { args: args, end: end })
   }
 
+  /// An expression that starts a statement or the body of a match arm. As in Rust, one that
+  /// starts with a block-like expression ends at its `}`, unless `.` or `?` follows: after
+  /// `unsafe { ... }`, `*p - *q` is the next statement, not a multiplication.
+  prv fn stmt_expr(self) -> Result<Expr, ()> {
+    if !self.at_block_like() {
+      return self.expr();
+    }
+
+    const head = self.primary_expr()?;
+
+    if !self.at(".") && !self.at("?") {
+      // `-` and `*` start the next statement; the other operators cannot.
+      if infix(self.kind()).is_some() && !self.at("-") && !self.at("*") {
+        self.diagnostics.push(
+          Diagnostic::error(codes::UNEXPECTED_TOKEN, self.span(), "found " + describe(self.kind()) + " after a block-like expression, which ends at its `}` here")
+            .with_label(head.span, "this expression is complete")
+            .with_help("wrap it in parentheses to use its value"),
+        );
+
+        return Err(());
+      }
+
+      return Ok(head);
+    }
+
+    const chained = self.postfix_ops(head, true)?;
+
+    self.binary_rest(chained, PREC_RANGE)
+  }
+
+  prv fn at_block_like(self) -> bool {
+    self.at("{") || self.at_keyword("if") || self.at_keyword("match") || self.at_keyword("while") || self.at_keyword("loop")
+      || self.at_keyword("for") || self.at_keyword("unsafe")
+  }
+
   prv fn binary_expr(self, min_prec: u8) -> Result<Expr, ()> {
-    var lhs = self.unary_expr()?;
+    const lhs = self.unary_expr()?;
+
+    self.binary_rest(lhs, min_prec)
+  }
+
+  /// The infix operators after `first`, of precedence `min_prec` or higher.
+  prv fn binary_rest(self, first: Expr, min_prec: u8) -> Result<Expr, ()> {
+    var lhs = first;
 
     while let Some(operator) = infix(self.kind()) {
       const prec = operator.prec;
@@ -2887,7 +2923,7 @@ class Parser {
 
       self.expect("=>")?;
 
-      const body = self.expr()?;
+      const body = self.stmt_expr()?;
       const span = pattern.span.to(body.span);
       // A comma separates arms; it is optional after a block-like body and before `}`.
       const separated = self.eat(",") || self.at("}") || body.is_block_like();

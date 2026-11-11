@@ -1,0 +1,20 @@
+// A statement that starts with a block-like expression ends at its `}`, as in Rust, so an
+// operator after it starts nothing (docs/spec/06-control-flow.md); parentheses keep the value.
+fn pick(c: bool) -> i32 {
+  if c { 1 } else { 2 } + 1 //~ ERROR E0100
+}
+
+fn compare(c: bool) -> bool {
+  match c { true => 1, false => 2 } == 1 //~ ERROR E0100
+}
+
+fn arm(value: i32) -> i32 {
+  match value {
+    0 => { 1 } / 2, //~ ERROR E0100
+    _ => (if value > 0 { 1 } else { 2 }) + 1,
+  }
+}
+
+fn main() {
+  println(`${pick(true)} ${compare(true)} ${arm(0)}`);
+}

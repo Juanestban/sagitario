@@ -177,6 +177,9 @@ pub class TypedModule {
   pub var const_types: List<Type>;
   /// The value of each module-level constant, or `None` if it has an error.
   pub var const_values: List<Option<ConstValue>>;
+  /// The value of each static computed from constants, by static id: its storage starts with it
+  /// (docs/adr/0083-global-state.md, Q527).
+  pub var static_values: List<Option<ConstValue>>;
   /// The type arguments of each use of a generic function, method or initializer, by node id.
   pub var call_args: Map<u32, List<Type>>;
   /// Calls to built-in methods, by node id.
@@ -226,6 +229,7 @@ pub class TypedModule {
     };
     self.sync_classes = new List();
     self.const_types = new List();
+    self.static_values = new List();
     self.const_values = new List();
     self.call_args = new Map<u32, List<Type>>();
     self.builtin_methods = new Map<u32, BuiltinMethod>();

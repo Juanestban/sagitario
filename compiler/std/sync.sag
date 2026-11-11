@@ -144,7 +144,7 @@ pub class AtomicBool {
   }
 
   pub fn load(self) -> bool {
-    unsafe { sag_sync_atomic_load(self.cell) } != 0
+    (unsafe { sag_sync_atomic_load(self.cell) }) != 0
   }
 
   pub fn store(self, value: bool) {
@@ -153,7 +153,7 @@ pub class AtomicBool {
 
   /// Stores `value` and returns the previous value.
   pub fn swap(self, value: bool) -> bool {
-    unsafe { sag_sync_atomic_swap(self.cell, if value { 1 } else { 0 }) } != 0
+    (unsafe { sag_sync_atomic_swap(self.cell, if value { 1 } else { 0 }) }) != 0
   }
 
   /// Stores `desired` if the value is `expected`: `Ok(expected)` if it did, `Err(actual)` if not.

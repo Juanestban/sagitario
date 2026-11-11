@@ -159,6 +159,19 @@ pub fn borrow(cx: Checker, mutable: bool, operand: Expr, expected: Option<Type>)
     return types::error();
   }
 
+  // A `static var` can change while lent, as Rust 2024 says (docs/adr/0083-global-state.md, Q528).
+  if let Some(name) = static_var_root(cx, operand) {
+    const symbol = if mutable { "&mut" } else { "&" };
+
+    cx.diagnostics.push(
+      Diagnostic::error(codes::INVALID_BORROW, operand.span, "cannot lend the `static var` `" + name + "` with `" + symbol + "`")
+        .with_note("another thread, or C, could change it while it is lent")
+        .with_help("copy its value in `unsafe`, or take a pointer with `&raw const` or `&raw mut`"),
+    );
+
+    return types::error();
+  }
+
   // A slice of a list keeps the list alive and its length fixed, wherever the list is.
   if wants_slice {
     match ty.kind {
@@ -904,4 +917,20 @@ fn overlap(a: List<Step>, b: List<Step>) -> bool {
   }
 
   true
+}
+
+/// The name of the `static var` that `place` is, or is a part of.
+fn static_var_root(cx: Checker, place: Expr) -> Option<String> {
+  match place.kind {
+    ExprKind::Field { base, .. } | ExprKind::Index { base, .. } => static_var_root(cx, base),
+    ExprKind::Path(_) => match cx.resolution.paths.get(place.id) {
+      Some(Res::Static(id)) => {
+        const decl = cx.resolution.static_decl(cx.package, id)?;
+
+        if decl.mutable { Some(decl.name.name) } else { None }
+      }
+      _ => None,
+    },
+    _ => None,
+  }
 }

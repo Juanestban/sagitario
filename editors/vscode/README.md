@@ -15,9 +15,9 @@ Support for the [Sagitario](https://github.com/Juanestban/sagitario) programming
   comments, documentation comments and attributes.
 - An icon for `.sag` files in the explorer and the tabs.
 - Commenting with `Ctrl+/`, matching and auto-closing brackets and quotes, and folding.
-- Snippets: `main`, `mainr`, `asyncmain`, `asyncfn`, `fn`, `pfn`, `static`, `struct`, `class`, `enum`,
-  `interface`, `implfor`, `match`, `iflet`, `whilelet`, `for`, `forin`, `if`, `ifelse`, `println`,
-  `fstr` (a format string) and `use`; for operators, `impleq`, `implord`, `implop` (`+`, `-`, `*`,
+- Snippets: `main`, `mainr`, `asyncmain`, `asyncfn`, `fn`, `pfn`, `static`, `staticvar`,
+  `struct`, `class`, `enum`, `interface`, `implfor`, `match`, `iflet`, `whilelet`, `for`,
+  `forin`, `if`, `ifelse`, `println`, `fstr` (a format string) and `use`; for operators, `impleq`, `implord`, `implop` (`+`, `-`, `*`,
   `/`, `%`) and `implneg`; and for the FFI, `extern` (a block of C functions), `externfn`,
   `export`, `reprc`, `union`, `reprenum`, `cfn`, `unsafe`, `cstring` and `library` (a function
   loaded from a dynamic library).

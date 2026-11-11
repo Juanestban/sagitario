@@ -8,8 +8,12 @@ The last expression of a block, written without a trailing `;`, is the value of 
 fn square(x: i32) -> i32 { x * x }
 ```
 
-- Block-like expressions (`if`, `while`, `loop`, `for`, `{ ... }`) used as statements need no
-  `;`; their value must then be `()`.
+- Block-like expressions (`if`, `match`, `while`, `loop`, `for`, `unsafe { ... }`, `{ ... }`)
+  used as statements need no `;`; their value must then be `()`.
+- As in Rust, a statement, final expression or match arm body that starts with a block-like
+  expression ends at its `}`, unless `.` or `?` continues it: after `unsafe { n += 1; }`, a line
+  `*a - *b` is the next expression, not a multiplication. Another operator there is an error
+  (`E0100`); parentheses use the value: `(if c { 1 } else { 2 }) + 1`.
 - A function with `-> T` must produce a `T` on every path: through its final expression or
   `return expr;`. A function without `-> T` uses `return;`.
 

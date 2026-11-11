@@ -1,0 +1,73 @@
+// A statement that starts with a block-like expression ends at its `}`, as in Rust: the `*`,
+// `-` or `&` on the next line starts another statement (docs/spec/06-control-flow.md). Only `.`
+// and `?` continue it, in a statement, a final expression or the body of a match arm.
+// expect-stdout: difference: 2
+// expect-stdout: negative: -4
+// expect-stdout: counted: 3
+// expect-stdout: sign: -1 0 1
+// expect-stdout: chained: 7 yes
+// expect-stdout: tried: 5
+use std::ffi::c_int;
+
+static var COUNT: i32 = 0;
+
+fn difference(a: &i32, b: &i32) -> c_int {
+  unsafe { COUNT += 1; }
+  *a - *b
+}
+
+fn negative(value: i32) -> i32 {
+  if value > 100 { return 0; }
+  -value
+}
+
+fn sign(value: i32) -> i32 {
+  match value {
+    0 => { 0 }
+    -1 => { -1 }
+    _ => { if value < 0 { -1 } else { 1 } }
+  }
+}
+
+fn bump(counter: &mut i32) {
+  { *counter += 1; }
+  *counter += 1;
+}
+
+fn larger(a: i32, b: i32) -> i32 {
+  if a > b { a } else { b }.max(7)
+}
+
+fn short(text: String) -> Result<(), String> {
+  if text.len() == 1 { Ok(()) } else { Err("long") }
+}
+
+fn parse(text: String) -> Result<i32, String> {
+  match text.len() { 0 => short("ab"), _ => short(text) }?;
+  Ok(5)
+}
+
+fn main() {
+  const a = 5;
+  const b = 3;
+
+  println(`difference: ${difference(&a, &b)}`);
+  println(`negative: ${negative(4)}`);
+
+  var counter = 1;
+
+  bump(&mut counter);
+  unsafe { COUNT += 1; }
+  println(`counted: ${counter}`);
+  println(`sign: ${sign(-1)} ${sign(0)} ${sign(9)}`);
+
+  const chained = larger(a, b);
+  const text = match chained { 7 => "yes", _ => "no" };
+
+  println(`chained: ${chained} ${text}`);
+
+  match parse("x") {
+    Ok(value) => println(`tried: ${value}`),
+    Err(error) => println(error),
+  }
+}

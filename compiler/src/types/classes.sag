@@ -6,7 +6,7 @@
 use pkg::ast::{Expr, ExprKind, FieldDecl, Ident, Path, Stmt};
 use pkg::diagnostics::Diagnostic;
 use pkg::diagnostics::codes;
-use pkg::resolve::{LocalKind, ParamOwner, TypeItem};
+use pkg::resolve::{LocalKind, ParamOwner, Res, TypeItem};
 use pkg::types::{Checker, ClassDef, FieldDef, Receiver, ReceiverCheck, SelfCall, Subst, Type, TypeKind};
 use pkg::types;
 use pkg::diagnostics;
@@ -374,6 +374,8 @@ enum PlaceBase {
   ListElement(bool),
   /// A value that is not stored anywhere.
   Temporary,
+  /// A `static`, or a part of one (docs/adr/0083-global-state.md): only a `static var` changes.
+  Static(u32),
   /// A name that is not a binding: already reported.
   Unknown,
 }
@@ -390,7 +392,10 @@ fn place_base(cx: Checker, place: Expr) -> PlaceBase {
   match place.kind {
     ExprKind::Path(_) => match exprs::local(cx, place) {
       Some(id) => PlaceBase::Local(id),
-      None => PlaceBase::Unknown,
+      None => match cx.resolution.paths.get(place.id) {
+        Some(Res::Static(id)) => PlaceBase::Static(id),
+        _ => PlaceBase::Unknown,
+      },
     },
     ExprKind::Field { base, name } => match cx.typed.expr_types.get(base.id) {
       Some(ty) => match ty.kind {
@@ -468,6 +473,28 @@ fn place_access(cx: Checker, place: Expr, place_use: PlaceUse) -> PlaceAccess {
 
   match place_base(cx, place) {
     PlaceBase::Unknown => PlaceAccess::Mutable,
+    PlaceBase::Static(id) => {
+      const decl = match cx.resolution.static_decl(cx.package, id) {
+        Some(found) => found,
+        None => return PlaceAccess::Mutable,
+      };
+
+      if decl.mutable {
+        return PlaceAccess::Mutable;
+      }
+
+      const diagnostic = if is_assign {
+        Diagnostic::error(code, place.span, "cannot modify the static `" + decl.name.name + "`")
+      } else {
+        Diagnostic::error(code, place.span, "cannot call the method `" + method_name + "`, which modifies `self`, on the static `" + decl.name.name + "`")
+      };
+
+      PlaceAccess::Immutable(
+        diagnostic
+          .with_label(decl.name.span, "declared with `static` here")
+          .with_help("a `static` holds one value that does not change in place: keep it in a `Mutex`, or declare it `static var`"),
+      )
+    }
     PlaceBase::Temporary => {
       const diagnostic = if is_assign {
         Diagnostic::error(codes::INVALID_ASSIGNMENT_TARGET, place.span, "cannot assign to a part of a temporary value")

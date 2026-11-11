@@ -601,7 +601,7 @@ pub fn unsafe_block(cx: Checker, value: Expr, body: Block, expected: Option<Type
     const keyword = Span::new(value.span.file, value.span.start, value.span.start + 6);
 
     cx.diagnostics.push(
-      Diagnostic::warning(codes::UNUSED_UNSAFE, keyword, "unnecessary `unsafe` block").with_note("it contains no call to C, pointer dereference or pointer offset"),
+      Diagnostic::warning(codes::UNUSED_UNSAFE, keyword, "unnecessary `unsafe` block").with_note("it contains no call to C, pointer dereference, pointer offset or use of a `static var`"),
     );
   }
 
@@ -620,7 +620,7 @@ fn points_to_void(pointee: Type) -> bool {
 fn is_address_place(cx: Checker, place: Expr) -> bool {
   match place.kind {
     ExprKind::Path(_) => match cx.resolution.paths.get(place.id) {
-      Some(pkg::resolve::Res::Local(_)) => true,
+      Some(pkg::resolve::Res::Local(_)) | Some(pkg::resolve::Res::Static(_)) => true,
       _ => false,
     },
     ExprKind::Field { .. } => true,
@@ -644,7 +644,19 @@ pub fn addr_of(cx: Checker, mutable: bool, place: Expr) -> Type {
     cx.union_write = Some(base.id);
   }
 
-  const ty = exprs::expr(cx, place, None);
+  var ty = types::error();
+
+  // The address of a static is safe to take, as in Rust: using it is not
+  // (docs/adr/0083-global-state.md, Q528).
+  match cx.resolution.paths.get(place.id) {
+    Some(pkg::resolve::Res::Static(id)) => {
+      ty = cx.typed.static_type(cx.resolution, id).unwrap_or(types::error());
+      cx.typed.expr_types.insert(place.id, ty);
+    }
+    _ => {
+      ty = exprs::expr(cx, place, None);
+    }
+  }
 
   cx.union_write = None;
 
