@@ -117,7 +117,7 @@ the integer helpers spec 2 promises, `Display`).
   question for the suite's record, since the project adds no dependency without asking.
 
 **Acceptance:** every row of the audit is done or out of scope with its reason, and the
-benchmarks run in CI with their results recorded.
+benchmarks run, locally, with their results recorded ([ADR-0090](adr/0090-benchmarks.md)).
 
 ## S3: The core in Sagitario
 

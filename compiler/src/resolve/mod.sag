@@ -40,6 +40,8 @@ pub enum StdItem {
   Exit,
   /// `size_of`, `align_of` or `zeroed` of `std::mem`, by name.
   Mem(String),
+  /// `black_box` of `std::hint` (docs/adr/0090-benchmarks.md, Q596).
+  BlackBox,
   /// `std::sys::Atomic`, the atomic storage of the standard library
   /// (docs/adr/0087-atomic-storage-and-std-sync.md, Q565).
   Atomic,
@@ -756,7 +758,7 @@ fn is_reserved_name(name: String) -> bool {
 }
 
 /// The modules of the standard library (docs/spec/11-standard-library.md).
-pub const STD_MODULES: String = "env ffi fs io math mem path process sync task thread time";
+pub const STD_MODULES: String = "env ffi fs hint io math mem path process sync task thread time";
 
 fn is_numeric_type(name: String) -> bool {
   NUMERIC_TYPES.split(" ").contains(name)
@@ -2123,6 +2125,7 @@ pub class Resolver {
           ItemRef::Std(StdItem::StringFromC) => return Some(Res::Builtin("string_from_c")),
           ItemRef::Std(StdItem::Exit) => return Some(Res::Builtin("exit")),
           ItemRef::Std(StdItem::Mem(name)) => return Some(Res::Builtin("mem::" + name)),
+          ItemRef::Std(StdItem::BlackBox) => return Some(Res::Builtin("hint::black_box")),
           ItemRef::Type(type_item) => {
             self.not_a_value(last.name, last.span, type_item);
 
@@ -2316,6 +2319,7 @@ pub class Resolver {
         ItemRef::Std(StdItem::StringFromC) => return Some(Res::Builtin("string_from_c")),
         ItemRef::Std(StdItem::Exit) => return Some(Res::Builtin("exit")),
         ItemRef::Std(StdItem::Mem(found)) => return Some(Res::Builtin("mem::" + found)),
+        ItemRef::Std(StdItem::BlackBox) => return Some(Res::Builtin("hint::black_box")),
         ItemRef::Std(StdItem::CType(_)) | ItemRef::Std(StdItem::CString) | ItemRef::Std(StdItem::Atomic) => {
           self.error(span, "`" + name + "` is a type, not a value");
 
@@ -2604,6 +2608,10 @@ pub class Resolver {
     }
 
     // They take their type as an argument, which no function written in Sagitario can do.
+    if info.in_std && info.path.len() == 2 && info.path[0] == "std" && info.path[1] == "hint" && name == "black_box" {
+      return Some(ItemRef::Std(StdItem::BlackBox));
+    }
+
     if info.in_std && info.path.len() == 2 && info.path[0] == "std" && info.path[1] == "mem" {
       if name == "size_of" || name == "align_of" || name == "zeroed" {
         return Some(ItemRef::Std(StdItem::Mem(name)));
@@ -2934,7 +2942,7 @@ pub class Resolver {
 
   prv fn not_a_type(self, name: String, span: Span, item: ItemRef) {
     const what = match item {
-      ItemRef::Fn(_) | ItemRef::Extern(_) | ItemRef::Std(StdItem::StringFromC) | ItemRef::Std(StdItem::Exit) | ItemRef::Std(StdItem::Mem(_)) => "a function",
+      ItemRef::Fn(_) | ItemRef::Extern(_) | ItemRef::Std(StdItem::StringFromC) | ItemRef::Std(StdItem::Exit) | ItemRef::Std(StdItem::Mem(_)) | ItemRef::Std(StdItem::BlackBox) => "a function",
       ItemRef::Module(_) | ItemRef::Std(StdItem::Root) | ItemRef::Std(StdItem::Ffi) => "a module",
       ItemRef::Type(_) | ItemRef::Std(_) => "a type",
       ItemRef::Const(_) => "a constant",

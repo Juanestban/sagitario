@@ -1,0 +1,378 @@
+//! Runs the benchmarks of `benchmarks/` in every language whose toolchain is installed, from the
+//! root of the repository (docs/adr/0090-benchmarks.md):
+//!
+//!     sag run tools/bench.sag -- [names] [--runs N] [--langs sag,rust,c] [--sag path]
+//!
+//! Each program is built optimized, run once to warm up and `N` times (5 by default); every
+//! language must print the same output. The median wall time of each, its size and the versions
+//! of the toolchains go to `benchmarks/results/<date>-<os>-<arch>.json`.
+
+use std::env;
+use std::fs;
+use std::io;
+use std::path;
+use std::process;
+use std::process::Command;
+use std::time::{Instant, SystemTime};
+
+const USAGE: String = "Usage: sag run tools/bench.sag -- [names] [--runs N] [--langs sag,rust,c] [--sag path]";
+
+@cfg(windows)
+const OS: String = "windows";
+@cfg(target_os = "linux")
+const OS: String = "linux";
+@cfg(target_os = "macos")
+const OS: String = "macos";
+@cfg(any(target_os = "android", target_os = "ios"))
+const OS: String = "mobile";
+
+@cfg(target_arch = "x86_64")
+const ARCH: String = "x86_64";
+@cfg(target_arch = "aarch64")
+const ARCH: String = "aarch64";
+@cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))
+const ARCH: String = "other";
+
+@cfg(windows)
+const EXE: String = ".exe";
+@cfg(unix)
+const EXE: String = "";
+
+/// A language of the suite: its source file, how its program is built, and its version.
+struct Language {
+  pub name: String;
+  pub file: String;
+}
+
+fn languages() -> List<Language> {
+  List::from([
+    Language { name: "sag", file: "main.sag" },
+    Language { name: "rust", file: "main.rs" },
+    Language { name: "c", file: "main.c" },
+  ])
+}
+
+/// What the command line asks for.
+struct Options {
+  pub names: List<String>;
+  pub runs: usize;
+  pub langs: List<String>;
+  pub sag: String;
+}
+
+/// One language's result on one benchmark.
+struct Measured {
+  pub lang: String;
+  pub times: List<f64>;
+  pub median: f64;
+  pub size: usize;
+}
+
+fn options() -> Result<Options, String> {
+  const args = env::args();
+  const names: List<String> = new List();
+  var runs = 5usize;
+  var langs = List::from(["sag", "rust", "c"]);
+  var sag = env::variable("SAG").unwrap_or("sag");
+  var index = 1usize;
+
+  while index < args.len() {
+    const arg = args[index];
+
+    if arg == "--runs" || arg == "--langs" || arg == "--sag" {
+      if index + 1 >= args.len() {
+        return Err(f"`{arg}` needs a value\n{USAGE}");
+      }
+
+      const value = args[index + 1];
+
+      if arg == "--runs" {
+        runs = match value.parse_u32() {
+          Ok(found) => found as usize,
+          Err(_) => return Err(f"`--runs` takes a number, not `{value}`"),
+        };
+      } else if arg == "--langs" {
+        langs = value.split(",");
+      } else {
+        sag = value;
+      }
+
+      index += 2;
+    } else if arg.starts_with("--") {
+      return Err(f"unknown option `{arg}`\n{USAGE}");
+    } else {
+      names.push(arg);
+      index += 1;
+    }
+  }
+
+  if runs == 0 {
+    return Err("`--runs` must be at least 1");
+  }
+
+  Ok(Options { names: names, runs: runs, langs: langs, sag: sag })
+}
+
+/// The C compiler: `SAG_CC`, as `sag` itself finds it, or `clang`.
+fn c_compiler() -> String {
+  env::variable("SAG_CC").unwrap_or("clang")
+}
+
+/// The first line a command prints, or `None` if it cannot run.
+fn first_line(program: String, arg: String) -> Option<String> {
+  match new Command(program).arg(arg).output() {
+    Ok(output) => {
+      if !output.status.success() {
+        return None;
+      }
+
+      const text = if output.stdout.trim().is_empty() { output.stderr } else { output.stdout };
+
+      Some(text.lines().first().unwrap_or("").trim())
+    }
+    Err(_) => None,
+  }
+}
+
+/// The toolchain of `lang`, by its version, or `None` when it is not installed.
+fn version(lang: String, options: Options) -> Option<String> {
+  if lang == "sag" {
+    first_line(options.sag, "--version")
+  } else if lang == "rust" {
+    first_line("rustc", "--version")
+  } else if lang == "c" {
+    first_line(c_compiler(), "--version")
+  } else {
+    None
+  }
+}
+
+/// Builds the program of `lang` in `dir` into `out`; the error is the compiler's output.
+fn build(lang: String, dir: String, out: String, options: Options) -> Result<(), String> {
+  const source = path::join(dir, if lang == "sag" { "main.sag" } else if lang == "rust" { "main.rs" } else { "main.c" });
+  const command = if lang == "sag" {
+    new Command(options.sag).args(List::from(["build", "--release", source, "--output", out]))
+  } else if lang == "rust" {
+    new Command("rustc").args(List::from(["-C", "opt-level=3", "-o", out, source]))
+  } else {
+    const c = new Command(c_compiler()).args(List::from(["-O2", "-o", out, source]));
+
+    if OS == "windows" { c } else { c.arg("-lm") }
+  };
+
+  match command.output() {
+    Ok(output) => if output.status.success() { Ok(()) } else { Err(output.stdout + output.stderr) },
+    Err(error) => Err(error.message()),
+  }
+}
+
+/// The arguments a benchmark takes, from its `args` file.
+fn benchmark_args(dir: String) -> List<String> {
+  const words: List<String> = new List();
+
+  if let Ok(text) = fs::read_to_string(path::join(dir, "args")) {
+    for word in text.trim().split(" ") {
+      if !word.is_empty() {
+        words.push(word);
+      }
+    }
+  }
+
+  words
+}
+
+/// One run of a program: its time in seconds and its output, with `\r\n` as `\n`.
+struct Run {
+  pub seconds: f64;
+  pub output: String;
+}
+
+fn run(program: String, args: List<String>) -> Result<Run, String> {
+  const start = Instant::now();
+
+  match new Command(program).args(args).output() {
+    Ok(output) => {
+      const seconds = start.elapsed().as_secs_f64();
+
+      if !output.status.success() {
+        return Err(f"exited with {output.status.code.unwrap_or(-1)}: {output.stderr.trim()}");
+      }
+
+      Ok(Run { seconds: seconds, output: output.stdout.replace("\r\n", "\n") })
+    }
+    Err(error) => Err(error.message()),
+  }
+}
+
+fn median(times: List<f64>) -> f64 {
+  const sorted: List<f64> = new List();
+
+  for time in times {
+    sorted.push(time);
+  }
+
+  sorted.sort_by((a, b) => a.total_compare(b));
+
+  const middle = sorted.len() / 2;
+
+  if sorted.len() % 2 == 1 { sorted[middle] } else { (sorted[middle - 1] + sorted[middle]) / 2.0 }
+}
+
+/// The date of `seconds` since 1970-01-01 in UTC, as `YYYY-MM-DD` (Howard Hinnant's algorithm).
+fn date(seconds: u64) -> String {
+  const days = (seconds / 86400) as i64 + 719468;
+  const era = days / 146097;
+  const day_of_era = days - era * 146097;
+  const year_of_era = (day_of_era - day_of_era / 1460 + day_of_era / 36524 - day_of_era / 146096) / 365;
+  const day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+  const month_index = (5 * day_of_year + 2) / 153;
+  const day = day_of_year - (153 * month_index + 2) / 5 + 1;
+  const month = if month_index < 10 { month_index + 3 } else { month_index - 9 };
+  const year = year_of_era + era * 400 + if month <= 2 { 1 } else { 0 };
+
+  f"{year:04}-{month:02}-{day:02}"
+}
+
+/// `text` as a JSON string.
+fn json(text: String) -> String {
+  const out = new StringBuilder();
+
+  out.append_char('"');
+
+  for c in text.chars() {
+    if c == '"' || c == '\\' {
+      out.append_char('\\');
+      out.append_char(c);
+    } else if c == '\n' {
+      out.append("\\n");
+    } else if (c as u32) < 0x20 {
+      out.append(f"\\u{c as u32:04x}");
+    } else {
+      out.append_char(c);
+    }
+  }
+
+  out.append_char('"');
+  out.to_string()
+}
+
+/// One benchmark in every language asked for: their results, or the reason it failed.
+fn benchmark(name: String, options: Options, available: List<String>) -> Result<List<Measured>, String> {
+  const dir = path::join("benchmarks", name);
+  const out_dir = path::join(path::join("build", "bench"), name);
+  const args = benchmark_args(dir);
+  const results: List<Measured> = new List();
+  var expected: Option<String> = None;
+  var expected_lang = "";
+
+  match fs::create_dir_all(out_dir) {
+    Ok(_) => {}
+    Err(error) => return Err(error.message()),
+  }
+
+  for lang in available {
+    const source = path::join(dir, if lang == "sag" { "main.sag" } else if lang == "rust" { "main.rs" } else { "main.c" });
+
+    if !fs::is_file(source) {
+      continue;
+    }
+
+    const program = path::join(out_dir, lang + EXE);
+
+    build(lang, dir, program, options).map_err((message) => f"{lang} does not build:\n{message}")?;
+
+    // A first run warms up the caches of the system, and gives the output to compare.
+    const output = run(program, args).map_err((message) => f"{lang} {message}")?.output;
+
+    match expected {
+      Some(text) => {
+        if text != output {
+          return Err(f"{lang} prints something other than {expected_lang}:\n{output}");
+        }
+      }
+      None => {
+        expected = Some(output);
+        expected_lang = lang;
+      }
+    }
+
+    const times: List<f64> = new List();
+
+    for _ in 0..options.runs {
+      times.push(run(program, args).map_err((message) => f"{lang} {message}")?.seconds);
+    }
+
+    const size = match fs::read(program) {
+      Ok(bytes) => bytes.len(),
+      Err(_) => 0,
+    };
+
+    results.push(Measured { lang: lang, times: times, median: median(times), size: size });
+  }
+
+  Ok(results)
+}
+
+fn main() -> Result<(), io::Error> {
+  const options = match options() {
+    Ok(found) => found,
+    Err(message) => {
+      io::eprintln(message)?;
+      process::exit(2);
+    }
+  };
+  const versions: List<String> = new List();
+  const available: List<String> = new List();
+
+  for lang in options.langs {
+    match version(lang, options) {
+      Some(found) => {
+        available.push(lang);
+        versions.push(f"    {json(lang)}: {json(found)}");
+      }
+      None => io::eprintln(f"skipping {lang}: its toolchain is not installed")?,
+    }
+  }
+
+  const names = if options.names.is_empty() { fs::read_dir("benchmarks")? } else { options.names };
+  const entries: List<String> = new List();
+
+  for name in names {
+    if !fs::is_dir(path::join("benchmarks", name)) || name == "results" {
+      continue;
+    }
+
+    io::println(f"{name}")?;
+
+    match benchmark(name, options, available) {
+      Ok(results) => {
+        const fastest = results.iter().fold(0.0, (best, result) => if best == 0.0 || result.median < best { result.median } else { best });
+        const languages: List<String> = new List();
+
+        for result in results {
+          const ratio = if fastest > 0.0 { result.median / fastest } else { 1.0 };
+          const times = result.times.iter().map((time) => f"{time:.6}").collect();
+
+          io::println(f"  {result.lang:<6} {result.median * 1000.0:>10.1} ms  {ratio:>5.2}x  {result.size / 1024:>6} KiB")?;
+          languages.push(f"        {json(result.lang)}: {{ \"median\": {result.median:.6}, \"times\": [{times.join(", ")}], \"size\": {result.size} }}");
+        }
+
+        entries.push(f"    {json(name)}: {{\n" + languages.join(",\n") + "\n    }");
+      }
+      Err(message) => {
+        io::eprintln(f"  failed: {message}")?;
+        process::exit(1);
+      }
+    }
+  }
+
+  const day = date(SystemTime::now().since_unix_epoch().as_secs());
+  const file = path::join(path::join("benchmarks", "results"), f"{day}-{OS}-{ARCH}.json");
+  const text = f"{{\n  \"date\": {json(day)},\n  \"os\": {json(OS)},\n  \"arch\": {json(ARCH)},\n  \"runs\": {options.runs},\n  \"toolchains\": {{\n" + versions.join(",\n") + "\n  },\n  \"benchmarks\": {\n" + entries.join(",\n") + "\n  }\n}\n";
+
+  fs::create_dir_all(path::join("benchmarks", "results"))?;
+  fs::write(file, text)?;
+  io::println(f"results in {file}")?;
+
+  Ok(())
+}

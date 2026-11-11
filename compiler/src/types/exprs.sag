@@ -1587,6 +1587,16 @@ fn call(cx: Checker, value: Expr, callee: Expr, args: List<Expr>, expected: Opti
         return collections::list_from(cx, value, callee, args, expected);
       } else if name == "Atomic::new" {
         return atomic_new(cx, value, args, expected);
+      } else if name == "hint::black_box" {
+        // Its argument's type is its result's (docs/adr/0090-benchmarks.md, Q596).
+        if args.len() != 1 {
+          cx.error(codes::WRONG_ARGUMENT_COUNT, value.span, `\`black_box\` takes 1 argument but ${args.len()} were supplied`);
+          unchecked_args(cx, args);
+
+          return types::error();
+        }
+
+        return expr(cx, args[0], expected);
       } else if name.starts_with("mem::") {
         return ffi::mem_call(cx, value, path, name, args, expected);
       } else if name == "include_str" {

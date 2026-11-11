@@ -3058,6 +3058,22 @@ pub class Lowering {
           return Ok(self.new_value(ty, rvalue));
         }
 
+        // The value goes through a local whose address the runtime's core receives
+        // (docs/adr/0090-benchmarks.md, Q596).
+        if name == "hint::black_box" {
+          if args.len() != 1 {
+            return Err("`black_box` without one argument");
+          }
+
+          const given = self.operand_as(args[0], ty)?;
+          const local = self.temp(ty);
+
+          self.store(local, given);
+          self.emit(Stmt::Eval(Rvalue::Call { callee: Callee::Runtime { function: "sag_black_box", located: false }, args: List::from([Operand::Ref(local_place(local, ty))]) }));
+
+          return Ok(self.owned_result(Some(local)));
+        }
+
         // Its value is the `T`, which initializes the field (docs/adr/0087-atomic-storage-and-std-sync.md).
         if name == "Atomic::new" {
           if args.len() != 1 {

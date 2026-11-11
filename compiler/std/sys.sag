@@ -2111,9 +2111,29 @@ fn communicate(stdin: *mut c_void, stdout: *mut c_void, stderr: *mut c_void, inp
   }
 }
 
+/// The file a program with a separator names, as UTF-16, with `.exe` when the name alone is not a
+/// file; `None` for a bare name, which `CreateProcessW` looks up in the directories of `PATH`. It
+/// gives the path to `CreateProcessW` itself, which otherwise reads it from the command line and
+/// finds no file in a relative path written with `/`.
+@cfg(windows)
+fn application_name(program: String) -> Option<List<u16>> {
+  if !program.contains("/") && !program.contains("\\") {
+    return None;
+  }
+
+  const native = program.replace("/", "\\");
+
+  if path_kind(native) == KIND_FILE || native.ends_with(".exe") {
+    return Some(to_utf16(native));
+  }
+
+  Some(to_utf16(native + ".exe"))
+}
+
 @cfg(windows)
 pub fn run_process(argv: List<String>, vars: List<String>, dir: Option<String>, input: Option<String>, capture: bool) -> Result<Finished, i32> {
   const line = to_utf16(command_line(argv));
+  const application = application_name(argv[0]);
   const environment: Option<List<u16>> = if vars.is_empty() { None } else { Some(environment_block(vars)) };
   const directory = match dir {
     Some(path) => Some(to_utf16(path)),
@@ -2179,7 +2199,12 @@ pub fn run_process(argv: List<String>, vars: List<String>, dir: Option<String>, 
     };
 
     // CREATE_UNICODE_ENVIRONMENT
-    if (unsafe { CreateProcessW(0 as *const u16, line.as_mut_ptr(), 0 as *mut c_void, 0 as *mut c_void, 1, 0x400, block, cwd, &mut startup, &mut process) }) == 0 {
+    const program = match application {
+      Some(units) => units.as_ptr(),
+      None => 0 as *const u16,
+    };
+
+    if (unsafe { CreateProcessW(program, line.as_mut_ptr(), 0 as *mut c_void, 0 as *mut c_void, 1, 0x400, block, cwd, &mut startup, &mut process) }) == 0 {
       code = failure();
     }
   }

@@ -1044,6 +1044,9 @@ SAG_FROM_UINTMAX(usize, size_t)
  * scientific notation as Rust writes it (`1.5e3`, `E` when `upper`); `NaN` and `inf` as they are.
  * `std` adds the sign. */
 sag_string sag_float_format(double value, int32_t precision, bool scientific, bool upper, bool is_f32);
+/* `std::hint::black_box`: the value at `value` escapes into C that the program's translation unit
+ * cannot see, so the C compiler assumes it read and may change it (docs/adr/0090-benchmarks.md). */
+void sag_black_box(const void *value);
 /* Gives `std::env`, written in Sagitario, what C's `main` received: the arguments on Unix
  * (docs/adr/0085-conditional-compilation-and-std-time.md, Q552). */
 void sag_env_init(int argc, const char *const *argv);

@@ -20,6 +20,7 @@ functions it uses.
 | `std::env` | Command-line arguments and environment variables | F3 |
 | `std::io` | Standard input and output with errors as values; `io::Error` | F3 |
 | `std::fs` | Files and directories | F3 |
+| `std::hint` | `black_box`, for benchmarks | S2 |
 | `std::math` | Constants of `f64`, and the methods of floats as functions | G1 |
 | `std::mem` | Sizes and alignments of types, and zeroed values for C | G1 |
 | `std::path` | Joining paths and taking them apart | F3 |
@@ -137,6 +138,13 @@ current directory unless they have a root. The functions with a `Result` fail wi
 - A path containing a NUL character is an error of kind `InvalidInput`.
 - Not yet: file metadata (size, times, permissions), removing a
   directory tree, and changing the current directory (F4, since it is process-wide state).
+
+## `std::hint`
+
+`black_box<T>(value: T) -> T` returns its argument, but the compiler and the C compiler must
+assume it was read and may have changed, so a benchmark keeps the work it measures:
+`sum = sum.wrapping_add(hint::black_box(i) * 3)`. It takes any type. As Rust's, it is a best
+effort, not a guarantee ([ADR-0090](../adr/0090-benchmarks.md)).
 
 ## `std::math`
 

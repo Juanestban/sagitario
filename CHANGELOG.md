@@ -39,6 +39,8 @@ The sources say 0.25.0.
 - The debug form of any value, `{x:?}` and the multi-line `{x:#?}`, which the compiler gives every
   type: `Point { x: 1, y: 2 }`, `Some(1)`, `[1, 2]`, `{"a": 1}`, strings with Rust's escapes, and
   cycles of classes cut as `Name { .. }`.
+- `std::hint::black_box`, and a suite of benchmarks against Rust and C run with
+  `sag run tools/bench.sag` ([ADR-0090](docs/adr/0090-benchmarks.md)).
 - An audit of the standard library against Rust's ([`docs/std-audit.md`](docs/std-audit.md)), the
   plan of S2, with a suite of benchmarks against Rust, C, C#, JavaScript and Python.
 - The language server completes `@cfg` conditions, attributes and their representations, and
@@ -63,6 +65,8 @@ The sources say 0.25.0.
 
 ### Fixed
 
+- On Windows, `Command` runs a program given by a relative path written with `/`
+  (`build/tool.exe`), which `CreateProcessW` did not find.
 - A statement starting with a block-like expression (`if`, `match`, `unsafe { }`, a block) ends at
   its `}`: `unsafe { f() } * p` no longer parses as a multiplication. Another operator there is
   an error (`E0100`) that asks for parentheses.

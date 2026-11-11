@@ -2,6 +2,7 @@
 
 use pkg::support;
 use pkg::support::{Context, Test, expect, expect_contains, expect_exit, sag};
+use std::fs;
 use std::path;
 
 pub fn tests() -> List<Test> {
@@ -10,6 +11,7 @@ pub fn tests() -> List<Test> {
     support::test("the_vscode_extension_has_the_version", the_vscode_extension_has_the_version),
     support::test("the_version_tool_reads_the_version", the_version_tool_reads_the_version),
     support::test("the_vscode_tool_rejects_unknown_arguments", the_vscode_tool_rejects_unknown_arguments),
+    support::test("the_benchmarks_compile", the_benchmarks_compile),
     support::test("help_succeeds", help_succeeds),
     support::test("invalid_usage_exits_with_2", invalid_usage_exits_with_2),
     support::test("missing_input_exits_with_1", missing_input_exits_with_1),
@@ -95,6 +97,33 @@ fn the_vscode_tool_rejects_unknown_arguments(cx: Context) -> Result<(), String> 
 
   expect_exit("sag run tools/vscode.sag -- --bogus", rejected, 2)?;
   expect_contains("sag run tools/vscode.sag -- --bogus", rejected.stderr, "unexpected arguments")
+}
+
+/// The Sagitario programs of `benchmarks/` and their runner keep up with the language, though the
+/// benchmarks run only locally (docs/adr/0090-benchmarks.md, Q598).
+fn the_benchmarks_compile(cx: Context) -> Result<(), String> {
+  const names = match fs::read_dir(cx.file("benchmarks")) {
+    Ok(found) => found,
+    Err(error) => return Err(error.message()),
+  };
+  var checked = 0usize;
+
+  for name in names {
+    const file = path::join(path::join("benchmarks", name), "main.sag");
+
+    if fs::is_file(cx.file(file)) {
+      support::expect_success(f"sag check {file}", sag(cx, List::from(["check", file]))?)?;
+      checked += 1;
+    }
+  }
+
+  expect(checked >= 3, f"only {checked} benchmarks in Sagitario were found")?;
+  support::expect_success("sag check tools/bench.sag", sag(cx, List::from(["check", "tools/bench.sag"]))?)?;
+
+  const rejected = sag(cx, List::from(["run", "tools/bench.sag", "--", "--bogus"]))?;
+
+  expect_exit("sag run tools/bench.sag -- --bogus", rejected, 2)?;
+  expect_contains("sag run tools/bench.sag -- --bogus", rejected.stderr, "unknown option")
 }
 
 fn help_succeeds(cx: Context) -> Result<(), String> {

@@ -286,6 +286,13 @@ static void sag_push_float(sag_sb *sb, double value, int max_digits, bool is_f32
   }
 }
 
+/* The last value given to `black_box`, written through a `volatile` so the write stays. */
+static const void *volatile sag_black_box_sink = NULL;
+
+void sag_black_box(const void *value) {
+  sag_black_box_sink = value;
+}
+
 sag_string sag_float_format(double value, int32_t precision, bool scientific, bool upper, bool is_f32) {
   sag_sb sb;
   sag_sb_init(&sb);

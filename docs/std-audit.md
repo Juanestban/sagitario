@@ -178,7 +178,7 @@ The audit of the library found gaps of the language itself, which the library ne
 |---|---|---|---|
 | `ffi` (`CString`, `CStr`, C types, `c_void`) | `std::ffi`, `Library` | ✅ | ADR-0078; `OsString` is ⛔: paths and arguments are UTF-8 `String`s, UTF-16 on Windows inside `std::sys` |
 | `os` (`unix::fs::PermissionsExt`, `windows::io::AsRawHandle`...) | — | 🟡 | Programs reach the system through `extern "C"`; raw descriptors of `std` types, once they exist (`File`, sockets), would be a record |
-| `hint::black_box` | — | ❌ | The benchmarks need it, so the optimizer does not delete measured work |
+| `hint::black_box` | `std::hint::black_box` | ✅ | ADR-0090 |
 | `any`, `TypeId` | — | ⛔ | Reflection; interfaces cover the cases of a general-purpose program |
 | `backtrace` | — | ❌ | With error chains |
 | `panic::catch_unwind`, hooks | — | ⛔ | No unwinding; a panic hook (a message before exiting) could come with the backtraces |
@@ -201,16 +201,13 @@ its record settles the open questions below.
 - Each run records the time, the peak memory and the size of the program, per platform, in
   `benchmarks/results/`.
 - A tool of the suite renders each benchmark as an animated race of the languages: an HTML page
-  without dependencies, which can be recorded as a video. Writing an MP4 itself would need an
-  encoder such as `ffmpeg`, which the record must decide on, since the project adds no dependency
-  without asking.
+  without dependencies, and an MP4 when `ffmpeg` is installed ([ADR-0090](adr/0090-benchmarks.md)).
 - The work it should point at: retains and releases removed when a value moves or is lent,
   atomic counts only for values that cross threads, `restrict` for `&mut` parameters and slices,
   and closures that never escape kept off the heap. The goal is the speed of Rust in code without
   allocation, and close to it elsewhere.
-- Open questions: where the other languages' toolchains come from in CI (rustc, a C compiler,
-  .NET, Node.js and Python are tools of the benchmarks, never of Sagitario), how many runs make a
-  result, and which machine's results are the reference.
+- They run locally, with the median of five runs after a warm-up by default; each results file
+  names its machine, and files of different machines are not compared (ADR-0090).
 
 ## Order of the records
 
@@ -235,4 +232,5 @@ From what most programs need to what fewer do. Each line is one record, or a few
 10. **Networking:** TCP and UDP sockets on the streams of 7.
 
 **Acceptance of S2** ([roadmap](roadmap-v2.md#s2-a-complete-standard-library)): every row above is
-✅, ➖ or ⛔ with its reason, and the benchmarks run in CI with their results recorded.
+✅, ➖ or ⛔ with its reason, and the benchmarks run, locally, with their results recorded
+([ADR-0090](adr/0090-benchmarks.md)).
