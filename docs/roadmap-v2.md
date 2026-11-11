@@ -46,8 +46,10 @@ parameters, with the borrow checker; slices and borrowed lists; and `fs::write_b
 overloading through interfaces ([ADR-0081](adr/0081-operator-overloading.md)) is done, in three
 increments: `impl ... for` blocks and several implementations of a generic interface; the
 arithmetic operators through `Add`, `Sub`, `Mul`, `Div`, `Rem` and `Neg`; and `==` and `<` through
-`Eq` and `Ord`. The acceptance program `tests/run-pass/g1_acceptance/` passes. Memory for frames,
-global state and binding generation remain.
+`Eq` and `Ord`. The acceptance program `tests/run-pass/g1_acceptance/` passes. Global state
+([ADR-0083](adr/0083-global-state.md)) comes in three increments, of which the first is done:
+`static`, one `Send` value for the program computed on its first use; `static var` with
+`unsafe`, and `@thread_local static var`, follow. Memory for frames and binding generation remain.
 
 - **Operator overloading** (`a + b` on vectors and matrices), today a deferred decision.
 - **Slices and byte buffers**: views of arrays and lists without copies, and reading and writing

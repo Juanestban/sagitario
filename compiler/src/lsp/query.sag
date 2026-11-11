@@ -183,6 +183,7 @@ class Finder {
   prv fn item(self, item: Item) {
     match item {
       Item::Fn(decl) => self.function(decl),
+      Item::Static(decl) => self.function(decl.init),
       Item::Struct(decl) => {
         self.name(decl.name);
 
@@ -674,6 +675,11 @@ fn declaration_text(analysis: Analysis, module: Module, ident: Ident) -> Option<
           });
         }
       }
+      Item::Static(decl) => {
+        if decl.name.span.start == at {
+          return Some(static_text(analysis, decl.name.name));
+        }
+      }
       Item::Extern(_) | Item::Impl(_) => {}
     }
   }
@@ -682,6 +688,25 @@ fn declaration_text(analysis: Analysis, module: Module, ident: Ident) -> Option<
 }
 
 /// `const NAME: Type` for a module-level constant of this module.
+/// `static NAME: Type`, or `static var ...`.
+fn static_text(analysis: Analysis, name: String) -> String {
+  if let Some(package) = analysis.package {
+    if let Some(resolution) = analysis.resolution {
+      for index in 0..resolution.statics.len() {
+        if let Some(text) = item_text(analysis, ItemRef::Static(index as u32)) {
+          if let Some(decl) = resolution.static_decl(package, index as u32) {
+            if decl.name.name == name {
+              return text;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  "static " + name
+}
+
 fn const_text(analysis: Analysis, resolution: Resolution, typed: TypedModule, name: String) -> String {
   if let Some(package) = analysis.package {
     for index in 0..resolution.consts.len() {
@@ -816,6 +841,7 @@ pub fn item_span(analysis: Analysis, item: ItemRef) -> Option<Span> {
     ItemRef::Fn(id) => Some(resolution.fn_decl(package, id)?.name.span),
     ItemRef::Extern(id) => Some(resolution.extern_decl(package, id)?.name.span),
     ItemRef::Const(id) => Some(resolution.const_decl(package, id)?.name.span),
+    ItemRef::Static(id) => Some(resolution.static_decl(package, id)?.name.span),
     ItemRef::Type(found) => type_item_span(package, resolution, found),
     ItemRef::Std(_) => None,
   }
@@ -835,6 +861,13 @@ pub fn item_text(analysis: Analysis, item: ItemRef) -> Option<String> {
       const ty = analysis.typed?.const_types.get(id as usize)?;
 
       Some("const " + name + ": " + types::text(ty))
+    }
+    ItemRef::Static(id) => {
+      const decl = resolution.static_decl(analysis.package?, id)?;
+      const ty = analysis.typed?.static_type(resolution, id)?;
+      const keyword = if decl.mutable { "static var " } else { "static " };
+
+      Some(keyword + decl.name.name + ": " + types::text(ty))
     }
     ItemRef::Extern(id) => Some("extern fn " + resolution.extern_decl(analysis.package?, id)?.name.name),
     ItemRef::Std(_) => None,
@@ -864,6 +897,7 @@ fn res_span(package: Package, resolution: Resolution, function: Option<u32>, res
     Res::Extern(id) => Some(resolution.extern_decl(package, id)?.name.span),
     Res::Struct(id) => Some(resolution.struct_decl(package, id)?.name.span),
     Res::Const(id) => Some(resolution.const_decl(package, id)?.name.span),
+    Res::Static(id) => Some(resolution.static_decl(package, id)?.name.span),
     Res::Variant(variant) => match variant.owner {
       EnumKind::User(id) => Some(resolution.enum_decl(package, id)?.variants.get(variant.index as usize)?.name.span),
       _ => None,

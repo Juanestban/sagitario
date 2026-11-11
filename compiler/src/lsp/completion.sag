@@ -28,7 +28,7 @@ const ENUM_MEMBER: i64 = 20;
 const CONSTANT: i64 = 21;
 const STRUCT: i64 = 22;
 
-const KEYWORDS: String = "abstract as async await break class const continue else enum extends extern false fn for if impl in interface let loop match new override pkg prv pub return self Self struct super true union unsafe use var weak where while zod";
+const KEYWORDS: String = "abstract as async await break class const continue else enum extends extern false fn for if impl in interface let loop match new override pkg prv pub return self Self static struct super true union unsafe use var weak where while zod";
 
 const BUILTINS: String = "print println eprintln panic include_str";
 
@@ -298,6 +298,7 @@ fn item_kind(item: ItemRef) -> i64 {
     ItemRef::Fn(_) => FUNCTION,
     ItemRef::Extern(_) => FUNCTION,
     ItemRef::Const(_) => CONSTANT,
+    ItemRef::Static(_) => VARIABLE,
     ItemRef::Type(TypeItem::Struct(_)) => STRUCT,
     ItemRef::Type(TypeItem::Enum(_)) => ENUM,
     ItemRef::Type(TypeItem::Class(_)) => CLASS,
@@ -313,7 +314,7 @@ fn item_detail(analysis: Analysis, item: ItemRef) -> String {
   match item {
     ItemRef::Fn(id) => query::signature(analysis, id).unwrap_or(""),
     // Module-level constants, the globals of a program, with their types.
-    ItemRef::Const(_) => query::item_text(analysis, item).unwrap_or(""),
+    ItemRef::Const(_) | ItemRef::Static(_) => query::item_text(analysis, item).unwrap_or(""),
     _ => "",
   }
 }

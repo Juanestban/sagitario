@@ -7,7 +7,7 @@ use pkg::ast::{BinaryOp, UnaryOp};
 use pkg::ast;
 use pkg::sir::{
   Callee, ClassInstance, Const, ExternDecl, FieldAt, Function, ItableEntry, Layouts, Operand, PanicMessage, Place, Program, Projection, Rvalue, SliceSource, Stmt,
-  TemplatePiece, type_key,
+  TemplatePiece, static_getter, type_key,
 };
 use pkg::types::{FloatTy, IntTy, NamedRef, Type, TypeKind};
 use pkg::types;
@@ -87,6 +87,7 @@ pub fn generate(program: Program) -> GeneratedC {
   generator.class_support(order);
   generator.interface_support(program);
   generator.closure_support(program);
+  generator.statics(program);
 
   for index in 0..program.functions.len() {
     const function = program.functions[index];
@@ -1329,6 +1330,69 @@ class Generator {
 
     self.out.append("  return sag_rt_finish();\n");
     self.out.append("}\n");
+  }
+
+  /// The storage of each `static` and `sag_static_N(file, line)`, which returns its value with a
+  /// reference, computing it on the first use (docs/adr/0083-global-state.md, Q527). The values
+  /// are released at exit for the leak check only (Q532).
+  pub fn statics(self, program: Program) {
+    for index in 0..program.statics.len() {
+      const def = program.statics[index];
+      const ty = self.c_type(def.ty);
+      const getter = static_getter(index as u32);
+      const head = "static " + ty + " " + getter + "(const char *file, int line) {
+";
+
+      if def.constant {
+        self.out.append(head);
+        self.out.append("  (void)file;
+  (void)line;
+");
+        self.out.append("  return " + fn_name(def.init) + "();
+}
+
+");
+        continue;
+      }
+
+      const value = `sag_static_value_${index}`;
+      const state = `sag_static_state_${index}`;
+      const managed = self.layouts.is_managed(def.ty);
+      var release = "NULL";
+
+      self.out.append("static " + ty + " " + value + ";
+");
+      self.out.append("static sag_static_state " + state + ";
+");
+
+      if managed {
+        release = `sag_static_release_${index}`;
+        self.out.append("static void " + release + "(void) {
+  " + self.arc_call("release", def.ty, value) + ";
+}
+");
+      }
+
+      self.out.append(head);
+      self.out.append("  if (!sag_static_ready(&" + state + ") && sag_static_begin(&" + state + ", " + c_string_literal(def.name) + ", file, line)) {
+");
+      self.out.append("    " + value + " = " + fn_name(def.init) + "();
+");
+      self.out.append("    sag_static_end(&" + state + ", " + release + ");
+");
+      self.out.append("  }
+");
+
+      if managed {
+        self.out.append("  " + self.arc_call("retain", def.ty, value) + ";
+");
+      }
+
+      self.out.append("  return " + value + ";
+}
+
+");
+    }
   }
 
   /// `ret sag_ffi_N(params)`, the wrapper calling a C function.

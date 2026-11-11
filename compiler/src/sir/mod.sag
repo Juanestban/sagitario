@@ -45,6 +45,23 @@ pub struct Program {
   pub boxes: List<Type>;
   /// How to get the message of an `Err` returned by `main`, when its error is not a `String`.
   pub main_error: Option<MainError>;
+  /// The `static`s, by id (docs/adr/0083-global-state.md).
+  pub statics: List<StaticDef>;
+}
+
+/// A `static`: its value is computed by the function `init` on the first use, read through
+/// `sag_static_N(file, line)`; a `constant` one is computed by `init` at each use, without a
+/// state, since its initializer is a constant expression of a primitive type or `String`.
+pub struct StaticDef {
+  pub name: String;
+  pub ty: Type;
+  pub init: u32;
+  pub constant: bool;
+}
+
+/// The C function reading the static `id`.
+pub fn static_getter(id: u32) -> String {
+  `sag_static_${id}`
 }
 
 /// The message of `main`'s error: converted to `Error` with `itable` if its type is concrete,
@@ -809,6 +826,26 @@ pub fn lower(package: Package, resolution: Resolution, typed: TypedModule, sourc
     externs.push(ExternDecl { symbol: decl.name.name, params: sig.params, ret: sig.ret, runtime: resolution.is_runtime_extern(package, id) });
   }
 
+  const statics: List<StaticDef> = new List();
+
+  for index in 0..resolution.statics.len() {
+    const id = index as u32;
+    const decl = match resolution.static_decl(package, id) {
+      Some(decl) => decl,
+      None => continue,
+    };
+    const ty = match typed.static_type(resolution, id) {
+      Some(found) => found,
+      None => return Err("no type for the static `" + decl.name.name + "`"),
+    };
+    const constant = match decl.value() {
+      Some(value) => is_constant_static(resolution, ty, value),
+      None => false,
+    };
+
+    statics.push(StaticDef { name: decl.name.name, ty: ty, init: resolution.statics[index].init, constant: constant });
+  }
+
   Ok(Program {
     functions: functions,
     layouts: layouts,
@@ -821,7 +858,32 @@ pub fn lower(package: Package, resolution: Resolution, typed: TypedModule, sourc
     itables: registry.itables,
     boxes: registry.boxes,
     main_error: main_error,
+    statics: statics,
   })
+}
+
+/// Whether a static of type `ty` initialized with `value` can be computed at each use: a
+/// primitive or a `String` computed from literals and constants, with operators and casts
+/// (docs/adr/0083-global-state.md, Q527).
+fn is_constant_static(resolution: Resolution, ty: Type, value: Expr) -> bool {
+  match ty.kind {
+    TypeKind::Int(_) | TypeKind::Float(_) | TypeKind::Bool | TypeKind::Char | TypeKind::String => is_constant_expr(resolution, value),
+    _ => false,
+  }
+}
+
+fn is_constant_expr(resolution: Resolution, value: Expr) -> bool {
+  match value.kind {
+    ExprKind::Int { .. } | ExprKind::Float { .. } | ExprKind::Bool(_) | ExprKind::Char(_) | ExprKind::Str(_) => true,
+    ExprKind::Path(_) => match resolution.paths.get(value.id) {
+      Some(Res::Const(_)) => true,
+      _ => false,
+    },
+    ExprKind::Unary { operand, .. } => is_constant_expr(resolution, operand),
+    ExprKind::Binary { lhs, rhs, .. } => is_constant_expr(resolution, lhs) && is_constant_expr(resolution, rhs),
+    ExprKind::Cast { expr, .. } => is_constant_expr(resolution, expr),
+    _ => false,
+  }
 }
 
 /// How the C `main` gets the message of an error that `main` returns, when it is not a `String`.
@@ -1483,6 +1545,12 @@ pub class Lowering {
 
           Ok(local_place(local, ty))
         }
+        // The value of a static, held by a temporary for the statement.
+        Some(Res::Static(_)) => {
+          const read = self.expr(value)?;
+
+          self.operand_place(read, ty)
+        }
         _ => Err("place of unsupported path"),
       },
       ExprKind::Field { base, name } => {
@@ -1901,6 +1969,8 @@ pub class Lowering {
         Some(Res::Extern(id)) => Ok(self.new_value(ty, Rvalue::ExternFnValue(id))),
         Some(Res::Variant(variant)) => Ok(matching::variant(self, ty, variant.index, new List())),
         Some(Res::Const(id)) => self.const_operand(id, ty),
+        // An owned value, as a call returns.
+        Some(Res::Static(id)) => Ok(self.call(Callee::Runtime { function: static_getter(id), located: true }, new List(), ty)),
         _ => Err("unsupported path operand"),
       },
       ExprKind::Try(inner) => matching::try_expr(self, inner),

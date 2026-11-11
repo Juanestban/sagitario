@@ -446,6 +446,11 @@ pub fn report_private_interfaces(resolution: Resolution, package: Package, diagn
             }
           }
         }
+        Item::Static(decl) => {
+          if is_public(decl.visibility) {
+            checks.push(Check { owner: decl.name.name, types: List::from([decl.ty]) });
+          }
+        }
         Item::Const(_) | Item::Impl(_) => {}
       }
 
@@ -824,6 +829,7 @@ fn item_paths(module: Module) -> List<Path> {
         type_paths(decl.ty, paths);
         expr_paths(decl.value, paths);
       }
+      Item::Static(decl) => fn_paths(decl.init, paths),
       Item::Impl(block) => {
         for param in block.generics {
           for bound in param.bounds {

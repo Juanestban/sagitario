@@ -63,8 +63,8 @@ fn item_kind(item: ItemRef) -> Option<u32> {
     ItemRef::Std(StdItem::CType(_)) => Some(TYPE),
     ItemRef::Std(StdItem::CString) => Some(CLASS),
     ItemRef::Std(_) => Some(FUNCTION),
-    // Constants keep the color of their SCREAMING_SNAKE_CASE names.
-    ItemRef::Const(_) => None,
+    // Constants and statics keep the color of their SCREAMING_SNAKE_CASE names.
+    ItemRef::Const(_) | ItemRef::Static(_) => None,
   }
 }
 
@@ -338,6 +338,7 @@ class Collector {
           self.type_expr(decl.ty);
           self.expr(decl.value);
         }
+        Item::Static(decl) => self.function(decl.init),
         Item::Impl(block) => {
           self.type_expr(block.implemented);
           self.type_expr(block.target);

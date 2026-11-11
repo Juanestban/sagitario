@@ -157,11 +157,16 @@ pub fn function(cx: Checker, id: u32, decl: FnDecl) {
       Some(tail) => tail.span,
       None => decl.body.span,
     };
-    var diagnostic = Diagnostic::error(codes::MISMATCHED_TYPES, span, "expected `" + types::text(ret) + "`, found `" + types::text(body_ty) + "`")
-      .with_note("the function `" + decl.name.name + "` must return a value of type `" + types::text(ret) + "` on every path");
+    // The value of a static is the body of a function of its own (docs/adr/0083-global-state.md).
+    const of_static = cx.resolution.static_of(id).is_some();
+    var diagnostic = Diagnostic::error(codes::MISMATCHED_TYPES, span, "expected `" + types::text(ret) + "`, found `" + types::text(body_ty) + "`");
+
+    if !of_static {
+      diagnostic = diagnostic.with_note("the function `" + decl.name.name + "` must return a value of type `" + types::text(ret) + "` on every path");
+    }
 
     if let Some(ret_span) = cx.ret_span {
-      diagnostic = diagnostic.with_label(ret_span, "expected because of the return type");
+      diagnostic = diagnostic.with_label(ret_span, if of_static { "expected because of the type of the static" } else { "expected because of the return type" });
     }
 
     cx.diagnostics.push(diagnostic);
@@ -350,6 +355,12 @@ fn assign(cx: Checker, target: Expr, op: Option<BinaryOp>, value: Expr) -> Type 
   const id = match target_local {
     Some(id) => id,
     None => {
+      if let Some(Res::Static(found)) = cx.resolution.paths.get(target.id) {
+        static_assignment(cx, target, found);
+
+        return expr(cx, value, None);
+      }
+
       // An unresolved name was already reported.
       if !is_path || cx.resolution.paths.contains_key(target.id) {
         cx.error(codes::INVALID_ASSIGNMENT_TARGET, target.span, "only bindings, fields and array elements can be assigned");
@@ -545,6 +556,7 @@ fn other_expr_kind(cx: Checker, value: Expr, expected: Option<Type>) -> Type {
       }
       Some(Res::Fn(id)) => closures::fn_value(cx, value, path, id, expected),
       Some(Res::Const(id)) => cx.typed.const_types.get(id as usize).unwrap_or(types::error()),
+      Some(Res::Static(id)) => cx.typed.static_type(cx.resolution, id).unwrap_or(types::error()),
       Some(Res::Extern(id)) if !cx.resolution.is_runtime_extern(cx.package, id) => ffi::extern_value(cx, id),
       Some(Res::FromRaw(_)) => {
         cx.diagnostics.push(
@@ -2518,4 +2530,17 @@ fn float_literal_type(suffix: Option<String>, expected: Option<Type>) -> Type {
   }
 
   types::of(TypeKind::Float(FloatTy::F64))
+}
+
+/// `NAME = value` on a `static`, which holds one value for the program
+/// (docs/adr/0083-global-state.md, Q526).
+fn static_assignment(cx: Checker, target: Expr, id: u32) {
+  var diagnostic = Diagnostic::error(codes::INVALID_ASSIGNMENT_TARGET, target.span, "cannot assign to a `static`")
+    .with_help("change its value through its methods, such as those of a `Mutex` or an atomic");
+
+  if let Some(decl) = cx.resolution.static_decl(cx.package, id) {
+    diagnostic = diagnostic.with_label(decl.name.span, "declared with `static` here");
+  }
+
+  cx.diagnostics.push(diagnostic);
 }

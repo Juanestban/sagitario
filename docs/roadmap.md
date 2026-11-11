@@ -267,7 +267,8 @@ channels, `try_receive` and timeouts (ADR-0047), `protected` visibility, `weak` 
 overloading and derived `Eq`, binding generation, internationalized diagnostics, automatic
 error conversion with `From<T>` (and implementing one generic interface several times),
 `Error::source()` and backtraces, a `Display` interface, slices, open ranges, general tuples,
-raw strings, `@test` / `@deprecated`, static fields and mutable globals, `sag doc`, inference of `None`/`Ok`/`Err` from later uses, re-exports (`pub use`), glob
+raw strings, `@test` / `@deprecated`, static fields and mutable globals (taken up by
+[ADR-0083](adr/0083-global-state.md)), `sag doc`, inference of `None`/`Ok`/`Err` from later uses, re-exports (`pub use`), glob
 imports, importing enum variants or a type's functions, `use` inside blocks.
 Undecided points needed during the MVP are tracked as open questions in the
 [spec index](spec/README.md#open-questions).

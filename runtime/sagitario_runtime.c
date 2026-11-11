@@ -3632,6 +3632,123 @@ sag_symbol sag_library_symbol(void *library, sag_string name) {
   return symbol;
 }
 
+/* ---- Statics (docs/adr/0083-global-state.md) ------------------------------------------ */
+
+/* The functions releasing the values of the statics computed, in order. */
+static void (**sag_static_releases)(void) = NULL;
+static size_t sag_static_releases_len = 0;
+static size_t sag_static_releases_cap = 0;
+
+#ifdef SAG_THREADS
+/* One lock for the computation of every static, and the condition the threads waiting for one
+ * wait on; zero-initialized on Windows. */
+#ifdef _WIN32
+static void *sag_statics_lock = NULL;
+static void *sag_statics_condition = NULL;
+#else
+static pthread_mutex_t sag_statics_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t sag_statics_condition = PTHREAD_COND_INITIALIZER;
+#endif
+
+static void sag_statics_acquire(void) {
+#ifdef _WIN32
+  AcquireSRWLockExclusive(&sag_statics_lock);
+#else
+  pthread_mutex_lock(&sag_statics_lock);
+#endif
+}
+
+static void sag_statics_release_lock(void) {
+#ifdef _WIN32
+  ReleaseSRWLockExclusive(&sag_statics_lock);
+#else
+  pthread_mutex_unlock(&sag_statics_lock);
+#endif
+}
+#endif
+
+_Noreturn static void sag_static_cycle(const char *name, const char *file, int line) {
+  char message[256];
+  snprintf(message, sizeof message, "the static `%s` was used while its value was being computed", name);
+  sag_panic_at(message, file, line);
+}
+
+bool sag_static_begin(sag_static_state *state, const char *name, const char *file, int line) {
+#ifdef SAG_THREADS
+  uintptr_t self = (uintptr_t)&sag_thread_marker;
+  sag_statics_acquire();
+  for (;;) {
+    int stage = atomic_load(&state->stage);
+    if (stage == 2) {
+      sag_statics_release_lock();
+      return false;
+    }
+    if (stage == 0) {
+      atomic_store(&state->owner, self);
+      atomic_store(&state->stage, 1);
+      sag_statics_release_lock();
+      return true;
+    }
+    if (atomic_load(&state->owner) == self) {
+      sag_statics_release_lock();
+      sag_static_cycle(name, file, line);
+    }
+#ifdef _WIN32
+    SleepConditionVariableSRW(&sag_statics_condition, &sag_statics_lock, SAG_WIN_INFINITE, 0);
+#else
+    pthread_cond_wait(&sag_statics_condition, &sag_statics_lock);
+#endif
+  }
+#else
+  if (state->stage == 1) {
+    sag_static_cycle(name, file, line);
+  }
+  state->stage = 1;
+  return true;
+#endif
+}
+
+void sag_static_end(sag_static_state *state, void (*release)(void)) {
+#ifdef SAG_THREADS
+  sag_statics_acquire();
+#endif
+  if (release != NULL) {
+    if (sag_static_releases_len == sag_static_releases_cap) {
+      size_t grown = sag_static_releases_cap == 0 ? 8 : sag_static_releases_cap * 2;
+      void (**moved)(void) = realloc(sag_static_releases, grown * sizeof *moved);
+      if (moved == NULL) {
+        sag_panic("out of memory");
+      }
+      sag_static_releases = moved;
+      sag_static_releases_cap = grown;
+    }
+    sag_static_releases[sag_static_releases_len++] = release;
+  }
+#ifdef SAG_THREADS
+  atomic_store(&state->owner, 0);
+  atomic_store_explicit(&state->stage, 2, memory_order_release);
+#ifdef _WIN32
+  WakeAllConditionVariable(&sag_statics_condition);
+#else
+  pthread_cond_broadcast(&sag_statics_condition);
+#endif
+  sag_statics_release_lock();
+#else
+  state->stage = 2;
+#endif
+}
+
+/* Releases the values of the statics, the last computed first, so that the leak check does not
+ * count them (Q532). Only once no other thread runs. */
+static void sag_statics_finish(void) {
+  while (sag_static_releases_len > 0) {
+    sag_static_releases[--sag_static_releases_len]();
+  }
+  free(sag_static_releases);
+  sag_static_releases = NULL;
+  sag_static_releases_cap = 0;
+}
+
 /* ---- Program lifecycle ----------------------------------------------------------------- */
 
 #ifdef _WIN32
@@ -3659,10 +3776,14 @@ int sag_rt_finish(void) {
     sag_panic("failed printing to stdout");
   }
   sag_task_shutdown();
+  bool leak_check = getenv("SAG_LEAK_CHECK") != NULL;
+  if (leak_check && sag_count_get(&sag_threads_running) == 0) {
+    sag_statics_finish();
+  }
   sag_drop_free();
   /* Objects of threads still running are alive. */
   size_t live = sag_count_get(&sag_live_objects);
-  if (getenv("SAG_LEAK_CHECK") != NULL && live != 0 && sag_count_get(&sag_threads_running) == 0) {
+  if (leak_check && live != 0 && sag_count_get(&sag_threads_running) == 0) {
     fprintf(stderr, "leak check: %zu ARC object(s) still alive at exit\n", live);
     return 102;
   }

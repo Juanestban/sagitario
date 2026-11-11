@@ -188,3 +188,32 @@ fn spawn_argument_error(cx: Checker, spawn: String, arg: Expr) {
       .with_note("the compiler checks that what the thread captures is `Send`, which it cannot do for other function values"),
   );
 }
+
+/// The type of every `static` is `Send`, since every thread can read it
+/// (docs/adr/0083-global-state.md, Q526).
+pub fn check_statics(cx: Checker) {
+  for index in 0..cx.resolution.statics.len() {
+    const id = index as u32;
+    const decl = match cx.resolution.static_decl(cx.package, id) {
+      Some(found) => found,
+      None => continue,
+    };
+    const ty = match cx.typed.static_type(cx.resolution, id) {
+      Some(found) => found,
+      None => continue,
+    };
+
+    if decl.mutable || types::is_error(ty) {
+      continue;
+    }
+
+    if let Some(reason) = cx.typed.not_send_reason(ty) {
+      cx.diagnostics.push(
+        Diagnostic::error(codes::NOT_SEND, decl.ty.span, "the static `" + decl.name.name + "` has the type `" + types::text(ty) + "`, which is not `Send`")
+          .with_note(reason)
+          .with_note("every thread can read a static, so its value must be `Send`")
+          .with_help("keep a `Send` value, such as an atomic or a `Mutex` of a `Send` value, or pass this one to the code that needs it"),
+      );
+    }
+  }
+}

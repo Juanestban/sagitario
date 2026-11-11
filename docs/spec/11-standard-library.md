@@ -294,6 +294,9 @@ worker.join();
 println(`${hits.load()} ${names.get()}`);
 ```
 
+A [static](03-memory.md#global-state-g1) holds a `Mutex` or an atomic that every thread
+reaches without passing it: `static HITS: AtomicI64 = new AtomicI64(0);`.
+
 | Item | Meaning |
 |---|---|
 | `Mutex<T: Send>` | A value that threads share, changed by one thread at a time |

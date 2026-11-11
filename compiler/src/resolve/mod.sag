@@ -5,7 +5,7 @@
 //! `u32` indices; maps by node id are `Map<u32, ...>`.
 
 use pkg::ast::{
-  Block, ClassDecl, ConstDecl, EnumDecl, Expr, ExprKind, ExternFn, FnDecl, GenericParam, Ident, ImplBlock, InterfaceDecl, Item, LambdaParam, Module, Package,
+  Block, ClassDecl, ConstDecl, StaticDecl, EnumDecl, Expr, ExprKind, ExternFn, FnDecl, GenericParam, Ident, ImplBlock, InterfaceDecl, Item, LambdaParam, Module, Package,
   Path, Pattern, PatternKind, Stmt, StructDecl, TemplatePart, TypeExpr, TypeExprKind, VariantFields, Visibility,
 };
 use pkg::diagnostics;
@@ -151,6 +151,8 @@ pub enum Res {
   Struct(u32),
   Variant(VariantRef),
   Const(u32),
+  /// A module-level `static` (docs/adr/0083-global-state.md).
+  Static(u32),
   /// `Name::from_raw` of the enum `Name`, which has an integer representation.
   FromRaw(u32),
 }
@@ -176,6 +178,7 @@ pub enum ItemRef {
   Fn(u32),
   Extern(u32),
   Const(u32),
+  Static(u32),
   Type(TypeItem),
   Module(u32),
   Std(StdItem),
@@ -255,6 +258,13 @@ pub struct ConstInfo {
   pub item: usize;
 }
 
+/// A `static` and the function computing its value.
+pub struct StaticInfo {
+  pub module: usize;
+  pub item: usize;
+  pub init: u32;
+}
+
 pub struct ExternInfo {
   pub module: usize;
   pub item: usize;
@@ -283,6 +293,7 @@ pub class Resolution {
   pub const interfaces: List<TypeInfo>;
   pub const blocks: List<BlockInfo>;
   pub const consts: List<ConstInfo>;
+  pub const statics: List<StaticInfo>;
   pub var prelude: Option<u32>;
   pub var std_root: Option<u32>;
   pub const package_roots: List<u32>;
@@ -305,6 +316,7 @@ pub class Resolution {
     self.interfaces = new List();
     self.blocks = new List();
     self.consts = new List();
+    self.statics = new List();
     self.prelude = None;
     self.std_root = None;
     self.package_roots = new List();
@@ -326,6 +338,7 @@ pub class Resolution {
     match info.member {
       None => match item {
         Item::Fn(decl) => Some(decl),
+        Item::Static(decl) => Some(decl.init),
         _ => None,
       },
       Some(member) => match item {
@@ -385,6 +398,26 @@ pub class Resolution {
       Item::Const(decl) => Some(decl),
       _ => None,
     }
+  }
+
+  pub fn static_decl(self, package: Package, id: u32) -> Option<StaticDecl> {
+    const info = self.statics.get(id as usize)?;
+
+    match item_at(package, info.module, info.item)? {
+      Item::Static(decl) => Some(decl),
+      _ => None,
+    }
+  }
+
+  /// The static whose value function `id` computes, if any.
+  pub fn static_of(self, id: u32) -> Option<u32> {
+    for index in 0..self.statics.len() {
+      if self.statics[index].init == id {
+        return Some(index as u32);
+      }
+    }
+
+    None
   }
 
   pub fn struct_decl(self, package: Package, id: u32) -> Option<StructDecl> {
@@ -1214,6 +1247,15 @@ fn declare_items(resolution: Resolution, source: usize, node: u32, module: Modul
 
         resolution.consts.push(ConstInfo { module: source, item: index });
         names.push(Named { name: decl.name, item: ItemRef::Const(id), visibility: decl.visibility });
+      }
+      Item::Static(decl) => {
+        const id = resolution.statics.len() as u32;
+        // Its value is computed by a function of its own, which has no name to call it by.
+        const init = resolution.functions.len() as u32;
+
+        resolution.functions.push(FnInfo { module: source, item: index, member: None, owner: None, block: None });
+        resolution.statics.push(StaticInfo { module: source, item: index, init: init });
+        names.push(Named { name: decl.name, item: ItemRef::Static(id), visibility: decl.visibility });
       }
       // Declared below, once the module's types are.
       Item::Impl(_) => {}
@@ -2068,6 +2110,7 @@ pub class Resolver {
           ItemRef::Fn(id) => return Some(Res::Fn(id)),
           ItemRef::Extern(id) => return Some(Res::Extern(id)),
           ItemRef::Const(id) => return Some(Res::Const(id)),
+          ItemRef::Static(id) => return Some(Res::Static(id)),
           ItemRef::Std(StdItem::StringFromC) => return Some(Res::Builtin("string_from_c")),
           ItemRef::Std(StdItem::Exit) => return Some(Res::Builtin("exit")),
           ItemRef::Std(StdItem::Mem(name)) => return Some(Res::Builtin("mem::" + name)),
@@ -2237,6 +2280,7 @@ pub class Resolver {
         ItemRef::Fn(id) => return Some(Res::Fn(id)),
         ItemRef::Extern(id) => return Some(Res::Extern(id)),
         ItemRef::Const(id) => return Some(Res::Const(id)),
+        ItemRef::Static(id) => return Some(Res::Static(id)),
         ItemRef::Std(StdItem::StringFromC) => return Some(Res::Builtin("string_from_c")),
         ItemRef::Std(StdItem::Exit) => return Some(Res::Builtin("exit")),
         ItemRef::Std(StdItem::Mem(found)) => return Some(Res::Builtin("mem::" + found)),
@@ -2840,6 +2884,7 @@ pub class Resolver {
       ItemRef::Module(_) | ItemRef::Std(StdItem::Root) | ItemRef::Std(StdItem::Ffi) => "a module",
       ItemRef::Type(_) | ItemRef::Std(_) => "a type",
       ItemRef::Const(_) => "a constant",
+      ItemRef::Static(_) => "a static",
     };
 
     self.error(span, "`" + name + "` is " + what + ", not a type");

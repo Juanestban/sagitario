@@ -24,11 +24,13 @@ treated as comments. A documentation tool (`sag doc`) is post-MVP.
 abstract  as        async     await     break     class     const     continue
 else      enum      extends   extern    false     fn        for       if
 impl      in        interface let       loop      match     new       override
-pkg       prv       pub       return    self      Self      struct    super
-true      unsafe    use       var       weak      where     while     zod
+pkg       prv       pub       return    self      Self      static    struct
+super     true      unsafe    use       var       weak      where     while
+zod
 ```
 
-`async` and `await` are those of [`async` functions](12-async.md) (F8).
+`async` and `await` are those of [`async` functions](12-async.md) (F8), and `static` declares a
+[static](03-memory.md#global-state-g1) (G1, [ADR-0083](../adr/0083-global-state.md)).
 
 `union` is a contextual keyword, as in Rust: it declares a [union](10-ffi.md#unions) only before
 the name of one, and is an ordinary name elsewhere.

@@ -1,6 +1,6 @@
 # 0083. Global state: `static`, `static var` and `@thread_local`
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-10
 - Supersedes in part: [ADR-0017](0017-resolution-of-open-questions-q1-q11.md) (Q8: no static
   fields or mutable globals in the MVP) and docs/spec/03-memory.md (the same rule)
@@ -120,3 +120,14 @@ fn frame() {
   not reported.
 - A `static` cannot hold a `List` or a `Map` shared by threads, as `Mutex<T>` cannot (ADR-0045,
   Q181); a `@thread_local static var` or a `static var` in `unsafe` can.
+
+## Notes
+
+- Increment 1 (`static`) is done: `docs/spec/03-memory.md#global-state-g1`, the tests
+  `tests/run-pass/statics/`, `tests/run-panic/static_cycle.sag`, `tests/compile-fail/static_errors.sag`
+  and `static_syntax.sag`. Each static has a function without parameters computing its value
+  (`StaticDecl::init`), which the resolver, the type checker and SIR treat as any function; the C
+  of each static is its storage, its state and `sag_static_N(file, line)`, which computes the value
+  on the first use and returns it with a reference (`codegen_c.sag`, `Generator::statics`), and the
+  runtime waits for a value another thread computes (`sag_static_begin`, `sag_static_end`).
+  `static var` is reported as not implemented yet (`E0900`).

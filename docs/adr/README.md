@@ -91,7 +91,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0080](0080-std-math-trigonometry.md) | Trigonometry in `std::math` | Accepted |
 | [0081](0081-operator-overloading.md) | Operator overloading through interfaces | Accepted |
 | [0082](0082-format-strings.md) | Format strings `f"..."` | Accepted |
-| [0083](0083-global-state.md) | Global state: `static`, `static var` and `@thread_local` | Proposed |
+| [0083](0083-global-state.md) | Global state: `static`, `static var` and `@thread_local` | Accepted |
 
 ## Template
 

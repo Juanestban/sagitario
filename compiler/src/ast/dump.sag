@@ -225,6 +225,19 @@ class Dumper {
         self.expr("value", decl.value);
         self.depth -= 1;
       }
+      Item::Static(decl) => {
+        const mutable_text = if decl.mutable { " var" } else { "" };
+
+        self.line("item", "Static", Some(decl.span), None, ident(decl.name) + " " + visibility(decl.visibility) + mutable_text);
+        self.depth += 1;
+        self.type_expr("ty", decl.ty);
+
+        if let Some(value) = decl.value() {
+          self.expr("value", value);
+        }
+
+        self.depth -= 1;
+      }
       Item::Impl(block) => {
         self.line("item", "Impl", Some(block.span), None, "");
         self.depth += 1;

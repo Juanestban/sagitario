@@ -939,6 +939,13 @@ pub class TypedModule {
   }
 
   /// Why values of `ty` cannot be sent to another thread, or `None` if `ty` is `Send`.
+  /// The type of a `static`: what the function computing its value returns.
+  pub fn static_type(self, resolution: Resolution, id: u32) -> Option<Type> {
+    const info = resolution.statics.get(id as usize)?;
+
+    Some(self.sigs.get(info.init as usize)?.ret)
+  }
+
   pub fn not_send_reason(self, ty: Type) -> Option<String> {
     self.not_send(ty, new List())
   }

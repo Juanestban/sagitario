@@ -76,6 +76,42 @@ const RUNTIME: String = include_str("../runtime/runtime.c");
   a module-level constant; the path is a string literal relative to the directory of the
   source file, and the file must be UTF-8. The file is read when the program is compiled.
 
+## Global state (G1)
+
+Rationale: [ADR-0083](../adr/0083-global-state.md).
+
+```sag
+use std::sync::{AtomicI64, Mutex};
+
+pub static WIDTH: i32 = 640;
+static FRAMES: AtomicI64 = new AtomicI64(0);
+static NAMES: Mutex<String> = new Mutex(load_names());
+
+fn frame() {
+  FRAMES.fetch_add(1);
+  NAMES.update((names) => names + ",");
+}
+```
+
+- `static NAME: Type = value;` at module level declares one value for the whole program, as
+  Rust's `static`. Like a constant it is an item: `pub` exports it, `use` imports it, and
+  `config::WIDTH` names it in full. Its type is always written.
+- Every thread can read a static, so its type must be `Send`
+  ([`Send`](05-interfaces-generics.md#send-f4)): primitives, `String`, structs and enums of `Send`
+  values, classes whose fields are all `const` and `Send`, `Mutex<T>`, the atomics and `Channel<T>`.
+  A `List`, a `Map` or a class with `var` fields is an error (`E0332`).
+- A static cannot be assigned (`E0307`). Its value changes only through its own methods, such as
+  those of an atomic or a `Mutex`: `FRAMES.fetch_add(1)`.
+- The value is any expression, computed **on the first use** of the static, exactly once even
+  when several threads reach it at once: the others wait for it. A static that needs its own value
+  while it is being computed, directly or through other statics or functions, panics naming it. A
+  static computed from literals and constants, of a primitive type or `String`, keeps no state.
+- Reading a static gives its value, as reading a `const` binding does: a struct is copied, and a
+  class instance or `Mutex` is the same object every time. `&NAME` lends it.
+- Its value lives until the program ends and is never released while it runs.
+- A static is not a constant: a module-level `const` cannot use one (`E0334`).
+- `static var` comes later ([ADR-0083](../adr/0083-global-state.md), Q528 and Q529).
+
 ## Struct mutability (F1)
 
 - Struct fields do **not** take `const`/`var`. A struct's mutability comes from the binding
@@ -137,7 +173,8 @@ struct Point impl Display {
 ## Static functions (F1)
 
 - A function declared inside a `struct`, `enum` or `class` without a `self` parameter is
-  **static** and is called as `Type::name(...)`. There is no `static` keyword.
+  **static** and is called as `Type::name(...)`. The keyword `static` declares module-level
+  [statics](#global-state-g1), not members of types.
 - Methods are called on a value, `p.len()`; static functions only through the type,
   `Point::origin()`. Calling a static function as `p.origin()` or a method as `Point::len(p)`
   is an error.
@@ -147,8 +184,7 @@ struct Point impl Display {
 - In classes, `new` is the special initializer, declared `fn new(self, ...)` (see
   [classes](04-classes.md#construction)), and can only be invoked through
   `new ClassName(...)`, never as `ClassName::new(...)`.
-- There are no static fields and no mutable global variables in the MVP; use module-level
-  `const`.
+- Types have no static fields: a module holds [statics](#global-state-g1) instead, as in Rust.
 
 ## Class field mutability (F2)
 

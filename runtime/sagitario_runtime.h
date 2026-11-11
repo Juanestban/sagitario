@@ -899,6 +899,35 @@ void sag_task_shutdown(void);
  * calling thread (docs/adr/0073-spawn-blocking.md). Both are retained. Needs SAG_THREADS. */
 void sag_task_spawn_blocking(sag_fnval body, sag_fnval done);
 
+/* ---- Statics (docs/adr/0083-global-state.md) ------------------------------------------ */
+
+/* Where the computation of the value of a `static` stands: 0 before it, 1 while a thread computes
+ * it, 2 once it is stored. Zero-initialized, as the storage of statics is. */
+typedef struct sag_static_state {
+#ifdef SAG_THREADS
+  atomic_int stage;
+  /* The marker of the thread computing it. */
+  atomic_uintptr_t owner;
+#else
+  int stage;
+#endif
+} sag_static_state;
+
+/* Whether the value of the static is stored. */
+static inline bool sag_static_ready(sag_static_state *state) {
+#ifdef SAG_THREADS
+  return atomic_load_explicit(&state->stage, memory_order_acquire) == 2;
+#else
+  return state->stage == 2;
+#endif
+}
+
+/* Whether the calling thread must compute the value of the static `name`, used at `file:line`.
+ * It waits while another thread computes it, and panics if this thread already is. */
+bool sag_static_begin(sag_static_state *state, const char *name, const char *file, int line);
+/* Marks the value stored; `release`, if not NULL, releases it at exit for the leak check. */
+void sag_static_end(sag_static_state *state, void (*release)(void));
+
 /* ---- Program lifecycle ----------------------------------------------------------------- */
 
 void sag_rt_init(int argc, char **argv);
