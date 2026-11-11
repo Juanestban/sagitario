@@ -833,9 +833,6 @@ void sag_time_sleep(uint64_t nanos);
 sag_string sag_process_run(sag_string argv, size_t argc, sag_string env, size_t env_count, sag_string cwd, sag_string input, bool has_input,
                            bool capture, int32_t *results, size_t *split);
 
-/* Whether paths follow Windows rules (`\` separators and drive letters). */
-bool sag_path_windows(void);
-
 /* ---- Standard library: std::thread (compiled with SAG_THREADS) ------------------------- */
 
 /* Runs `body` in a new thread, which holds a reference to it, and returns the thread; panics if

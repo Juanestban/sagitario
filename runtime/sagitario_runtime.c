@@ -2005,14 +2005,6 @@ sag_string sag_fs_current_dir(int32_t *status) {
 #endif
 }
 
-bool sag_path_windows(void) {
-#ifdef _WIN32
-  return true;
-#else
-  return false;
-#endif
-}
-
 /* ---- Tasks (docs/spec/12-async.md) ----------------------------------------------------- */
 
 typedef struct sag_task_timer_entry {

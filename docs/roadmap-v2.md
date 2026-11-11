@@ -65,8 +65,8 @@ shims (Q541).
 
 **Status:** in progress. [ADR-0085](adr/0085-conditional-compilation-and-std-time.md) fixes the
 pattern and the order of the modules. Conditional compilation with `@cfg` is done, and
-`std::time` and `std::env` are written on the system API in `std::sys`, without C.
-`std::path` follows.
+`std::time`, `std::env` and `std::path` are written on the system API in `std::sys`, without
+C. `std::io` follows.
 
 - One module per increment: `std::env`, `std::io`, `std::process` with `Command`, `std::fs`,
   `std::path`, `std::time`, `std::thread`, `std::sync` and dynamic libraries.

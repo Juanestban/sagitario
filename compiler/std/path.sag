@@ -2,12 +2,15 @@
 //! `/` separates components everywhere, and `\` too on Windows, where a path may also start
 //! with a drive (`C:`).
 
-extern "C" {
-  fn sag_path_windows() -> bool;
+/// Whether paths follow the rules of Windows: `\` separators and drive letters.
+@cfg(windows)
+fn windows() -> bool {
+  true
 }
 
+@cfg(unix)
 fn windows() -> bool {
-  unsafe { sag_path_windows() }
+  false
 }
 
 fn is_separator(byte: u8) -> bool {

@@ -136,4 +136,6 @@ extern "C" {
   `GetEnvironmentVariableW`, converting between UTF-16 and UTF-8 with U+FFFD for unpaired
   surrogates. The runtime keeps `sag_sb_push_utf16`, which `std::fs` still uses. `std::env` is in
   `CORE_STD`. A library, which has no `main`, sees no arguments on Unix, as before.
+- `std::path` is done, the third module of S1: it only asked the runtime whether paths follow
+  the rules of Windows (`sag_path_windows`), which `@cfg` now answers.
 
