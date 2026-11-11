@@ -48,6 +48,11 @@ pub struct Program {
   pub main_error: Option<MainError>;
   /// The `static`s, by id (docs/adr/0083-global-state.md).
   pub statics: List<StaticDef>;
+  /// The types written by `{x:?}`: the C gives each one `sag_debug_string_N`, `N` its index
+  /// (docs/adr/0089-display-debug-and-format-specifiers.md, Q588).
+  pub debug_types: List<Type>;
+  /// The prelude's `Map`, whose debug form is that of its entries.
+  pub map_class: Option<u32>;
 }
 
 /// A `static`: its storage, reached through `sag_static_N(file, line)`, which gives its address.
@@ -220,6 +225,9 @@ pub struct EnumLayout {
   pub name: String;
   /// The field types of each variant.
   pub variants: List<List<Type>>;
+  /// The name of each variant, and of its fields when they are named (empty when positional).
+  pub variant_names: List<String>;
+  pub field_names: List<List<String>>;
   /// The integer type of an enum with an integer representation, which its values are.
   pub repr: Option<IntTy>;
   /// With a representation, the value of each variant.
@@ -229,6 +237,7 @@ pub struct EnumLayout {
 pub struct StructLayout {
   pub name: String;
   pub fields: List<Type>;
+  pub field_names: List<String>;
   /// A union: its fields share their memory.
   pub is_union: bool;
 }
@@ -631,12 +640,15 @@ pub class ClassInstance {
   pub var fields: List<Type>;
   /// Which of those fields are `weak`.
   pub var weak_fields: List<bool>;
+  /// Their names, for the debug form.
+  pub var field_names: List<String>;
   /// The methods called through the vtable, by slot.
   pub var vtable: List<u32>;
 
-  pub fn new(self, class_ref: NamedRef, fields: List<Type>, weak_fields: List<bool>) {
+  pub fn new(self, class_ref: NamedRef, fields: List<Type>, weak_fields: List<bool>, field_names: List<String>) {
     self.class_ref = class_ref;
     self.parent = None;
+    self.field_names = field_names;
     self.fields = fields;
     self.weak_fields = weak_fields;
     self.vtable = new List();
@@ -716,6 +728,9 @@ pub class Registry {
   pub var wrapped: List<u32>;
   /// For `async fn main`, the function the C `main` calls instead.
   pub var async_main: Option<u32>;
+  pub var debug_types: List<Type>;
+  /// The types whose debug form is reached, by `type_key`.
+  pub var debug_seen: Map<String, bool>;
 
   pub fn new(self, first_instance: u32) {
     self.itables = new List();
@@ -734,6 +749,8 @@ pub class Registry {
     self.envs = new List();
     self.wrapped = new List();
     self.async_main = None;
+    self.debug_types = new List();
+    self.debug_seen = new Map<String, bool>();
   }
 }
 
@@ -760,21 +777,36 @@ pub fn lower(package: Package, resolution: Resolution, typed: TypedModule, sourc
 
   for def in typed.structs {
     const fields: List<Type> = new List();
+    const field_names: List<String> = new List();
 
     for field in def.fields {
       fields.push(field.ty);
+      field_names.push(field.name);
     }
 
-    structs.push(StructLayout { name: def.name, fields: fields, is_union: def.is_union });
+    structs.push(StructLayout { name: def.name, fields: fields, field_names: field_names, is_union: def.is_union });
   }
 
   const enums: List<EnumLayout> = new List();
 
   for def in typed.enums {
     const variants: List<List<Type>> = new List();
+    const variant_names: List<String> = new List();
+    const field_names: List<List<String>> = new List();
 
     for variant in def.variants {
       variants.push(variant.field_types());
+      variant_names.push(variant.name);
+
+      const names: List<String> = new List();
+
+      if variant.named {
+        for field in variant.fields {
+          names.push(field.name.unwrap_or(""));
+        }
+      }
+
+      field_names.push(names);
     }
 
     const values: List<Const> = new List();
@@ -785,7 +817,7 @@ pub fn lower(package: Package, resolution: Resolution, typed: TypedModule, sourc
       }
     }
 
-    enums.push(EnumLayout { name: def.name, variants: variants, repr: def.repr, values: values });
+    enums.push(EnumLayout { name: def.name, variants: variants, variant_names: variant_names, field_names: field_names, repr: def.repr, values: values });
   }
 
   const layouts = Layouts { structs: structs, enums: enums };
@@ -952,6 +984,8 @@ pub fn lower(package: Package, resolution: Resolution, typed: TypedModule, sourc
     boxes: registry.boxes,
     main_error: main_error,
     statics: statics,
+    debug_types: registry.debug_types,
+    map_class: typed.prelude.map,
   })
 }
 
@@ -2219,6 +2253,62 @@ pub class Lowering {
     Ok(self.call(callee, List::from([value]), types::string()))
   }
 
+  /// The index of `ty` among the types written by `{x:?}`, with the class instances its debug
+  /// form reaches registered (docs/adr/0089-display-debug-and-format-specifiers.md, Q588).
+  prv fn debug_index(self, ty: Type) -> usize {
+    for index in 0..self.registry.debug_types.len() {
+      if types::same_type(self.registry.debug_types[index], ty) {
+        return index;
+      }
+    }
+
+    self.registry.debug_types.push(ty);
+    self.reach_debug(ty);
+    self.registry.debug_types.len() - 1
+  }
+
+  prv fn reach_debug(self, ty: Type) {
+    const key = type_key(ty);
+
+    if self.registry.debug_seen.contains_key(key) {
+      return;
+    }
+
+    self.registry.debug_seen.insert(key, true);
+    mono::register_types(self, ty);
+
+    match ty.kind {
+      TypeKind::Class(class_ref) => {
+        mono::class_instance(self, class_ref);
+
+        for field in self.typed.class_field_types(class_ref) {
+          self.reach_debug(field);
+        }
+
+        if let Some(parent) = self.typed.class_parent(class_ref) {
+          self.reach_debug(types::of(TypeKind::Class(parent)));
+        }
+      }
+      TypeKind::Struct(named) => {
+        for field in self.typed.struct_field_types(named) {
+          self.reach_debug(field);
+        }
+      }
+      TypeKind::Enum(_) | TypeKind::Option(_) | TypeKind::Result { .. } => {
+        if let Some(variants) = self.typed.variants(ty) {
+          for variant in variants {
+            for field in variant.field_types() {
+              self.reach_debug(field);
+            }
+          }
+        }
+      }
+      TypeKind::Array { elem, .. } | TypeKind::List(elem) | TypeKind::Slice { elem, .. } => self.reach_debug(elem),
+      TypeKind::Atomic(inner) => self.reach_debug(inner),
+      _ => {}
+    }
+  }
+
   /// A function of the root of `std`, which every program loads, as an instance.
   prv fn std_function(self, name: String) -> Result<u32, String> {
     const root = match self.resolution.std_root {
@@ -2242,6 +2332,22 @@ pub class Lowering {
   /// `{value:spec}`: the text the functions of `std` give it
   /// (docs/adr/0089-display-debug-and-format-specifiers.md, Q585–Q587).
   prv fn formatted(self, value: Operand, ty: Type, spec: FormatSpec) -> Result<Operand, String> {
+    // The debug form, whose C the backend writes for each type, then the width of any text.
+    if spec.kind == "?" {
+      const index = self.debug_index(ty);
+      const callee = Callee::Runtime { function: `sag_debug_string_${index}`, located: false };
+      const text = self.call(callee, List::from([value, Operand::Const(Const::Bool(spec.alternate))]), types::string());
+
+      if spec.width.is_none() {
+        return Ok(text);
+      }
+
+      const function = self.std_function("format_text")?;
+      const padding = List::from([text, Operand::Const(Const::Char(spec.fill)), int_operand(spec.align as u64, false, IntTy::U32), int_operand(spec.width.unwrap_or(0), false, IntTy::Usize), int_operand(1, true, IntTy::I64)]);
+
+      return Ok(self.call(Callee::Fn(function), padding, types::string()));
+    }
+
     var flags = 0u64;
 
     if spec.plus {

@@ -63,6 +63,20 @@ void sag_sb_push_f64(sag_sb *sb, double value);
 void sag_sb_push_f32(sag_sb *sb, float value);
 void sag_sb_push_bool(sag_sb *sb, bool value);
 void sag_sb_push_char(sag_sb *sb, uint32_t c);
+
+/* The debug form of values, `{x:?}` (docs/adr/0089-display-debug-and-format-specifiers.md, Q588):
+ * the C of each type calls these. A string or character between quotes with Rust's escapes; an
+ * address in hexadecimal; before an element, a separator, or a line indented by `indent` levels
+ * of four spaces when `pretty` (`{x:#?}`), `spaced` putting a space after an opening brace; after
+ * the last one, the closing text. `sag_debug_enter` returns false for an object whose form is
+ * being written already, a cycle, and `sag_debug_leave` ends the last one entered. */
+void sag_sb_push_debug_str(sag_sb *sb, sag_string s);
+void sag_sb_push_debug_char(sag_sb *sb, uint32_t c);
+void sag_sb_push_address(sag_sb *sb, const void *address);
+void sag_debug_next(sag_sb *sb, bool first, int32_t indent, bool pretty, bool spaced);
+void sag_debug_end(sag_sb *sb, bool any, int32_t indent, bool pretty, bool spaced, const char *close);
+bool sag_debug_enter(const void *object);
+void sag_debug_leave(void);
 sag_string sag_sb_finish(sag_sb *sb);
 
 /* ---- Printing (prelude) ---------------------------------------------------------------- */

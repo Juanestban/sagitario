@@ -36,6 +36,9 @@ The sources say 0.25.0.
 - Format specifiers, Rust's mini-language after a `:` in the braces of a format string:
   width, fill and alignment, `+`, zero padding, precision, and `x`, `X`, `o`, `b`, `e`, `E`
   (`f"{price:>8.2}"`, `f"{mask:#06x}"`).
+- The debug form of any value, `{x:?}` and the multi-line `{x:#?}`, which the compiler gives every
+  type: `Point { x: 1, y: 2 }`, `Some(1)`, `[1, 2]`, `{"a": 1}`, strings with Rust's escapes, and
+  cycles of classes cut as `Name { .. }`.
 - An audit of the standard library against Rust's ([`docs/std-audit.md`](docs/std-audit.md)), the
   plan of S2, with a suite of benchmarks against Rust, C, C#, JavaScript and Python.
 - The language server completes `@cfg` conditions, attributes and their representations, and

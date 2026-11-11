@@ -102,3 +102,14 @@ fn main() {
   implemented (`E0900`) until increment 3. The grammar of the editor colors the specifier.
   Tests: `tests/run-pass/format_specifiers.sag`, `tests/compile-fail/format_specifiers.sag` and
   `format_specifier_syntax.sag`.
+- Increment 3 (the debug form) is done. SIR lists the types `{x:?}` writes
+  (`Program::debug_types`) and registers the class instances their forms reach; the layouts now
+  carry the names of fields and variants. The C backend writes a function `sag_debug_N` for each
+  of those types and the types inside them (`debug_support`), and `sag_debug_string_N` for the
+  ones the program writes; the runtime's core gives the escapes of strings and characters, the
+  separators of `#?` and the stack of the objects being written, which stops cycles. A field of
+  type `Atomic` is read with `atomic_load`. Two details differ from Q588: an interface value is
+  written `dyn Name`, since its itable has no debug function yet, and a weak field `(weak)`, as
+  Rust writes its `Weak`. Tests: `tests/run-pass/debug_format.sag` (structs, enums, strings and
+  their escapes, options, results, lists, arrays, maps, classes with a parent, a cycle, a width,
+  a generic struct and `#?`), with the leak check.

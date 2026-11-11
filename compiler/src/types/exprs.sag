@@ -609,8 +609,11 @@ fn check_spec(cx: Checker, spec: FormatSpec, ty: Type) {
   const what = "`" + types::text(ty) + "`";
   var problem: Option<String> = None;
 
+  // Every type has a debug form (docs/adr/0089-display-debug-and-format-specifiers.md, Q588).
   if kind == "?" {
-    cx.error(codes::NOT_IMPLEMENTED, spec.span, "the debug form `{x:?}` is not implemented yet (docs/adr/0089-display-debug-and-format-specifiers.md, increment 3)");
+    if spec.plus || spec.zero || spec.precision.is_some() {
+      cx.error(codes::INVALID_FORMAT_STRING, spec.span, "the debug form `?` takes a width, a fill, an alignment and `#`, not `+`, `0` or a precision");
+    }
 
     return;
   }
@@ -758,11 +761,14 @@ fn other_expr_kind(cx: Checker, value: Expr, expected: Option<Type>) -> Type {
         if let Some(inner) = part.expr() {
           const ty = expr(cx, inner, None);
 
+          var debug = false;
+
           if let TemplatePart::Formatted { spec, .. } = part {
             check_spec(cx, spec, ty);
+            debug = spec.kind == "?";
           }
 
-          if !cx.typed.displayable(ty) {
+          if !debug && !cx.typed.displayable(ty) {
             cx.diagnostics.push(
               Diagnostic::error(codes::NOT_INTERPOLABLE, inner.span, "a value of type `" + types::text(ty) + "` cannot be interpolated")
                 .with_note("numbers, `bool`, `char`, `String` and the types implementing `Display` can be interpolated")

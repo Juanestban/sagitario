@@ -362,6 +362,115 @@ void sag_sb_push_bool(sag_sb *sb, bool value) {
   }
 }
 
+/* ---- The debug form of values (docs/adr/0089-display-debug-and-format-specifiers.md) -------- */
+
+/* Rust's escapes of `{:?}`: quotes, backslashes, `\n`, `\r`, `\t`, `\0`, and `\u{...}` for the
+ * other control characters. */
+static void sag_push_debug_scalar(sag_sb *sb, uint32_t c, uint32_t quote) {
+  char escaped[16];
+  if (c == quote || c == '\\') {
+    escaped[0] = '\\';
+    escaped[1] = (char)c;
+    sag_sb_push_bytes(sb, escaped, 2);
+  } else if (c == '\n') {
+    sag_sb_push_bytes(sb, "\\n", 2);
+  } else if (c == '\r') {
+    sag_sb_push_bytes(sb, "\\r", 2);
+  } else if (c == '\t') {
+    sag_sb_push_bytes(sb, "\\t", 2);
+  } else if (c == 0) {
+    sag_sb_push_bytes(sb, "\\0", 2);
+  } else if (c < 0x20 || c == 0x7F) {
+    int len = snprintf(escaped, sizeof escaped, "\\u{%x}", (unsigned)c);
+    sag_sb_push_bytes(sb, escaped, (size_t)len);
+  } else {
+    sag_sb_push_char(sb, c);
+  }
+}
+
+void sag_sb_push_debug_str(sag_sb *sb, sag_string s) {
+  sag_sb_push_bytes(sb, "\"", 1);
+  size_t index = 0;
+  while (index < s.len) {
+    sag_push_debug_scalar(sb, sag_utf8_next(s, &index), '"');
+  }
+  sag_sb_push_bytes(sb, "\"", 1);
+}
+
+void sag_sb_push_debug_char(sag_sb *sb, uint32_t c) {
+  sag_sb_push_bytes(sb, "'", 1);
+  sag_push_debug_scalar(sb, c, '\'');
+  sag_sb_push_bytes(sb, "'", 1);
+}
+
+void sag_sb_push_address(sag_sb *sb, const void *address) {
+  char text[32];
+  int len = snprintf(text, sizeof text, "0x%" PRIxPTR, (uintptr_t)address);
+  sag_sb_push_bytes(sb, text, (size_t)len);
+}
+
+static void sag_debug_line(sag_sb *sb, int32_t indent) {
+  sag_sb_push_bytes(sb, "\n", 1);
+  for (int32_t level = 0; level < indent; level++) {
+    sag_sb_push_bytes(sb, "    ", 4);
+  }
+}
+
+void sag_debug_next(sag_sb *sb, bool first, int32_t indent, bool pretty, bool spaced) {
+  if (pretty) {
+    sag_debug_line(sb, indent);
+  } else if (!first) {
+    sag_sb_push_bytes(sb, ", ", 2);
+  } else if (spaced) {
+    sag_sb_push_bytes(sb, " ", 1);
+  }
+}
+
+void sag_debug_end(sag_sb *sb, bool any, int32_t indent, bool pretty, bool spaced, const char *close) {
+  if (pretty && any) {
+    sag_debug_line(sb, indent);
+  } else if (spaced && any) {
+    sag_sb_push_bytes(sb, " ", 1);
+  }
+  sag_sb_push_bytes(sb, close, strlen(close));
+}
+
+/* The objects whose debug form this thread is writing, innermost last. */
+static SAG_THREAD_LOCAL const void **sag_debug_objects = NULL;
+static SAG_THREAD_LOCAL size_t sag_debug_len = 0;
+static SAG_THREAD_LOCAL size_t sag_debug_cap = 0;
+
+bool sag_debug_enter(const void *object) {
+  for (size_t index = 0; index < sag_debug_len; index++) {
+    if (sag_debug_objects[index] == object) {
+      return false;
+    }
+  }
+  if (sag_debug_len == sag_debug_cap) {
+    size_t cap = sag_debug_cap == 0 ? 8 : sag_debug_cap * 2;
+    const void **grown = realloc((void *)sag_debug_objects, cap * sizeof(const void *));
+    if (grown == NULL) {
+      sag_panic("out of memory");
+    }
+    sag_debug_objects = grown;
+    sag_debug_cap = cap;
+  }
+  sag_debug_objects[sag_debug_len++] = object;
+  return true;
+}
+
+void sag_debug_leave(void) {
+  if (sag_debug_len > 0) {
+    sag_debug_len--;
+  }
+  /* Freed when the outermost form ends, so leak checkers see nothing left. */
+  if (sag_debug_len == 0) {
+    free((void *)sag_debug_objects);
+    sag_debug_objects = NULL;
+    sag_debug_cap = 0;
+  }
+}
+
 void sag_sb_push_char(sag_sb *sb, uint32_t c) {
   char bytes[4];
   size_t len;

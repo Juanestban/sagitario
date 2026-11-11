@@ -175,15 +175,17 @@ pub fn class_instance(lw: Lowering, class_ref: NamedRef) -> usize {
   const def = lw.typed.class_def(class_ref.id);
   const fields = lw.typed.class_field_types(class_ref);
   const weak_fields: List<bool> = new List();
+  const field_names: List<String> = new List();
 
   if let Some(found) = def {
     for field in found.fields {
       weak_fields.push(field.is_weak);
+      field_names.push(field.name);
     }
   }
 
   // Reserved first: a class may refer to itself through its fields.
-  const created = new ClassInstance(class_ref, fields, weak_fields);
+  const created = new ClassInstance(class_ref, fields, weak_fields, field_names);
 
   lw.registry.classes.push(created);
   lw.registry.class_index.insert(key, index);

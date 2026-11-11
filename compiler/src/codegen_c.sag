@@ -101,6 +101,7 @@ pub fn generate(program: Program) -> GeneratedC {
   generator.interface_support(program);
   generator.closure_support(program);
   generator.statics(program);
+  generator.debug_support(program);
 
   for index in 0..program.functions.len() {
     const function = program.functions[index];
@@ -115,6 +116,98 @@ pub fn generate(program: Program) -> GeneratedC {
   const text = head + generator.long_string_definitions() + generator.fn_pointer_conversions() + generator.zeroed_definitions() + generator.out.to_string();
 
   GeneratedC { program: text, ffi: generator.ffi_unit(program, false), std_ffi: generator.ffi_unit(program, true), threads: threads }
+}
+
+/// A field of a class, with how the C reads it from `v`.
+struct DebugField {
+  pub name: String;
+  pub ty: Type;
+  pub access: String;
+  pub is_weak: bool;
+}
+
+/// What a struct, a variant or a class writes: a field with its label (none when positional), or
+/// `(weak)` for a weak field, whose `access` is empty.
+struct DebugItem {
+  pub label: String;
+  pub ty: Type;
+  pub access: String;
+}
+
+fn debug_position(all: List<Type>, ty: Type) -> Option<usize> {
+  for index in 0..all.len() {
+    if types::same_type(all[index], ty) {
+      return Some(index);
+    }
+  }
+
+  None
+}
+
+fn is_map(program: Program, class_ref: NamedRef) -> bool {
+  match program.map_class {
+    Some(id) => id == class_ref.id,
+    None => false,
+  }
+}
+
+/// `sag_sb_push_bytes` of a text without quotes or backslashes.
+fn push_text(text: String) -> String {
+  "  sag_sb_push_bytes(sb, " + c_string_literal(text) + `, ${text.len()});`
+}
+
+/// One element of a list or array, the first when `first` holds.
+fn debug_element(elem: Type, access: String, first: String, all: List<Type>) -> String {
+  const index = debug_position(all, elem).unwrap_or(0);
+
+  `    sag_debug_next(sb, ${first}, indent + 1, pretty, false);\n    sag_debug_${index}(sb, ${access}, indent + 1, pretty);\n    if (pretty) {\n      sag_sb_push_bytes(sb, ",", 1);\n    }`
+}
+
+/// The fields of `items`, after the separator, each followed by a comma when `pretty`.
+fn debug_items(body: List<String>, items: List<DebugItem>, all: List<Type>, pad: String, spaced: bool) {
+  for index in 0..items.len() {
+    const item = items[index];
+
+    body.push(pad + `sag_debug_next(sb, ${index == 0}, indent + 1, pretty, ${spaced});`);
+
+    if !item.label.is_empty() {
+      const label = item.label + ": ";
+
+      body.push(pad + "sag_sb_push_bytes(sb, " + c_string_literal(label) + `, ${label.len()});`);
+    }
+
+    if item.access.is_empty() {
+      body.push(pad + "sag_sb_push_bytes(sb, \"(weak)\", 6);");
+    } else {
+      body.push(pad + `sag_debug_${debug_position(all, item.ty).unwrap_or(0)}(sb, ${item.access}, indent + 1, pretty);`);
+    }
+
+    body.push(pad + "if (pretty) {");
+    body.push(pad + "  sag_sb_push_bytes(sb, \",\", 1);");
+    body.push(pad + "}");
+  }
+}
+
+/// `Name { a: 1, b: 2 }`, or `Name` without fields.
+fn debug_named(body: List<String>, name: String, items: List<DebugItem>, all: List<Type>, pad: String) {
+  body.push(pad + "sag_sb_push_bytes(sb, " + c_string_literal(name) + `, ${name.len()});`);
+
+  if items.is_empty() {
+    return;
+  }
+
+  body.push(pad + "sag_sb_push_bytes(sb, \" {\", 2);");
+  debug_items(body, items, all, pad, true);
+  body.push(pad + "sag_debug_end(sb, true, indent, pretty, true, \"}\");");
+}
+
+/// `Name(a, b)`.
+fn debug_tuple(body: List<String>, name: String, items: List<DebugItem>, all: List<Type>, pad: String) {
+  const open = name + "(";
+
+  body.push(pad + "sag_sb_push_bytes(sb, " + c_string_literal(open) + `, ${open.len()});`);
+  debug_items(body, items, all, pad, false);
+  body.push(pad + "sag_debug_end(sb, true, indent, pretty, false, \")\");");
 }
 
 /// Exported functions are called from the FFI translation unit; the others stay private.
@@ -1270,6 +1363,346 @@ class Generator {
       TypeKind::Slice { .. } => "sag_slice",
       TypeKind::Atomic(inner) => "_Atomic(" + self.c_type(inner) + ")",
     }
+  }
+
+  // ---- The debug form of values (docs/adr/0089-display-debug-and-format-specifiers.md, Q588) ----
+
+  /// `sag_debug_N(sb, value, indent, pretty)` for each type `{x:?}` writes and those inside it, and
+  /// `sag_debug_string_N(value, pretty)` for the ones the program writes, which SIR calls.
+  pub fn debug_support(self, program: Program) {
+    if program.debug_types.is_empty() {
+      return;
+    }
+
+    const all: List<Type> = new List();
+
+    for ty in program.debug_types {
+      all.push(ty);
+    }
+
+    var next = 0usize;
+
+    while next < all.len() {
+      for child in self.debug_children(all[next], program) {
+        if debug_position(all, child).is_none() {
+          all.push(child);
+        }
+      }
+
+      next += 1;
+    }
+
+    for index in 0..all.len() {
+      self.out.append(`static void sag_debug_${index}(sag_sb *sb, ` + self.c_type(all[index]) + " v, int32_t indent, bool pretty);\n");
+    }
+
+    for index in 0..program.debug_types.len() {
+      self.out.append(`static sag_string sag_debug_string_${index}(` + self.c_type(all[index]) + " v, bool pretty) {\n");
+      self.out.append(`  sag_sb sb;\n  sag_sb_init(&sb);\n  sag_debug_${index}(&sb, v, 0, pretty);\n  return sag_sb_finish(&sb);\n}\n`);
+    }
+
+    for index in 0..all.len() {
+      const body: List<String> = new List();
+
+      self.debug_body(all[index], all, program, body);
+      self.out.append(`static void sag_debug_${index}(sag_sb *sb, ` + self.c_type(all[index]) + " v, int32_t indent, bool pretty) {\n");
+      self.out.append("  (void)indent;\n  (void)pretty;\n");
+      self.out.append(body.join("\n") + "\n}\n");
+    }
+
+    self.out.append("\n");
+  }
+
+  /// The types whose debug form that of `ty` writes.
+  prv fn debug_children(self, ty: Type, program: Program) -> List<Type> {
+    const result: List<Type> = new List();
+
+    match ty.kind {
+      TypeKind::Struct(named) => {
+        if !self.layouts.is_union(ty) {
+          for field in self.layouts.struct_fields(named) {
+            result.push(field);
+          }
+        }
+      }
+      TypeKind::Enum(_) | TypeKind::Option(_) | TypeKind::Result { .. } => {
+        if self.layouts.enum_repr(ty).is_none() {
+          for part in self.flat_parts(ty) {
+            result.push(part);
+          }
+        }
+      }
+      TypeKind::Array { elem, .. } | TypeKind::List(elem) | TypeKind::Slice { elem, .. } => result.push(elem),
+      TypeKind::Class(class_ref) => {
+        if is_map(program, class_ref) {
+          for arg in class_ref.args {
+            result.push(arg);
+          }
+        } else {
+          for field in self.debug_fields(class_ref) {
+            if !field.is_weak {
+              result.push(field.ty);
+            }
+          }
+        }
+      }
+      _ => {}
+    }
+
+    result
+  }
+
+  /// Every field of a class instance, those of its ancestors first.
+  prv fn debug_fields(self, class_ref: NamedRef) -> List<DebugField> {
+    const chain: List<usize> = new List();
+    var current: Option<usize> = Some(self.class_index(class_ref));
+
+    while let Some(index) = current {
+      chain.insert(0, index);
+      current = match self.classes.get(index) {
+        Some(instance) => instance.parent,
+        None => None,
+      };
+    }
+
+    const fields: List<DebugField> = new List();
+
+    for index in chain {
+      if let Some(instance) = self.classes.get(index) {
+        for field in 0..instance.fields.len() {
+          var ty = instance.fields[field];
+          var access = `((sag_c${index} *)v)->f${field}`;
+
+          // An atomic is read as one (docs/adr/0087-atomic-storage-and-std-sync.md).
+          if let TypeKind::Atomic(inner) = ty.kind {
+            ty = inner;
+            access = "atomic_load(&" + access + ")";
+          }
+
+          fields.push(DebugField {
+            name: instance.field_names.get(field).unwrap_or(""),
+            ty: ty,
+            access: access,
+            is_weak: instance.weak_fields.get(field).unwrap_or(false),
+          });
+        }
+      }
+    }
+
+    fields
+  }
+
+  /// The C that writes the debug form of `v`, of type `ty`.
+  prv fn debug_body(self, ty: Type, all: List<Type>, program: Program, body: List<String>) {
+    match ty.kind {
+      TypeKind::Unit => body.push(push_text("()")),
+      TypeKind::Bool => body.push("  sag_sb_push_bool(sb, v);"),
+      TypeKind::Char => body.push("  sag_sb_push_debug_char(sb, v);"),
+      TypeKind::String => body.push("  sag_sb_push_debug_str(sb, v);"),
+      TypeKind::Int(int_ty) => body.push(if types::is_signed(int_ty) { "  sag_sb_push_i64(sb, (int64_t)v);" } else { "  sag_sb_push_u64(sb, (uint64_t)v);" }),
+      TypeKind::Float(FloatTy::F32) => body.push("  sag_sb_push_f32(sb, v);"),
+      TypeKind::Float(FloatTy::F64) => body.push("  sag_sb_push_f64(sb, v);"),
+      TypeKind::Ptr { .. } | TypeKind::Ref { .. } => body.push("  sag_sb_push_address(sb, (const void *)v);"),
+      TypeKind::Function { .. } | TypeKind::CFn { .. } => body.push(push_text("fn")),
+      TypeKind::StringBuilder => body.push(push_text("StringBuilder")),
+      TypeKind::CString => body.push(push_text("CString")),
+      TypeKind::Interface(interface_ref) => body.push(push_text("dyn " + interface_ref.name)),
+      TypeKind::Struct(named) => {
+        const layout = self.layouts.structs.get(named.id as usize);
+        const name = match layout {
+          Some(found) => found.name,
+          None => "",
+        };
+
+        if self.layouts.is_union(ty) {
+          body.push(push_text(name + " { .. }"));
+          return;
+        }
+
+        const names = match layout {
+          Some(found) => found.field_names,
+          None => new List<String>(),
+        };
+        const fields = self.layouts.struct_fields(named);
+        const items: List<DebugItem> = new List();
+
+        for index in 0..fields.len() {
+          items.push(DebugItem { label: names.get(index).unwrap_or(""), ty: fields[index], access: `v.f${index}` });
+        }
+
+        debug_named(body, name, items, all, "  ");
+      }
+      TypeKind::Array { elem, len } => {
+        body.push("  sag_sb_push_bytes(sb, \"[\", 1);");
+        body.push(`  for (size_t sag_k = 0; sag_k < ${len}u; sag_k++) {`);
+        body.push(debug_element(elem, "v.data[sag_k]", "sag_k == 0", all));
+        body.push("  }");
+        body.push(`  sag_debug_end(sb, ${len}u > 0, indent, pretty, false, "]");`);
+      }
+      TypeKind::List(elem) => {
+        const elem_type = self.c_type(elem);
+
+        body.push("  size_t sag_n = sag_list_len(v);");
+        body.push("  sag_sb_push_bytes(sb, \"[\", 1);");
+        body.push("  for (size_t sag_k = 0; sag_k < sag_n; sag_k++) {");
+        body.push(debug_element(elem, "(*(" + elem_type + " *)sag_list_at(v, sag_k, __FILE__, __LINE__))", "sag_k == 0", all));
+        body.push("  }");
+        body.push("  sag_debug_end(sb, sag_n > 0, indent, pretty, false, \"]\");");
+      }
+      TypeKind::Slice { elem, .. } => {
+        const elem_type = self.c_type(elem);
+
+        body.push("  sag_sb_push_bytes(sb, \"[\", 1);");
+        body.push("  for (size_t sag_k = 0; sag_k < v.len; sag_k++) {");
+        body.push(debug_element(elem, "((" + elem_type + " *)v.data)[sag_k]", "sag_k == 0", all));
+        body.push("  }");
+        body.push("  sag_debug_end(sb, v.len > 0, indent, pretty, false, \"]\");");
+      }
+      TypeKind::Option(inner) => {
+        if pkg::sir::is_nullable_pointer(ty) {
+          body.push("  if (v == NULL) {");
+          body.push("  " + push_text("None"));
+          body.push("    return;");
+          body.push("  }");
+          debug_tuple(body, "Some", List::from([DebugItem { label: "", ty: inner, access: "v" }]), all, "  ");
+        } else {
+          body.push("  if (v.tag == 0u) {");
+          body.push("  " + push_text("None"));
+          body.push("    return;");
+          body.push("  }");
+          debug_tuple(body, "Some", List::from([DebugItem { label: "", ty: inner, access: "v.u.v1.f0" }]), all, "  ");
+        }
+      }
+      TypeKind::Result { value, error } => {
+        body.push("  if (v.tag == 0u) {");
+        debug_tuple(body, "Ok", List::from([DebugItem { label: "", ty: value, access: "v.u.v0.f0" }]), all, "    ");
+        body.push("    return;");
+        body.push("  }");
+        debug_tuple(body, "Err", List::from([DebugItem { label: "", ty: error, access: "v.u.v1.f0" }]), all, "  ");
+      }
+      TypeKind::Enum(named) => {
+        const layout = match self.layouts.enums.get(named.id as usize) {
+          Some(found) => found,
+          None => return,
+        };
+
+        // An enum with an integer representation is its value (docs/spec/10-ffi.md).
+        if layout.repr.is_some() {
+          for index in 0..layout.values.len() {
+            body.push("  if (v == " + constant(layout.values[index]) + ") {");
+            body.push("  " + push_text(layout.variant_names.get(index).unwrap_or("")));
+            body.push("    return;");
+            body.push("  }");
+          }
+
+          body.push("  sag_sb_push_i64(sb, (int64_t)v);");
+          return;
+        }
+
+        const groups = self.parts(ty);
+
+        body.push("  switch (v.tag) {");
+
+        for variant in 0..groups.len() {
+          const name = layout.variant_names.get(variant).unwrap_or("");
+          const labels = layout.field_names.get(variant).unwrap_or(new List<String>());
+          const fields = groups[variant];
+          const items: List<DebugItem> = new List();
+
+          for index in 0..fields.len() {
+            items.push(DebugItem { label: labels.get(index).unwrap_or(""), ty: fields[index], access: `v.u.v${variant}.f${index}` });
+          }
+
+          body.push(`  case ${variant}u: {`);
+
+          if fields.is_empty() {
+            body.push("  " + push_text(name));
+          } else if labels.is_empty() {
+            debug_tuple(body, name, items, all, "    ");
+          } else {
+            debug_named(body, name, items, all, "    ");
+          }
+
+          body.push("    break;");
+          body.push("  }");
+        }
+
+        body.push("  default:");
+        body.push("    break;");
+        body.push("  }");
+      }
+      TypeKind::Class(class_ref) => {
+        if is_map(program, class_ref) {
+          self.debug_map(class_ref, all, body);
+          return;
+        }
+
+        // A cycle writes the class again without its fields.
+        body.push("  if (!sag_debug_enter(v)) {");
+        body.push("  " + push_text(class_ref.name + " { .. }"));
+        body.push("    return;");
+        body.push("  }");
+
+        const items: List<DebugItem> = new List();
+
+        for field in self.debug_fields(class_ref) {
+          if field.is_weak {
+            items.push(DebugItem { label: field.name, ty: types::unit(), access: "" });
+          } else {
+            items.push(DebugItem { label: field.name, ty: field.ty, access: field.access });
+          }
+        }
+
+        debug_named(body, class_ref.name, items, all, "  ");
+        body.push("  sag_debug_leave();");
+      }
+      _ => body.push(push_text("?")),
+    }
+  }
+
+  /// The prelude's `Map`: its entries in order, `{key: value, ...}`.
+  prv fn debug_map(self, class_ref: NamedRef, all: List<Type>, body: List<String>) {
+    const index = self.class_index(class_ref);
+    const instance = match self.classes.get(index) {
+      Some(found) => found,
+      None => return,
+    };
+    var items_field = 0usize;
+
+    for field in 0..instance.field_names.len() {
+      if instance.field_names[field] == "items" {
+        items_field = field;
+      }
+    }
+
+    const items_ty = instance.fields.get(items_field).unwrap_or(types::unit());
+    const entry_ty = match items_ty.kind {
+      TypeKind::List(elem) => elem,
+      _ => return,
+    };
+    const key_ty = class_ref.args.get(0).unwrap_or(types::unit());
+    const value_ty = class_ref.args.get(1).unwrap_or(types::unit());
+    const entry_type = self.c_type(entry_ty);
+
+    body.push(`  sag_object *sag_items = ((sag_c${index} *)v)->f${items_field};`);
+    body.push("  size_t sag_n = sag_list_len(sag_items);");
+    body.push("  bool sag_any = false;");
+    body.push("  sag_sb_push_bytes(sb, \"{\", 1);");
+    body.push("  for (size_t sag_k = 0; sag_k < sag_n; sag_k++) {");
+    body.push("    " + entry_type + " sag_e = *(" + entry_type + " *)sag_list_at(sag_items, sag_k, __FILE__, __LINE__);");
+    body.push("    if (sag_e.tag != 1u) {");
+    body.push("      continue;");
+    body.push("    }");
+    body.push("    sag_debug_next(sb, !sag_any, indent + 1, pretty, false);");
+    body.push("    sag_any = true;");
+    body.push(`    sag_debug_${debug_position(all, key_ty).unwrap_or(0)}(sb, sag_e.u.v1.f0.f0, indent + 1, pretty);`);
+    body.push("    sag_sb_push_bytes(sb, \": \", 2);");
+    body.push(`    sag_debug_${debug_position(all, value_ty).unwrap_or(0)}(sb, sag_e.u.v1.f0.f1, indent + 1, pretty);`);
+    body.push("    if (pretty) {");
+    body.push("      sag_sb_push_bytes(sb, \",\", 1);");
+    body.push("    }");
+    body.push("  }");
+    body.push("  sag_debug_end(sb, sag_any, indent, pretty, false, \"}\");");
   }
 
   /// The C `main`, which calls the program's `main`; a library has none.

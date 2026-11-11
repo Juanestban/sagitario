@@ -177,6 +177,16 @@ arguments have the type of the receiver, unless written otherwise.
   specifier that does not fit its value (`x` on a float, a precision on an integer, `+` or `0` on
   text, `#` without a base) or is not valid is an error (`E0007`). The widths and precisions are
   literal numbers.
+- `{x:?}` writes the debug form of any value, which the compiler gives every type, as Rust's
+  derived `Debug`: numbers and `bool` as above, `char` and `String` quoted with Rust's escapes
+  (`'a'`, `"tab	"`), `Some(1)`, `None`, `Ok(..)`, `Err(..)`, structs and classes with every
+  field (`Point { x: 1, y: 2 }`, those of a parent class first), enum variants by name with their
+  fields (`Circle(2.5)`, `Rect { w: 1, h: 2 }`, `Empty`), lists, arrays and slices as `[1, 2]`, maps
+  as `{"a": 1}`, a weak field as `(weak)`, a function value as `fn`, a raw pointer as its address
+  and an interface value as `dyn Name`. A class instance reached again while its own form is
+  being written is `Name { .. }`. `{x:#?}` writes one field or element per line, indented by four
+  spaces, each followed by a comma. A width, fill and alignment apply to the debug form too; `+`,
+  `0` and a precision do not (`E0007`).
 - Byte indexing (`s[i]`) is not allowed; use `s.chars()` or `s.bytes()`.
 - `a + b` creates a new `String`; `s += t` is `s = s + t`. `==`, `!=`, `<`, `<=`, `>`, `>=`
   compare the bytes lexicographically.
