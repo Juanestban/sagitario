@@ -2,11 +2,11 @@
 //! differs by system, as Rust's `std/src/sys` (docs/adr/0085-conditional-compilation-and-std-time.md,
 //! Q551). Only the modules of `std` can name it.
 
-use std::ffi::{c_char, c_int, c_void, string_from_c};
+use std::ffi::{c_char, c_int, c_void, string_from_c, CString};
 @cfg(windows)
 use std::mem;
 @cfg(unix)
-use std::ffi::{c_long, CString};
+use std::ffi::c_long;
 
 // ---- errno ------------------------------------------------------------------------------------
 
@@ -2214,4 +2214,87 @@ pub fn run_process(argv: List<String>, vars: List<String>, dir: Option<String>, 
   }
 
   Ok(Finished { code: Some(exit as i32), stdout: stdout, stderr: stderr })
+}
+
+// ---- Dynamic libraries ------------------------------------------------------------------------
+
+/// Why a library was not loaded, when its path cannot be a C string.
+const NUL_IN_PATH: String = "the path contains a NUL character";
+
+@cfg(unix)
+extern "C" {
+  fn dlopen(path: *const c_char, mode: c_int) -> *mut c_void;
+  fn dlerror() -> *const c_char;
+  fn dlsym(library: *mut c_void, name: *const c_char) -> *mut c_void;
+}
+
+/// `RTLD_NOW | RTLD_LOCAL`: the symbols are bound when the library loads, and stay its own.
+/// `RTLD_LOCAL` is 0 except on Apple systems, and 32-bit Android has `RTLD_NOW` 0.
+@cfg(any(target_os = "linux", all(target_os = "android", target_pointer_width = "64")))
+const LOAD_MODE: c_int = 2;
+@cfg(all(target_os = "android", target_pointer_width = "32"))
+const LOAD_MODE: c_int = 0;
+@cfg(any(target_os = "macos", target_os = "ios"))
+const LOAD_MODE: c_int = 6;
+
+/// Loads the library at `path`, or by its name as the system finds it: the library, or the
+/// system's reason.
+@cfg(unix)
+pub fn open_library(path: String) -> Result<*mut c_void, String> {
+  const name = match c_path(path) {
+    Some(found) => found,
+    None => return Err(NUL_IN_PATH),
+  };
+  const library = unsafe { dlopen(name.as_ptr(), LOAD_MODE) };
+
+  if !library.is_null() {
+    return Ok(library);
+  }
+
+  const reason = unsafe { dlerror() };
+
+  Err(if reason.is_null() { "unknown error" } else { unsafe { string_from_c(reason) } })
+}
+
+/// The function `name` of `library`, or `None`. POSIX guarantees that the data pointer `dlsym`
+/// gives holds a function's address.
+@cfg(unix)
+pub fn library_symbol(library: *mut c_void, name: String) -> Option<unsafe extern "C" fn()> {
+  const c_name = c_path(name)?;
+  const address = unsafe { dlsym(library, c_name.as_ptr()) };
+
+  if address.is_null() { None } else { Some(unsafe { address as unsafe extern "C" fn() }) }
+}
+
+@cfg(windows)
+extern "C" {
+  fn LoadLibraryW(name: *const u16) -> *mut c_void;
+  fn GetProcAddress(library: *mut c_void, name: *const c_char) -> Option<unsafe extern "C" fn()>;
+}
+
+@cfg(windows)
+pub fn open_library(path: String) -> Result<*mut c_void, String> {
+  const name = match wide_path(path) {
+    Some(found) => found,
+    None => return Err(NUL_IN_PATH),
+  };
+  const library = unsafe { LoadLibraryW(name.as_ptr()) };
+
+  if !library.is_null() {
+    return Ok(library);
+  }
+
+  const error = unsafe { GetLastError() };
+
+  Err(`Windows error ${error}`)
+}
+
+@cfg(windows)
+pub fn library_symbol(library: *mut c_void, name: String) -> Option<unsafe extern "C" fn()> {
+  const c_name = match CString::new(name) {
+    Ok(found) => found,
+    Err(_) => return None,
+  };
+
+  unsafe { GetProcAddress(library, c_name.as_ptr()) }
 }

@@ -161,5 +161,11 @@ extern "C" {
   runtime's reader threads, named pipes opened for overlapped I/O, waited for with
   `WaitForMultipleObjects`, as Rust's `std` reads two pipes: threads would make every program
   using `Command` count references atomically. `tests/run-pass/std_command.sag` gains an input
-  longer than a pipe holds. The runtime keeps `sag_wide`, which dynamic libraries use.
+  longer than a pipe holds.
+- Dynamic libraries (`std::ffi::Library`) are done, the seventh module of S1: `std::sys` calls
+  `dlopen`, `dlerror` and `dlsym` on Unix, and `LoadLibraryW` and `GetProcAddress` on Windows,
+  and gives the reason of a failure as a value, so the runtime's thread-local reason goes too.
+  `RTLD_NOW | RTLD_LOCAL` differs by system (2 on Linux and 64-bit Android, 0 on 32-bit Android,
+  6 on Apple systems). The address `dlsym` gives becomes a function pointer with `as`, which
+  POSIX allows. The runtime's UTF-16 conversion (`sag_wide`) goes with them.
 

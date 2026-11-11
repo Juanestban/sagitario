@@ -763,12 +763,6 @@ void sag_env_init(int argc, const char *const *argv);
 /* Flushes output and ends the program without running pending releases. */
 _Noreturn void sag_process_exit(int32_t code);
 
-/* Dynamic libraries (docs/adr/0078-ffi-without-c-shims.md): a library, never unloaded, or NULL
- * with the reason in `sag_library_error`; and one of its functions, or NULL. */
-typedef void (*sag_symbol)(void);
-void *sag_library_open(sag_string path);
-sag_string sag_library_error(void);
-sag_symbol sag_library_symbol(void *library, sag_string name);
 /* Nanoseconds of a monotonic clock, and sleeping at least `nanos` nanoseconds: written in
  * Sagitario in `std::time`, which every program compiles, for the timers of the core
  * (docs/adr/0085-conditional-compilation-and-std-time.md, Q552). */

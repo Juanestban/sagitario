@@ -1,6 +1,6 @@
 /* `getenv` is standard C11; MSVC's CRT only deprecates it in favor of non-portable variants. */
 #define _CRT_SECURE_NO_WARNINGS
-/* The clocks, threads and dynamic libraries of the runtime are POSIX, not C11. */
+/* The clocks and threads of the runtime are POSIX, not C11. */
 #if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
 #define _POSIX_C_SOURCE 200809L
 #endif
@@ -27,7 +27,6 @@
 #ifdef __APPLE__
 #include <sys/sysctl.h>
 #endif
-#include <dlfcn.h>
 #endif
 
 /* ---- Reference counts and thread-local state ------------------------------------------- */
@@ -1236,8 +1235,6 @@ static sag_string sag_string_from_bytes_lossy(const uint8_t *bytes, size_t len) 
 /* ---- Standard library: std::process ------------------------------------------------------ */
 
 #ifdef _WIN32
-#include <wchar.h>
-
 /* The kernel32 functions the runtime calls are declared here, because <windows.h> is not strict
  * C11. */
 #if defined(_M_IX86) || defined(__i386__)
@@ -1255,34 +1252,12 @@ _Noreturn void sag_process_exit(int32_t code) {
   _Exit((int)code);
 }
 
-/* ---- Windows handles and UTF-16 paths, for the threads and the dynamic libraries ----------- */
+/* ---- Windows handles, for the threads -------------------------------------------------- */
 
 #ifdef _WIN32
 /* kernel32 declarations, with the Windows types spelled out: BOOL is `int`, DWORD
  * `unsigned long` and HANDLE `void *`. */
 extern int SAG_WINAPI CloseHandle(void *handle);
-extern unsigned long SAG_WINAPI GetLastError(void);
-
-/* `s` as a NUL-terminated UTF-16 string, or NULL if it contains a NUL character. */
-static wchar_t *sag_wide(sag_string s) {
-  if (memchr(s.ptr, 0, s.len) != NULL) {
-    return NULL;
-  }
-  wchar_t *wide = sag_alloc((s.len + 1) * sizeof(wchar_t));
-  size_t len = 0;
-  size_t index = 0;
-  while (index < s.len) {
-    uint32_t c = sag_utf8_next(s, &index);
-    if (c >= 0x10000) {
-      wide[len++] = (wchar_t)(0xD800 + ((c - 0x10000) >> 10));
-      wide[len++] = (wchar_t)(0xDC00 + ((c - 0x10000) & 0x3FF));
-    } else {
-      wide[len++] = (wchar_t)c;
-    }
-  }
-  wide[len] = 0;
-  return wide;
-}
 #endif
 
 /* ---- Tasks (docs/spec/12-async.md) ----------------------------------------------------- */
@@ -1979,95 +1954,6 @@ static void sag_task_close_inbox(void) {
   sag_object_release(&inbox->header);
 }
 #endif
-
-/* ---- Dynamic libraries (docs/adr/0078-ffi-without-c-shims.md) --------------------------- */
-
-#ifdef _WIN32
-extern void *SAG_WINAPI LoadLibraryW(const wchar_t *name);
-extern sag_symbol SAG_WINAPI GetProcAddress(void *library, const char *name);
-extern unsigned long SAG_WINAPI GetLastError(void);
-#endif
-
-/* Why the last library of this thread did not load. */
-static SAG_THREAD_LOCAL char sag_library_reason[256];
-
-static void sag_library_set_reason(const char *text) {
-  size_t len = strlen(text);
-  if (len >= sizeof sag_library_reason) {
-    len = sizeof sag_library_reason - 1;
-  }
-  memcpy(sag_library_reason, text, len);
-  sag_library_reason[len] = '\0';
-}
-
-/* A C string with the text of `name`, or NULL if it contains a NUL character. */
-static char *sag_library_c_name(sag_string name) {
-  if (memchr(name.ptr, 0, name.len) != NULL) {
-    return NULL;
-  }
-  char *text = sag_alloc(name.len + 1);
-  memcpy(text, name.ptr, name.len);
-  text[name.len] = 0;
-  return text;
-}
-
-void *sag_library_open(sag_string path) {
-#ifdef _WIN32
-  wchar_t *wide = sag_wide(path);
-  if (wide == NULL) {
-    sag_library_set_reason("the path contains a NUL character");
-    return NULL;
-  }
-  void *library = LoadLibraryW(wide);
-  free(wide);
-  if (library == NULL) {
-    char reason[64];
-    snprintf(reason, sizeof reason, "Windows error %lu", GetLastError());
-    sag_library_set_reason(reason);
-  }
-  return library;
-#else
-  char *cpath = sag_library_c_name(path);
-  if (cpath == NULL) {
-    sag_library_set_reason("the path contains a NUL character");
-    return NULL;
-  }
-  void *library = dlopen(cpath, RTLD_NOW | RTLD_LOCAL);
-  free(cpath);
-  if (library == NULL) {
-    const char *reason = dlerror();
-    sag_library_set_reason(reason != NULL ? reason : "unknown error");
-  }
-  return library;
-#endif
-}
-
-sag_string sag_library_error(void) {
-  sag_sb sb;
-  sag_sb_init(&sb);
-  sag_sb_push_bytes(&sb, sag_library_reason, strlen(sag_library_reason));
-  return sag_sb_finish(&sb);
-}
-
-sag_symbol sag_library_symbol(void *library, sag_string name) {
-  char *cname = sag_library_c_name(name);
-  if (cname == NULL) {
-    return NULL;
-  }
-#ifdef _WIN32
-  sag_symbol symbol = GetProcAddress(library, cname);
-#else
-  /* POSIX guarantees that a data pointer from `dlsym` holds a function's address; ISO C does not
-   * define the cast, so the bits are copied. */
-  void *address = dlsym(library, cname);
-  sag_symbol symbol = NULL;
-  if (address != NULL) {
-    memcpy(&symbol, &address, sizeof symbol);
-  }
-#endif
-  free(cname);
-  return symbol;
-}
 
 /* ---- Statics (docs/adr/0083-global-state.md) ------------------------------------------ */
 

@@ -297,7 +297,7 @@ compiled with every program:
 - panic (message, file, line, exit code 101), including the array bounds check
   `sag_index_at`,
 - `String` storage and UTF-8 helpers, allocation,
-- basic I/O used by `std`,
+- the printing of the prelude (`print`, `println`), through C's streams as `std::io`,
 - overflow-checked integer helpers (`sag_add_i32_at`, ...) that panic in debug and wrap when
   compiled with `-DSAG_RELEASE` (`sag build --release`), saturating float-to-integer casts,
 - a string builder used by template strings, with shortest round-trip float formatting,
@@ -305,8 +305,8 @@ compiled with every program:
   parsing (`sag_parse_*`), ASCII `char` helpers and the ARC `StringBuilder` (`sag_builder_*`),
 - FFI support: the ARC `CString` (`sag_cstring_*`), `sag_string_from_c_at` (lossy UTF-8),
   `sag_c_char` (C's `char`), the raw pointer macros (`SAG_PTR_ADD`, `SAG_CHECK_PTR`,
-  `SAG_LIST_PTR`, ...), and the dynamic libraries of `std::ffi::Library` (`sag_library_*`, with
-  `LoadLibraryW` or `dlopen`, linked with `-ldl` on Linux and Android),
+  `SAG_LIST_PTR`, ...); the dynamic libraries of `std::ffi::Library` are written in `std::sys`
+  (`dlopen`, linked with `-ldl` on Linux and Android, or `LoadLibraryW`),
 - a live-object counter checked at exit when `SAG_LEAK_CHECK` is set (exit code 102),
 - the executor of tasks of each thread (`sag_task_*`, [ADR-0072](adr/0072-async-await-increments.md)):
   the functions ready to resume tasks, first in first out, the timers of `task::sleep`, by
