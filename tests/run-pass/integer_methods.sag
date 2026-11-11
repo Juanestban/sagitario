@@ -1,0 +1,46 @@
+// The integer methods of spec 2 and their limits
+// (docs/adr/0088-bitwise-operators-and-integer-methods.md, Q580).
+// expect-stdout: limits -2147483648 2147483647 0 255 -9223372036854775808 18446744073709551615
+// expect-stdout: wrapping -2147483648 255 0 -128 1 2
+// expect-stdout: checked Some(7) None None None None Some(-3) None None Some(8) None
+// expect-stdout: saturating 255 0 2147483647 -2147483648 -2147483648 255
+// expect-stdout: bits 3 29 30 0 32 4 8 0 6
+// expect-stdout: rotate 32 -2147483648 2 1 13330 4660
+// expect-stdout: power true false false
+// expect-stdout: constant 4294967295 -128
+
+const ALL: u32 = u32::MAX;
+const LOW: i8 = i8::MIN;
+
+/// The values are read at run time, so the C computes them.
+fn value<T>(x: T) -> T {
+  x
+}
+
+fn show<T>(found: Option<T>, text: fn(T) -> String) -> String {
+  match found {
+    Some(inner) => f"Some({text(inner)})",
+    None => "None",
+  }
+}
+
+fn main() {
+  println(f"limits {i32::MIN} {i32::MAX} {u8::MIN} {u8::MAX} {i64::MIN} {u64::MAX}");
+
+  const max = value(i32::MAX);
+  println(f"wrapping {max.wrapping_add(1)} {value(0u8).wrapping_sub(1)} {value(16u8).wrapping_mul(16)} {value(-128i8).wrapping_neg()} {value(1u8).wrapping_shl(8)} {value(8i32).wrapping_shr(34)}");
+
+  const i32_text = (x: i32) => f"{x}";
+  const u8_text = (x: u8) => f"{x}";
+  println(f"checked {show(value(3i32).checked_add(4), i32_text)} {show(max.checked_add(1), i32_text)} {show(value(200u8).checked_add(100), u8_text)} {show(value(1i32).checked_div(0), i32_text)} {show(value(i32::MIN).checked_div(-1), i32_text)} {show(value(3i32).checked_neg(), i32_text)} {show(value(i32::MIN).checked_neg(), i32_text)} {show(value(1u8).checked_shl(8), u8_text)} {show(value(1u8).checked_shl(3), u8_text)} {show(value(0u8).checked_sub(1), u8_text)}");
+
+  println(f"saturating {value(250u8).saturating_add(10)} {value(5u8).saturating_sub(10)} {max.saturating_add(5)} {value(i32::MIN).saturating_sub(1)} {max.saturating_mul(-2)} {value(16u8).saturating_mul(16)}");
+
+  println(f"bits {value(7u8).count_ones()} {value(7u32).count_zeros()} {value(3u32).leading_zeros()} {value(-1i32).leading_zeros()} {value(0u32).trailing_zeros()} {value(16u8).trailing_zeros()} {value(0u8).leading_zeros()} {value(0i64).count_ones()} {value(-64i8).trailing_zeros()}");
+
+  println(f"rotate {value(1u8).rotate_left(5)} {value(1i32).rotate_right(1)} {value(1u64).rotate_left(65)} {value(128u8).rotate_left(1)} {value(0x1234u16).swap_bytes()} {value(0x3412u16).swap_bytes()}");
+
+  println(f"power {value(64u32).is_power_of_two()} {value(0u32).is_power_of_two()} {value(6usize).is_power_of_two()}");
+
+  println(f"constant {ALL} {LOW}");
+}

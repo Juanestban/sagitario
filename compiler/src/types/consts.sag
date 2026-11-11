@@ -15,6 +15,7 @@ use pkg::resolve::Res;
 use pkg::span::Span;
 use pkg::types::{Checker, FloatTy, IntTy, Type, TypeKind};
 use pkg::types;
+use pkg::types::numbers;
 use std::fs;
 use std::io::ErrorKind;
 use std::path;
@@ -279,6 +280,15 @@ fn const_eval(cx: Checker, expr: Expr, hint: Option<Type>, module: usize) -> Opt
     }
     ExprKind::Path(_) => match cx.resolution.paths.get(expr.id) {
       Some(Res::Const(other)) => const_value(cx, other, Some(expr.span)),
+      Some(Res::Builtin(name)) if numbers::int_limit(name).is_some() => match numbers::int_limit(name) {
+        Some(limit) => {
+          const max = types::int_max(limit.ty, cx.target.pointer_width);
+          const value = if limit.max { Wide::of(false, max) } else if types::is_signed(limit.ty) { Wide::of(true, max + 1) } else { Wide::of(false, 0) };
+
+          Some(Typed { ty: types::int(limit.ty), value: ConstValue::Int(value) })
+        }
+        None => not_constant(cx, expr.span),
+      },
       _ => not_constant(cx, expr.span),
     },
     ExprKind::Unary { op, operand } => {

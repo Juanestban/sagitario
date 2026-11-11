@@ -68,7 +68,10 @@ Division by zero, out-of-bounds indexing and every other panic behave the same i
 ## Integer arithmetic
 
 - Overflow **panics in debug builds** and **wraps in release builds**.
-- The standard library provides explicit `wrapping_*`, `checked_*` and `saturating_*` methods.
+- The [methods of integers](#methods-of-numbers-g1) `wrapping_*`, `checked_*` and `saturating_*`
+  never panic on overflow: they wrap, give `None`, or stop at the limit of the type.
+- `i32::MIN` and `i32::MAX` (and those of every integer type) are the limits of the type, as
+  constants.
 - Integer division by zero always panics, in every build mode.
 - The generated C must never rely on undefined behavior (see
   [architecture](../architecture.md#c-code-generation)).
@@ -77,7 +80,8 @@ Division by zero, out-of-bounds indexing and every other panic behave the same i
 
 Rationale: [ADR-0076](../adr/0076-std-math-and-methods-of-numbers.md),
 [ADR-0077](../adr/0077-std-math-powers-and-logarithms.md),
-[ADR-0080](../adr/0080-std-math-trigonometry.md). Besides `equals`,
+[ADR-0080](../adr/0080-std-math-trigonometry.md),
+[ADR-0088](../adr/0088-bitwise-operators-and-integer-methods.md). Besides `equals`,
 `compare` and `hash` (integers) and `total_compare` (floats), numbers have these methods; their
 arguments have the type of the receiver, unless written otherwise.
 
@@ -105,6 +109,17 @@ arguments have the type of the receiver, unless written otherwise.
 | `atan2(x)` | | yes | the angle of the point `(x, y)` with `y` the receiver, in `[-Ï€, Ï€]`, following the signs of zeros (`0.0.atan2(-0.0)` is Ï€) |
 | `sinh()`, `cosh()`, `tanh()` | | yes | the hyperbolic functions |
 | `to_degrees()`, `to_radians()` | | yes | the angle in degrees or in radians |
+| `wrapping_add(other)`, `wrapping_sub(other)`, `wrapping_mul(other)` | yes | | the result modulo the width of the type, in every build |
+| `wrapping_neg()` | signed | | `-x` modulo the width: the smallest value stays itself |
+| `wrapping_shl(n: u32)`, `wrapping_shr(n: u32)` | yes | | `x << (n % width)`, `x >> (n % width)` |
+| `checked_add(other)`, `checked_sub(other)`, `checked_mul(other)`, `checked_div(other)`, `checked_rem(other)` | yes | | `Option<T>`: the result, or `None` on overflow or a division by zero |
+| `checked_neg()` | signed | | `Option<T>`: `None` for the smallest value |
+| `checked_shl(n: u32)`, `checked_shr(n: u32)` | yes | | `Option<T>`: `None` when `n` is the width of the type or more |
+| `saturating_add(other)`, `saturating_sub(other)`, `saturating_mul(other)` | yes | | the result, or the limit of the type it would pass |
+| `count_ones()`, `count_zeros()`, `leading_zeros()`, `trailing_zeros()` | yes | | `u32`: the bits set or clear, in all or before the first set bit from the top or the bottom; the width for zero |
+| `rotate_left(n: u32)`, `rotate_right(n: u32)` | yes | | the bits moved by `n % width`, those leaving one end entering at the other |
+| `swap_bytes()` | yes | | the bytes in the reverse order |
+| `is_power_of_two()` | unsigned | | whether `x` is `1`, `2`, `4`...; `false` for `0` |
 
 - `abs()` and `pow()` overflow as arithmetic does: a panic in debug builds, wrapping in release
   builds (the `abs()` of the smallest value of a type is itself). On unsigned integers `abs()`

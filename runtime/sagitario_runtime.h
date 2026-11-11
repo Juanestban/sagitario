@@ -407,6 +407,255 @@ SAG_UNSIGNED_SHIFTS(u32, uint32_t)
 SAG_UNSIGNED_SHIFTS(u64, uint64_t)
 SAG_UNSIGNED_SHIFTS(usize, size_t)
 
+/* ---- Integer methods that never panic, and bits ------------------------------------------
+ * `wrapping_*`, `checked_*`, `saturating_*`, the counts of bits, rotations and byte swaps
+ * (docs/adr/0088-bitwise-operators-and-integer-methods.md, Q580). As above, values are computed
+ * through `uint64_t` and the unsigned type `UT` of the same width; a `checked_*` function writes
+ * its result to `*out` and returns whether there is one. */
+
+#define SAG_INT_BITS(NAME, T, UT)                                                                         \
+  static inline T sag_wrapping_add_##NAME(T a, T b) {                                                   \
+    return (T)(UT)((uint64_t)a + (uint64_t)b);                                                          \
+  }                                                                                                     \
+  static inline T sag_wrapping_sub_##NAME(T a, T b) {                                                   \
+    return (T)(UT)((uint64_t)a - (uint64_t)b);                                                          \
+  }                                                                                                     \
+  static inline T sag_wrapping_mul_##NAME(T a, T b) {                                                   \
+    return (T)(UT)((uint64_t)a * (uint64_t)b);                                                          \
+  }                                                                                                     \
+  static inline T sag_wrapping_shl_##NAME(T a, uint32_t n) {                                            \
+    return (T)(UT)((uint64_t)(UT)a << (n % (sizeof(T) * 8u)));                                          \
+  }                                                                                                     \
+  static inline bool sag_checked_shl_##NAME(T a, uint32_t n, T *out) {                                  \
+    if (n >= sizeof(T) * 8u) {                                                                          \
+      return false;                                                                                     \
+    }                                                                                                   \
+    *out = (T)(UT)((uint64_t)(UT)a << n);                                                               \
+    return true;                                                                                        \
+  }                                                                                                     \
+  static inline uint32_t sag_count_ones_##NAME(T a) {                                                   \
+    uint64_t x = (UT)a;                                                                                 \
+    uint32_t count = 0;                                                                                 \
+    while (x != 0) {                                                                                    \
+      count += (uint32_t)(x & 1u);                                                                      \
+      x >>= 1;                                                                                          \
+    }                                                                                                   \
+    return count;                                                                                       \
+  }                                                                                                     \
+  static inline uint32_t sag_count_zeros_##NAME(T a) {                                                  \
+    return (uint32_t)(sizeof(T) * 8u) - sag_count_ones_##NAME(a);                                       \
+  }                                                                                                     \
+  static inline uint32_t sag_leading_zeros_##NAME(T a) {                                                \
+    uint64_t x = (UT)a;                                                                                 \
+    uint32_t count = 0;                                                                                 \
+    for (uint32_t bit = (uint32_t)(sizeof(T) * 8u); bit > 0 && ((x >> (bit - 1)) & 1u) == 0; bit--) {   \
+      count++;                                                                                          \
+    }                                                                                                   \
+    return count;                                                                                       \
+  }                                                                                                     \
+  static inline uint32_t sag_trailing_zeros_##NAME(T a) {                                               \
+    uint64_t x = (UT)a;                                                                                 \
+    uint32_t count = 0;                                                                                 \
+    if (x == 0) {                                                                                       \
+      return (uint32_t)(sizeof(T) * 8u);                                                                \
+    }                                                                                                   \
+    while ((x & 1u) == 0) {                                                                             \
+      x >>= 1;                                                                                          \
+      count++;                                                                                          \
+    }                                                                                                   \
+    return count;                                                                                       \
+  }                                                                                                     \
+  static inline T sag_rotate_left_##NAME(T a, uint32_t n) {                                             \
+    uint32_t bits = (uint32_t)(sizeof(T) * 8u);                                                         \
+    uint64_t x = (UT)a;                                                                                 \
+    n %= bits;                                                                                          \
+    if (n == 0) {                                                                                       \
+      return a;                                                                                         \
+    }                                                                                                   \
+    return (T)(UT)((x << n) | (x >> (bits - n)));                                                       \
+  }                                                                                                     \
+  static inline T sag_rotate_right_##NAME(T a, uint32_t n) {                                            \
+    uint32_t bits = (uint32_t)(sizeof(T) * 8u);                                                         \
+    uint64_t x = (UT)a;                                                                                 \
+    n %= bits;                                                                                          \
+    if (n == 0) {                                                                                       \
+      return a;                                                                                         \
+    }                                                                                                   \
+    return (T)(UT)((x >> n) | (x << (bits - n)));                                                       \
+  }                                                                                                     \
+  static inline T sag_swap_bytes_##NAME(T a) {                                                          \
+    uint64_t x = (UT)a;                                                                                 \
+    uint64_t swapped = 0;                                                                               \
+    for (size_t byte = 0; byte < sizeof(T); byte++) {                                                   \
+      swapped = (swapped << 8) | (x & 0xFFu);                                                           \
+      x >>= 8;                                                                                          \
+    }                                                                                                   \
+    return (T)(UT)swapped;                                                                              \
+  }
+
+#define SAG_SIGNED_EXTRAS(NAME, T, UT, MIN, MAX)                                                          \
+  SAG_INT_BITS(NAME, T, UT)                                                                             \
+  static inline bool sag_add_overflows_##NAME(T a, T b) {                                               \
+    return (b > 0 && a > (T)(MAX - b)) || (b < 0 && a < (T)(MIN - b));                                   \
+  }                                                                                                     \
+  static inline bool sag_sub_overflows_##NAME(T a, T b) {                                               \
+    return (b < 0 && a > (T)(MAX + b)) || (b > 0 && a < (T)(MIN + b));                                   \
+  }                                                                                                     \
+  static inline bool sag_mul_overflows_##NAME(T a, T b) {                                               \
+    if (a > 0) {                                                                                        \
+      return b > 0 ? a > (T)(MAX / b) : b < (T)(MIN / a);                                               \
+    }                                                                                                   \
+    if (a < 0) {                                                                                        \
+      return b > 0 ? a < (T)(MIN / b) : (b != 0 && b < (T)(MAX / a));                                   \
+    }                                                                                                   \
+    return false;                                                                                       \
+  }                                                                                                     \
+  static inline T sag_wrapping_neg_##NAME(T a) {                                                        \
+    return (T)(UT)(UINT64_C(0) - (uint64_t)a);                                                          \
+  }                                                                                                     \
+  static inline T sag_wrapping_shr_##NAME(T a, uint32_t n) {                                            \
+    n %= (uint32_t)(sizeof(T) * 8u);                                                                    \
+    return a < 0 ? (T)~(T)((T)~a >> n) : (T)(a >> n);                                                   \
+  }                                                                                                     \
+  static inline bool sag_checked_add_##NAME(T a, T b, T *out) {                                         \
+    if (sag_add_overflows_##NAME(a, b)) {                                                               \
+      return false;                                                                                     \
+    }                                                                                                   \
+    *out = sag_wrapping_add_##NAME(a, b);                                                               \
+    return true;                                                                                        \
+  }                                                                                                     \
+  static inline bool sag_checked_sub_##NAME(T a, T b, T *out) {                                         \
+    if (sag_sub_overflows_##NAME(a, b)) {                                                               \
+      return false;                                                                                     \
+    }                                                                                                   \
+    *out = sag_wrapping_sub_##NAME(a, b);                                                               \
+    return true;                                                                                        \
+  }                                                                                                     \
+  static inline bool sag_checked_mul_##NAME(T a, T b, T *out) {                                         \
+    if (sag_mul_overflows_##NAME(a, b)) {                                                               \
+      return false;                                                                                     \
+    }                                                                                                   \
+    *out = sag_wrapping_mul_##NAME(a, b);                                                               \
+    return true;                                                                                        \
+  }                                                                                                     \
+  static inline bool sag_checked_div_##NAME(T a, T b, T *out) {                                         \
+    if (b == 0 || (a == MIN && b == -1)) {                                                              \
+      return false;                                                                                     \
+    }                                                                                                   \
+    *out = (T)(a / b);                                                                                  \
+    return true;                                                                                        \
+  }                                                                                                     \
+  static inline bool sag_checked_rem_##NAME(T a, T b, T *out) {                                         \
+    if (b == 0 || (a == MIN && b == -1)) {                                                              \
+      return false;                                                                                     \
+    }                                                                                                   \
+    *out = (T)(a % b);                                                                                  \
+    return true;                                                                                        \
+  }                                                                                                     \
+  static inline bool sag_checked_neg_##NAME(T a, T *out) {                                              \
+    if (a == MIN) {                                                                                     \
+      return false;                                                                                     \
+    }                                                                                                   \
+    *out = (T)(-a);                                                                                     \
+    return true;                                                                                        \
+  }                                                                                                     \
+  static inline bool sag_checked_shr_##NAME(T a, uint32_t n, T *out) {                                  \
+    if (n >= sizeof(T) * 8u) {                                                                          \
+      return false;                                                                                     \
+    }                                                                                                   \
+    *out = sag_wrapping_shr_##NAME(a, n);                                                               \
+    return true;                                                                                        \
+  }                                                                                                     \
+  static inline T sag_saturating_add_##NAME(T a, T b) {                                                 \
+    if (sag_add_overflows_##NAME(a, b)) {                                                               \
+      return b > 0 ? MAX : MIN;                                                                         \
+    }                                                                                                   \
+    return sag_wrapping_add_##NAME(a, b);                                                               \
+  }                                                                                                     \
+  static inline T sag_saturating_sub_##NAME(T a, T b) {                                                 \
+    if (sag_sub_overflows_##NAME(a, b)) {                                                               \
+      return b < 0 ? MAX : MIN;                                                                         \
+    }                                                                                                   \
+    return sag_wrapping_sub_##NAME(a, b);                                                               \
+  }                                                                                                     \
+  static inline T sag_saturating_mul_##NAME(T a, T b) {                                                 \
+    if (sag_mul_overflows_##NAME(a, b)) {                                                               \
+      return (a < 0) != (b < 0) ? MIN : MAX;                                                            \
+    }                                                                                                   \
+    return sag_wrapping_mul_##NAME(a, b);                                                               \
+  }
+
+#define SAG_UNSIGNED_EXTRAS(NAME, T, MAX)                                                                 \
+  SAG_INT_BITS(NAME, T, T)                                                                              \
+  static inline T sag_wrapping_shr_##NAME(T a, uint32_t n) {                                            \
+    return (T)((uint64_t)a >> (n % (sizeof(T) * 8u)));                                                  \
+  }                                                                                                     \
+  static inline bool sag_checked_add_##NAME(T a, T b, T *out) {                                         \
+    if (a > (T)(MAX - b)) {                                                                             \
+      return false;                                                                                     \
+    }                                                                                                   \
+    *out = (T)(a + b);                                                                                  \
+    return true;                                                                                        \
+  }                                                                                                     \
+  static inline bool sag_checked_sub_##NAME(T a, T b, T *out) {                                         \
+    if (a < b) {                                                                                        \
+      return false;                                                                                     \
+    }                                                                                                   \
+    *out = (T)(a - b);                                                                                  \
+    return true;                                                                                        \
+  }                                                                                                     \
+  static inline bool sag_checked_mul_##NAME(T a, T b, T *out) {                                         \
+    if (b != 0 && a > (T)(MAX / b)) {                                                                   \
+      return false;                                                                                     \
+    }                                                                                                   \
+    *out = sag_wrapping_mul_##NAME(a, b);                                                               \
+    return true;                                                                                        \
+  }                                                                                                     \
+  static inline bool sag_checked_div_##NAME(T a, T b, T *out) {                                         \
+    if (b == 0) {                                                                                       \
+      return false;                                                                                     \
+    }                                                                                                   \
+    *out = (T)(a / b);                                                                                  \
+    return true;                                                                                        \
+  }                                                                                                     \
+  static inline bool sag_checked_rem_##NAME(T a, T b, T *out) {                                         \
+    if (b == 0) {                                                                                       \
+      return false;                                                                                     \
+    }                                                                                                   \
+    *out = (T)(a % b);                                                                                  \
+    return true;                                                                                        \
+  }                                                                                                     \
+  static inline bool sag_checked_shr_##NAME(T a, uint32_t n, T *out) {                                  \
+    if (n >= sizeof(T) * 8u) {                                                                          \
+      return false;                                                                                     \
+    }                                                                                                   \
+    *out = (T)((uint64_t)a >> n);                                                                       \
+    return true;                                                                                        \
+  }                                                                                                     \
+  static inline T sag_saturating_add_##NAME(T a, T b) {                                                 \
+    return a > (T)(MAX - b) ? MAX : (T)(a + b);                                                         \
+  }                                                                                                     \
+  static inline T sag_saturating_sub_##NAME(T a, T b) {                                                 \
+    return a < b ? (T)0 : (T)(a - b);                                                                   \
+  }                                                                                                     \
+  static inline T sag_saturating_mul_##NAME(T a, T b) {                                                 \
+    return b != 0 && a > (T)(MAX / b) ? MAX : sag_wrapping_mul_##NAME(a, b);                            \
+  }                                                                                                     \
+  static inline bool sag_is_power_of_two_##NAME(T a) {                                                  \
+    return a != 0 && (a & (T)(a - 1u)) == 0;                                                            \
+  }
+
+SAG_SIGNED_EXTRAS(i8, int8_t, uint8_t, INT8_MIN, INT8_MAX)
+SAG_SIGNED_EXTRAS(i16, int16_t, uint16_t, INT16_MIN, INT16_MAX)
+SAG_SIGNED_EXTRAS(i32, int32_t, uint32_t, INT32_MIN, INT32_MAX)
+SAG_SIGNED_EXTRAS(i64, int64_t, uint64_t, INT64_MIN, INT64_MAX)
+SAG_SIGNED_EXTRAS(isize, intptr_t, uintptr_t, INTPTR_MIN, INTPTR_MAX)
+SAG_UNSIGNED_EXTRAS(u8, uint8_t, UINT8_MAX)
+SAG_UNSIGNED_EXTRAS(u16, uint16_t, UINT16_MAX)
+SAG_UNSIGNED_EXTRAS(u32, uint32_t, UINT32_MAX)
+SAG_UNSIGNED_EXTRAS(u64, uint64_t, UINT64_MAX)
+SAG_UNSIGNED_EXTRAS(usize, size_t, SIZE_MAX)
+
 /* ---- Methods of numbers (docs/adr/0076-std-math-and-methods-of-numbers.md) ---------------
  * `pow` multiplies through the checked helpers above, so it panics (debug) or wraps (release)
  * as `*` does. It squares the base only while bits of the exponent remain: a square that

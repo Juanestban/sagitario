@@ -21,14 +21,41 @@ pub struct NumberMethod {
   pub ret: Type;
   pub function: String;
   pub located: bool;
+  /// A `checked_*` method: the function returns whether there is a result, written to a last
+  /// parameter, and the method gives an `Option`.
+  pub checked: bool;
 }
 
 fn method(name: String, param_names: String, params: List<Type>, ret: Type, function: String) -> NumberMethod {
-  NumberMethod { name: name, param_names: param_names, params: params, ret: ret, function: function, located: false }
+  NumberMethod { name: name, param_names: param_names, params: params, ret: ret, function: function, located: false, checked: false }
 }
 
 fn located(name: String, param_names: String, params: List<Type>, ret: Type, function: String) -> NumberMethod {
-  NumberMethod { name: name, param_names: param_names, params: params, ret: ret, function: function, located: true }
+  NumberMethod { name: name, param_names: param_names, params: params, ret: ret, function: function, located: true, checked: false }
+}
+
+fn checked(name: String, param_names: String, params: List<Type>, value: Type, function: String) -> NumberMethod {
+  NumberMethod { name: name, param_names: param_names, params: params, ret: types::option(value), function: function, located: false, checked: true }
+}
+
+/// The integer type and the limit a path such as `i32::MAX` names
+/// (docs/adr/0088-bitwise-operators-and-integer-methods.md, Q580).
+pub struct IntLimit {
+  pub ty: IntTy;
+  pub max: bool;
+}
+
+pub fn int_limit(name: String) -> Option<IntLimit> {
+  const parts = name.split("::");
+
+  if parts.len() != 2 || (parts[1] != "MIN" && parts[1] != "MAX") {
+    return None;
+  }
+
+  match types::int_from_name(parts[0]) {
+    Some(int_ty) => Some(IntLimit { ty: int_ty, max: parts[1] == "MAX" }),
+    None => None,
+  }
 }
 
 /// The methods of a number type, empty for other types; the language server lists them.
@@ -70,6 +97,38 @@ fn int_methods(int_ty: IntTy) -> List<NumberMethod> {
     methods.push(located("abs", "", new List(), ty, `sag_abs_${name}_at`));
     methods.push(method("signum", "", new List(), ty, `sag_signum_${name}`));
   }
+
+  // Arithmetic that never panics, and the bits (docs/adr/0088-bitwise-operators-and-integer-methods.md, Q580).
+  const u32_ty = types::int(IntTy::U32);
+
+  for op in List::from(["add", "sub", "mul"]) {
+    methods.push(method("wrapping_" + op, "other", List::from([ty]), ty, `sag_wrapping_${op}_${name}`));
+    methods.push(method("saturating_" + op, "other", List::from([ty]), ty, `sag_saturating_${op}_${name}`));
+  }
+
+  for op in List::from(["add", "sub", "mul", "div", "rem"]) {
+    methods.push(checked("checked_" + op, "other", List::from([ty]), ty, `sag_checked_${op}_${name}`));
+  }
+
+  for op in List::from(["shl", "shr"]) {
+    methods.push(method("wrapping_" + op, "n", List::from([u32_ty]), ty, `sag_wrapping_${op}_${name}`));
+    methods.push(checked("checked_" + op, "n", List::from([u32_ty]), ty, `sag_checked_${op}_${name}`));
+  }
+
+  if types::is_signed(int_ty) {
+    methods.push(method("wrapping_neg", "", new List(), ty, `sag_wrapping_neg_${name}`));
+    methods.push(checked("checked_neg", "", new List(), ty, `sag_checked_neg_${name}`));
+  } else {
+    methods.push(method("is_power_of_two", "", new List(), types::of(TypeKind::Bool), `sag_is_power_of_two_${name}`));
+  }
+
+  for op in List::from(["count_ones", "count_zeros", "leading_zeros", "trailing_zeros"]) {
+    methods.push(method(op, "", new List(), u32_ty, `sag_${op}_${name}`));
+  }
+
+  methods.push(method("rotate_left", "n", List::from([u32_ty]), ty, `sag_rotate_left_${name}`));
+  methods.push(method("rotate_right", "n", List::from([u32_ty]), ty, `sag_rotate_right_${name}`));
+  methods.push(method("swap_bytes", "", new List(), ty, `sag_swap_bytes_${name}`));
 
   methods
 }
@@ -138,7 +197,7 @@ pub fn number_method(cx: Checker, value: Expr, receiver_ty: Type, method: Ident,
     None => {
       var diagnostic = Diagnostic::error(codes::UNKNOWN_MEMBER, method.span, "no method `" + name + "` on type `" + types::text(receiver_ty) + "`");
 
-      if unsigned && (name == "abs" || name == "signum") {
+      if unsigned && (name == "abs" || name == "signum" || name == "wrapping_neg" || name == "checked_neg") {
         diagnostic = diagnostic.with_note("unsigned integers are never negative");
       } else {
         const names: List<String> = new List();
@@ -160,7 +219,12 @@ pub fn number_method(cx: Checker, value: Expr, receiver_ty: Type, method: Ident,
   };
 
   exprs::check_args(cx, value.span, "method", chosen.params, args);
-  cx.typed.builtin_methods.insert(value.id, BuiltinMethod::Runtime { function: chosen.function, located: chosen.located });
+
+  if chosen.checked {
+    cx.typed.builtin_methods.insert(value.id, BuiltinMethod::Checked(chosen.function));
+  } else {
+    cx.typed.builtin_methods.insert(value.id, BuiltinMethod::Runtime { function: chosen.function, located: chosen.located });
+  }
 
   Some(chosen.ret)
 }

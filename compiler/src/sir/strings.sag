@@ -57,6 +57,28 @@ pub fn text_method(lw: Lowering, method: BuiltinMethod, ty: Type, receiver: Expr
       Ok(sentinel_option(lw, ty, digit, IntTy::U32, 4294967295))
     }
     BuiltinMethod::Parse(target) => parse(lw, ty, target, operands),
+    // The function writes the value and says whether there is one
+    // (docs/adr/0088-bitwise-operators-and-integer-methods.md).
+    BuiltinMethod::Checked(function) => {
+      const value_ty = match ty.kind {
+        TypeKind::Option(inner) => inner,
+        _ => return Err("a checked method without an `Option`"),
+      };
+      const found = lw.temp(value_ty);
+
+      operands.push(Operand::Ref(local_place(found, value_ty)));
+
+      const present = lw.new_value(types::of(TypeKind::Bool), Rvalue::Call { callee: runtime(function), args: operands });
+      const dest = lw.temp(ty);
+
+      lw.emit(Stmt::If {
+        cond: present,
+        then_body: List::from([Stmt::Assign { dest: dest, value: Rvalue::Variant { index: 1, fields: List::from([Operand::Local(found)]) } }]),
+        else_body: List::from([Stmt::Assign { dest: dest, value: Rvalue::Variant { index: 0, fields: new List() } }]),
+      });
+
+      Ok(Operand::Local(dest))
+    }
     _ => Err("unexpected text method"),
   }
 }

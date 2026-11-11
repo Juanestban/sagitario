@@ -761,6 +761,11 @@ fn other_expr_kind(cx: Checker, value: Expr, expected: Option<Type>) -> Type {
 
         types::error()
       }
+      // `i32::MAX` (docs/adr/0088-bitwise-operators-and-integer-methods.md, Q580).
+      Some(Res::Builtin(name)) if numbers::int_limit(name).is_some() => match numbers::int_limit(name) {
+        Some(limit) => types::int(limit.ty),
+        None => types::error(),
+      },
       Some(Res::Extern(_)) | Some(Res::Builtin(_)) => {
         cx.diagnostics.push(
           Diagnostic::error(codes::WRONG_CALL_FORM, value.span, "C functions and prelude functions cannot be used as values")

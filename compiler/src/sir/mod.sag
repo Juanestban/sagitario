@@ -20,6 +20,7 @@ use pkg::sir::tasks;
 use pkg::types::{FloatTy, IntTy, NamedRef, Receiver, Subst, Type, TypeKind};
 use pkg::types;
 use pkg::types::consts::ConstValue;
+use pkg::types::numbers;
 use pkg::types::typed::{BuiltinMethod, TypedModule};
 
 pub struct Program {
@@ -2044,6 +2045,21 @@ pub class Lowering {
         Some(Res::Extern(id)) => Ok(self.new_value(ty, Rvalue::ExternFnValue(id))),
         Some(Res::Variant(variant)) => Ok(matching::variant(self, ty, variant.index, new List())),
         Some(Res::Const(id)) => self.const_operand(id, ty),
+        // `i32::MAX` (docs/adr/0088-bitwise-operators-and-integer-methods.md).
+        Some(Res::Builtin(name)) if numbers::int_limit(name).is_some() => match numbers::int_limit(name) {
+          Some(limit) => {
+            const max = types::int_max(limit.ty, self.package.target.pointer_width);
+
+            if limit.max {
+              Ok(int_operand(max, false, limit.ty))
+            } else if types::is_signed(limit.ty) {
+              Ok(int_operand(max + 1, true, limit.ty))
+            } else {
+              Ok(int_operand(0, false, limit.ty))
+            }
+          }
+          None => Err("an integer limit without its type"),
+        },
         Some(Res::Static(id)) => {
           const place = self.place(value)?;
 
@@ -2252,7 +2268,7 @@ pub class Lowering {
         BuiltinMethod::Prelude(function) => collections::prelude_method(self, value, function, ty, receiver, args),
         BuiltinMethod::TotalCompare => collections::total_compare(self, ty, receiver, args),
         BuiltinMethod::RangeRev => collections::range_iter(self, receiver, true, ty),
-        BuiltinMethod::Runtime { .. } | BuiltinMethod::Find | BuiltinMethod::ToDigit | BuiltinMethod::Parse(_) => {
+        BuiltinMethod::Runtime { .. } | BuiltinMethod::Find | BuiltinMethod::ToDigit | BuiltinMethod::Parse(_) | BuiltinMethod::Checked(_) => {
           strings::text_method(self, builtin, ty, receiver, args)
         }
         _ => matching::builtin_method(self, builtin, ty, receiver, args),

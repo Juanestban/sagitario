@@ -479,6 +479,12 @@ fn path_members(items: Items, analysis: Analysis, module_index: Option<usize>, c
     return;
   }
 
+  // `i32::MAX` (docs/adr/0088-bitwise-operators-and-integer-methods.md, Q581).
+  if chain.len() == 1 && types::int_from_name(first).is_some() {
+    items.add_words("MIN MAX", CONSTANT);
+    return;
+  }
+
   // The module the path starts from.
   var current: Option<u32> = None;
   var rest = 1usize;

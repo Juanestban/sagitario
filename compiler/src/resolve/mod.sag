@@ -767,6 +767,8 @@ const NUMERIC_TYPES: String = "i8 i16 i32 i64 i128 isize u8 u16 u32 u64 u128 usi
 
 /// Prelude and primitive type names that program types can shadow.
 const PRELUDE_TYPES: String = "bool char String StringBuilder Option Result List";
+/// The integer types, whose `MIN` and `MAX` a path names (`i32::MAX`).
+const INT_TYPE_NAMES: String = "i8 i16 i32 i64 isize u8 u16 u32 u64 usize";
 
 pub fn resolve(package: Package, diagnostics: Diagnostics) -> Resolution {
   const resolution = new Resolution();
@@ -1426,6 +1428,9 @@ pub enum Start {
   List,
   /// The primitive `char`, with the static function `from_u32`.
   Char,
+  /// An integer type, by name, with the constants `MIN` and `MAX`
+  /// (docs/adr/0088-bitwise-operators-and-integer-methods.md, Q580).
+  Int(String),
 }
 
 /// What a qualified path names so far, the last segment consumed and the segments left.
@@ -2149,6 +2154,11 @@ pub class Resolver {
 
           return None;
         }
+        Start::Int(_) => {
+          self.error(last.span, "`" + last.name + "` is a type, not a value");
+
+          return None;
+        }
       }
     }
 
@@ -2189,6 +2199,15 @@ pub class Resolver {
           }
 
           self.error(last.span, "`char` has one static function, `char::from_u32`");
+
+          return None;
+        }
+        Start::Int(int_name) => {
+          if member.name == "MIN" || member.name == "MAX" {
+            return Some(Res::Builtin(int_name + "::" + member.name));
+          }
+
+          self.error(member.span, "no constant `" + member.name + "` in `" + int_name + "`; integer types have `MIN` and `MAX`");
 
           return None;
         }
@@ -2394,6 +2413,8 @@ pub class Resolver {
             start = Start::List;
           } else if name == "char" {
             start = Start::Char;
+          } else if INT_TYPE_NAMES.split(" ").contains(name) {
+            start = Start::Int(name);
           } else if name == "std" {
             start = Start::Item(ItemRef::Std(StdItem::Root));
           } else if let Some(root) = self.resolution.dependency_root(self.package, self.module, name) {

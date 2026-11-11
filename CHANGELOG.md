@@ -26,6 +26,10 @@ The sources say 0.25.0.
 - Bitwise operators and shifts, as Rust's: `&`, `|`, `^`, `!` on integers, `<<` and `>>`, with
   `&=`, `|=`, `^=`, `<<=` and `>>=` and Rust's precedence; a shift by the width or more panics in
   debug builds ([ADR-0088](docs/adr/0088-bitwise-operators-and-integer-methods.md)).
+- The integer methods spec 2 promised: `wrapping_*`, `checked_*` (giving `Option`) and
+  `saturating_*`, with `count_ones`, `leading_zeros`, `trailing_zeros`, `rotate_left`,
+  `rotate_right`, `swap_bytes` and `is_power_of_two`; and `i32::MIN`, `i32::MAX` and those of
+  every integer type.
 - An audit of the standard library against Rust's ([`docs/std-audit.md`](docs/std-audit.md)), the
   plan of S2, with a suite of benchmarks against Rust, C, C#, JavaScript and Python.
 - The language server completes `@cfg` conditions, attributes and their representations, and

@@ -102,10 +102,11 @@ fn sequence(bytes: &[u8], at: usize) -> isize {
 /// The character of the whole sequence of `count` bytes at `bytes[at]`.
 fn decode(bytes: &[u8], at: usize, count: usize) -> char {
   const first = bytes[at] as u32;
-  var code = if count == 1 { first } else if count == 2 { first - 0xC0 } else if count == 3 { first - 0xE0 } else { first - 0xF0 };
+  // The bits of the first byte after its marker, then six of each continuation byte.
+  var code = if count == 1 { first } else if count == 2 { first & 0x1F } else if count == 3 { first & 0x0F } else { first & 0x07 };
 
   for offset in 1..count {
-    code = code * 64 + (bytes[at + offset] as u32 - 0x80);
+    code = (code << 6) | (bytes[at + offset] as u32 & 0x3F);
   }
 
   char::from_u32(code).unwrap_or('?')

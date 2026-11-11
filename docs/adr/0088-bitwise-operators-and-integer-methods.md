@@ -83,3 +83,17 @@ fn main() {
   Tests: `tests/run-pass/bitwise_operators.sag`, `tests/run-panic/shift_overflow.sag` and
   `tests/compile-fail/bitwise_operators.sag`; the corpus of constants now gives `!` a float to
   reject, since `!1` is an integer.
+- Increment 2 (the integer methods and the limits) is done. The methods are runtime functions,
+  as the other methods of numbers are (`types::numbers`); `checked_*` ones write their result to
+  a last parameter and return whether there is one, and SIR builds the `Option`
+  (`BuiltinMethod::Checked`). They are static functions of the runtime's header, computed through
+  `uint64_t` (`SAG_SIGNED_EXTRAS`, `SAG_UNSIGNED_EXTRAS`). `i32::MIN` and `i32::MAX` resolve as
+  builtins of a new path start (`resolve::Start::Int`), are constants for the compiler, and
+  `sag lsp` completes them after `i32::`. Tests: `tests/run-pass/integer_methods.sag`, run in
+  debug and release, and cases in `tests/compile-fail/bitwise_operators.sag`.
+- Increment 3 (the standard library with bits) is done: the decoding of UTF-8 (`std::decode`),
+  UTF-16 on Windows (`from_utf16_lossy`, `to_utf16`), the type in `st_mode`, the attributes of
+  Windows files, the status of `waitpid` and the flags of `CreateNamedPipeW` use `&`, `|`, `<<`
+  and `>>`. The hashing of the prelude needs no change: it reduces hashes with `%` by the size of
+  the table. The compiler itself keeps `*`, `/` and `%` until the seed is updated for another
+  reason (CLAUDE.md).
