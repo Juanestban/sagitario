@@ -1,0 +1,42 @@
+// word-count: counts the words of a text and prints the most frequent. Strings and a map. The
+// text has the argument's number of words, chosen from 2000 by the generator MINSTD
+// (`x = x * 48271 % 2147483647`), the same in every language.
+use std::env;
+
+fn main() {
+  const args = env::args();
+  const count = if args.len() > 1 { args[1].parse_u64().unwrap_or(1000) } else { 1000 };
+  const text = new StringBuilder();
+  var seed = 42u64;
+
+  for i in 0..count {
+    seed = seed * 48271 % 2147483647;
+
+    if i > 0 {
+      text.append(" ");
+    }
+
+    text.append(f"w{seed % 2000}");
+  }
+
+  const counts = new Map<String, u64>();
+
+  for word in text.to_string().split(" ") {
+    counts.insert(word, counts.get(word).unwrap_or(0) + 1);
+  }
+
+  const entries: List<Entry<String, u64>> = new List();
+
+  for entry in counts {
+    entries.push(entry);
+  }
+
+  // The most frequent first, and words of the same count in the order of their bytes.
+  entries.sort_by((a, b) => if a.value != b.value { b.value.compare(a.value) } else { a.key.compare(b.key) });
+
+  println(f"words {count} distinct {counts.len()}");
+
+  for index in 0..5usize {
+    println(f"{entries[index].key} {entries[index].value}");
+  }
+}

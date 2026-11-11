@@ -92,3 +92,13 @@ sag run tools/bench.sag -- --race benchmarks/results/2026-11-11-windows-x86_64.j
   has a separator (`application_name`), with `.exe` added when the name alone is not a file, as
   spec 11 promises. A first run on Windows (x86-64, 3 runs): n-body 264 ms in Sagitario, 201 in
   Rust and 262 in C; binary-trees 975, 655 and 552 ms; hello 10.4, 8.2 and 7.9 ms.
+- Increment 2 is done: `spectral-norm`, `word-count`, `sort`, `map-count`, `parallel-sum` and
+  `channels` join the suite, and C#, JavaScript and Python every benchmark. Two details differ
+  from Q592 and Q594: the runner writes the `.csproj` of each C# program in `build/bench/`, for
+  the version of the SDK it finds, instead of one per directory of `benchmarks/`; and a warm-up
+  longer than 5 seconds is followed by a single timed run, so the interpreters do not take
+  minutes. The inputs come from the generator MINSTD, exact in every language, and the outputs
+  match byte for byte. The first runs already point at the work: Sagitario is about C's speed in
+  numeric loops (`n-body`, `spectral-norm`, `parallel-sum`), but `List::sort` is about 15 times
+  slower than Rust's, the map of strings of `word-count` about 7 times and a `Channel` about 13
+  times, which increment 4 records with the full results.

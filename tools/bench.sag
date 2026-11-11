@@ -1,11 +1,12 @@
 //! Runs the benchmarks of `benchmarks/` in every language whose toolchain is installed, from the
 //! root of the repository (docs/adr/0090-benchmarks.md):
 //!
-//!     sag run tools/bench.sag -- [names] [--runs N] [--langs sag,rust,c] [--sag path]
+//!     sag run tools/bench.sag -- [names] [--runs N] [--langs sag,rust,c,cs,js,py] [--sag path]
 //!
-//! Each program is built optimized, run once to warm up and `N` times (5 by default); every
-//! language must print the same output. The median wall time of each, its size and the versions
-//! of the toolchains go to `benchmarks/results/<date>-<os>-<arch>.json`.
+//! Each program is built optimized, run once to warm up and `N` times (5 by default), once when
+//! the warm-up takes more than 5 seconds; every language must print the same output. The median
+//! wall time of each, its size and the versions of the toolchains go to
+//! `benchmarks/results/<date>-<os>-<arch>.json`.
 
 use std::env;
 use std::fs;
@@ -15,7 +16,13 @@ use std::process;
 use std::process::Command;
 use std::time::{Instant, SystemTime};
 
-const USAGE: String = "Usage: sag run tools/bench.sag -- [names] [--runs N] [--langs sag,rust,c] [--sag path]";
+const USAGE: String = "Usage: sag run tools/bench.sag -- [names] [--runs N] [--langs sag,rust,c,cs,js,py] [--sag path]";
+
+/// Every language of the suite, by the name of its source file `main.<name>`.
+const LANGUAGES: String = "sag rust c cs js py";
+
+/// A warm-up longer than this, in seconds, is followed by a single timed run.
+const SLOW: f64 = 5.0;
 
 @cfg(windows)
 const OS: String = "windows";
@@ -38,26 +45,28 @@ const EXE: String = ".exe";
 @cfg(unix)
 const EXE: String = "";
 
-/// A language of the suite: its source file, how its program is built, and its version.
-struct Language {
-  pub name: String;
-  pub file: String;
-}
-
-fn languages() -> List<Language> {
-  List::from([
-    Language { name: "sag", file: "main.sag" },
-    Language { name: "rust", file: "main.rs" },
-    Language { name: "c", file: "main.c" },
-  ])
-}
-
 /// What the command line asks for.
 struct Options {
   pub names: List<String>;
   pub runs: usize;
   pub langs: List<String>;
   pub sag: String;
+}
+
+/// A language that can run: its name and the version of its toolchain.
+struct Toolchain {
+  pub lang: String;
+  pub version: String;
+  /// The program that runs it: the compiler, or the interpreter of `js` and `py`.
+  pub tool: String;
+}
+
+/// How a built benchmark runs: a program, with arguments before those of the benchmark.
+struct Invocation {
+  pub program: String;
+  pub prefix: List<String>;
+  /// The file whose size is the size of the program.
+  pub artifact: String;
 }
 
 /// One language's result on one benchmark.
@@ -68,11 +77,17 @@ struct Measured {
   pub size: usize;
 }
 
+/// One run of a program: its time in seconds and its output, with `\r\n` as `\n`.
+struct Run {
+  pub seconds: f64;
+  pub output: String;
+}
+
 fn options() -> Result<Options, String> {
   const args = env::args();
   const names: List<String> = new List();
   var runs = 5usize;
-  var langs = List::from(["sag", "rust", "c"]);
+  var langs = LANGUAGES.split(" ");
   var sag = env::variable("SAG").unwrap_or("sag");
   var index = 1usize;
 
@@ -93,6 +108,12 @@ fn options() -> Result<Options, String> {
         };
       } else if arg == "--langs" {
         langs = value.split(",");
+
+        for lang in langs {
+          if !LANGUAGES.split(" ").contains(lang) {
+            return Err(f"unknown language `{lang}`: the languages are {LANGUAGES}");
+          }
+        }
       } else {
         sag = value;
       }
@@ -113,11 +134,6 @@ fn options() -> Result<Options, String> {
   Ok(Options { names: names, runs: runs, langs: langs, sag: sag })
 }
 
-/// The C compiler: `SAG_CC`, as `sag` itself finds it, or `clang`.
-fn c_compiler() -> String {
-  env::variable("SAG_CC").unwrap_or("clang")
-}
-
 /// The first line a command prints, or `None` if it cannot run.
 fn first_line(program: String, arg: String) -> Option<String> {
   match new Command(program).arg(arg).output() {
@@ -134,36 +150,81 @@ fn first_line(program: String, arg: String) -> Option<String> {
   }
 }
 
-/// The toolchain of `lang`, by its version, or `None` when it is not installed.
-fn version(lang: String, options: Options) -> Option<String> {
-  if lang == "sag" {
-    first_line(options.sag, "--version")
+/// The toolchain of `lang`, or `None` when it is not installed.
+fn toolchain(lang: String, options: Options) -> Option<Toolchain> {
+  const tools = if lang == "sag" {
+    List::from([options.sag])
   } else if lang == "rust" {
-    first_line("rustc", "--version")
+    List::from(["rustc"])
   } else if lang == "c" {
-    first_line(c_compiler(), "--version")
+    // As `sag` finds its C compiler.
+    List::from([env::variable("SAG_CC").unwrap_or("clang")])
+  } else if lang == "cs" {
+    List::from(["dotnet"])
+  } else if lang == "js" {
+    List::from(["node"])
   } else {
-    None
-  }
-}
-
-/// Builds the program of `lang` in `dir` into `out`; the error is the compiler's output.
-fn build(lang: String, dir: String, out: String, options: Options) -> Result<(), String> {
-  const source = path::join(dir, if lang == "sag" { "main.sag" } else if lang == "rust" { "main.rs" } else { "main.c" });
-  const command = if lang == "sag" {
-    new Command(options.sag).args(List::from(["build", "--release", source, "--output", out]))
-  } else if lang == "rust" {
-    new Command("rustc").args(List::from(["-C", "opt-level=3", "-o", out, source]))
-  } else {
-    const c = new Command(c_compiler()).args(List::from(["-O2", "-o", out, source]));
-
-    if OS == "windows" { c } else { c.arg("-lm") }
+    List::from(["python3", "python"])
   };
 
+  for tool in tools {
+    if let Some(version) = first_line(tool, "--version") {
+      return Some(Toolchain { lang: lang, version: version, tool: tool });
+    }
+  }
+
+  None
+}
+
+/// The target framework of a .NET SDK version such as `10.0.201`: `net10.0`.
+fn framework(version: String) -> String {
+  const parts = version.split(".");
+
+  if parts.len() >= 2 { f"net{parts[0]}.{parts[1]}" } else { "net8.0" }
+}
+
+fn output_of(command: Command) -> Result<(), String> {
   match command.output() {
     Ok(output) => if output.status.success() { Ok(()) } else { Err(output.stdout + output.stderr) },
     Err(error) => Err(error.message()),
   }
+}
+
+/// Builds the program of `chain` from `source` in `out_dir`: how it runs, or the compiler's output.
+fn build(chain: Toolchain, source: String, out_dir: String, options: Options) -> Result<Invocation, String> {
+  const lang = chain.lang;
+  const program = path::join(out_dir, lang + EXE);
+  const none: List<String> = new List();
+
+  if lang == "sag" {
+    output_of(new Command(options.sag).args(List::from(["build", "--release", source, "--output", program])))?;
+  } else if lang == "rust" {
+    output_of(new Command(chain.tool).args(List::from(["-C", "opt-level=3", "-o", program, source])))?;
+  } else if lang == "c" {
+    // The optimization `sag build --release` gives its C.
+    const c = new Command(chain.tool).args(List::from(["-O2", "-o", program, source]));
+
+    output_of(if OS == "windows" { c } else { c.arg("-lm") })?;
+  } else if lang == "cs" {
+    const project_dir = path::join(out_dir, "cs");
+    const root = fs::current_dir().map_err((error) => error.message())?;
+    const project = f"<Project Sdk=\"Microsoft.NET.Sdk\">\n  <PropertyGroup>\n    <OutputType>Exe</OutputType>\n    <TargetFramework>{framework(chain.version)}</TargetFramework>\n    <Nullable>enable</Nullable>\n    <AssemblyName>bench</AssemblyName>\n    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>\n    <InvariantGlobalization>true</InvariantGlobalization>\n  </PropertyGroup>\n  <ItemGroup>\n    <Compile Include=\"{path::join(root, source)}\" />\n  </ItemGroup>\n</Project>\n";
+    const project_file = path::join(project_dir, "bench.csproj");
+    const built = path::join(project_dir, "out");
+
+    fs::create_dir_all(project_dir).map_err((error) => error.message())?;
+    fs::write(project_file, project).map_err((error) => error.message())?;
+    output_of(new Command(chain.tool).args(List::from(["build", project_file, "-c", "Release", "-o", built, "--nologo", "-v", "q"])))?;
+
+    const exe = path::join(built, "bench" + EXE);
+
+    return Ok(Invocation { program: exe, prefix: none, artifact: path::join(built, "bench.dll") });
+  } else {
+    // Interpreted: the interpreter runs the source.
+    return Ok(Invocation { program: chain.tool, prefix: List::from([source]), artifact: source });
+  }
+
+  Ok(Invocation { program: program, prefix: none, artifact: program })
 }
 
 /// The arguments a benchmark takes, from its `args` file.
@@ -181,16 +242,20 @@ fn benchmark_args(dir: String) -> List<String> {
   words
 }
 
-/// One run of a program: its time in seconds and its output, with `\r\n` as `\n`.
-struct Run {
-  pub seconds: f64;
-  pub output: String;
-}
+fn run(invocation: Invocation, args: List<String>) -> Result<Run, String> {
+  const all: List<String> = new List();
 
-fn run(program: String, args: List<String>) -> Result<Run, String> {
+  for arg in invocation.prefix {
+    all.push(arg);
+  }
+
+  for arg in args {
+    all.push(arg);
+  }
+
   const start = Instant::now();
 
-  match new Command(program).args(args).output() {
+  match new Command(invocation.program).args(all).output() {
     Ok(output) => {
       const seconds = start.elapsed().as_secs_f64();
 
@@ -256,8 +321,8 @@ fn json(text: String) -> String {
   out.to_string()
 }
 
-/// One benchmark in every language asked for: their results, or the reason it failed.
-fn benchmark(name: String, options: Options, available: List<String>) -> Result<List<Measured>, String> {
+/// One benchmark in every language available: their results, or the reason it failed.
+fn benchmark(name: String, options: Options, chains: List<Toolchain>) -> Result<List<Measured>, String> {
   const dir = path::join("benchmarks", name);
   const out_dir = path::join(path::join("build", "bench"), name);
   const args = benchmark_args(dir);
@@ -265,44 +330,40 @@ fn benchmark(name: String, options: Options, available: List<String>) -> Result<
   var expected: Option<String> = None;
   var expected_lang = "";
 
-  match fs::create_dir_all(out_dir) {
-    Ok(_) => {}
-    Err(error) => return Err(error.message()),
-  }
+  fs::create_dir_all(out_dir).map_err((error) => error.message())?;
 
-  for lang in available {
-    const source = path::join(dir, if lang == "sag" { "main.sag" } else if lang == "rust" { "main.rs" } else { "main.c" });
+  for chain in chains {
+    const lang = chain.lang;
+    const source = path::join(dir, "main." + (if lang == "rust" { "rs" } else { lang }));
 
     if !fs::is_file(source) {
       continue;
     }
 
-    const program = path::join(out_dir, lang + EXE);
-
-    build(lang, dir, program, options).map_err((message) => f"{lang} does not build:\n{message}")?;
-
+    const invocation = build(chain, source, out_dir, options).map_err((message) => f"{lang} does not build:\n{message}")?;
     // A first run warms up the caches of the system, and gives the output to compare.
-    const output = run(program, args).map_err((message) => f"{lang} {message}")?.output;
+    const warm = run(invocation, args).map_err((message) => f"{lang} {message}")?;
 
     match expected {
       Some(text) => {
-        if text != output {
-          return Err(f"{lang} prints something other than {expected_lang}:\n{output}");
+        if text != warm.output {
+          return Err(f"{lang} prints something other than {expected_lang}:\n{warm.output}");
         }
       }
       None => {
-        expected = Some(output);
+        expected = Some(warm.output);
         expected_lang = lang;
       }
     }
 
+    const runs = if warm.seconds > SLOW { 1usize } else { options.runs };
     const times: List<f64> = new List();
 
-    for _ in 0..options.runs {
-      times.push(run(program, args).map_err((message) => f"{lang} {message}")?.seconds);
+    for _ in 0..runs {
+      times.push(run(invocation, args).map_err((message) => f"{lang} {message}")?.seconds);
     }
 
-    const size = match fs::read(program) {
+    const size = match fs::read(invocation.artifact) {
       Ok(bytes) => bytes.len(),
       Err(_) => 0,
     };
@@ -322,13 +383,13 @@ fn main() -> Result<(), io::Error> {
     }
   };
   const versions: List<String> = new List();
-  const available: List<String> = new List();
+  const chains: List<Toolchain> = new List();
 
   for lang in options.langs {
-    match version(lang, options) {
+    match toolchain(lang, options) {
       Some(found) => {
-        available.push(lang);
-        versions.push(f"    {json(lang)}: {json(found)}");
+        chains.push(found);
+        versions.push(f"    {json(lang)}: {json(found.version)}");
       }
       None => io::eprintln(f"skipping {lang}: its toolchain is not installed")?,
     }
@@ -344,7 +405,7 @@ fn main() -> Result<(), io::Error> {
 
     io::println(f"{name}")?;
 
-    match benchmark(name, options, available) {
+    match benchmark(name, options, chains) {
       Ok(results) => {
         const fastest = results.iter().fold(0.0, (best, result) => if best == 0.0 || result.median < best { result.median } else { best });
         const languages: List<String> = new List();
@@ -353,7 +414,7 @@ fn main() -> Result<(), io::Error> {
           const ratio = if fastest > 0.0 { result.median / fastest } else { 1.0 };
           const times = result.times.iter().map((time) => f"{time:.6}").collect();
 
-          io::println(f"  {result.lang:<6} {result.median * 1000.0:>10.1} ms  {ratio:>5.2}x  {result.size / 1024:>6} KiB")?;
+          io::println(f"  {result.lang:<6} {result.median * 1000.0:>10.1} ms  {ratio:>6.2}x  {result.size / 1024:>6} KiB")?;
           languages.push(f"        {json(result.lang)}: {{ \"median\": {result.median:.6}, \"times\": [{times.join(", ")}], \"size\": {result.size} }}");
         }
 
