@@ -148,4 +148,18 @@ extern "C" {
   64-bit ones (`stat$INODE64`) cannot be named in C. Only the release's CI runs macOS for Intel.
   `ENOTEMPTY` differs by system (39, 66, 41). UTF-8 is checked by `std` itself (`super::utf8`).
   The runtime keeps the UTF-16 paths and `errno` helpers that `std::process` still uses.
+- `std::process` with `Command` is done, the sixth module of S1, and about 700 lines of C are
+  deleted. `std::sys::run_process` starts the program and gives its exit code and the bytes it
+  printed; `std::process` turns them into text with U+FFFD (`super::utf8_lossy`, which shares
+  its reading of UTF-8 with `super::utf8`). On Linux and Android, `fork` and `execve`, with
+  pipes made by `pipe2(O_CLOEXEC)`; the child only calls async-signal-safe functions, and writes
+  the `errno` of a failure to a pipe that `execve` closes. On Apple systems, `posix_spawn` with
+  `POSIX_SPAWN_CLOEXEC_DEFAULT` and `posix_spawn_file_actions_addchdir_np` (macOS 10.15, iOS
+  13): setting `FD_CLOEXEC` takes `fcntl`, which is variadic and cannot be declared (spec 10).
+  Unix writes stdin and reads stdout and stderr together with `poll`, at most `PIPE_BUF` bytes
+  per write, so the pipe stays blocking. Windows uses `CreateProcessW` and, instead of the
+  runtime's reader threads, named pipes opened for overlapped I/O, waited for with
+  `WaitForMultipleObjects`, as Rust's `std` reads two pipes: threads would make every program
+  using `Command` count references atomically. `tests/run-pass/std_command.sag` gains an input
+  longer than a pipe holds. The runtime keeps `sag_wide`, which dynamic libraries use.
 

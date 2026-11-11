@@ -3,6 +3,8 @@
 //! Q551). Only the modules of `std` can name it.
 
 use std::ffi::{c_char, c_int, c_void, string_from_c};
+@cfg(windows)
+use std::mem;
 @cfg(unix)
 use std::ffi::{c_long, CString};
 
@@ -1176,4 +1178,1040 @@ pub fn current_dir() -> Result<String, i32> {
   }
 
   Ok(from_utf16_lossy(&buffer[0..len as usize]))
+}
+
+// ---- Running programs -------------------------------------------------------------------------
+
+/// How a program ended, and what it printed when it was captured.
+pub struct Finished {
+  /// Its exit code, or `None` if a signal ended it.
+  pub code: Option<i32>;
+  pub stdout: List<u8>;
+  pub stderr: List<u8>;
+}
+
+/// `struct pollfd`, the same on every Unix system.
+@cfg(unix)
+@repr(C)
+struct PollFd {
+  pub fd: c_int;
+  pub events: i16;
+  pub revents: i16;
+}
+
+@cfg(unix)
+const POLLIN: i16 = 1;
+@cfg(unix)
+const POLLOUT: i16 = 4;
+@cfg(unix)
+const SIGPIPE: c_int = 13;
+@cfg(unix)
+const X_OK: c_int = 1;
+
+/// What one write to a pipe that `poll` found ready never blocks on: POSIX's least `PIPE_BUF`.
+@cfg(unix)
+const PIPE_BUF: usize = 512;
+
+@cfg(unix)
+extern "C" {
+  fn close(fd: c_int) -> c_int;
+  fn read(fd: c_int, buffer: *mut c_void, size: usize) -> isize;
+  fn write(fd: c_int, buffer: *const c_void, size: usize) -> isize;
+  fn access(path: *const c_char, mode: c_int) -> c_int;
+  fn waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_int;
+  fn signal(number: c_int, handler: Option<extern "C" fn(c_int)>) -> Option<extern "C" fn(c_int)>;
+}
+
+/// `nfds_t` is `unsigned long` in glibc and `unsigned int` in bionic and on Apple systems.
+@cfg(target_os = "linux")
+extern "C" {
+  fn poll(fds: *mut PollFd, count: usize, timeout: c_int) -> c_int;
+}
+
+@cfg(any(target_os = "android", target_os = "macos", target_os = "ios"))
+extern "C" {
+  fn poll(fds: *mut PollFd, count: u32, timeout: c_int) -> c_int;
+}
+
+/// Waits without a time limit until one of the `count` descriptors at `fds` is ready.
+@cfg(target_os = "linux")
+fn wait_ready(fds: *mut PollFd, count: usize) -> c_int {
+  unsafe { poll(fds, count, -1) }
+}
+
+@cfg(any(target_os = "android", target_os = "macos", target_os = "ios"))
+fn wait_ready(fds: *mut PollFd, count: usize) -> c_int {
+  unsafe { poll(fds, count as u32, -1) }
+}
+
+/// Linux and Android create pipes closed on `execve` in one call, and start programs with `fork`.
+@cfg(any(target_os = "linux", target_os = "android"))
+extern "C" {
+  fn pipe2(fds: *mut c_int, flags: c_int) -> c_int;
+  fn fork() -> c_int;
+  fn dup2(from: c_int, to: c_int) -> c_int;
+  fn chdir(path: *const c_char) -> c_int;
+  fn execve(path: *const c_char, argv: *const *mut c_char, envp: *const *mut c_char) -> c_int;
+  fn _exit(code: c_int);
+  static environ: *const *mut c_char;
+}
+
+/// `O_CLOEXEC` on every architecture Sagitario supports.
+@cfg(any(target_os = "linux", target_os = "android"))
+const O_CLOEXEC: c_int = 0x80000;
+
+/// Apple systems start programs with `posix_spawn`, whose option types are pointers there: setting
+/// `FD_CLOEXEC` takes `fcntl`, which is variadic, and `POSIX_SPAWN_CLOEXEC_DEFAULT` closes every
+/// descriptor the child is not given instead.
+@cfg(any(target_os = "macos", target_os = "ios"))
+extern "C" {
+  fn pipe(fds: *mut c_int) -> c_int;
+  fn _NSGetEnviron() -> *const *const *mut c_char;
+  fn posix_spawn(pid: *mut c_int, path: *const c_char, actions: *const *mut c_void, attributes: *const *mut c_void, argv: *const *mut c_char, envp: *const *mut c_char) -> c_int;
+  fn posix_spawn_file_actions_init(actions: *mut *mut c_void) -> c_int;
+  fn posix_spawn_file_actions_destroy(actions: *mut *mut c_void) -> c_int;
+  fn posix_spawn_file_actions_adddup2(actions: *mut *mut c_void, from: c_int, to: c_int) -> c_int;
+  fn posix_spawn_file_actions_addinherit_np(actions: *mut *mut c_void, fd: c_int) -> c_int;
+  fn posix_spawn_file_actions_addchdir_np(actions: *mut *mut c_void, path: *const c_char) -> c_int;
+  fn posix_spawnattr_init(attributes: *mut *mut c_void) -> c_int;
+  fn posix_spawnattr_destroy(attributes: *mut *mut c_void) -> c_int;
+  fn posix_spawnattr_setflags(attributes: *mut *mut c_void, flags: i16) -> c_int;
+}
+
+@cfg(any(target_os = "macos", target_os = "ios"))
+const POSIX_SPAWN_CLOEXEC_DEFAULT: i16 = 0x4000;
+
+/// The environment of this program, as C's `environ`.
+@cfg(any(target_os = "linux", target_os = "android"))
+fn environment() -> *const *mut c_char {
+  unsafe { environ }
+}
+
+/// Shared libraries on Apple systems cannot refer to `environ` directly.
+@cfg(any(target_os = "macos", target_os = "ios"))
+fn environment() -> *const *mut c_char {
+  unsafe { *_NSGetEnviron() }
+}
+
+/// A pipe in `fds`, whose descriptors the child does not keep after `execve`.
+@cfg(any(target_os = "linux", target_os = "android"))
+fn open_pipe(fds: *mut c_int) -> bool {
+  (unsafe { pipe2(fds, O_CLOEXEC) }) == 0
+}
+
+/// `posix_spawn` closes them in the child.
+@cfg(any(target_os = "macos", target_os = "ios"))
+fn open_pipe(fds: *mut c_int) -> bool {
+  (unsafe { pipe(fds) }) == 0
+}
+
+@cfg(unix)
+fn close_fd(fd: c_int) {
+  if fd >= 0 {
+    unsafe { close(fd); }
+  }
+}
+
+/// The file `program` names: itself if it contains `/`, else the first executable file of that
+/// name in the directories of `PATH`, where an empty directory is the current one.
+@cfg(unix)
+fn find_program(program: String) -> Option<CString> {
+  if program.contains("/") {
+    return c_path(program);
+  }
+
+  const path = variable("PATH").unwrap_or("/usr/local/bin:/usr/bin:/bin");
+
+  for dir in path.split(":") {
+    const candidate = if dir.is_empty() { `./${program}` } else { `${dir}/${program}` };
+
+    if path_kind(candidate) == KIND_FILE {
+      const name = c_path(candidate)?;
+
+      if (unsafe { access(name.as_ptr(), X_OK) }) == 0 {
+        return Some(name);
+      }
+    }
+  }
+
+  None
+}
+
+/// Whether the `NAME=value` entry of the environment has the name of `entry`, another one.
+@cfg(unix)
+fn same_name(existing: *mut c_char, entry: String) -> bool {
+  const name = entry.as_ptr();
+  var at = 0usize;
+
+  loop {
+    const a = unsafe { *(existing as *const u8).add(at) };
+    const b = unsafe { *name.add(at) };
+
+    // `std::process` gives names that are not empty and have no `=`.
+    if b == 0x3D {
+      return a == 0x3D;
+    }
+
+    if a != b {
+      return false;
+    }
+
+    at += 1;
+  }
+}
+
+/// The child between `fork` and `execve`, where only async-signal-safe calls may be made: nothing
+/// here allocates, counts references or panics. A failure is reported as its `errno` on `report`.
+@cfg(any(target_os = "linux", target_os = "android"))
+fn child(program: *const c_char, argv: *const *mut c_char, envp: *const *mut c_char, dir: *const c_char, fds: *const c_int, report: c_int) {
+  var target = 0;
+
+  while target < 3 {
+    const fd = unsafe { *fds.add(target as usize) };
+
+    if fd >= 0 && (unsafe { dup2(fd, target) }) < 0 {
+      exit_child(report);
+    }
+
+    target += 1;
+  }
+
+  if !dir.is_null() && (unsafe { chdir(dir) }) != 0 {
+    exit_child(report);
+  }
+
+  unsafe { execve(program, argv, envp); }
+  exit_child(report);
+}
+
+@cfg(any(target_os = "linux", target_os = "android"))
+fn exit_child(report: c_int) {
+  const error = [errno()];
+
+  unsafe {
+    write(report, error.as_ptr() as *const c_void, 4);
+    _exit(127);
+  }
+}
+
+/// Starts `program` with the descriptors at `fds` as its stdin, stdout and stderr (a negative one
+/// is inherited), in `dir` unless it is null: the process, or the code of the failure.
+@cfg(any(target_os = "linux", target_os = "android"))
+fn spawn(program: *const c_char, argv: *const *mut c_char, envp: *const *mut c_char, dir: *const c_char, fds: *const c_int) -> Result<c_int, i32> {
+  // The child writes the `errno` of a failure to this pipe, which `execve` closes when it works.
+  var report = [-1; 2];
+
+  if !open_pipe(report.as_mut_ptr()) {
+    return Err(failure());
+  }
+
+  const pid = unsafe { fork() };
+
+  if pid == 0 {
+    child(program, argv, envp, dir, fds, report[1]);
+  }
+
+  const code = if pid < 0 { failure() } else { 0 };
+  var error = [0; 1];
+  var count = 0isize;
+
+  close_fd(report[1]);
+
+  if pid > 0 {
+    loop {
+      clear_errno();
+      count = unsafe { read(report[0], error.as_mut_ptr() as *mut c_void, 4) };
+
+      if count >= 0 || errno() != EINTR {
+        break;
+      }
+    }
+  }
+
+  close_fd(report[0]);
+
+  if pid < 0 {
+    return Err(code);
+  }
+
+  if count == 4 {
+    wait_child(pid);
+    return Err(error[0]);
+  }
+
+  Ok(pid)
+}
+
+@cfg(any(target_os = "macos", target_os = "ios"))
+fn spawn(program: *const c_char, argv: *const *mut c_char, envp: *const *mut c_char, dir: *const c_char, fds: *const c_int) -> Result<c_int, i32> {
+  var actions = 0 as *mut c_void;
+  var attributes = 0 as *mut c_void;
+  var pid = 0;
+  var code = unsafe { posix_spawn_file_actions_init(&raw mut actions) };
+
+  if code != 0 {
+    return Err(code);
+  }
+
+  code = unsafe { posix_spawnattr_init(&raw mut attributes) };
+
+  if code == 0 {
+    code = unsafe { posix_spawnattr_setflags(&raw mut attributes, POSIX_SPAWN_CLOEXEC_DEFAULT) };
+  }
+
+  var target = 0;
+
+  while target < 3 && code == 0 {
+    const fd = unsafe { *fds.add(target as usize) };
+
+    code = if fd >= 0 {
+      unsafe { posix_spawn_file_actions_adddup2(&raw mut actions, fd, target) }
+    } else {
+      unsafe { posix_spawn_file_actions_addinherit_np(&raw mut actions, target) }
+    };
+    target += 1;
+  }
+
+  if code == 0 && !dir.is_null() {
+    code = unsafe { posix_spawn_file_actions_addchdir_np(&raw mut actions, dir) };
+  }
+
+  if code == 0 {
+    code = unsafe { posix_spawn(&raw mut pid, program, &raw const actions, &raw const attributes, argv, envp) };
+  }
+
+  unsafe {
+    posix_spawn_file_actions_destroy(&raw mut actions);
+    posix_spawnattr_destroy(&raw mut attributes);
+  }
+
+  if code == 0 { Ok(pid) } else { Err(code) }
+}
+
+/// Waits for the process `pid` to end: its exit code, or `None` if a signal ended it.
+@cfg(unix)
+fn wait_child(pid: c_int) -> Option<i32> {
+  var status = [0; 1];
+
+  loop {
+    clear_errno();
+
+    if (unsafe { waitpid(pid, status.as_mut_ptr(), 0) }) >= 0 || errno() != EINTR {
+      break;
+    }
+  }
+
+  // `WIFEXITED`: no signal in the low 7 bits; `WEXITSTATUS`: the next 8 bits.
+  if status[0] % 128 == 0 { Some(status[0] / 256 % 256) } else { None }
+}
+
+/// Reads what is available from `fd` into `bytes`: `fd`, or -1 once it is closed at the end of
+/// the stream.
+@cfg(unix)
+fn drain(fd: c_int, bytes: List<u8>) -> c_int {
+  const start = bytes.len();
+
+  bytes.resize(start + 4096, 0);
+  clear_errno();
+
+  const count = unsafe { read(fd, bytes.as_mut_ptr().add(start) as *mut c_void, 4096) };
+  const interrupted = count < 0 && errno() == EINTR;
+
+  bytes.resize(start + if count > 0 { count as usize } else { 0 }, 0);
+
+  if count > 0 || interrupted {
+    fd
+  } else {
+    close_fd(fd);
+    -1
+  }
+}
+
+/// The C strings of `texts`, which `std::process` gives without NUL characters.
+@cfg(unix)
+fn c_strings(texts: List<String>) -> Result<List<CString>, i32> {
+  const strings = new List<CString>();
+
+  for text in texts {
+    match c_path(text) {
+      Some(found) => strings.push(found),
+      None => return Err(EINVAL),
+    }
+  }
+
+  Ok(strings)
+}
+
+/// A NULL-terminated array of the C strings `strings`, which must outlive it.
+@cfg(unix)
+fn pointers(strings: List<CString>) -> List<usize> {
+  const addresses = new List<usize>();
+
+  for text in strings {
+    addresses.push(text.as_ptr() as usize);
+  }
+
+  addresses.push(0);
+  addresses
+}
+
+/// Runs `argv[0]` with the arguments `argv`, the `NAME=value` entries of `vars` added to its
+/// environment, in `dir`, with `input` as its stdin, capturing its stdout and stderr when
+/// `capture`: how it ended, or the code of the failure to start it.
+@cfg(unix)
+pub fn run_process(argv: List<String>, vars: List<String>, dir: Option<String>, input: Option<String>, capture: bool) -> Result<Finished, i32> {
+  const program = match find_program(argv[0]) {
+    Some(found) => found,
+    None => return Err(ENOENT),
+  };
+  const c_args = c_strings(argv)?;
+  const c_vars = c_strings(vars)?;
+  const arg_pointers = pointers(c_args);
+  const parent = environment();
+  const env_pointers = new List<usize>();
+
+  if !vars.is_empty() {
+    var index = 0usize;
+
+    while !parent.is_null() {
+      const existing = unsafe { *parent.add(index) };
+
+      if existing.is_null() {
+        break;
+      }
+
+      if !vars.iter().any((entry) => same_name(existing, entry)) {
+        env_pointers.push(existing as usize);
+      }
+
+      index += 1;
+    }
+
+    for entry in c_vars {
+      env_pointers.push(entry.as_ptr() as usize);
+    }
+
+    env_pointers.push(0);
+  }
+
+  const envp = if vars.is_empty() { parent } else { env_pointers.as_ptr() as *const *mut c_char };
+  const c_dir: Option<CString> = match dir {
+    Some(path) => match c_path(path) {
+      Some(found) => Some(found),
+      None => return Err(EINVAL),
+    },
+    None => None,
+  };
+  const dir_pointer = match c_dir {
+    Some(path) => path.as_ptr(),
+    None => 0 as *const c_char,
+  };
+  var stdin_pipe = [-1; 2];
+  var stdout_pipe = [-1; 2];
+  var stderr_pipe = [-1; 2];
+  var code = 0;
+
+  if (input.is_some() && !open_pipe(stdin_pipe.as_mut_ptr())) || (capture && (!open_pipe(stdout_pipe.as_mut_ptr()) || !open_pipe(stderr_pipe.as_mut_ptr()))) {
+    code = failure();
+  }
+
+  // The child shares stdout and stderr: what this program printed must come first.
+  unsafe { fflush(0 as *mut c_void); }
+
+  const fds = [stdin_pipe[0], stdout_pipe[1], stderr_pipe[1]];
+  const started = if code == 0 {
+    spawn(program.as_ptr(), arg_pointers.as_ptr() as *const *mut c_char, envp, dir_pointer, fds.as_ptr())
+  } else {
+    Err(code)
+  };
+
+  close_fd(stdin_pipe[0]);
+  close_fd(stdout_pipe[1]);
+  close_fd(stderr_pipe[1]);
+
+  const pid = match started {
+    Ok(found) => found,
+    Err(failed) => {
+      close_fd(stdin_pipe[1]);
+      close_fd(stdout_pipe[0]);
+      close_fd(stderr_pipe[0]);
+      return Err(failed);
+    }
+  };
+  const stdout = new List<u8>();
+  const stderr = new List<u8>();
+  const text = input.unwrap_or("");
+  var in_fd = stdin_pipe[1];
+  var out_fd = stdout_pipe[0];
+  var err_fd = stderr_pipe[0];
+  var done = 0usize;
+
+  if in_fd >= 0 && text.is_empty() {
+    close_fd(in_fd);
+    in_fd = -1;
+  }
+
+  // A child that stops reading would end this program with SIGPIPE; SIG_IGN is 1.
+  const ignore = Some(unsafe { 1usize as extern "C" fn(c_int) });
+  const writes = in_fd >= 0;
+  const previous = if writes { unsafe { signal(SIGPIPE, ignore) } } else { None };
+  var ready = [PollFd { fd: -1, events: 0, revents: 0 }; 3];
+
+  // `poll` leaves out the slots of closed streams, whose descriptor is negative.
+  while in_fd >= 0 || out_fd >= 0 || err_fd >= 0 {
+    ready[0] = PollFd { fd: in_fd, events: POLLOUT, revents: 0 };
+    ready[1] = PollFd { fd: out_fd, events: POLLIN, revents: 0 };
+    ready[2] = PollFd { fd: err_fd, events: POLLIN, revents: 0 };
+    clear_errno();
+
+    if wait_ready(ready.as_mut_ptr(), 3) < 0 {
+      if errno() == EINTR {
+        continue;
+      }
+
+      break;
+    }
+
+    if in_fd >= 0 && ready[0].revents != 0 {
+      const left = text.len() - done;
+      const size = if left > PIPE_BUF { PIPE_BUF } else { left };
+
+      clear_errno();
+
+      const written = unsafe { write(in_fd, text.as_ptr().add(done) as *const c_void, size) };
+
+      if written > 0 {
+        done += written as usize;
+      }
+
+      // Once the child closes its stdin, the rest of the input is dropped.
+      if done == text.len() || (written < 0 && errno() != EINTR) {
+        close_fd(in_fd);
+        in_fd = -1;
+      }
+    }
+
+    if out_fd >= 0 && ready[1].revents != 0 {
+      out_fd = drain(out_fd, stdout);
+    }
+
+    if err_fd >= 0 && ready[2].revents != 0 {
+      err_fd = drain(err_fd, stderr);
+    }
+  }
+
+  if writes {
+    unsafe { signal(SIGPIPE, previous); }
+  }
+
+  close_fd(in_fd);
+  close_fd(out_fd);
+  close_fd(err_fd);
+
+  Ok(Finished { code: wait_child(pid), stdout: stdout, stderr: stderr })
+}
+
+/// `SECURITY_ATTRIBUTES`.
+@cfg(windows)
+@repr(C)
+struct SecurityAttributes {
+  pub length: u32;
+  pub descriptor: *mut c_void;
+  pub inherit: c_int;
+}
+
+/// `STARTUPINFOW`.
+@cfg(windows)
+@repr(C)
+struct StartupInfo {
+  pub size: u32;
+  pub reserved: *mut u16;
+  pub desktop: *mut u16;
+  pub title: *mut u16;
+  pub x: u32;
+  pub y: u32;
+  pub x_size: u32;
+  pub y_size: u32;
+  pub x_count_chars: u32;
+  pub y_count_chars: u32;
+  pub fill_attribute: u32;
+  pub flags: u32;
+  pub show_window: u16;
+  pub reserved2_size: u16;
+  pub reserved2: *mut u8;
+  pub std_input: *mut c_void;
+  pub std_output: *mut c_void;
+  pub std_error: *mut c_void;
+}
+
+/// `PROCESS_INFORMATION`.
+@cfg(windows)
+@repr(C)
+struct ProcessInformation {
+  pub process: *mut c_void;
+  pub thread: *mut c_void;
+  pub process_id: u32;
+  pub thread_id: u32;
+}
+
+/// `OVERLAPPED`, for reading and writing several pipes at once without threads.
+@cfg(windows)
+@repr(C)
+struct Overlapped {
+  pub internal: usize;
+  pub internal_high: usize;
+  pub offset: u32;
+  pub offset_high: u32;
+  pub event: *mut c_void;
+}
+
+/// The two ends of a pipe to a child.
+@cfg(windows)
+struct PipeEnds {
+  /// This program's end, opened for overlapped I/O.
+  pub ours: *mut c_void;
+  /// The child's end, which it inherits.
+  pub theirs: *mut c_void;
+}
+
+@cfg(windows)
+extern "C" {
+  fn CreateNamedPipeW(name: *const u16, open_mode: u32, pipe_mode: u32, instances: u32, out_size: u32, in_size: u32, timeout: u32, security: *mut c_void) -> *mut c_void;
+  fn CreateEventW(security: *mut c_void, manual_reset: c_int, signaled: c_int, name: *const u16) -> *mut c_void;
+  fn GetOverlappedResult(file: *mut c_void, overlapped: *mut Overlapped, transferred: *mut u32, wait: c_int) -> c_int;
+  fn CancelIo(file: *mut c_void) -> c_int;
+  fn WaitForMultipleObjects(count: u32, handles: *const *mut c_void, wait_all: c_int, milliseconds: u32) -> u32;
+  fn WaitForSingleObject(handle: *mut c_void, milliseconds: u32) -> u32;
+  fn GetExitCodeProcess(process: *mut c_void, code: *mut u32) -> c_int;
+  fn CreateProcessW(application: *const u16, command_line: *mut u16, process_security: *mut c_void, thread_security: *mut c_void, inherit_handles: c_int, flags: u32, environment: *mut c_void, directory: *const u16, startup: *mut StartupInfo, information: *mut ProcessInformation) -> c_int;
+  fn GetEnvironmentStringsW() -> *mut u16;
+  fn FreeEnvironmentStringsW(block: *mut u16) -> c_int;
+  fn GetCurrentProcess() -> *mut c_void;
+  fn GetCurrentProcessId() -> u32;
+  fn GetCurrentThreadId() -> u32;
+  fn DuplicateHandle(source_process: *mut c_void, source: *mut c_void, target_process: *mut c_void, target: *mut *mut c_void, access: u32, inherit: c_int, options: u32) -> c_int;
+}
+
+@cfg(windows)
+const INFINITE: u32 = 0xFFFF_FFFF;
+@cfg(windows)
+const ERROR_IO_PENDING: u32 = 997;
+@cfg(windows)
+const EQUALS: u16 = 0x3D;
+
+/// The pipes this thread has created, which name the next one.
+@cfg(windows)
+@thread_local
+static var PIPES: u64 = 0;
+
+/// A pipe for a child: one it writes (its stdout or stderr) when `inbound`, else its stdin.
+/// Anonymous pipes cannot be overlapped, so it is a named pipe with a name of its own, as Rust's
+/// `std` does.
+@cfg(windows)
+fn child_pipe(inbound: bool) -> Result<PipeEnds, i32> {
+  const count = PIPES;
+
+  PIPES = count + 1;
+
+  const pid = unsafe { GetCurrentProcessId() };
+  const tid = unsafe { GetCurrentThreadId() };
+  const name = to_utf16(`\\\\.\\pipe\\sagitario-${pid}-${tid}-${count}`);
+  // PIPE_ACCESS_INBOUND (1) or PIPE_ACCESS_OUTBOUND (2), with FILE_FLAG_OVERLAPPED and
+  // FILE_FLAG_FIRST_PIPE_INSTANCE; a pipe of bytes that rejects remote clients.
+  const access = if inbound { 1u32 } else { 2u32 };
+  const ours = unsafe { CreateNamedPipeW(name.as_ptr(), access + 0x4000_0000 + 0x0008_0000, 8, 1, 4096, 4096, 0, 0 as *mut c_void) };
+
+  if invalid(ours) {
+    return Err(failure());
+  }
+
+  var inheritable = SecurityAttributes { length: mem::size_of<SecurityAttributes>() as u32, descriptor: 0 as *mut c_void, inherit: 1 };
+  // GENERIC_WRITE or GENERIC_READ, OPEN_EXISTING.
+  const theirs_access = if inbound { 0x4000_0000u32 } else { 0x8000_0000u32 };
+  const theirs = unsafe { CreateFileW(name.as_ptr(), theirs_access, 0, &raw mut inheritable as *mut c_void, 3, 0, 0 as *mut c_void) };
+
+  if invalid(theirs) {
+    const code = failure();
+
+    unsafe { CloseHandle(ours); }
+    return Err(code);
+  }
+
+  Ok(PipeEnds { ours: ours, theirs: theirs })
+}
+
+/// An inheritable copy of this program's standard stream `index`, or null if it has none.
+@cfg(windows)
+fn inherited(index: i32) -> *mut c_void {
+  const handle = unsafe { GetStdHandle((-10 - index) as u32) };
+  var copy = 0 as *mut c_void;
+
+  if handle.is_null() || invalid(handle) {
+    return copy;
+  }
+
+  // DUPLICATE_SAME_ACCESS
+  if (unsafe { DuplicateHandle(GetCurrentProcess(), handle, GetCurrentProcess(), &raw mut copy, 0, 1, 2) }) == 0 {
+    return 0 as *mut c_void;
+  }
+
+  copy
+}
+
+/// Appends `arg` quoted so that the rules of Microsoft's C runtime (`args`) read it back.
+@cfg(windows)
+fn quote_arg(line: StringBuilder, arg: String) {
+  if !arg.is_empty() && !arg.contains(" ") && !arg.contains("\t") && !arg.contains("\"") {
+    line.append(arg);
+    return;
+  }
+
+  line.append("\"");
+
+  var slashes = 0usize;
+
+  for c in arg.chars() {
+    if c == '\\' {
+      slashes += 1;
+      continue;
+    }
+
+    // Backslashes before a quote are doubled, and the quote escaped.
+    line.append("\\".repeat(if c == '"' { slashes * 2 + 1 } else { slashes }));
+    line.append_char(c);
+    slashes = 0;
+  }
+
+  // Backslashes before the closing quote are doubled.
+  line.append("\\".repeat(slashes * 2));
+  line.append("\"");
+}
+
+/// The command line of `argv`, whose program name is only quoted, never escaped, when it holds
+/// spaces.
+@cfg(windows)
+fn command_line(argv: List<String>) -> String {
+  const line = new StringBuilder();
+  const program = argv[0];
+  const spaced = program.is_empty() || program.contains(" ") || program.contains("\t");
+
+  if spaced {
+    line.append("\"");
+  }
+
+  line.append(program);
+
+  if spaced {
+    line.append("\"");
+  }
+
+  for index in 1..argv.len() {
+    line.append(" ");
+    quote_arg(line, argv[index]);
+  }
+
+  line.to_string()
+}
+
+/// An ASCII letter of UTF-16 in upper case.
+@cfg(windows)
+fn upper(c: u16) -> u16 {
+  if c >= 0x61 && c <= 0x7A { c - 32 } else { c }
+}
+
+/// Whether the entry at `at` of an environment block has the name of `entry`, a `NAME=value` in
+/// UTF-16: Windows names ignore ASCII case.
+@cfg(windows)
+fn same_wide_name(block: *const u16, at: usize, entry: List<u16>) -> bool {
+  var index = 0usize;
+
+  loop {
+    const a = unit(block, at + index);
+    const b = entry[index];
+
+    if b == EQUALS {
+      return a == EQUALS;
+    }
+
+    if a == 0 || upper(a) != upper(b) {
+      return false;
+    }
+
+    index += 1;
+  }
+}
+
+/// The environment block of the child: this program's, with the `NAME=value` entries of `vars`
+/// replacing or adding variables. Entries starting with `=` are hidden variables of the shell.
+@cfg(windows)
+fn environment_block(vars: List<String>) -> List<u16> {
+  const block = new List<u16>();
+  const added = new List<List<u16>>();
+
+  for entry in vars {
+    added.push(to_utf16(entry));
+  }
+
+  const parent = unsafe { GetEnvironmentStringsW() };
+
+  if !parent.is_null() {
+    const units = parent as *const u16;
+    var at = 0usize;
+
+    while unit(units, at) != 0 {
+      var end = at;
+
+      while unit(units, end) != 0 {
+        end += 1;
+      }
+
+      const replaced = unit(units, at) != EQUALS && added.iter().any((entry) => same_wide_name(units, at, entry));
+
+      if !replaced {
+        for index in at..end + 1 {
+          block.push(unit(units, index));
+        }
+      }
+
+      at = end + 1;
+    }
+
+    unsafe { FreeEnvironmentStringsW(parent); }
+  }
+
+  for entry in added {
+    for c in entry {
+      block.push(c);
+    }
+  }
+
+  // The block ends with an empty entry.
+  block.push(0);
+  block
+}
+
+/// Writes `input` to the child's stdin `stdin` and reads its `stdout` and `stderr` into `out` and
+/// `err`, all at once with overlapped I/O, until each pipe is closed; a null handle is not a pipe.
+@cfg(windows)
+fn communicate(stdin: *mut c_void, stdout: *mut c_void, stderr: *mut c_void, input: String, out: List<u8>, err: List<u8>) {
+  var handles = [stdin, stdout, stderr];
+  var events = [0 as *mut c_void; 3];
+  var overlapped = [Overlapped { internal: 0, internal_high: 0, offset: 0, offset_high: 0, event: 0 as *mut c_void }; 3];
+  var pending = [false; 3];
+  // Room for a read of stdout, then for one of stderr.
+  var buffer = [0u8; 8192];
+  var done = 0usize;
+
+  if !handles[0].is_null() && input.is_empty() {
+    unsafe { CloseHandle(handles[0]); }
+    handles[0] = 0 as *mut c_void;
+  }
+
+  for stream in 0..3usize {
+    if !handles[stream].is_null() {
+      events[stream] = unsafe { CreateEventW(0 as *mut c_void, 1, 0, 0 as *const u16) };
+      overlapped[stream].event = events[stream];
+    }
+  }
+
+  loop {
+    // An operation on each open pipe without one.
+    for stream in 0..3usize {
+      if handles[stream].is_null() || pending[stream] {
+        continue;
+      }
+
+      const place = &raw mut overlapped[stream] as *mut c_void;
+      const started = if stream == 0 {
+        const left = input.len() - done;
+        const size = if left > 65536 { 65536u32 } else { left as u32 };
+
+        unsafe { WriteFile(handles[0], input.as_ptr().add(done), size, 0 as *mut u32, place) }
+      } else {
+        unsafe { ReadFile(handles[stream], &raw mut buffer[(stream - 1) * 4096], 4096, 0 as *mut u32, place) }
+      };
+
+      if started != 0 || (unsafe { GetLastError() }) == ERROR_IO_PENDING {
+        pending[stream] = true;
+      } else {
+        unsafe { CloseHandle(handles[stream]); }
+        handles[stream] = 0 as *mut c_void;
+      }
+    }
+
+    var waiting = [0 as *mut c_void; 3];
+    var streams = [0usize; 3];
+    var count = 0usize;
+
+    for stream in 0..3usize {
+      if pending[stream] {
+        waiting[count] = events[stream];
+        streams[count] = stream;
+        count += 1;
+      }
+    }
+
+    if count == 0 {
+      break;
+    }
+
+    const signaled = unsafe { WaitForMultipleObjects(count as u32, waiting.as_ptr(), 0, INFINITE) } as usize;
+
+    if signaled >= count {
+      // WAIT_FAILED: the operations are cancelled, and waited for before the buffers go.
+      for stream in 0..3usize {
+        if pending[stream] {
+          var ignored = 0u32;
+
+          unsafe {
+            CancelIo(handles[stream]);
+            GetOverlappedResult(handles[stream], &raw mut overlapped[stream], &raw mut ignored, 1);
+            CloseHandle(handles[stream]);
+          }
+          handles[stream] = 0 as *mut c_void;
+          pending[stream] = false;
+        }
+      }
+
+      break;
+    }
+
+    const stream = streams[signaled];
+    var transferred = 0u32;
+    const ok = (unsafe { GetOverlappedResult(handles[stream], &raw mut overlapped[stream], &raw mut transferred, 0) }) != 0;
+
+    pending[stream] = false;
+
+    var finished = !ok || transferred == 0;
+
+    if stream == 0 {
+      done += transferred as usize;
+      // Once the child closes its stdin, the rest of the input is dropped.
+      finished = !ok || done == input.len();
+    } else {
+      const bytes = if stream == 1 { out } else { err };
+      const base = (stream - 1) * 4096;
+
+      for index in 0..transferred as usize {
+        bytes.push(buffer[base + index]);
+      }
+    }
+
+    if finished {
+      unsafe { CloseHandle(handles[stream]); }
+      handles[stream] = 0 as *mut c_void;
+    }
+  }
+
+  for stream in 0..3usize {
+    if !events[stream].is_null() {
+      unsafe { CloseHandle(events[stream]); }
+    }
+  }
+}
+
+@cfg(windows)
+pub fn run_process(argv: List<String>, vars: List<String>, dir: Option<String>, input: Option<String>, capture: bool) -> Result<Finished, i32> {
+  const line = to_utf16(command_line(argv));
+  const environment: Option<List<u16>> = if vars.is_empty() { None } else { Some(environment_block(vars)) };
+  const directory = match dir {
+    Some(path) => Some(to_utf16(path)),
+    None => None,
+  };
+  var ours = [0 as *mut c_void; 3];
+  var theirs = [0 as *mut c_void; 3];
+  var code = 0;
+
+  for stream in 0..3usize {
+    const piped = if stream == 0 { input.is_some() } else { capture };
+
+    if !piped {
+      theirs[stream] = inherited(stream as i32);
+    } else if code == 0 {
+      match child_pipe(stream != 0) {
+        Ok(ends) => {
+          ours[stream] = ends.ours;
+          theirs[stream] = ends.theirs;
+        }
+        Err(failed) => {
+          code = failed;
+        }
+      }
+    }
+  }
+
+  // The child shares stdout and stderr: what this program printed must come first.
+  unsafe { fflush(0 as *mut c_void); }
+
+  var process = ProcessInformation { process: 0 as *mut c_void, thread: 0 as *mut c_void, process_id: 0, thread_id: 0 };
+
+  if code == 0 {
+    const none = 0 as *mut u16;
+    // STARTF_USESTDHANDLES
+    var startup = StartupInfo {
+      size: mem::size_of<StartupInfo>() as u32,
+      reserved: none,
+      desktop: none,
+      title: none,
+      x: 0,
+      y: 0,
+      x_size: 0,
+      y_size: 0,
+      x_count_chars: 0,
+      y_count_chars: 0,
+      fill_attribute: 0,
+      flags: 0x100,
+      show_window: 0,
+      reserved2_size: 0,
+      reserved2: 0 as *mut u8,
+      std_input: theirs[0],
+      std_output: theirs[1],
+      std_error: theirs[2],
+    };
+    const block = match environment {
+      Some(units) => units.as_ptr() as *mut c_void,
+      None => 0 as *mut c_void,
+    };
+    const cwd = match directory {
+      Some(units) => units.as_ptr(),
+      None => 0 as *const u16,
+    };
+
+    // CREATE_UNICODE_ENVIRONMENT
+    if (unsafe { CreateProcessW(0 as *const u16, line.as_mut_ptr(), 0 as *mut c_void, 0 as *mut c_void, 1, 0x400, block, cwd, &mut startup, &mut process) }) == 0 {
+      code = failure();
+    }
+  }
+
+  // The child holds its own copies of its ends.
+  for stream in 0..3usize {
+    if !theirs[stream].is_null() {
+      unsafe { CloseHandle(theirs[stream]); }
+    }
+  }
+
+  if code != 0 {
+    for stream in 0..3usize {
+      if !ours[stream].is_null() {
+        unsafe { CloseHandle(ours[stream]); }
+      }
+    }
+
+    return Err(code);
+  }
+
+  const stdout = new List<u8>();
+  const stderr = new List<u8>();
+  var exit = 0u32;
+
+  communicate(ours[0], ours[1], ours[2], input.unwrap_or(""), stdout, stderr);
+
+  unsafe {
+    WaitForSingleObject(process.process, INFINITE);
+    GetExitCodeProcess(process.process, &raw mut exit);
+    CloseHandle(process.process);
+    CloseHandle(process.thread);
+  }
+
+  Ok(Finished { code: Some(exit as i32), stdout: stdout, stderr: stderr })
 }

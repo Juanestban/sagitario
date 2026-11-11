@@ -753,23 +753,15 @@ SAG_FROM_UINTMAX(u32, uint32_t)
 SAG_FROM_UINTMAX(u64, uint64_t)
 SAG_FROM_UINTMAX(usize, size_t)
 
-/* ---- Standard library: std::env, std::io, std::process --------------------------------- *
+/* ---- Standard library: std::env, std::process ------------------------------------------- *
  * Declared in Sagitario by the standard library modules (docs/spec/11-standard-library.md).
  * They borrow their string arguments and return new references. */
-
-/* Codes of I/O errors: `errno` values are positive, the runtime's own are negative, as `std`
- * reads them (`os_error`, docs/adr/0086-c-globals-and-std-io.md). */
-#define SAG_IO_INVALID_DATA (-2)
-#define SAG_IO_UNKNOWN (-3)
-#define SAG_IO_UNEXPECTED_EOF (-4)
 
 /* Gives `std::env`, written in Sagitario, what C's `main` received: the arguments on Unix
  * (docs/adr/0085-conditional-compilation-and-std-time.md, Q552). */
 void sag_env_init(int argc, const char *const *argv);
 /* Flushes output and ends the program without running pending releases. */
 _Noreturn void sag_process_exit(int32_t code);
-
-
 
 /* Dynamic libraries (docs/adr/0078-ffi-without-c-shims.md): a library, never unloaded, or NULL
  * with the reason in `sag_library_error`; and one of its functions, or NULL. */
@@ -782,14 +774,6 @@ sag_symbol sag_library_symbol(void *library, sag_string name);
  * (docs/adr/0085-conditional-compilation-and-std-time.md, Q552). */
 uint64_t sag_time_monotonic(void);
 void sag_time_sleep(uint64_t nanos);
-
-/* Runs the program `argv` (`argc` parts separated by NUL, the program first) with the
- * `NAME=value` entries of `env` added to the environment, in `cwd` unless it is empty, with
- * `input` as stdin if `has_input`, capturing stdout and stderr if `capture`. Sets results[0] to
- * an error code or 0, results[1] to the exit code and results[2] to whether there is one, and
- * returns stdout followed by stderr, `*split` being the length of stdout. */
-sag_string sag_process_run(sag_string argv, size_t argc, sag_string env, size_t env_count, sag_string cwd, sag_string input, bool has_input,
-                           bool capture, int32_t *results, size_t *split);
 
 /* ---- Standard library: std::thread (compiled with SAG_THREADS) ------------------------- */
 

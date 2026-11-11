@@ -6,21 +6,7 @@
 
 use std::io;
 use std::io::ErrorKind;
-
-extern "C" {
-  fn sag_process_run(
-    argv: String,
-    argc: usize,
-    env: String,
-    env_count: usize,
-    cwd: String,
-    input: String,
-    has_input: bool,
-    capture: bool,
-    results: *mut i32,
-    split: *mut usize,
-  ) -> String;
-}
+use std::sys;
 
 /// How a program ended.
 pub struct ExitStatus {
@@ -145,36 +131,13 @@ pub class Command {
       argv.push(arg);
     }
 
-    var results = [0i32; 3];
-    var split = [0usize; 1];
-    const input = self.stdin_text.unwrap_or("");
-    const has_input = self.stdin_text.is_some();
-    const dir = self.directory.unwrap_or("");
-    const printed = unsafe {
-      sag_process_run(
-        argv.join(nul),
-        argv.len(),
-        self.variables.join(nul),
-        self.variables.len(),
-        dir,
-        input,
-        has_input,
-        capture,
-        results.as_mut_ptr(),
-        split.as_mut_ptr(),
-      )
-    };
-
-    if results[0] != 0 {
-      return Err(super::os_error(results[0], action));
+    match sys::run_process(argv, self.variables, self.directory, self.stdin_text, capture) {
+      Ok(finished) => Ok(Output {
+        status: ExitStatus { code: finished.code },
+        stdout: super::utf8_lossy(&finished.stdout),
+        stderr: super::utf8_lossy(&finished.stderr),
+      }),
+      Err(code) => Err(super::os_error(code, action)),
     }
-
-    const code = if results[2] == 1 { Some(results[1]) } else { None };
-
-    Ok(Output {
-      status: ExitStatus { code: code },
-      stdout: printed.substring(0, split[0]),
-      stderr: printed.substring(split[0], printed.len()),
-    })
   }
 }
