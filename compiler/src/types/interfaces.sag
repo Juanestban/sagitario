@@ -427,10 +427,19 @@ fn check_implementations(cx: Checker) {
     const own_blocks: List<Option<u32>> = new List();
 
     if let Some(entry) = cx.typed.impls.get(item_key(item)) {
+      // An interface the type implements itself, in its header or a block, comes from there,
+      // not from the block of an interface extending it.
+      for index in 0..entry.interfaces.len() {
+        own.push(entry.interfaces[index]);
+        own_blocks.push(entry.blocks.get(index).unwrap_or(None));
+      }
+
       for index in 0..entry.interfaces.len() {
         for ancestor in cx.typed.interface_ancestor_refs(entry.interfaces[index]) {
-          own.push(ancestor);
-          own_blocks.push(entry.blocks.get(index).unwrap_or(None));
+          if !types::contains_ref(own, ancestor) {
+            own.push(ancestor);
+            own_blocks.push(entry.blocks.get(index).unwrap_or(None));
+          }
         }
       }
     }

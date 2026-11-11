@@ -129,8 +129,8 @@ struct Point impl Display {
   contain. There is no move.
 - A struct cannot contain itself by value, directly or through other structs or arrays: its
   size would be infinite. Recursive data needs a reference type (`class`, F2).
-- Structs are not compared with `==` and cannot be interpolated (see
-  [types](02-types.md#equality-f1f2)).
+- Structs are compared with `==` and `<` only when they implement `Eq` and `Ord`, and cannot be
+  interpolated (see [types](02-types.md#equality-f1f2)).
 - `struct Name impl I1, I2` implements interfaces (F2). Structs never use `extends`. Generic
   structs arrive with generics (F2).
 

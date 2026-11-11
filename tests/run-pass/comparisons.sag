@@ -1,0 +1,148 @@
+// `==` and `!=` through `Eq`, and `<`, `<=`, `>`, `>=` through `Ord`, on structs, enums and type
+// parameters (docs/adr/0081-operator-overloading.md, increment 3); enums without data keep `==` by
+// variant unless they implement `Eq`, and classes keep `==` by identity.
+// expect-stdout: true true true false true true
+// expect-stdout: true true false false false true
+// expect-stdout: false true false true true false
+// expect-stdout: false false true true false true
+// expect-stdout: 10 9 x
+// expect-stdout: true false false true
+// expect-stdout: true false
+// expect-stdout: true false true
+// expect-stdout: false true true
+// expect-stdout: 9 4 10
+// expect-stdout: true false true true
+// expect-stdout: 1 true
+struct Version impl Ord {
+  pub major: i32;
+  pub minor: i32;
+
+  pub fn equals(self, other: Version) -> bool {
+    self.major == other.major && self.minor == other.minor
+  }
+
+  pub fn compare(self, other: Version) -> Ordering {
+    if self.major != other.major { self.major.compare(other.major) } else { self.minor.compare(other.minor) }
+  }
+}
+
+struct Point {
+  pub x: i32;
+  pub y: i32;
+}
+
+impl Eq for Point {
+  fn equals(self, other: Point) -> bool {
+    self.x == other.x && self.y == other.y
+  }
+}
+
+enum Shape {
+  Circle(f64),
+  Square(f64),
+}
+
+impl Eq for Shape {
+  fn equals(self, other: Shape) -> bool {
+    match self {
+      Shape::Circle(r) => match other {
+        Shape::Circle(s) => r == s,
+        _ => false,
+      },
+      Shape::Square(a) => match other {
+        Shape::Square(b) => a == b,
+        _ => false,
+      },
+    }
+  }
+}
+
+// Without data and with `Eq`: `==` calls `equals`, which here ignores the variant.
+enum Light impl Eq {
+  Red,
+  Green,
+
+  pub fn equals(self, _other: Light) -> bool {
+    true
+  }
+}
+
+enum Plain {
+  A,
+  B,
+}
+
+class Node impl Eq {
+  pub const id: i32;
+
+  pub fn new(self, id: i32) {
+    self.id = id;
+  }
+
+  pub fn equals(self, other: Node) -> bool {
+    self.id == other.id
+  }
+}
+
+// `Ord` in its own block, beside the block of `Eq` it extends.
+struct Rank {
+  pub value: i32;
+}
+
+impl Eq for Rank {
+  fn equals(self, other: Rank) -> bool { self.value == other.value }
+}
+
+impl Ord for Rank {
+  fn compare(self, other: Rank) -> Ordering { self.value.compare(other.value) }
+}
+
+fn max_of<T: Ord>(a: T, b: T) -> T {
+  if a < b { b } else { a }
+}
+
+fn same<T: Eq>(a: T, b: T) -> bool {
+  a == b
+}
+
+fn order<T: Ord>(a: T, b: T) -> String {
+  f"{a < b} {a <= b} {a > b} {a >= b} {a == b} {a != b}"
+}
+
+fn main() {
+  const v1 = Version { major: 1, minor: 4 };
+  const v2 = Version { major: 1, minor: 10 };
+  const v3 = Version { major: 1, minor: 4 };
+
+  println(f"{v1 < v2} {v1 <= v3} {v2 > v1} {v1 >= v2} {v1 == v3} {v1 != v2}");
+  println(order(v1, v2));
+  println(order(3, 3));
+  println(order("b", "a"));
+
+  const m = max_of(v1, v2);
+  println(f"{m.minor} {max_of(4, 9)} {max_of("x", "abc")}");
+
+  const p = Point { x: 1, y: 2 };
+  println(f"{p == Point { x: 1, y: 2 }} {p != p} {same(p, Point { x: 0, y: 2 })} {same(5, 5)}");
+  println(f"{Shape::Circle(1.0) == Shape::Circle(1.0)} {Shape::Circle(1.0) == Shape::Square(1.0)}");
+  println(f"{Light::Red == Light::Green} {Plain::A == Plain::B} {Plain::A == Plain::A}");
+
+  // Classes keep identity, even with `Eq`.
+  const a = new Node(1);
+  const b = new Node(1);
+  println(f"{a == b} {a == a} {a.equals(b)}");
+
+  const versions = List::from([v2, v1, Version { major: 0, minor: 9 }]);
+  versions.sort();
+  println(f"{versions[0].minor} {versions[1].minor} {versions[2].minor}");
+
+  const low = Rank { value: 1 };
+  const high = Rank { value: 2 };
+
+  println(f"{low < high} {low == high} {low.equals(low)} {low.compare(high) == Ordering::Less}");
+
+  const ranks = List::from([high, low]);
+
+  ranks.sort();
+  println(f"{ranks[0].value} {ranks.contains(high)}");
+}

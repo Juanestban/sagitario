@@ -2219,6 +2219,31 @@ pub class Lowering {
   prv fn binary(self, value: Expr, ty: Type, op: BinaryOp, lhs: Expr, rhs: Expr) -> Result<Operand, String> {
     // An operator implemented by the type of `lhs` (docs/adr/0081-operator-overloading.md).
     if self.typed.method_calls.contains_key(value.id) {
+      if op == BinaryOp::Eq || op == BinaryOp::Ne {
+        const equal = self.method_call_with(value, lhs, List::from([rhs]), ty, None, true)?;
+
+        if op == BinaryOp::Eq {
+          return Ok(equal);
+        }
+
+        return Ok(self.new_value(ty, Rvalue::Unary { op: UnaryOp::Not, ty: ty, operand: equal }));
+      }
+
+      if op == BinaryOp::Lt || op == BinaryOp::Le || op == BinaryOp::Gt || op == BinaryOp::Ge {
+        // `compare`, then its variant: `a < b` is `Less`, `a <= b` is not `Greater`.
+        const ordering_ty = self.typed.ordering_type();
+        const order = self.method_call_with(value, lhs, List::from([rhs]), ordering_ty, None, true)?;
+        const place = self.operand_place(order, ordering_ty)?;
+        const variant = if op == BinaryOp::Lt || op == BinaryOp::Ge { 0u32 } else { 2u32 };
+        const found = matching::tag_is(self, place, variant)?;
+
+        if op == BinaryOp::Lt || op == BinaryOp::Gt {
+          return Ok(found);
+        }
+
+        return Ok(self.new_value(ty, Rvalue::Unary { op: UnaryOp::Not, ty: ty, operand: found }));
+      }
+
       return self.method_call_with(value, lhs, List::from([rhs]), ty, None, true);
     }
 

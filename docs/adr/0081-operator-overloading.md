@@ -90,3 +90,9 @@ Rust also gives each implementation an associated type, `Output`, for the result
   writing it on the right; several implementations of `Neg` make `-a` ambiguous (`E0344`). A
   method of an operator that modifies `self` gets a copy of the left operand, as operands are
   values.
+- Increment 3 (equality and order) is done: `docs/spec/05-interfaces-generics.md#equality-order-and-hashing-f2`,
+  with the acceptance program of G1, `tests/run-pass/g1_acceptance/`. A data-less enum
+  implementing `Eq` compares with its `equals`; without it, by variant as before. A block of an
+  interface whose parent the type implements itself (`impl Ord for P` beside `impl Eq for P`)
+  holds only the interface's own methods, as Rust's separate implementations of a trait and its
+  supertrait do, which refines Q507's rule that a block holds the methods of the parents too.

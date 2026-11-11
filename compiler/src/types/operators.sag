@@ -9,6 +9,7 @@ use pkg::ast::{BinaryOp, Expr};
 use pkg::ast;
 use pkg::diagnostics::Diagnostic;
 use pkg::diagnostics::codes;
+use pkg::resolve::ParamOwner;
 use pkg::span::Span;
 use pkg::types::{Checker, NamedRef, Type, TypeKind};
 use pkg::types;
@@ -73,6 +74,35 @@ fn record(cx: Checker, id: u32, interface_ref: NamedRef) {
     cx.typed.method_calls.insert(id, function);
     cx.typed.call_args.insert(id, interface_ref.args);
   }
+}
+
+/// The type of `ty` with its own parameters, as a block names it: `Tree<T>` for a `Tree<f64>`.
+fn own_type_text(cx: Checker, ty: Type) -> String {
+  const item = match types::type_item_of(ty) {
+    Some(found) => found,
+    None => return types::text(ty),
+  };
+  const params: List<String> = new List();
+
+  for param in cx.resolution.generics(cx.package, ParamOwner::Item(item)) {
+    params.push(param.name.name);
+  }
+
+  const name = cx.resolution.type_name(cx.package, item);
+
+  if params.is_empty() { name } else { name + "<" + params.join(", ") + ">" }
+}
+
+/// The header of a block implementing `implemented` for the type of `ty`, with the type's own
+/// parameters, since a block is for all of a generic type: `impl<T> Eq for Tree<T>`.
+fn impl_header(cx: Checker, ty: Type, implemented: String) -> String {
+  const own = own_type_text(cx, ty);
+  const start = match own.find("<") {
+    Some(at) => "impl" + own.substring(at, own.len()) + " ",
+    None => "impl ",
+  };
+
+  start + implemented + " for " + own
 }
 
 /// Whether a right operand of type `rhs` can be an unsuffixed literal like `literal`.
@@ -162,7 +192,7 @@ fn choose(cx: Checker, op: BinaryOp, symbol: String, span: Span, lhs_ty: Type, r
     diagnostic = match lhs_ty.kind {
       TypeKind::Param(_) => diagnostic.with_help("bound the type parameter: `" + shown_lhs + ": " + wanted + "`"),
       TypeKind::Interface(_) => diagnostic.with_note("the interface `" + shown_lhs + "` does not extend `" + found.name + "`"),
-      _ => diagnostic.with_help("implement `" + wanted + "` for `" + shown_lhs + "`: `impl " + found.name + "<" + shown_rhs + ", " + shown_rhs + "> for " + shown_lhs + " { ... }`"),
+      _ => diagnostic.with_help("implement `" + wanted + "` for `" + shown_lhs + "`: `" + impl_header(cx, lhs_ty, found.name + "<" + shown_rhs + ", " + shown_rhs + ">") + " { ... }`"),
     };
   } else {
     const accepted: List<String> = new List();
@@ -240,7 +270,7 @@ pub fn neg_call(cx: Checker, value: Expr, ty: Type) -> Type {
 
     cx.diagnostics.push(match ty.kind {
       TypeKind::Param(_) => diagnostic.with_help("bound the type parameter: `" + shown + ": Neg<" + shown + ">`"),
-      _ => diagnostic.with_help("implement `Neg<" + shown + ">` for `" + shown + "`: `impl Neg<" + shown + "> for " + shown + " { ... }`"),
+      _ => diagnostic.with_help("implement `Neg<" + shown + ">` for `" + shown + "`: `" + impl_header(cx, ty, "Neg<" + shown + ">") + " { ... }`"),
     });
   } else {
     cx.diagnostics.push(
@@ -250,4 +280,69 @@ pub fn neg_call(cx: Checker, value: Expr, ty: Type) -> Type {
   }
 
   types::error()
+}
+
+/// `a == b` and `a != b` on a struct, enum or type parameter implementing `Eq` (calling
+/// `equals`), and `<`, `<=`, `>`, `>=` on one implementing `Ord` (calling `compare`); `None`
+/// leaves the comparison to the built-in rules: numbers, strings, enums without data and the
+/// identity of class instances (Q514). Both operands were checked and have type `ty`.
+pub fn comparison_call(cx: Checker, value: Expr, op: BinaryOp, ty: Type, span: Span) -> Option<Type> {
+  const by_interface = match ty.kind {
+    TypeKind::Struct(_) | TypeKind::Enum(_) | TypeKind::Param(_) => true,
+    _ => false,
+  };
+
+  if !by_interface {
+    return None;
+  }
+
+  const equality = op == BinaryOp::Eq || op == BinaryOp::Ne;
+  const wanted = if equality { cx.typed.prelude.eq } else { cx.typed.prelude.ord };
+  const id = wanted?;
+  const bool_ty = types::of(TypeKind::Bool);
+
+  if !instantiations(cx, ty, id).is_empty() {
+    if let Some(def) = cx.typed.interface_def(id) {
+      if let Some(method) = def.methods.first() {
+        cx.typed.method_calls.insert(value.id, method);
+      }
+    }
+
+    return Some(bool_ty);
+  }
+
+  // Enums without data keep `==` by variant.
+  if equality && is_fieldless_enum(cx, ty) {
+    return None;
+  }
+
+  const shown = types::text(ty);
+  const symbol = ast::binary_symbol(op);
+  const interface_name = if equality { "Eq" } else { "Ord" };
+  const diagnostic = Diagnostic::error(codes::INVALID_OPERAND, span, "cannot compare values of type `" + shown + "` with `" + symbol + "`");
+  const own = own_type_text(cx, ty);
+  const method = if equality { "fn equals(self, other: " + own + ") -> bool" } else { "fn compare(self, other: " + own + ") -> Ordering" };
+
+  cx.diagnostics.push(match ty.kind {
+    TypeKind::Param(_) => diagnostic.with_help("bound the type parameter: `" + shown + ": " + interface_name + "`"),
+    _ => diagnostic.with_help("implement `" + interface_name + "` for `" + shown + "`: `" + impl_header(cx, ty, interface_name) + " { " + method + " { ... } }`"),
+  });
+
+  Some(bool_ty)
+}
+
+fn is_fieldless_enum(cx: Checker, ty: Type) -> bool {
+  if let TypeKind::Enum(_) = ty.kind {
+    if let Some(variants) = cx.typed.variants(ty) {
+      for variant in variants {
+        if !variant.fields.is_empty() {
+          return false;
+        }
+      }
+
+      return true;
+    }
+  }
+
+  false
 }

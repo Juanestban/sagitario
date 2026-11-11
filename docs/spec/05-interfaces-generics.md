@@ -165,7 +165,8 @@ Rationale: [ADR-0032](../adr/0032-generics.md).
   arguments.
 - Generic code is checked once, where it is written. Without bounds a `T` can be stored,
   copied, passed, returned and put inside other types. Its bounds add their methods and fields.
-  There is no `==`, interpolation or arithmetic on an unbounded `T`.
+  There is no `==`, interpolation or arithmetic on an unbounded `T`; bounded by `Eq`, `Ord` or
+  an [operator interface](#operators), `T` has the operators they give.
 - A type argument must implement the bounds of its parameter. Classes, structs and enums
   implementing an interface satisfy it, and so do the interface type itself and type parameters
   bounded by it. Integers, `bool`, `char` and `String` implement the prelude's `Eq`, `Ord` and
@@ -231,7 +232,12 @@ interface Hash extends Eq {
   orders them by the IEEE 754 total order (`-NaN < -inf < ... < -0.0 < 0.0 < ... < inf < NaN`).
 - Programs implement them like any interface: `struct Version impl Ord` with `equals` and
   `compare`. Equal values must have the same `hash`.
-- `==` keeps its meaning (identity for class instances); generic code writes `a.equals(b)`.
+- `==` and `!=` call `equals` on structs, enums and type parameters implementing `Eq`, and `<`,
+  `<=`, `>`, `>=` use `compare` on those implementing `Ord`: `a < b` is
+  `a.compare(b) == Ordering::Less`, `a <= b` is `a.compare(b) != Ordering::Greater`
+  ([ADR-0081](../adr/0081-operator-overloading.md), Q514). On class instances `==` stays identity,
+  even when the class implements `Eq`; floats keep their IEEE comparisons. A comparison of a type
+  without the interface is an error (`E0310`) naming it.
 - `List::contains`, `List::index_of` and `List::sort` need `Eq` or `Ord`, and the keys of a
   `Map` need `Hash`.
 
@@ -277,8 +283,10 @@ const clip = projection * view * model * position;   // Mat4 * Mat4 * Mat4 * Vec
   generic code uses them through bounds: `fn sum<T: Add<T, T>>(a: T, b: T) -> T { a + b }`
   works for `i32`, `f64`, `String` and a `Vec2` implementing `Add<Vec2, Vec2>`. As with `Ord`,
   numbers and strings satisfy these bounds but do not convert to values of the interfaces.
-- `&&`, `||`, `!`, indexing, and comparisons other than through `Eq` and `Ord` are not
-  overloadable.
+- `&&`, `||`, `!` and indexing are not overloadable; comparisons go through
+  [`Eq` and `Ord`](#equality-order-and-hashing-f2).
+- A block for an interface that extends another one the type implements itself, such as
+  `impl Ord for P` beside `impl Eq for P`, holds only its own methods.
 
 ## Standard generic types (F2)
 

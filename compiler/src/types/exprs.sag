@@ -914,6 +914,13 @@ fn binary(cx: Checker, value: Expr, op: BinaryOp, lhs: Expr, rhs: Expr, expected
   }
 
   const equality = op == BinaryOp::Eq || op == BinaryOp::Ne;
+
+  // Structs, enums and type parameters compare through `Eq` and `Ord`
+  // (docs/adr/0081-operator-overloading.md, Q514).
+  if let Some(result) = operators::comparison_call(cx, value, op, ty, span) {
+    return result;
+  }
+
   var supported = false;
 
   match ty.kind {

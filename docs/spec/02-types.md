@@ -184,14 +184,18 @@ const text = builder.to_string();
 
 - `==` is defined between primitives, between `String`s, and between data-less enum values.
 - Between class instances, `==` is **identity** (same instance).
-- Structs, enums with data and classes compare by value through the prelude interfaces `Eq`
-  and `Ord` (F2, [interfaces](05-interfaces-generics.md#equality-order-and-hashing-f2)), which
-  integers, `bool`, `char` and `String` also implement: `a.equals(b)`, `a.compare(b)`.
+- Structs and enums compare by value through the prelude interfaces `Eq` and `Ord`
+  (F2, [interfaces](05-interfaces-generics.md#equality-order-and-hashing-f2)), which integers,
+  `bool`, `char` and `String` also implement: on a type implementing `Eq`, `a == b` calls
+  `a.equals(b)` and `a != b` negates it; on one implementing `Ord`, `<`, `<=`, `>` and `>=`
+  compare by `a.compare(b)` ([ADR-0081](../adr/0081-operator-overloading.md), Q514). A data-less
+  enum implementing `Eq` uses its `equals` too. Classes call `a.equals(b)`, since their `==` stays
+  identity.
 - Arrays, lists, maps, iterators, interface values and function values cannot be compared with
   `==`.
 - [Arithmetic operators](05-interfaces-generics.md#operators) (`+`, `-`, `*`, `/`, `%`, unary
   `-`) apply to other types through the prelude interfaces `Add`, `Sub`, `Mul`, `Div`, `Rem` and
-  `Neg` ([ADR-0081](../adr/0081-operator-overloading.md)); `==` and `<` on them come next.
+  `Neg` ([ADR-0081](../adr/0081-operator-overloading.md)).
 
 ## Enums (F1)
 

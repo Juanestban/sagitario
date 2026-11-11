@@ -152,6 +152,9 @@ match s {
 - `==` and `!=` apply to integers, floats, `char`, `bool` and `String`; `<` `<=` `>` `>=` to
   integers, floats, `char` and `String` (byte-wise lexicographic order). `+` also concatenates
   `String`s.
+- On structs, enums and type parameters, `==` and `!=` call `equals` of `Eq`, and `<` `<=` `>`
+  `>=` use `compare` of `Ord` ([equality and order](05-interfaces-generics.md#equality-order-and-hashing-f2));
+  class instances compare by identity.
 - Assignments (`=` and compound forms) are statements: they have no value, so `x = y = 0` is
   an error. Their target is a `var` binding, or a field or array element of one (see
   [struct mutability](03-memory.md#struct-mutability-f1)).
