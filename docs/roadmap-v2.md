@@ -90,6 +90,10 @@ every platform of CI.
 
 The standard library a general-purpose language needs, with Rust's std as the reference (Q542).
 
+**Status:** in progress. The audit is written, [`docs/std-audit.md`](std-audit.md), with the order
+of the records that fill its gaps; the first are gaps of the language itself (bitwise operators,
+the integer helpers spec 2 promises, `Display`).
+
 - An audit first, `docs/std-audit.md`, which compares each module of Rust's std with Sagitario
   and records what exists, what is missing, and what is out of scope with the reason. The modules
   are collections, `fmt`, `io`, `net`, `sync`, `thread`, `time`, `fs`, `path`, `env`, `process`,
@@ -97,8 +101,9 @@ The standard library a general-purpose language needs, with Rust's std as the re
 - Each gap is filled by a record of its own.
 - The crates most Rust programs use (`serde`, `regex`, `rand`, `chrono`) are Nova packages, not
   the standard library.
-- A suite of benchmarks, `benchmarks/`, part of the audit: the same programs in Sagitario, Rust
-  and C, built optimized, to measure how far Sagitario is from them and where. Numeric loops over
+- A suite of benchmarks, `benchmarks/`, part of the audit: the same programs in Sagitario, Rust,
+  C, C#, JavaScript (Node.js) and Python, built or run optimized, to measure how far Sagitario is
+  from each and where. Numeric loops over
   structs and arrays (n-body, spectral norm), allocation and reference counting (binary trees),
   strings and collections (word counts, sorting, maps), threads (a parallel sum, channels), and
   the start of a program. It records times and memory per platform, and names the work that
@@ -106,6 +111,10 @@ The standard library a general-purpose language needs, with Rust's std as the re
   for values that cross threads, `restrict` for `&mut` parameters and slices, and closures that
   never escape kept off the heap. The goal is the speed of Rust in code without allocation, and
   close to it elsewhere.
+- The results can be watched: a tool of the suite renders each benchmark as an animated race of
+  the languages, an HTML page with no dependency, which can be recorded as a video. Writing the
+  video file itself (MP4) would need an encoder such as `ffmpeg`; whether the tool uses one is a
+  question for the suite's record, since the project adds no dependency without asking.
 
 **Acceptance:** every row of the audit is done or out of scope with its reason, and the
 benchmarks run in CI with their results recorded.
