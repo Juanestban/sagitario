@@ -421,7 +421,7 @@ pub fn range_json(start: Position, end: Position) -> Json {
 pub fn analyze(entry: Entry, documents: Map<String, Document>, internal: List<String>) -> Analysis {
   const sources = new SourceMap();
   const diagnostics = new Diagnostics();
-  const loader = new Loader(entry.path);
+  const loader = new Loader(entry.path, TargetInfo::host());
   const result = new Analysis(entry, sources);
 
   for document in documents.values() {
@@ -456,7 +456,7 @@ pub fn analyze(entry: Entry, documents: Map<String, Document>, internal: List<St
     return result;
   }
 
-  var package = loader.package(prelude, TargetInfo::host());
+  var package = loader.package(prelude);
 
   package.library = entry.library;
 

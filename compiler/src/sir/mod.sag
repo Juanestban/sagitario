@@ -776,6 +776,22 @@ pub fn lower(package: Package, resolution: Resolution, typed: TypedModule, sourc
   };
   const instances: List<Option<Function>> = new List();
 
+  // The functions of the standard library are instances made where they are called; those C
+  // calls, which the runtime's core does, are made here.
+  for index in 0..resolution.functions.len() {
+    const id = index as u32;
+
+    if !resolution.in_library(id) || resolution.in_prelude(id) {
+      continue;
+    }
+
+    if let Some(decl) = resolution.fn_decl(package, id) {
+      if decl.extern_c {
+        mono::require(registry, id);
+      }
+    }
+  }
+
   // Lowering an instance may need more instances.
   while let Some(index) = registry.pending.pop() {
     const instance = match registry.instances.get(index) {

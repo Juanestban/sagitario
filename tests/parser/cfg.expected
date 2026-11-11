@@ -1,0 +1,20 @@
+exit: 1
+--- stdout
+module: Module
+  use: Use 595..609
+    tree: UseTree 599..608 std@599..602::kept@604..608
+  item: Fn 247..295 #0 kept_android@278..290 module extern_c=false abstract=false override=false
+    body: Block 293..295
+  item: Fn 337..422 #2 kept_all@409..417 module extern_c=false abstract=false override=false
+    body: Block 420..422
+  item: Struct 500..548 KeptNot@538..545 module repr_c=false
+  item: Extern 611..685
+    function: ExternFn 658..683 kept_c@674..680 module
+--- stderr
+error[E0100]: expected a binding name, found `=`
+  --> tests/parser/cfg.sag:34:9
+   |
+34 |   const = 1;
+   |         ^
+
+error: could not compile `tests/parser/cfg.sag` due to 1 previous error

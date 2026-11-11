@@ -17,6 +17,7 @@ pub fn tests() -> List<Test> {
     support::test("targets_lists_the_cross_compilation_targets", targets_lists_the_targets),
     support::test("cl_needs_a_developer_command_prompt", cl_needs_a_developer_command_prompt),
     support::test("checks_deeply_nested_code", checks_deeply_nested_code),
+    support::test("check_follows_the_target_of_cfg", check_follows_the_target_of_cfg),
     support::test("missing_output_directory_exits_with_1", missing_output_directory_exits_with_1),
   ])
 }
@@ -147,6 +148,39 @@ fn cl_needs_a_developer_command_prompt(cx: Context) -> Result<(), String> {
 
   expect_exit("sag run --cc cl", ran, 1)?;
   expect_contains("sag run --cc cl", ran.stderr, "Developer Command Prompt")
+}
+
+/// `@cfg` keeps the items of the target being checked (docs/adr/0085-conditional-compilation-and-std-time.md):
+/// the item for 32-bit Android has an error that only `--target armv7-linux-androideabi` sees.
+fn check_follows_the_target_of_cfg(cx: Context) -> Result<(), String> {
+  const dir = cx.temp_dir("cfg")?;
+  const file = path::join(dir, "cfg.sag");
+
+  support::write_file(
+    file,
+    "@cfg(all(target_os = \"android\", target_pointer_width = \"32\"))
+fn width() -> i32 {
+  \"thirty-two\"
+}
+
+@cfg(not(all(target_os = \"android\", target_pointer_width = \"32\")))
+fn width() -> i32 {
+  64
+}
+
+pub fn main() {
+  println(f\"{width()}\");
+}
+",
+  )?;
+
+  support::expect_success("sag check", sag(cx, List::from(["check", file]))?)?;
+  support::expect_success("sag check --target aarch64-linux-android", sag(cx, List::from(["check", "--target", "aarch64-linux-android", file]))?)?;
+
+  const armv7 = sag(cx, List::from(["check", "--target", "armv7-linux-androideabi", file]))?;
+
+  expect_exit("sag check --target armv7-linux-androideabi", armv7, 1)?;
+  expect_contains("sag check --target armv7-linux-androideabi", armv7.stderr, "E0300")
 }
 
 fn checks_deeply_nested_code(cx: Context) -> Result<(), String> {

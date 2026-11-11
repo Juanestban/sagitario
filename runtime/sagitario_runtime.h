@@ -820,10 +820,10 @@ int32_t sag_fs_copy(sag_string from, sag_string to);
 /* The names in a directory, without `.` and `..`, separated by NUL characters. */
 sag_string sag_fs_read_dir(sag_string path, int32_t *status);
 sag_string sag_fs_current_dir(int32_t *status);
-/* Nanoseconds of a monotonic clock, and since the Unix epoch (0 before it). */
+/* Nanoseconds of a monotonic clock, and sleeping at least `nanos` nanoseconds: written in
+ * Sagitario in `std::time`, which every program compiles, for the timers of the core
+ * (docs/adr/0085-conditional-compilation-and-std-time.md, Q552). */
 uint64_t sag_time_monotonic(void);
-uint64_t sag_time_system(void);
-/* Sleeps at least `nanos` nanoseconds. */
 void sag_time_sleep(uint64_t nanos);
 
 /* Runs the program `argv` (`argc` parts separated by NUL, the program first) with the

@@ -398,7 +398,7 @@ Rationale: [ADR-0039](../adr/0039-time-and-commands.md).
 ## Implementation rules
 
 The modules of `std`, except `std::ffi`, are written in Sagitario and embedded in the compiler.
-They follow the rules of every module, with three exceptions that only the standard library has:
+They follow the rules of every module, with four exceptions that only the standard library has:
 
 - It may declare functions of the runtime in `extern "C"` blocks: names starting with `sag_`,
   which may also take and return `String` and take `fn()` values (borrowed arguments, new
@@ -407,9 +407,21 @@ They follow the rules of every module, with three exceptions that only the stand
   types of the same name (`io::Error` implements `Error`).
 - It may use the `prv` members of the prelude's types: `std::task` implements `sleep` and
   `block_on` on those of `Task` ([ADR-0072](../adr/0072-async-await-increments.md)).
+- It may use C symbols that programs cannot: the reserved names of the system's C library
+  (`__errno_location`), and the runtime's own names starting with `sag_` for its
+  `@export` functions. The runtime's core calls these functions, such as
+  `sag_time_monotonic` in `std::time`, so every program compiles their modules, and they are
+  generated although no Sagitario code calls them. They are not exported by a library a program
+  builds ([ADR-0085](../adr/0085-conditional-compilation-and-std-time.md), Q552).
 
 `std` itself has a file of private helpers, which its modules call as `super::name`: like any
 module's private items, only its submodules see them.
+
+`std::sys` holds the C API of each system that the standard library is written on, and the code
+that differs by system, chosen with [`@cfg`](09-modules.md#conditional-compilation-s1): its
+functions, constants and structs, and the reading of `errno`. Only the modules of `std` can name
+it; for a program it does not exist (`E0200`)
+([ADR-0085](../adr/0085-conditional-compilation-and-std-time.md), Q551).
 
 `std::process::exit` is provided by the compiler, since no function written in Sagitario can
 declare that it never returns. The compiler also checks the arguments of `thread::spawn`,

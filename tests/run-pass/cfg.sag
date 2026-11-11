@@ -1,0 +1,71 @@
+// Conditional compilation (docs/adr/0085-conditional-compilation-and-std-time.md): an item whose
+// `@cfg` does not hold for the target is parsed and left out before names are resolved, so two
+// items may share a name, and an item left out may name what does not exist. The output is the
+// same on every system.
+// expect-stdout: system known: true
+// expect-stdout: pointers of 64 bits: true
+// expect-stdout: process id positive: true
+// expect-stdout: never: false
+@cfg(unix)
+use std::ffi::c_int;
+
+@cfg(windows)
+fn system() -> String {
+  "windows"
+}
+
+@cfg(unix)
+fn system() -> String {
+  "unix"
+}
+
+@cfg(target_pointer_width = "64")
+const WIDTH: i32 = 64;
+
+@cfg(target_pointer_width = "32")
+const WIDTH: i32 = 32;
+
+extern "C" {
+  @cfg(windows)
+  fn GetCurrentProcessId() -> u32;
+  @cfg(unix)
+  fn getpid() -> c_int;
+}
+
+@cfg(windows)
+fn process_id() -> i64 {
+  unsafe { GetCurrentProcessId() as i64 }
+}
+
+@cfg(not(windows))
+fn process_id() -> i64 {
+  unsafe { getpid() as i64 }
+}
+
+/// Never kept: its names are not resolved, and its module does not exist.
+@cfg(all(windows, unix))
+use std::missing;
+
+@cfg(any())
+fn never() -> bool {
+  missing::call()
+}
+
+@cfg(not(any()))
+fn never() -> bool {
+  false
+}
+
+@cfg(any(target_os = "linux", target_os = "macos", target_os = "windows", target_os = "android", target_os = "ios"))
+struct Known {
+  pub name: String;
+}
+
+fn main() {
+  const known = Known { name: system() };
+
+  println(f"system known: {known.name == "windows" || known.name == "unix"}");
+  println(f"pointers of 64 bits: {WIDTH == 64}");
+  println(f"process id positive: {process_id() > 0}");
+  println(f"never: {never()}");
+}

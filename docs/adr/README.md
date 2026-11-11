@@ -93,7 +93,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0082](0082-format-strings.md) | Format strings `f"..."` | Accepted |
 | [0083](0083-global-state.md) | Global state: `static`, `static var` and `@thread_local` | Accepted |
 | [0084](0084-a-complete-language-and-the-engine-apart.md) | Roadmap v2: a complete language, with the game engine as a project apart | Accepted |
-| [0085](0085-conditional-compilation-and-std-time.md) | Conditional compilation with `@cfg`, and `std::time` in Sagitario (S1) | Proposed |
+| [0085](0085-conditional-compilation-and-std-time.md) | Conditional compilation with `@cfg`, and `std::time` in Sagitario (S1) | Accepted |
 
 ## Template
 

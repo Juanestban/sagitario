@@ -4,6 +4,7 @@
 //! analysis of the document that reached the type checker.
 
 use pkg::ast::Module;
+use pkg::cfg;
 use pkg::lsp::analysis::Analysis;
 use pkg::lsp::json;
 use pkg::lsp::json::{Json, member};
@@ -18,6 +19,7 @@ use pkg::types::typed::TypedModule;
 const METHOD: i64 = 2;
 const FUNCTION: i64 = 3;
 const FIELD: i64 = 5;
+const PROPERTY: i64 = 10;
 const VARIABLE: i64 = 6;
 const CLASS: i64 = 7;
 const INTERFACE: i64 = 8;
@@ -47,7 +49,7 @@ const OPTION_METHODS: String = "is_some is_none unwrap expect unwrap_or map and_
 const RESULT_METHODS: String = "is_ok is_err unwrap expect unwrap_or unwrap_err map map_err and_then unwrap_or_else";
 const BUILDER_METHODS: String = "append append_char len is_empty clear to_string";
 /// The attributes (docs/spec/01-lexical.md#attributes-f1), with what they are written as.
-const ATTRIBUTES: String = "export repr thread_local";
+const ATTRIBUTES: String = "cfg export repr thread_local";
 /// The representations of `@repr(...)`: `C` for structs, unions and enums, an integer type for
 /// enums.
 const REPRESENTATIONS: String = "C i8 i16 i32 i64 isize u8 u16 u32 u64 usize";
@@ -231,6 +233,11 @@ pub fn complete(analysis: Option<Analysis>, module: Option<Module>, module_index
     return Json::Array(items.list);
   }
 
+  if (separator == '(' || separator == ',' || separator == ' ') && in_cfg(chars, start) {
+    cfg_conditions(items);
+    return Json::Array(items.list);
+  }
+
   // `(` asks only for the argument of an attribute: in a call, the names would cover the code.
   if let Some(character) = trigger {
     if character == "(" || character == "@" {
@@ -262,7 +269,9 @@ pub fn complete(analysis: Option<Analysis>, module: Option<Module>, module_index
 
 fn attributes(items: Items) {
   for name in ATTRIBUTES.split(" ") {
-    if name == "export" {
+    if name == "cfg" {
+      items.add_snippet(name, KEYWORD, "@cfg(condition): keeps the item only on the systems where the condition holds", "cfg(${1:windows})");
+    } else if name == "export" {
       items.add_snippet(name, KEYWORD, "@export(\"symbol\"): the C symbol of an `extern \"C\"` function", "export(\"${1:symbol}\")");
     } else if name == "repr" {
       items.add_snippet(name, KEYWORD, "@repr(C) on structs, unions and enums, or an integer type on enums", "repr(${1:C})");
@@ -270,6 +279,54 @@ fn attributes(items: Items) {
       items.add_snippet(name, KEYWORD, "@thread_local on a `static var`: one value per thread", "thread_local");
     }
   }
+}
+
+/// The conditions of `@cfg(...)` (docs/adr/0085-conditional-compilation-and-std-time.md): the
+/// names, the names with a value, whose values are a choice, and the combinations.
+fn cfg_conditions(items: Items) {
+  items.add_words(cfg::NAMES, ENUM_MEMBER);
+
+  for key in cfg::KEYS.split(" ") {
+    const choice = cfg::values(key).split(" ").join(",");
+
+    items.add_snippet(key, PROPERTY, key + " = \"...\": one of " + cfg::values(key).split(" ").join(", "), key + " = \"${1|" + choice + "|}\"");
+  }
+
+  for combinator in cfg::COMBINATORS.split(" ") {
+    const what = if combinator == "all" { "every condition holds" } else if combinator == "any" { "one condition holds" } else { "the condition does not hold" };
+
+    items.add_snippet(combinator, FUNCTION, combinator + "(...): " + what, combinator + "(${1})");
+  }
+}
+
+/// Whether `start`, on its line, is inside the parentheses of an `@cfg(`.
+fn in_cfg(chars: List<char>, start: usize) -> bool {
+  var index = start;
+  var depth = 0i32;
+
+  while index > 0 {
+    const previous = chars.get(index - 1).unwrap_or(' ');
+
+    if previous == '\n' {
+      return false;
+    }
+
+    if previous == ')' {
+      depth += 1;
+    } else if previous == '(' {
+      if depth == 0 && attribute_before(chars, index - 1) == "cfg" {
+        return true;
+      }
+
+      if depth > 0 {
+        depth -= 1;
+      }
+    }
+
+    index -= 1;
+  }
+
+  false
 }
 
 /// The name of the attribute written as `@name` right before the `(` at `paren`, or `""`.

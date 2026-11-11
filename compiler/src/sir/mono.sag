@@ -5,7 +5,7 @@
 use pkg::diagnostics::Diagnostic;
 use pkg::diagnostics::codes;
 use pkg::resolve::{ParamOwner, Resolution, TypeItem};
-use pkg::sir::{ClassInstance, Instance, Lowering, subst_key, type_key};
+use pkg::sir::{ClassInstance, Instance, Lowering, Registry, subst_key, type_key};
 use pkg::types::{NamedRef, Subst, Type, TypeKind};
 use pkg::types;
 use pkg::types::typed::{TypedModule, owner_key};
@@ -86,6 +86,24 @@ pub fn instance(lw: Lowering, function: u32, subst: Subst) -> u32 {
   lw.registry.pending.push(index);
 
   lw.registry.first_instance + index as u32
+}
+
+/// The instance of a function of the standard library that no Sagitario code calls: an
+/// `extern "C" fn` the runtime's core calls (docs/adr/0085-conditional-compilation-and-std-time.md,
+/// Q552).
+pub fn require(registry: Registry, function: u32) {
+  const subst = Subst::empty();
+  const key = `${function}:` + subst_key(subst);
+
+  if registry.instance_index.contains_key(key) {
+    return;
+  }
+
+  const index = registry.instances.len();
+
+  registry.instances.push(Instance { template: function, subst: subst, lambda: false });
+  registry.instance_index.insert(key, index);
+  registry.pending.push(index);
 }
 
 /// The type arguments a call recorded by the type checker gives `function`, in the function

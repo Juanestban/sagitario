@@ -1,6 +1,6 @@
 # 0085. Conditional compilation with `@cfg`, and `std::time` in Sagitario (S1)
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-11
 - Refines: [ADR-0084](0084-a-complete-language-and-the-engine-apart.md) (Q541: the pattern and
   the order of S1)
@@ -103,3 +103,29 @@ extern "C" {
   time and code until S3 moves the core.
 - Behavior on Linux, macOS and Android is checked by CI, since the development machine may not run
   them.
+
+## Notes
+
+- Increment 1 (`@cfg`) is done: `docs/spec/09-modules.md#conditional-compilation-s1`, the tests
+  `tests/run-pass/cfg.sag`, `tests/compile-fail/cfg_errors.sag` and `cfg_duplicate.sag`, the
+  corpus `tests/parser/cfg.sag` (parsed for `x86_64-linux-android`, as every dump), and the test
+  `cli::check_follows_the_target_of_cfg`, which checks one file for three targets. The conditions
+  are read, checked and evaluated in `compiler/src/cfg.sag`. The parser receives the target
+  (`parse_module`, `parse_module_from`) and leaves out what does not hold. `TargetInfo` gains `os`
+  and `arch`, and `TargetInfo::host` finds them as the rest of the host is found: from the path
+  separator on Windows (and `PROCESSOR_ARCHITECTURE`), a file only macOS has (and `uname -m`), and
+  `/proc/cpuinfo` on Linux, since the compiler itself cannot use `@cfg` until the seed is updated.
+- Increment 2 (`std::sys` and `std::time`) is done. `compiler/std/sys.sag` declares the clocks,
+  `nanosleep`/`Sleep` and `errno` of each system with `@cfg`; `std::time` reads them, and exports
+  `sag_time_monotonic` and `sag_time_sleep` for the timers of the core. The C of `std::time` is
+  deleted from the runtime, and its `sag_time_system` with it. Every program loads `std::time`
+  (`loader.sag`, `CORE_STD`), and with it `std`, which loads `std::io`. SIR makes an instance of
+  each `extern "C" fn` of the standard library (`mono::require`), since its functions are
+  otherwise generated only where Sagitario code calls them. The standard library may use the
+  reserved C symbols (`types::ffi::check_symbols`), and a library's header and exported symbols
+  leave its functions out (`driver::header::exports`). The test
+  `tests/compile-fail/std_sys_private.sag` checks that a program cannot name `std::sys`. The dumps
+  of `tests/types` and `tests/codegen` include the new modules; the C dumps, built for
+  `x86_64-linux-android`, show the Unix branch of `std::sys`. The desktop Linux and macOS
+  branches have no cross-compilation target, so CI runs them.
+

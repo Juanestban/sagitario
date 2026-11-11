@@ -1,0 +1,196 @@
+//! `std::sys`: the C API of each system that the standard library is written on, and the code that
+//! differs by system, as Rust's `std/src/sys` (docs/adr/0085-conditional-compilation-and-std-time.md,
+//! Q551). Only the modules of `std` can name it.
+
+use std::ffi::c_int;
+@cfg(unix)
+use std::ffi::c_long;
+
+// ---- errno ------------------------------------------------------------------------------------
+
+@cfg(target_os = "linux")
+extern "C" {
+  fn __errno_location() -> *mut c_int;
+}
+
+@cfg(target_os = "android")
+extern "C" {
+  fn __errno() -> *mut c_int;
+}
+
+@cfg(any(target_os = "macos", target_os = "ios"))
+extern "C" {
+  fn __error() -> *mut c_int;
+}
+
+/// The error of the last call to the C library that failed in this thread: C's `errno`, which is
+/// a macro reaching a function whose name changes with the C library.
+@cfg(target_os = "linux")
+pub fn errno() -> i32 {
+  unsafe { *__errno_location() }
+}
+
+@cfg(target_os = "android")
+pub fn errno() -> i32 {
+  unsafe { *__errno() }
+}
+
+@cfg(any(target_os = "macos", target_os = "ios"))
+pub fn errno() -> i32 {
+  unsafe { *__error() }
+}
+
+/// A call interrupted by a signal, on every Unix system.
+@cfg(unix)
+const EINTR: i32 = 4;
+
+// ---- Clocks and sleeping ----------------------------------------------------------------------
+
+/// `struct timespec`, whose `time_t` has 64 bits, except on 32-bit Android.
+@cfg(all(unix, not(all(target_os = "android", target_pointer_width = "32"))))
+@repr(C)
+pub struct Timespec {
+  pub tv_sec: i64;
+  pub tv_nsec: c_long;
+
+  pub fn of(secs: u64, nanos: u64) -> Timespec {
+    Timespec { tv_sec: secs as i64, tv_nsec: nanos as c_long }
+  }
+
+  /// The nanoseconds it holds, or zero for a time before 1970.
+  pub fn nanos(self) -> u64 {
+    if self.tv_sec < 0 { 0 } else { self.tv_sec as u64 * 1_000_000_000 + self.tv_nsec as u64 }
+  }
+}
+
+/// `struct timespec` on 32-bit Android, whose `time_t` has 32 bits.
+@cfg(all(target_os = "android", target_pointer_width = "32"))
+@repr(C)
+pub struct Timespec {
+  pub tv_sec: i32;
+  pub tv_nsec: c_long;
+
+  /// At most 2^31 - 1 seconds, about 68 years.
+  pub fn of(secs: u64, nanos: u64) -> Timespec {
+    Timespec { tv_sec: if secs > 0x7FFF_FFFF { 0x7FFF_FFFF } else { secs as i32 }, tv_nsec: nanos as c_long }
+  }
+
+  pub fn nanos(self) -> u64 {
+    if self.tv_sec < 0 { 0 } else { self.tv_sec as u64 * 1_000_000_000 + self.tv_nsec as u64 }
+  }
+}
+
+@cfg(unix)
+const CLOCK_REALTIME: c_int = 0;
+
+@cfg(any(target_os = "linux", target_os = "android"))
+const CLOCK_MONOTONIC: c_int = 1;
+
+@cfg(any(target_os = "macos", target_os = "ios"))
+const CLOCK_MONOTONIC: c_int = 6;
+
+@cfg(unix)
+extern "C" {
+  fn clock_gettime(clock: c_int, now: *mut Timespec) -> c_int;
+  fn nanosleep(duration: *const Timespec, left: *mut Timespec) -> c_int;
+}
+
+/// `FILETIME`: 100-nanosecond intervals since 1601-01-01, in two halves.
+@cfg(windows)
+@repr(C)
+pub struct FileTime {
+  pub low: u32;
+  pub high: u32;
+}
+
+@cfg(windows)
+extern "C" {
+  fn QueryPerformanceCounter(count: *mut i64) -> c_int;
+  fn QueryPerformanceFrequency(frequency: *mut i64) -> c_int;
+  fn GetSystemTimePreciseAsFileTime(time: *mut FileTime);
+  fn Sleep(milliseconds: u32);
+}
+
+/// A monotonic clock, in nanoseconds since a start that means nothing outside the program.
+@cfg(unix)
+pub fn monotonic_nanos() -> u64 {
+  clock(CLOCK_MONOTONIC)
+}
+
+/// The system clock, in nanoseconds since 1970-01-01 00:00:00 UTC, or zero before it.
+@cfg(unix)
+pub fn system_nanos() -> u64 {
+  clock(CLOCK_REALTIME)
+}
+
+@cfg(unix)
+fn clock(id: c_int) -> u64 {
+  var now = Timespec::of(0, 0);
+
+  if unsafe { clock_gettime(id, &mut now) } != 0 {
+    return 0;
+  }
+
+  now.nanos()
+}
+
+@cfg(windows)
+pub fn monotonic_nanos() -> u64 {
+  var count = 0i64;
+  var frequency = 1i64;
+
+  unsafe {
+    QueryPerformanceCounter(&mut count);
+    QueryPerformanceFrequency(&mut frequency);
+  }
+
+  if frequency <= 0 || count < 0 {
+    return 0;
+  }
+
+  const ticks = count as u64;
+  const rate = frequency as u64;
+
+  // Split so that `ticks * 10^9` cannot overflow.
+  ticks / rate * 1_000_000_000 + ticks % rate * 1_000_000_000 / rate
+}
+
+@cfg(windows)
+pub fn system_nanos() -> u64 {
+  var now = FileTime { low: 0, high: 0 };
+
+  unsafe { GetSystemTimePreciseAsFileTime(&mut now); }
+
+  // The Unix epoch is 11644473600 seconds after 1601-01-01.
+  const intervals = now.high as u64 * 0x1_0000_0000 + now.low as u64;
+  const epoch = 116_444_736_000_000_000u64;
+
+  if intervals < epoch { 0 } else { (intervals - epoch) * 100 }
+}
+
+/// Pauses the calling thread for at least `nanos` nanoseconds, resuming after a signal.
+@cfg(unix)
+pub fn sleep_nanos(nanos: u64) {
+  var left = Timespec::of(nanos / 1_000_000_000, nanos % 1_000_000_000);
+
+  loop {
+    const asked = left;
+
+    if unsafe { nanosleep(&asked, &mut left) } == 0 || errno() != EINTR {
+      return;
+    }
+  }
+}
+
+/// In whole milliseconds, rounded up so that the program never sleeps less than asked.
+@cfg(windows)
+pub fn sleep_nanos(nanos: u64) {
+  var millis = nanos / 1_000_000 + if nanos % 1_000_000 != 0 { 1 } else { 0 };
+
+  while millis > 0 {
+    const part = if millis > 0x7FFF_FFFF { 0x7FFF_FFFFu64 } else { millis };
+
+    unsafe { Sleep(part as u32); }
+    millis -= part;
+  }
+}

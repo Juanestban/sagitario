@@ -36,6 +36,7 @@ compiler/           the compiler and Nova, written in Sagitario (compiler/Nova.t
   src/lexer.sag           hand-written lexer: text → tokens (unicode.sag: the Unicode data it uses)
   src/ast/                AST definitions and their dump
   src/parser.sag          recursive descent + Pratt parsing for expressions: tokens → AST
+  src/cfg.sag             the conditions of `@cfg`, which the parser checks and evaluates
   src/loader.sag          reads the entry file and the modules, dependencies and std it reaches
   src/resolve/            module tree, `use`, name resolution, visibility
   src/types/              type checking, local inference, generics, inheritance, interfaces,
@@ -351,7 +352,17 @@ Anything expressible in Sagitario belongs in `compiler/std/` instead.
 - Cross-compilation (`driver/targets.sag`): a target gives the C compiler with the arguments every call
   needs (`CCompiler::args`: `--target=<triple>`, and `-isysroot` for iOS) and the facts the type
   checker needs (`TargetInfo` in `Package::target`: pointer width, size of C's `long`, sign of
-  C's `char`). Without `--target` they are those of the machine running the compiler.
+  C's `char`, and the system and processor of `@cfg`). Without `--target` they are those of the
+  machine running the compiler (`TargetInfo::host`).
+- Conditional compilation ([ADR-0085](adr/0085-conditional-compilation-and-std-time.md)): the
+  loader gives the parser the target (`Loader::target`), and the parser leaves out each item, `use`
+  or function of an `extern` block whose `@cfg` does not hold (`Parser::cfg_holds`, `cfg::holds`),
+  after parsing it, so that the resolver never sees it.
+- The standard library on the system (S1, [ADR-0084](adr/0084-a-complete-language-and-the-engine-apart.md)):
+  `compiler/std/sys.sag` (`std::sys`, which only `std` can name) declares the C API of each system
+  with `@cfg`, and the modules of `std` call it instead of functions of the runtime. A function
+  that the runtime's core still calls keeps its C name with `@export`. Its module is in
+  `loader::CORE_STD`, which every program loads, and `mono::require` makes its instance.
 
 ## Language server
 

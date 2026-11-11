@@ -36,8 +36,13 @@ pub struct Package {
   pub target: TargetInfo;
 }
 
-/// The machine the program is compiled for: what the sizes of C types depend on.
+/// The machine the program is compiled for: what the sizes of C types and the conditions of
+/// `@cfg` depend on.
 pub struct TargetInfo {
+  /// `target_os` of `@cfg`: `windows`, `linux`, `macos`, `android` or `ios`.
+  pub os: String;
+  /// `target_arch` of `@cfg`: `x86_64`, `aarch64` or `arm`.
+  pub arch: String;
   /// The width of pointers, `isize` and `usize`: 32 or 64.
   pub pointer_width: u32;
   /// Whether C's `long` has 32 bits: on Windows and on 32-bit targets.
@@ -48,7 +53,13 @@ pub struct TargetInfo {
   /// The machine running the compiler. `sag` runs on 64-bit hosts, where C's `long` has 32 bits
   /// on Windows alone and C's `char` is unsigned on Linux for ARM alone.
   pub fn host() -> TargetInfo {
-    TargetInfo { pointer_width: 64, long_is_32: loader::windows(), char_is_unsigned: loader::linux_on_arm() }
+    TargetInfo {
+      os: loader::host_os(),
+      arch: loader::host_arch(),
+      pointer_width: 64,
+      long_is_32: loader::windows(),
+      char_is_unsigned: loader::linux_on_arm(),
+    }
   }
 }
 

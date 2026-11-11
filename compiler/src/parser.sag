@@ -5,9 +5,11 @@
 use pkg::ast::{
   ArrayLen, BinaryOp, Block, ClassDecl, ConstDecl, StaticDecl, Discriminant, EnumDecl, Export, Expr, ExprKind, ExternBlock, ExternFn, FieldDecl, FieldInit, FieldPattern,
   FnDecl, GenericParam, Ident, ImplBlock, InterfaceDecl, Item, LambdaParam, LetStmt, MatchArm, Module, Param, Path, Pattern, PatternKind, Stmt,
-  StructDecl, TemplatePart, TypeArgs, TypeExpr, TypeExprKind, UnaryOp, UseDecl, UseTree, UseTreeKind, VariantDecl, VariantFieldDecl,
+  StructDecl, TargetInfo, TemplatePart, TypeArgs, TypeExpr, TypeExprKind, UnaryOp, UseDecl, UseTree, UseTreeKind, VariantDecl, VariantFieldDecl,
   VariantFields, Visibility,
 };
+use pkg::cfg;
+use pkg::cfg::{Cfg, CfgKind};
 use pkg::diagnostics::{Diagnostic, Diagnostics};
 use pkg::diagnostics::codes;
 use pkg::lexer;
@@ -23,16 +25,18 @@ pub class Ids {
   }
 }
 
-pub fn parse_module(file: u32, tokens: List<Token>, diagnostics: Diagnostics) -> Module {
-  const parser = new Parser(file, tokens, new Ids(0), diagnostics);
+/// Parses a module for `target`, which the conditions of `@cfg` are evaluated for: an item whose
+/// condition does not hold is parsed and left out (docs/adr/0085-conditional-compilation-and-std-time.md).
+pub fn parse_module(file: u32, tokens: List<Token>, target: TargetInfo, diagnostics: Diagnostics) -> Module {
+  const parser = new Parser(file, tokens, new Ids(0), target, diagnostics);
 
   parser.module(file)
 }
 
 /// Parses one module of a package; node ids continue from `ids`, so they stay unique across the
 /// modules of the package.
-pub fn parse_module_from(file: u32, tokens: List<Token>, ids: Ids, diagnostics: Diagnostics) -> Module {
-  const parser = new Parser(file, tokens, ids, diagnostics);
+pub fn parse_module_from(file: u32, tokens: List<Token>, ids: Ids, target: TargetInfo, diagnostics: Diagnostics) -> Module {
+  const parser = new Parser(file, tokens, ids, target, diagnostics);
 
   parser.module(file)
 }
@@ -41,6 +45,8 @@ pub fn parse_module_from(file: u32, tokens: List<Token>, ids: Ids, diagnostics: 
 struct Attribute {
   pub name: Ident;
   pub args: List<AttributeArg>;
+  /// The condition of `@cfg(...)`, when it is well formed.
+  pub cfg: Option<Cfg>;
   pub span: Span;
 }
 
@@ -63,6 +69,9 @@ enum AttributeTarget {
   Const,
   Impl,
   Static,
+  Use,
+  /// A function inside an `extern "C"` block.
+  ExternBlockFn,
 }
 
 /// What the attributes of an item set.
@@ -243,6 +252,8 @@ class Parser {
   prv const eof: Token;
   prv const ids: Ids;
   prv const diagnostics: Diagnostics;
+  /// What the conditions of `@cfg` are evaluated for.
+  prv const target: TargetInfo;
   /// Set in the condition of `if`/`while` and the iterable of `for`, where `{` starts the body.
   prv var no_struct_literal: bool;
   /// Set in the guard of a `match` arm, where `name =>` ends the guard instead of starting a
@@ -251,7 +262,7 @@ class Parser {
   /// Whether the type being parsed may be a slice `[T]`: right after the `&` of a parameter's type.
   prv var slice_allowed: bool;
 
-  pub fn new(self, file: u32, tokens: List<Token>, ids: Ids, diagnostics: Diagnostics) {
+  pub fn new(self, file: u32, tokens: List<Token>, ids: Ids, target: TargetInfo, diagnostics: Diagnostics) {
     // Documentation comments are not processed in the MVP (docs/spec/01-lexical.md).
     const kept: List<Token> = new List();
 
@@ -272,6 +283,7 @@ class Parser {
     self.eof = Token { kind: TokenKind::Eof, span: eof_span };
     self.ids = ids;
     self.diagnostics = diagnostics;
+    self.target = target;
     self.no_struct_literal = false;
     self.in_guard = false;
     self.slice_allowed = false;
@@ -382,18 +394,36 @@ class Parser {
 
     while !self.at_eof() {
       const start = self.pos;
+      const item_start = self.span();
 
-      if self.at_keyword("use") {
-        match self.use_decl() {
-          Ok(decl) => uses.push(decl),
-          Err(_) => self.skip_item(),
+      match self.attributes() {
+        Ok(attributes) => {
+          const kept = self.cfg_holds(attributes);
+
+          if self.at_keyword("use") {
+            match self.use_decl() {
+              Ok(decl) => {
+                self.apply_attributes(attributes, AttributeTarget::Use);
+
+                if kept {
+                  uses.push(decl);
+                }
+              }
+              Err(_) => self.skip_item(),
+            }
+          } else {
+            match self.item(item_start, attributes) {
+              Ok(Some(item)) => {
+                if kept {
+                  items.push(item);
+                }
+              }
+              Ok(None) => {}
+              Err(_) => self.skip_item(),
+            }
+          }
         }
-      } else {
-        match self.item() {
-          Ok(Some(item)) => items.push(item),
-          Ok(None) => {}
-          Err(_) => self.skip_item(),
-        }
+        Err(_) => self.skip_item(),
       }
 
       if self.pos == start {
@@ -502,9 +532,8 @@ class Parser {
     }
   }
 
-  prv fn item(self) -> Result<Option<Item>, ()> {
-    const start = self.span();
-    const attributes = self.attributes()?;
+  /// The item after `attributes`, which start at `start`.
+  prv fn item(self, start: Span, attributes: List<Attribute>) -> Result<Option<Item>, ()> {
     const visibility = self.visibility();
     const kind = self.kind();
 
@@ -762,6 +791,23 @@ class Parser {
       const args: List<AttributeArg> = new List();
       var end = name.span;
 
+      if name.name == "cfg" {
+        if !self.eat("(") {
+          self.attribute_error(start.to(end), "`@cfg` takes a condition: `@cfg(windows)`", None);
+          attributes.push(Attribute { name: name, args: args, cfg: None, span: start.to(end) });
+          continue;
+        }
+
+        const condition = self.cfg_condition()?;
+
+        end = self.expect(")")?.span;
+
+        const checked: Option<Cfg> = if cfg::check(condition, self.diagnostics) { Some(condition) } else { None };
+
+        attributes.push(Attribute { name: name, args: args, cfg: checked, span: start.to(end) });
+        continue;
+      }
+
       if self.eat("(") {
         while !self.at(")") {
           const arg = match self.kind() {
@@ -781,10 +827,74 @@ class Parser {
         end = self.expect(")")?.span;
       }
 
-      attributes.push(Attribute { name: name, args: args, span: start.to(end) });
+      attributes.push(Attribute { name: name, args: args, cfg: None, span: start.to(end) });
     }
 
     Ok(attributes)
+  }
+
+  /// A condition of `@cfg`: `name`, `name = "value"`, or `all(...)`, `any(...)` or `not(...)`.
+  prv fn cfg_condition(self) -> Result<Cfg, ()> {
+    const name = self.ident("a condition such as `windows`")?;
+
+    if self.eat("=") {
+      const value = match self.kind() {
+        TokenKind::Str(text) => text,
+        _ => return Err(self.unexpected("a string such as `\"linux\"`")),
+      };
+      const end = self.advance().span;
+
+      return Ok(new Cfg(CfgKind::Value { key: name.name, value: value }, name.span.to(end)));
+    }
+
+    if !self.at("(") {
+      return Ok(new Cfg(CfgKind::Name(name.name), name.span));
+    }
+
+    if !cfg::COMBINATORS.split(" ").contains(name.name) {
+      self.attribute_error(name.span, "unknown combination `" + name.name + "(...)` in `@cfg`", Some("conditions are combined with `all(...)`, `any(...)` and `not(...)`"));
+
+      return Err(());
+    }
+
+    self.advance();
+
+    const conditions: List<Cfg> = new List();
+
+    while !self.at(")") {
+      conditions.push(self.cfg_condition()?);
+
+      if !self.eat(",") {
+        break;
+      }
+    }
+
+    const end = self.expect(")")?.span;
+    const span = name.span.to(end);
+
+    if name.name == "not" {
+      if conditions.len() != 1 {
+        self.attribute_error(span, "`not` takes one condition", Some("write `not(any(a, b))` to negate several"));
+
+        return Err(());
+      }
+
+      return Ok(new Cfg(CfgKind::Not(conditions[0]), span));
+    }
+
+    if name.name == "all" { Ok(new Cfg(CfgKind::All(conditions), span)) } else { Ok(new Cfg(CfgKind::Any(conditions), span)) }
+  }
+
+  /// Whether the item after `attributes` is kept for the target: it has no `@cfg`, or its condition
+  /// holds. A malformed `@cfg` was reported, and keeps the item.
+  prv fn cfg_holds(self, attributes: List<Attribute>) -> bool {
+    for attribute in attributes {
+      if let Some(condition) = attribute.cfg {
+        return cfg::holds(condition, self.target);
+      }
+    }
+
+    true
   }
 
   /// Checks the attributes of an item: `@export("symbol")` on an `extern "C" fn`, `@repr(C)` on
@@ -797,7 +907,9 @@ class Parser {
       const name = attribute.name.name;
 
       if seen.contains(name) {
-        self.attribute_error(attribute.span, "the attribute `@" + name + "` is repeated", None);
+        const help: Option<String> = if name == "cfg" { Some("combine the conditions in one: `@cfg(all(a, b))`") } else { None };
+
+        self.attribute_error(attribute.span, "the attribute `@" + name + "` is repeated", help);
         continue;
       }
 
@@ -866,6 +978,19 @@ class Parser {
           }
           None => self.attribute_error(attribute.span, "the representation of an enum is an integer type, such as `@repr(i32)`, or `@repr(C)`", None),
         }
+      } else if name == "cfg" {
+        const is_member = match target {
+          AttributeTarget::Member => true,
+          _ => false,
+        };
+
+        if is_member {
+          self.attribute_error(
+            attribute.span,
+            "`@cfg` applies to module-level items and to the functions of `extern` blocks",
+            Some("choose the whole struct or class with `@cfg`, once per condition"),
+          );
+        }
       } else if name == "thread_local" && is_static {
         if attribute.args.is_empty() {
           applied.thread_local = Some(attribute.span);
@@ -884,7 +1009,7 @@ class Parser {
         self.attribute_error(
           attribute.span,
           "unknown attribute `@" + name + "`",
-          Some("the attributes are `@export(\"symbol\")`, `@repr(C)` and `@thread_local`"),
+          Some("the attributes are `@cfg(condition)`, `@export(\"symbol\")`, `@repr(C)` and `@thread_local`"),
         );
       }
     }
@@ -944,7 +1069,8 @@ class Parser {
       const before = self.pos;
 
       match self.extern_fn() {
-        Ok(function) => functions.push(function),
+        Ok(Some(function)) => functions.push(function),
+        Ok(None) => {}
         Err(_) => self.skip_member(),
       }
 
@@ -974,9 +1100,10 @@ class Parser {
     }
   }
 
-  /// `fn name(params) -> Ret;` inside an `extern "C"` block.
-  prv fn extern_fn(self) -> Result<ExternFn, ()> {
+  /// `fn name(params) -> Ret;` inside an `extern "C"` block, or `None` if its `@cfg` does not hold.
+  prv fn extern_fn(self) -> Result<Option<ExternFn>, ()> {
     const start = self.span();
+    const attributes = self.attributes()?;
     const visibility = self.visibility();
 
     self.expect_keyword("fn")?;
@@ -1006,7 +1133,13 @@ class Parser {
 
     const end = self.expect(";")?.span;
 
-    Ok(ExternFn { visibility: visibility, name: name, params: params, return_type: return_type, span: start.to(end) })
+    self.apply_attributes(attributes, AttributeTarget::ExternBlockFn);
+
+    if !self.cfg_holds(attributes) {
+      return Ok(None);
+    }
+
+    Ok(Some(ExternFn { visibility: visibility, name: name, params: params, return_type: return_type, span: start.to(end) }))
   }
 
   /// The parameters `name: Type, ...` up to the closing `)`, which is not consumed.
@@ -3113,7 +3246,7 @@ class Parser {
       match part {
         lexer::TemplatePart::Text(text) => result.push(TemplatePart::Text(text)),
         lexer::TemplatePart::Expr(tokens) => {
-          const sub = new Parser(self.eof.span.file, tokens, self.ids, self.diagnostics);
+          const sub = new Parser(self.eof.span.file, tokens, self.ids, self.target, self.diagnostics);
 
           if sub.at_eof() {
             return Err(sub.unexpected("an expression inside `${}`"));

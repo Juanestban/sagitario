@@ -278,7 +278,7 @@ The phases and their acceptance criteria are in [docs/roadmap.md](docs/roadmap.m
 | F7    | Distribution: releases, installers, `nova update self`                    | 🟡 Acceptance  |
 | F8    | `async`/`await`                                                           | ✅ Done        |
 | G1    | Language prerequisites: math, FFI, references, operators, global state    | ✅ Done        |
-| S1    | The standard library in Sagitario, over the C library of each system      | ⬜ Next        |
+| S1    | The standard library in Sagitario, over the C library of each system      | 🟡 In progress |
 | S2    | A standard library as complete as Rust's, from an audit of its modules    | ⬜ Planned     |
 | S3    | The core of the runtime in Sagitario (ARC, strings, lists, tasks)         | ⬜ Planned     |
 | S4    | Binding generation from C headers, as `bindgen`                           | ⬜ Planned     |

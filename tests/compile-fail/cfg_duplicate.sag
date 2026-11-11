@@ -1,0 +1,15 @@
+// Two items of the same name are allowed when their conditions exclude each other; when both hold,
+// the name is repeated (docs/adr/0085-conditional-compilation-and-std-time.md, Q550).
+
+@cfg(any(windows, unix))
+fn system() -> String {
+  "any"
+}
+
+fn system() -> String { //~ ERROR E0201
+  "always"
+}
+
+fn main() {
+  println(system());
+}

@@ -1,0 +1,35 @@
+// `@cfg` (docs/adr/0085-conditional-compilation-and-std-time.md): the corpus is parsed for
+// `x86_64-linux-android`, so only the items whose condition holds there are in the tree. Every one
+// left out is parsed: its syntax errors are reported.
+@cfg(target_os = "android")
+fn kept_android() {}
+
+@cfg(windows)
+fn left_out_windows() {}
+
+@cfg(all(unix, target_arch = "x86_64", target_pointer_width = "64"))
+fn kept_all() {}
+
+@cfg(any(target_os = "ios", target_arch = "aarch64"))
+fn left_out_any() {}
+
+@cfg(not(target_os = "linux"))
+struct KeptNot {}
+
+@cfg(windows)
+use std::left_out;
+
+@cfg(unix)
+use std::kept;
+
+extern "C" {
+  @cfg(windows)
+  fn LeftOut();
+  @cfg(unix)
+  fn kept_c();
+}
+
+@cfg(windows)
+fn left_out_with_error() {
+  const = 1;
+}

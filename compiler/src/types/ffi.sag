@@ -293,6 +293,9 @@ pub fn check_repr_c_structs(cx: Checker) {
 struct Symbol {
   pub span: Span;
   pub sig: Option<FnSig>;
+  /// Of the standard library, which may declare the reserved names of the system's C library
+  /// and define the runtime's own (docs/adr/0085-conditional-compilation-and-std-time.md, Q552).
+  pub in_std: bool;
 }
 
 /// Checks the C symbols: valid identifiers, not reserved, each declared or defined once (a C
@@ -315,7 +318,7 @@ pub fn check_symbols(cx: Checker) {
     }
 
     names.push(decl.name.name);
-    found.push(Symbol { span: decl.name.span, sig: cx.typed.extern_sig(id) });
+    found.push(Symbol { span: decl.name.span, sig: cx.typed.extern_sig(id), in_std: cx.resolution.is_std_source(cx.resolution.externs[index].module) });
   }
 
   for index in 0..cx.resolution.functions.len() {
@@ -325,14 +328,16 @@ pub fn check_symbols(cx: Checker) {
     };
 
     if decl.extern_c {
+      const in_std = cx.resolution.is_std_source(cx.resolution.functions[index].module);
+
       match decl.export {
         Some(export) => {
           names.push(export.symbol);
-          found.push(Symbol { span: export.span, sig: None });
+          found.push(Symbol { span: export.span, sig: None, in_std: in_std });
         }
         None => {
           names.push(decl.name.name);
-          found.push(Symbol { span: decl.name.span, sig: None });
+          found.push(Symbol { span: decl.name.span, sig: None, in_std: in_std });
         }
       }
     }
@@ -343,7 +348,9 @@ pub fn check_symbols(cx: Checker) {
     const entry = found[index];
     const span = entry.span;
 
-    if let Some(problem) = symbol_problem(symbol) {
+    const problem: Option<String> = if entry.in_std { None } else { symbol_problem(symbol) };
+
+    if let Some(problem) = problem {
       cx.diagnostics.push(
         Diagnostic::error(codes::INVALID_SYMBOL, span, "cannot use `" + symbol + "` as a C symbol")
           .with_note(problem)

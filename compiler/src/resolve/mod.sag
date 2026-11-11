@@ -2454,10 +2454,19 @@ pub class Resolver {
         return Some(ItemRef::Std(StdItem::Ffi));
       }
 
+      // `std::sys` is the standard library's own (docs/adr/0085-conditional-compilation-and-std-time.md, Q551).
+      var visible = name != "sys";
+
+      if let Some(current) = self.resolution.module(self.module) {
+        visible = visible || current.in_std;
+      }
+
       if let Some(root) = self.resolution.std_root {
         if let Some(info) = self.resolution.module(root) {
           if let Some(child) = info.children.get(name) {
-            return Some(ItemRef::Module(child));
+            if visible {
+              return Some(ItemRef::Module(child));
+            }
           }
         }
       }

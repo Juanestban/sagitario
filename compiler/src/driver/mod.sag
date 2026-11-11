@@ -297,7 +297,15 @@ fn dump_file(options: CompileOptions, kind: String) -> i32 {
   if kind == "tokens" {
     print(lexer::dump(tokens));
   } else if !diagnostics.has_errors() {
-    print(dump::dump(parser::parse_module(file, tokens, diagnostics)));
+    const target = match options.target {
+      Some(name) => match targets::find(name) {
+        Ok(found) => found.info,
+        Err(code) => return code,
+      },
+      None => TargetInfo::host(),
+    };
+
+    print(dump::dump(parser::parse_module(file, tokens, target, diagnostics)));
   }
 
   match report(diagnostics, sources, options) {
@@ -422,7 +430,11 @@ fn load_package(options: CompileOptions) -> Result<Loaded, i32> {
 
   const sources = new SourceMap();
   const diagnostics = new Diagnostics();
-  const loader = new Loader(input);
+  const target = match options.target {
+    Some(name) => targets::find(name)?.info,
+    None => TargetInfo::host(),
+  };
+  const loader = new Loader(input, target);
 
   // The input's package comes first; dependency `i` is package `i + 1`.
   for dependency in options.dependencies {
@@ -443,12 +455,7 @@ fn load_package(options: CompileOptions) -> Result<Loaded, i32> {
 
   report(diagnostics, sources, options)?;
 
-  const target = match options.target {
-    Some(name) => targets::find(name)?.info,
-    None => TargetInfo::host(),
-  };
-
-  var package = loader.package(prelude, target);
+  var package = loader.package(prelude);
 
   package.library = options.library;
 

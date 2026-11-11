@@ -127,3 +127,47 @@ fn main() {
   only inside its struct); enum variants have their enum's visibility. Class members follow
   [classes](04-classes.md).
 - A `pub` item whose signature or fields mention a private type gets a warning: code elsewhere could receive values of a type it cannot name.
+
+## Conditional compilation (S1)
+
+Rationale: [ADR-0085](../adr/0085-conditional-compilation-and-std-time.md).
+
+```sag
+@cfg(windows)
+extern "C" {
+  fn GetCurrentProcessId() -> u32;
+}
+
+@cfg(unix)
+extern "C" {
+  fn getpid() -> c_int;
+}
+
+@cfg(any(target_os = "linux", target_os = "android"))
+const CLOCK_MONOTONIC: c_int = 1;
+@cfg(any(target_os = "macos", target_os = "ios"))
+const CLOCK_MONOTONIC: c_int = 6;
+```
+
+- `@cfg(condition)`, as Rust's `#[cfg(...)]`, keeps an item only when its condition holds for
+  the target being compiled: the one of `--target`, or the machine running the compiler.
+- The conditions are a closed set (`E0105` lists them):
+
+  | Condition | Holds on |
+  |---|---|
+  | `windows` | Windows |
+  | `unix` | Linux, macOS, Android and iOS |
+  | `target_os = "..."` | `"windows"`, `"linux"`, `"macos"`, `"android"` or `"ios"` |
+  | `target_arch = "..."` | `"x86_64"`, `"aarch64"` or `"arm"` (32-bit ARM) |
+  | `target_pointer_width = "..."` | `"32"` or `"64"` |
+  | `all(c, ...)`, `any(c, ...)`, `not(c)` | every, one, or not the condition; `all()` holds and `any()` does not |
+
+- It applies to module-level items: functions, structs, enums, unions, classes, interfaces,
+  constants, statics, `use` declarations, `impl` blocks and `extern "C"` blocks, and to each
+  function inside an `extern "C"` block. On a field or a method it is an error (`E0105`).
+- An item has at most one `@cfg`; `all(...)` combines conditions.
+- An item whose condition does not hold is parsed and left out before names are resolved: its
+  syntax errors are reported, but its names and types are not checked, and a `use` left out
+  loads no module. Two items may have the same name if their conditions exclude each other; if
+  both hold, the name is repeated (`E0201`).
+- `sag check --target` checks the program as that target sees it.

@@ -14,8 +14,10 @@ use pkg::parser::Ids;
 use pkg::resolve::modules;
 use pkg::resolve::modules::ModuleRef;
 use pkg::span::{SourceMap, Span};
+use std::env;
 use std::fs;
 use std::path;
+use std::process::Command;
 
 /// The part of the prelude written in Sagitario.
 const PRELUDE: String = include_str("../std/prelude.sag");
@@ -35,6 +37,11 @@ const STD_SYNC: String = include_str("../std/sync.sag");
 const STD_TASK: String = include_str("../std/task.sag");
 const STD_THREAD: String = include_str("../std/thread.sag");
 const STD_TIME: String = include_str("../std/time.sag");
+const STD_SYS: String = include_str("../std/sys.sag");
+
+/// The modules of `std` whose functions the runtime's core calls, which every program compiles
+/// (docs/adr/0085-conditional-compilation-and-std-time.md, Q552).
+const CORE_STD: String = "time";
 
 /// The source of the standard library module `std::name` written in Sagitario.
 fn std_source(name: String) -> Option<String> {
@@ -63,6 +70,8 @@ fn std_source(name: String) -> Option<String> {
     Some(STD_THREAD)
   } else if name == "time" {
     Some(STD_TIME)
+  } else if name == "sys" {
+    Some(STD_SYS)
   } else {
     None
   }
@@ -152,6 +161,43 @@ pub fn windows() -> bool {
   path::join("x\\", "y") == "x\\y"
 }
 
+/// The system running the compiler, as `target_os` of `@cfg` names it: macOS has this file and no
+/// other system has.
+pub fn host_os() -> String {
+  if windows() {
+    "windows"
+  } else if fs::is_file("/System/Library/CoreServices/SystemVersion.plist") {
+    "macos"
+  } else {
+    "linux"
+  }
+}
+
+/// The processor running the compiler, as `target_arch` of `@cfg` names it. `sag` runs on 64-bit
+/// hosts only.
+pub fn host_arch() -> String {
+  if windows() {
+    return match env::variable("PROCESSOR_ARCHITECTURE") {
+      Some(name) if name == "ARM64" => "aarch64",
+      _ => "x86_64",
+    };
+  }
+
+  if linux_on_arm() {
+    return "aarch64";
+  }
+
+  if host_os() == "macos" {
+    if let Ok(output) = new Command("uname").arg("-m").output() {
+      if output.stdout.trim() == "arm64" {
+        return "aarch64";
+      }
+    }
+  }
+
+  "x86_64"
+}
+
 /// Whether the compiler runs on Linux for ARM, where C's `char` is unsigned: only the kernel of
 /// that system names the architecture of the processor in `/proc/cpuinfo`, as `CPU architecture`.
 pub fn linux_on_arm() -> bool {
@@ -226,6 +272,8 @@ enum ModuleFile {
 pub class Loader {
   /// The input's package first, then its dependencies.
   pub const packages: List<LoadedPackage>;
+  /// What the conditions of `@cfg` are evaluated for.
+  pub const target: TargetInfo;
   /// Keeps node ids unique across modules.
   prv const ids: Ids;
   pub const modules: List<Module>;
@@ -239,7 +287,8 @@ pub class Loader {
 
   /// A loader for the program whose root module is `entry`, without dependencies until
   /// `add_dependency`.
-  pub fn new(self, entry: String) {
+  pub fn new(self, entry: String, target: TargetInfo) {
+    self.target = target;
     self.packages = List::from([new LoadedPackage("", entry, new List())]);
     self.ids = new Ids(0);
     self.modules = new List();
@@ -300,7 +349,7 @@ pub class Loader {
     const tokens = lexer::lex(id, text, diagnostics);
 
     if diagnostics.error_count() == errors {
-      var module = parser::parse_module_from(id, tokens, self.ids, diagnostics);
+      var module = parser::parse_module_from(id, tokens, self.ids, self.target, diagnostics);
 
       module.path = module_path;
       module.package = package;
@@ -317,6 +366,14 @@ pub class Loader {
     const attempted = new Map<String, bool>();
     const attempted_std = new Map<String, bool>();
     var index = 0usize;
+
+    for name in CORE_STD.split(" ") {
+      attempted_std.insert(name, true);
+
+      if let Some(text) = std_source(name) {
+        self.load_std(name, self.std_overrides.get(name).unwrap_or(text), sources, diagnostics);
+      }
+    }
 
     while index < self.modules.len() {
       const module = self.modules[index];
@@ -356,7 +413,8 @@ pub class Loader {
       }
 
       for name in modules::std_references(module) {
-        if attempted_std.contains_key(name) {
+        // `std::sys` is the standard library's own (Q551).
+        if attempted_std.contains_key(name) || (name == "sys" && !self.std.contains(index)) {
           continue;
         }
 
@@ -392,7 +450,7 @@ pub class Loader {
   prv fn load_embedded(self, file: String, text: String, module_path: List<String>, sources: SourceMap, diagnostics: Diagnostics) -> usize {
     const id = sources.add(file, text);
     const tokens = lexer::lex(id, text, diagnostics);
-    var module = parser::parse_module_from(id, tokens, self.ids, diagnostics);
+    var module = parser::parse_module_from(id, tokens, self.ids, self.target, diagnostics);
 
     module.path = module_path;
     self.modules.push(module);
@@ -514,7 +572,9 @@ pub class Loader {
 
   /// The package of the program, compiled for `target`: its modules, the prelude and the
   /// standard library modules.
-  pub fn package(self, prelude: usize, target: TargetInfo) -> Package {
+  pub fn package(self, prelude: usize) -> Package {
+    const target = self.target;
+
     const infos: List<PackageInfo> = new List();
 
     for loaded in self.packages {

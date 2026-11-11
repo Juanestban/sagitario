@@ -63,6 +63,11 @@ The standard library half of the runtime, about 2,000 lines of `runtime/sagitari
 rewritten in Sagitario over the C library and the system API through `extern "C"`, without C
 shims (Q541).
 
+**Status:** in progress. [ADR-0085](adr/0085-conditional-compilation-and-std-time.md) fixes the
+pattern and the order of the modules. Conditional compilation with `@cfg` is done, and
+`std::time` is written on the clocks of each system in `std::sys`, without C. `std::env`
+follows.
+
 - One module per increment: `std::env`, `std::io`, `std::process` with `Command`, `std::fs`,
   `std::path`, `std::time`, `std::thread`, `std::sync` and dynamic libraries.
 - The C API of each system (POSIX on Linux, macOS, Android and iOS; Win32 on Windows) declared in

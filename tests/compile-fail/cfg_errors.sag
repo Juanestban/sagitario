@@ -1,0 +1,37 @@
+// The conditions of `@cfg` (docs/adr/0085-conditional-compilation-and-std-time.md, Q547-Q549):
+// a closed set of names and values, combined with `all`, `any` and `not`, on module-level items
+// and the functions of `extern` blocks.
+
+@cfg(linux) //~ ERROR E0105
+fn a() {}
+
+@cfg(target_os = "freebsd") //~ ERROR E0105
+fn b() {}
+
+@cfg(target_cpu = "x86_64") //~ ERROR E0105
+fn c() {}
+
+@cfg(not(windows, unix)) //~ ERROR E0105
+fn d() {}
+
+@cfg(either(windows, unix)) //~ ERROR E0105
+fn e() {}
+
+@cfg //~ ERROR E0105
+fn f() {}
+
+@cfg(windows)
+@cfg(unix) //~ ERROR E0105
+fn g() {}
+
+struct Point {
+  @cfg(windows) //~ ERROR E0105
+  pub x: i32;
+}
+
+extern "C" {
+  @cfg(target_arch = "riscv64") //~ ERROR E0105
+  fn puts(text: *const u8) -> i32;
+}
+
+fn main() {}
