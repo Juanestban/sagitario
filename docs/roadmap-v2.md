@@ -97,8 +97,18 @@ The standard library a general-purpose language needs, with Rust's std as the re
 - Each gap is filled by a record of its own.
 - The crates most Rust programs use (`serde`, `regex`, `rand`, `chrono`) are Nova packages, not
   the standard library.
+- A suite of benchmarks, `benchmarks/`, part of the audit: the same programs in Sagitario, Rust
+  and C, built optimized, to measure how far Sagitario is from them and where. Numeric loops over
+  structs and arrays (n-body, spectral norm), allocation and reference counting (binary trees),
+  strings and collections (word counts, sorting, maps), threads (a parallel sum, channels), and
+  the start of a program. It records times and memory per platform, and names the work that
+  closes the gaps: retains and releases removed when a value moves or is lent, atomic counts only
+  for values that cross threads, `restrict` for `&mut` parameters and slices, and closures that
+  never escape kept off the heap. The goal is the speed of Rust in code without allocation, and
+  close to it elsewhere.
 
-**Acceptance:** every row of the audit is done or out of scope with its reason.
+**Acceptance:** every row of the audit is done or out of scope with its reason, and the
+benchmarks run in CI with their results recorded.
 
 ## S3: The core in Sagitario
 
