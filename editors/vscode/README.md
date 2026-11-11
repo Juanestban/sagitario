@@ -66,6 +66,15 @@ npm run package                           # writes sagitario.vsix
 code --install-extension sagitario.vsix
 ```
 
+From the root of the repository, one command does the three steps (`npm ci` only when
+`node_modules` is missing) and replaces the installed extension; then reload the windows of VS
+Code:
+
+```sh
+sag run tools/vscode.sag                          # --no-install only packages it
+sag run tools/vscode.sag -- --code code-insiders  # another VS Code
+```
+
 ## License
 
 Licensed under either of MIT or Apache-2.0, at your option, as the rest of the repository

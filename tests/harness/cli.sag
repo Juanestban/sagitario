@@ -9,6 +9,7 @@ pub fn tests() -> List<Test> {
     support::test("version_prints_the_version", version_prints_the_version),
     support::test("the_vscode_extension_has_the_version", the_vscode_extension_has_the_version),
     support::test("the_version_tool_reads_the_version", the_version_tool_reads_the_version),
+    support::test("the_vscode_tool_rejects_unknown_arguments", the_vscode_tool_rejects_unknown_arguments),
     support::test("help_succeeds", help_succeeds),
     support::test("invalid_usage_exits_with_2", invalid_usage_exits_with_2),
     support::test("missing_input_exits_with_1", missing_input_exits_with_1),
@@ -85,6 +86,14 @@ fn the_version_tool_reads_the_version(cx: Context) -> Result<(), String> {
 
   expect_exit("sag run tools/version.sag -- 1.02", rejected, 2)?;
   expect_contains("sag run tools/version.sag -- 1.02", rejected.stderr, "expected a version X.Y.Z")
+}
+
+/// `tools/vscode.sag` (editors/vscode/README.md) rejects an unknown argument before running npm.
+fn the_vscode_tool_rejects_unknown_arguments(cx: Context) -> Result<(), String> {
+  const rejected = sag(cx, List::from(["run", "tools/vscode.sag", "--", "--bogus"]))?;
+
+  expect_exit("sag run tools/vscode.sag -- --bogus", rejected, 2)?;
+  expect_contains("sag run tools/vscode.sag -- --bogus", rejected.stderr, "unexpected arguments")
 }
 
 fn help_succeeds(cx: Context) -> Result<(), String> {

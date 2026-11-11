@@ -1,0 +1,121 @@
+//! Packages the VS Code extension of `editors/vscode/` and installs it in the VS Code of this
+//! machine, replacing the one installed, run from the root of the repository:
+//!
+//!     sag run tools/vscode.sag
+//!     sag run tools/vscode.sag -- --code code-insiders
+//!
+//! It runs `npm ci` when `node_modules` is missing (or with `--ci`), `npm run package`, which
+//! writes `editors/vscode/sagitario.vsix`, and `code --install-extension` with it. `--no-install`
+//! only packages it. Reload the windows of VS Code afterwards to use it.
+
+use std::env;
+use std::fs;
+use std::path;
+use std::process;
+use std::process::Command;
+
+const USAGE: String = "Usage: sag run tools/vscode.sag -- [--ci] [--no-install] [--code <program>]";
+
+const EXTENSION: String = "editors/vscode";
+
+struct Options {
+  pub ci: bool;
+  pub install: bool;
+  pub code: String;
+}
+
+/// Whether this runs on Windows, where `npm` and `code` are `.cmd` scripts that only `cmd.exe`
+/// runs.
+fn windows() -> bool {
+  path::join("x\\", "y") == "x\\y"
+}
+
+/// `program` with `args`, through `cmd.exe` on Windows.
+fn command(program: String, args: List<String>) -> Command {
+  if windows() {
+    return new Command("cmd.exe").args(List::from(["/d", "/c", program])).args(args);
+  }
+
+  new Command(program).args(args)
+}
+
+/// Runs `program` with `args` in `dir`, printing what it prints.
+fn step(program: String, args: List<String>, dir: String) -> Result<(), String> {
+  const shown = f"{program} {args.join(" ")}";
+
+  println(f"> {shown}");
+
+  match command(program, args).current_dir(dir).status() {
+    Ok(status) => {
+      if status.success() {
+        Ok(())
+      } else {
+        Err(f"`{shown}` failed")
+      }
+    }
+    Err(error) => Err(f"cannot run `{program}`: {error.message()}; is it installed and on PATH?"),
+  }
+}
+
+fn parse(args: List<String>) -> Option<Options> {
+  var options = Options { ci: false, install: true, code: "code" };
+  var i = 1usize;
+
+  while i < args.len() {
+    const arg = args[i];
+
+    if arg == "--ci" {
+      options.ci = true;
+    } else if arg == "--no-install" {
+      options.install = false;
+    } else if arg == "--code" && i + 1 < args.len() {
+      options.code = args[i + 1];
+      i += 1;
+    } else {
+      return None;
+    }
+
+    i += 1;
+  }
+
+  Some(options)
+}
+
+fn run(options: Options) -> Result<String, String> {
+  if options.ci || !fs::is_dir(f"{EXTENSION}/node_modules") {
+    step("npm", List::from(["ci"]), EXTENSION)?;
+  }
+
+  step("npm", List::from(["run", "package"]), EXTENSION)?;
+
+  if !options.install {
+    return Ok(f"packaged {EXTENSION}/sagitario.vsix");
+  }
+
+  step(options.code, List::from(["--install-extension", "sagitario.vsix", "--force"]), EXTENSION)?;
+
+  Ok("installed the extension; reload the windows of VS Code (Developer: Reload Window) to use it")
+}
+
+fn main() {
+  if !fs::is_file(f"{EXTENSION}/package.json") {
+    eprintln("error: run it from the root of the repository");
+    process::exit(2);
+  }
+
+  const options = match parse(env::args()) {
+    Some(found) => found,
+    None => {
+      eprintln(f"error: unexpected arguments\n\n{USAGE}");
+      process::exit(2);
+    }
+  };
+
+  match run(options) {
+    Ok(message) => println(message),
+    Err(message) => {
+      eprintln(f"error: {message}");
+      process::exit(1);
+    }
+  }
+}

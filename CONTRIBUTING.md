@@ -44,6 +44,7 @@ nova check                      # front end only
 
 cd editors/vscode && npm ci && npm run package   # the VS Code extension: sagitario.vsix
 code --install-extension editors/vscode/sagitario.vsix   # it starts `sag lsp` from PATH
+sag run tools/vscode.sag        # both, replacing the extension installed in your VS Code
 ```
 
 On Windows, `build/bin/sag.exe` and `build/bin/nova.exe`; with `cl`, run the commands from a
