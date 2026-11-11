@@ -4,7 +4,7 @@
 //! modules of `types` the checks of one area each, as functions taking the checker
 //! (docs/adr/0053-type-checker-port-and-type-dumps.md).
 
-use pkg::ast::{ArrayLen, EnumDecl, FieldDecl, FnDecl, Package, TargetInfo, TypeExpr, TypeExprKind, VariantFields, Visibility};
+use pkg::ast::{ArrayLen, EnumDecl, Expr, FieldDecl, FnDecl, Package, TargetInfo, TypeExpr, TypeExprKind, VariantFields, Visibility};
 use pkg::diagnostics;
 use pkg::diagnostics::{Diagnostic, Diagnostics};
 use pkg::diagnostics::codes;
@@ -160,6 +160,9 @@ pub enum TypeKind {
   Slice { mutable: bool, elem: Type },
   CVoid,
   CString,
+  /// `std::sys::Atomic<T>`: a `bool` or an integer that threads read and change at once, only the
+  /// type of a `const` field of a class (docs/adr/0087-atomic-storage-and-std-sync.md).
+  Atomic(Type),
   /// The type of expressions that never produce a value.
   Never,
   /// The type of an expression that already produced an error.
@@ -346,6 +349,10 @@ pub fn same_type(a: Type, b: Type) -> bool {
       TypeKind::Slice { mutable: other_mutable, elem: other_elem } => mutable == other_mutable && same_type(elem, other_elem),
       _ => false,
     },
+    TypeKind::Atomic(x) => match b.kind {
+      TypeKind::Atomic(y) => same_type(x, y),
+      _ => false,
+    },
     _ => tag(a) == tag(b),
   }
 }
@@ -468,6 +475,7 @@ pub fn text(ty: Type) -> String {
     TypeKind::Slice { mutable, elem } => (if mutable { "&mut [" } else { "&[" }) + text(elem) + "]",
     TypeKind::CVoid => "c_void",
     TypeKind::CString => "CString",
+    TypeKind::Atomic(value) => "Atomic<" + text(value) + ">",
     TypeKind::Never => "never",
     TypeKind::Error => "{error}",
   }
@@ -1105,6 +1113,11 @@ pub class Checker {
   pub var in_async: bool;
   pub var self_calls: List<SelfCall>;
   pub var receiver_checks: List<ReceiverCheck>;
+  /// Whether the next type lowered is that of a `const` field of a class, where `Atomic` may be.
+  pub var atomic_field: bool;
+  /// The expressions of an `Atomic` type not yet used through a method or as the value of its
+  /// field: those left when a function ends are errors (docs/adr/0087-atomic-storage-and-std-sync.md).
+  pub var atomic_uses: List<Expr>;
 
   pub fn new(self, package: Package, resolution: Resolution, diagnostics: Diagnostics) {
     self.package = package;
@@ -1136,6 +1149,8 @@ pub class Checker {
     self.in_async = false;
     self.self_calls = new List();
     self.receiver_checks = new List();
+    self.atomic_field = false;
+    self.atomic_uses = new List();
   }
 
   pub fn error(self, code: String, span: Span, message: String) {
@@ -1560,8 +1575,44 @@ pub class Checker {
     self.type_expr_at(ty, false)
   }
 
+  /// `Atomic<T>`, of a `bool` or an integer, in the one place it may be
+  /// (docs/adr/0087-atomic-storage-and-std-sync.md, Q565 and Q566).
+  prv fn atomic_type(self, span: Span, args: List<TypeExpr>, allowed: bool) -> Type {
+    if args.len() != 1 {
+      self.error(codes::WRONG_TYPE_ARGUMENTS, span, `\`Atomic\` takes 1 type argument but ${args.len()} were supplied`);
+
+      return error();
+    }
+
+    const value = self.type_expr(args[0]);
+    const atomic_value = match value.kind {
+      TypeKind::Bool | TypeKind::Int(_) => true,
+      TypeKind::Error => return error(),
+      _ => false,
+    };
+
+    if !atomic_value {
+      self.error(codes::WRONG_TYPE_ARGUMENTS, span, "`Atomic` holds a `bool` or an integer, not `" + text(value) + "`");
+
+      return error();
+    }
+
+    if !allowed {
+      self.error(codes::INVALID_REFERENCE, span, "`Atomic<" + text(value) + ">` can only be the type of a `const` field of a class");
+
+      return error();
+    }
+
+    of(TypeKind::Atomic(value))
+  }
+
   /// A type, possibly behind a pointer, the only place `c_void` can appear.
   pub fn type_expr_at(self, ty: TypeExpr, behind_pointer: bool) -> Type {
+    // Only the type itself may be atomic, not the types inside it.
+    const atomic_allowed = self.atomic_field;
+
+    self.atomic_field = false;
+
     match ty.kind {
       TypeExprKind::Ptr { mutable, pointee } => ffi::pointer_type(self, mutable, pointee),
       TypeExprKind::Ref { mutable, pointee } => match pointee.kind {
@@ -1634,6 +1685,10 @@ pub class Checker {
           self.type_bounds.push(SpanType { span: ty.span, ty: result });
 
           return result;
+        }
+
+        if let Some(TypeRes::Atomic) = self.resolution.type_paths.get(path.id) {
+          return self.atomic_type(ty.span, args, atomic_allowed);
         }
 
         const name = match path.segments.last() {
@@ -1733,6 +1788,11 @@ pub class Checker {
             return ffi::c_type(c, self.target);
           }
           Some(TypeRes::CString) => return of(TypeKind::CString),
+          Some(TypeRes::Atomic) => {
+            self.error(codes::WRONG_TYPE_ARGUMENTS, path.span, "`Atomic` needs a type argument: `Atomic<T>`");
+
+            return error();
+          }
           Some(TypeRes::Error) => return error(),
           _ => {}
         }

@@ -304,6 +304,11 @@ fn project_one(place: Place, projection: Projection, ty: Type) -> Place {
 }
 
 /// A local as a place.
+/// A C11 operation of `<stdatomic.h>`, a generic macro the runtime does not declare.
+fn c_operation(function: String) -> Callee {
+  Callee::Runtime { function: function, located: false }
+}
+
 pub fn local_place(local: u32, ty: Type) -> Place {
   Place { local: local, projections: new List(), ty: ty }
 }
@@ -790,7 +795,7 @@ pub fn lower(package: Package, resolution: Resolution, typed: TypedModule, sourc
   const instances: List<Option<Function>> = new List();
 
   // The functions of the standard library are instances made where they are called; those C
-  // calls, which the runtime's core does, are made here.
+  // calls, which the runtime's core does through their `@export` names, are made here.
   for index in 0..resolution.functions.len() {
     const id = index as u32;
 
@@ -799,7 +804,7 @@ pub fn lower(package: Package, resolution: Resolution, typed: TypedModule, sourc
     }
 
     if let Some(decl) = resolution.fn_decl(package, id) {
-      if decl.extern_c {
+      if decl.extern_c && decl.export.is_some() {
         mono::require(registry, id);
       }
     }
@@ -1484,6 +1489,14 @@ pub class Lowering {
       const stored = self.expr(value)?;
       const place = self.place(target)?;
       const ty = place.ty;
+
+      // The field of an `Atomic` is initialized once, by `Atomic::new` (docs/adr/0087-atomic-storage-and-std-sync.md).
+      if let TypeKind::Atomic(_) = ty.kind {
+        self.emit(Stmt::Eval(Rvalue::Call { callee: Callee::Runtime { function: "atomic_init", located: false }, args: List::from([Operand::Ref(place), stored]) }));
+
+        return Ok(());
+      }
+
       const converted = interfaces::convert(self, stored, value_ty, ty);
       // `text += more` is `text = text + more`.
       const combined = self.combine(op, ty, Operand::Place(place), converted);
@@ -2139,12 +2152,73 @@ pub class Lowering {
     Ok(self.new_value(ty, Rvalue::Template(pieces)))
   }
 
+  /// A method of `Atomic<T>`, one of C11's sequentially consistent operations on the field
+  /// (docs/adr/0087-atomic-storage-and-std-sync.md, Q568).
+  prv fn atomic_method(self, name: String, ty: Type, receiver: Expr, args: List<Expr>) -> Result<Operand, String> {
+    const place = self.place(receiver)?;
+    const inner = match place.ty.kind {
+      TypeKind::Atomic(found) => found,
+      _ => return Err("an atomic method on a value that is not atomic"),
+    };
+    const values: List<Operand> = List::from([Operand::Ref(place)]);
+
+    for arg in args {
+      values.push(self.operand_as(arg, inner)?);
+    }
+
+    if name == "store" {
+      self.emit(Stmt::Eval(Rvalue::Call { callee: c_operation("atomic_store"), args: values }));
+
+      return Ok(unit_operand());
+    }
+
+    if name == "compare_exchange" {
+      if values.len() != 3 {
+        return Err("`compare_exchange` without two arguments");
+      }
+
+      // C writes the value it found into `expected` when it differs.
+      const expected = values[1];
+      const found = self.temp(inner);
+
+      self.emit(Stmt::Assign { dest: found, value: Rvalue::Use(expected) });
+
+      const call_args = List::from([values[0], Operand::Ref(local_place(found, inner)), values[2]]);
+      const exchanged = self.new_value(types::of(TypeKind::Bool), Rvalue::Call { callee: c_operation("atomic_compare_exchange_strong"), args: call_args });
+      const dest = self.temp(ty);
+      const then_body = List::from([Stmt::Assign { dest: dest, value: Rvalue::Variant { index: 0, fields: List::from([expected]) } }]);
+      const else_body = List::from([Stmt::Assign { dest: dest, value: Rvalue::Variant { index: 1, fields: List::from([Operand::Local(found)]) } }]);
+
+      self.emit(Stmt::If { cond: exchanged, then_body: then_body, else_body: else_body });
+
+      return Ok(Operand::Local(dest));
+    }
+
+    const function = if name == "load" {
+      "atomic_load"
+    } else if name == "swap" {
+      "atomic_exchange"
+    } else if name == "fetch_add" {
+      "atomic_fetch_add"
+    } else if name == "fetch_sub" {
+      "atomic_fetch_sub"
+    } else {
+      return Err("an unknown atomic method `" + name + "`");
+    };
+
+    Ok(self.new_value(ty, Rvalue::Call { callee: c_operation(function), args: values }))
+  }
+
   prv fn method_call_expr(self, value: Expr, ty: Type, receiver: Expr, method: Ident, args: List<Expr>) -> Result<Operand, String> {
     if self.typed.field_calls.contains_key(value.id) {
       return closures::field_call(self, receiver, method.name, args);
     }
 
     if let Some(builtin) = self.typed.builtin_methods.get(value.id) {
+      if let BuiltinMethod::Atomic(name) = builtin {
+        return self.atomic_method(name, ty, receiver, args);
+      }
+
       return match builtin {
         BuiltinMethod::Map | BuiltinMethod::MapErr | BuiltinMethod::AndThen | BuiltinMethod::UnwrapOrElse | BuiltinMethod::Filter => {
           closures::closure_method(self, builtin, ty, receiver, args)
@@ -2693,6 +2767,18 @@ pub class Lowering {
           const rvalue = if name == "mem::size_of" { Rvalue::SizeOf(measured) } else if name == "mem::align_of" { Rvalue::AlignOf(measured) } else { Rvalue::Zeroed };
 
           return Ok(self.new_value(ty, rvalue));
+        }
+
+        // Its value is the `T`, which initializes the field (docs/adr/0087-atomic-storage-and-std-sync.md).
+        if name == "Atomic::new" {
+          if args.len() != 1 {
+            return Err("`Atomic::new` without one argument");
+          }
+
+          return match ty.kind {
+            TypeKind::Atomic(inner) => self.operand_as(args[0], inner),
+            _ => Err("`Atomic::new` without an atomic type"),
+          };
         }
 
         if name == "CString::new" {

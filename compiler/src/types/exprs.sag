@@ -151,6 +151,7 @@ pub fn function(cx: Checker, id: u32, decl: FnDecl) {
   const body_ty = if decl.is_abstract { ret } else { block(cx, decl.body, Some(ret)) };
 
   cx.in_async = false;
+  atomic_misuses(cx);
 
   if !cx.fits(body_ty, ret) {
     const span = match decl.body.tail {
@@ -337,6 +338,15 @@ fn assign(cx: Checker, target: Expr, op: Option<BinaryOp>, value: Expr) -> Type 
     if !checked {
       expect(cx, value, target_ty);
     }
+
+    if let TypeKind::Atomic(_) = target_ty.kind {
+      atomic_used(cx, target);
+
+      if let ExprKind::Call { .. } = value.kind {
+        atomic_used(cx, value);
+      }
+    }
+
     closures::check_closure_cycle(cx, target, value);
 
     const never = match cx.typed.expr_types.get(value.id) {
@@ -483,7 +493,95 @@ pub fn expr(cx: Checker, value: Expr, expected: Option<Type>) -> Type {
 
   cx.typed.expr_types.insert(value.id, ty);
 
+  if let TypeKind::Atomic(_) = ty.kind {
+    cx.atomic_uses.push(value);
+  }
+
   ty
+}
+
+/// An expression of an `Atomic` type used as it may be: as the receiver of a method, or as the
+/// field it initializes.
+fn atomic_used(cx: Checker, value: Expr) {
+  const left: List<Expr> = new List();
+
+  for found in cx.atomic_uses {
+    if found.id != value.id {
+      left.push(found);
+    }
+  }
+
+  cx.atomic_uses = left;
+}
+
+/// Reports the expressions of an `Atomic` type used other than through its methods
+/// (docs/adr/0087-atomic-storage-and-std-sync.md, Q567).
+fn atomic_misuses(cx: Checker) {
+  for found in cx.atomic_uses {
+    cx.error(codes::INVALID_REFERENCE, found.span, "an `Atomic` is only used through its methods, and created as the value of its field");
+  }
+
+  cx.atomic_uses = new List();
+}
+
+/// A method of `Atomic<T>` (docs/adr/0087-atomic-storage-and-std-sync.md, Q568).
+fn atomic_method(cx: Checker, value: Expr, receiver: Expr, inner: Type, method: Ident, args: List<Expr>) -> Type {
+  const name = method.name;
+  const is_int = match inner.kind {
+    TypeKind::Int(_) => true,
+    _ => false,
+  };
+  var params: List<Type> = new List();
+  var ret = inner;
+
+  atomic_used(cx, receiver);
+
+  if name == "load" {
+    ret = inner;
+  } else if name == "store" {
+    params = List::from([inner]);
+    ret = types::unit();
+  } else if name == "swap" || (is_int && (name == "fetch_add" || name == "fetch_sub")) {
+    params = List::from([inner]);
+  } else if name == "compare_exchange" {
+    params = List::from([inner, inner]);
+    ret = types::of(TypeKind::Result { value: inner, error: inner });
+  } else {
+    cx.error(codes::UNKNOWN_MEMBER, method.span, "no method `" + name + "` on type `Atomic<" + types::text(inner) + ">`");
+    unchecked_args(cx, args);
+
+    return types::error();
+  }
+
+  check_args(cx, value.span, "method", params, args);
+  cx.typed.builtin_methods.insert(value.id, BuiltinMethod::Atomic(name));
+
+  ret
+}
+
+/// `Atomic::new(value)`, only the value given to a field of type `Atomic<T>`, which is expected.
+fn atomic_new(cx: Checker, value: Expr, args: List<Expr>, expected: Option<Type>) -> Type {
+  const inner = match expected {
+    Some(ty) => match ty.kind {
+      TypeKind::Atomic(inner) => Some(inner),
+      _ => None,
+    },
+    None => None,
+  };
+
+  match inner {
+    Some(found) => {
+      check_args(cx, value.span, "function", List::from([found]), args);
+
+      types::of(TypeKind::Atomic(found))
+    }
+    None => {
+      cx.error(codes::INVALID_REFERENCE, value.span, "`Atomic::new` only gives its value to a `const` field of type `Atomic<T>`, in the initializer of its class");
+      unchecked_args(cx, args);
+
+      types::error()
+    }
+  }
 }
 
 fn path_of(value: Expr) -> Option<Path> {
@@ -1330,6 +1428,8 @@ fn call(cx: Checker, value: Expr, callee: Expr, args: List<Expr>, expected: Opti
         sig = Some(FnSig { receiver: None, params: List::from([types::string()]), ret: ret });
       } else if name == "List::from" {
         return collections::list_from(cx, value, callee, args, expected);
+      } else if name == "Atomic::new" {
+        return atomic_new(cx, value, args, expected);
       } else if name.starts_with("mem::") {
         return ffi::mem_call(cx, value, path, name, args, expected);
       } else if name == "include_str" {
@@ -1467,6 +1567,10 @@ fn method_call(cx: Checker, value: Expr, receiver: Expr, method: Ident, args: Li
 
   const receiver_ty = borrow::deref_base(cx, receiver);
   const name = method.name;
+
+  if let TypeKind::Atomic(inner) = receiver_ty.kind {
+    return atomic_method(cx, value, receiver, inner, method, args);
+  }
 
   if let TypeKind::Slice { .. } = receiver_ty.kind {
     return borrow::slice_method(cx, value, receiver_ty, method, args);

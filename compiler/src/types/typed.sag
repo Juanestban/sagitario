@@ -73,6 +73,8 @@ pub enum BuiltinMethod {
   Prelude(u32),
   TotalCompare,
   RangeRev,
+  /// A method of `Atomic<T>`, by name (docs/adr/0087-atomic-storage-and-std-sync.md).
+  Atomic(String),
 }
 
 /// A list or array used as an iterator: the prelude function making the iterator and its type
@@ -970,6 +972,8 @@ pub class TypedModule {
       TypeKind::Function { .. } => Some("a function value can capture values that are not `Send`"),
       TypeKind::Ptr { .. } | TypeKind::CVoid => Some("raw pointers are not `Send`"),
       TypeKind::Ref { .. } | TypeKind::Slice { .. } => Some("references live while a call does"),
+      // Threads share an atomic to change it at once (docs/adr/0087-atomic-storage-and-std-sync.md, Q569).
+      TypeKind::Atomic(_) => None,
       TypeKind::Interface(interface_ref) => {
         if let Some(send) = self.prelude.send {
           if send == interface_ref.id {

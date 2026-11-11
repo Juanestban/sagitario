@@ -35,6 +35,9 @@ pub fn class_defs(cx: Checker) {
     const fields: List<FieldDef> = new List();
 
     for field in decl.fields {
+      // An instance of a class keeps one address, which an atomic needs.
+      cx.atomic_field = types::is_const(field);
+
       const ty = cx.type_expr(field.ty);
       const is_weak = field.is_weak && check_weak_field(cx, field, ty);
 

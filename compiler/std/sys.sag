@@ -7,6 +7,7 @@ use std::ffi::{c_char, c_int, c_void, string_from_c, CString};
 use std::mem;
 @cfg(unix)
 use std::ffi::c_long;
+use std::sys::Atomic;
 
 // ---- errno ------------------------------------------------------------------------------------
 
@@ -2297,4 +2298,269 @@ pub fn library_symbol(library: *mut c_void, name: String) -> Option<unsafe exter
   };
 
   unsafe { GetProcAddress(library, c_name.as_ptr()) }
+}
+
+// ---- Locks ------------------------------------------------------------------------------------
+
+/// Room for `pthread_mutex_t` or `pthread_cond_t` of every supported C library: glibc's, bionic's
+/// and Apple's are at most 64 and 48 bytes, aligned to 8
+/// (docs/adr/0087-atomic-storage-and-std-sync.md, Q570).
+@cfg(unix)
+@repr(C)
+struct PthreadBuffer {
+  pub words: [u64; 8];
+}
+
+@cfg(unix)
+extern "C" {
+  fn pthread_mutex_init(mutex: *mut PthreadBuffer, attributes: *const c_void) -> c_int;
+  fn pthread_mutex_lock(mutex: *mut PthreadBuffer) -> c_int;
+  fn pthread_mutex_unlock(mutex: *mut PthreadBuffer) -> c_int;
+  fn pthread_cond_init(condition: *mut PthreadBuffer, attributes: *const c_void) -> c_int;
+  fn pthread_cond_wait(condition: *mut PthreadBuffer, mutex: *mut PthreadBuffer) -> c_int;
+  fn pthread_cond_broadcast(condition: *mut PthreadBuffer) -> c_int;
+  /// `pthread_t` is an integer or a pointer, of the size of a pointer, on every supported system.
+  fn pthread_self() -> usize;
+}
+
+/// A number for the calling thread, never 0.
+@cfg(unix)
+fn thread_id() -> usize {
+  unsafe { pthread_self() }
+}
+
+/// A lock with a condition, for `Mutex` and `Channel`. C changes the memory of its fields, which
+/// the generated C never declares `const`. They are never destroyed: Sagitario has no destructors,
+/// and the default mutexes and conditions of these C libraries hold nothing to free.
+@cfg(unix)
+pub class Lock {
+  prv const mutex: PthreadBuffer;
+  prv const condition: PthreadBuffer;
+  /// The thread holding the lock, or 0.
+  prv const owner: Atomic<usize>;
+
+  pub fn new(self) {
+    self.mutex = PthreadBuffer { words: [0u64; 8] };
+    self.condition = PthreadBuffer { words: [0u64; 8] };
+    self.owner = Atomic::new(0);
+
+    const failed = (unsafe { pthread_mutex_init(self.mutex_place(), 0 as *const c_void) }) != 0
+      || (unsafe { pthread_cond_init(self.condition_place(), 0 as *const c_void) }) != 0;
+
+    if failed {
+      panic("failed to create a mutex");
+    }
+  }
+
+  prv fn mutex_place(self) -> *mut PthreadBuffer {
+    &raw const self.mutex as *mut PthreadBuffer
+  }
+
+  prv fn condition_place(self) -> *mut PthreadBuffer {
+    &raw const self.condition as *mut PthreadBuffer
+  }
+
+  /// Takes the lock, waiting for it; panics if this thread holds it already.
+  pub fn lock(self) {
+    const me = thread_id();
+
+    if self.owner.load() == me {
+      panic("a thread locked a `Mutex` it already holds: the function given to `update` must not use the same mutex");
+    }
+
+    unsafe { pthread_mutex_lock(self.mutex_place()); }
+    self.owner.store(me);
+  }
+
+  pub fn unlock(self) {
+    self.owner.store(0);
+    unsafe { pthread_mutex_unlock(self.mutex_place()); }
+  }
+
+  /// Releases the lock, which this thread holds, until another thread calls `notify_all`, then
+  /// takes it again. It may also return without one.
+  pub fn wait(self) {
+    self.owner.store(0);
+    unsafe { pthread_cond_wait(self.condition_place(), self.mutex_place()); }
+    self.owner.store(thread_id());
+  }
+
+  /// Wakes every thread waiting on the lock.
+  pub fn notify_all(self) {
+    unsafe { pthread_cond_broadcast(self.condition_place()); }
+  }
+}
+
+/// `SRWLOCK` and `CONDITION_VARIABLE`: one pointer each, which starts as zero.
+@cfg(windows)
+@repr(C)
+struct WinLockCell {
+  pub value: usize;
+}
+
+@cfg(windows)
+extern "C" {
+  fn AcquireSRWLockExclusive(lock: *mut WinLockCell);
+  fn ReleaseSRWLockExclusive(lock: *mut WinLockCell);
+  fn SleepConditionVariableSRW(condition: *mut WinLockCell, lock: *mut WinLockCell, milliseconds: u32, flags: u32) -> c_int;
+  fn WakeAllConditionVariable(condition: *mut WinLockCell);
+}
+
+/// A number for the calling thread, never 0.
+@cfg(windows)
+fn thread_id() -> usize {
+  (unsafe { GetCurrentThreadId() }) as usize
+}
+
+/// A lock with a condition, for `Mutex` and `Channel`. C changes the memory of its fields, which
+/// the generated C never declares `const`; `SRWLOCK_INIT` and `CONDITION_VARIABLE_INIT` are zero,
+/// and neither is destroyed.
+@cfg(windows)
+pub class Lock {
+  prv const srw: WinLockCell;
+  prv const condition: WinLockCell;
+  /// The thread holding the lock, or 0.
+  prv const owner: Atomic<usize>;
+
+  pub fn new(self) {
+    self.srw = WinLockCell { value: 0 };
+    self.condition = WinLockCell { value: 0 };
+    self.owner = Atomic::new(0);
+  }
+
+  prv fn srw_place(self) -> *mut WinLockCell {
+    &raw const self.srw as *mut WinLockCell
+  }
+
+  prv fn condition_place(self) -> *mut WinLockCell {
+    &raw const self.condition as *mut WinLockCell
+  }
+
+  /// Takes the lock, waiting for it; panics if this thread holds it already.
+  pub fn lock(self) {
+    const me = thread_id();
+
+    if self.owner.load() == me {
+      panic("a thread locked a `Mutex` it already holds: the function given to `update` must not use the same mutex");
+    }
+
+    unsafe { AcquireSRWLockExclusive(self.srw_place()); }
+    self.owner.store(me);
+  }
+
+  pub fn unlock(self) {
+    self.owner.store(0);
+    unsafe { ReleaseSRWLockExclusive(self.srw_place()); }
+  }
+
+  /// Releases the lock, which this thread holds, until another thread calls `notify_all`, then
+  /// takes it again. It may also return without one.
+  pub fn wait(self) {
+    self.owner.store(0);
+    unsafe { SleepConditionVariableSRW(self.condition_place(), self.srw_place(), INFINITE, 0); }
+    self.owner.store(thread_id());
+  }
+
+  /// Wakes every thread waiting on the lock.
+  pub fn notify_all(self) {
+    unsafe { WakeAllConditionVariable(self.condition_place()); }
+  }
+}
+
+// ---- Threads ----------------------------------------------------------------------------------
+
+/// What the runtime's core does for each thread, which stays C until S3
+/// (docs/adr/0087-atomic-storage-and-std-sync.md, Q571).
+extern "C" {
+  fn sag_thread_run(thread: *mut c_void);
+}
+
+@cfg(unix)
+extern "C" {
+  fn pthread_create(thread: *mut usize, attributes: *const c_void, start: extern "C" fn(*mut c_void) -> *mut c_void, argument: *mut c_void) -> c_int;
+  fn pthread_join(thread: usize, result: *mut *mut c_void) -> c_int;
+  fn sysconf(name: c_int) -> c_long;
+}
+
+/// `_SC_NPROCESSORS_ONLN` of each C library.
+@cfg(target_os = "linux")
+const NPROCESSORS_ONLN: c_int = 84;
+@cfg(target_os = "android")
+const NPROCESSORS_ONLN: c_int = 0x61;
+@cfg(any(target_os = "macos", target_os = "ios"))
+const NPROCESSORS_ONLN: c_int = 58;
+
+/// The entry of a thread of `std::thread`: `thread` is the core's.
+@cfg(unix)
+extern "C" fn sag_thread_entry(thread: *mut c_void) -> *mut c_void {
+  unsafe { sag_thread_run(thread); }
+  0 as *mut c_void
+}
+
+/// Starts the core's `thread`: the system's thread, which `join_thread` waits for. Panics if the
+/// system cannot start one.
+@cfg(unix)
+pub fn start_thread(thread: *mut c_void) -> usize {
+  var id = 0usize;
+
+  if (unsafe { pthread_create(&raw mut id, 0 as *const c_void, sag_thread_entry, thread) }) != 0 {
+    panic("failed to spawn a thread");
+  }
+
+  id
+}
+
+@cfg(unix)
+pub fn join_thread(system: usize) {
+  unsafe { pthread_join(system, 0 as *mut *mut c_void); }
+}
+
+/// The number of logical processors, at least 1.
+@cfg(unix)
+pub fn processors() -> usize {
+  const count = unsafe { sysconf(NPROCESSORS_ONLN) };
+
+  if count > 0 { count as usize } else { 1 }
+}
+
+@cfg(windows)
+extern "C" {
+  fn CreateThread(security: *mut c_void, stack_size: usize, start: extern "C" fn(*mut c_void) -> u32, parameter: *mut c_void, flags: u32, thread_id: *mut u32) -> *mut c_void;
+  fn GetActiveProcessorCount(group: u16) -> u32;
+}
+
+@cfg(windows)
+extern "C" fn sag_thread_entry(thread: *mut c_void) -> u32 {
+  unsafe { sag_thread_run(thread); }
+  0
+}
+
+@cfg(windows)
+pub fn start_thread(thread: *mut c_void) -> usize {
+  const handle = unsafe { CreateThread(0 as *mut c_void, 0, sag_thread_entry, thread, 0, 0 as *mut u32) };
+
+  if handle.is_null() {
+    panic("failed to spawn a thread");
+  }
+
+  handle as usize
+}
+
+@cfg(windows)
+pub fn join_thread(system: usize) {
+  const handle = system as *mut c_void;
+
+  unsafe {
+    WaitForSingleObject(handle, INFINITE);
+    CloseHandle(handle);
+  }
+}
+
+/// The number of logical processors of every processor group, at least 1.
+@cfg(windows)
+pub fn processors() -> usize {
+  // ALL_PROCESSOR_GROUPS
+  const count = unsafe { GetActiveProcessorCount(0xFFFF) };
+
+  if count > 0 { count as usize } else { 1 }
 }
