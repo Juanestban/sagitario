@@ -63,7 +63,8 @@ checks it), and the sessions in `tests/lsp/` expect it. One command changes all 
 sag run tools/version.sag -- 0.11.0   # without a version, it prints the current one
 ```
 
-Then rebuild `sag`, run the harness, commit, and push the tag:
+Move the entries under `[Unreleased]` in `CHANGELOG.md` to a section for the new version, with
+its date and link. Then rebuild `sag`, run the harness, commit, and push the tag:
 
 ```sh
 git tag v0.11.0 && git push origin v0.11.0
