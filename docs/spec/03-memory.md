@@ -65,8 +65,9 @@ const RUNTIME: String = include_str("../runtime/runtime.c");
 - A constant is an item: `pub` exports it, `use` imports it, and `limits::MAX_USERS` names it
   in full. Its type is always written, and is an integer, a float, `bool`, `char` or `String`.
 - The compiler computes its value from literals, other constants, unary `-` and `!`, the
-  arithmetic operators (`+` also joins strings), comparisons, `&&`, `||`, `as` between primitive
-  types and `include_str`. A constant cannot need its own value.
+  arithmetic operators (`+` also joins strings), the bitwise operators and shifts, comparisons,
+  `&&`, `||`, `as` between primitive types and `include_str`. A constant cannot need its own
+  value. A constant shifted by its width or more is an error.
 - A value outside its type, an integer division by zero, a float literal too large for its type
   (`1e39` as `f32`), or any other expression (a call, a lambda, `new`) is an error.
 - Float arithmetic follows IEEE-754: a constant may be infinite or NaN (`1.0 / 0.0`, `0.0 / 0.0`),

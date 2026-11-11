@@ -136,11 +136,15 @@ match s {
 | 3 | `as` | left |
 | 4 | `*` `/` `%` | left |
 | 5 | `+` `-` | left |
-| 6 | `==` `!=` `<` `<=` `>` `>=` | none: `a < b < c` is an error |
-| 7 | `&&` | left, short-circuit |
-| 8 | `\|\|` | left, short-circuit |
-| 9 | `..` `..=` | none |
-| 10 | `=` `+=` `-=` `*=` `/=` `%=` | statements, not expressions |
+| 6 | `<<` `>>` | left |
+| 7 | `&` | left |
+| 8 | `^` | left |
+| 9 | `\|` | left |
+| 10 | `==` `!=` `<` `<=` `>` `>=` | none: `a < b < c` is an error |
+| 11 | `&&` | left, short-circuit |
+| 12 | `\|\|` | left, short-circuit |
+| 13 | `..` `..=` | none |
+| 14 | `=` `+=` `-=` `*=` `/=` `%=` `&=` `\|=` `^=` `<<=` `>>=` | statements, not expressions |
 
 - Operands of binary operators must have identical types (no implicit conversions), except for
   [operators of other types](05-interfaces-generics.md#operators), whose right operand has the
@@ -152,7 +156,19 @@ match s {
 - Unary `-` applies to signed integers and floats, and to types implementing `Neg`; it is an
   error on unsigned types. A negative literal such as `-128i8` is a single value and fits its
   type.
-- `!`, `&&` and `||` apply only to `bool`. There are no bitwise operators in the MVP.
+- `&&` and `||` apply only to `bool`. `!` is the logical not of a `bool`, and flips every bit of
+  an integer (`!0u8` is `255`), as in Rust.
+- The bitwise operators ([ADR-0088](../adr/0088-bitwise-operators-and-integer-methods.md)):
+  `&`, `|` and `^` (and, or, exclusive or) take two integers of the same type, or two `bool`s,
+  both evaluated. `a << n` and `a >> n` shift an integer `a` by `n` bits, an integer of any type
+  (`u32` when it is an unsuffixed literal), and keep the type of `a`. `<<` drops the bits
+  shifted out, also of signed numbers; `>>` is arithmetic on signed numbers and logical on
+  unsigned ones (`-16 >> 2` is `-4`). A shift by a negative amount, or by the width of the type
+  or more, panics in debug builds (`attempt to shift left with overflow`) and shifts by the
+  amount modulo the width in release builds. Their precedence is Rust's, so `flags & MASK == 0`
+  is `(flags & MASK) == 0`. They are not overloadable yet.
+- `>>` is two `>` with nothing between them, so the `>>` that closes `List<List<T>>` stays two;
+  `a > > b` is not a shift. `~` is not an operator: the bitwise not is `!`.
 - `==` and `!=` apply to integers, floats, `char`, `bool` and `String`; `<` `<=` `>` `>=` to
   integers, floats, `char` and `String` (byte-wise lexicographic order). `+` also concatenates
   `String`s.

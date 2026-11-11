@@ -1,0 +1,16 @@
+// The operands of the bitwise operators and shifts
+// (docs/adr/0088-bitwise-operators-and-integer-methods.md, Q576).
+fn main() {
+  const _floats = 1.5 & 2.0; //~ ERROR E0310
+  const _strings = "a" | "b"; //~ ERROR E0310
+  const _mixed = 1u8 & 2u16; //~ ERROR E0300
+  const _text = "a" << 1; //~ ERROR E0310
+  const _amount = 1 << 2.0; //~ ERROR E0310
+  const _flag = true << 1; //~ ERROR E0310
+  const _not = !"text"; //~ ERROR E0310
+  var name = "x";
+  name &= "y"; //~ ERROR E0310
+  println(name);
+}
+
+const TOO_FAR: u8 = 1 << 8; //~ ERROR E0334

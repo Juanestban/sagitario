@@ -304,6 +304,13 @@ fn project_one(place: Place, projection: Projection, ty: Type) -> Place {
 }
 
 /// A local as a place.
+fn is_shift_assignment(op: Option<BinaryOp>) -> bool {
+  match op {
+    Some(found) => found == BinaryOp::Shl || found == BinaryOp::Shr,
+    None => false,
+  }
+}
+
 /// A C11 operation of `<stdatomic.h>`, a generic macro the runtime does not declare.
 fn c_operation(function: String) -> Callee {
   Callee::Runtime { function: function, located: false }
@@ -1497,7 +1504,7 @@ pub class Lowering {
         return Ok(());
       }
 
-      const converted = interfaces::convert(self, stored, value_ty, ty);
+      const converted = if is_shift_assignment(op) { self.cast_amount(stored, value_ty) } else { interfaces::convert(self, stored, value_ty, ty) };
       // `text += more` is `text = text + more`.
       const combined = self.combine(op, ty, Operand::Place(place), converted);
 
@@ -1539,7 +1546,7 @@ pub class Lowering {
       return Ok(());
     }
 
-    const stored = self.operand_as(value, ty)?;
+    const stored = if is_shift_assignment(op) { self.shift_amount(value)? } else { self.operand_as(value, ty)? };
     const combined = self.combine(op, ty, Operand::Local(local), stored);
 
     match combined.op {
@@ -1561,6 +1568,24 @@ pub class Lowering {
   }
 
   /// `text += more` becomes `text = text + more`; other operators stay.
+  /// The amount of a shift, as a `u64`, which keeps a negative amount out of range.
+  prv fn shift_amount(self, amount: Expr) -> Result<Operand, String> {
+    const amount_ty = self.type_of(amount)?;
+    const value = self.expr(amount)?;
+
+    Ok(self.cast_amount(value, amount_ty))
+  }
+
+  prv fn cast_amount(self, value: Operand, from: Type) -> Operand {
+    const wide = types::int(IntTy::U64);
+
+    if types::same_type(from, wide) {
+      return value;
+    }
+
+    self.new_value(wide, Rvalue::Cast { from: from, to: wide, operand: value })
+  }
+
   prv fn combine(self, op: Option<BinaryOp>, ty: Type, current: Operand, value: Operand) -> Combined {
     if let Some(compound) = op {
       if compound == BinaryOp::Add && types::is_string(ty) {
@@ -2462,6 +2487,15 @@ pub class Lowering {
 
     const operand_ty = self.type_of(lhs)?;
     const left = self.expr(lhs)?;
+
+    // The amount of a shift has a type of its own; the C takes it as a `u64`
+    // (docs/adr/0088-bitwise-operators-and-integer-methods.md, Q576).
+    if op == BinaryOp::Shl || op == BinaryOp::Shr {
+      const amount = self.shift_amount(rhs)?;
+
+      return Ok(strings::binary(self, op, operand_ty, left, amount));
+    }
+
     const right = self.expr(rhs)?;
 
     if let TypeKind::Enum(_) = operand_ty.kind {

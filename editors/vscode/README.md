@@ -10,7 +10,8 @@ Support for the [Sagitario](https://github.com/Juanestban/sagitario) programming
   (module-level constants and statics with their types) and of types, the outline of a document (`Ctrl+Shift+O`), and the colors of modules, functions and
   types in paths (semantic tokens). Inside the braces of format strings, as rust-analyzer does
   in Rust's, it also colors the variables, parameters, fields, methods and functions.
-- Syntax highlighting of `.sag` files: keywords, types, numbers with their suffixes, characters,
+- Syntax highlighting of `.sag` files: keywords, types, operators (the bitwise ones and shifts
+  too), numbers with their suffixes, characters,
   strings, format strings `f"...{expr}..."` and template strings with their interpolations,
   whose expressions are highlighted as code and whose braces as punctuation, nested block
   comments, documentation comments and attributes.

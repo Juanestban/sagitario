@@ -2198,7 +2198,11 @@ class Generator {
     match value {
       Rvalue::Use(operand) => self.operand(operand),
       Rvalue::Unary { op, ty: operand_ty, operand } => match op {
-        UnaryOp::Not => "(!" + self.operand(operand) + ")",
+        // On an integer, every bit flipped (docs/adr/0088-bitwise-operators-and-integer-methods.md).
+        UnaryOp::Not => match operand_ty.kind {
+          TypeKind::Int(int_ty) => "((" + int_c_type(int_ty) + ")~" + self.operand(operand) + ")",
+          _ => "(!" + self.operand(operand) + ")",
+        },
         UnaryOp::Neg => match operand_ty.kind {
           TypeKind::Int(int_ty) => "sag_neg_" + types::int_name(int_ty) + "_at(" + self.operand(operand) + ", __FILE__, __LINE__)",
           _ => "(-" + self.operand(operand) + ")",
@@ -2449,6 +2453,18 @@ fn binary(op: BinaryOp, ty: Type, lhs: String, rhs: String) -> String {
     helper = "div";
   } else if op == BinaryOp::Rem {
     helper = "rem";
+  } else if op == BinaryOp::Shl {
+    helper = "shl";
+  } else if op == BinaryOp::Shr {
+    helper = "shr";
+  } else if op == BinaryOp::BitAnd || op == BinaryOp::BitOr || op == BinaryOp::BitXor {
+    // Defined on every value; the cast undoes C's promotion to `int`.
+    const c_ty = match ty.kind {
+      TypeKind::Int(int_ty) => int_c_type(int_ty),
+      _ => "bool",
+    };
+
+    return "((" + c_ty + ")(" + lhs + " " + ast::binary_symbol(op) + " " + rhs + "))";
   } else {
     // Comparisons are defined for every operand value; `&&`/`||` never reach here.
     return "(" + lhs + " " + ast::binary_symbol(op) + " " + rhs + ")";

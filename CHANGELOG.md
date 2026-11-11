@@ -23,6 +23,11 @@ The sources say 0.25.0.
   `any` and `not` ([ADR-0085](docs/adr/0085-conditional-compilation-and-std-time.md)).
 - C's global variables in `extern "C"` blocks, `static NAME: T;` and `static var NAME: T;`, used
   inside `unsafe` ([ADR-0086](docs/adr/0086-c-globals-and-std-io.md)).
+- Bitwise operators and shifts, as Rust's: `&`, `|`, `^`, `!` on integers, `<<` and `>>`, with
+  `&=`, `|=`, `^=`, `<<=` and `>>=` and Rust's precedence; a shift by the width or more panics in
+  debug builds ([ADR-0088](docs/adr/0088-bitwise-operators-and-integer-methods.md)).
+- An audit of the standard library against Rust's ([`docs/std-audit.md`](docs/std-audit.md)), the
+  plan of S2, with a suite of benchmarks against Rust, C, C#, JavaScript and Python.
 - The language server completes `@cfg` conditions, attributes and their representations, and
   shows the types of constants; the VS Code extension gains snippets for `@thread_local`, `@cfg`
   and C globals.

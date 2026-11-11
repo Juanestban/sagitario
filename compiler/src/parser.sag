@@ -106,13 +106,18 @@ enum InfixKind {
 /// The integer types, which an enum may take as its representation.
 const INT_TYPES: String = "i8 i16 i32 i64 isize u8 u16 u32 u64 usize";
 
+// Rust's precedence (docs/adr/0088-bitwise-operators-and-integer-methods.md, Q575).
 const PREC_RANGE: u8 = 1;
 const PREC_OR: u8 = 2;
 const PREC_AND: u8 = 3;
 const PREC_COMPARE: u8 = 4;
-const PREC_ADD: u8 = 5;
-const PREC_MUL: u8 = 6;
-const PREC_AS: u8 = 7;
+const PREC_BIT_OR: u8 = 5;
+const PREC_BIT_XOR: u8 = 6;
+const PREC_BIT_AND: u8 = 7;
+const PREC_SHIFT: u8 = 8;
+const PREC_ADD: u8 = 9;
+const PREC_MUL: u8 = 10;
+const PREC_AS: u8 = 11;
 
 fn binary(prec: u8, op: BinaryOp) -> Option<Infix> {
   Some(Infix { prec: prec, kind: InfixKind::Binary(op) })
@@ -136,6 +141,10 @@ fn infix(kind: TokenKind) -> Option<Infix> {
       "*" => binary(PREC_MUL, BinaryOp::Mul),
       "/" => binary(PREC_MUL, BinaryOp::Div),
       "%" => binary(PREC_MUL, BinaryOp::Rem),
+      "|" => binary(PREC_BIT_OR, BinaryOp::BitOr),
+      "^" => binary(PREC_BIT_XOR, BinaryOp::BitXor),
+      "&" => binary(PREC_BIT_AND, BinaryOp::BitAnd),
+      "<<" => binary(PREC_SHIFT, BinaryOp::Shl),
       _ => None,
     },
     TokenKind::Keyword(text) if text == "as" => Some(Infix { prec: PREC_AS, kind: InfixKind::As }),
@@ -157,6 +166,10 @@ fn assignment_op(kind: TokenKind) -> Option<Assignment> {
       "*=" => Some(Assignment { op: Some(BinaryOp::Mul) }),
       "/=" => Some(Assignment { op: Some(BinaryOp::Div) }),
       "%=" => Some(Assignment { op: Some(BinaryOp::Rem) }),
+      "&=" => Some(Assignment { op: Some(BinaryOp::BitAnd) }),
+      "|=" => Some(Assignment { op: Some(BinaryOp::BitOr) }),
+      "^=" => Some(Assignment { op: Some(BinaryOp::BitXor) }),
+      "<<=" => Some(Assignment { op: Some(BinaryOp::Shl) }),
       _ => None,
     },
     _ => None,
@@ -313,6 +326,37 @@ class Parser {
 
   prv fn at(self, text: String) -> bool {
     is_punct(self.kind(), text)
+  }
+
+  /// Whether the token after the current one is `text`, with nothing between them.
+  prv fn joined(self, text: String) -> bool {
+    match self.tokens.get(self.pos + 1) {
+      Some(next) => is_punct(next.kind, text) && next.span.start == self.span().end,
+      None => false,
+    }
+  }
+
+  /// The infix operator at the current token. `>>` is two `>` with nothing between them, and
+  /// `>>=` a `>` joined to a `>=`, an assignment (docs/adr/0088-bitwise-operators-and-integer-methods.md, Q578).
+  prv fn infix_here(self) -> Option<Infix> {
+    if self.at(">") && self.joined(">") {
+      return binary(PREC_SHIFT, BinaryOp::Shr);
+    }
+
+    if self.at(">") && self.joined(">=") {
+      return None;
+    }
+
+    infix(self.kind())
+  }
+
+  /// The assignment at the current token, `>>=` included.
+  prv fn assignment_here(self) -> Option<Assignment> {
+    if self.at(">") && self.joined(">=") {
+      return Some(Assignment { op: Some(BinaryOp::Shr) });
+    }
+
+    assignment_op(self.kind())
   }
 
   prv fn at_keyword(self, text: String) -> bool {
@@ -2350,7 +2394,12 @@ class Parser {
 
     const expr = self.stmt_expr()?;
 
-    if let Some(assignment) = assignment_op(self.kind()) {
+    if let Some(assignment) = self.assignment_here() {
+      // `>>=` is two tokens.
+      if self.at(">") {
+        self.advance();
+      }
+
       self.advance();
 
       const value = self.expr()?;
@@ -2468,7 +2517,7 @@ class Parser {
 
     if !self.at(".") && !self.at("?") {
       // `-` and `*` start the next statement; the other operators cannot.
-      if infix(self.kind()).is_some() && !self.at("-") && !self.at("*") {
+      if self.infix_here().is_some() && !self.at("-") && !self.at("*") {
         self.diagnostics.push(
           Diagnostic::error(codes::UNEXPECTED_TOKEN, self.span(), "found " + describe(self.kind()) + " after a block-like expression, which ends at its `}` here")
             .with_label(head.span, "this expression is complete")
@@ -2501,11 +2550,16 @@ class Parser {
   prv fn binary_rest(self, first: Expr, min_prec: u8) -> Result<Expr, ()> {
     var lhs = first;
 
-    while let Some(operator) = infix(self.kind()) {
+    while let Some(operator) = self.infix_here() {
       const prec = operator.prec;
 
       if prec < min_prec {
         break;
+      }
+
+      // `>>` is two tokens.
+      if let InfixKind::Binary(BinaryOp::Shr) = operator.kind {
+        self.advance();
       }
 
       const op_span = self.advance().span;
@@ -2537,7 +2591,7 @@ class Parser {
 
       // Comparisons and ranges are not associative: `a < b < c` is an error.
       if prec == PREC_COMPARE || prec == PREC_RANGE {
-        if let Some(next) = infix(self.kind()) {
+        if let Some(next) = self.infix_here() {
           if next.prec == prec {
             self.diagnostics.push(
               Diagnostic::error(codes::CHAINED_OPERATORS, self.span(), "comparison and range operators cannot be chained; use parentheses or `&&`"),

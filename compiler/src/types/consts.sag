@@ -298,9 +298,16 @@ fn const_eval(cx: Checker, expr: Expr, hint: Option<Type>, module: usize) -> Opt
 
       match found.value {
         ConstValue::Int(value) => {
-          if op == UnaryOp::Neg {
-            if let TypeKind::Int(int_ty) = found.ty.kind {
+          if let TypeKind::Int(int_ty) = found.ty.kind {
+            if op == UnaryOp::Neg {
               return const_int(cx, Some(value.neg()), int_ty, expr.span);
+            }
+
+            // Every bit flipped (docs/adr/0088-bitwise-operators-and-integer-methods.md).
+            if op == UnaryOp::Not {
+              const width = bits(int_ty, cx.target.pointer_width);
+
+              return Some(Typed { ty: found.ty, value: ConstValue::Int(from_bits(low_mask(width) - to_bits(value, int_ty, cx.target.pointer_width), int_ty, cx.target.pointer_width)) });
             }
           }
         }
@@ -326,6 +333,14 @@ fn const_eval(cx: Checker, expr: Expr, hint: Option<Type>, module: usize) -> Opt
     ExprKind::Binary { op, lhs, rhs } => {
       const operand_hint: Option<Type> = if is_comparison(op) || op == BinaryOp::And || op == BinaryOp::Or { None } else { hint };
       const left = const_eval(cx, lhs, operand_hint, module)?;
+
+      // The amount of a shift has a type of its own, `u32` for a literal.
+      if op == BinaryOp::Shl || op == BinaryOp::Shr {
+        const amount = const_eval(cx, rhs, Some(types::int(IntTy::U32)), module)?;
+
+        return const_shift(cx, op, left, amount, expr.span);
+      }
+
       const right = const_eval(cx, rhs, Some(left.ty), module)?;
 
       if !types::same_type(left.ty, right.ty) {
@@ -487,8 +502,16 @@ fn const_binary(cx: Checker, op: BinaryOp, ty: Type, lhs: ConstValue, rhs: Const
             return Some(Typed { ty: ty, value: ConstValue::Bool(a && b) });
           }
 
-          if op == BinaryOp::Or {
+          if op == BinaryOp::Or || op == BinaryOp::BitOr {
             return Some(Typed { ty: ty, value: ConstValue::Bool(a || b) });
+          }
+
+          if op == BinaryOp::BitAnd {
+            return Some(Typed { ty: ty, value: ConstValue::Bool(a && b) });
+          }
+
+          if op == BinaryOp::BitXor {
+            return Some(Typed { ty: ty, value: ConstValue::Bool(a != b) });
           }
         }
       }
@@ -527,6 +550,13 @@ fn const_binary(cx: Checker, op: BinaryOp, ty: Type, lhs: ConstValue, rhs: Const
 
           if op == BinaryOp::Rem {
             return const_int(cx, Some(a.rem(b)), int_ty, span);
+          }
+
+          if op == BinaryOp::BitAnd || op == BinaryOp::BitOr || op == BinaryOp::BitXor {
+            const width = cx.target.pointer_width;
+            const combined = combine_bits(op, to_bits(a, int_ty, width), to_bits(b, int_ty, width));
+
+            return Some(Typed { ty: ty, value: ConstValue::Int(from_bits(combined, int_ty, width)) });
           }
 
           return const_operand_error(cx, span, symbol, ty);
@@ -575,6 +605,111 @@ fn bits(int_ty: IntTy, pointer_width: u32) -> u32 {
     IntTy::I64 | IntTy::U64 => 64,
     IntTy::Isize | IntTy::Usize => pointer_width,
   }
+}
+
+/// The unsigned type of the same width as `int_ty`.
+fn unsigned_of(int_ty: IntTy) -> IntTy {
+  match int_ty {
+    IntTy::I8 => IntTy::U8,
+    IntTy::I16 => IntTy::U16,
+    IntTy::I32 => IntTy::U32,
+    IntTy::I64 => IntTy::U64,
+    IntTy::Isize => IntTy::Usize,
+    other => other,
+  }
+}
+
+/// The bits of `value` in the width of `int_ty`, as an unsigned number (two's complement).
+fn to_bits(value: Wide, int_ty: IntTy, pointer_width: u32) -> u64 {
+  wrap(value, unsigned_of(int_ty), pointer_width).magnitude
+}
+
+/// The value of `int_ty` whose bits are `bits`.
+fn from_bits(bits: u64, int_ty: IntTy, pointer_width: u32) -> Wide {
+  wrap(Wide::of(false, bits), int_ty, pointer_width)
+}
+
+/// Every bit of a width set.
+fn low_mask(width: u32) -> u64 {
+  if width == 64 { U64_MAX } else { power_of_two(width) - 1 }
+}
+
+/// 2 to the power `n`, for `n` below 64.
+fn power_of_two(n: u32) -> u64 {
+  var result = 1u64;
+
+  for _ in 0..n {
+    result = result * 2;
+  }
+
+  result
+}
+
+/// `a & b`, `a | b` or `a ^ b`, one bit at a time: the compiler is built by a seed without
+/// bitwise operators.
+fn combine_bits(op: BinaryOp, a: u64, b: u64) -> u64 {
+  var result = 0u64;
+  var x = a;
+  var y = b;
+
+  for index in 0..64u32 {
+    const p = x % 2;
+    const q = y % 2;
+    const bit = if op == BinaryOp::BitAnd { p * q } else if op == BinaryOp::BitOr { if p + q > 0 { 1u64 } else { 0u64 } } else { (p + q) % 2 };
+
+    if bit == 1 {
+      result += power_of_two(index);
+    }
+
+    x = x / 2;
+    y = y / 2;
+  }
+
+  result
+}
+
+/// `value << amount` or `value >> amount`, an error when the amount is not below the width.
+fn const_shift(cx: Checker, op: BinaryOp, value: Typed, amount: Typed, span: Span) -> Option<Typed> {
+  const symbol = "`" + ast::binary_symbol(op) + "`";
+  const int_ty = match value.ty.kind {
+    TypeKind::Int(found) => found,
+    _ => return const_operand_error(cx, span, symbol, value.ty),
+  };
+  const found = match value.value {
+    ConstValue::Int(found) => found,
+    _ => return const_operand_error(cx, span, symbol, value.ty),
+  };
+  const shift = match amount.value {
+    ConstValue::Int(found) => found,
+    _ => return const_operand_error(cx, span, symbol, amount.ty),
+  };
+  const pointer_width = cx.target.pointer_width;
+  const width = bits(int_ty, pointer_width);
+
+  if shift.negative || shift.magnitude >= width as u64 {
+    cx.error(codes::NOT_CONSTANT, span, `this constant shifts by ${shift.text()}, which is not below the ${width} bits of \`${types::int_name(int_ty)}\``);
+
+    return None;
+  }
+
+  const n = shift.magnitude as u32;
+
+  if n == 0 {
+    return Some(Typed { ty: value.ty, value: ConstValue::Int(found) });
+  }
+
+  if op == BinaryOp::Shl {
+    // The bits shifted out are dropped: the low `width - n` bits, moved up.
+    const kept = to_bits(found, int_ty, pointer_width) % power_of_two(width - n);
+
+    return Some(Typed { ty: value.ty, value: ConstValue::Int(from_bits(kept * power_of_two(n), int_ty, pointer_width)) });
+  }
+
+  // `>>` rounds towards negative infinity, as an arithmetic shift does.
+  const divisor = power_of_two(n);
+  const shifted = if found.negative { Wide::of(true, (found.magnitude - 1) / divisor + 1) } else { Wide::of(false, found.magnitude / divisor) };
+
+  Some(Typed { ty: value.ty, value: ConstValue::Int(shifted) })
 }
 
 /// `value` reduced to the width of `int_ty`, keeping the low bits (two's complement).

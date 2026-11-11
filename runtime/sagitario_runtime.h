@@ -388,6 +388,25 @@ SAG_UNSIGNED_OPS(u32, uint32_t, UINT32_MAX)
 SAG_UNSIGNED_OPS(u64, uint64_t, UINT64_MAX)
 SAG_UNSIGNED_OPS(usize, size_t, SIZE_MAX)
 
+/* Shifts (docs/adr/0088-bitwise-operators-and-integer-methods.md, Q577): an amount of the width
+ * or more panics in debug builds and is reduced modulo the width in release ones. They compute
+ * through `uint64_t`, so a negative number shifted left, or a bit shifted into the sign, is never
+ * undefined behavior; `>>` of a negative number flips it twice, so its sign bits come in. */
+#define SAG_SIGNED_SHIFTS(NAME, T, UT)                                                                      static inline T sag_shl_##NAME##_at(T a, uint64_t n, const char *file, int line) {                        if (n >= sizeof(T) * 8u) {                                                                                sag_overflow("attempt to shift left with overflow", file, line);                                        n %= sizeof(T) * 8u;                                                                                  }                                                                                                       return (T)(UT)((uint64_t)(UT)a << n);                                                                 }                                                                                                       static inline T sag_shr_##NAME##_at(T a, uint64_t n, const char *file, int line) {                        if (n >= sizeof(T) * 8u) {                                                                                sag_overflow("attempt to shift right with overflow", file, line);                                       n %= sizeof(T) * 8u;                                                                                  }                                                                                                       if (a < 0) {                                                                                              return (T)~(T)((T)~a >> n);                                                                           }                                                                                                       return (T)(a >> n);                                                                                   }
+
+#define SAG_UNSIGNED_SHIFTS(NAME, T)                                                                        static inline T sag_shl_##NAME##_at(T a, uint64_t n, const char *file, int line) {                        if (n >= sizeof(T) * 8u) {                                                                                sag_overflow("attempt to shift left with overflow", file, line);                                        n %= sizeof(T) * 8u;                                                                                  }                                                                                                       return (T)((uint64_t)a << n);                                                                         }                                                                                                       static inline T sag_shr_##NAME##_at(T a, uint64_t n, const char *file, int line) {                        if (n >= sizeof(T) * 8u) {                                                                                sag_overflow("attempt to shift right with overflow", file, line);                                       n %= sizeof(T) * 8u;                                                                                  }                                                                                                       return (T)((uint64_t)a >> n);                                                                         }
+
+SAG_SIGNED_SHIFTS(i8, int8_t, uint8_t)
+SAG_SIGNED_SHIFTS(i16, int16_t, uint16_t)
+SAG_SIGNED_SHIFTS(i32, int32_t, uint32_t)
+SAG_SIGNED_SHIFTS(i64, int64_t, uint64_t)
+SAG_SIGNED_SHIFTS(isize, intptr_t, uintptr_t)
+SAG_UNSIGNED_SHIFTS(u8, uint8_t)
+SAG_UNSIGNED_SHIFTS(u16, uint16_t)
+SAG_UNSIGNED_SHIFTS(u32, uint32_t)
+SAG_UNSIGNED_SHIFTS(u64, uint64_t)
+SAG_UNSIGNED_SHIFTS(usize, size_t)
+
 /* ---- Methods of numbers (docs/adr/0076-std-math-and-methods-of-numbers.md) ---------------
  * `pow` multiplies through the checked helpers above, so it panics (debug) or wraps (release)
  * as `*` does. It squares the base only while bits of the exponent remain: a square that

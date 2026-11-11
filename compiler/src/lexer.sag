@@ -725,14 +725,26 @@ class Lexer {
       '-' => if self.eat('>') { "->" } else if self.eat('=') { "-=" } else { "-" },
       '=' => if self.eat('=') { "==" } else if self.eat('>') { "=>" } else { "=" },
       '!' => if self.eat('=') { "!=" } else { "!" },
-      '<' => if self.eat('=') { "<=" } else { "<" },
+      // `>>` is two `>`, which the parser joins, so that `List<List<T>>` closes twice
+      // (docs/adr/0088-bitwise-operators-and-integer-methods.md, Q578).
+      '<' => if self.eat('<') { if self.eat('=') { "<<=" } else { "<<" } } else if self.eat('=') { "<=" } else { "<" },
       '>' => if self.eat('=') { ">=" } else { ">" },
       '+' => if self.eat('=') { "+=" } else { "+" },
       '*' => if self.eat('=') { "*=" } else { "*" },
       '/' => if self.eat('=') { "/=" } else { "/" },
       '%' => if self.eat('=') { "%=" } else { "%" },
-      '&' => if self.eat('&') { "&&" } else { "&" },
-      '|' => if self.eat('|') { "||" } else { "|" },
+      '&' => if self.eat('&') { "&&" } else if self.eat('=') { "&=" } else { "&" },
+      '|' => if self.eat('|') { "||" } else if self.eat('=') { "|=" } else { "|" },
+      '^' => if self.eat('=') { "^=" } else { "^" },
+      // As in Rust, every bit of an integer is flipped with `!`
+      // (docs/adr/0088-bitwise-operators-and-integer-methods.md, Q574).
+      '~' => {
+        self.diagnostics.push(
+          Diagnostic::error(codes::UNEXPECTED_CHARACTER, self.span(start), "unexpected character `~`").with_help("flip the bits of an integer with `!`, as in Rust: `!mask`"),
+        );
+
+        return;
+      }
       other => {
         self.error(codes::UNEXPECTED_CHARACTER, start, `unexpected character \`${other}\``);
 

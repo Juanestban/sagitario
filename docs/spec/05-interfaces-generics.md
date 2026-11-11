@@ -283,7 +283,8 @@ const clip = projection * view * model * position;   // Mat4 * Mat4 * Mat4 * Vec
   generic code uses them through bounds: `fn sum<T: Add<T, T>>(a: T, b: T) -> T { a + b }`
   works for `i32`, `f64`, `String` and a `Vec2` implementing `Add<Vec2, Vec2>`. As with `Ord`,
   numbers and strings satisfy these bounds but do not convert to values of the interfaces.
-- `&&`, `||`, `!` and indexing are not overloadable; comparisons go through
+- `&&`, `||`, `!`, the bitwise operators and shifts, and indexing are not overloadable;
+  comparisons go through
   [`Eq` and `Ord`](#equality-order-and-hashing-f2).
 - A block for an interface that extends another one the type implements itself, such as
   `impl Ord for P` beside `impl Eq for P`, holds only its own methods.
