@@ -1,0 +1,57 @@
+// Trigonometry of `std::math` (docs/adr/0080-std-math-trigonometry.md), as methods of `f64` and
+// `f32` and as functions of `std::math`. Results that libraries may round differently in the last
+// digit are compared within a tolerance, so the output is the same on every system.
+// expect-stdout: sin 0 true true nan true
+// expect-stdout: cos 1 true tan 0 true nan true
+// expect-stdout: asin true nan true acos true nan true atan true true
+// expect-stdout: atan2 true true true 0 -0 true
+// expect-stdout: hyperbolic 0 1 0 true true 1 -1 inf
+// expect-stdout: degrees 180 true true true
+// expect-stdout: f32 true true true true 180
+// expect-stdout: functions true true true true true true true true true true true true
+use std::math;
+use std::math::{E, INFINITY, NAN, NEG_INFINITY, PI};
+
+/// Whether `a` and `b` agree up to a relative error of 1e-12.
+fn close(a: f64, b: f64) -> bool {
+  (a - b).abs() <= 1e-12 * b.abs().max(1.0)
+}
+
+/// The same for `f32`, up to 1e-6.
+fn close32(a: f32, b: f32) -> bool {
+  (a - b).abs() <= 1e-6 * b.abs().max(1.0)
+}
+
+fn main() {
+  println(`sin ${0.0.sin()} ${close((PI / 2.0).sin(), 1.0)} ${PI.sin().abs() < 1e-15} nan ${INFINITY.sin().is_nan()}`);
+  println(`cos ${0.0.cos()} ${close((PI / 3.0).cos(), 0.5)} tan ${0.0.tan()} ${close((PI / 4.0).tan(), 1.0)} nan ${NEG_INFINITY.cos().is_nan() && NAN.tan().is_nan()}`);
+  println(`asin ${close(1.0.asin(), PI / 2.0)} nan ${2.0.asin().is_nan()} acos ${close((-1.0).acos(), PI)} nan ${(-1.5).acos().is_nan()} atan ${close(1.0.atan(), PI / 4.0)} ${close(INFINITY.atan(), PI / 2.0)}`);
+  println(`atan2 ${close(1.0.atan2(1.0), PI / 4.0)} ${close((-1.0).atan2(-1.0), -3.0 * PI / 4.0)} ${0.0.atan2(-0.0) == PI && (-0.0).atan2(-0.0) == -PI} ${0.0.atan2(0.0)} ${(-0.0).atan2(0.0)} ${close(1.0.atan2(0.0), PI / 2.0)}`);
+  println(`hyperbolic ${0.0.sinh()} ${0.0.cosh()} ${0.0.tanh()} ${close(1.0.sinh(), (E - 1.0 / E) / 2.0)} ${close(1.0.cosh(), (E + 1.0 / E) / 2.0)} ${INFINITY.tanh()} ${NEG_INFINITY.tanh()} ${1000.0.cosh()}`);
+  println(`degrees ${PI.to_degrees()} ${close(180.0.to_radians(), PI)} ${close(90.0.to_radians().sin(), 1.0)} ${close((-45.0).to_radians().to_degrees(), -45.0)}`);
+
+  const quarter: f32 = math::PI as f32 / 4.0;
+  println(`f32 ${close32((quarter * 2.0).sin(), 1.0)} ${close32(quarter.tan(), 1.0)} ${close32(1.0f32.atan2(1.0), quarter)} ${close32(90.0f32.to_radians(), quarter * 2.0) && close32(0.5f32.tanh(), 0.46211717)} ${(math::PI as f32).to_degrees()}`);
+
+  const checks = List::from([
+    close(math::sin(PI / 6.0), 0.5),
+    close(math::cos(PI), -1.0),
+    close(math::tan(PI / 4.0), 1.0),
+    close(math::asin(0.5), PI / 6.0),
+    close(math::acos(0.5), PI / 3.0),
+    close(math::atan(1.0), PI / 4.0),
+    close(math::atan2(1.0, -1.0), 3.0 * PI / 4.0),
+    close(math::sinh(1.0), 1.0.sinh()),
+    close(math::cosh(1.0), 1.0.cosh()),
+    close(math::tanh(1.0), 1.0.sinh() / 1.0.cosh()),
+    close(math::to_degrees(PI / 2.0), 90.0),
+    close(math::to_radians(90.0), PI / 2.0),
+  ]);
+  var line = "functions";
+
+  for check in checks {
+    line = line + ` ${check}`;
+  }
+
+  println(line);
+}

@@ -1,0 +1,67 @@
+// C layouts (docs/adr/0078-ffi-without-c-shims.md, increment 2).
+use std::mem;
+
+extern "C" {
+  fn takes_array(values: [i32; 4]); //~ ERROR E0322
+}
+
+@repr(C)
+struct Holder {
+  pub names: [String; 2]; //~ ERROR E0322
+}
+
+@repr(i8)
+enum Small {
+  A = 127,
+  B, //~ ERROR E0302
+  C = 300, //~ ERROR E0302
+}
+
+@repr(u8)
+enum Unsigned {
+  Negative = -1, //~ ERROR E0302
+}
+
+@repr(i32)
+enum Repeated {
+  First = 1,
+  Second = 1, //~ ERROR E0201
+}
+
+@repr(i32)
+enum WithData {
+  Value(i32), //~ ERROR E0105
+}
+
+enum Plain {
+  A = 1, //~ ERROR E0105
+}
+
+@repr(C)
+union Number {
+  pub int: i32;
+  pub float: f32;
+}
+
+@repr(i32)
+enum NoZero {
+  One = 1,
+}
+
+struct Rust {
+  pub x: i32;
+}
+
+fn main() {
+  const number = Number { int: 1 };
+  const _bits = number.float; //~ ERROR E0323
+  const _both = Number { int: 1, float: 2.0 }; //~ ERROR E0315
+  const _none = Number {}; //~ ERROR E0315
+  const _size = mem::size_of(); //~ ERROR E0311
+  const _zero: i32 = mem::zeroed(); //~ ERROR E0323
+  const _nonzero: NoZero = unsafe { mem::zeroed() }; //~ ERROR E0322
+  const _rust: Rust = unsafe { mem::zeroed() }; //~ ERROR E0322
+  const _closure: fn() = unsafe { mem::zeroed() }; //~ ERROR E0322
+  const _plain = Plain::A as i32; //~ ERROR E0305
+  const _from = Plain::from_raw(1); //~ ERROR E0200
+}

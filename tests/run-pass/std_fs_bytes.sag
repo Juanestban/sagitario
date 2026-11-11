@@ -1,0 +1,48 @@
+// `fs::write_bytes`, the counterpart of `fs::read`, writes any slice of bytes: a list, an array, a
+// range of one, or nothing (docs/adr/0079-references-and-borrowing.md, Q497).
+// expect-stdout: 6 97 0 255 1
+// expect-stdout: 3 1 2 3
+// expect-stdout: 2 99 0
+// expect-stdout: 0
+// expect-stdout: cannot write "missing/bytes.bin": No such file or directory
+use std::fs;
+use std::io;
+
+fn show(path: String) -> Result<(), io::Error> {
+  const bytes = fs::read(path)?;
+  var line = `${bytes.len()}`;
+
+  for byte in bytes {
+    line = line + ` ${byte}`;
+  }
+
+  println(line);
+  Ok(())
+}
+
+fn main() -> Result<(), io::Error> {
+  const file = "bytes.bin";
+  const list = List::from([97u8, 98, 99, 0, 255, 1]);
+
+  fs::write_bytes(file, &list)?;
+  // The list is no longer lent once the call returns.
+  list.push(7);
+
+  const bytes = fs::read(file)?;
+
+  println(`${bytes.len()} ${bytes[0]} ${bytes[3]} ${bytes[4]} ${bytes[5]}`);
+
+  fs::write_bytes(file, &[1u8, 2, 3])?;
+  show(file)?;
+  fs::write_bytes(file, &list[2..=3])?;
+  show(file)?;
+  fs::write_bytes(file, &list[0..0])?;
+  println(`${fs::read(file)?.len()}`);
+  fs::remove_file(file)?;
+
+  if let Err(error) = fs::write_bytes("missing/bytes.bin", &list) {
+    println(error.message());
+  }
+
+  Ok(())
+}

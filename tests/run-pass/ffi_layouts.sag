@@ -1,0 +1,119 @@
+// C layouts (docs/adr/0078-ffi-without-c-shims.md, increment 2): fixed arrays in `@repr(C)`
+// structs, unions, enums with an integer representation, and `std::mem`.
+// expect-stdout: 0 0 0 false
+// expect-stdout: 72 1.5
+// expect-stdout: 8 4 10 8 16
+// expect-stdout: 1 7
+// expect-stdout: 1 0 0 1
+// expect-stdout: 2 -4 44
+// expect-stdout: out of memory
+// expect-stdout: device lost
+// expect-stdout: false true
+// expect-stdout: 0 4 8 37
+use std::ffi::{c_char, c_int};
+use std::mem;
+
+extern "C" {
+  fn abs(value: c_int) -> c_int;
+}
+
+@repr(C)
+struct Properties {
+  pub id: u32;
+  pub name: [c_char; 8];
+  pub limits: [f32; 3];
+  pub callback: Option<extern "C" fn(i32) -> i32>;
+}
+
+@repr(C)
+struct Pair {
+  pub a: u8;
+  pub b: u32;
+}
+
+@repr(C)
+union ClearColor {
+  pub float32: [f32; 4];
+  pub uint32: [u32; 4];
+}
+
+@repr(C)
+struct DepthStencil {
+  pub depth: f32;
+  pub stencil: u32;
+}
+
+@repr(C)
+union ClearValue {
+  pub color: ClearColor;
+  pub depth_stencil: DepthStencil;
+}
+
+@repr(i32)
+enum Status {
+  Success = 0,
+  NotReady,
+  Timeout,
+  OutOfMemory = -1,
+  DeviceLost = -4,
+}
+
+@repr(C)
+enum Format {
+  Undefined,
+  Rgba8 = 37,
+  Bgra8 = 44,
+}
+
+@repr(C)
+struct Image {
+  pub format: Format;
+  pub width: u32;
+}
+
+fn describe(status: Status) -> String {
+  match status {
+    Status::Success => "success",
+    Status::NotReady => "not ready",
+    Status::Timeout => "timeout",
+    Status::OutOfMemory => "out of memory",
+    Status::DeviceLost => "device lost",
+  }
+}
+
+fn main() {
+  var props: Properties = unsafe { mem::zeroed() };
+
+  println(`${props.id} ${props.name[0]} ${props.limits[2]} ${props.callback.is_some()}`);
+
+  props.name[0] = 72;
+  props.limits[1] = 1.5;
+
+  println(`${props.name[0]} ${props.limits[1]}`);
+  println(`${mem::size_of<Pair>()} ${mem::align_of<Pair>()} ${mem::size_of<[u16; 5]>()} ${mem::size_of<u64>()} ${mem::size_of<ClearValue>()}`);
+
+  var value = ClearValue { depth_stencil: DepthStencil { depth: 1.0, stencil: 7 } };
+  const depth = unsafe { value.depth_stencil };
+
+  println(`${depth.depth} ${depth.stencil}`);
+
+  value.color = ClearColor { float32: [1.0, 0.0, 0.0, 1.0] };
+
+  const bits = unsafe { value.color.uint32 };
+  const one = unsafe { abs(1) };
+
+  println(`${bits[0] / 1065353216} ${bits[1]} ${bits[2]} ${one}`);
+  println(`${Status::Timeout as i32} ${Status::DeviceLost as i32} ${Format::Bgra8 as u32}`);
+  println(describe(Status::OutOfMemory));
+
+  match Status::from_raw(-4) {
+    Some(found) => println(describe(found)),
+    None => println("none"),
+  }
+
+  println(`${Status::from_raw(7).is_some()} ${Status::NotReady == Status::NotReady}`);
+
+  const image: Image = unsafe { mem::zeroed() };
+
+  println(`${image.format as i32} ${mem::size_of<Format>()} ${mem::size_of<Image>()} ${Format::Rgba8 as i32}`);
+}

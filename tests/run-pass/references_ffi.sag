@@ -1,0 +1,46 @@
+// References and C (docs/adr/0079-references-and-borrowing.md, Q496): a `&mut T` where C expects
+// a `*mut T`, a `&T` where it expects a `*const T`, and references as the parameters of a
+// comparison that `qsort` calls.
+// expect-stdout: 0.5 4
+// expect-stdout: 1 3 5 7 9
+// expect-stdout: 3 4
+use std::ffi::{c_int, c_void};
+
+extern "C" {
+  fn frexp(value: f64, exponent: *mut c_int) -> f64;
+  fn qsort(base: *mut c_void, count: usize, size: usize, compare: extern "C" fn(&i32, &i32) -> c_int);
+  fn memcpy(dest: *mut c_void, src: *const c_void, count: usize) -> *mut c_void;
+}
+
+@repr(C)
+struct Size {
+  pub width: i32;
+  pub height: i32;
+}
+
+/// C passes pointers to the elements, which are references here: never null.
+extern "C" fn ascending(a: &i32, b: &i32) -> c_int {
+  if *a < *b { -1 } else if *a > *b { 1 } else { 0 }
+}
+
+/// `&T` and `&mut T` become the C pointers the function asks for.
+fn copy_size(to: &mut Size, from: &Size) {
+  unsafe { memcpy(to as *mut Size as *mut c_void, from as *const Size as *const c_void, 8); }
+}
+
+fn main() {
+  var exponent: c_int = 0;
+  const mantissa = unsafe { frexp(8.0, &mut exponent) };
+
+  println(`${mantissa} ${exponent}`);
+
+  var numbers = [9, 3, 7, 1, 5];
+
+  unsafe { qsort(numbers.as_mut_ptr() as *mut c_void, 5, 4, ascending); }
+  println(`${numbers[0]} ${numbers[1]} ${numbers[2]} ${numbers[3]} ${numbers[4]}`);
+
+  var copy = Size { width: 0, height: 0 };
+
+  copy_size(&mut copy, &Size { width: 3, height: 4 });
+  println(`${copy.width} ${copy.height}`);
+}

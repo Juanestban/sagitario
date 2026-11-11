@@ -1,0 +1,12 @@
+// An element past the end of a slice panics, as for arrays
+// (docs/adr/0079-references-and-borrowing.md, Q494).
+// expect-panic: index out of bounds: the len is 2 but the index is 2
+fn third(values: &[i32]) -> i32 {
+  values[2]
+}
+
+fn main() {
+  const array = [1, 2, 3, 4];
+
+  println(`${third(&array[1..3])}`);
+}

@@ -10,9 +10,10 @@ use pkg::diagnostics::codes;
 use pkg::resolve::{EnumKind, LocalKind, ParamOwner, Res, TypeItem, VariantRef};
 use pkg::span::Span;
 use pkg::ast::TargetInfo;
-use pkg::types::{Checker, FloatTy, FnSig, IntTy, LoopCx, LoopKind, ParamRef, Receiver, SELF_PARAM, StructDef, Subst, Type, TypeKind, VariantDef};
+use pkg::types::{Checker, FloatTy, FnSig, IntTy, LoopCx, LoopKind, NamedRef, ParamRef, Receiver, SELF_PARAM, StructDef, Subst, Type, TypeKind, VariantDef};
 use pkg::types;
 use pkg::types::classes;
+use pkg::types::borrow;
 use pkg::types::classes::PlaceUse;
 use pkg::types::closures;
 use pkg::types::collections;
@@ -22,10 +23,11 @@ use pkg::types::generic::Unknowns;
 use pkg::types::inheritance;
 use pkg::types::interfaces;
 use pkg::types::numbers;
+use pkg::types::operators;
 use pkg::types::patterns;
 use pkg::types::send;
 use pkg::types::strings;
-use pkg::types::typed::BuiltinMethod;
+use pkg::types::typed::{BuiltinMethod, item_key};
 
 /// The signature of a builtin, by its name.
 pub fn builtin_sig(name: String, target: TargetInfo) -> FnSig {
@@ -308,15 +310,28 @@ fn assign(cx: Checker, target: Expr, op: Option<BinaryOp>, value: Expr) -> Type 
   };
 
   if is_place {
+    // `u.field = value` writes a field of a union, which is safe.
+    if op.is_none() {
+      if let ExprKind::Field { base, .. } = target.kind {
+        cx.union_write = Some(base.id);
+      }
+    }
+
     const target_ty = expr(cx, target, None);
+
+    cx.union_write = None;
 
     classes::check_mutable_place(cx, target, PlaceUse::Assign);
 
+    var checked = false;
+
     if let Some(compound) = op {
-      check_compound_operand(cx, target, compound, target_ty);
+      checked = compound_operand(cx, target, compound, target_ty, value);
     }
 
-    expect(cx, value, target_ty);
+    if !checked {
+      expect(cx, value, target_ty);
+    }
     closures::check_closure_cycle(cx, target, value);
 
     const never = match cx.typed.expr_types.get(value.id) {
@@ -374,11 +389,16 @@ fn assign(cx: Checker, target: Expr, op: Option<BinaryOp>, value: Expr) -> Type 
 
   match current {
     Some(ty) => {
+      var checked = false;
+
       if let Some(compound) = op {
-        check_compound_operand(cx, target, compound, ty);
+        checked = compound_operand(cx, target, compound, ty, value);
       }
 
-      expect(cx, value, ty);
+      if !checked {
+        expect(cx, value, ty);
+      }
+
       value_ty = ty;
     }
     None => {
@@ -399,12 +419,22 @@ fn assign(cx: Checker, target: Expr, op: Option<BinaryOp>, value: Expr) -> Type 
   if types::is_never(value_ty) { types::of(TypeKind::Never) } else { types::unit() }
 }
 
-fn check_compound_operand(cx: Checker, target: Expr, op: BinaryOp, ty: Type) {
+/// Checks the target of `target op= value`; with an operator implemented by the target's type, it
+/// also checks `value` and returns `true` (docs/adr/0081-operator-overloading.md, Q512).
+fn compound_operand(cx: Checker, target: Expr, op: BinaryOp, ty: Type, value: Expr) -> bool {
+  if is_arithmetic(op) && operators::is_operator_operand(ty) {
+    operators::compound_call(cx, target, op, ty, value);
+
+    return true;
+  }
+
   const concatenation = types::is_string(ty) && op == BinaryOp::Add;
 
   if !concatenation && !is_numeric(ty) && !types::is_error(ty) {
     cx.error(codes::INVALID_OPERAND, target.span, "cannot apply `" + ast::binary_symbol(op) + "=` to a value of type `" + types::text(ty) + "`");
   }
+
+  false
 }
 
 /// What imposes an expected type, for the label of a mismatch.
@@ -506,9 +536,23 @@ fn other_expr_kind(cx: Checker, value: Expr, expected: Option<Type>) -> Type {
     }
     ExprKind::Path(path) => match cx.resolution.paths.get(value.id) {
       // An unassigned binding without a known type is reported by the flow analysis.
-      Some(Res::Local(id)) => local_type(cx, id).unwrap_or(types::error()),
+      Some(Res::Local(id)) => {
+        const ty = local_type(cx, id).unwrap_or(types::error());
+
+        borrow::check_reference_use(cx, value, id, ty);
+
+        ty
+      }
       Some(Res::Fn(id)) => closures::fn_value(cx, value, path, id, expected),
       Some(Res::Const(id)) => cx.typed.const_types.get(id as usize).unwrap_or(types::error()),
+      Some(Res::Extern(id)) if !cx.resolution.is_runtime_extern(cx.package, id) => ffi::extern_value(cx, id),
+      Some(Res::FromRaw(_)) => {
+        cx.diagnostics.push(
+          Diagnostic::error(codes::WRONG_CALL_FORM, value.span, "`from_raw` cannot be used as a value").with_help("wrap the call in a lambda: `(n) => Name::from_raw(n)`"),
+        );
+
+        types::error()
+      }
       Some(Res::Extern(_)) | Some(Res::Builtin(_)) => {
         cx.diagnostics.push(
           Diagnostic::error(codes::WRONG_CALL_FORM, value.span, "C functions and prelude functions cannot be used as values")
@@ -559,8 +603,9 @@ fn other_expr_kind(cx: Checker, value: Expr, expected: Option<Type>) -> Type {
       }
     }
     ExprKind::Unary { op, operand } => unary(cx, value, op, operand, expected),
-    ExprKind::Binary { op, lhs, rhs } => binary(cx, op, lhs, rhs, expected),
+    ExprKind::Binary { op, lhs, rhs } => binary(cx, value, op, lhs, rhs, expected),
     ExprKind::Cast { expr: inner, ty } => cast(cx, inner, ty),
+    ExprKind::AddrOf { mutable, place, raw } => if raw { ffi::addr_of(cx, mutable, place) } else { borrow::borrow(cx, mutable, place, expected) },
     ExprKind::Range { start, end, .. } => collections::range_value(cx, value, start, end, expected),
     ExprKind::Block(body) => block(cx, body, expected),
     ExprKind::Unsafe(body) => ffi::unsafe_block(cx, value, body, expected),
@@ -713,6 +758,10 @@ fn unary(cx: Checker, value: Expr, op: UnaryOp, operand: Expr, expected: Option<
         }
         TypeKind::Float(_) | TypeKind::Error | TypeKind::Never => ty,
         _ => {
+          if operators::is_operator_operand(ty) {
+            return operators::neg_call(cx, value, ty);
+          }
+
           cx.error(codes::INVALID_OPERAND, value.span, "cannot negate a value of type `" + types::text(ty) + "`");
 
           types::error()
@@ -723,7 +772,7 @@ fn unary(cx: Checker, value: Expr, op: UnaryOp, operand: Expr, expected: Option<
 }
 
 /// An unsuffixed numeric literal, possibly negated, whose type comes from context.
-fn is_untyped_literal(value: Expr) -> bool {
+pub fn is_untyped_literal(value: Expr) -> bool {
   match value.kind {
     ExprKind::Int { suffix, .. } => suffix.is_none(),
     ExprKind::Float { suffix, .. } => suffix.is_none(),
@@ -748,6 +797,11 @@ pub fn same_type_operands(cx: Checker, lhs: Expr, rhs: Expr, hint: Option<Type>)
     rhs_ty = expr(cx, rhs, Some(lhs_ty));
   }
 
+  join_operands(cx, lhs, rhs, lhs_ty, rhs_ty, mismatch_on_right)
+}
+
+/// The type both checked operands share, reporting a mismatch.
+fn join_operands(cx: Checker, lhs: Expr, rhs: Expr, lhs_ty: Type, rhs_ty: Type, mismatch_on_right: bool) -> Type {
   if types::is_error(lhs_ty) || types::is_error(rhs_ty) {
     return types::error();
   }
@@ -782,7 +836,18 @@ pub fn same_type_operands(cx: Checker, lhs: Expr, rhs: Expr, hint: Option<Type>)
   types::error()
 }
 
-fn binary(cx: Checker, op: BinaryOp, lhs: Expr, rhs: Expr, expected: Option<Type>) -> Type {
+/// A number or string on the left of an operator that only the right operand's type could have.
+fn right_operator(cx: Checker, span: Span, symbol: String, lhs_ty: Type, rhs_ty: Type) -> Type {
+  cx.diagnostics.push(
+    Diagnostic::error(codes::INVALID_OPERAND, span, "cannot apply `" + symbol + "` to `" + types::text(lhs_ty) + "` and `" + types::text(rhs_ty) + "`")
+      .with_note("an operator is looked up in the type of its left operand")
+      .with_help("write the `" + types::text(rhs_ty) + "` on the left, if its type implements the operator"),
+  );
+
+  types::error()
+}
+
+fn binary(cx: Checker, value: Expr, op: BinaryOp, lhs: Expr, rhs: Expr, expected: Option<Type>) -> Type {
   const bool_ty = types::of(TypeKind::Bool);
 
   if op == BinaryOp::And || op == BinaryOp::Or {
@@ -793,9 +858,40 @@ fn binary(cx: Checker, op: BinaryOp, lhs: Expr, rhs: Expr, expected: Option<Type
   }
 
   const hint = if is_arithmetic(op) { numeric_only(expected) } else { None };
-  const ty = same_type_operands(cx, lhs, rhs, hint);
   const span = lhs.span.to(rhs.span);
   const symbol = ast::binary_symbol(op);
+  var ty = types::error();
+
+  // The left operand's type decides: a type other than a number or a string calls its operator
+  // (docs/adr/0081-operator-overloading.md, Q511).
+  if is_arithmetic(op) && !is_untyped_literal(lhs) {
+    const lhs_ty = expr(cx, lhs, hint);
+
+    if operators::is_operator_operand(lhs_ty) {
+      return operators::binary_call(cx, value, op, lhs, lhs_ty, rhs);
+    }
+
+    const rhs_ty = expr(cx, rhs, Some(lhs_ty));
+
+    if operators::is_operator_operand(rhs_ty) && !types::is_error(lhs_ty) {
+      return right_operator(cx, span, symbol, lhs_ty, rhs_ty);
+    }
+
+    ty = join_operands(cx, lhs, rhs, lhs_ty, rhs_ty, true);
+  } else if is_arithmetic(op) && !is_untyped_literal(rhs) {
+    // `2.0 * v`: the literal cannot take the type of `v`.
+    const rhs_ty = expr(cx, rhs, hint);
+
+    if operators::is_operator_operand(rhs_ty) {
+      const lhs_ty = expr(cx, lhs, None);
+
+      return right_operator(cx, span, symbol, lhs_ty, rhs_ty);
+    }
+
+    ty = join_operands(cx, lhs, rhs, expr(cx, lhs, Some(rhs_ty)), rhs_ty, false);
+  } else {
+    ty = same_type_operands(cx, lhs, rhs, hint);
+  }
 
   if is_arithmetic(op) {
     return match ty.kind {
@@ -818,6 +914,13 @@ fn binary(cx: Checker, op: BinaryOp, lhs: Expr, rhs: Expr, expected: Option<Type
   }
 
   const equality = op == BinaryOp::Eq || op == BinaryOp::Ne;
+
+  // Structs, enums and type parameters compare through `Eq` and `Ord`
+  // (docs/adr/0081-operator-overloading.md, Q514).
+  if let Some(result) = operators::comparison_call(cx, value, op, ty, span) {
+    return result;
+  }
+
   var supported = false;
 
   match ty.kind {
@@ -887,7 +990,7 @@ fn cast(cx: Checker, inner: Expr, ty: TypeExpr) -> Type {
   const to = cx.type_expr(ty);
   // `0 as *const T` is the null pointer: the literal is a `usize`.
   const to_pointer = match to.kind {
-    TypeKind::Ptr { .. } => true,
+    TypeKind::Ptr { .. } | TypeKind::CFn { .. } => true,
     _ => false,
   };
   const hint = if to_pointer { Some(types::int(IntTy::Usize)) } else { None };
@@ -898,9 +1001,33 @@ fn cast(cx: Checker, inner: Expr, ty: TypeExpr) -> Type {
     valid = true;
   } else {
     match from.kind {
+      // `&T as *const T` and `&mut T as *mut T`, as in Rust (docs/adr/0079-references-and-borrowing.md, Q496).
+      TypeKind::Ref { mutable, pointee } => {
+        valid = match to.kind {
+          TypeKind::Ptr { mutable: to_mutable, pointee: to_pointee } => (mutable || !to_mutable) && types::same_type(pointee, to_pointee),
+          _ => false,
+        };
+      }
       TypeKind::Ptr { .. } => {
         valid = match to.kind {
           TypeKind::Ptr { .. } | TypeKind::Int(IntTy::Usize) => true,
+          TypeKind::CFn { .. } => {
+            ffi::require_unsafe(cx, inner.span.to(ty.span), "converting a pointer to a C function pointer");
+
+            true
+          }
+          _ => false,
+        };
+      }
+      // A C function pointer is an address; making one from another value is Rust's `transmute`.
+      TypeKind::CFn { .. } => {
+        valid = match to.kind {
+          TypeKind::Ptr { .. } | TypeKind::Int(IntTy::Usize) => true,
+          TypeKind::CFn { .. } => {
+            ffi::require_unsafe(cx, inner.span.to(ty.span), "converting between C function pointer types");
+
+            true
+          }
           _ => false,
         };
       }
@@ -908,6 +1035,13 @@ fn cast(cx: Checker, inner: Expr, ty: TypeExpr) -> Type {
         valid = match to.kind {
           TypeKind::Int(_) | TypeKind::Float(_) => true,
           TypeKind::Ptr { .. } => int_ty == IntTy::Usize,
+          TypeKind::CFn { .. } => {
+            if int_ty == IntTy::Usize {
+              ffi::require_unsafe(cx, inner.span.to(ty.span), "converting an address to a C function pointer");
+            }
+
+            int_ty == IntTy::Usize
+          }
           TypeKind::Char => int_ty == IntTy::U8,
           _ => false,
         };
@@ -921,6 +1055,18 @@ fn cast(cx: Checker, inner: Expr, ty: TypeExpr) -> Type {
       TypeKind::Bool | TypeKind::Char => {
         valid = match to.kind {
           TypeKind::Int(_) => true,
+          _ => false,
+        };
+      }
+      // The value of a variant of an enum with an integer representation, as Rust's `as`.
+      TypeKind::Enum(named) => {
+        const has_repr = match cx.typed.enums.get(named.id as usize) {
+          Some(def) => def.repr.is_some(),
+          None => false,
+        };
+
+        valid = match to.kind {
+          TypeKind::Int(_) => has_repr,
           _ => false,
         };
       }
@@ -1039,7 +1185,7 @@ fn for_iter(cx: Checker, iter: Expr) -> Type {
       }
 
       return match ty.kind {
-        TypeKind::Array { elem, .. } => elem,
+        TypeKind::Array { elem, .. } | TypeKind::Slice { elem, .. } => elem,
         TypeKind::Error | TypeKind::Never => types::error(),
         _ => {
           cx.diagnostics.push(
@@ -1143,6 +1289,15 @@ fn call(cx: Checker, value: Expr, callee: Expr, args: List<Expr>, expected: Opti
     Some(Res::Extern(id)) => {
       sig = ffi::extern_call_sig(cx, callee, id);
     }
+    Some(Res::FromRaw(id)) => {
+      const enum_ty = cx.type_ref(TypeItem::Enum(id));
+      const repr = match cx.typed.enums.get(id as usize) {
+        Some(def) => def.repr.unwrap_or(IntTy::I32),
+        None => IntTy::I32,
+      };
+
+      sig = Some(FnSig { receiver: None, params: List::from([types::int(repr)]), ret: types::option(enum_ty) });
+    }
     Some(Res::Builtin(name)) => {
       if name == "Error" {
         const ret = match cx.typed.error_types {
@@ -1153,6 +1308,8 @@ fn call(cx: Checker, value: Expr, callee: Expr, args: List<Expr>, expected: Opti
         sig = Some(FnSig { receiver: None, params: List::from([types::string()]), ret: ret });
       } else if name == "List::from" {
         return collections::list_from(cx, value, callee, args, expected);
+      } else if name.starts_with("mem::") {
+        return ffi::mem_call(cx, value, path, name, args, expected);
       } else if name == "include_str" {
         cx.diagnostics.push(
           Diagnostic::error(codes::INVALID_INCLUDE, value.span, "`include_str` can only give the value of a module-level constant")
@@ -1208,13 +1365,90 @@ pub fn check_args(cx: Checker, span: Span, what: String, params: List<Type>, val
   }
 }
 
+/// The methods named `name` of the blocks of a struct, enum or class and of its ancestor classes.
+fn block_methods(cx: Checker, owner: TypeItem, name: String) -> List<u32> {
+  const owners: List<TypeItem> = new List();
+
+  match owner {
+    TypeItem::Class(id) => {
+      for class_id in cx.typed.class_chain(id) {
+        owners.push(TypeItem::Class(class_id));
+      }
+    }
+    TypeItem::Interface(_) => return new List(),
+    other => owners.push(other),
+  }
+
+  const found: List<u32> = new List();
+
+  for item in owners {
+    for block in cx.resolution.type_blocks(item) {
+      if let Some(info) = cx.resolution.blocks.get(block as usize) {
+        for function in info.functions {
+          if let Some(decl) = cx.resolution.fn_decl(cx.package, function) {
+            if decl.name.name == name {
+              found.push(function);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  found
+}
+
+/// The interface a block implements, with its type arguments.
+pub fn block_interface(cx: Checker, block: u32) -> Option<NamedRef> {
+  const info = cx.resolution.blocks.get(block as usize)?;
+  const entry = cx.typed.impls.get(item_key(info.target))?;
+
+  for index in 0..entry.interfaces.len() {
+    if let Some(Some(found)) = entry.blocks.get(index) {
+      if found == block {
+        return Some(entry.interfaces[index]);
+      }
+    }
+  }
+
+  None
+}
+
+/// A method name that several implementations give the type.
+fn ambiguous_method(cx: Checker, method: Ident, receiver_ty: Type, own: Option<u32>, in_blocks: List<u32>) {
+  const type_name = types::text(receiver_ty);
+  const shown: List<String> = new List();
+
+  if own.is_some() {
+    shown.push("`" + type_name + "`");
+  }
+
+  for function in in_blocks {
+    if let Some(block) = cx.resolution.block_of(function) {
+      if let Some(implemented) = block_interface(cx, block) {
+        shown.push("`impl " + types::text(types::interface_type(implemented)) + " for " + type_name + "`");
+      }
+    }
+  }
+
+  cx.diagnostics.push(
+    Diagnostic::error(codes::AMBIGUOUS_METHOD, method.span, "`" + type_name + "` has several methods `" + method.name + "`")
+      .with_note("`" + method.name + "` is declared in " + shown.join(", "))
+      .with_help("call it through a type parameter or a value of the interface you mean"),
+  );
+}
+
 fn method_call(cx: Checker, value: Expr, receiver: Expr, method: Ident, args: List<Expr>) -> Type {
   if let ExprKind::Zod = receiver.kind {
     return inheritance::zod_call(cx, value, receiver, method, args);
   }
 
-  const receiver_ty = expr(cx, receiver, None);
+  const receiver_ty = borrow::deref_base(cx, receiver);
   const name = method.name;
+
+  if let TypeKind::Slice { .. } = receiver_ty.kind {
+    return borrow::slice_method(cx, value, receiver_ty, method, args);
+  }
 
   if let Some(ty) = ffi::ffi_method(cx, value, receiver, receiver_ty, method, args) {
     return ty;
@@ -1310,9 +1544,54 @@ fn method_call(cx: Checker, value: Expr, receiver: Expr, method: Ident, args: Li
     _ => cx.resolution.type_function(cx.package, owner, name),
   };
 
-  // A default method of an interface the type implements.
+  // A method of an `impl ... for` block, called by a name no other method of the type has
+  // (docs/adr/0081-operator-overloading.md, Q509).
+  const in_blocks = block_methods(cx, owner, name);
+
+  if !in_blocks.is_empty() {
+    if found.is_some() || in_blocks.len() > 1 {
+      ambiguous_method(cx, method, receiver_ty, found, in_blocks);
+      unchecked_args(cx, args);
+
+      return types::error();
+    }
+
+    found = in_blocks.first();
+  }
+
+  // A default method of an interface the type implements, once: with two instantiations, which
+  // one is meant is not known.
   if found.is_none() {
     found = interfaces::default_method(cx, owner, name);
+
+    if let Some(default) = found {
+      if let Some(TypeItem::Interface(interface_id)) = cx.resolution.owner(default) {
+        const instantiations: List<NamedRef> = new List();
+
+        for implemented in cx.typed.implemented_refs(receiver_ty) {
+          if implemented.id == interface_id {
+            instantiations.push(implemented);
+          }
+        }
+
+        if instantiations.len() > 1 {
+          const shown: List<String> = new List();
+
+          for implemented in instantiations {
+            shown.push("`" + types::text(types::interface_type(implemented)) + "`");
+          }
+
+          cx.diagnostics.push(
+            Diagnostic::error(codes::AMBIGUOUS_METHOD, method.span, "`" + name + "` is a default method of " + shown.join(" and "))
+              .with_note("`" + types::text(receiver_ty) + "` implements the interface more than once")
+              .with_help("call it through a type parameter or a value of the interface you mean"),
+          );
+          unchecked_args(cx, args);
+
+          return types::error();
+        }
+      }
+    }
   }
 
   var resolved: Option<u32> = None;
@@ -1418,7 +1697,7 @@ fn resolve_same(a: TypeItem, b: TypeItem) -> bool {
 }
 
 fn field(cx: Checker, base: Expr, name: Ident) -> Type {
-  const base_ty = expr(cx, base, None);
+  const base_ty = borrow::deref_base(cx, base);
   const field_name = name.name;
 
   if let TypeKind::Class(class_ref) = base_ty.kind {
@@ -1443,6 +1722,17 @@ fn field(cx: Checker, base: Expr, name: Ident) -> Type {
     Some(def) => def,
     None => return types::error(),
   };
+
+  if def.is_union {
+    const writing = match cx.union_write {
+      Some(id) => id == base.id,
+      None => false,
+    };
+
+    if !writing {
+      ffi::require_unsafe(cx, name.span, "reading the field `" + field_name + "` of a union");
+    }
+  }
   var found: Option<types::FieldDef> = None;
 
   for candidate in def.fields {
@@ -1491,12 +1781,17 @@ fn field(cx: Checker, base: Expr, name: Ident) -> Type {
 }
 
 fn index(cx: Checker, base: Expr, position: Expr) -> Type {
-  const base_ty = expr(cx, base, None);
+  const base_ty = borrow::deref_base(cx, base);
+
+  if let ExprKind::Range { start, end, .. } = position.kind {
+    return borrow::range_index(cx, base, base_ty, start, end);
+  }
 
   expect(cx, position, types::int(IntTy::Usize));
 
   match base_ty.kind {
     TypeKind::Array { elem, .. } => elem,
+    TypeKind::Slice { elem, .. } => elem,
     TypeKind::List(elem) => elem,
     TypeKind::Error | TypeKind::Never => types::error(),
     TypeKind::String => {
@@ -1542,7 +1837,7 @@ fn struct_literal(cx: Checker, value: Expr, path: Path, fields: List<FieldInit>,
       return types::error();
     }
   };
-  const def = cx.typed.struct_def(id).unwrap_or(StructDef { name: "", fields: new List() });
+  const def = cx.typed.struct_def(id).unwrap_or(StructDef { name: "", fields: new List(), is_union: false });
   const seen: List<Seen> = new List();
   // The type arguments of a generic struct come from the path, the expected type and the field
   // values.
@@ -1631,6 +1926,18 @@ fn struct_literal(cx: Checker, value: Expr, path: Path, fields: List<FieldInit>,
   }
 
   const shown = types::text(ty);
+
+  // A union holds one of its fields.
+  if def.is_union {
+    if seen.len() != 1 {
+      cx.diagnostics.push(
+        Diagnostic::error(codes::MISSING_FIELDS, path.span, `the literal of the union \`${shown}\` sets ${seen.len()} fields`)
+          .with_note("a union literal sets exactly one field"),
+      );
+    }
+
+    missing.clear();
+  }
 
   if !missing.is_empty() {
     cx.diagnostics.push(
@@ -2030,6 +2337,8 @@ fn builtin_method(cx: Checker, value: Expr, receiver_ty: Type, method: Ident, ar
 /// `value?` (docs/spec/07-errors.md#the--operator).
 /// What an `async fn` cannot be (docs/spec/12-async.md#async-fn).
 fn check_async_fn(cx: Checker, decl: FnDecl) {
+  borrow::check_async_params(cx, decl);
+
   if decl.extern_c || decl.export.is_some() {
     cx.diagnostics.push(
       Diagnostic::error(codes::INVALID_ASYNC, decl.name.span, "an `async fn` cannot be called from C")

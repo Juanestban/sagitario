@@ -45,6 +45,38 @@ pub interface Hash extends Eq {
   fn hash(self) -> u64;
 }
 
+/// `a + b` for values of a type other than numbers and `String`, with a right operand of type
+/// `Rhs` and a result of type `Out` (docs/adr/0081-operator-overloading.md). Numbers implement
+/// the arithmetic interfaces with their own type, and `String` implements `Add<String, String>`.
+pub interface Add<Rhs, Out> {
+  fn add(self, other: Rhs) -> Out;
+}
+
+/// `a - b`.
+pub interface Sub<Rhs, Out> {
+  fn sub(self, other: Rhs) -> Out;
+}
+
+/// `a * b`.
+pub interface Mul<Rhs, Out> {
+  fn mul(self, other: Rhs) -> Out;
+}
+
+/// `a / b`.
+pub interface Div<Rhs, Out> {
+  fn div(self, other: Rhs) -> Out;
+}
+
+/// `a % b`.
+pub interface Rem<Rhs, Out> {
+  fn rem(self, other: Rhs) -> Out;
+}
+
+/// `-a`. Signed integers and floats implement it.
+pub interface Neg<Out> {
+  fn neg(self) -> Out;
+}
+
 /// Values that can cross to another thread (docs/spec/05-interfaces-generics.md#send): those
 /// no other thread can change. The compiler infers which types are `Send`; no type names it
 /// after `impl`, and it is only a bound (`T: Send`), not a type.
@@ -455,6 +487,29 @@ fn list_index_of<T: Eq>(list: List<T>, value: T) -> Option<usize> {
 
 fn list_contains<T: Eq>(list: List<T>, value: T) -> bool {
   list_index_of(list, value).is_some()
+}
+
+/// `slice.iter()`: an iterator over a copy of the elements, which may outlive the call that lent
+/// the slice (docs/adr/0079-references-and-borrowing.md, Q494).
+fn slice_iter<T>(slice: &[T]) -> Iter<T> {
+  const copy = new List<T>();
+
+  for value in slice {
+    copy.push(value);
+  }
+
+  list_iter(copy)
+}
+
+/// Rust's `Vec::resize`: removes the elements past `len`, or adds copies of `value` up to it.
+fn list_resize<T>(list: List<T>, len: usize, value: T) {
+  while list.len() > len {
+    list.pop();
+  }
+
+  while list.len() < len {
+    list.push(value);
+  }
 }
 
 fn list_sort<T: Ord>(list: List<T>) {

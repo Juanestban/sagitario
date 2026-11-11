@@ -20,6 +20,13 @@ pub struct PreludeItems {
   pub iter: Option<u32>;
   pub map: Option<u32>;
   pub send: Option<u32>;
+  /// The interfaces of the operators (docs/adr/0081-operator-overloading.md).
+  pub add: Option<u32>;
+  pub sub: Option<u32>;
+  pub mul: Option<u32>;
+  pub div: Option<u32>;
+  pub rem: Option<u32>;
+  pub neg: Option<u32>;
 }
 
 /// The methods of `List<T>` implemented by the compiler (docs/spec/02-types.md#arrays-and-lists).
@@ -75,10 +82,19 @@ pub struct ToIter {
   pub args: List<Type>;
 }
 
-/// The interfaces a struct, enum or class declares with `impl`.
+/// An interface of an operator in the prelude, if it was found.
+struct Operator {
+  pub id: Option<u32>;
+  pub name: String;
+}
+
+/// The interfaces a struct, enum or class implements: those after `impl` in its header, then
+/// those of its `impl ... for` blocks (docs/adr/0081-operator-overloading.md).
 pub struct ImplEntry {
   pub item: TypeItem;
   pub interfaces: List<NamedRef>;
+  /// For each interface, the block implementing it, or `None` for the header.
+  pub blocks: List<Option<u32>>;
 }
 
 /// The type parameters of a generic declaration.
@@ -174,6 +190,8 @@ pub class TypedModule {
   pub var zod_calls: Map<u32, bool>;
   /// `value.name(args)` calling a field of a function type, by node id.
   pub var field_calls: Map<u32, bool>;
+  /// The type argument of each call of `mem::size_of`, `mem::align_of` and `mem::zeroed`.
+  pub var mem_types: Map<u32, Type>;
   /// Lists and arrays used as iterators, by node id.
   pub var to_iter: Map<u32, ToIter>;
   /// Ranges used as values, by node id: the prelude function making their iterator.
@@ -190,7 +208,22 @@ pub class TypedModule {
     self.generics = new Map<String, GenericsEntry>();
     self.error_types = None;
     self.slots = new Map<u32, usize>();
-    self.prelude = PreludeItems { ordering: None, eq: None, ord: None, hash: None, entry: None, iter: None, map: None, send: None };
+    self.prelude = PreludeItems {
+      ordering: None,
+      eq: None,
+      ord: None,
+      hash: None,
+      entry: None,
+      iter: None,
+      map: None,
+      send: None,
+      add: None,
+      sub: None,
+      mul: None,
+      div: None,
+      rem: None,
+      neg: None,
+    };
     self.sync_classes = new List();
     self.const_types = new List();
     self.const_values = new List();
@@ -201,6 +234,7 @@ pub class TypedModule {
     self.method_calls = new Map<u32, u32>();
     self.zod_calls = new Map<u32, bool>();
     self.field_calls = new Map<u32, bool>();
+    self.mem_types = new Map<u32, Type>();
     self.to_iter = new Map<u32, ToIter>();
     self.ranges = new Map<u32, u32>();
   }
@@ -690,9 +724,47 @@ pub class TypedModule {
     result
   }
 
-  /// The interfaces integers, `bool`, `char` and `String` implement: `Ord` and `Hash`.
+  /// The interfaces integers, `bool`, `char` and `String` implement: `Ord` and `Hash`; and those
+  /// of the operators that numbers and `String` have, with their own type (Q513 of ADR-0081).
   pub fn primitive_impls(self, ty: Type) -> List<NamedRef> {
     const result: List<NamedRef> = new List();
+    var numeric = false;
+    var negatable = false;
+
+    match ty.kind {
+      TypeKind::Int(int_ty) => {
+        numeric = true;
+        negatable = types::is_signed(int_ty);
+      }
+      TypeKind::Float(_) => {
+        numeric = true;
+        negatable = true;
+      }
+      _ => {}
+    }
+
+    const pair = List::from([ty, ty]);
+
+    if numeric {
+      for entry in List::from([Operator { id: self.prelude.add, name: "Add" }, Operator { id: self.prelude.sub, name: "Sub" }, Operator { id: self.prelude.mul, name: "Mul" }, Operator { id: self.prelude.div, name: "Div" }, Operator { id: self.prelude.rem, name: "Rem" }]) {
+        if let Some(id) = entry.id {
+          result.push(NamedRef { id: id, name: entry.name, args: pair });
+        }
+      }
+    }
+
+    if negatable {
+      if let Some(id) = self.prelude.neg {
+        result.push(NamedRef { id: id, name: "Neg", args: List::from([ty]) });
+      }
+    }
+
+    if types::is_string(ty) {
+      if let Some(id) = self.prelude.add {
+        result.push(NamedRef { id: id, name: "Add", args: pair });
+      }
+    }
+
     const primitive = match ty.kind {
       TypeKind::Int(_) | TypeKind::Bool | TypeKind::Char | TypeKind::String => true,
       _ => false,
@@ -711,6 +783,66 @@ pub class TypedModule {
     }
 
     result
+  }
+
+  /// The method `name` of the `impl ... for` block of `ty` (or of an ancestor class) that
+  /// implements `interface_ref` or a descendant of it, with these type arguments; `None` when the
+  /// header implements it, whose methods are the type's own.
+  pub fn block_method(self, resolution: Resolution, package: Package, ty: Type, interface_ref: NamedRef, name: String) -> Option<u32> {
+    // The type, or the class and its ancestors, with their type arguments.
+    const owners: List<TypeItem> = new List();
+    const owner_args: List<List<Type>> = new List();
+
+    match ty.kind {
+      TypeKind::Struct(named) => {
+        owners.push(TypeItem::Struct(named.id));
+        owner_args.push(named.args);
+      }
+      TypeKind::Enum(named) => {
+        owners.push(TypeItem::Enum(named.id));
+        owner_args.push(named.args);
+      }
+      TypeKind::Class(named) => {
+        for ancestor in self.class_ancestors(named) {
+          owners.push(TypeItem::Class(ancestor.id));
+          owner_args.push(ancestor.args);
+        }
+      }
+      _ => return None,
+    }
+
+    for position in 0..owners.len() {
+      const item = owners[position];
+      const entry = match self.impls.get(item_key(item)) {
+        Some(found) => found,
+        None => continue,
+      };
+      const subst = Subst::of(ParamOwner::Item(item), owner_args[position]);
+
+      for index in 0..entry.interfaces.len() {
+        const block = match entry.blocks.get(index) {
+          Some(Some(found)) => found,
+          _ => continue,
+        };
+        const implemented = types::substitute_ref(entry.interfaces[index], subst);
+
+        if !types::contains_ref(self.interface_ancestor_refs(implemented), interface_ref) {
+          continue;
+        }
+
+        if let Some(info) = resolution.blocks.get(block as usize) {
+          for function in info.functions {
+            if let Some(decl) = resolution.fn_decl(package, function) {
+              if decl.name.name == name {
+                return Some(function);
+              }
+            }
+          }
+        }
+      }
+    }
+
+    None
   }
 
   /// Whether values of `ty` implement `interface` (with the same type arguments). The compiler
@@ -819,12 +951,14 @@ pub class TypedModule {
     }
 
     match ty.kind {
+      // A C function pointer holds no data, as in Rust.
       TypeKind::Unit | TypeKind::Bool | TypeKind::Char | TypeKind::Int(_) | TypeKind::Float(_) | TypeKind::String | TypeKind::CString | TypeKind::Never
-        | TypeKind::Error => None,
+        | TypeKind::Error | TypeKind::CFn { .. } => None,
       TypeKind::StringBuilder => Some("a `StringBuilder` can be changed through any reference to it"),
       TypeKind::List(_) => Some("a `" + types::text(ty) + "` can be changed through any reference to it"),
       TypeKind::Function { .. } => Some("a function value can capture values that are not `Send`"),
       TypeKind::Ptr { .. } | TypeKind::CVoid => Some("raw pointers are not `Send`"),
+      TypeKind::Ref { .. } | TypeKind::Slice { .. } => Some("references live while a call does"),
       TypeKind::Interface(interface_ref) => {
         if let Some(send) = self.prelude.send {
           if send == interface_ref.id {

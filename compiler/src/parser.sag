@@ -3,8 +3,8 @@
 //! reported") and the parser recovers at item and statement boundaries.
 
 use pkg::ast::{
-  ArrayLen, BinaryOp, Block, ClassDecl, ConstDecl, EnumDecl, Export, Expr, ExprKind, ExternBlock, ExternFn, FieldDecl, FieldInit, FieldPattern,
-  FnDecl, GenericParam, Ident, InterfaceDecl, Item, LambdaParam, LetStmt, MatchArm, Module, Param, Path, Pattern, PatternKind, Stmt,
+  ArrayLen, BinaryOp, Block, ClassDecl, ConstDecl, Discriminant, EnumDecl, Export, Expr, ExprKind, ExternBlock, ExternFn, FieldDecl, FieldInit, FieldPattern,
+  FnDecl, GenericParam, Ident, ImplBlock, InterfaceDecl, Item, LambdaParam, LetStmt, MatchArm, Module, Param, Path, Pattern, PatternKind, Stmt,
   StructDecl, TemplatePart, TypeArgs, TypeExpr, TypeExprKind, UnaryOp, UseDecl, UseTree, UseTreeKind, VariantDecl, VariantFieldDecl,
   VariantFields, Visibility,
 };
@@ -61,12 +61,22 @@ enum AttributeTarget {
   ExternBlock,
   Member,
   Const,
+  Impl,
 }
 
 /// What the attributes of an item set.
 struct Applied {
   pub export: Option<Export>;
   pub repr_c: bool;
+  /// The representation of an enum: an integer type, or `C`.
+  pub repr: Option<Ident>;
+}
+
+/// The parameters and result of a function type, and where it ends.
+struct FnTypeSignature {
+  pub params: List<TypeExpr>;
+  pub ret: Option<TypeExpr>;
+  pub end: Span;
 }
 
 /// What an infix token does, with its binding power (higher binds tighter).
@@ -80,6 +90,9 @@ enum InfixKind {
   Range(bool),
   As,
 }
+
+/// The integer types, which an enum may take as its representation.
+const INT_TYPES: String = "i8 i16 i32 i64 isize u8 u16 u32 u64 usize";
 
 const PREC_RANGE: u8 = 1;
 const PREC_OR: u8 = 2;
@@ -148,6 +161,14 @@ fn is_punct(kind: TokenKind, text: String) -> bool {
 fn is_keyword(kind: TokenKind, text: String) -> bool {
   match kind {
     TokenKind::Keyword(found) => found == text,
+    _ => false,
+  }
+}
+
+/// Whether the token is the identifier `word`, a keyword only where the grammar expects it.
+fn is_contextual(kind: TokenKind, word: String) -> bool {
+  match kind {
+    TokenKind::Ident(name) => name == word,
     _ => false,
   }
 }
@@ -224,6 +245,8 @@ class Parser {
   /// Set in the guard of a `match` arm, where `name =>` ends the guard instead of starting a
   /// lambda.
   prv var in_guard: bool;
+  /// Whether the type being parsed may be a slice `[T]`: right after the `&` of a parameter's type.
+  prv var slice_allowed: bool;
 
   pub fn new(self, file: u32, tokens: List<Token>, ids: Ids, diagnostics: Diagnostics) {
     // Documentation comments are not processed in the MVP (docs/spec/01-lexical.md).
@@ -248,6 +271,7 @@ class Parser {
     self.diagnostics = diagnostics;
     self.no_struct_literal = false;
     self.in_guard = false;
+    self.slice_allowed = false;
   }
 
   prv fn current(self) -> Token {
@@ -481,7 +505,9 @@ class Parser {
     const visibility = self.visibility();
     const kind = self.kind();
 
-    if is_keyword(kind, "fn") || (is_keyword(kind, "async") && is_keyword(self.nth_kind(1), "fn")) {
+    const unsafe_fn = is_keyword(kind, "unsafe") && (is_keyword(self.nth_kind(1), "fn") || is_keyword(self.nth_kind(1), "async"));
+
+    if is_keyword(kind, "fn") || (is_keyword(kind, "async") && is_keyword(self.nth_kind(1), "fn")) || unsafe_fn {
       const decl = self.fn_decl(visibility, start, false)?;
 
       self.apply_attributes(attributes, AttributeTarget::Fn);
@@ -490,17 +516,32 @@ class Parser {
     }
 
     if is_keyword(kind, "struct") {
-      var decl = self.struct_decl(visibility, start)?;
+      var decl = self.struct_decl(visibility, start, false)?;
 
       decl.repr_c = self.apply_attributes(attributes, AttributeTarget::Struct).repr_c;
 
       return Ok(Some(Item::Struct(decl)));
     }
 
-    if is_keyword(kind, "enum") {
-      const decl = self.enum_decl(visibility, start)?;
+    // `union` is a keyword only before the name of a union, as in Rust.
+    if is_contextual(kind, "union") && is_ident(self.nth_kind(1)) {
+      var decl = self.struct_decl(visibility, start, true)?;
 
-      self.apply_attributes(attributes, AttributeTarget::Enum);
+      decl.repr_c = self.apply_attributes(attributes, AttributeTarget::Struct).repr_c;
+
+      if !decl.repr_c {
+        self.diagnostics.push(
+          Diagnostic::error(codes::INVALID_ATTRIBUTE, decl.name.span, "a union needs the C layout").with_help("write `@repr(C)` before the union"),
+        );
+      }
+
+      return Ok(Some(Item::Struct(decl)));
+    }
+
+    if is_keyword(kind, "enum") {
+      var decl = self.enum_decl(visibility, start)?;
+
+      decl.repr = self.apply_attributes(attributes, AttributeTarget::Enum).repr;
 
       return Ok(Some(Item::Enum(decl)));
     }
@@ -514,7 +555,13 @@ class Parser {
     }
 
     if is_keyword(kind, "extern") {
-      return Ok(Some(self.extern_item(visibility, start, attributes)?));
+      return Ok(Some(self.extern_item(visibility, start, attributes, false)?));
+    }
+
+    if is_keyword(kind, "unsafe") && is_keyword(self.nth_kind(1), "extern") {
+      self.advance();
+
+      return Ok(Some(self.extern_item(visibility, start, attributes, true)?));
     }
 
     if is_keyword(kind, "use") {
@@ -537,7 +584,75 @@ class Parser {
       return Ok(Some(Item::Const(decl)));
     }
 
+    if is_keyword(kind, "impl") {
+      match visibility {
+        Visibility::Module => {}
+        _ => {
+          self.diagnostics.push(
+            Diagnostic::error(codes::UNEXPECTED_TOKEN, start, "an `impl` block takes no visibility: its methods are public, as the interface's are")
+              .with_help("remove `pub` or `prv`"),
+          );
+        }
+      }
+
+      const decl = self.impl_block(start)?;
+
+      self.apply_attributes(attributes, AttributeTarget::Impl);
+
+      return Ok(Some(Item::Impl(decl)));
+    }
+
     Err(self.unexpected("an item"))
+  }
+
+  /// `impl<T> Interface<A> for Type<T> { methods }` (docs/adr/0081-operator-overloading.md,
+  /// Q507): methods without `pub` or `prv`, which are public.
+  prv fn impl_block(self, start: Span) -> Result<ImplBlock, ()> {
+    self.expect_keyword("impl")?;
+
+    const generics = self.generic_params()?;
+    const implemented = self.type_expr()?;
+
+    self.expect_keyword("for")?;
+
+    const target = self.type_expr()?;
+
+    self.where_clause(generics)?;
+    self.expect("{")?;
+
+    const functions: List<FnDecl> = new List();
+
+    while !self.at("}") && !self.at_eof() {
+      const before = self.pos;
+      const member_start = self.span();
+
+      if self.at_keyword("pub") || self.at_keyword("prv") {
+        const span = self.advance().span;
+
+        self.diagnostics.push(
+          Diagnostic::error(codes::UNEXPECTED_TOKEN, span, "the methods of an `impl` block take no visibility: they are public, as the interface's are")
+            .with_help("remove `pub` or `prv`"),
+        );
+      }
+
+      if self.at_keyword("fn") || self.at_keyword("async") || self.at_keyword("unsafe") {
+        match self.fn_decl(Visibility::Public, member_start, true) {
+          Ok(function) => functions.push(function),
+          Err(_) => self.skip_member(),
+        }
+      } else {
+        self.unexpected("a method of the interface");
+        self.skip_member();
+      }
+
+      if self.pos == before {
+        self.advance();
+      }
+    }
+
+    const end = self.expect("}")?.span;
+
+    Ok(ImplBlock { generics: generics, implemented: implemented, target: target, functions: functions, span: start.to(end) })
   }
 
   /// `const NAME: Type = value;` at module level; the type is required.
@@ -605,7 +720,7 @@ class Parser {
   /// Checks the attributes of an item: `@export("symbol")` on an `extern "C" fn`, `@repr(C)` on
   /// a struct. Errors are reported and the attribute is ignored.
   prv fn apply_attributes(self, attributes: List<Attribute>, target: AttributeTarget) -> Applied {
-    var applied = Applied { export: None, repr_c: false };
+    var applied = Applied { export: None, repr_c: false, repr: None };
     const seen: List<String> = new List();
 
     for attribute in attributes {
@@ -661,7 +776,22 @@ class Parser {
           self.attribute_error(attribute.span, "the only representation is `@repr(C)`", None);
         }
       } else if name == "repr" && is_enum {
-        self.diagnostics.push(Diagnostic::error(codes::NOT_IMPLEMENTED, attribute.span, "`@repr(C)` on enums is not implemented yet"));
+        var repr: Option<String> = None;
+
+        if attribute.args.len() == 1 {
+          if let Some(AttributeArg::Name(text)) = attribute.args.first() {
+            if text == "C" || INT_TYPES.split(" ").contains(text) {
+              repr = Some(text);
+            }
+          }
+        }
+
+        match repr {
+          Some(text) => {
+            applied.repr = Some(Ident { name: text, span: attribute.span });
+          }
+          None => self.attribute_error(attribute.span, "the representation of an enum is an integer type, such as `@repr(i32)`, or `@repr(C)`", None),
+        }
       } else if name == "test" || name == "deprecated" {
         self.diagnostics.push(Diagnostic::error(codes::NOT_IMPLEMENTED, attribute.span, "the attribute `@" + name + "` is not implemented yet"));
       } else if name == "export" {
@@ -686,28 +816,27 @@ class Parser {
     self.diagnostics.push(diagnostic);
   }
 
-  /// `extern "C" fn ...` (a function C can call) or `extern "C" { ... }` (C functions to call).
-  prv fn extern_item(self, visibility: Visibility, start: Span, attributes: List<Attribute>) -> Result<Item, ()> {
+  /// `extern "C" fn ...` (a function C can call) or `extern "C" { ... }` (C functions to call);
+  /// `is_unsafe` after `unsafe`, which only a function takes.
+  prv fn extern_item(self, visibility: Visibility, start: Span, attributes: List<Attribute>, is_unsafe: bool) -> Result<Item, ()> {
     self.expect_keyword("extern")?;
-
-    match self.kind() {
-      TokenKind::Str(abi) => {
-        const span = self.advance().span;
-
-        if abi != "C" {
-          self.diagnostics.push(Diagnostic::error(codes::NOT_IMPLEMENTED, span, "the ABI \"" + abi + "\" is not supported; write `extern \"C\"`"));
-        }
-      }
-      _ => return Err(self.unexpected("an ABI string such as `\"C\"`")),
-    }
+    self.abi()?;
 
     if self.at_keyword("fn") || self.at_keyword("async") {
       var decl = self.fn_decl(visibility, start, false)?;
 
       decl.extern_c = true;
+      decl.is_unsafe = is_unsafe;
       decl.export = self.apply_attributes(attributes, AttributeTarget::ExternFn).export;
 
       return Ok(Item::Fn(decl));
+    }
+
+    if is_unsafe {
+      self.diagnostics.push(
+        Diagnostic::error(codes::UNEXPECTED_TOKEN, start, "an `extern` block is not marked `unsafe`")
+          .with_help("remove `unsafe`: calling any function of an `extern` block already needs an `unsafe` block"),
+      );
     }
 
     self.apply_attributes(attributes, AttributeTarget::ExternBlock);
@@ -741,6 +870,22 @@ class Parser {
     const end = self.expect("}")?.span;
 
     Ok(Item::Extern(ExternBlock { functions: functions, span: start.to(end) }))
+  }
+
+  /// The ABI string after `extern`, which must be `"C"`.
+  prv fn abi(self) -> Result<(), ()> {
+    match self.kind() {
+      TokenKind::Str(abi) => {
+        const span = self.advance().span;
+
+        if abi != "C" {
+          self.diagnostics.push(Diagnostic::error(codes::NOT_IMPLEMENTED, span, "the ABI \"" + abi + "\" is not supported; write `extern \"C\"`"));
+        }
+
+        Ok(())
+      }
+      _ => Err(self.unexpected("an ABI string such as `\"C\"`")),
+    }
   }
 
   /// `fn name(params) -> Ret;` inside an `extern "C"` block.
@@ -787,7 +932,7 @@ class Parser {
 
       self.expect(":")?;
 
-      const ty = self.type_expr()?;
+      const ty = self.param_type()?;
 
       params.push(Param { span: param_name.span.to(ty.span), name: param_name, ty: ty });
 
@@ -823,10 +968,15 @@ class Parser {
     Visibility::Public
   }
 
-  prv fn struct_decl(self, visibility: Visibility, start: Span) -> Result<StructDecl, ()> {
-    self.expect_keyword("struct")?;
+  /// A struct, or a union with `is_union` (after its contextual keyword).
+  prv fn struct_decl(self, visibility: Visibility, start: Span, is_union: bool) -> Result<StructDecl, ()> {
+    if is_union {
+      self.advance();
+    } else {
+      self.expect_keyword("struct")?;
+    }
 
-    const name = self.ident("a struct name")?;
+    const name = self.ident(if is_union { "a union name" } else { "a struct name" })?;
     const generics = self.generic_params()?;
     const impls = self.impls()?;
 
@@ -864,8 +1014,19 @@ class Parser {
 
     const end = self.expect("}")?.span;
 
+    if is_union {
+      if !generics.is_empty() || !impls.is_empty() {
+        self.not_implemented(name.span, "generic unions and unions implementing interfaces");
+      }
+
+      if let Some(function) = functions.first() {
+        self.not_implemented(function.name.span, "functions of unions");
+      }
+    }
+
     Ok(StructDecl {
       repr_c: false,
+      is_union: is_union,
       visibility: visibility,
       name: name,
       generics: generics,
@@ -1079,7 +1240,7 @@ class Parser {
 
     const end = self.expect("}")?.span;
 
-    Ok(EnumDecl { visibility: visibility, name: name, generics: generics, impls: impls, variants: variants, functions: functions, span: start.to(end) })
+    Ok(EnumDecl { repr: None, visibility: visibility, name: name, generics: generics, impls: impls, variants: variants, functions: functions, span: start.to(end) })
   }
 
   prv fn empty_variant(self, span: Span, name: Ident) {
@@ -1110,7 +1271,7 @@ class Parser {
         self.empty_variant(name.span.to(end), name);
       }
 
-      return Ok(VariantDecl { span: name.span.to(end), name: name, fields: VariantFields::Tuple(types) });
+      return Ok(VariantDecl { span: name.span.to(end), name: name, fields: VariantFields::Tuple(types), discriminant: None });
     }
 
     if self.eat("{") {
@@ -1136,10 +1297,33 @@ class Parser {
         self.empty_variant(name.span.to(end), name);
       }
 
-      return Ok(VariantDecl { span: name.span.to(end), name: name, fields: VariantFields::Named(fields) });
+      return Ok(VariantDecl { span: name.span.to(end), name: name, fields: VariantFields::Named(fields), discriminant: None });
     }
 
-    Ok(VariantDecl { span: name.span, name: name, fields: VariantFields::Unit })
+    // `Name = 7`: an explicit discriminant.
+    if self.eat("=") {
+      const start = self.span();
+      const negative = self.eat("-");
+
+      match self.kind() {
+        TokenKind::Int { value, suffix } => {
+          const end = self.advance().span;
+
+          if suffix.is_some() {
+            self.diagnostics.push(
+              Diagnostic::error(codes::UNEXPECTED_TOKEN, end, "a discriminant has no type suffix").with_help("its type is the representation of the enum"),
+            );
+          }
+
+          const discriminant = Discriminant { value: value, negative: negative, span: start.to(end) };
+
+          return Ok(VariantDecl { span: name.span.to(end), name: name, fields: VariantFields::Unit, discriminant: Some(discriminant) });
+        }
+        _ => return Err(self.unexpected("an integer literal")),
+      }
+    }
+
+    Ok(VariantDecl { span: name.span, name: name, fields: VariantFields::Unit, discriminant: None })
   }
 
   /// Skips a malformed variant: to the next `,` or the `}` closing the enum, at depth zero.
@@ -1200,7 +1384,7 @@ class Parser {
     const is_abstract = self.eat_keyword("abstract");
     const is_override = self.eat_keyword("override");
 
-    if is_abstract || is_override || self.at_keyword("fn") || self.at_keyword("async") {
+    if is_abstract || is_override || self.at_keyword("fn") || self.at_keyword("async") || self.at_keyword("unsafe") {
       var decl = self.method_decl(visibility, start, is_abstract)?;
 
       decl.is_override = is_override;
@@ -1308,7 +1492,18 @@ class Parser {
   /// A function's signature followed by the body `body` describes.
   prv fn signature_then(self, visibility: Visibility, start: Span, in_type: bool, body: Body) -> Result<FnDecl, ()> {
     const id = self.next_id();
+    const unsafe_start = self.span();
+    var is_unsafe = self.eat_keyword("unsafe");
     const is_async = self.eat_keyword("async");
+
+    if is_async && self.at_keyword("unsafe") {
+      self.advance();
+      is_unsafe = true;
+    }
+
+    if is_unsafe && is_async {
+      self.not_implemented(unsafe_start, "`unsafe` `async` functions");
+    }
 
     self.expect_keyword("fn")?;
 
@@ -1396,6 +1591,7 @@ class Parser {
       is_abstract: is_abstract,
       is_override: false,
       is_async: is_async,
+      is_unsafe: is_unsafe,
       name: name,
       generics: generics,
       self_param: self_param,
@@ -1428,9 +1624,73 @@ class Parser {
     self.ident(expected)
   }
 
+  /// The type of a parameter: a type, `&T` or `&mut T` (docs/spec/03-memory.md#references).
+  prv fn param_type(self) -> Result<TypeExpr, ()> {
+    if self.at("&") || self.at("&&") {
+      return self.ref_type();
+    }
+
+    self.type_expr()
+  }
+
+  /// `&T` or `&mut T`; `&&T` is a reference to a reference, which is an error.
+  prv fn ref_type(self) -> Result<TypeExpr, ()> {
+    const doubled = self.at("&&");
+    const start = self.advance().span;
+
+    if doubled {
+      const inner = self.ref_type_rest(start)?;
+
+      self.invalid_reference(inner.span);
+
+      return Ok(new TypeExpr(TypeExprKind::Ref { mutable: false, pointee: inner }, start.to(inner.span)));
+    }
+
+    self.ref_type_rest(start)
+  }
+
+  /// `T` or `mut T` after a `&`; `T` may be a slice `[T]`.
+  prv fn ref_type_rest(self, start: Span) -> Result<TypeExpr, ()> {
+    const mutable = is_mut(self.kind());
+
+    if mutable {
+      self.advance();
+    }
+
+    self.slice_allowed = true;
+
+    const pointee = self.type_expr()?;
+
+    Ok(new TypeExpr(TypeExprKind::Ref { mutable: mutable, pointee: pointee }, start.to(pointee.span)))
+  }
+
+  prv fn invalid_reference(self, span: Span) {
+    self.diagnostics.push(
+      Diagnostic::error(codes::INVALID_REFERENCE, span, "a reference can only be the type of a parameter")
+        .with_note("references live while a call does: fields, results, bindings and type arguments cannot hold them")
+        .with_help("store the value itself, or a class instance to share it"),
+    );
+  }
+
   prv fn type_expr(self) -> Result<TypeExpr, ()> {
     const start = self.span();
     const kind = self.kind();
+    const slice_allowed = self.slice_allowed;
+
+    self.slice_allowed = false;
+
+    // References only live while a call does, so they are only the types of parameters
+    // (docs/adr/0079-references-and-borrowing.md, Q488); the type after `&` is kept to go on.
+    if is_punct(kind, "&") || is_punct(kind, "&&") {
+      const parsed = self.ref_type()?;
+
+      self.invalid_reference(parsed.span);
+
+      return match parsed.kind {
+        TypeExprKind::Ref { pointee, .. } => Ok(pointee),
+        _ => Ok(parsed),
+      };
+    }
 
     if is_punct(kind, "(") && is_punct(self.nth_kind(1), ")") {
       self.advance();
@@ -1467,6 +1727,21 @@ class Parser {
 
       const elem = self.type_expr()?;
 
+      // `[T]`: a slice, only behind the reference of a parameter (docs/adr/0079-references-and-borrowing.md, Q494).
+      if self.at("]") {
+        const end = self.advance().span;
+        const span = start.to(end);
+
+        if !slice_allowed {
+          self.diagnostics.push(
+            Diagnostic::error(codes::INVALID_REFERENCE, span, "a slice can only be the type of a parameter, behind `&` or `&mut`")
+              .with_help("write `&[" + "T]` in a parameter, or use an array `[T; N]` or a `List<T>`"),
+          );
+        }
+
+        return Ok(new TypeExpr(TypeExprKind::Slice(elem), span));
+      }
+
       self.expect(";")?;
 
       const len = self.array_len()?;
@@ -1483,29 +1758,23 @@ class Parser {
 
     if is_keyword(kind, "fn") {
       self.advance();
-      self.expect("(")?;
 
-      const params: List<TypeExpr> = new List();
+      const signature = self.fn_type_signature()?;
 
-      while !self.at(")") {
-        params.push(self.type_expr()?);
+      return Ok(new TypeExpr(TypeExprKind::Fn { params: signature.params, ret: signature.ret }, start.to(signature.end)));
+    }
 
-        if !self.eat(",") {
-          break;
-        }
-      }
+    // `extern "C" fn(A) -> R` and `unsafe extern "C" fn(A) -> R`: C function pointers.
+    if is_keyword(kind, "extern") || (is_keyword(kind, "unsafe") && is_keyword(self.nth_kind(1), "extern")) {
+      const is_unsafe = self.eat_keyword("unsafe");
 
-      var end = self.expect(")")?.span;
-      var ret: Option<TypeExpr> = None;
+      self.expect_keyword("extern")?;
+      self.abi()?;
+      self.expect_keyword("fn")?;
 
-      if self.eat("->") {
-        const parsed = self.type_expr()?;
+      const signature = self.fn_type_signature()?;
 
-        end = parsed.span;
-        ret = Some(parsed);
-      }
-
-      return Ok(new TypeExpr(TypeExprKind::Fn { params: params, ret: ret }, start.to(end)));
+      return Ok(new TypeExpr(TypeExprKind::CFn { is_unsafe: is_unsafe, params: signature.params, ret: signature.ret }, start.to(signature.end)));
     }
 
     if is_punct(kind, "*") {
@@ -1529,6 +1798,33 @@ class Parser {
     }
 
     Err(self.unexpected("a type"))
+  }
+
+  /// `(A, B) -> R` after the `fn` of a function type.
+  prv fn fn_type_signature(self) -> Result<FnTypeSignature, ()> {
+    self.expect("(")?;
+
+    const params: List<TypeExpr> = new List();
+
+    while !self.at(")") {
+      params.push(self.param_type()?);
+
+      if !self.eat(",") {
+        break;
+      }
+    }
+
+    var end = self.expect(")")?.span;
+    var ret: Option<TypeExpr> = None;
+
+    if self.eat("->") {
+      const parsed = self.type_expr()?;
+
+      end = parsed.span;
+      ret = Some(parsed);
+    }
+
+    Ok(FnTypeSignature { params: params, ret: ret, end: end })
   }
 
   /// The `N` of `[T; N]` and `[value; N]`: an integer literal.
@@ -1939,6 +2235,8 @@ class Parser {
       op = UnaryOp::Deref;
     } else if self.at_keyword("await") {
       return self.await_expr();
+    } else if self.at("&") {
+      return self.addr_of();
     } else {
       return self.postfix_expr();
     }
@@ -1948,6 +2246,46 @@ class Parser {
     const span = start.to(operand.span);
 
     Ok(self.expr_node(ExprKind::Unary { op: op, operand: operand }, span))
+  }
+
+  /// `&raw const place` or `&raw mut place` (docs/spec/10-ffi.md#raw-pointers); otherwise
+  /// `&value` or `&mut place`, a reference (docs/spec/03-memory.md#references).
+  prv fn addr_of(self) -> Result<Expr, ()> {
+    const start = self.advance().span;
+    const after_raw = self.nth_kind(1);
+
+    // `&raw` alone borrows a binding named `raw`.
+    if !is_contextual(self.kind(), "raw") || !(is_keyword(after_raw, "const") || is_mut(after_raw)) {
+      const mutable = is_mut(self.kind());
+
+      if mutable {
+        self.advance();
+      }
+
+      const operand = self.unary_expr()?;
+      const span = start.to(operand.span);
+
+      return Ok(self.expr_node(ExprKind::AddrOf { mutable: mutable, place: operand, raw: false }, span));
+    }
+
+    self.advance();
+
+    var mutable = false;
+
+    if self.at_keyword("const") {
+      mutable = false;
+    } else if is_mut(self.kind()) {
+      mutable = true;
+    } else {
+      return Err(self.unexpected("`const` or `mut` after `&raw`"));
+    }
+
+    self.advance();
+
+    const place = self.unary_expr()?;
+    const span = start.to(place.span);
+
+    Ok(self.expr_node(ExprKind::AddrOf { mutable: mutable, place: place, raw: true }, span))
   }
 
   /// `await operand`: the operand is the chain of postfix operators up to the first `?`, which,
@@ -2092,7 +2430,7 @@ class Parser {
 
       while !self.at(")") {
         const name = self.ident("a parameter name")?;
-        const ty: Option<TypeExpr> = if self.eat(":") { Some(self.type_expr()?) } else { None };
+        const ty: Option<TypeExpr> = if self.eat(":") { Some(self.param_type()?) } else { None };
         const param_span = match ty {
           Some(ty) => name.span.to(ty.span),
           None => name.span,

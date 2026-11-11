@@ -102,6 +102,19 @@ pub enum Item {
   Interface(InterfaceDecl),
   Extern(ExternBlock),
   Const(ConstDecl),
+  Impl(ImplBlock),
+}
+
+/// `impl<T> Interface<A> for Type<T> { methods }`: the methods of one interface for one type,
+/// declared in the module of the type (docs/adr/0081-operator-overloading.md, Q507).
+pub struct ImplBlock {
+  pub generics: List<GenericParam>;
+  /// The interface, with its type arguments.
+  pub implemented: TypeExpr;
+  pub target: TypeExpr;
+  /// Public, as the members of an interface are.
+  pub functions: List<FnDecl>;
+  pub span: Span;
 }
 
 /// `const NAME: Type = value;` at module level.
@@ -158,6 +171,8 @@ pub struct Export {
 }
 
 pub struct EnumDecl {
+  /// The integer type of `@repr(i32)`, or `C` for `@repr(C)` (docs/spec/10-ffi.md).
+  pub repr: Option<Ident>;
   pub visibility: Visibility;
   pub name: Ident;
   pub generics: List<GenericParam>;
@@ -170,6 +185,15 @@ pub struct EnumDecl {
 pub struct VariantDecl {
   pub name: Ident;
   pub fields: VariantFields;
+  /// `= 7` or `= -1` after a variant of an enum with an integer representation.
+  pub discriminant: Option<Discriminant>;
+  pub span: Span;
+}
+
+/// An explicit discriminant: an integer literal, as decimal digits, with its sign.
+pub struct Discriminant {
+  pub value: String;
+  pub negative: bool;
   pub span: Span;
 }
 
@@ -187,6 +211,8 @@ pub struct VariantFieldDecl {
 
 pub struct StructDecl {
   pub repr_c: bool;
+  /// `union`: its fields share their memory (docs/spec/10-ffi.md).
+  pub is_union: bool;
   pub visibility: Visibility;
   pub name: Ident;
   pub generics: List<GenericParam>;
@@ -215,6 +241,8 @@ pub struct FnDecl {
   pub is_override: bool;
   /// `async fn`: calling it returns a `Task` (docs/spec/12-async.md).
   pub is_async: bool;
+  /// `unsafe fn`: calling it needs `unsafe` (docs/spec/10-ffi.md).
+  pub is_unsafe: bool;
   pub name: Ident;
   pub generics: List<GenericParam>;
   /// The span of `self`, only in methods.
@@ -258,8 +286,14 @@ pub enum TypeExprKind {
   Array { elem: TypeExpr, len: ArrayLen },
   /// `*const T` or `*mut T`
   Ptr { mutable: bool, pointee: TypeExpr },
+  /// `&T` or `&mut T`, only the type of a parameter.
+  Ref { mutable: bool, pointee: TypeExpr },
+  /// `[T]`, only after the `&` or `&mut` of a parameter's type: a slice.
+  Slice(TypeExpr),
   /// `fn(A, B) -> R`
   Fn { params: List<TypeExpr>, ret: Option<TypeExpr> },
+  /// `extern "C" fn(A, B) -> R`, or `unsafe extern "C" fn(...)`: a C function pointer.
+  CFn { is_unsafe: bool, params: List<TypeExpr>, ret: Option<TypeExpr> },
 }
 
 /// The length of an array type or repeat expression: an integer literal, as decimal digits.
@@ -398,6 +432,9 @@ pub enum ExprKind {
   Unary { op: UnaryOp, operand: Expr },
   Binary { op: BinaryOp, lhs: Expr, rhs: Expr },
   Cast { expr: Expr, ty: TypeExpr },
+  /// `&raw const place` or `&raw mut place` (`raw`): the address of a place, as a raw pointer;
+  /// otherwise `&value` or `&mut place`, a reference lent to a parameter.
+  AddrOf { mutable: bool, place: Expr, raw: bool },
   /// `start..end` or `start..=end`
   Range { start: Expr, end: Expr, inclusive: bool },
   /// `expr?`

@@ -55,6 +55,51 @@ interface Clone {
 - In a default method, `self` has type `Self`: the implementing type, bounded by the interface,
   whose fields and methods it reaches. Default methods are compiled for each implementing type.
 
+### `impl ... for` blocks
+
+Rationale: [ADR-0081](../adr/0081-operator-overloading.md), increment 1. Besides its header, a
+type implements an interface in a block at module level, as in Rust. Each block holds the methods
+of one interface, so a type can implement a generic interface several times, with different type
+arguments:
+
+```sag
+interface Scale<By, Out> {
+  fn scale(self, by: By) -> Out;
+}
+
+struct Vec2 {
+  pub x: f64;
+  pub y: f64;
+}
+
+impl Scale<f64, Vec2> for Vec2 {
+  fn scale(self, by: f64) -> Vec2 { Vec2 { x: self.x * by, y: self.y * by } }
+}
+
+impl Scale<Vec2, Vec2> for Vec2 {
+  fn scale(self, by: Vec2) -> Vec2 { Vec2 { x: self.x * by.x, y: self.y * by.y } }
+}
+```
+
+- A block is written in the module that declares its type, a struct, enum or class (`E0343`).
+  Neither the block nor its methods take `pub` or `prv`: the methods are public, and they reach
+  the private members of the type as its own methods do.
+- A block holds the methods of its interface and of the interface's parents, and nothing else
+  (`E0329`); methods with a default may be left out. The fields of the interface are fields of the
+  type, as for the header.
+- A generic type writes its parameters after `impl` and after the type, in order and without
+  bounds, which are the type's: `impl<T> Named for Box<T>` (`E0343`). The names may differ from
+  the type's. A block cannot implement an interface only for some arguments (`Box<i32>`).
+- The header names each interface once; another instantiation of a generic interface goes in a
+  block. Implementing the same instantiation twice, in the header or in blocks, is an error
+  (`E0342`).
+- A method of a block is reached through a value of the interface, through a type parameter
+  bounded by it, and by name when the type has no other method of that name
+  (`v.scale(2.0)` above is ambiguous, `E0344`). A default method of an interface the type
+  implements twice is ambiguous by name too.
+- A subclass inherits the blocks of its classes. Their methods are not virtual: a subclass does
+  not override them.
+
 ## Interfaces as types
 
 An interface can be used as a type (`const shapes: [Shape; 2] = [square, circle];`). Such values
@@ -120,15 +165,17 @@ Rationale: [ADR-0032](../adr/0032-generics.md).
   arguments.
 - Generic code is checked once, where it is written. Without bounds a `T` can be stored,
   copied, passed, returned and put inside other types. Its bounds add their methods and fields.
-  There is no `==`, interpolation or arithmetic on an unbounded `T`.
+  There is no `==`, interpolation or arithmetic on an unbounded `T`; bounded by `Eq`, `Ord` or
+  an [operator interface](#operators), `T` has the operators they give.
 - A type argument must implement the bounds of its parameter. Classes, structs and enums
   implementing an interface satisfy it, and so do the interface type itself and type parameters
   bounded by it. Integers, `bool`, `char` and `String` implement the prelude's `Eq`, `Ord` and
   `Hash`, and no other interface.
 - In a call, a lambda argument whose parameter types are known infers type parameters from its
   result: `iter.map(n => n * 2)` infers the `U` of `map<U>(f: fn(T) -> U)`.
-- Generic interfaces (`interface Source<T>`) are implemented once per type and, instantiated,
-  can be types (`Source<i32>`). Generic classes extend and are extended with arguments
+- Generic interfaces (`interface Source<T>`) can be implemented several times by one type, with
+  different arguments, in [`impl ... for` blocks](#impl--for-blocks), and, instantiated, can be
+  types (`Source<i32>`). Generic classes extend and are extended with arguments
   (`class IntBox extends Box<i32>`). There is no variance: `Box<Dog>` is not a `Box<Animal>`.
 - Methods with their own type parameters cannot be overridden or be abstract.
 - Generics are **monomorphized**: each concrete instantiation produces its own specialized
@@ -185,9 +232,61 @@ interface Hash extends Eq {
   orders them by the IEEE 754 total order (`-NaN < -inf < ... < -0.0 < 0.0 < ... < inf < NaN`).
 - Programs implement them like any interface: `struct Version impl Ord` with `equals` and
   `compare`. Equal values must have the same `hash`.
-- `==` keeps its meaning (identity for class instances); generic code writes `a.equals(b)`.
+- `==` and `!=` call `equals` on structs, enums and type parameters implementing `Eq`, and `<`,
+  `<=`, `>`, `>=` use `compare` on those implementing `Ord`: `a < b` is
+  `a.compare(b) == Ordering::Less`, `a <= b` is `a.compare(b) != Ordering::Greater`
+  ([ADR-0081](../adr/0081-operator-overloading.md), Q514). On class instances `==` stays identity,
+  even when the class implements `Eq`; floats keep their IEEE comparisons. A comparison of a type
+  without the interface is an error (`E0310`) naming it.
 - `List::contains`, `List::index_of` and `List::sort` need `Eq` or `Ord`, and the keys of a
   `Map` need `Hash`.
+
+## Operators
+
+Rationale: [ADR-0081](../adr/0081-operator-overloading.md), increment 2. The prelude declares
+one interface per arithmetic operator, whose type arguments are the type of the right operand and
+the type of the result:
+
+```sag
+interface Add<Rhs, Out> { fn add(self, other: Rhs) -> Out; }   // a + b
+interface Sub<Rhs, Out> { fn sub(self, other: Rhs) -> Out; }   // a - b
+interface Mul<Rhs, Out> { fn mul(self, other: Rhs) -> Out; }   // a * b
+interface Div<Rhs, Out> { fn div(self, other: Rhs) -> Out; }   // a / b
+interface Rem<Rhs, Out> { fn rem(self, other: Rhs) -> Out; }   // a % b
+interface Neg<Out> { fn neg(self) -> Out; }                     // -a
+```
+
+```sag
+impl Mul<Mat4, Mat4> for Mat4 { fn mul(self, other: Mat4) -> Mat4 { ... } }
+impl Mul<Vec4, Vec4> for Mat4 { fn mul(self, v: Vec4) -> Vec4 { ... } }
+
+const clip = projection * view * model * position;   // Mat4 * Mat4 * Mat4 * Vec4
+```
+
+- On a struct, enum, class, interface value or type parameter `a`, `a + b` calls the `add` of the
+  implementation of `Add` by the type of `a` whose `Rhs` is the type of `b`, and has the type of
+  its `Out`. Only the type of the left operand is searched: `v * 2.0` can be implemented,
+  `2.0 * v` is an error (`E0310`).
+- When the type of `a` implements the interface once, `b` is checked against its `Rhs`, so an
+  unsuffixed literal takes that type. With several implementations, an unsuffixed literal takes
+  the one implementation of its kind of number, and other operands must have one `Rhs` exactly.
+  An operator without an implementation for the operands is an error (`E0310`) that names the
+  interface to implement, or the right operands the type accepts. `-a` with several
+  implementations of `Neg` is ambiguous (`E0344`).
+- `a += b` (and `-=`, `*=`, `/=`, `%=`) is `a = a + b`, with `a` evaluated once; the `Out` of the
+  implementation must be the type of `a` (`E0310`). There is no `AddAssign`.
+- Operands are evaluated left to right and passed by value: a method of the operator that
+  modifies `self` changes a copy of the left operand.
+- Integers and floats implement the five binary interfaces with their own type as `Rhs` and
+  `Out`, signed integers and floats implement `Neg<Self>`, and `String` implements
+  `Add<String, String>`. Their operators keep their meaning (overflow and division by zero), and
+  generic code uses them through bounds: `fn sum<T: Add<T, T>>(a: T, b: T) -> T { a + b }`
+  works for `i32`, `f64`, `String` and a `Vec2` implementing `Add<Vec2, Vec2>`. As with `Ord`,
+  numbers and strings satisfy these bounds but do not convert to values of the interfaces.
+- `&&`, `||`, `!` and indexing are not overloadable; comparisons go through
+  [`Eq` and `Ord`](#equality-order-and-hashing-f2).
+- A block for an interface that extends another one the type implements itself, such as
+  `impl Ord for P` beside `impl Eq for P`, holds only its own methods.
 
 ## Standard generic types (F2)
 

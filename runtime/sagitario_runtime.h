@@ -264,6 +264,8 @@ static inline const uint8_t *sag_string_ptr(sag_string s) {
 #define SAG_PTR_ADD(p, n) ((p) + (n))
 #define SAG_ARRAY_PTR(a) ((a).data)
 #define SAG_ARRAY_MUT_PTR(a) ((a).data)
+/* The first element of a list, until its length changes (docs/adr/0078-ffi-without-c-shims.md). */
+#define SAG_LIST_PTR(list) ((void *)((sag_list *)(list))->data)
 #define SAG_CHECK_PTR(p, file, line) ((p) != NULL ? (p) : (sag_null_pointer_at(file, line), (p)))
 
 /* ---- Arrays ------------------------------------------------------------------------------ */
@@ -439,7 +441,8 @@ SAG_INT_METHODS(u64, uint64_t)
 SAG_INT_METHODS(usize, size_t)
 
 /* F is the suffix of the <math.h> functions of T: `f` for float, nothing for double. `min` and
- * `max` ignore a NaN (fmin, fmax); `round` rounds halves away from zero. */
+ * `max` ignore a NaN (fmin, fmax); `round` rounds halves away from zero; `powi` computes in double,
+ * where every `i32` exponent is exact; `mul_add` rounds once (fma); the receiver of `atan2` is `y`. */
 #define SAG_FLOAT_METHODS(NAME, T, F)                                                                     \
   static inline T sag_##NAME##_abs(T x) {                                                                 \
     return fabs##F(x);                                                                                    \
@@ -488,10 +491,94 @@ SAG_INT_METHODS(usize, size_t)
   }                                                                                                       \
   static inline bool sag_##NAME##_is_finite(T x) {                                                        \
     return isfinite(x) != 0;                                                                              \
+  }                                                                                                       \
+  static inline T sag_##NAME##_sqrt(T x) {                                                                \
+    return sqrt##F(x);                                                                                    \
+  }                                                                                                       \
+  static inline T sag_##NAME##_cbrt(T x) {                                                                \
+    return cbrt##F(x);                                                                                    \
+  }                                                                                                       \
+  static inline T sag_##NAME##_powi(T x, int32_t n) {                                                     \
+    return (T)pow((double)x, (double)n);                                                                  \
+  }                                                                                                       \
+  static inline T sag_##NAME##_powf(T x, T y) {                                                           \
+    return pow##F(x, y);                                                                                  \
+  }                                                                                                       \
+  static inline T sag_##NAME##_exp(T x) {                                                                 \
+    return exp##F(x);                                                                                     \
+  }                                                                                                       \
+  static inline T sag_##NAME##_exp2(T x) {                                                                \
+    return exp2##F(x);                                                                                    \
+  }                                                                                                       \
+  static inline T sag_##NAME##_ln(T x) {                                                                  \
+    return log##F(x);                                                                                     \
+  }                                                                                                       \
+  static inline T sag_##NAME##_log2(T x) {                                                                \
+    return log2##F(x);                                                                                    \
+  }                                                                                                       \
+  static inline T sag_##NAME##_log10(T x) {                                                               \
+    return log10##F(x);                                                                                   \
+  }                                                                                                       \
+  static inline T sag_##NAME##_log(T x, T base) {                                                         \
+    return log##F(x) / log##F(base);                                                                      \
+  }                                                                                                       \
+  static inline T sag_##NAME##_hypot(T x, T y) {                                                          \
+    return hypot##F(x, y);                                                                                \
+  }                                                                                                       \
+  static inline T sag_##NAME##_mul_add(T x, T a, T b) {                                                   \
+    return fma##F(x, a, b);                                                                               \
+  }                                                                                                       \
+  static inline T sag_##NAME##_sin(T x) {                                                                 \
+    return sin##F(x);                                                                                     \
+  }                                                                                                       \
+  static inline T sag_##NAME##_cos(T x) {                                                                 \
+    return cos##F(x);                                                                                     \
+  }                                                                                                       \
+  static inline T sag_##NAME##_tan(T x) {                                                                 \
+    return tan##F(x);                                                                                     \
+  }                                                                                                       \
+  static inline T sag_##NAME##_asin(T x) {                                                                \
+    return asin##F(x);                                                                                    \
+  }                                                                                                       \
+  static inline T sag_##NAME##_acos(T x) {                                                                \
+    return acos##F(x);                                                                                    \
+  }                                                                                                       \
+  static inline T sag_##NAME##_atan(T x) {                                                                \
+    return atan##F(x);                                                                                    \
+  }                                                                                                       \
+  static inline T sag_##NAME##_sinh(T x) {                                                                \
+    return sinh##F(x);                                                                                    \
+  }                                                                                                       \
+  static inline T sag_##NAME##_cosh(T x) {                                                                \
+    return cosh##F(x);                                                                                    \
+  }                                                                                                       \
+  static inline T sag_##NAME##_tanh(T x) {                                                                \
+    return tanh##F(x);                                                                                    \
+  }                                                                                                       \
+  static inline T sag_##NAME##_atan2(T y, T x) {                                                          \
+    return atan2##F(y, x);                                                                                \
   }
 
 SAG_FLOAT_METHODS(f32, float, f)
 SAG_FLOAT_METHODS(f64, double, )
+
+/* Degrees and radians multiply by a constant, as Rust does (docs/adr/0080-std-math-trigonometry.md,
+ * Q503): for f32, the float nearest to 180/pi, and (float)pi / 180. */
+static inline float sag_f32_to_degrees(float x) {
+  return x * 57.2957795130823208767981548141051703f;
+}
+
+static inline float sag_f32_to_radians(float x) {
+  return x * (3.14159265358979323846264338327950288f / 180.0f);
+}
+
+static inline double sag_f64_to_degrees(double x) {
+  return x * (180.0 / 3.14159265358979323846264338327950288);
+}
+
+static inline double sag_f64_to_radians(double x) {
+  return x * (3.14159265358979323846264338327950288 / 180.0);
+}
 
 /* ---- Conversions (`as`) -----------------------------------------------------------------
  * Float to integer saturates and maps NaN to 0; LIMIT is 2^(bits-1) for signed types and 2^bits
@@ -573,6 +660,9 @@ typedef struct sag_list {
   size_t size;
   unsigned char *data;
   void (*release)(void *element);
+  /* The slices lent from the list: while there are any, its length cannot change
+   * (docs/adr/0079-references-and-borrowing.md, Q495). */
+  size_t lent;
 } sag_list;
 
 sag_object *sag_list_new(size_t size, void (*release)(void *element));
@@ -601,6 +691,41 @@ void *sag_list_pop(sag_object *list);
 void *sag_list_remove(sag_object *list, size_t index, const char *file, int line);
 void sag_list_clear(sag_object *list);
 void sag_list_reverse(sag_object *list);
+
+/* ---- Slices (docs/adr/0079-references-and-borrowing.md, Q494) ----------------------------- */
+
+/* `&[T]` and `&mut [T]`: `len` elements at `data`. A slice of a list holds a reference to the list
+ * in `owner` and counts in its `lent`; a slice of an array has no owner. */
+typedef struct sag_slice {
+  void *data;
+  size_t len;
+  sag_object *owner;
+} sag_slice;
+
+/* The elements `start..end` (`start..=end` with `inclusive`), or all of them with `whole`, of a
+ * list, of `len` elements of `size` bytes at `data`, or of another slice; panics if the range is
+ * out of bounds. */
+sag_slice sag_slice_list(sag_object *list, bool whole, size_t start, size_t end, bool inclusive, const char *file, int line);
+sag_slice sag_slice_array(void *data, size_t len, size_t size, bool whole, size_t start, size_t end, bool inclusive, const char *file, int line);
+sag_slice sag_slice_sub(sag_slice slice, size_t size, bool whole, size_t start, size_t end, bool inclusive, const char *file, int line);
+void sag_slice_retain(sag_slice slice);
+void sag_slice_release(sag_slice slice);
+
+static inline size_t sag_slice_len(sag_slice slice) {
+  return slice.len;
+}
+
+static inline bool sag_slice_is_empty(sag_slice slice) {
+  return slice.len == 0;
+}
+
+#define SAG_SLICE_PTR(slice) ((slice).data)
+
+/* The element at `index`, of `size` bytes; panics if it is out of bounds. */
+static inline void *sag_slice_at(sag_slice slice, size_t index, size_t size, const char *file, int line) {
+  size_t checked = sag_index_at(index, slice.len, file, line);
+  return (unsigned char *)slice.data + checked * size;
+}
 
 /* ---- Hashing and order (docs/spec/05-interfaces-generics.md) ------------------------------ */
 
@@ -675,7 +800,17 @@ _Noreturn void sag_process_exit(int32_t code);
 /* Each returns 0 or an error code, or sets `*status` to one. Paths with NUL are EINVAL. */
 int32_t sag_fs_kind(sag_string path);
 sag_string sag_fs_read(sag_string path, int32_t *status);
+sag_string sag_fs_read_bytes(sag_string path, int32_t *status);
+
+/* Dynamic libraries (docs/adr/0078-ffi-without-c-shims.md): a library, never unloaded, or NULL
+ * with the reason in `sag_library_error`; and one of its functions, or NULL. */
+typedef void (*sag_symbol)(void);
+void *sag_library_open(sag_string path);
+sag_string sag_library_error(void);
+sag_symbol sag_library_symbol(void *library, sag_string name);
 int32_t sag_fs_write(sag_string path, sag_string text, bool append);
+/* `len` bytes at `data`, which may be NULL when `len` is 0. */
+int32_t sag_fs_write_bytes(sag_string path, const uint8_t *data, size_t len);
 int32_t sag_fs_create_dir(sag_string path);
 int32_t sag_fs_remove_dir(sag_string path);
 int32_t sag_fs_remove_file(sag_string path);

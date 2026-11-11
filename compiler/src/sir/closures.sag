@@ -210,6 +210,19 @@ pub fn call_closure(lw: Lowering, value: Operand, args: List<Operand>, params: L
   lw.call(Callee::Closure { params: params, ret: ret }, operands, ret)
 }
 
+/// Calls the C function `pointer` points to; it holds no references, so it needs no copy.
+fn call_pointer(lw: Lowering, pointer: Operand, args: List<Expr>, params: List<Type>, ret: Type) -> Result<Operand, String> {
+  const operands = List::from([pointer]);
+  var index = 0usize;
+
+  while index < args.len() && index < params.len() {
+    operands.push(lw.operand_as(args[index], params[index])?);
+    index += 1;
+  }
+
+  Ok(lw.call(Callee::Pointer { params: params, ret: ret }, operands, ret))
+}
+
 /// `callee(args)` where `callee` is a value of a function type.
 pub fn call_value(lw: Lowering, callee: Expr, args: List<Expr>) -> Result<Operand, String> {
   const callee_ty = lw.type_of(callee)?;
@@ -220,6 +233,11 @@ pub fn call_value(lw: Lowering, callee: Expr, args: List<Expr>) -> Result<Operan
     TypeKind::Function { params: found_params, ret: found_ret } => {
       params = found_params;
       ret = found_ret;
+    }
+    TypeKind::CFn { params: found_params, ret: found_ret, .. } => {
+      const pointer = lw.expr(callee)?;
+
+      return call_pointer(lw, pointer, args, found_params, found_ret);
     }
     _ => return Err("call of a value that is not a function"),
   }
@@ -273,6 +291,11 @@ pub fn field_call(lw: Lowering, receiver: Expr, name: String, args: List<Expr>) 
     TypeKind::Function { params: found_params, ret: found_ret } => {
       params = found_params;
       ret = found_ret;
+    }
+    TypeKind::CFn { params: found_params, ret: found_ret, .. } => {
+      const field_base = lw.base_place(receiver)?;
+
+      return call_pointer(lw, Operand::Place(project(field_base, projection, field_ty)), args, found_params, found_ret);
     }
     _ => return Err("field call of a field that is not a function"),
   }

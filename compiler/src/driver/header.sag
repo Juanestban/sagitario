@@ -62,14 +62,62 @@ class Header {
   pub const names: List<String>;
   /// `@repr(C)` structs in the order they must be defined: a struct after those it holds.
   pub const defined: List<u32>;
+  /// The start of the names of the C function pointer types, `<library>_fn<N>`.
+  prv const prefix: String;
+  /// The C function pointer types, each after those its signature mentions; safe and unsafe
+  /// ones with the same signature share one.
+  pub const fn_pointers: List<Type>;
 
-  pub fn new(self, package: Package, resolution: Resolution, typed: TypedModule) {
+  pub fn new(self, package: Package, resolution: Resolution, typed: TypedModule, prefix: String) {
     self.package = package;
     self.resolution = resolution;
     self.typed = typed;
     self.ids = new List();
     self.names = new List();
     self.defined = new List();
+    self.prefix = prefix;
+    self.fn_pointers = new List();
+  }
+
+  /// Whether the struct `id` is a union.
+  pub fn is_union(self, id: u32) -> bool {
+    match self.resolution.struct_decl(self.package, id) {
+      Some(decl) => decl.is_union,
+      None => false,
+    }
+  }
+
+  /// The C name of the C function pointer type `ty`, which must be registered.
+  prv fn fn_pointer_name(self, ty: Type) -> String {
+    for index in 0..self.fn_pointers.len() {
+      if same_signature(self.fn_pointers[index], ty) {
+        return self.prefix + `_fn${index}`;
+      }
+    }
+
+    self.prefix + "_fn"
+  }
+
+  /// `typedef R (*name)(A, B);` for every C function pointer type.
+  pub fn fn_pointer_typedefs(self) -> String {
+    const out = new StringBuilder();
+
+    for pointer in self.fn_pointers {
+      if let TypeKind::CFn { params, ret, .. } = pointer.kind {
+        const parts: List<String> = new List();
+
+        for param in params {
+          parts.push(self.declare(param, None, ""));
+        }
+
+        const param_text = if parts.is_empty() { "void" } else { parts.join(", ") };
+        const ret_text = if is_valueless(ret) { "void" } else { self.declare(ret, None, "") };
+
+        out.append("typedef " + ret_text + " (*" + self.fn_pointer_name(pointer) + ")(" + param_text + ");\n");
+      }
+    }
+
+    out.to_string()
   }
 
   pub fn struct_name(self, id: u32) -> String {
@@ -98,7 +146,24 @@ class Header {
   /// Visits the structs `ty` needs, defining the `@repr(C)` ones held by value or pointed to.
   pub fn visit(self, ty: Type) {
     match ty.kind {
-      TypeKind::Ptr { pointee, .. } => self.visit(pointee),
+      TypeKind::Ptr { pointee, .. } | TypeKind::Ref { pointee, .. } => self.visit(pointee),
+      TypeKind::Option(inner) => self.visit(inner),
+      TypeKind::Array { elem, .. } => self.visit(elem),
+      TypeKind::CFn { params, ret, .. } => {
+        for param in params {
+          self.visit(param);
+        }
+
+        self.visit(ret);
+
+        for known in self.fn_pointers {
+          if same_signature(known, ty) {
+            return;
+          }
+        }
+
+        self.fn_pointers.push(ty);
+      }
       TypeKind::Struct(named) => {
         const id = named.id;
 
@@ -176,10 +241,37 @@ class Header {
       TypeKind::Struct(named) => {
         base = self.struct_name(named.id);
       }
-      TypeKind::Ptr { mutable, pointee } => {
+      // An enum with an integer representation is its integer.
+      TypeKind::Enum(named) => {
+        if let Some(def) = self.typed.enums.get(named.id as usize) {
+          if let Some(repr) = def.repr {
+            return self.declare(pkg::types::int(repr), None, name);
+          }
+        }
+      }
+      // A field `T name[N]`.
+      TypeKind::Array { elem, len } => {
         const inner_written: Option<TypeExpr> = match written {
           Some(found) => match found.kind {
-            TypeExprKind::Ptr { pointee: inner, .. } => Some(inner),
+            TypeExprKind::Array { elem: inner, .. } => Some(inner),
+            _ => None,
+          },
+          None => None,
+        };
+
+        return self.declare(elem, inner_written, name + `[${len}]`);
+      }
+      // `Option<extern "C" fn(..)>`, whose `None` is `NULL`.
+      TypeKind::Option(inner) => {
+        base = self.fn_pointer_name(inner);
+      }
+      TypeKind::CFn { .. } => {
+        base = self.fn_pointer_name(ty);
+      }
+      TypeKind::Ptr { mutable, pointee } | TypeKind::Ref { mutable, pointee } => {
+        const inner_written: Option<TypeExpr> = match written {
+          Some(found) => match found.kind {
+            TypeExprKind::Ptr { pointee: inner, .. } | TypeExprKind::Ref { pointee: inner, .. } => Some(inner),
             _ => None,
           },
           None => None,
@@ -235,6 +327,17 @@ fn doc_comment(text: String, start: usize) -> List<String> {
   docs
 }
 
+/// Whether two C function pointer types have the same signature, safe or not.
+fn same_signature(a: Type, b: Type) -> bool {
+  if let TypeKind::CFn { params, ret, .. } = a.kind {
+    if let TypeKind::CFn { params: other_params, ret: other_ret, .. } = b.kind {
+      return pkg::types::same_types(params, other_params) && pkg::types::same_type(ret, other_ret);
+    }
+  }
+
+  false
+}
+
 fn is_valueless(ty: Type) -> bool {
   match ty.kind {
     TypeKind::Unit => true,
@@ -246,7 +349,13 @@ fn is_valueless(ty: Type) -> bool {
 /// The header of the library `name`.
 pub fn generate(name: String, package: Package, resolution: Resolution, typed: TypedModule, sources: SourceMap) -> String {
   const found = exports(package, resolution, typed);
-  const header = new Header(package, resolution, typed);
+  const prefix = new StringBuilder();
+
+  for c in name.to_ascii_lowercase().chars() {
+    prefix.append_char(if c.is_ascii_alphanumeric() { c } else { '_' });
+  }
+
+  const header = new Header(package, resolution, typed, prefix.to_string());
 
   for export in found {
     for ty in export.params {
@@ -272,15 +381,24 @@ pub fn generate(name: String, package: Package, resolution: Resolution, typed: T
     out.append("\n");
   }
 
-  for struct_name in header.names {
-    out.append(`typedef struct ${struct_name} ${struct_name};\n`);
+  for index in 0..header.names.len() {
+    const struct_name = header.names[index];
+    const keyword = if header.is_union(header.ids[index]) { "union" } else { "struct" };
+
+    out.append(`typedef ${keyword} ${struct_name} ${struct_name};\n`);
+  }
+
+  if !header.fn_pointers.is_empty() {
+    out.append("\n" + header.fn_pointer_typedefs());
   }
 
   for id in header.defined {
     const struct_name = header.struct_name(id);
     const written = resolution.struct_decl(package, id);
 
-    out.append(`\nstruct ${struct_name} {\n`);
+    const keyword = if header.is_union(id) { "union" } else { "struct" };
+
+    out.append(`\n${keyword} ${struct_name} {\n`);
 
     if let Some(def) = typed.structs.get(id as usize) {
       for index in 0..def.fields.len() {

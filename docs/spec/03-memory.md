@@ -129,8 +129,8 @@ struct Point impl Display {
   contain. There is no move.
 - A struct cannot contain itself by value, directly or through other structs or arrays: its
   size would be infinite. Recursive data needs a reference type (`class`, F2).
-- Structs are not compared with `==` and cannot be interpolated (see
-  [types](02-types.md#equality-f1f2)).
+- Structs are compared with `==` and `<` only when they implement `Eq` and `Ord`, and cannot be
+  interpolated (see [types](02-types.md#equality-f1f2)).
 - `struct Name impl I1, I2` implements interfaces (F2). Structs never use `extends`. Generic
   structs arrive with generics (F2).
 
@@ -164,3 +164,62 @@ struct Point impl Display {
 - Data races are prevented by `Send` (F4, [interfaces](05-interfaces-generics.md#send-f4)):
   a thread can only receive values that no other thread can change, so a class instance with
   `var` fields never reaches two threads.
+
+## References
+
+References ([ADR-0079](../adr/0079-references-and-borrowing.md), increment 1) let a function read
+or change a value of its caller without copying it, as in Rust. They live while a call does, so
+they need no lifetimes, and ARC, classes and closures keep their rules.
+
+```sag
+fn length(v: &Vec2) -> f32 { (v.x * v.x + v.y * v.y).sqrt() }
+fn scale(v: &mut Vec2, by: f32) { v.x *= by; v.y *= by; }
+fn swap(a: &mut i32, b: &mut i32) { const kept = *a; *a = *b; *b = kept; }
+
+var position = Vec2 { x: 3.0, y: 4.0 };
+scale(&mut position, 2.0);
+println(`${length(&position)}`);
+```
+
+- `&T` and `&mut T` are only the **types of parameters**: of functions, methods, initializers,
+  `extern "C" fn` items, lambdas and function types (`fn(&T)`). A field, result, binding, element
+  or type argument cannot be a reference (`List<&T>`, `&&T`): an error (`E0339`).
+- The caller writes the loan: `f(&x)` lends `x`, `f(&mut x)` lends it to be changed. A value is
+  never lent implicitly. `&` of a value that is not a place (`&5`, `&f()`, `&Vec2 { ... }`) lends
+  a temporary that lives until the call returns. A reference can only be passed to a parameter of
+  a reference type (or of a raw pointer type, for C): storing, returning or otherwise using a
+  `&x` or a reference parameter as a value is an error (`E0339`). A type argument is never
+  inferred to be a reference.
+- **Places.** `&` and `&mut` lend a binding or parameter, a field of a struct, an element of an
+  array, `*reference`, `*pointer`, or a field of a class instance whose type holds no ARC values
+  (numbers, `bool`, raw pointers, and structs and arrays of those): the instance is kept alive
+  until the call returns. An element of a list and a field holding ARC values reached through a
+  class instance cannot be lent, since other references could make the list grow or replace the
+  field (`E0340`): copy them into a binding first. `&mut` needs a place that can be modified: of
+  a `var` binding, of a `&mut` parameter, or a `var` field of a class instance (`E0312`);
+  `&mut` of a temporary is an error (`E0340`).
+- **Inside the callee.** Fields and methods are reached through a reference directly (`v.x`,
+  `v.length()`, `v[i]` for an array); `*v` reads the whole value (a copy) and `*v = value`
+  replaces it, both safe. Through a `&mut T`, fields can be assigned and methods that modify
+  `self` called; through a `&T`, the value cannot change (`E0312`, `E0313`). A reference to a
+  class instance or a list lends the binding that holds the reference: `&mut` lets the callee
+  replace the instance (`*player = new Player(...)`); the `var` fields of an instance can be
+  changed through either kind, as through any `const` binding.
+- A reference parameter is passed on as it is (`g(v)`), and a `&mut T` where a `&T` is expected.
+  `&v` of a reference parameter lends what it refers to again. Operators do not reach through a
+  reference: write `*a + *b`, `*v == w`, `` `${*name}` ``.
+- **Exclusivity.** In one call, a place lent with `&mut` cannot also be lent with `&` or `&mut`,
+  or be passed by value, unless the places are disjoint: different fields of the same struct, as
+  in Rust (`f(&mut p.first, &p.second)` is fine). Two elements of an array are not disjoint:
+  `f(&mut a[i], &a[j])` is an error (`E0341`). The receiver of a method that modifies `self`
+  cannot be lent to the same call either (`v.add(&v)`); its arguments by value are copied before
+  the call, so they may read from it. Places reached through class instances are not checked, as
+  with C#'s `ref`: other references may reach the same instance, but aliasing only shows changes
+  and never frees memory in use.
+- **Escaping.** A lambda cannot capture a reference parameter, and an `async fn` cannot take one,
+  since both outlive the call (`E0339`); copy the value first (`const copy = *v;`).
+- [Slices](02-types.md#slices), `&[T]` and `&mut [T]`, follow the same rules: views of a run of
+  elements of an array, a list or a slice.
+- In C, a `&T` is a `const T *` and a `&mut T` a `T *`, never null: lending costs nothing at run
+  time, except keeping a lent class instance alive, and counting the slices of a list. References meet C as raw pointers
+  ([FFI](10-ffi.md#raw-pointers)).

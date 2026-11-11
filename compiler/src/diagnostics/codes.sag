@@ -8,7 +8,7 @@
 /// A character that cannot start any token.
 pub const UNEXPECTED_CHARACTER: String = "E0001";
 
-/// A string or template literal without its closing delimiter.
+/// A string, format string or template literal without its closing delimiter.
 pub const UNTERMINATED_STRING: String = "E0002";
 
 /// A `/* */` comment without its closing `*/`.
@@ -22,6 +22,10 @@ pub const INVALID_NUMBER: String = "E0005";
 
 /// A character literal that is empty, unterminated or holds more than one character.
 pub const INVALID_CHAR_LITERAL: String = "E0006";
+
+/// A format string with a `}` that closes nothing or an empty `{}`
+/// (docs/adr/0082-format-strings.md).
+pub const INVALID_FORMAT_STRING: String = "E0007";
 
 /// A token that does not fit the grammar at that point.
 pub const UNEXPECTED_TOKEN: String = "E0100";
@@ -192,6 +196,29 @@ pub const INVALID_ASYNC: String = "E0337";
 
 /// An `async` method that modifies `self`, a copy of a struct or enum value.
 pub const ASYNC_MODIFIES_SELF: String = "E0338";
+
+/// A reference type outside the type of a parameter, or a reference used other than by passing
+/// it to a parameter, dereferencing it or reaching its fields and methods: stored, returned,
+/// captured by a lambda or used by an `async fn` (docs/adr/0079-references-and-borrowing.md).
+pub const INVALID_REFERENCE: String = "E0339";
+
+/// `&` or `&mut` of what cannot be lent: `&mut` of a value that is not a place, an element of a
+/// list, or a field holding reference-counted values reached through a class instance.
+pub const INVALID_BORROW: String = "E0340";
+
+/// A place lent with `&mut` in a call that also lends or passes it (Q492 of ADR-0079).
+pub const CONFLICTING_BORROW: String = "E0341";
+
+/// A type implementing the same interface, with the same type arguments, twice
+/// (docs/adr/0081-operator-overloading.md, Q508).
+pub const DUPLICATE_IMPL: String = "E0342";
+
+/// An `impl ... for` block whose type is not a struct, enum or class declared in its module, or
+/// whose type parameters are not those of the type, in order and without bounds (Q507).
+pub const INVALID_IMPL_BLOCK: String = "E0343";
+
+/// A method called by a name that several of the type's methods have, in `impl` blocks (Q509).
+pub const AMBIGUOUS_METHOD: String = "E0344";
 
 /// A language feature that is specified but not implemented yet.
 pub const NOT_IMPLEMENTED: String = "E0900";

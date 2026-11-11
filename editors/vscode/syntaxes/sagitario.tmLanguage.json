@@ -162,6 +162,33 @@
           }
         },
         {
+          "name": "string.interpolated.sagitario",
+          "begin": "\\bf\"",
+          "end": "\"",
+          "beginCaptures": {
+            "0": {
+              "name": "punctuation.definition.string.begin.sagitario"
+            }
+          },
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.definition.string.end.sagitario"
+            }
+          },
+          "patterns": [
+            {
+              "include": "#escapes"
+            },
+            {
+              "name": "constant.character.escape.sagitario",
+              "match": "\\{\\{|\\}\\}"
+            },
+            {
+              "include": "#format-interpolation"
+            }
+          ]
+        },
+        {
           "name": "string.quoted.double.sagitario",
           "begin": "\"",
           "end": "\"",
@@ -206,19 +233,43 @@
         }
       ]
     },
+    "format-interpolation": {
+      "name": "meta.interpolation.sagitario meta.embedded.line.sagitario",
+      "contentName": "source.sagitario",
+      "begin": "\\{",
+      "end": "\\}",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.section.interpolation.begin.sagitario punctuation.section.embedded.begin.sagitario"
+        }
+      },
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.section.interpolation.end.sagitario punctuation.section.embedded.end.sagitario"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#braces"
+        },
+        {
+          "include": "$self"
+        }
+      ]
+    },
     "interpolation": {
-      "name": "meta.interpolation.sagitario",
+      "name": "meta.interpolation.sagitario meta.embedded.line.sagitario",
       "contentName": "source.sagitario",
       "begin": "\\$\\{",
       "end": "\\}",
       "beginCaptures": {
         "0": {
-          "name": "punctuation.section.interpolation.begin.sagitario"
+          "name": "punctuation.section.interpolation.begin.sagitario punctuation.section.embedded.begin.sagitario"
         }
       },
       "endCaptures": {
         "0": {
-          "name": "punctuation.section.interpolation.end.sagitario"
+          "name": "punctuation.section.interpolation.end.sagitario punctuation.section.embedded.end.sagitario"
         }
       },
       "patterns": [
@@ -335,6 +386,15 @@
         {
           "name": "storage.type.sagitario",
           "match": "\\b(struct|enum|class|interface|const|var)\\b"
+        },
+        {
+          "comment": "Contextual keywords: `union` before the name of a union, `raw` and `mut` after `&`.",
+          "match": "\\b(union)\\s+(?=[A-Za-z_])",
+          "captures": { "1": { "name": "storage.type.sagitario" } }
+        },
+        {
+          "match": "(&)(raw|mut)\\b",
+          "captures": { "2": { "name": "storage.modifier.sagitario" } }
         },
         {
           "name": "storage.modifier.sagitario",

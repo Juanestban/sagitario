@@ -446,7 +446,7 @@ pub fn report_private_interfaces(resolution: Resolution, package: Package, diagn
             }
           }
         }
-        Item::Const(_) => {}
+        Item::Const(_) | Item::Impl(_) => {}
       }
 
       for check in checks {
@@ -535,8 +535,17 @@ fn type_paths(ty: TypeExpr, out: List<Path>) {
       }
     }
     TypeExprKind::Array { elem, .. } => type_paths(elem, out),
-    TypeExprKind::Ptr { pointee, .. } => type_paths(pointee, out),
+    TypeExprKind::Ptr { pointee, .. } | TypeExprKind::Ref { pointee, .. } | TypeExprKind::Slice(pointee) => type_paths(pointee, out),
     TypeExprKind::Fn { params, ret } => {
+      for param in params {
+        type_paths(param, out);
+      }
+
+      if let Some(ret) = ret {
+        type_paths(ret, out);
+      }
+    }
+    TypeExprKind::CFn { params, ret, .. } => {
       for param in params {
         type_paths(param, out);
       }
@@ -815,6 +824,20 @@ fn item_paths(module: Module) -> List<Path> {
         type_paths(decl.ty, paths);
         expr_paths(decl.value, paths);
       }
+      Item::Impl(block) => {
+        for param in block.generics {
+          for bound in param.bounds {
+            type_paths(bound, paths);
+          }
+        }
+
+        type_paths(block.implemented, paths);
+        type_paths(block.target, paths);
+
+        for function in block.functions {
+          fn_paths(function, paths);
+        }
+      }
     }
   }
 
@@ -964,6 +987,7 @@ fn expr_paths(expr: Expr, out: List<Path>) {
     ExprKind::ArrayRepeat { value, .. } => expr_paths(value, out),
     ExprKind::Try(value) | ExprKind::Await(value) => expr_paths(value, out),
     ExprKind::Unary { operand, .. } => expr_paths(operand, out),
+    ExprKind::AddrOf { place, .. } => expr_paths(place, out),
     ExprKind::New { path, args } => {
       expr_path(path, out);
       exprs_paths(args, out);

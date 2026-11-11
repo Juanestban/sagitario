@@ -4,13 +4,14 @@
 //! modules of `types` the checks of one area each, as functions taking the checker
 //! (docs/adr/0053-type-checker-port-and-type-dumps.md).
 
-use pkg::ast::{ArrayLen, FieldDecl, FnDecl, Package, TargetInfo, TypeExpr, TypeExprKind, VariantFields, Visibility};
+use pkg::ast::{ArrayLen, EnumDecl, FieldDecl, FnDecl, Package, TargetInfo, TypeExpr, TypeExprKind, VariantFields, Visibility};
 use pkg::diagnostics;
 use pkg::diagnostics::{Diagnostic, Diagnostics};
 use pkg::diagnostics::codes;
 use pkg::resolve::{ParamOwner, Resolution, TypeItem, TypeRes};
 use pkg::resolve;
 use pkg::span::Span;
+use pkg::types::borrow;
 use pkg::types::classes;
 use pkg::types::collections;
 use pkg::types::consts;
@@ -145,11 +146,18 @@ pub enum TypeKind {
   Interface(NamedRef),
   Param(ParamRef),
   Function { params: List<Type>, ret: Type },
+  /// `extern "C" fn(A) -> R`, or `unsafe extern "C" fn(A) -> R`: a C function pointer, never null.
+  CFn { is_unsafe: bool, params: List<Type>, ret: Type },
   Array { elem: Type, len: u64 },
   List(Type),
   Option(Type),
   Result { value: Type, error: Type },
   Ptr { mutable: bool, pointee: Type },
+  /// `&T` or `&mut T`: a reference, only the type of a parameter
+  /// (docs/adr/0079-references-and-borrowing.md).
+  Ref { mutable: bool, pointee: Type },
+  /// `&[T]` or `&mut [T]`: a view of a run of elements, only the type of a parameter (Q494).
+  Slice { mutable: bool, elem: Type },
   CVoid,
   CString,
   /// The type of expressions that never produce a value.
@@ -221,6 +229,14 @@ pub fn is_unit(ty: Type) -> bool {
 
 pub fn is_error(ty: Type) -> bool {
   tag(ty) == 8
+}
+
+/// Whether `ty` is a reference or a slice, which only parameters have.
+pub fn is_borrowed(ty: Type) -> bool {
+  match ty.kind {
+    TypeKind::Ref { .. } | TypeKind::Slice { .. } => true,
+    _ => false,
+  }
 }
 
 pub fn is_never(ty: Type) -> bool {
@@ -297,6 +313,11 @@ pub fn same_type(a: Type, b: Type) -> bool {
       TypeKind::Function { params: other_params, ret: other_ret } => same_types(params, other_params) && same_type(ret, other_ret),
       _ => false,
     },
+    TypeKind::CFn { is_unsafe, params, ret } => match b.kind {
+      TypeKind::CFn { is_unsafe: other_unsafe, params: other_params, ret: other_ret } =>
+        is_unsafe == other_unsafe && same_types(params, other_params) && same_type(ret, other_ret),
+      _ => false,
+    },
     TypeKind::Array { elem, len } => match b.kind {
       TypeKind::Array { elem: other_elem, len: other_len } => len == other_len && same_type(elem, other_elem),
       _ => false,
@@ -315,6 +336,14 @@ pub fn same_type(a: Type, b: Type) -> bool {
     },
     TypeKind::Ptr { mutable, pointee } => match b.kind {
       TypeKind::Ptr { mutable: other_mutable, pointee: other_pointee } => mutable == other_mutable && same_type(pointee, other_pointee),
+      _ => false,
+    },
+    TypeKind::Ref { mutable, pointee } => match b.kind {
+      TypeKind::Ref { mutable: other_mutable, pointee: other_pointee } => mutable == other_mutable && same_type(pointee, other_pointee),
+      _ => false,
+    },
+    TypeKind::Slice { mutable, elem } => match b.kind {
+      TypeKind::Slice { mutable: other_mutable, elem: other_elem } => mutable == other_mutable && same_type(elem, other_elem),
       _ => false,
     },
     _ => tag(a) == tag(b),
@@ -353,7 +382,38 @@ pub fn plain_fits(actual: Type, expected: Type) -> bool {
     }
   }
 
-  same_type(actual, expected) || const_pointer || is_never(actual) || is_error(actual) || is_error(expected)
+  // A `&mut T` can be used as a `&T`, and a reference as a raw pointer to C, as in Rust
+  // (docs/adr/0079-references-and-borrowing.md, Q489 and Q496).
+  var reference = false;
+
+  if let TypeKind::Slice { mutable, elem } = actual.kind {
+    if let TypeKind::Slice { mutable: expected_mutable, elem: expected_elem } = expected.kind {
+      reference = mutable && !expected_mutable && same_type(elem, expected_elem);
+    }
+  }
+
+  if let TypeKind::Ref { mutable, pointee } = actual.kind {
+    match expected.kind {
+      TypeKind::Ref { mutable: expected_mutable, pointee: expected_pointee } => {
+        reference = mutable && !expected_mutable && same_type(pointee, expected_pointee);
+      }
+      TypeKind::Ptr { mutable: expected_mutable, pointee: expected_pointee } => {
+        reference = (mutable || !expected_mutable) && same_type(pointee, expected_pointee);
+      }
+      _ => {}
+    }
+  }
+
+  // An `extern "C" fn` can be used as an `unsafe extern "C" fn`, as in Rust.
+  var unsafe_fn = false;
+
+  if let TypeKind::CFn { is_unsafe, params, ret } = actual.kind {
+    if let TypeKind::CFn { is_unsafe: expected_unsafe, params: expected_params, ret: expected_ret } = expected.kind {
+      unsafe_fn = !is_unsafe && expected_unsafe && same_types(params, expected_params) && same_type(ret, expected_ret);
+    }
+  }
+
+  same_type(actual, expected) || const_pointer || reference || unsafe_fn || is_never(actual) || is_error(actual) || is_error(expected)
 }
 
 fn generic_text(name: String, args: List<Type>) -> String {
@@ -393,12 +453,19 @@ pub fn text(ty: Type) -> String {
 
       if is_unit(ret) { head } else { head + " -> " + text(ret) }
     }
+    TypeKind::CFn { is_unsafe, params, ret } => {
+      const head = (if is_unsafe { "unsafe " } else { "" }) + "extern \"C\" fn(" + texts(params).join(", ") + ")";
+
+      if is_unit(ret) { head } else { head + " -> " + text(ret) }
+    }
     TypeKind::Array { elem, len } => `[${text(elem)}; ${len}]`,
     TypeKind::List(elem) => "List<" + text(elem) + ">",
     TypeKind::Option(value) => "Option<" + text(value) + ">",
     TypeKind::Result { value, error } => "Result<" + text(value) + ", " + text(error) + ">",
     TypeKind::StringBuilder => "StringBuilder",
     TypeKind::Ptr { mutable, pointee } => (if mutable { "*mut " } else { "*const " }) + text(pointee),
+    TypeKind::Ref { mutable, pointee } => (if mutable { "&mut " } else { "&" }) + text(pointee),
+    TypeKind::Slice { mutable, elem } => (if mutable { "&mut [" } else { "&[" }) + text(elem) + "]",
     TypeKind::CVoid => "c_void",
     TypeKind::CString => "CString",
     TypeKind::Never => "never",
@@ -551,7 +618,10 @@ pub fn substitute(ty: Type, subst: Subst) -> Type {
     TypeKind::Option(value) => of(TypeKind::Option(substitute(value, subst))),
     TypeKind::Result { value, error } => of(TypeKind::Result { value: substitute(value, subst), error: substitute(error, subst) }),
     TypeKind::Ptr { mutable, pointee } => of(TypeKind::Ptr { mutable: mutable, pointee: substitute(pointee, subst) }),
+    TypeKind::Ref { mutable, pointee } => of(TypeKind::Ref { mutable: mutable, pointee: substitute(pointee, subst) }),
+    TypeKind::Slice { mutable, elem } => of(TypeKind::Slice { mutable: mutable, elem: substitute(elem, subst) }),
     TypeKind::Function { params, ret } => of(TypeKind::Function { params: substitute_all(params, subst), ret: substitute(ret, subst) }),
+    TypeKind::CFn { is_unsafe, params, ret } => of(TypeKind::CFn { is_unsafe: is_unsafe, params: substitute_all(params, subst), ret: substitute(ret, subst) }),
     _ => ty,
   }
 }
@@ -570,7 +640,7 @@ pub fn depth(ty: Type) -> usize {
     TypeKind::Array { elem, .. } => 1 + depth(elem),
     TypeKind::List(elem) => 1 + depth(elem),
     TypeKind::Option(elem) => 1 + depth(elem),
-    TypeKind::Ptr { pointee, .. } => 1 + depth(pointee),
+    TypeKind::Ptr { pointee, .. } | TypeKind::Ref { pointee, .. } | TypeKind::Slice { elem: pointee, .. } => 1 + depth(pointee),
     TypeKind::Result { value, error } => {
       const a = depth(value);
       const b = depth(error);
@@ -578,6 +648,12 @@ pub fn depth(ty: Type) -> usize {
       1 + (if a > b { a } else { b })
     }
     TypeKind::Function { params, ret } => {
+      const a = max_depth(params);
+      const b = depth(ret);
+
+      1 + (if a > b { a } else { b })
+    }
+    TypeKind::CFn { params, ret, .. } => {
       const a = max_depth(params);
       const b = depth(ret);
 
@@ -612,9 +688,10 @@ pub fn has_self(ty: Type) -> bool {
     TypeKind::Array { elem, .. } => has_self(elem),
     TypeKind::List(elem) => has_self(elem),
     TypeKind::Option(elem) => has_self(elem),
-    TypeKind::Ptr { pointee, .. } => has_self(pointee),
+    TypeKind::Ptr { pointee, .. } | TypeKind::Ref { pointee, .. } | TypeKind::Slice { elem: pointee, .. } => has_self(pointee),
     TypeKind::Result { value, error } => has_self(value) || has_self(error),
     TypeKind::Function { params, ret } => any_has_self(params) || has_self(ret),
+    TypeKind::CFn { params, ret, .. } => any_has_self(params) || has_self(ret),
     _ => false,
   }
 }
@@ -670,6 +747,8 @@ pub struct FieldDef {
 pub struct StructDef {
   pub name: String;
   pub fields: List<FieldDef>;
+  /// A union: its fields share their memory.
+  pub is_union: bool;
 }
 
 pub class ClassDef {
@@ -725,6 +804,62 @@ pub struct GenericDef {
 pub struct EnumDef {
   pub name: String;
   pub variants: List<VariantDef>;
+  /// The integer type of `@repr(i32)` (`i32` for `@repr(C)`), whose values the variants are.
+  pub repr: Option<IntTy>;
+  /// With a representation, the value of each variant.
+  pub discriminants: List<EnumValue>;
+}
+
+/// The representation of an enum and the values of its variants.
+struct EnumRepr {
+  pub repr: Option<IntTy>;
+  pub values: List<EnumValue>;
+}
+
+/// The value of a variant of an enum with an integer representation: its magnitude and sign.
+pub struct EnumValue {
+  pub magnitude: u64;
+  pub negative: bool;
+}
+
+pub fn enum_value_text(value: EnumValue) -> String {
+  (if value.negative { "-" } else { "" }) + `${value.magnitude}`
+}
+
+/// The value after `value`, or `None` past the largest `u64`.
+fn next_enum_value(value: EnumValue) -> Option<EnumValue> {
+  if value.negative {
+    const magnitude = value.magnitude - 1;
+
+    return Some(EnumValue { magnitude: magnitude, negative: magnitude != 0 });
+  }
+
+  if value.magnitude == 18446744073709551615 {
+    return None;
+  }
+
+  Some(EnumValue { magnitude: value.magnitude + 1, negative: false })
+}
+
+/// The value of decimal digits, or `None` past the largest `u64`.
+fn digits_value(digits: String) -> Option<u64> {
+  var value = 0u64;
+
+  for c in digits.chars() {
+    if c == '_' {
+      continue;
+    }
+
+    const digit = c as u32 as u64 - 48;
+
+    if value > (18446744073709551615 - digit) / 10 {
+      return None;
+    }
+
+    value = value * 10 + digit;
+  }
+
+  Some(value)
 }
 
 /// A field of a variant: named fields have a name.
@@ -840,6 +975,16 @@ pub fn check_until(package: Package, resolution: Resolution, diagnostics: Diagno
   generic::check_type_bounds(checker);
   send::check_send_types(checker);
 
+  // The borrow checker needs the types and which methods modify `self`; after type errors, it
+  // would only repeat them.
+  if !diagnostics.has_errors() {
+    for index in 0..resolution.functions.len() {
+      if let Some(decl) = resolution.fn_decl(package, index as u32) {
+        borrow::check_function(checker, index as u32, decl);
+      }
+    }
+  }
+
   const typed = checker.typed;
 
   for index in 0..resolution.functions.len() {
@@ -944,6 +1089,9 @@ pub class Checker {
   pub var loops: List<LoopCx>;
   /// The enclosing `unsafe` blocks, innermost last, with whether each one was needed.
   pub var unsafe_blocks: List<bool>;
+  /// The base of the field being assigned with `=`, which may be a field of a union: writing one
+  /// is safe, reading one is not.
+  pub var union_write: Option<u32>;
   /// Whether each struct or enum method modifies `self` directly, by function id.
   pub var mutates_self: List<bool>;
   /// The lambdas being checked, innermost last.
@@ -973,6 +1121,7 @@ pub class Checker {
     self.function = 0;
     self.loops = new List();
     self.unsafe_blocks = new List();
+    self.union_write = None;
     self.mutates_self = new List();
 
     for _ in 0..resolution.functions.len() {
@@ -1030,6 +1179,102 @@ pub class Checker {
     self.resolution.generics(self.package, owner).len()
   }
 
+  /// The integer representation of an enum and the values of its variants
+  /// (docs/adr/0078-ffi-without-c-shims.md, Q479).
+  prv fn enum_repr(self, decl: EnumDecl) -> EnumRepr {
+    const values: List<EnumValue> = new List();
+    const written = match decl.repr {
+      Some(found) => found,
+      None => {
+        for variant in decl.variants {
+          if let Some(discriminant) = variant.discriminant {
+            self.diagnostics.push(
+              Diagnostic::error(codes::INVALID_ATTRIBUTE, discriminant.span, "explicit discriminants need an integer representation")
+                .with_help("write `@repr(i32)`, or another integer type, before the enum"),
+            );
+          }
+        }
+
+        return EnumRepr { repr: None, values: values };
+      }
+    };
+    const int_ty = if written.name == "C" { IntTy::I32 } else { int_from_name(written.name).unwrap_or(IntTy::I32) };
+
+    if !decl.generics.is_empty() {
+      self.diagnostics.push(Diagnostic::error(codes::INVALID_ATTRIBUTE, written.span, "an enum with an integer representation cannot be generic"));
+    }
+
+    const shown = if written.name == "C" { "`i32` (C's `int`)" } else { "`" + written.name + "`" };
+    const max = int_max(int_ty, self.target.pointer_width);
+    var next: Option<EnumValue> = Some(EnumValue { magnitude: 0, negative: false });
+
+    for variant in decl.variants {
+      match variant.fields {
+        VariantFields::Unit => {}
+        _ => {
+          self.diagnostics.push(
+            Diagnostic::error(codes::INVALID_ATTRIBUTE, variant.span, "the variants of an enum with an integer representation carry no data")
+              .with_label(written.span, "the representation is given here"),
+          );
+        }
+      }
+
+      var value = EnumValue { magnitude: 0, negative: false };
+
+      match variant.discriminant {
+        Some(discriminant) => {
+          match digits_value(discriminant.value) {
+            Some(magnitude) => {
+              value = EnumValue { magnitude: magnitude, negative: discriminant.negative && magnitude != 0 };
+            }
+            None => {
+              self.error(codes::INTEGER_OUT_OF_RANGE, discriminant.span, "the discriminant of `" + variant.name.name + "` does not fit in " + shown);
+              next = None;
+              continue;
+            }
+          }
+
+          const fits = if value.negative { is_signed(int_ty) && value.magnitude - 1 <= max } else { value.magnitude <= max };
+
+          if !fits {
+            self.error(codes::INTEGER_OUT_OF_RANGE, discriminant.span, "the discriminant " + enum_value_text(value) + " of `" + variant.name.name + "` does not fit in " + shown);
+          }
+        }
+        None => {
+          match next {
+            Some(found) => {
+              value = found;
+            }
+            None => continue,
+          }
+
+          if !value.negative && value.magnitude > max {
+            self.diagnostics.push(
+              Diagnostic::error(codes::INTEGER_OUT_OF_RANGE, variant.name.span, "the discriminant " + enum_value_text(value) + " of `" + variant.name.name + "` does not fit in " + shown)
+                .with_note("a variant without `= value` takes the value of the previous one plus one"),
+            );
+          }
+        }
+      }
+
+      for position in 0..values.len() {
+        if values[position].magnitude == value.magnitude && values[position].negative == value.negative {
+          const other = decl.variants[position];
+
+          self.diagnostics.push(
+            Diagnostic::error(codes::DUPLICATE_DEFINITION, variant.name.span, "`" + variant.name.name + "` has the discriminant " + enum_value_text(value) + " of `" + other.name.name + "`")
+              .with_label(other.name.span, "the same value here"),
+          );
+        }
+      }
+
+      values.push(value);
+      next = next_enum_value(value);
+    }
+
+    EnumRepr { repr: Some(int_ty), values: values }
+  }
+
   /// Resolves the field types of every enum variant.
   pub fn enum_defs(self) {
     for index in 0..self.resolution.enums.len() {
@@ -1066,7 +1311,9 @@ pub class Checker {
         variants.push(VariantDef { name: variant.name.name, named: named, fields: fields });
       }
 
-      self.typed.enums.push(EnumDef { name: decl.name.name, variants: variants });
+      const repr = self.enum_repr(decl);
+
+      self.typed.enums.push(EnumDef { name: decl.name.name, variants: variants, repr: repr.repr, discriminants: repr.values });
     }
 
     self.owner = None;
@@ -1096,7 +1343,7 @@ pub class Checker {
         fields.push(FieldDef { name: field.name.name, ty: self.type_expr(field.ty), public: !is_private(field.visibility), mutable: true, is_weak: false, span: field.span });
       }
 
-      self.typed.structs.push(StructDef { name: decl.name.name, fields: fields });
+      self.typed.structs.push(StructDef { name: decl.name.name, fields: fields, is_union: decl.is_union });
     }
 
     self.owner = None;
@@ -1314,6 +1561,12 @@ pub class Checker {
   pub fn type_expr_at(self, ty: TypeExpr, behind_pointer: bool) -> Type {
     match ty.kind {
       TypeExprKind::Ptr { mutable, pointee } => ffi::pointer_type(self, mutable, pointee),
+      TypeExprKind::Ref { mutable, pointee } => match pointee.kind {
+        TypeExprKind::Slice(elem) => of(TypeKind::Slice { mutable: mutable, elem: self.type_expr(elem) }),
+        _ => of(TypeKind::Ref { mutable: mutable, pointee: self.type_expr(pointee) }),
+      },
+      // A slice outside a reference was reported by the parser.
+      TypeExprKind::Slice(_) => error(),
       TypeExprKind::Fn { params, ret } => {
         const types: List<Type> = new List();
 
@@ -1327,6 +1580,20 @@ pub class Checker {
         };
 
         of(TypeKind::Function { params: types, ret: result })
+      }
+      TypeExprKind::CFn { is_unsafe, params, ret } => {
+        const types: List<Type> = new List();
+
+        for param in params {
+          types.push(self.type_expr(param));
+        }
+
+        const result = match ret {
+          Some(ret) => self.type_expr(ret),
+          None => unit(),
+        };
+
+        of(TypeKind::CFn { is_unsafe: is_unsafe, params: types, ret: result })
       }
       TypeExprKind::Unit => unit(),
       TypeExprKind::Array { elem, len } => {

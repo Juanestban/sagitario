@@ -7,7 +7,9 @@ use std::path;
 extern "C" {
   fn sag_fs_kind(path: String) -> i32;
   fn sag_fs_read(path: String, status: *mut i32) -> String;
+  fn sag_fs_read_bytes(path: String, status: *mut i32) -> String;
   fn sag_fs_write(path: String, text: String, append: bool) -> i32;
+  fn sag_fs_write_bytes(path: String, data: *const u8, len: usize) -> i32;
   fn sag_fs_create_dir(path: String) -> i32;
   fn sag_fs_remove_dir(path: String) -> i32;
   fn sag_fs_remove_file(path: String) -> i32;
@@ -35,9 +37,36 @@ pub fn read_to_string(path: String) -> Result<String, io::Error> {
   if status[0] == 0 { Ok(text) } else { Err(failure(status[0], `cannot read "${path}"`)) }
 }
 
+/// The bytes of the file at `path`, such as an image or SPIR-V code.
+pub fn read(path: String) -> Result<List<u8>, io::Error> {
+  var status = [0i32; 1];
+  // The runtime gives the bytes in a string, which is never used as text.
+  const raw = unsafe { sag_fs_read_bytes(path, status.as_mut_ptr()) };
+
+  if status[0] != 0 {
+    return Err(failure(status[0], `cannot read "${path}"`));
+  }
+
+  const bytes: List<u8> = new List();
+
+  for byte in raw.bytes() {
+    bytes.push(byte);
+  }
+
+  Ok(bytes)
+}
+
 /// Writes `text` to the file at `path`, creating it or replacing its contents.
 pub fn write(path: String, text: String) -> Result<(), io::Error> {
   const code = unsafe { sag_fs_write(path, text, false) };
+
+  if code == 0 { Ok(()) } else { Err(failure(code, `cannot write "${path}"`)) }
+}
+
+/// Writes `bytes` to the file at `path`, creating it or replacing its contents: the counterpart of
+/// `read` (docs/adr/0079-references-and-borrowing.md, Q497).
+pub fn write_bytes(path: String, bytes: &[u8]) -> Result<(), io::Error> {
+  const code = unsafe { sag_fs_write_bytes(path, bytes.as_ptr(), bytes.len()) };
 
   if code == 0 { Ok(()) } else { Err(failure(code, `cannot write "${path}"`)) }
 }

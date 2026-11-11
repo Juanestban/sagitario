@@ -47,6 +47,11 @@
     "description": "An interface",
     "body": ["pub interface ${1:Name} {", "  fn ${2:method}(self) -> ${3:String};$0", "}"]
   },
+  "impl for": {
+    "prefix": "implfor",
+    "description": "An interface implemented for a type in its own block",
+    "body": ["impl ${1:Interface} for ${2:Type} {", "  fn ${3:method}(self) -> ${4:String} {", "    $0", "  }", "}"]
+  },
   "match": {
     "prefix": "match",
     "description": "A match expression",
@@ -85,11 +90,67 @@
   "println": {
     "prefix": "println",
     "description": "Print a line with interpolated values",
-    "body": ["println(`${1:text}`);$0"]
+    "body": ["println(f\"${1:text}\");$0"]
   },
   "use": {
     "prefix": "use",
     "description": "Import a module",
     "body": ["use ${1:std}::${2:fs};$0"]
+  },
+  "extern \"C\" block": {
+    "prefix": "extern",
+    "description": "Declare C functions, called inside `unsafe`",
+    "body": [
+      "use std::ffi::{c_char, c_int};",
+      "",
+      "extern \"C\" {",
+      "  fn ${1:name}(${2:text: *const c_char}) -> ${3:c_int};$0",
+      "}"
+    ]
+  },
+  "extern \"C\" fn": {
+    "prefix": "externfn",
+    "description": "A function with the C ABI, exported under its own name",
+    "body": ["extern \"C\" fn ${1:name}(${2}) -> ${3:i32} {", "  $0", "}"]
+  },
+  "@export extern \"C\" fn": {
+    "prefix": "export",
+    "description": "A function with the C ABI, exported under the given symbol",
+    "body": [
+      "@export(\"${1:symbol}\")",
+      "pub extern \"C\" fn ${2:name}(${3}) -> ${4:i32} {",
+      "  $0",
+      "}"
+    ]
+  },
+  "@repr(C) struct": {
+    "prefix": "reprc",
+    "description": "A struct with the C layout, which can cross the FFI boundary",
+    "body": ["@repr(C)", "pub struct ${1:Name} {", "  pub ${2:field}: ${3:i32};$0", "}"]
+  },
+  "@repr(C) union": {
+    "prefix": "union",
+    "description": "A union with the C layout: its fields share their memory",
+    "body": ["@repr(C)", "pub union ${1:Name} {", "  pub ${2:field}: ${3:i32};$0", "}"]
+  },
+  "@repr(i32) enum": {
+    "prefix": "reprenum",
+    "description": "An enum laid out as an integer, for C",
+    "body": ["@repr(${1:i32})", "pub enum ${2:Name} {", "  ${3:First} = ${4:0},", "  ${5:Second},$0", "}"]
+  },
+  "extern \"C\" fn type": {
+    "prefix": "cfn",
+    "description": "The type of a C function pointer",
+    "body": ["extern \"C\" fn(${1:i32}) -> ${2:i32}"]
+  },
+  "unsafe": {
+    "prefix": "unsafe",
+    "description": "An unsafe block: calls to C functions and raw pointers",
+    "body": ["unsafe { $0 }"]
+  },
+  "CString": {
+    "prefix": "cstring",
+    "description": "A NUL-terminated copy of a string, to pass to C with as_ptr()",
+    "body": ["const ${1:text} = CString::new(${2:\"text\"}).unwrap();$0"]
   }
 }

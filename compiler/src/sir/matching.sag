@@ -46,6 +46,13 @@ pub fn variant(lw: Lowering, ty: Type, index: u32, fields: List<Operand>) -> Ope
 pub fn tag(lw: Lowering, value: Operand, ty: Type) -> Result<Operand, String> {
   const place = lw.operand_place(value, ty)?;
 
+  // The value of an enum with an integer representation is the value of its variant.
+  if lw.layouts.enum_repr(ty).is_some() {
+    if let TypeKind::Enum(named) = ty.kind {
+      return Ok(Operand::Place(project(place, Projection::EnumIndex(named.id as usize), tag_type())));
+    }
+  }
+
   Ok(Operand::Place(project(place, Projection::Tag, tag_type())))
 }
 

@@ -1,0 +1,348 @@
+//! Operators on values other than numbers and `String` (docs/adr/0081-operator-overloading.md):
+//! `a + b` calls `add` of the prelude's `Add` implemented by the type of `a`, the one whose right
+//! operand has the type of `b`; `-a` calls `neg` of `Neg`, and `a += b` is `a = a + b`. The call
+//! is recorded as a method call of the interface method on the expression (on the target for
+//! `+=`), with the interface's type arguments, so that lowering finds the implementation as for
+//! any call of an interface method.
+
+use pkg::ast::{BinaryOp, Expr};
+use pkg::ast;
+use pkg::diagnostics::Diagnostic;
+use pkg::diagnostics::codes;
+use pkg::resolve::ParamOwner;
+use pkg::span::Span;
+use pkg::types::{Checker, NamedRef, Type, TypeKind};
+use pkg::types;
+use pkg::types::exprs;
+
+/// Whether an operator on a value of this type goes through the interfaces of the operators.
+pub fn is_operator_operand(ty: Type) -> bool {
+  match ty.kind {
+    TypeKind::Struct(_) | TypeKind::Enum(_) | TypeKind::Class(_) | TypeKind::Interface(_) | TypeKind::Param(_) => true,
+    _ => false,
+  }
+}
+
+/// The interface of an operator: its id and its name.
+struct OperatorInterface {
+  pub id: u32;
+  pub name: String;
+}
+
+fn binary_interface(cx: Checker, op: BinaryOp) -> Option<OperatorInterface> {
+  const prelude = cx.typed.prelude;
+  const found = if op == BinaryOp::Add {
+    prelude.add
+  } else if op == BinaryOp::Sub {
+    prelude.sub
+  } else if op == BinaryOp::Mul {
+    prelude.mul
+  } else if op == BinaryOp::Div {
+    prelude.div
+  } else if op == BinaryOp::Rem {
+    prelude.rem
+  } else {
+    None
+  };
+  const id = found?;
+  const name = cx.typed.interface_def(id)?.name;
+
+  Some(OperatorInterface { id: id, name: name })
+}
+
+/// The instantiations of an interface that values of `ty` implement.
+fn instantiations(cx: Checker, ty: Type, id: u32) -> List<NamedRef> {
+  const found: List<NamedRef> = new List();
+
+  for implemented in cx.typed.implemented_refs(ty) {
+    if implemented.id == id {
+      found.push(implemented);
+    }
+  }
+
+  found
+}
+
+/// Records the operator as a call of the interface's method with these type arguments.
+fn record(cx: Checker, id: u32, interface_ref: NamedRef) {
+  const method = match cx.typed.interface_def(interface_ref.id) {
+    Some(def) => def.methods.first(),
+    None => None,
+  };
+
+  if let Some(function) = method {
+    cx.typed.method_calls.insert(id, function);
+    cx.typed.call_args.insert(id, interface_ref.args);
+  }
+}
+
+/// The type of `ty` with its own parameters, as a block names it: `Tree<T>` for a `Tree<f64>`.
+fn own_type_text(cx: Checker, ty: Type) -> String {
+  const item = match types::type_item_of(ty) {
+    Some(found) => found,
+    None => return types::text(ty),
+  };
+  const params: List<String> = new List();
+
+  for param in cx.resolution.generics(cx.package, ParamOwner::Item(item)) {
+    params.push(param.name.name);
+  }
+
+  const name = cx.resolution.type_name(cx.package, item);
+
+  if params.is_empty() { name } else { name + "<" + params.join(", ") + ">" }
+}
+
+/// The header of a block implementing `implemented` for the type of `ty`, with the type's own
+/// parameters, since a block is for all of a generic type: `impl<T> Eq for Tree<T>`.
+fn impl_header(cx: Checker, ty: Type, implemented: String) -> String {
+  const own = own_type_text(cx, ty);
+  const start = match own.find("<") {
+    Some(at) => "impl" + own.substring(at, own.len()) + " ",
+    None => "impl ",
+  };
+
+  start + implemented + " for " + own
+}
+
+/// Whether a right operand of type `rhs` can be an unsuffixed literal like `literal`.
+fn literal_fits(literal: Expr, rhs: Type) -> bool {
+  var float_literal = false;
+  var current = literal;
+
+  while true {
+    match current.kind {
+      ast::ExprKind::Float { .. } => {
+        float_literal = true;
+        break;
+      }
+      ast::ExprKind::Unary { operand, .. } => {
+        current = operand;
+      }
+      _ => break,
+    }
+  }
+
+  match rhs.kind {
+    TypeKind::Float(_) => float_literal,
+    TypeKind::Int(_) => !float_literal,
+    _ => false,
+  }
+}
+
+/// The implementation of the operator for `lhs_ty` whose right operand has the type of `rhs`,
+/// which is checked here; `None` after reporting an error.
+fn choose(cx: Checker, op: BinaryOp, symbol: String, span: Span, lhs_ty: Type, rhs: Expr) -> Option<NamedRef> {
+  const found = match binary_interface(cx, op) {
+    Some(found) => found,
+    None => {
+      exprs::expr(cx, rhs, None);
+      cx.error(codes::INVALID_OPERAND, span, "cannot apply `" + symbol + "` to values of type `" + types::text(lhs_ty) + "`");
+
+      return None;
+    }
+  };
+  const candidates = instantiations(cx, lhs_ty, found.id);
+
+  // One implementation gives the right operand its type, so literals take it.
+  if candidates.len() == 1 {
+    const only = candidates[0];
+
+    exprs::expect(cx, rhs, only.args.get(0).unwrap_or(types::error()));
+
+    return Some(only);
+  }
+
+  // An unsuffixed literal fits the one implementation taking a number of its kind.
+  if exprs::is_untyped_literal(rhs) {
+    const numeric: List<NamedRef> = new List();
+
+    for candidate in candidates {
+      if literal_fits(rhs, candidate.args.get(0).unwrap_or(types::error())) {
+        numeric.push(candidate);
+      }
+    }
+
+    if numeric.len() == 1 {
+      exprs::expect(cx, rhs, numeric[0].args.get(0).unwrap_or(types::error()));
+
+      return Some(numeric[0]);
+    }
+  }
+
+  const rhs_ty = exprs::expr(cx, rhs, None);
+
+  if types::is_error(rhs_ty) {
+    return None;
+  }
+
+  for candidate in candidates {
+    if types::same_type(candidate.args.get(0).unwrap_or(types::error()), rhs_ty) {
+      return Some(candidate);
+    }
+  }
+
+  const shown_lhs = types::text(lhs_ty);
+  const shown_rhs = types::text(rhs_ty);
+  var diagnostic = Diagnostic::error(codes::INVALID_OPERAND, span, "cannot apply `" + symbol + "` to `" + shown_lhs + "` and `" + shown_rhs + "`");
+
+  if candidates.is_empty() {
+    const wanted = found.name + "<" + shown_rhs + ", Out>";
+
+    diagnostic = match lhs_ty.kind {
+      TypeKind::Param(_) => diagnostic.with_help("bound the type parameter: `" + shown_lhs + ": " + wanted + "`"),
+      TypeKind::Interface(_) => diagnostic.with_note("the interface `" + shown_lhs + "` does not extend `" + found.name + "`"),
+      _ => diagnostic.with_help("implement `" + wanted + "` for `" + shown_lhs + "`: `" + impl_header(cx, lhs_ty, found.name + "<" + shown_rhs + ", " + shown_rhs + ">") + " { ... }`"),
+    };
+  } else {
+    const accepted: List<String> = new List();
+
+    for candidate in candidates {
+      accepted.push("`" + types::text(candidate.args.get(0).unwrap_or(types::error())) + "`");
+    }
+
+    diagnostic = diagnostic.with_note("`" + shown_lhs + "` implements `" + symbol + "` with right operands of type " + accepted.join(", "));
+  }
+
+  cx.diagnostics.push(diagnostic);
+
+  None
+}
+
+/// `lhs op rhs` with `lhs` of type `lhs_ty`, already checked, a value other than a number or a
+/// string; only the type of the left operand is searched (Q511).
+pub fn binary_call(cx: Checker, value: Expr, op: BinaryOp, lhs: Expr, lhs_ty: Type, rhs: Expr) -> Type {
+  const symbol = ast::binary_symbol(op);
+  const chosen = match choose(cx, op, symbol, lhs.span.to(rhs.span), lhs_ty, rhs) {
+    Some(found) => found,
+    None => return types::error(),
+  };
+
+  record(cx, value.id, chosen);
+
+  chosen.args.get(1).unwrap_or(types::error())
+}
+
+/// `target op= value` with `target` of type `ty`, a value other than a number or a string: `target
+/// = target op value`, whose result must have the type of `target` (Q512).
+pub fn compound_call(cx: Checker, target: Expr, op: BinaryOp, ty: Type, value: Expr) {
+  const symbol = ast::binary_symbol(op);
+  const chosen = match choose(cx, op, symbol, target.span.to(value.span), ty, value) {
+    Some(found) => found,
+    None => return,
+  };
+  const out = chosen.args.get(1).unwrap_or(types::error());
+
+  if !types::same_type(out, ty) && !types::is_error(out) {
+    cx.diagnostics.push(
+      Diagnostic::error(codes::INVALID_OPERAND, target.span.to(value.span), "cannot apply `" + symbol + "=` to a value of type `" + types::text(ty) + "`")
+        .with_note("`" + symbol + "` gives a `" + types::text(out) + "`, which cannot be stored back in it"),
+    );
+
+    return;
+  }
+
+  record(cx, target.id, chosen);
+}
+
+/// `-operand` with `operand` of type `ty`, already checked, a value other than a number.
+pub fn neg_call(cx: Checker, value: Expr, ty: Type) -> Type {
+  const id = match cx.typed.prelude.neg {
+    Some(found) => found,
+    None => {
+      cx.error(codes::INVALID_OPERAND, value.span, "cannot negate a value of type `" + types::text(ty) + "`");
+
+      return types::error();
+    }
+  };
+  const candidates = instantiations(cx, ty, id);
+
+  if candidates.len() == 1 {
+    record(cx, value.id, candidates[0]);
+
+    return candidates[0].args.get(0).unwrap_or(types::error());
+  }
+
+  const shown = types::text(ty);
+
+  if candidates.is_empty() {
+    const diagnostic = Diagnostic::error(codes::INVALID_OPERAND, value.span, "cannot negate a value of type `" + shown + "`");
+
+    cx.diagnostics.push(match ty.kind {
+      TypeKind::Param(_) => diagnostic.with_help("bound the type parameter: `" + shown + ": Neg<" + shown + ">`"),
+      _ => diagnostic.with_help("implement `Neg<" + shown + ">` for `" + shown + "`: `" + impl_header(cx, ty, "Neg<" + shown + ">") + " { ... }`"),
+    });
+  } else {
+    cx.diagnostics.push(
+      Diagnostic::error(codes::AMBIGUOUS_METHOD, value.span, "`" + shown + "` implements `Neg` more than once")
+        .with_note("the result of `-` would not be known; call `neg` through a value of the interface you mean"),
+    );
+  }
+
+  types::error()
+}
+
+/// `a == b` and `a != b` on a struct, enum or type parameter implementing `Eq` (calling
+/// `equals`), and `<`, `<=`, `>`, `>=` on one implementing `Ord` (calling `compare`); `None`
+/// leaves the comparison to the built-in rules: numbers, strings, enums without data and the
+/// identity of class instances (Q514). Both operands were checked and have type `ty`.
+pub fn comparison_call(cx: Checker, value: Expr, op: BinaryOp, ty: Type, span: Span) -> Option<Type> {
+  const by_interface = match ty.kind {
+    TypeKind::Struct(_) | TypeKind::Enum(_) | TypeKind::Param(_) => true,
+    _ => false,
+  };
+
+  if !by_interface {
+    return None;
+  }
+
+  const equality = op == BinaryOp::Eq || op == BinaryOp::Ne;
+  const wanted = if equality { cx.typed.prelude.eq } else { cx.typed.prelude.ord };
+  const id = wanted?;
+  const bool_ty = types::of(TypeKind::Bool);
+
+  if !instantiations(cx, ty, id).is_empty() {
+    if let Some(def) = cx.typed.interface_def(id) {
+      if let Some(method) = def.methods.first() {
+        cx.typed.method_calls.insert(value.id, method);
+      }
+    }
+
+    return Some(bool_ty);
+  }
+
+  // Enums without data keep `==` by variant.
+  if equality && is_fieldless_enum(cx, ty) {
+    return None;
+  }
+
+  const shown = types::text(ty);
+  const symbol = ast::binary_symbol(op);
+  const interface_name = if equality { "Eq" } else { "Ord" };
+  const diagnostic = Diagnostic::error(codes::INVALID_OPERAND, span, "cannot compare values of type `" + shown + "` with `" + symbol + "`");
+  const own = own_type_text(cx, ty);
+  const method = if equality { "fn equals(self, other: " + own + ") -> bool" } else { "fn compare(self, other: " + own + ") -> Ordering" };
+
+  cx.diagnostics.push(match ty.kind {
+    TypeKind::Param(_) => diagnostic.with_help("bound the type parameter: `" + shown + ": " + interface_name + "`"),
+    _ => diagnostic.with_help("implement `" + interface_name + "` for `" + shown + "`: `" + impl_header(cx, ty, interface_name) + " { " + method + " { ... } }`"),
+  });
+
+  Some(bool_ty)
+}
+
+fn is_fieldless_enum(cx: Checker, ty: Type) -> bool {
+  if let TypeKind::Enum(_) = ty.kind {
+    if let Some(variants) = cx.typed.variants(ty) {
+      for variant in variants {
+        if !variant.fields.is_empty() {
+          return false;
+        }
+      }
+
+      return true;
+    }
+  }
+
+  false
+}

@@ -1,0 +1,19 @@
+// Addresses and buffers (docs/adr/0078-ffi-without-c-shims.md, increment 3).
+fn value() -> i32 {
+  1
+}
+
+fn main() {
+  const fixed = 1;
+  const _a = &raw mut fixed; //~ ERROR E0312
+  const items = List::from([1, 2]);
+  const _b = &raw const items[0]; //~ ERROR E0310
+  const _c = &raw const value(); //~ ERROR E0310
+  const text = "text";
+  const _d = &raw const text; //~ ERROR E0322
+  const names = List::from(["a"]);
+  const _e = names.as_ptr(); //~ ERROR E0322
+  var counter = 0;
+  const pointer = &raw mut counter;
+  const _f = *pointer; //~ ERROR E0323
+}

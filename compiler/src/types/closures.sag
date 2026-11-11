@@ -11,6 +11,7 @@ use pkg::span::Span;
 use pkg::types::{Checker, Receiver, Type, TypeKind};
 use pkg::types;
 use pkg::types::exprs;
+use pkg::types::ffi;
 use pkg::types::generic;
 use pkg::types::generic::Unknowns;
 use pkg::types::send;
@@ -148,6 +149,31 @@ pub fn fn_value(cx: Checker, value: Expr, path: Path, function: u32, expected: O
     Some(decl) => decl.name.name,
     None => "",
   };
+
+  if let Some(decl) = cx.resolution.fn_decl(cx.package, function) {
+    var closure_expected = false;
+
+    if let Some(ty) = expected {
+      if let TypeKind::Function { .. } = ty.kind {
+        closure_expected = true;
+      }
+    }
+
+    // An `extern "C" fn` is a C function pointer, unless a closure is expected of it.
+    if decl.extern_c && !(closure_expected && !decl.is_unsafe) {
+      return ffi::c_fn_type(decl.is_unsafe, sig);
+    }
+
+    if decl.is_unsafe {
+      cx.diagnostics.push(
+        Diagnostic::error(codes::WRONG_CALL_FORM, value.span, "the unsafe function `" + name + "` cannot be used as a closure")
+          .with_help("wrap the call in a lambda with an `unsafe` block: `(x) => unsafe { " + name + "(x) }`"),
+      );
+
+      return types::error();
+    }
+  }
+
   // Its argument is checked where it is called.
   if let Some(spawn) = send::spawn_name(cx, function) {
     cx.diagnostics.push(
@@ -231,6 +257,15 @@ pub fn call_value(cx: Checker, value: Expr, callee: Expr, args: List<Expr>) -> T
 
       ret
     }
+    TypeKind::CFn { is_unsafe, params, ret } => {
+      if is_unsafe {
+        ffi::require_unsafe(cx, callee.span, "calling an `unsafe extern \"C\" fn`");
+      }
+
+      exprs::check_args(cx, value.span, "function", params, args);
+
+      ret
+    }
     TypeKind::Error | TypeKind::Never => {
       exprs::unchecked_args(cx, args);
 
@@ -250,6 +285,16 @@ pub fn call_value(cx: Checker, value: Expr, callee: Expr, args: List<Expr>) -> T
 pub fn field_call(cx: Checker, value: Expr, field_ty: Type, args: List<Expr>) -> Type {
   match field_ty.kind {
     TypeKind::Function { params, ret } => {
+      exprs::check_args(cx, value.span, "function", params, args);
+      cx.typed.field_calls.insert(value.id, true);
+
+      ret
+    }
+    TypeKind::CFn { is_unsafe, params, ret } => {
+      if is_unsafe {
+        ffi::require_unsafe(cx, value.span, "calling an `unsafe extern \"C\" fn`");
+      }
+
       exprs::check_args(cx, value.span, "function", params, args);
       cx.typed.field_calls.insert(value.id, true);
 
@@ -424,7 +469,7 @@ pub fn function_field(cx: Checker, receiver_ty: Type, name: String) -> Option<Ty
   }
 
   match ty.kind {
-    TypeKind::Function { .. } => Some(ty),
+    TypeKind::Function { .. } | TypeKind::CFn { .. } => Some(ty),
     _ => None,
   }
 }

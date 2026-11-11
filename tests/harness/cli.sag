@@ -8,6 +8,7 @@ pub fn tests() -> List<Test> {
   List::from([
     support::test("version_prints_the_version", version_prints_the_version),
     support::test("the_vscode_extension_has_the_version", the_vscode_extension_has_the_version),
+    support::test("the_version_tool_reads_the_version", the_version_tool_reads_the_version),
     support::test("help_succeeds", help_succeeds),
     support::test("invalid_usage_exits_with_2", invalid_usage_exits_with_2),
     support::test("missing_input_exits_with_1", missing_input_exits_with_1),
@@ -69,6 +70,21 @@ fn the_vscode_extension_has_the_version(cx: Context) -> Result<(), String> {
   }
 
   Ok(())
+}
+
+/// `tools/version.sag` (CONTRIBUTING.md#releasing) finds the version without arguments, and
+/// rejects one that is not `X.Y.Z` before touching any file.
+fn the_version_tool_reads_the_version(cx: Context) -> Result<(), String> {
+  const version = support::sagitario_version(cx)?;
+  const ran = sag(cx, List::from(["run", "tools/version.sag"]))?;
+
+  support::expect_success("sag run tools/version.sag", ran)?;
+  support::expect_equal("sag run tools/version.sag", ran.stdout.trim(), version)?;
+
+  const rejected = sag(cx, List::from(["run", "tools/version.sag", "--", "1.02"]))?;
+
+  expect_exit("sag run tools/version.sag -- 1.02", rejected, 2)?;
+  expect_contains("sag run tools/version.sag -- 1.02", rejected.stderr, "expected a version X.Y.Z")
 }
 
 fn help_succeeds(cx: Context) -> Result<(), String> {

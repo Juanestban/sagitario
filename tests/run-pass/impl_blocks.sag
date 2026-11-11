@@ -1,0 +1,161 @@
+// `impl Interface for Type` blocks and several implementations of one generic interface
+// (docs/adr/0081-operator-overloading.md, increment 1): a block holds the methods of one
+// instantiation; a value of the interface, a bound or a call by a unique name reaches them.
+// expect-stdout: name (1, 2) | (2, 4) (3, 8)
+// expect-stdout: header 10 block 2.5
+// expect-stdout: generic (2, 4) (4, 8)
+// expect-stdout: values (2, 4) (1, 2) wrapped
+// expect-stdout: enum north 1 | south -1
+// expect-stdout: default <(1, 2)> <wrapped>
+// expect-stdout: class base base base 4
+interface Scale<By, Out> {
+  fn scale(self, by: By) -> Out;
+}
+
+interface Named {
+  fn name(self) -> String;
+
+  fn quoted(self) -> String {
+    "<" + self.name() + ">"
+  }
+}
+
+struct Vec2 {
+  pub x: f64;
+  pub y: f64;
+}
+
+impl Scale<f64, Vec2> for Vec2 {
+  fn scale(self, by: f64) -> Vec2 {
+    Vec2 { x: self.x * by, y: self.y * by }
+  }
+}
+
+impl Scale<Vec2, Vec2> for Vec2 {
+  fn scale(self, by: Vec2) -> Vec2 {
+    Vec2 { x: self.x * by.x, y: self.y * by.y }
+  }
+}
+
+impl Named for Vec2 {
+  fn name(self) -> String {
+    `(${self.x}, ${self.y})`
+  }
+}
+
+// One instantiation in the header, another in a block, which reaches the private field.
+struct Meters impl Scale<i32, i32> {
+  prv value: i32;
+
+  pub fn of(value: i32) -> Meters {
+    Meters { value: value }
+  }
+
+  pub fn scale(self, by: i32) -> i32 {
+    self.value * by
+  }
+}
+
+impl Scale<f64, f64> for Meters {
+  fn scale(self, by: f64) -> f64 {
+    (self.value as f64) * by
+  }
+}
+
+// A generic type, whose block names its parameter differently.
+struct Wrapper<T> {
+  pub value: T;
+}
+
+impl<U> Named for Wrapper<U> {
+  fn name(self) -> String {
+    "wrapped"
+  }
+}
+
+enum Direction {
+  North,
+  South,
+}
+
+impl Scale<i32, i32> for Direction {
+  fn scale(self, by: i32) -> i32 {
+    match self {
+      Direction::North => by,
+      Direction::South => -by,
+    }
+  }
+}
+
+impl Named for Direction {
+  fn name(self) -> String {
+    match self {
+      Direction::North => "north",
+      Direction::South => "south",
+    }
+  }
+}
+
+class Animal {
+  pub const legs: i32;
+
+  pub fn new(self, legs: i32) {
+    self.legs = legs;
+  }
+}
+
+impl Named for Animal {
+  fn name(self) -> String {
+    "base"
+  }
+}
+
+class Dog extends Animal {
+  pub fn new(self) {
+    zod.new(4);
+  }
+}
+
+fn twice<T: Scale<f64, T>>(value: T) -> T {
+  value.scale(2.0)
+}
+
+fn by_int<T: Scale<i32, i32>>(value: T, by: i32) -> i32 {
+  value.scale(by)
+}
+
+fn by_float<T: Scale<f64, f64>>(value: T, by: f64) -> f64 {
+  value.scale(by)
+}
+
+fn describe(value: Named) -> String {
+  value.name()
+}
+
+fn main() {
+  const v = Vec2 { x: 1.0, y: 2.0 };
+  const by_vec: Scale<Vec2, Vec2> = v;
+  const scaled: Vec2 = twice(v);
+  const factors = Vec2 { x: 3.0, y: 4.0 };
+
+  println(`name ${v.name()} | ${scaled.name()} ${by_vec.scale(factors).name()}`);
+
+  const meters = Meters::of(5);
+
+  println(`header ${by_int(meters, 2)} block ${by_float(meters, 0.5)}`);
+  println(`generic ${twice(v).name()} ${twice(twice(v)).name()}`);
+
+  const items: [Named; 3] = [scaled, v, Wrapper { value: 2 }];
+
+  println(`values ${describe(items[0])} ${describe(items[1])} ${describe(items[2])}`);
+  println(`enum ${Direction::North.name()} ${by_int(Direction::North, 1)} | ${describe(Direction::South)} ${Direction::South.scale(1)}`);
+  const wrapper = Wrapper { value: "x" };
+
+  println(`default ${v.quoted()} ${wrapper.quoted()}`);
+
+  // A subclass inherits the blocks of its class.
+  const dog = new Dog();
+  const animal: Animal = dog;
+
+  println(`class ${animal.name()} ${describe(dog)} ${dog.name()} ${dog.legs}`);
+}

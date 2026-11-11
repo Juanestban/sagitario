@@ -1,0 +1,70 @@
+// C function pointers and `unsafe fn` (docs/adr/0078-ffi-without-c-shims.md, increment 1).
+use std::ffi::c_int;
+
+extern "C" {
+  fn abs(value: c_int) -> c_int;
+}
+
+extern "C" fn twice(x: i32) -> i32 {
+  x * 2
+}
+
+unsafe fn halve(x: i32) -> i32 {
+  x / 2
+}
+
+extern "C" fn takes_closure(f: fn(i32) -> i32) -> i32 { //~ ERROR E0322
+  f(1)
+}
+
+interface Shape {
+  fn area(self) -> i32;
+}
+
+struct Square impl Shape {
+  pub side: i32;
+
+  pub unsafe fn area(self) -> i32 { //~ ERROR E0329
+    self.side * self.side
+  }
+}
+
+class Base {
+  pub fn new(self) {}
+
+  pub fn run(self) -> i32 {
+    1
+  }
+
+  pub unsafe fn risky(self) -> i32 {
+    2
+  }
+}
+
+class Derived extends Base {
+  pub fn new(self) {
+    zod.new();
+  }
+
+  pub override unsafe fn run(self) -> i32 { //~ ERROR E0327
+    3
+  }
+
+  pub override fn risky(self) -> i32 { //~ ERROR E0327
+    4
+  }
+}
+
+fn main() {
+  const _a = halve(4); //~ ERROR E0323
+  const f: unsafe extern "C" fn(c_int) -> c_int = abs;
+  const _b = f(-1); //~ ERROR E0323
+  const _c = 16usize as extern "C" fn(i32) -> i32; //~ ERROR E0323
+  const _d = unsafe { twice as extern "C" fn(i64) -> i64 };
+  const _e = twice as extern "C" fn(i32); //~ ERROR E0323
+  const _same = twice == twice; //~ ERROR E0310
+  const _g: fn(i32) -> i32 = halve; //~ ERROR E0314
+  const _h: extern "C" fn(c_int) -> c_int = abs; //~ ERROR E0300
+  const _i = 1.5 as extern "C" fn(i32) -> i32; //~ ERROR E0305
+  const _j = `${twice}`; //~ ERROR E0306
+}

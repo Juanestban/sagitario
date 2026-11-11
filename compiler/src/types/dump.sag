@@ -374,11 +374,24 @@ pub fn ty(value: Type) -> String {
 
       "fn(" + parts.join(", ") + ")" + result
     }
+    TypeKind::CFn { is_unsafe, params, ret } => {
+      const parts: List<String> = new List();
+
+      for param in params {
+        parts.push(ty(param));
+      }
+
+      const result = if types::is_unit(ret) { "" } else { " -> " + ty(ret) };
+
+      (if is_unsafe { "unsafe " } else { "" }) + "extern \"C\" fn(" + parts.join(", ") + ")" + result
+    }
     TypeKind::Array { elem, len } => "[" + ty(elem) + `; ${len}]`,
     TypeKind::List(elem) => "List<" + ty(elem) + ">",
     TypeKind::Option(inner) => "Option<" + ty(inner) + ">",
     TypeKind::Result { value: ok, error } => "Result<" + ty(ok) + ", " + ty(error) + ">",
     TypeKind::Ptr { mutable, pointee } => (if mutable { "*mut " } else { "*const " }) + ty(pointee),
+    TypeKind::Ref { mutable, pointee } => (if mutable { "&mut " } else { "&" }) + ty(pointee),
+    TypeKind::Slice { mutable, elem } => (if mutable { "&mut [" } else { "&[" }) + ty(elem) + "]",
     _ => types::text(value),
   }
 }

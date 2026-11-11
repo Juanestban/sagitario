@@ -69,6 +69,9 @@ button.on_click(counter);
 - `var` fields of a captured class instance may be modified: that changes the shared object,
   not the capture.
 - `self` is captured like any other binding.
+- A reference parameter cannot be captured, since the closure can outlive the call that lent it
+  (`E0339`, [references](03-memory.md#references)); a lambda may take references as parameters,
+  `(v: &Vec2) => v.x`.
 
 ```sag
 var total = 0;

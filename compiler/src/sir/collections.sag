@@ -2,7 +2,7 @@
 //! (docs/spec/02-types.md#arrays-and-lists, docs/spec/08-closures.md#iterators, ADR-0034). The
 //! port of `sagitario_sir::collections`.
 
-use pkg::ast::{BinaryOp, Block, Expr, ExprKind};
+use pkg::ast::{BinaryOp, Block, Expr, ExprKind, UnaryOp};
 use pkg::resolve::{ParamOwner, Res, TypeItem};
 use pkg::sir::{Callee, Lowering, Operand, Place, Projection, Rvalue, Stmt, bool_operand, int_operand, local_place, project, unit_operand};
 use pkg::sir::matching;
@@ -400,6 +400,15 @@ fn same_option(id: u32, found: Option<u32>) -> bool {
 /// Whether `function` is a method of the prelude's `Eq`, `Ord` or `Hash`, called on an integer,
 /// `bool`, `char` or `String`.
 pub fn is_primitive_method(lw: Lowering, function: u32, receiver_ty: Type) -> bool {
+  const numeric = match receiver_ty.kind {
+    TypeKind::Int(_) | TypeKind::Float(_) | TypeKind::String => true,
+    _ => false,
+  };
+
+  if numeric && operator_of(lw, function).is_some() {
+    return true;
+  }
+
   if !is_primitive(receiver_ty) {
     return false;
   }
@@ -410,10 +419,60 @@ pub fn is_primitive_method(lw: Lowering, function: u32, receiver_ty: Type) -> bo
   }
 }
 
-/// `equals`, `compare` or `hash` on an integer, `bool`, `char` or `String`.
+/// The operator whose interface declares `function`: `Neg` as `None` inside, and the others as
+/// their binary operator (docs/adr/0081-operator-overloading.md).
+fn operator_of(lw: Lowering, function: u32) -> Option<Option<BinaryOp>> {
+  const id = match lw.resolution.owner(function) {
+    Some(TypeItem::Interface(found)) => found,
+    _ => return None,
+  };
+  const prelude = lw.typed.prelude;
+
+  if same_option(id, prelude.add) {
+    Some(Some(BinaryOp::Add))
+  } else if same_option(id, prelude.sub) {
+    Some(Some(BinaryOp::Sub))
+  } else if same_option(id, prelude.mul) {
+    Some(Some(BinaryOp::Mul))
+  } else if same_option(id, prelude.div) {
+    Some(Some(BinaryOp::Div))
+  } else if same_option(id, prelude.rem) {
+    Some(Some(BinaryOp::Rem))
+  } else if same_option(id, prelude.neg) {
+    Some(None)
+  } else {
+    None
+  }
+}
+
+/// An operator's method on a number or a `String`, reached through a type parameter: the
+/// operator itself, with its checks (`lhs` is the receiver's value).
+pub fn primitive_operator(lw: Lowering, function: u32, receiver_ty: Type, lhs: Operand, args: List<Expr>) -> Result<Operand, String> {
+  match operator_of(lw, function) {
+    Some(Some(op)) => {
+      if args.len() != 1 {
+        return Err("binary operator without one argument");
+      }
+
+      const rhs = lw.operand_as(args[0], receiver_ty)?;
+
+      Ok(pkg::sir::strings::binary(lw, op, receiver_ty, lhs, rhs))
+    }
+    Some(None) => Ok(lw.new_value(receiver_ty, Rvalue::Unary { op: UnaryOp::Neg, ty: receiver_ty, operand: lhs })),
+    None => Err("primitive operator of another interface"),
+  }
+}
+
+/// `equals`, `compare` or `hash` on an integer, `bool`, `char` or `String`, or an operator on a
+/// number or a `String`.
 pub fn primitive_method(lw: Lowering, function: u32, ty: Type, receiver: Expr, args: List<Expr>) -> Result<Operand, String> {
   const receiver_ty = lw.type_of(receiver)?;
   const lhs = lw.expr(receiver)?;
+
+  if operator_of(lw, function).is_some() {
+    return primitive_operator(lw, function, receiver_ty, lhs, args);
+  }
+
   const interface_id = match lw.resolution.owner(function) {
     Some(TypeItem::Interface(id)) => Some(id),
     _ => None,
@@ -477,6 +536,12 @@ pub fn for_collection(lw: Lowering, variable: u32, iter: Expr, body: Block) -> R
     return Ok(true);
   }
 
+  if let TypeKind::Slice { elem, .. } = iter_ty.kind {
+    for_slice(lw, variable, iter, iter_ty, elem, body)?;
+
+    return Ok(true);
+  }
+
   var source = unit_operand();
 
   match lw.typed.map_args(iter_ty) {
@@ -509,6 +574,39 @@ pub fn for_collection(lw: Lowering, variable: u32, iter: Expr, body: Block) -> R
   for_iter(lw, variable, source, body)?;
 
   Ok(true)
+}
+
+/// The loop over a slice, whose length cannot change: `var` owns a copy of each element.
+fn for_slice(lw: Lowering, variable: u32, iter: Expr, slice_ty: Type, elem: Type, body: Block) -> Result<(), String> {
+  const value = lw.expr(iter)?;
+  const slice_local = lw.temp(slice_ty);
+
+  // The slice, and a list it views, stay alive during the loop.
+  lw.store(slice_local, value);
+  lw.pending.push(slice_local);
+
+  const index = lw.temp(usize_type());
+
+  lw.emit(Stmt::Assign { dest: index, value: Rvalue::Use(usize_const(0)) });
+
+  const slice = Operand::Local(slice_local);
+  const mark = lw.open_loop(None);
+  const len = lw.call(Callee::Runtime { function: "sag_slice_len", located: false }, List::from([slice]), usize_type());
+  const more = binary_value(lw, bool_type(), BinaryOp::Lt, usize_type(), Operand::Local(index), len);
+
+  lw.emit(Stmt::If { cond: more, then_body: new List(), else_body: List::from([Stmt::Break]) });
+
+  const place = project(local_place(slice_local, slice_ty), Projection::SliceElem { index: Operand::Local(index), elem: elem }, elem);
+
+  lw.store(variable, Operand::Place(place));
+  lw.emit(Stmt::Assign { dest: index, value: Rvalue::Binary { op: BinaryOp::Add, ty: usize_type(), lhs: Operand::Local(index), rhs: usize_const(1) } });
+  loop_var_body(lw, variable, body)?;
+
+  const loop_body = lw.close_loop(mark);
+
+  lw.emit(Stmt::Loop(loop_body));
+
+  Ok(())
 }
 
 /// The loop over a list: the length is read at every step, and `var` owns a copy of each element.

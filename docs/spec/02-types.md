@@ -75,7 +75,9 @@ Division by zero, out-of-bounds indexing and every other panic behave the same i
 
 ## Methods of numbers (G1)
 
-Rationale: [ADR-0076](../adr/0076-std-math-and-methods-of-numbers.md). Besides `equals`,
+Rationale: [ADR-0076](../adr/0076-std-math-and-methods-of-numbers.md),
+[ADR-0077](../adr/0077-std-math-powers-and-logarithms.md),
+[ADR-0080](../adr/0080-std-math-trigonometry.md). Besides `equals`,
 `compare` and `hash` (integers) and `total_compare` (floats), numbers have these methods; their
 arguments have the type of the receiver, unless written otherwise.
 
@@ -92,10 +94,25 @@ arguments have the type of the receiver, unless written otherwise.
 | `round()` | | yes | the nearest integer, halves away from zero (`2.5` → `3`, `-2.5` → `-3`) |
 | `fract()` | | yes | `x - x.trunc()` |
 | `is_nan()`, `is_infinite()`, `is_finite()` | | yes | `bool` |
+| `sqrt()`, `cbrt()` | | yes | the square root (NaN for a negative number, `-0.0` for `-0.0`), the cube root |
+| `powi(n: i32)`, `powf(y)` | | yes | `x` to the power `n` or `y`; `1.0` for a zero exponent, also for NaN; NaN for a negative `x` and a fractional `y` |
+| `exp()`, `exp2()` | | yes | e or 2 to the power `x` |
+| `ln()`, `log2()`, `log10()`, `log(base)` | | yes | the logarithm (NaN for a negative number, negative infinity for zero); `log(base)` is `ln(x) / ln(base)` |
+| `hypot(y)` | | yes | √(x² + y²), without overflowing in between |
+| `mul_add(a, b)` | | yes | `x * a + b`, rounded once |
+| `sin()`, `cos()`, `tan()` | | yes | in radians; NaN for an infinity |
+| `asin()`, `acos()`, `atan()` | | yes | the inverse, in `[-Ï€/2, Ï€/2]`, `[0, Ï€]` and `[-Ï€/2, Ï€/2]`; NaN outside `[-1, 1]` for `asin` and `acos` |
+| `atan2(x)` | | yes | the angle of the point `(x, y)` with `y` the receiver, in `[-Ï€, Ï€]`, following the signs of zeros (`0.0.atan2(-0.0)` is Ï€) |
+| `sinh()`, `cosh()`, `tanh()` | | yes | the hyperbolic functions |
+| `to_degrees()`, `to_radians()` | | yes | the angle in degrees or in radians |
 
 - `abs()` and `pow()` overflow as arithmetic does: a panic in debug builds, wrapping in release
   builds (the `abs()` of the smallest value of a type is itself). On unsigned integers `abs()`
   and `signum()` do not exist.
+- `sqrt` and `mul_add` are exact to the last bit. The other functions of floats from `cbrt` on
+  are those of the system's C library, whose results may differ between systems in the last
+  digit; `powi` computes in `f64`. `math::PI.sin()` is not exactly zero, since `PI` is not exactly
+  Ï€. `to_degrees` and `to_radians` multiply by `180 / Ï€` or `Ï€ / 180`.
 - Methods of a literal need no parentheses unless it is negative: `2.5.floor()`, `(-2.5).abs()`
   (`-2.5.abs()` is `-(2.5.abs())`).
 - [`std::math`](11-standard-library.md#stdmath) has the constants (`math::PI`) and the methods of
@@ -105,8 +122,9 @@ arguments have the type of the receiver, unless written otherwise.
 
 - Always valid UTF-8 and **immutable**.
 - Managed by ARC: copying a `String` value only increments its reference count.
-- `+` and template strings create a new `String`. `StringBuilder` builds strings efficiently.
-- Template strings interpolate any expression with `${expr}`:
+- `+` and format strings create a new `String`. `StringBuilder` builds strings efficiently.
+- Format strings interpolate any expression with `{expr}`: `f"total = {a + b * 2}"`
+  ([lexical rules](01-lexical.md#other-literals-f1)); deprecated template strings do the same with
   `` `total = ${a + b * 2}` ``. Interpolable types and their format:
 
   | Type | Format |
@@ -166,12 +184,18 @@ const text = builder.to_string();
 
 - `==` is defined between primitives, between `String`s, and between data-less enum values.
 - Between class instances, `==` is **identity** (same instance).
-- Structs, enums with data and classes compare by value through the prelude interfaces `Eq`
-  and `Ord` (F2, [interfaces](05-interfaces-generics.md#equality-order-and-hashing-f2)), which
-  integers, `bool`, `char` and `String` also implement: `a.equals(b)`, `a.compare(b)`.
+- Structs and enums compare by value through the prelude interfaces `Eq` and `Ord`
+  (F2, [interfaces](05-interfaces-generics.md#equality-order-and-hashing-f2)), which integers,
+  `bool`, `char` and `String` also implement: on a type implementing `Eq`, `a == b` calls
+  `a.equals(b)` and `a != b` negates it; on one implementing `Ord`, `<`, `<=`, `>` and `>=`
+  compare by `a.compare(b)` ([ADR-0081](../adr/0081-operator-overloading.md), Q514). A data-less
+  enum implementing `Eq` uses its `equals` too. Classes call `a.equals(b)`, since their `==` stays
+  identity.
 - Arrays, lists, maps, iterators, interface values and function values cannot be compared with
   `==`.
-- Operator overloading is **post-MVP** (planned through interfaces such as `Add`, `Eq`, `Ord`).
+- [Arithmetic operators](05-interfaces-generics.md#operators) (`+`, `-`, `*`, `/`, `%`, unary
+  `-`) apply to other types through the prelude interfaces `Add`, `Sub`, `Mul`, `Div`, `Rem` and
+  `Neg` ([ADR-0081](../adr/0081-operator-overloading.md)).
 
 ## Enums (F1)
 
@@ -210,8 +234,9 @@ enum Shape impl Display {
 - `enum Name impl I1, I2` implements interfaces (F2). Generic enums arrive with generics (F2).
 - Enums are value types; their mutability comes from the binding, as for structs. Copying an
   enum retains the `String`s it holds. An enum cannot contain itself by value.
-- Only enums whose variants carry no data support `==` and `!=`. Enums cannot be converted with
-  `as` or interpolated.
+- Only enums whose variants carry no data support `==` and `!=`. Enums cannot be interpolated,
+  and only those with an integer representation (`@repr(i32)`, for C) are converted with `as`,
+  to integers ([FFI](10-ffi.md#enums-with-an-integer-representation)).
 - Values are inspected with an exhaustive `match` (see [control flow](06-control-flow.md#match)).
 
 ## Arrays and lists
@@ -267,11 +292,62 @@ Rationale: [ADR-0034](../adr/0034-collections-and-iterators.md).
   | `sort()` | `()`: stable, ascending; needs `T: Ord` |
   | `sort_by(f)` | `()`: stable, by `f: fn(T, T) -> Ordering` |
   | `join(sep)` | `String`; only on `List<String>` |
+  | `resize(n, value)` | `()`: removes the elements past `n`, or adds copies of `value` up to `n` (Rust's `Vec::resize`) |
+  | `as_ptr()`, `as_mut_ptr()` | `*const T`, `*mut T` to the first element, for C ([FFI](10-ffi.md#raw-pointers)) |
   | `iter()` and the methods of `Iter<T>` | see [iterators](08-closures.md#iterators) |
 
 - `for x in list` visits the elements by position and reads the length at every step:
   elements added or removed by the body are seen, and the loop never reads out of bounds.
 - Lists are not compared with `==` and cannot be interpolated.
+
+### Slices
+
+A slice `&[T]` or `&mut [T]` ([ADR-0079](../adr/0079-references-and-borrowing.md), increment 2) is a
+view of a run of elements of an array, a list or another slice, without copying them. Like a
+[reference](03-memory.md#references), it is only the type of a parameter (`[T]` alone is an error,
+`E0339`), and it is passed to one, never stored or returned.
+
+```sag
+fn sum(values: &[i32]) -> i32 {
+  var total = 0;
+  for value in values { total += value; }
+  total
+}
+
+fn double(values: &mut [i32]) {
+  for i in 0..values.len() { values[i] *= 2; }
+}
+
+const list = List::from([1, 2, 3, 4]);
+sum(&list);           // the whole list
+sum(&list[1..3]);     // a range: elements 1 and 2
+double(&mut list);
+```
+
+- **Making one.** Where a slice is expected, `&array`, `&list` and `&slice` lend all the elements,
+  and `&items[a..b]` or `&items[a..=b]` a range of them (`&mut` too). `&[1, 2, 3]` lends a
+  temporary array. Inside a function, `slice[a..b]` is a part of a slice parameter, passed on as a
+  slice of the same kind. A range of an array or a list without `&` is an error (`E0310`). A
+  range out of bounds panics with Rust's messages (`range end index 5 out of range for slice of
+  length 3`, `slice index starts at 3 but ends at 2`).
+- **What it allows.** `len()`, `is_empty()`, `s[i]` checked as for arrays (`index out of
+  bounds`), `for value in s`, `iter()` (an `Iter<T>` over a copy of the elements, which may
+  outlive the call), `as_ptr()` and, through a `&mut [T]`, `as_mut_ptr()` for C. Through a
+  `&mut [T]`, `s[i] = value`, `s[i].field = value`, methods that modify `self` on `s[i]`, and
+  `&mut s[i]` change the viewed elements; through a `&[T]` they are errors (`E0312`, `E0313`).
+- **Mutability.** `&mut array` needs an array that can be modified (a `var` binding, a `&mut`
+  parameter, a `var` field). A list is a reference, so `&mut list` works through any binding, as
+  `list[i] = value` does. `&mut slice` needs a `&mut [T]` slice.
+- **Borrowed lists** (Q495). A list lent as a slice keeps a count of its slices: while one is
+  lent, `push`, `insert`, `pop`, `remove`, `clear`, `resize` and any other change of its length
+  panic (`cannot change the length of a list while it is borrowed`), as Rust's `RefCell` does,
+  since another reference to the list could otherwise move the elements the slice views.
+  Changing elements in place stays allowed. The slice also keeps the list alive until the call
+  returns.
+- The borrow checker treats a slice as a reference ([exclusivity](03-memory.md#references)): two
+  ranges of the same array or list binding are never known to be disjoint, so
+  `f(&mut a[0..2], &a[2..4])` is an error (`E0341`).
+- In C, a slice is a pointer, a length and the list it views, if any (`sag_slice`).
 
 ### Maps (F2)
 

@@ -9,6 +9,7 @@ use pkg::lsp::json::{Json, member};
 use pkg::lsp::query;
 use pkg::resolve::{ItemRef, ModuleInfo, Resolution, StdItem, TypeItem};
 use pkg::types;
+use pkg::types::numbers;
 use pkg::types::{Type, TypeKind};
 use pkg::types::typed::TypedModule;
 
@@ -33,12 +34,14 @@ const BUILTINS: String = "print println eprintln panic include_str";
 /// The types the language provides (docs/spec/02-types.md).
 const BUILTIN_TYPES: String = "i8 i16 i32 i64 isize u8 u16 u32 u64 usize f32 f64 bool char String StringBuilder List Option Result";
 
-const STD_MODULES: String = "env ffi fs io path process sync thread time";
+const STD_MODULES: String = "env ffi fs io math mem path process sync task thread time";
 
 /// The methods of the types the compiler provides (docs/spec/02-types.md).
 const STRING_METHODS: String = "len is_empty contains starts_with ends_with find trim trim_start trim_end to_ascii_uppercase to_ascii_lowercase replace repeat substring chars bytes split lines parse_i8 parse_i16 parse_i32 parse_i64 parse_isize parse_u8 parse_u16 parse_u32 parse_u64 parse_usize parse_f32 parse_f64";
-const LIST_METHODS: String = "len is_empty push pop get first last insert remove clear reverse contains index_of sort sort_by join iter";
-const ARRAY_METHODS: String = "len iter map filter take skip step_by collect count fold for_each any all find";
+const LIST_METHODS: String = "len is_empty push pop get first last insert remove clear reverse contains index_of sort sort_by join iter resize as_ptr as_mut_ptr";
+const ARRAY_METHODS: String = "len iter map filter take skip step_by collect count fold for_each any all find as_ptr as_mut_ptr";
+const SLICE_METHODS: String = "len is_empty iter as_ptr as_mut_ptr";
+const POINTER_METHODS: String = "is_null add";
 const OPTION_METHODS: String = "is_some is_none unwrap expect unwrap_or map and_then unwrap_or_else filter";
 const RESULT_METHODS: String = "is_ok is_err unwrap expect unwrap_or unwrap_err map map_err and_then unwrap_or_else";
 const BUILDER_METHODS: String = "append append_char len is_empty clear to_string";
@@ -447,6 +450,17 @@ fn functions_of(resolution: Resolution, item: TypeItem) -> List<u32> {
   }
 }
 
+/// The methods of the `impl ... for` blocks of a type (docs/adr/0081-operator-overloading.md).
+fn add_block_functions(found: List<u32>, resolution: Resolution, item: TypeItem) {
+  for block in resolution.type_blocks(item) {
+    if let Some(info) = resolution.blocks.get(block as usize) {
+      for function in info.functions {
+        found.push(function);
+      }
+    }
+  }
+}
+
 // ---- Members ----------------------------------------------------------------------------------
 
 /// The members after `receiver.`, where the `.` is at `dot` of the characters before the cursor.
@@ -486,7 +500,7 @@ fn receiver_type(analysis: Analysis, module: Option<Module>, chain: List<String>
   var ty = current?;
 
   for index in 1..chain.len() {
-    ty = member_type(analysis, ty, chain[index])?;
+    ty = member_type(analysis, referred(ty), chain[index])?;
   }
 
   Some(ty)
@@ -569,17 +583,23 @@ fn methods_of(typed: TypedModule, resolution: Resolution, ty: Type) -> List<u32>
       for function in functions_of(resolution, TypeItem::Struct(named.id)) {
         found.push(function);
       }
+
+      add_block_functions(found, resolution, TypeItem::Struct(named.id));
     }
     TypeKind::Enum(named) => {
       for function in functions_of(resolution, TypeItem::Enum(named.id)) {
         found.push(function);
       }
+
+      add_block_functions(found, resolution, TypeItem::Enum(named.id));
     }
     TypeKind::Class(named) => {
       for class_id in typed.class_chain(named.id) {
         for function in functions_of(resolution, TypeItem::Class(class_id)) {
           found.push(function);
         }
+
+        add_block_functions(found, resolution, TypeItem::Class(class_id));
       }
     }
     TypeKind::Interface(named) => {
@@ -600,8 +620,18 @@ fn is_class(ty: Type) -> bool {
   }
 }
 
+/// The type a reference refers to: its fields and methods are used through it
+/// (docs/spec/03-memory.md#references).
+fn referred(ty: Type) -> Type {
+  match ty.kind {
+    TypeKind::Ref { pointee, .. } => pointee,
+    _ => ty,
+  }
+}
+
 /// The fields and methods of a value of type `ty`.
-fn members(items: Items, analysis: Analysis, ty: Type) {
+fn members(items: Items, analysis: Analysis, reference: Type) {
+  const ty = referred(reference);
   const package = match analysis.package {
     Some(found) => found,
     None => return,
@@ -630,6 +660,10 @@ fn members(items: Items, analysis: Analysis, ty: Type) {
     }
   }
 
+  for found in numbers::methods_of(ty) {
+    items.add(found.name, METHOD, numbers::signature(found));
+  }
+
   const builtin = match ty.kind {
     TypeKind::String => STRING_METHODS,
     TypeKind::StringBuilder => BUILDER_METHODS,
@@ -638,6 +672,9 @@ fn members(items: Items, analysis: Analysis, ty: Type) {
     TypeKind::Option(_) => OPTION_METHODS,
     TypeKind::Result { .. } => RESULT_METHODS,
     TypeKind::Char => CHAR_METHODS,
+    TypeKind::Slice { .. } => SLICE_METHODS,
+    TypeKind::Ptr { .. } => POINTER_METHODS,
+    TypeKind::CString => "as_ptr",
     _ => "",
   };
 

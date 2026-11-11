@@ -84,7 +84,13 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0073](0073-spawn-blocking.md) | `task::spawn_blocking` | Accepted |
 | [0074](0074-async-methods-generics-and-values.md) | `async` methods, generic `async fn` and `async fn` as values | Accepted |
 | [0075](0075-f8-acceptance.md) | The acceptance of F8 | Accepted |
-| [0076](0076-std-math-and-methods-of-numbers.md) | `std::math` and the methods of numbers | Accepted |
+| [0076](0076-std-math-and-methods-of-numbers.md) | `std::math` and the methods of numbers | Accepted (refined by 0077, 0080) |
+| [0077](0077-std-math-powers-and-logarithms.md) | Powers, roots and logarithms in `std::math` | Accepted |
+| [0078](0078-ffi-without-c-shims.md) | A complete FFI: C libraries without C shims | Accepted |
+| [0079](0079-references-and-borrowing.md) | References and borrowing in parameters | Accepted |
+| [0080](0080-std-math-trigonometry.md) | Trigonometry in `std::math` | Accepted |
+| [0081](0081-operator-overloading.md) | Operator overloading through interfaces | Accepted |
+| [0082](0082-format-strings.md) | Format strings `f"..."` | Accepted |
 
 ## Template
 

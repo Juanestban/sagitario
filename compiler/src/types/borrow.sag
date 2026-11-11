@@ -1,0 +1,907 @@
+//! References and borrowing (docs/spec/03-memory.md#references,
+//! docs/adr/0079-references-and-borrowing.md): the operators `&` and `&mut`, the use of a
+//! reference parameter through its fields and methods, and the borrow checker, a pass over each
+//! function once its types are known.
+
+use pkg::ast::{Block, Expr, ExprKind, FnDecl, Ident, Stmt, TemplatePart, TypeExprKind, UnaryOp};
+use pkg::diagnostics::Diagnostic;
+use pkg::diagnostics::codes;
+use pkg::resolve::Res;
+use pkg::span::Span;
+use pkg::types::{Checker, IntTy, Receiver, Type, TypeKind};
+use pkg::types;
+use pkg::types::collections;
+use pkg::types::typed::BuiltinMethod;
+use pkg::types::classes;
+use pkg::types::classes::PlaceUse;
+use pkg::types::closures;
+use pkg::types::exprs;
+use pkg::types::ffi;
+use pkg::types::generic;
+
+/// The type of an expression used as the base of a field, an element or a method call. A
+/// reference parameter there is the value it refers to, which the expression gets as its type,
+/// as in Rust (`v.x`, `v.length()`).
+pub fn deref_base(cx: Checker, base: Expr) -> Type {
+  const ty = exprs::expr(cx, base, None);
+
+  match ty.kind {
+    TypeKind::Ref { pointee, .. } => {
+      cx.typed.expr_types.insert(base.id, pointee);
+
+      pointee
+    }
+    _ => ty,
+  }
+}
+
+/// A reference parameter named by a path, checked where it is used: a lambda cannot capture it
+/// (Q493), since the lambda may outlive the call.
+pub fn check_reference_use(cx: Checker, value: Expr, local: u32, ty: Type) {
+  if types::is_borrowed(ty) {
+    if closures::is_captured(cx, local) {
+      const name = local_name(cx, local);
+
+      cx.diagnostics.push(
+        Diagnostic::error(codes::INVALID_REFERENCE, value.span, "a lambda cannot capture the reference `" + name + "`")
+          .with_note("lambdas capture copies of values and can outlive the call that lent the reference")
+          .with_help("copy the value it refers to outside the lambda: `const copy = *" + name + ";`"),
+      );
+    }
+  }
+}
+
+/// An `async fn` or `async` method cannot take references: its body runs after the call returns
+/// (Q493).
+pub fn check_async_params(cx: Checker, decl: FnDecl) {
+  for param in decl.params {
+    if let TypeExprKind::Ref { .. } = param.ty.kind {
+      cx.diagnostics.push(
+        Diagnostic::error(codes::INVALID_REFERENCE, param.ty.span, "an `async fn` cannot take a reference")
+          .with_note("its body runs after the call that lent the reference returns")
+          .with_help("take the value itself"),
+      );
+    }
+  }
+}
+
+/// What a borrowed expression is.
+enum Lent {
+  /// A binding, a field or element of one, or `*pointer`.
+  Place,
+  /// A field of a class instance, which is kept alive while it is lent.
+  ClassField(String),
+  /// An element of a list, which moves when the list grows.
+  ListElement,
+  /// A value that is not stored anywhere: it lives until the call returns.
+  Temporary,
+}
+
+fn lent(cx: Checker, value: Expr) -> Lent {
+  match value.kind {
+    ExprKind::Path(_) => match cx.resolution.paths.get(value.id) {
+      Some(Res::Local(_)) => Lent::Place,
+      _ => Lent::Temporary,
+    },
+    ExprKind::Field { base, name } => match cx.typed.expr_types.get(base.id) {
+      Some(ty) => match ty.kind {
+        TypeKind::Class(_) => Lent::ClassField(name.name),
+        TypeKind::Struct(_) => match lent(cx, base) {
+          Lent::Temporary => Lent::Temporary,
+          other => other,
+        },
+        _ => Lent::Temporary,
+      },
+      None => Lent::Temporary,
+    },
+    ExprKind::Index { base, .. } => match cx.typed.expr_types.get(base.id) {
+      Some(ty) => match ty.kind {
+        // The elements of a slice do not move while it is lent.
+        TypeKind::Array { .. } | TypeKind::Slice { .. } => lent(cx, base),
+        TypeKind::List(_) => Lent::ListElement,
+        _ => Lent::Temporary,
+      },
+      None => Lent::Temporary,
+    },
+    ExprKind::Unary { op, .. } => if op == UnaryOp::Deref { Lent::Place } else { Lent::Temporary },
+    _ => Lent::Temporary,
+  }
+}
+
+/// `&value` or `&mut place` (Q489 and Q491): a reference for a parameter; where a slice is
+/// expected, a slice of an array, a list or a slice (Q494).
+pub fn borrow(cx: Checker, mutable: bool, operand: Expr, expected: Option<Type>) -> Type {
+  // `&items[a..b]`: a slice of a range.
+  if let ExprKind::Index { base, index } = operand.kind {
+    if let ExprKind::Range { start, end, .. } = index.kind {
+      return slice_range(cx, mutable, operand, base, start, end);
+    }
+  }
+
+  var wants_slice = false;
+  var hint: Option<Type> = None;
+
+  if let Some(found) = expected {
+    match found.kind {
+      TypeKind::Ref { pointee, .. } | TypeKind::Ptr { pointee, .. } => {
+        hint = Some(pointee);
+      }
+      TypeKind::Slice { elem, .. } => {
+        wants_slice = true;
+
+        // `&[1, 2, 3]` where a `&[i64]` is expected; an element type being inferred gives none.
+        if let ExprKind::ArrayLit(elems) = operand.kind {
+          if !generic::mentions_params(elem) {
+            hint = Some(types::of(TypeKind::Array { elem: elem, len: elems.len() as u64 }));
+          }
+        }
+      }
+      _ => {}
+    }
+  }
+
+  // A field of a union is lent without being read.
+  if let ExprKind::Field { base, .. } = operand.kind {
+    cx.union_write = Some(base.id);
+  }
+
+  // `&v` of a reference parameter lends what it refers to.
+  var ty = exprs::expr(cx, operand, hint);
+
+  if let TypeKind::Ref { pointee, .. } = ty.kind {
+    cx.typed.expr_types.insert(operand.id, pointee);
+    ty = pointee;
+  }
+
+  cx.union_write = None;
+
+  if types::is_error(ty) {
+    return types::error();
+  }
+
+  // A slice of a list keeps the list alive and its length fixed, wherever the list is.
+  if wants_slice {
+    match ty.kind {
+      TypeKind::List(elem) => return types::of(TypeKind::Slice { mutable: mutable, elem: elem }),
+      TypeKind::Slice { mutable: lent_mutable, elem } => {
+        if mutable && !lent_mutable {
+          immutable_slice(cx, operand.span, elem);
+        }
+
+        return types::of(TypeKind::Slice { mutable: mutable, elem: elem });
+      }
+      _ => {}
+    }
+  }
+
+  const symbol = if mutable { "&mut" } else { "&" };
+
+  match lent(cx, operand) {
+    Lent::Place => {}
+    Lent::Temporary => {
+      if mutable {
+        cx.diagnostics.push(
+          Diagnostic::error(codes::INVALID_BORROW, operand.span, "`&mut` needs a place that can be modified")
+            .with_note("this value is not stored anywhere, so changes to it would be lost")
+            .with_help("store the value in a `var` binding first"),
+        );
+
+        return types::error();
+      }
+    }
+    Lent::ListElement => {
+      cx.diagnostics.push(
+        Diagnostic::error(codes::INVALID_BORROW, operand.span, "`" + symbol + "` cannot lend an element of a list")
+          .with_note("the elements of a list move when it grows, and other references to the list can make it grow")
+          .with_help("copy the element into a binding and lend that: `var item = list[i];`"),
+      );
+
+      return types::error();
+    }
+    Lent::ClassField(name) => {
+      if ffi::is_managed(cx, ty, new List()) {
+        cx.diagnostics.push(
+          Diagnostic::error(codes::INVALID_BORROW, operand.span, "`" + symbol + "` cannot lend the field `" + name + "` of a class instance, which holds reference-counted values")
+            .with_note("other references to the instance could replace the field while it is lent")
+            .with_help("copy the field into a binding and lend that: `var " + name + " = ...;`"),
+        );
+
+        return types::error();
+      }
+    }
+  }
+
+  if mutable {
+    classes::check_mutable_place(cx, operand, PlaceUse::Borrow);
+  }
+
+  if wants_slice {
+    if let TypeKind::Array { elem, .. } = ty.kind {
+      return types::of(TypeKind::Slice { mutable: mutable, elem: elem });
+    }
+  }
+
+  types::of(TypeKind::Ref { mutable: mutable, pointee: ty })
+}
+
+fn immutable_slice(cx: Checker, span: Span, elem: Type) {
+  cx.diagnostics.push(
+    Diagnostic::error(codes::IMMUTABLE_PLACE, span, "cannot lend a part of a `&[" + types::text(elem) + "]` slice with `&mut`")
+      .with_help("take a `&mut [" + types::text(elem) + "]` parameter, and lend it with `&mut`"),
+  );
+}
+
+fn expect_bounds(cx: Checker, start: Expr, end: Expr) {
+  exprs::expect(cx, start, types::int(IntTy::Usize));
+  exprs::expect(cx, end, types::int(IntTy::Usize));
+}
+
+/// `&items[a..b]` or `&mut items[a..b]`: a slice of a range of an array, a list or a slice.
+fn slice_range(cx: Checker, mutable: bool, operand: Expr, base: Expr, start: Expr, end: Expr) -> Type {
+  const base_ty = deref_base(cx, base);
+
+  expect_bounds(cx, start, end);
+
+  var elem = types::error();
+
+  match base_ty.kind {
+    TypeKind::Array { elem: found, .. } => {
+      elem = found;
+
+      match lent(cx, base) {
+        Lent::ListElement => {
+          cx.diagnostics.push(
+            Diagnostic::error(codes::INVALID_BORROW, base.span, "cannot lend a part of an array that is an element of a list")
+              .with_note("the elements of a list move when it grows")
+              .with_help("copy the array into a binding and lend that"),
+          );
+
+          return types::error();
+        }
+        Lent::ClassField(name) => {
+          if ffi::is_managed(cx, found, new List()) {
+            cx.diagnostics.push(
+              Diagnostic::error(codes::INVALID_BORROW, base.span, "cannot lend a part of the field `" + name + "` of a class instance, which holds reference-counted values")
+                .with_help("copy the field into a binding and lend that"),
+            );
+
+            return types::error();
+          }
+        }
+        Lent::Temporary => {
+          if mutable {
+            cx.diagnostics.push(Diagnostic::error(codes::INVALID_BORROW, base.span, "`&mut` needs a place that can be modified").with_help("store the value in a `var` binding first"));
+
+            return types::error();
+          }
+        }
+        Lent::Place => {}
+      }
+
+      if mutable {
+        classes::check_mutable_place(cx, base, PlaceUse::Borrow);
+      }
+    }
+    TypeKind::List(found) => {
+      elem = found;
+    }
+    TypeKind::Slice { mutable: lent_mutable, elem: found } => {
+      elem = found;
+
+      if mutable && !lent_mutable {
+        immutable_slice(cx, base.span, found);
+      }
+    }
+    TypeKind::Error | TypeKind::Never => return types::error(),
+    _ => {
+      cx.error(codes::INVALID_OPERAND, base.span, "cannot take a range of a value of type `" + types::text(base_ty) + "`; only arrays, lists and slices have ranges");
+
+      return types::error();
+    }
+  }
+
+  const ty = types::of(TypeKind::Slice { mutable: mutable, elem: elem });
+
+  cx.typed.expr_types.insert(operand.id, ty);
+
+  ty
+}
+
+/// `slice[a..b]`: a part of a slice parameter, passed on as a slice of the same kind. Arrays and
+/// lists are lent for that: `&items[a..b]`.
+pub fn range_index(cx: Checker, base: Expr, base_ty: Type, start: Expr, end: Expr) -> Type {
+  expect_bounds(cx, start, end);
+
+  match base_ty.kind {
+    TypeKind::Slice { .. } => base_ty,
+    TypeKind::Array { .. } | TypeKind::List(_) => {
+      cx.diagnostics.push(
+        Diagnostic::error(codes::INVALID_OPERAND, base.span, "a range of a `" + types::text(base_ty) + "` is a slice, which is lent with `&`")
+          .with_help("write `&items[a..b]`, or `&mut items[a..b]`, for a parameter `&[T]`"),
+      );
+
+      types::error()
+    }
+    TypeKind::Error | TypeKind::Never => types::error(),
+    _ => {
+      cx.error(codes::INVALID_OPERAND, base.span, "cannot take a range of a value of type `" + types::text(base_ty) + "`; only arrays, lists and slices have ranges");
+
+      types::error()
+    }
+  }
+}
+
+/// The methods of slices (Q494).
+pub fn slice_method(cx: Checker, value: Expr, receiver_ty: Type, method: Ident, args: List<Expr>) -> Type {
+  const mutable = match receiver_ty.kind {
+    TypeKind::Slice { mutable, .. } => mutable,
+    _ => false,
+  };
+  const elem = match receiver_ty.kind {
+    TypeKind::Slice { elem, .. } => elem,
+    _ => types::error(),
+  };
+  const name = method.name;
+
+  if name == "iter" {
+    return collections::prelude_method(cx, value, "slice_iter", List::from([elem]), args);
+  }
+
+  var function = "";
+  var ret = types::error();
+
+  if name == "len" {
+    function = "sag_slice_len";
+    ret = types::int(IntTy::Usize);
+  } else if name == "is_empty" {
+    function = "sag_slice_is_empty";
+    ret = types::of(TypeKind::Bool);
+  } else if name == "as_ptr" || name == "as_mut_ptr" {
+    function = "SAG_SLICE_PTR";
+    ret = types::of(TypeKind::Ptr { mutable: name == "as_mut_ptr", pointee: elem });
+
+    if name == "as_mut_ptr" && !mutable {
+      cx.diagnostics.push(
+        Diagnostic::error(codes::IMMUTABLE_RECEIVER, method.span, "cannot call `as_mut_ptr` on a `&[" + types::text(elem) + "]` slice")
+          .with_help("take a `&mut [" + types::text(elem) + "]` parameter, and lend it with `&mut`"),
+      );
+    }
+
+    if ffi::is_managed(cx, elem, new List()) {
+      cx.diagnostics.push(
+        Diagnostic::error(codes::NOT_FFI_SAFE, method.span, "a pointer cannot point to `" + types::text(elem) + "`, which holds reference-counted values"),
+      );
+    }
+  } else {
+    cx.diagnostics.push(
+      Diagnostic::error(codes::UNKNOWN_MEMBER, method.span, "no method `" + name + "` on type `" + types::text(receiver_ty) + "`")
+        .with_note("the methods of slices are `len`, `is_empty`, `iter`, `as_ptr` and `as_mut_ptr`"),
+    );
+    exprs::unchecked_args(cx, args);
+
+    return types::error();
+  }
+
+  exprs::check_args(cx, value.span, "method", new List(), args);
+  cx.typed.builtin_methods.insert(value.id, BuiltinMethod::Runtime { function: function, located: false });
+
+  ret
+}
+
+fn local_name(cx: Checker, local: u32) -> String {
+  match cx.resolution.function_locals(cx.function).get(local as usize) {
+    Some(info) => info.name,
+    None => "",
+  }
+}
+
+/// How an argument reaches a place in a call.
+enum Mode {
+  /// Read, or passed by value.
+  Read,
+  /// Lent with `&`.
+  Shared,
+  /// Lent with `&mut`.
+  Exclusive,
+}
+
+/// A step from a binding to a place inside it.
+enum Step {
+  Field(String),
+  /// Any element of an array: two are never known to differ.
+  Element,
+}
+
+/// A place an argument of a call reaches.
+struct Access {
+  pub root: u32;
+  pub steps: List<Step>;
+  pub mode: Mode;
+  pub span: Span;
+  /// The method that modifies this receiver, if it is one.
+  pub method: Option<String>;
+}
+
+/// The borrow checker of one function (Q492): checks where references are used and that a place
+/// lent with `&mut` is not reached by another argument of the same call.
+pub fn check_function(cx: Checker, id: u32, decl: FnDecl) {
+  if decl.is_abstract {
+    return;
+  }
+
+  cx.function = id;
+
+  const walker = new Walker(cx);
+
+  walker.block(decl.body);
+}
+
+class Walker {
+  prv const cx: Checker;
+
+  pub fn new(self, cx: Checker) {
+    self.cx = cx;
+  }
+
+  prv fn type_of(self, value: Expr) -> Option<Type> {
+    self.cx.typed.expr_types.get(value.id)
+  }
+
+  prv fn is_reference(self, value: Expr) -> bool {
+    match self.type_of(value) {
+      Some(ty) => types::is_borrowed(ty),
+      None => false,
+    }
+  }
+
+  /// Whether an expression gives a reference of its own: `&value`, a reference parameter, or a
+  /// part of a slice (`slice[a..b]`). Other expressions are references only through a type
+  /// argument inferred from one of those, which is reported there.
+  prv fn is_lender(self, value: Expr) -> bool {
+    match value.kind {
+      ExprKind::AddrOf { raw, .. } => !raw,
+      ExprKind::Path(_) => true,
+      ExprKind::Index { index, .. } => match index.kind {
+        ExprKind::Range { .. } => true,
+        _ => false,
+      },
+      _ => false,
+    }
+  }
+
+  pub fn block(self, body: Block) {
+    for statement in body.stmts {
+      match statement {
+        Stmt::Let(decl) => {
+          if let Some(init) = decl.init {
+            self.expr(init);
+          }
+        }
+        Stmt::Assign { target, value, .. } => {
+          self.expr(target);
+          self.expr(value);
+        }
+        Stmt::Expr(value) => self.expr(value),
+      }
+    }
+
+    if let Some(tail) = body.tail {
+      self.expr(tail);
+    }
+  }
+
+  prv fn exprs(self, values: List<Expr>) {
+    for value in values {
+      self.expr(value);
+    }
+  }
+
+  /// An expression that must not be a reference.
+  prv fn expr(self, value: Expr) {
+    if self.is_reference(value) && self.is_lender(value) {
+      self.misplaced(value);
+    }
+
+    self.inner(value);
+  }
+
+  /// An expression whose value is a reference where it is used: lent to a parameter of a
+  /// reference type or of a raw pointer type, or dereferenced.
+  prv fn lent(self, value: Expr, allowed: bool) {
+    if !allowed && self.is_reference(value) && self.is_lender(value) {
+      self.misplaced(value);
+    }
+
+    self.inner(value);
+  }
+
+  prv fn misplaced(self, value: Expr) {
+    var diagnostic = Diagnostic::error(codes::INVALID_REFERENCE, value.span, "a reference can only be passed to a parameter of a reference type");
+
+    match value.kind {
+      ExprKind::AddrOf { .. } => {
+        diagnostic = diagnostic
+          .with_note("references live while a call does: they cannot be stored, returned or passed as other values")
+          .with_help("pass `&value` straight to a parameter `&T`, or use the value itself");
+      }
+      _ => {
+        const name = match exprs::local(self.cx, value) {
+          Some(local) => local_name(self.cx, local),
+          None => "",
+        };
+        const shown = if name.is_empty() { "reference" } else { "`" + name + "`" };
+
+        diagnostic = diagnostic
+          .with_note("a reference parameter can be passed on, read with `*`, or used through its fields and methods")
+          .with_help("copy the value it refers to with `*" + (if name.is_empty() { "reference" } else { name }) + "` to use " + shown + " as a value");
+      }
+    }
+
+    self.cx.diagnostics.push(diagnostic);
+  }
+
+  prv fn inner(self, value: Expr) {
+    match value.kind {
+      ExprKind::Int { .. } | ExprKind::Float { .. } | ExprKind::Bool(_) | ExprKind::Char(_) | ExprKind::Str(_) | ExprKind::Unit | ExprKind::Path(_)
+        | ExprKind::Zod | ExprKind::Continue => {}
+      ExprKind::Template(parts) => {
+        for part in parts {
+          if let TemplatePart::Expr(inner) = part {
+            self.expr(inner);
+          }
+        }
+      }
+      ExprKind::Call { callee, args } => {
+        self.expr(callee);
+        self.call(value, None, self.call_params(callee), args);
+      }
+      // A slice is used through its elements and methods.
+      ExprKind::MethodCall { receiver, args, .. } => {
+        self.lent(receiver, true);
+        self.call(value, Some(receiver), self.method_params(value), args);
+      }
+      ExprKind::New { args, .. } => self.call(value, None, self.initializer_params(value), args),
+      ExprKind::Field { base, .. } => self.expr(base),
+      ExprKind::Index { base, index } => {
+        self.lent(base, true);
+        self.expr(index);
+      }
+      ExprKind::StructLit { fields, .. } => {
+        for field in fields {
+          self.expr(field.value);
+        }
+      }
+      ExprKind::ArrayLit(elems) => self.exprs(elems),
+      ExprKind::ArrayRepeat { value: repeated, .. } => self.expr(repeated),
+      ExprKind::Unary { op, operand } => self.lent(operand, op == UnaryOp::Deref),
+      ExprKind::Binary { lhs, rhs, .. } => {
+        self.expr(lhs);
+        self.expr(rhs);
+      }
+      // `reference as *const T`.
+      ExprKind::Cast { expr: inner, .. } => {
+        const to_pointer = match self.type_of(value) {
+          Some(ty) => match ty.kind {
+            TypeKind::Ptr { .. } => true,
+            _ => false,
+          },
+          None => false,
+        };
+
+        self.lent(inner, to_pointer);
+      }
+      // What `&` lends may be a slice already: `&slice`, `&items[a..b]`.
+      ExprKind::AddrOf { place, .. } => self.lent(place, true),
+      ExprKind::Range { start, end, .. } => {
+        self.expr(start);
+        self.expr(end);
+      }
+      ExprKind::Try(inner) | ExprKind::Await(inner) => self.expr(inner),
+      ExprKind::Lambda { body, .. } => self.expr(body),
+      ExprKind::Match { scrutinee, arms } => {
+        self.expr(scrutinee);
+
+        for arm in arms {
+          if let Some(guard) = arm.guard {
+            self.expr(guard);
+          }
+
+          self.expr(arm.body);
+        }
+      }
+      ExprKind::Block(body) | ExprKind::Unsafe(body) | ExprKind::Loop(body) => self.block(body),
+      ExprKind::If { cond, then_block, else_branch } => {
+        self.expr(cond);
+        self.block(then_block);
+
+        if let Some(other) = else_branch {
+          self.expr(other);
+        }
+      }
+      ExprKind::While { cond, body } => {
+        self.expr(cond);
+        self.block(body);
+      }
+      // A `for` loop reads the elements of a slice.
+      ExprKind::For { iter, body, .. } => {
+        self.lent(iter, true);
+        self.block(body);
+      }
+      ExprKind::Break(result) | ExprKind::Return(result) => {
+        if let Some(inner) = result {
+          self.expr(inner);
+        }
+      }
+    }
+  }
+
+  /// The parameter types of the function a call names, if known.
+  prv fn call_params(self, callee: Expr) -> Option<List<Type>> {
+    match self.cx.resolution.paths.get(callee.id) {
+      Some(Res::Fn(id)) => return Some(self.cx.typed.sig(id)?.params),
+      Some(Res::Extern(id)) => return Some(self.cx.typed.extern_sig(id)?.params),
+      Some(Res::Local(_)) | None => {}
+      _ => return None,
+    }
+
+    // A binding, field, call result or lambda of a function type.
+    const ty = self.type_of(callee)?;
+
+    match ty.kind {
+      TypeKind::Function { params, .. } | TypeKind::CFn { params, .. } => Some(params),
+      _ => None,
+    }
+  }
+
+  prv fn method_params(self, value: Expr) -> Option<List<Type>> {
+    const function = self.cx.typed.method_calls.get(value.id)?;
+
+    Some(self.cx.typed.sig(function)?.params)
+  }
+
+  prv fn initializer_params(self, value: Expr) -> Option<List<Type>> {
+    const ty = self.type_of(value)?;
+    const class_ref = match ty.kind {
+      TypeKind::Class(found) => found,
+      _ => return None,
+    };
+    const initializer = match self.cx.typed.class_def(class_ref.id)?.initializer {
+      Some(found) => found,
+      None => self.cx.typed.inherited_initializer(class_ref.id)?,
+    };
+
+    Some(self.cx.typed.sig(initializer)?.params)
+  }
+
+  /// The arguments of a call: a reference can be lent to a parameter of a reference or raw
+  /// pointer type; then no place lent with `&mut` may be reached by another argument.
+  prv fn call(self, value: Expr, receiver: Option<Expr>, params: Option<List<Type>>, args: List<Expr>) {
+    const accesses: List<Access> = new List();
+
+    if let Some(found) = receiver {
+      const mode = self.receiver_mode(value);
+      const exclusive = is_exclusive(mode);
+
+      if let Some(access) = self.access(found, mode) {
+        var method: Option<String> = None;
+
+        if exclusive {
+          if let ExprKind::MethodCall { method: name, .. } = value.kind {
+            method = Some(name.name);
+          }
+        }
+
+        accesses.push(Access { root: access.root, steps: access.steps, mode: access.mode, span: access.span, method: method });
+      }
+    }
+
+    for index in 0..args.len() {
+      const arg = args[index];
+      var param: Option<Type> = None;
+
+      if let Some(found) = params {
+        param = found.get(index);
+      }
+
+      const takes_reference = match param {
+        Some(ty) => match ty.kind {
+          TypeKind::Ref { .. } | TypeKind::Slice { .. } | TypeKind::Ptr { .. } => true,
+          _ => false,
+        },
+        None => false,
+      };
+
+      self.lent(arg, takes_reference);
+
+      if let Some(access) = self.argument_access(arg, param) {
+        accesses.push(access);
+      }
+    }
+
+    self.check_exclusive(accesses);
+  }
+
+  prv fn receiver_mode(self, value: Expr) -> Mode {
+    const function = match self.cx.typed.method_calls.get(value.id) {
+      Some(found) => found,
+      None => return Mode::Read,
+    };
+
+    match self.cx.typed.sig(function) {
+      Some(sig) => match sig.receiver {
+        Some(Receiver::Var) => Mode::Exclusive,
+        _ => Mode::Read,
+      },
+      None => Mode::Read,
+    }
+  }
+
+  prv fn argument_access(self, arg: Expr, param: Option<Type>) -> Option<Access> {
+    if let ExprKind::AddrOf { mutable, place, raw } = arg.kind {
+      if raw {
+        return None;
+      }
+
+      return self.access(place, if mutable { Mode::Exclusive } else { Mode::Shared });
+    }
+
+    // A reference parameter passed on lends its place again, as the parameter asks.
+    if self.is_reference(arg) {
+      const exclusive = match param {
+        Some(ty) => match ty.kind {
+          TypeKind::Ref { mutable, .. } | TypeKind::Slice { mutable, .. } | TypeKind::Ptr { mutable, .. } => mutable,
+          _ => false,
+        },
+        None => false,
+      };
+
+      return self.access(arg, if exclusive { Mode::Exclusive } else { Mode::Shared });
+    }
+
+    self.access(arg, Mode::Read)
+  }
+
+  /// The place `value` designates, if it is one the checker can follow: through bindings, fields
+  /// of structs, elements of arrays and reference parameters, not class instances (Q492).
+  prv fn access(self, value: Expr, mode: Mode) -> Option<Access> {
+    const steps: List<Step> = new List();
+    var current = value;
+
+    loop {
+      match current.kind {
+        ExprKind::Path(_) => {
+          const root = exprs::local(self.cx, current)?;
+          const ordered: List<Step> = new List();
+          var index = steps.len();
+
+          while index > 0 {
+            index -= 1;
+            ordered.push(steps[index]);
+          }
+
+          return Some(Access { root: root, steps: ordered, mode: mode, span: value.span, method: None });
+        }
+        ExprKind::Field { base, name } => {
+          match self.type_of(base)?.kind {
+            TypeKind::Struct(_) => {}
+            _ => return None,
+          }
+
+          steps.push(Step::Field(name.name));
+          current = base;
+        }
+        ExprKind::Index { base, .. } => {
+          // The elements of a list or slice binding, as those of an array, are not known to differ.
+          match self.type_of(base)?.kind {
+            TypeKind::Array { .. } | TypeKind::Slice { .. } | TypeKind::List(_) => {}
+            _ => return None,
+          }
+
+          steps.push(Step::Element);
+          current = base;
+        }
+        ExprKind::Unary { op, operand } => {
+          if op != UnaryOp::Deref {
+            return None;
+          }
+
+          match self.type_of(operand)?.kind {
+            TypeKind::Ref { .. } => {}
+            _ => return None,
+          }
+
+          current = operand;
+        }
+        _ => return None,
+      }
+    }
+  }
+
+  prv fn check_exclusive(self, accesses: List<Access>) {
+    for later in 0..accesses.len() {
+      for earlier in 0..later {
+        const a = accesses[earlier];
+        const b = accesses[later];
+        const a_exclusive = is_exclusive(a.mode);
+        const b_exclusive = is_exclusive(b.mode);
+
+        // The arguments of a method that modifies `self` are copied before the call, so they may be
+        // read from the receiver.
+        const copied = (a.method.is_some() && is_read(b.mode)) || (b.method.is_some() && is_read(a.mode));
+
+        if (a_exclusive || b_exclusive) && !copied && a.root == b.root && overlap(a.steps, b.steps) {
+          const lent = if a_exclusive { a } else { b };
+          const other = if a_exclusive { b } else { a };
+          const name = self.place_text(lent);
+          const how = match lent.method {
+            Some(method) => "modified by the method `" + method + "`",
+            None => "lent with `&mut`",
+          };
+
+          self.cx.diagnostics.push(
+            Diagnostic::error(codes::CONFLICTING_BORROW, other.span, "`" + name + "` is " + how + " and also used in the same call")
+              .with_label(lent.span, how + " here")
+              .with_note("while a call runs, a `&mut` reference must be the only way to reach its value")
+              .with_help("copy the value into a binding first, or make two calls"),
+          );
+
+          return;
+        }
+      }
+    }
+  }
+
+  prv fn place_text(self, access: Access) -> String {
+    var text = local_name(self.cx, access.root);
+
+    for step in access.steps {
+      match step {
+        Step::Field(name) => {
+          text = text + "." + name;
+        }
+        Step::Element => {
+          text = text + "[..]";
+        }
+      }
+    }
+
+    text
+  }
+}
+
+fn is_read(mode: Mode) -> bool {
+  match mode {
+    Mode::Read => true,
+    _ => false,
+  }
+}
+
+fn is_exclusive(mode: Mode) -> bool {
+  match mode {
+    Mode::Exclusive => true,
+    _ => false,
+  }
+}
+
+/// Whether two places may share memory: one contains the other, unless they part at different
+/// fields of a struct.
+fn overlap(a: List<Step>, b: List<Step>) -> bool {
+  var index = 0usize;
+
+  while index < a.len() && index < b.len() {
+    match a[index] {
+      Step::Field(first) => {
+        if let Step::Field(second) = b[index] {
+          if first != second {
+            return false;
+          }
+        }
+      }
+      Step::Element => {}
+    }
+
+    index += 1;
+  }
+
+  true
+}

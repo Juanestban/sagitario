@@ -1,0 +1,39 @@
+// Powers, roots and logarithms of `std::math` (docs/adr/0077-std-math-powers-and-logarithms.md),
+// as methods of `f64` and `f32` and as functions of `std::math`. Results that libraries may round
+// differently in the last digit are compared within a tolerance, so the output is the same on
+// every system.
+// expect-stdout: sqrt 3 1.4142135623730951 nan true -0
+// expect-stdout: cbrt true true
+// expect-stdout: powi 1024 0.125 1 -8
+// expect-stdout: powf true true nan true
+// expect-stdout: exp 1 true exp2 8 0.5
+// expect-stdout: ln 0 true -inf nan true
+// expect-stdout: log2 3 log10 true log true
+// expect-stdout: hypot true inf
+// expect-stdout: mul_add 7 true
+// expect-stdout: f32 1.5 true true true 9
+// expect-stdout: functions 3 true 8 true 3 true 7 true
+use std::math;
+use std::math::{E, INFINITY, NAN};
+
+/// Whether `a` and `b` agree up to a relative error of 1e-12.
+fn close(a: f64, b: f64) -> bool {
+  (a - b).abs() <= 1e-12 * b.abs().max(1.0)
+}
+
+fn main() {
+  println(`sqrt ${9.0.sqrt()} ${2.0.sqrt()} nan ${(-1.0).sqrt().is_nan()} ${(-0.0).sqrt()}`);
+  println(`cbrt ${close((-27.0).cbrt(), -3.0)} ${close(2.0.cbrt() * 2.0.cbrt() * 2.0.cbrt(), 2.0)}`);
+  println(`powi ${2.0.powi(10)} ${2.0.powi(-3)} ${NAN.powi(0)} ${(-2.0).powi(3)}`);
+  println(`powf ${close(2.0.powf(0.5), 2.0.sqrt())} ${close(10.0.powf(3.0), 1000.0)} nan ${(-8.0).powf(1.0 / 3.0).is_nan()}`);
+  println(`exp ${0.0.exp()} ${close(1.0.exp(), E)} exp2 ${3.0.exp2()} ${(-1.0).exp2()}`);
+  println(`ln ${1.0.ln()} ${close(E.ln(), 1.0)} ${0.0.ln()} nan ${(-1.0).ln().is_nan()}`);
+  println(`log2 ${8.0.log2()} log10 ${close(1000.0.log10(), 3.0)} log ${close(81.0.log(3.0), 4.0)}`);
+  println(`hypot ${close(3.0.hypot(4.0), 5.0)} ${INFINITY.hypot(NAN)}`);
+  println(`mul_add ${2.0.mul_add(3.0, 1.0)} ${0.1.mul_add(10.0, -1.0) != 0.1 * 10.0 - 1.0}`);
+
+  const quarter: f32 = 2.25;
+  println(`f32 ${quarter.sqrt()} ${(8.0f32.cbrt() - 2.0).abs() < 1e-6} ${(quarter.powf(0.5) - 1.5).abs() < 1e-6} ${(3.0f32.hypot(4.0) - 5.0).abs() < 1e-6} ${3.0f32.powi(2)}`);
+
+  println(`functions ${math::sqrt(9.0)} ${close(math::cbrt(8.0), 2.0)} ${math::powi(2.0, 3)} ${close(math::powf(4.0, 0.5), 2.0)} ${math::log2(8.0)} ${close(math::hypot(3.0, 4.0), 5.0)} ${math::mul_add(2.0, 3.0, 1.0)} ${close(math::log(100.0, 10.0), 2.0) && close(math::exp(math::ln(5.0)), 5.0) && close(math::exp2(0.5), 2.0.sqrt()) && close(math::log10(0.01), -2.0)}`);
+}

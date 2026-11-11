@@ -1,0 +1,106 @@
+// Addresses and buffers (docs/adr/0078-ffi-without-c-shims.md, increment 3): `&raw const` and
+// `&raw mut`, pointers to the elements of lists, `List::resize` and `fs::read`.
+// expect-stdout: 3 100 102 3
+// expect-stdout: 640 480
+// expect-stdout: 1 2 0 0
+// expect-stdout: 640 1
+// expect-stdout: 6 97 0 255 1
+// expect-stdout: cannot read "missing.bin": No such file or directory
+use std::ffi::{c_char, c_int, c_void, CString};
+use std::fs;
+use std::mem;
+
+extern "C" {
+  fn memcpy(dest: *mut c_void, src: *const c_void, count: usize) -> *mut c_void;
+  fn memset(dest: *mut c_void, value: c_int, count: usize) -> *mut c_void;
+  fn fopen(path: *const c_char, mode: *const c_char) -> *mut c_void;
+  fn fwrite(data: *const c_void, size: usize, count: usize, file: *mut c_void) -> usize;
+  fn fclose(file: *mut c_void) -> c_int;
+}
+
+@repr(C)
+struct Extent {
+  pub width: u32;
+  pub height: u32;
+}
+
+@repr(C)
+struct Info {
+  pub next: *const c_void;
+  pub extent: Extent;
+}
+
+/// Fills `count`, then the devices, as `vkEnumeratePhysicalDevices` does.
+extern "C" fn count_devices(count: *mut u32, devices: *mut u64) {
+  unsafe {
+    if devices.is_null() {
+      *count = 3;
+    } else {
+      for index in 0..(*count as usize) {
+        *devices.add(index) = 100 + index as u64;
+      }
+    }
+  }
+}
+
+/// Writes bytes that are not UTF-8 through C.
+fn write_blob(path: String, bytes: List<u8>) {
+  const c_path = CString::new(path).unwrap();
+  const mode = CString::new("wb").unwrap();
+
+  unsafe {
+    const file = fopen(c_path.as_ptr(), mode.as_ptr());
+
+    fwrite(bytes.as_ptr() as *const c_void, 1, bytes.len(), file);
+    fclose(file);
+  }
+}
+
+fn main() {
+  var count = 0u32;
+
+  count_devices(&raw mut count, 0 as *mut u64);
+
+  const devices: List<u64> = new List();
+
+  devices.resize(count as usize, 0);
+  count_devices(&raw mut count, devices.as_mut_ptr());
+
+  println(`${count} ${devices[0]} ${devices[2]} ${devices.len()}`);
+
+  var extent = Extent { width: 1, height: 2 };
+  const info = Info { next: 0 as *const c_void, extent: Extent { width: 640, height: 480 } };
+
+  unsafe {
+    memcpy(&raw mut extent as *mut c_void, &raw const info.extent as *const c_void, mem::size_of<Extent>());
+  }
+
+  println(`${extent.width} ${extent.height}`);
+
+  var numbers = [1, 2, 3, 4];
+
+  unsafe { memset(&raw mut numbers[2] as *mut c_void, 0, 8); }
+
+  println(`${numbers[0]} ${numbers[1]} ${numbers[2]} ${numbers[3]}`);
+
+  const chain = Info { next: &raw const info as *const c_void, extent: Extent { width: 0, height: 0 } };
+  const first = unsafe { *(chain.next as *const Info) };
+
+  devices.resize(1, 0);
+
+  println(`${first.extent.width} ${devices.len()}`);
+
+  write_blob("blob.bin", List::from([97u8, 98, 99, 0, 255, 1]));
+
+  match fs::read("blob.bin") {
+    Ok(bytes) => println(`${bytes.len()} ${bytes[0]} ${bytes[3]} ${bytes[4]} ${bytes[5]}`),
+    Err(error) => println(error.message()),
+  }
+
+  fs::remove_file("blob.bin").unwrap();
+
+  match fs::read("missing.bin") {
+    Ok(_) => println("unexpected"),
+    Err(error) => println(error.message()),
+  }
+}

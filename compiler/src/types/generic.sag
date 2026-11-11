@@ -11,6 +11,7 @@ use pkg::span::Span;
 use pkg::types::{Checker, GenericDef, NamedRef, ParamRef, SpanType, Subst, SubstEntry, Type, TypeKind};
 use pkg::types;
 use pkg::types::exprs;
+use pkg::types::ffi;
 use pkg::types::interfaces;
 use pkg::types::typed::{GenericsEntry, owner_key};
 
@@ -252,6 +253,16 @@ pub class Unknowns {
           self.unify(pointee, actual_pointee);
         }
       }
+      TypeKind::Ref { pointee, .. } => {
+        if let TypeKind::Ref { pointee: actual_pointee, .. } = actual.kind {
+          self.unify(pointee, actual_pointee);
+        }
+      }
+      TypeKind::Slice { elem, .. } => {
+        if let TypeKind::Slice { elem: actual_elem, .. } = actual.kind {
+          self.unify(elem, actual_elem);
+        }
+      }
       TypeKind::Result { value, error } => {
         if let TypeKind::Result { value: actual_value, error: actual_error } = actual.kind {
           self.unify(value, actual_value);
@@ -294,6 +305,14 @@ pub class Unknowns {
           }
         }
       }
+      TypeKind::CFn { params, ret, .. } => {
+        if let TypeKind::CFn { params: actual_params, ret: actual_ret, .. } = actual.kind {
+          if params.len() == actual_params.len() {
+            self.unify_all(params, actual_params);
+            self.unify(ret, actual_ret);
+          }
+        }
+      }
       _ => {}
     }
   }
@@ -326,9 +345,10 @@ fn mentions_unknown(ty: Type, unknowns: Unknowns) -> bool {
     TypeKind::Array { elem, .. } => mentions_unknown(elem, unknowns),
     TypeKind::List(elem) => mentions_unknown(elem, unknowns),
     TypeKind::Option(elem) => mentions_unknown(elem, unknowns),
-    TypeKind::Ptr { pointee, .. } => mentions_unknown(pointee, unknowns),
+    TypeKind::Ptr { pointee, .. } | TypeKind::Ref { pointee, .. } | TypeKind::Slice { elem: pointee, .. } => mentions_unknown(pointee, unknowns),
     TypeKind::Result { value, error } => mentions_unknown(value, unknowns) || mentions_unknown(error, unknowns),
     TypeKind::Function { params, ret } => any_unknown(params, unknowns) || mentions_unknown(ret, unknowns),
+    TypeKind::CFn { params, ret, .. } => any_unknown(params, unknowns) || mentions_unknown(ret, unknowns),
     _ => false,
   }
 }
@@ -416,6 +436,11 @@ pub fn generic_arg(cx: Checker, arg: Expr, param: Type, fixed: Subst, unknowns: 
     }
   }
 
+  // `&values` lends a slice where one is expected, whatever its elements.
+  if let TypeKind::Slice { .. } = known.kind {
+    hint = Some(known);
+  }
+
   const actual = exprs::expr(cx, arg, hint);
 
   unknowns.unify(pattern, actual);
@@ -424,6 +449,19 @@ pub fn generic_arg(cx: Checker, arg: Expr, param: Type, fixed: Subst, unknowns: 
 
   if !mentions_unknown(expected, unknowns) && !cx.fits(actual, expected) {
     exprs::mismatch(cx, arg.span, expected, actual);
+  }
+}
+
+/// Whether `ty` mentions a type parameter.
+pub fn mentions_params(ty: Type) -> bool {
+  match ty.kind {
+    TypeKind::Param(_) => true,
+    TypeKind::Struct(named) | TypeKind::Enum(named) | TypeKind::Class(named) | TypeKind::Interface(named) => named.args.iter().any((arg) => mentions_params(arg)),
+    TypeKind::Array { elem, .. } | TypeKind::List(elem) | TypeKind::Option(elem) => mentions_params(elem),
+    TypeKind::Ptr { pointee, .. } | TypeKind::Ref { pointee, .. } | TypeKind::Slice { elem: pointee, .. } => mentions_params(pointee),
+    TypeKind::Result { value, error } => mentions_params(value) || mentions_params(error),
+    TypeKind::Function { params, ret } | TypeKind::CFn { params, ret, .. } => params.iter().any((param) => mentions_params(param)) || mentions_params(ret),
+    _ => false,
   }
 }
 
@@ -454,6 +492,9 @@ pub fn fn_call(cx: Checker, expr: Expr, path: Path, function: u32, args: List<Ex
       return types::error();
     }
   };
+
+  ffi::check_unsafe_call(cx, expr.span, function);
+
   const name = match cx.resolution.fn_decl(cx.package, function) {
     Some(decl) => decl.name.name,
     None => "",
@@ -539,6 +580,8 @@ pub fn generic_method_call(cx: Checker, expr: Expr, receiver_ty: Type, function:
       return types::error();
     }
   };
+  ffi::check_unsafe_call(cx, expr.span, function);
+
   const fixed = interfaces::inherited_subst(cx, receiver_ty, function);
   const own_count = cx.generic_count(ParamOwner::Fn(function));
   const unknowns = new Unknowns();

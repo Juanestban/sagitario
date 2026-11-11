@@ -1,0 +1,313 @@
+// The acceptance of G1 (docs/roadmap-v2.md): the matrices of a camera computed with operators
+// (docs/adr/0081-operator-overloading.md), a mesh read from a binary file into a byte buffer, and
+// a C function called through a pointer loaded from a dynamic library: `qsort` orders the
+// transformed vertices by depth with a comparison written in Sagitario. Values are rounded to
+// three decimals, so that the output is the same with the C library of every system.
+// expect-stdout: loaded the C library
+// expect-stdout: mesh 12 bytes, 4 vertices
+// expect-stdout: identity true, view kept true
+// expect-stdout: vertex 2 depth 7.211 at (0, -0.211, 0.974)
+// expect-stdout: vertex 3 depth 6.481 at (-0.163, -0.303, 0.969)
+// expect-stdout: vertex 1 depth 5.831 at (0, -0.161, 0.967)
+// expect-stdout: vertex 0 depth 5.657 at (0, -0.429, 0.963)
+use std::ffi::{c_int, c_void, Library};
+use std::fs;
+use std::math;
+
+struct Vec3 {
+  pub x: f64;
+  pub y: f64;
+  pub z: f64;
+
+  pub fn of(x: f64, y: f64, z: f64) -> Vec3 {
+    Vec3 { x: x, y: y, z: z }
+  }
+
+  pub fn dot(self, other: Vec3) -> f64 {
+    self.x * other.x + self.y * other.y + self.z * other.z
+  }
+
+  pub fn cross(self, other: Vec3) -> Vec3 {
+    Vec3::of(self.y * other.z - self.z * other.y, self.z * other.x - self.x * other.z, self.x * other.y - self.y * other.x)
+  }
+
+  pub fn length(self) -> f64 {
+    self.dot(self).sqrt()
+  }
+
+  pub fn normalized(self) -> Vec3 {
+    self * (1.0 / self.length())
+  }
+}
+
+impl Add<Vec3, Vec3> for Vec3 {
+  fn add(self, other: Vec3) -> Vec3 {
+    Vec3::of(self.x + other.x, self.y + other.y, self.z + other.z)
+  }
+}
+
+impl Sub<Vec3, Vec3> for Vec3 {
+  fn sub(self, other: Vec3) -> Vec3 {
+    Vec3::of(self.x - other.x, self.y - other.y, self.z - other.z)
+  }
+}
+
+impl Mul<f64, Vec3> for Vec3 {
+  fn mul(self, k: f64) -> Vec3 {
+    Vec3::of(self.x * k, self.y * k, self.z * k)
+  }
+}
+
+impl Neg<Vec3> for Vec3 {
+  fn neg(self) -> Vec3 {
+    Vec3::of(-self.x, -self.y, -self.z)
+  }
+}
+
+struct Vec4 {
+  pub x: f64;
+  pub y: f64;
+  pub z: f64;
+  pub w: f64;
+}
+
+/// A 4×4 matrix, by columns, as OpenGL and Vulkan read them.
+struct Mat4 {
+  pub m: [f64; 16];
+
+  pub fn identity() -> Mat4 {
+    var m = [0.0; 16];
+
+    for i in 0usize..4 {
+      m[i * 4 + i] = 1.0;
+    }
+
+    Mat4 { m: m }
+  }
+
+  pub fn at(self, row: usize, col: usize) -> f64 {
+    self.m[col * 4 + row]
+  }
+
+  pub fn translation(by: Vec3) -> Mat4 {
+    var m = Mat4::identity().m;
+
+    m[12] = by.x;
+    m[13] = by.y;
+    m[14] = by.z;
+
+    Mat4 { m: m }
+  }
+
+  pub fn rotation_y(angle: f64) -> Mat4 {
+    var m = Mat4::identity().m;
+    const c = math::cos(angle);
+    const s = math::sin(angle);
+
+    m[0] = c;
+    m[2] = -s;
+    m[8] = s;
+    m[10] = c;
+
+    Mat4 { m: m }
+  }
+
+  /// A right-handed perspective projection onto OpenGL's clip space.
+  pub fn perspective(fov_y: f64, aspect: f64, near: f64, far: f64) -> Mat4 {
+    var m = [0.0; 16];
+    const f = 1.0 / (fov_y / 2.0).tan();
+
+    m[0] = f / aspect;
+    m[5] = f;
+    m[10] = (far + near) / (near - far);
+    m[11] = -1.0;
+    m[14] = 2.0 * far * near / (near - far);
+
+    Mat4 { m: m }
+  }
+
+  /// The view of a camera at `eye` looking at `target`.
+  pub fn look_at(eye: Vec3, target: Vec3, up: Vec3) -> Mat4 {
+    const forward = (target - eye).normalized();
+    const side = forward.cross(up).normalized();
+    const above = side.cross(forward);
+    var m = Mat4::identity().m;
+
+    m[0] = side.x;
+    m[4] = side.y;
+    m[8] = side.z;
+    m[1] = above.x;
+    m[5] = above.y;
+    m[9] = above.z;
+    m[2] = -forward.x;
+    m[6] = -forward.y;
+    m[10] = -forward.z;
+    m[12] = -side.dot(eye);
+    m[13] = -above.dot(eye);
+    m[14] = forward.dot(eye);
+
+    Mat4 { m: m }
+  }
+}
+
+impl Mul<Mat4, Mat4> for Mat4 {
+  fn mul(self, other: Mat4) -> Mat4 {
+    var m = [0.0; 16];
+
+    for col in 0usize..4 {
+      for row in 0usize..4 {
+        var sum = 0.0;
+
+        for k in 0usize..4 {
+          sum += self.at(row, k) * other.at(k, col);
+        }
+
+        m[col * 4 + row] = sum;
+      }
+    }
+
+    Mat4 { m: m }
+  }
+}
+
+impl Mul<Vec4, Vec4> for Mat4 {
+  fn mul(self, v: Vec4) -> Vec4 {
+    const parts = [v.x, v.y, v.z, v.w];
+    var out = [0.0; 4];
+
+    for row in 0usize..4 {
+      var sum = 0.0;
+
+      for k in 0usize..4 {
+        sum += self.at(row, k) * parts[k];
+      }
+
+      out[row] = sum;
+    }
+
+    Vec4 { x: out[0], y: out[1], z: out[2], w: out[3] }
+  }
+}
+
+impl Eq for Mat4 {
+  fn equals(self, other: Mat4) -> bool {
+    for i in 0usize..16 {
+      if (self.m[i] - other.m[i]).abs() > 1e-12 {
+        return false;
+      }
+    }
+
+    true
+  }
+}
+
+/// A transformed vertex and its distance from the camera, as C's `qsort` sorts it.
+@repr(C)
+struct Depth {
+  pub index: i32;
+  pub depth: f64;
+  pub x: f64;
+  pub y: f64;
+  pub z: f64;
+}
+
+/// The farthest vertex first, as a painter draws.
+extern "C" fn farthest_first(a: &Depth, b: &Depth) -> c_int {
+  if a.depth > b.depth {
+    -1
+  } else if a.depth < b.depth {
+    1
+  } else {
+    a.index - b.index
+  }
+}
+
+fn open_c_library() -> Option<Library> {
+  for name in ["ucrtbase.dll", "msvcrt.dll", "libc.so.6", "libc.so", "/usr/lib/libSystem.B.dylib"] {
+    if let Ok(library) = Library::open(name) {
+      return Some(library);
+    }
+  }
+
+  None
+}
+
+/// `x` rounded to three decimals, without a negative zero.
+fn fixed(x: f64) -> f64 {
+  (x * 1000.0).round() / 1000.0 + 0.0
+}
+
+/// The vertices of the mesh, three bytes each: the coordinates plus one.
+fn write_mesh(path: String) -> Result<(), String> {
+  const coordinates = [-1, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, -1];
+  const bytes: List<u8> = new List();
+
+  for c in coordinates {
+    bytes.push((c + 1) as u8);
+  }
+
+  fs::write_bytes(path, &bytes).map_err((error) => error.message())
+}
+
+fn read_mesh(path: String) -> Result<List<Vec3>, String> {
+  const bytes = fs::read(path).map_err((error) => error.message())?;
+  const vertices: List<Vec3> = new List();
+  var i = 0usize;
+
+  while i + 2 < bytes.len() {
+    vertices.push(Vec3::of((bytes[i] as f64) - 1.0, (bytes[i + 1] as f64) - 1.0, (bytes[i + 2] as f64) - 1.0));
+    i += 3;
+  }
+
+  println(f"mesh {bytes.len()} bytes, {vertices.len()} vertices");
+
+  Ok(vertices)
+}
+
+fn main() -> Result<(), String> {
+  const library = match open_c_library() {
+    Some(found) => found,
+    None => return Err("no C library"),
+  };
+  const symbol = match library.symbol("qsort") {
+    Some(found) => found,
+    None => return Err("no qsort in the C library"),
+  };
+  const qsort = unsafe { symbol as unsafe extern "C" fn(*mut c_void, usize, usize, extern "C" fn(&Depth, &Depth) -> c_int) };
+
+  println("loaded the C library");
+
+  write_mesh("mesh.bin")?;
+
+  const vertices = read_mesh("mesh.bin")?;
+
+  fs::remove_file("mesh.bin").map_err((error) => error.message())?;
+
+  const eye = Vec3::of(0.0, 2.0, 5.0);
+  const up = Vec3::of(0.0, 1.0, 0.0);
+  const view = Mat4::look_at(eye, Vec3::of(0.0, 0.0, 0.0), up);
+  const projection = Mat4::perspective(90.0.to_radians(), 1.0, 0.1, 100.0);
+  const model = Mat4::translation(-up * 2.0) * Mat4::rotation_y(90.0.to_radians());
+  const camera = projection * view * model;
+
+  println(f"identity {Mat4::identity() * view == view}, view kept {view * Mat4::identity() == view}");
+
+  const depths: List<Depth> = new List();
+
+  for index in 0usize..vertices.len() {
+    const vertex = vertices[index];
+    const clip = camera * Vec4 { x: vertex.x, y: vertex.y, z: vertex.z, w: 1.0 };
+    const world = model * Vec4 { x: vertex.x, y: vertex.y, z: vertex.z, w: 1.0 };
+    const distance = (Vec3::of(world.x, world.y, world.z) - eye).length();
+
+    depths.push(Depth { index: index as i32, depth: distance, x: clip.x / clip.w, y: clip.y / clip.w, z: clip.z / clip.w });
+  }
+
+  unsafe { qsort(depths.as_mut_ptr() as *mut c_void, depths.len(), std::mem::size_of<Depth>(), farthest_first) };
+
+  for found in depths {
+    println(f"vertex {found.index} depth {fixed(found.depth)} at ({fixed(found.x)}, {fixed(found.y)}, {fixed(found.z)})");
+  }
+
+  Ok(())
+}

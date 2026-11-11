@@ -356,6 +356,8 @@ pub fn mark_self_modified(cx: Checker) {
 /// What a place expression is used for.
 pub enum PlaceUse {
   Assign,
+  /// Lent with `&mut`.
+  Borrow,
   /// The receiver of the named method, which modifies it.
   Receiver(String),
 }
@@ -450,11 +452,18 @@ fn place_access(cx: Checker, place: Expr, place_use: PlaceUse) -> PlaceAccess {
   var code = codes::IMMUTABLE_PLACE;
   var method_name = "";
   var is_assign = true;
+  var is_borrow = false;
 
-  if let PlaceUse::Receiver(method) = place_use {
-    code = codes::IMMUTABLE_RECEIVER;
-    method_name = method;
-    is_assign = false;
+  match place_use {
+    PlaceUse::Receiver(method) => {
+      code = codes::IMMUTABLE_RECEIVER;
+      method_name = method;
+      is_assign = false;
+    }
+    PlaceUse::Borrow => {
+      is_borrow = true;
+    }
+    PlaceUse::Assign => {}
   }
 
   match place_base(cx, place) {
@@ -528,7 +537,9 @@ fn place_access(cx: Checker, place: Expr, place_use: PlaceUse) -> PlaceAccess {
         Some(declaring) => declaring.name,
         None => "",
       };
-      const action = if is_assign {
+      const action = if is_borrow {
+        "cannot lend the field `" + name.name + "` with `&mut`"
+      } else if is_assign {
         "cannot modify the field `" + name.name + "`"
       } else {
         "cannot call the method `" + method_name + "`, which modifies `self`, on the field `" + name.name + "`"
@@ -555,7 +566,13 @@ fn place_access(cx: Checker, place: Expr, place_use: PlaceUse) -> PlaceAccess {
         None => return PlaceAccess::Mutable,
       };
       const name = info.name;
-      const action = if is_assign { "cannot modify `" + name + "`" } else { "cannot call the method `" + method_name + "`, which modifies `self`, on `" + name + "`" };
+      const action = if is_borrow {
+        "cannot lend `" + name + "` with `&mut`"
+      } else if is_assign {
+        "cannot modify `" + name + "`"
+      } else {
+        "cannot call the method `" + method_name + "`, which modifies `self`, on `" + name + "`"
+      };
       const copy = "copy it into a `var` binding: `var " + name + " = " + name + ";`";
       var reason = "";
       var label = "";
@@ -576,9 +593,39 @@ fn place_access(cx: Checker, place: Expr, place_use: PlaceUse) -> PlaceAccess {
           help = "declare `" + name + "` with `var` to modify it";
         }
         LocalKind::Param => {
-          reason = "parameters are immutable";
-          label = "parameter declared here";
-          help = copy;
+          // What a `&mut` parameter refers to can be modified; through a `&` one, nothing.
+          match exprs::local_type(cx, root) {
+            Some(ty) => match ty.kind {
+              TypeKind::Ref { mutable, pointee } => {
+                if mutable {
+                  return PlaceAccess::Mutable;
+                }
+
+                reason = "it is a `&` reference";
+                label = "parameter declared here";
+                help = "take a `&mut " + types::text(pointee) + "` parameter, and lend it with `&mut`";
+              }
+              TypeKind::Slice { mutable, elem } => {
+                if mutable {
+                  return PlaceAccess::Mutable;
+                }
+
+                reason = "it is a `&[" + types::text(elem) + "]` slice";
+                label = "parameter declared here";
+                help = "take a `&mut [" + types::text(elem) + "]` parameter, and lend it with `&mut`";
+              }
+              _ => {
+                reason = "parameters are immutable";
+                label = "parameter declared here";
+                help = copy;
+              }
+            },
+            None => {
+              reason = "parameters are immutable";
+              label = "parameter declared here";
+              help = copy;
+            }
+          }
         }
         LocalKind::ForVar => {
           reason = "loop variables are immutable";
@@ -627,13 +674,24 @@ pub fn receiver_use(cx: Checker, receiver: Expr, function: u32, name: String) {
   match ffi::deref_pointer(receiver) {
     Some(pointer) => {
       if let Some(ty) = cx.typed.expr_types.get(pointer.id) {
-        if let TypeKind::Ptr { mutable, .. } = ty.kind {
-          if !mutable {
-            access = PlaceAccess::Immutable(
-              Diagnostic::error(codes::IMMUTABLE_RECEIVER, receiver.span, "cannot call the method `" + name + "`, which modifies `self`, through a `*const` pointer")
-                .with_help("use a `*mut` pointer, for example with `as *mut T`"),
-            );
+        match ty.kind {
+          TypeKind::Ptr { mutable, .. } => {
+            if !mutable {
+              access = PlaceAccess::Immutable(
+                Diagnostic::error(codes::IMMUTABLE_RECEIVER, receiver.span, "cannot call the method `" + name + "`, which modifies `self`, through a `*const` pointer")
+                  .with_help("use a `*mut` pointer, for example with `as *mut T`"),
+              );
+            }
           }
+          TypeKind::Ref { mutable, pointee } => {
+            if !mutable {
+              access = PlaceAccess::Immutable(
+                Diagnostic::error(codes::IMMUTABLE_RECEIVER, receiver.span, "cannot call the method `" + name + "`, which modifies `self`, through a `&` reference")
+                  .with_help("take a `&mut " + types::text(pointee) + "` parameter, and lend it with `&mut`"),
+              );
+            }
+          }
+          _ => {}
         }
       }
     }

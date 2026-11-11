@@ -78,6 +78,8 @@ fn main() { ... }
   criteria, run with ThreadSanitizer ([ADR-0048](adr/0048-async-await.md)).
 - `tests/run-pass/reference_async/` is the reference program of the F8 acceptance criteria, run
   with ThreadSanitizer ([ADR-0075](adr/0075-f8-acceptance.md)).
+- `tests/run-pass/reference_ffi/` is the reference program of a complete FFI, written without C
+  files ([ADR-0078](adr/0078-ffi-without-c-shims.md), Q486).
 - `tests/acceptance/f3/` is the F3 acceptance program: the `wc` and `textcount` packages and a C
   program using the library, run by the test `f3_acceptance` of the harness
   ([ADR-0044](adr/0044-c-toolchains.md)).

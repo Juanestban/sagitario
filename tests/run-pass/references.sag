@@ -1,0 +1,241 @@
+// References in parameters (docs/spec/03-memory.md#references): `&T` reads the caller's value
+// without copying it, `&mut T` changes it.
+// expect-stdout: length 5
+// expect-stdout: scaled 6 8
+// expect-stdout: moved 7 9
+// expect-stdout: reset 0 0
+// expect-stdout: swapped 2 1
+// expect-stdout: counted 3 [1, 2, 3]
+// expect-stdout: name Ada Lovelace
+// expect-stdout: grid 9
+// expect-stdout: temporary 25
+// expect-stdout: health 70
+// expect-stdout: generic 42
+// expect-stdout: lambda 12
+// expect-stdout: player Grace 10
+// expect-stdout: replaced Linus
+// expect-stdout: 25
+// expect-stdout: relent 4 6
+// expect-stdout: disjoint 1 2
+// expect-stdout: shape 10
+// expect-stdout: counter 15
+// expect-stdout: pointer 9
+// expect-stdout: text 11 hello world
+
+struct Vec2 {
+  pub x: i32;
+  pub y: i32;
+
+  pub fn length_squared(self) -> i32 {
+    self.x * self.x + self.y * self.y
+  }
+
+  pub fn translate(self, by: i32) {
+    self = Vec2 { x: self.x + by, y: self.y + by };
+  }
+}
+
+struct Pair {
+  pub first: Vec2;
+  pub second: Vec2;
+}
+
+class Player {
+  pub var name: String;
+  pub var health: i32;
+
+  pub fn new(self, name: String, health: i32) {
+    self.name = name;
+    self.health = health;
+  }
+}
+
+fn length(v: &Vec2) -> i32 {
+  v.length_squared()
+}
+
+fn scale(v: &mut Vec2, by: i32) {
+  v.x = v.x * by;
+  v.y *= by;
+}
+
+fn move_by(v: &mut Vec2, by: i32) {
+  v.translate(by);
+}
+
+fn reset(v: &mut Vec2) {
+  *v = Vec2 { x: 0, y: 0 };
+}
+
+fn swap(a: &mut i32, b: &mut i32) {
+  const kept = *a;
+
+  *a = *b;
+  *b = kept;
+}
+
+/// A list is a reference already: `&mut` lets the function replace it.
+fn count(numbers: &mut List<i32>, total: &mut usize) {
+  numbers.push(3);
+  *total = numbers.len();
+}
+
+fn full_name(first: &String, last: &String) -> String {
+  `${*first} ${*last}`
+}
+
+fn sum(grid: &[i32; 3]) -> i32 {
+  grid[0] + grid[1] + grid[2]
+}
+
+fn square(n: &i64) -> i64 {
+  *n * *n
+}
+
+fn hurt(health: &mut i32, damage: i32) {
+  *health -= damage;
+}
+
+fn show<T>(value: &T) -> T {
+  *value
+}
+
+fn pass_on(v: &Vec2) -> i32 {
+  length(v)
+}
+
+fn rename(player: &mut Player) {
+  *player = new Player("Linus", 1);
+}
+
+fn describe(player: &Player) -> String {
+  `${player.name} ${player.health}`
+}
+
+/// `&mut v` and `&v` of reference parameters lend what they refer to again.
+fn double_twice(v: &mut Vec2) {
+  scale(&mut v, 2);
+  scale(v, 1);
+  length(&v);
+}
+
+fn copy_into(to: &mut Vec2, from: &Vec2) {
+  *to = *from;
+}
+
+interface Shape {
+  fn grow(self, by: &i32) -> i32;
+}
+
+struct Square impl Shape {
+  pub side: i32;
+
+  pub fn grow(self, by: &i32) -> i32 {
+    (self.side + *by) * 2
+  }
+}
+
+class Counter {
+  pub var total: i32;
+
+  pub fn new(self, start: &i32) {
+    self.total = *start;
+  }
+
+  pub fn add(self, amount: &mut i32) {
+    self.total += *amount;
+    *amount = 0;
+  }
+}
+
+fn append(text: &mut String, more: &String) {
+  *text = *text + " " + *more;
+}
+
+fn main() {
+  const v = Vec2 { x: 3, y: 4 };
+
+  println(`length ${length(&v) / 5}`);
+
+  var w = Vec2 { x: 3, y: 4 };
+
+  scale(&mut w, 2);
+  println(`scaled ${w.x} ${w.y}`);
+
+  var pair = Pair { first: Vec2 { x: 6, y: 8 }, second: Vec2 { x: 0, y: 0 } };
+
+  move_by(&mut pair.first, 1);
+  println(`moved ${pair.first.x} ${pair.first.y}`);
+  reset(&mut pair.first);
+  println(`reset ${pair.first.x} ${pair.first.y}`);
+
+  var a = 1;
+  var b = 2;
+
+  swap(&mut a, &mut b);
+  println(`swapped ${a} ${b}`);
+
+  var numbers = List::from([1, 2]);
+  var total = 0usize;
+
+  count(&mut numbers, &mut total);
+  println(`counted ${total} [${numbers.map((n) => `${n}`).collect().join(", ")}]`);
+
+  const first = "Ada";
+
+  println(`name ${full_name(&first, &"Lovelace")}`);
+  println(`grid ${sum(&[2, 3, 4])}`);
+  println(`temporary ${square(&5)}`);
+
+  const player = new Player("Grace", 100);
+
+  hurt(&mut player.health, 30);
+  println(`health ${player.health}`);
+  println(`generic ${show(&42)}`);
+
+  const apply = (p: &Vec2) => p.x + p.y;
+
+  const applied = apply(&Vec2 { x: 5, y: 7 });
+
+  println(`lambda ${applied}`);
+
+  var other = new Player("Grace", 10);
+
+  println(`player ${describe(&other)}`);
+  rename(&mut other);
+  println(`replaced ${other.name}`);
+  println(`${pass_on(&v)}`);
+
+  var relent = Vec2 { x: 1, y: 2 };
+
+  double_twice(&mut relent);
+  // `scale` doubled it; then `relent.x + 2` and `relent.y + 2`.
+  move_by(&mut relent, 2);
+  println(`relent ${relent.x} ${relent.y}`);
+
+  var pair2 = Pair { first: Vec2 { x: 0, y: 0 }, second: Vec2 { x: 1, y: 2 } };
+
+  copy_into(&mut pair2.first, &pair2.second);
+  println(`disjoint ${pair2.first.x} ${pair2.first.y}`);
+
+  const shape: Shape = Square { side: 3 };
+
+  println(`shape ${shape.grow(&2)}`);
+
+  const counter = new Counter(&10);
+  var amount = 5;
+
+  counter.add(&mut amount);
+  println(`counter ${counter.total + amount}`);
+
+  var cell = 4;
+  const pointer = &raw mut cell;
+
+  unsafe { hurt(&mut *pointer, -5); }
+  println(`pointer ${cell}`);
+
+  var text = "hello";
+
+  append(&mut text, &"world");
+  println(`text ${text.len()} ${text}`);
+}

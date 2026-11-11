@@ -192,6 +192,7 @@ fn item_ref(item: ItemRef) -> String {
       StdItem::CString => "std CString",
       StdItem::StringFromC => "std string_from_c",
       StdItem::Exit => "std exit",
+      StdItem::Mem(name) => "std mem::" + name,
     },
   }
 }
@@ -203,6 +204,7 @@ fn resolved(res: Res) -> String {
     Res::Builtin(name) => "builtin " + name,
     Res::Local(id) => `local ${id}`,
     Res::Struct(id) => `struct ${id}`,
+    Res::FromRaw(id) => `from_raw of enum ${id}`,
     Res::Variant(variant) => {
       const owner = match variant.owner {
         EnumKind::User(id) => `enum ${id}`,

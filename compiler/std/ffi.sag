@@ -1,0 +1,41 @@
+//! The part of `std::ffi` written in Sagitario (docs/spec/10-ffi.md#dynamic-libraries): loading
+//! dynamic libraries at run time. The C types, `CString` and `string_from_c` are provided by the
+//! compiler.
+
+use std::ffi::c_void;
+
+extern "C" {
+  fn sag_library_open(path: String) -> *mut c_void;
+  fn sag_library_error() -> String;
+  fn sag_library_symbol(library: *mut c_void, name: String) -> Option<unsafe extern "C" fn()>;
+}
+
+/// A dynamic library loaded at run time (`LoadLibraryW`, `dlopen`). It is never unloaded, so the
+/// function pointers taken from it stay valid until the program ends.
+pub class Library {
+  prv const handle: *mut c_void;
+
+  prv fn new(self, handle: *mut c_void) {
+    self.handle = handle;
+  }
+
+  /// Loads the library at `path`, or by its name, as the system finds it (`vulkan-1.dll`,
+  /// `libvulkan.so.1`). The error is the system's reason.
+  pub fn open(path: String) -> Result<Library, String> {
+    const handle = unsafe { sag_library_open(path) };
+
+    if handle.is_null() {
+      const reason = unsafe { sag_library_error() };
+
+      return Err(`cannot load the library "${path}": ${reason}`);
+    }
+
+    Ok(new Library(handle))
+  }
+
+  /// The function `name` of the library, or `None`; convert it to its type with `as` inside
+  /// `unsafe`.
+  pub fn symbol(self, name: String) -> Option<unsafe extern "C" fn()> {
+    unsafe { sag_library_symbol(self.handle, name) }
+  }
+}

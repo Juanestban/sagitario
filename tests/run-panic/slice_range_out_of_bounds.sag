@@ -1,0 +1,19 @@
+// A range past the end of what a slice views panics, with Rust's message
+// (docs/adr/0079-references-and-borrowing.md, Q494).
+// expect-panic: range end index 5 out of range for slice of length 3
+fn sum(values: &[i32]) -> i32 {
+  var total = 0;
+
+  for value in values {
+    total += value;
+  }
+
+  total
+}
+
+fn main() {
+  const list = List::from([1, 2, 3]);
+  const end = list.len() + 2;
+
+  println(`${sum(&list[1..end])}`);
+}

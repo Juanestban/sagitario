@@ -1,0 +1,50 @@
+// The rules of operators on types other than numbers and `String`
+// (docs/adr/0081-operator-overloading.md, Q511-Q513): the left operand's type implements the
+// operator for the right operand's type, `op=` keeps the type, and `-` has one result.
+struct Vec2 {
+  pub x: f64;
+}
+
+impl Mul<f64, Vec2> for Vec2 {
+  fn mul(self, k: f64) -> Vec2 { Vec2 { x: self.x * k } }
+}
+
+impl Mul<Vec2, f64> for Vec2 {
+  fn mul(self, other: Vec2) -> f64 { self.x * other.x }
+}
+
+impl Neg<Vec2> for Vec2 {
+  fn neg(self) -> Vec2 { self }
+}
+
+impl Neg<f64> for Vec2 {
+  fn neg(self) -> f64 { self.x }
+}
+
+interface Shape {
+  fn area(self) -> f64;
+}
+
+fn generic<T>(a: T, b: T) -> T {
+  a + b //~ ERROR E0310
+}
+
+fn by_shape(a: Shape, b: Shape) -> f64 {
+  const _sum = a + b; //~ ERROR E0310
+  0.0
+}
+
+fn main() {
+  const v = Vec2 { x: 1.0 };
+  const _scaled = v * 2.0;
+  const _dot = v * v;
+  const _sum = v + v; //~ ERROR E0310
+  const _int = v * 2; //~ ERROR E0310
+  const _bool = v * true; //~ ERROR E0310
+  const _left = 2.0 * v; //~ ERROR E0310
+  const _neg = -v; //~ ERROR E0344
+  var w = v;
+
+  w *= 3.0;
+  w *= v; //~ ERROR E0310
+}

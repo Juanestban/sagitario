@@ -1,0 +1,41 @@
+// Dynamic libraries (docs/adr/0078-ffi-without-c-shims.md, increment 4): the C library of the
+// system, loaded at run time, and a function found in it and called through a pointer.
+// expect-stdout: loaded
+// expect-stdout: 42
+// expect-stdout: false
+// expect-stdout: true
+use std::ffi::{c_int, Library};
+
+/// The C library of the system, whichever this one is.
+fn c_library() -> Option<Library> {
+  for name in ["ucrtbase.dll", "msvcrt.dll", "libc.so.6", "libc.so", "/usr/lib/libSystem.B.dylib"] {
+    if let Ok(library) = Library::open(name) {
+      return Some(library);
+    }
+  }
+
+  None
+}
+
+fn main() {
+  const library = match c_library() {
+    Some(found) => found,
+    None => return println("no C library"),
+  };
+
+  println("loaded");
+
+  if let Some(found) = library.symbol("abs") {
+    const abs = unsafe { found as unsafe extern "C" fn(c_int) -> c_int };
+    const value = unsafe { abs(-42) };
+
+    println(`${value}`);
+  }
+
+  println(`${library.symbol("no_such_function_in_libc").is_some()}`);
+
+  match Library::open("no-such-library-sagitario.dll") {
+    Ok(_) => println("unexpected"),
+    Err(message) => println(`${message.starts_with("cannot load the library \"no-such-library-sagitario.dll\": ")}`),
+  }
+}

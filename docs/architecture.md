@@ -39,7 +39,8 @@ compiler/           the compiler and Nova, written in Sagitario (compiler/Nova.t
   src/loader.sag          reads the entry file and the modules, dependencies and std it reaches
   src/resolve/            module tree, `use`, name resolution, visibility
   src/types/              type checking, local inference, generics, inheritance, interfaces,
-                          flow analysis, `Send` and the check of `thread::spawn` (send.sag)
+                          flow analysis, `Send` and the check of `thread::spawn` (send.sag), and
+                          references with the borrow checker (borrow.sag)
   src/sir/                SIR definition + lowering from the typed AST + retain/release insertion
   src/codegen_c.sag       SIR → C11 text
   src/driver/             orchestrates the pipeline, embeds the runtime, invokes the C compiler;
@@ -91,6 +92,20 @@ modify the receiver they borrow from. Fields of class instances are places behin
 managed value from one takes an owned copy, and an instance reached through another place is
 retained for the statement. `new C(args)` allocates the instance (`Alloc`) and calls the
 initializer on it.
+
+References ([ADR-0079](adr/0079-references-and-borrowing.md)) are C pointers. The type checker
+gives a reference parameter used as the base of a field, an element or a method call the type
+of the value it refers to (`borrow::deref_base`); SIR then reads that path as the place behind the
+pointer (`Projection::Borrowed`, `(*lN)`), and passes it on as the pointer itself when its type
+is still a reference. `&value` lowers to `Operand::Ref` of the place, or of a temporary; a class
+instance a lent field is reached through gets an owned copy for the statement. `borrow.sag` holds
+the operators, and the borrow checker, a pass over each function after the type checker (skipped
+when it reported errors): where references may appear, and the exclusivity of `&mut` among the
+arguments of a call. A slice is a `sag_slice` (data, length and the list it views, or NULL),
+built by `Rvalue::Slice` and managed like a reference: making or retaining one retains the list
+and adds to its `lent` count, releasing it undoes both, and the runtime functions that change a
+list's length panic while `lent` is not zero. `Projection::SliceElem` reads an element through
+`sag_slice_at`.
 
 SIR is the place for ARC optimizations and the boundary behind which other backends (LLVM)
 could be added.
@@ -151,6 +166,16 @@ runs the executor until the task of `main` finishes.
   interface, `Callee::Dyn` calls an entry). An itable lists thunks calling the type's methods
   (through the vtable when they vary), the interface's default methods, a getter and a setter per
   field, and the itables of the parent interfaces.
+- An arithmetic operator on a type other than a number or a string (`types/operators.sag`) is
+  recorded like a method call of its interface's method (`TypedModule::method_calls` and
+  `call_args` on the expression, or on the target of `+=`), which SIR lowers with the method calls
+  (`method_call_with`, with the receiver's value when `+=` evaluated its place); on numbers and
+  strings reached through a bound, `collections::primitive_operator` emits the operator itself.
+- An `impl Interface for Type` block (`Item::Impl`) registers its methods with the type as their
+  owner (`FnInfo::block`, `Resolution::blocks`) but outside the type's own functions, and the
+  interface joins the type's `ImplEntry` with the block that implements it. The method of an
+  instantiation of an interface is found by `TypedModule::block_method`, which `method_for` (the
+  itables and calls on known types) tries before the type's methods by name.
 - Generics are monomorphized while lowering: generic functions, methods of generic types and
   interface methods are templates, instantiated on demand from a worklist with the type
   arguments the checker recorded (`TypedModule::call_args`), and every type of an instance is
@@ -222,6 +247,24 @@ runs the executor until the task of `main` finishes.
   defines a wrapper `sag_ffi_N` for it, plus a function with each exported symbol that calls
   the Sagitario function; exported functions are the only non-`static` ones. A dereference
   goes through `SAG_CHECK_PTR`, which panics on a null pointer.
+- C function pointer types (`extern "C" fn(..)`, [ADR-0078](adr/0078-ffi-without-c-shims.md))
+  become one `typedef R (*sag_pN)(A, B);` per signature, shared by safe and unsafe ones and
+  emitted in both translation units after the declarations of the aggregates. An `extern "C" fn`
+  of the program is the pointer to its function (`Rvalue::CFnValue`), a C function of an `extern`
+  block the pointer to its wrapper `sag_ffi_N` (`Rvalue::ExternFnValue`), and `Callee::Pointer`
+  calls one. `Option` of a function pointer is the pointer itself: `sir::project` turns its tag
+  into `Projection::NonNull` and its field into the place itself, and `None` is `NULL`. Converting
+  a function pointer to or from an address goes through a union in `sag_pN_address` and
+  `sag_pN_from` (which panics on `NULL`), since ISO C11 does not define casts between function and
+  data pointers. A program using one of its `extern "C" fn`s as a value is compiled with
+  `SAG_THREADS`, since C may call it on another thread.
+- A union is a struct whose layout says so (`StructLayout::is_union`): a C `union`, built by
+  `Rvalue::UnionValue` with a designated initializer. An enum with an integer representation
+  (`EnumLayout::repr`) is that integer: its variants are their values, `matching::tag` reads the
+  position of the variant through `sag_eN_index` (which panics on any other value), and
+  `Name::from_raw` checks a value with `sag_eN_valid`. `mem::size_of` and `mem::align_of` are
+  `sizeof` and `_Alignof`, and `mem::zeroed` a helper writing every byte of its type.
+  `&raw const` and `&raw mut` are `Operand::Ref` of their place.
 - Planned (F2): `Option<ClassRef>` as a nullable pointer.
 
 ## Runtime
@@ -248,7 +291,9 @@ compiled with every program:
 - the `String` API (`sag_string_*`; `trim` and `substring` return views sharing the buffer),
   parsing (`sag_parse_*`), ASCII `char` helpers and the ARC `StringBuilder` (`sag_builder_*`),
 - FFI support: the ARC `CString` (`sag_cstring_*`), `sag_string_from_c_at` (lossy UTF-8),
-  `sag_c_char` (C's `char`) and the raw pointer macros (`SAG_PTR_ADD`, `SAG_CHECK_PTR`, ...),
+  `sag_c_char` (C's `char`), the raw pointer macros (`SAG_PTR_ADD`, `SAG_CHECK_PTR`,
+  `SAG_LIST_PTR`, ...), and the dynamic libraries of `std::ffi::Library` (`sag_library_*`, with
+  `LoadLibraryW` or `dlopen`, linked with `-ldl` on Linux and Android),
 - a live-object counter checked at exit when `SAG_LEAK_CHECK` is set (exit code 102),
 - the executor of tasks of each thread (`sag_task_*`, [ADR-0072](adr/0072-async-await-increments.md)):
   the functions ready to resume tasks, first in first out, the timers of `task::sleep`, by
@@ -305,7 +350,9 @@ keeps the last analysis that reached the type checker for hover, definitions and
 while the code being typed does not compile. `lsp/positions.sag` converts LSP's UTF-16 columns
 to byte offsets, `lsp/query.sag` finds the node under the cursor, `lsp/completion.sag` reads the
 text before the cursor, `lsp/tokens.sag` gives the names of paths their semantic tokens
-([ADR-0059](adr/0059-language-server-paths-and-semantic-tokens.md)), and `lsp/json.sag` parses
+([ADR-0059](adr/0059-language-server-paths-and-semantic-tokens.md)), and inside the
+interpolations of format strings and templates also the bindings, fields and methods, which the
+grammar would leave in the color of the string, and `lsp/json.sag` parses
 and writes JSON. The VS Code extension starts
 it (`editors/vscode/extension.js`).
 

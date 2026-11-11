@@ -1,0 +1,32 @@
+// C function pointers (docs/adr/0078-ffi-without-c-shims.md): a typedef per signature, shared by
+// safe and unsafe pointers; `Option` of one as the pointer itself, `NULL` for `None`; calls
+// through pointers; and conversions to and from addresses through a union, which ISO C11 defines.
+use std::ffi::c_int;
+
+extern "C" {
+  fn abs(value: c_int) -> c_int;
+}
+
+extern "C" fn twice(x: i32) -> i32 {
+  x * 2
+}
+
+@repr(C)
+struct Callbacks {
+  pub on_value: Option<extern "C" fn(i32) -> i32>;
+}
+
+fn main() {
+  const absolute: unsafe extern "C" fn(c_int) -> c_int = abs;
+  var callbacks = Callbacks { on_value: None };
+
+  callbacks.on_value = Some(twice);
+
+  if let Some(f) = callbacks.on_value {
+    const address = f as usize;
+    const back = unsafe { address as unsafe extern "C" fn(i32) -> i32 };
+    const result = unsafe { back(2) + absolute(-1) };
+
+    println(`${result}`);
+  }
+}

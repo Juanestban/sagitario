@@ -129,15 +129,32 @@ fn has_own_params(lw: Lowering, function: u32) -> bool {
   lw.typed.generics.contains_key(owner_key(ParamOwner::Fn(function)))
 }
 
-/// The function implementing the interface method `method` for values of `concrete`: the type's
-/// own (or inherited) method, or else the default method instantiated for the type.
+/// The function implementing the interface method `method` for values of `concrete`: the method
+/// of the `impl ... for` block implementing that instantiation of the interface, the type's own
+/// (or inherited) method, or else the default method instantiated for the type.
 pub fn method_for(lw: Lowering, method: u32, concrete: Type, subst: Subst, own: List<Type>) -> MethodTarget {
   const name = match lw.resolution.fn_decl(lw.package, method) {
     Some(decl) => decl.name.name,
     None => "",
   };
+  var found: Option<u32> = None;
 
-  match implementation(lw, concrete, name) {
+  if let Some(TypeItem::Interface(interface_id)) = lw.resolution.owner(method) {
+    const name_of = match lw.typed.interface_def(interface_id) {
+      Some(def) => def.name,
+      None => "",
+    };
+    const args = subst.args_of(ParamOwner::Item(TypeItem::Interface(interface_id))).unwrap_or(new List());
+    const interface_ref = NamedRef { id: interface_id, name: name_of, args: args };
+
+    found = lw.typed.block_method(lw.resolution, lw.package, concrete, interface_ref, name);
+  }
+
+  if found.is_none() {
+    found = implementation(lw, concrete, name);
+  }
+
+  match found {
     Some(function) => {
       const owner = owner_subst(lw, concrete, function);
       const chosen = if has_own_params(lw, function) { owner.with(ParamOwner::Fn(function), own) } else { owner };

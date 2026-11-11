@@ -1,0 +1,41 @@
+// `==` and `!=` need `Eq`, and `<`, `<=`, `>`, `>=` need `Ord`, on structs, enums with data and
+// type parameters (docs/adr/0081-operator-overloading.md, Q514).
+struct Point {
+  pub x: i32;
+}
+
+impl Eq for Point {
+  fn equals(self, other: Point) -> bool { self.x == other.x }
+}
+
+struct Plain {
+  pub x: i32;
+}
+
+enum Shape {
+  Circle(f64),
+  Empty,
+}
+
+enum Light {
+  Red,
+  Green,
+}
+
+fn same<T>(a: T, b: T) -> bool {
+  a == b //~ ERROR E0310
+}
+
+fn less<T: Eq>(a: T, b: T) -> bool {
+  a < b //~ ERROR E0310
+}
+
+fn main() {
+  const p = Point { x: 1 };
+  const _equal = p == p;
+  const _less = p < p; //~ ERROR E0310
+  const _plain = Plain { x: 1 } == Plain { x: 1 }; //~ ERROR E0310
+  const _shape = Shape::Empty == Shape::Circle(1.0); //~ ERROR E0310
+  const _light = Light::Red == Light::Green;
+  const _order = Light::Red < Light::Green; //~ ERROR E0310
+}

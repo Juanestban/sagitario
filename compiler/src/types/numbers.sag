@@ -11,22 +11,48 @@ use pkg::types;
 use pkg::types::exprs;
 use pkg::types::typed::BuiltinMethod;
 
-/// A method of a number: its name, parameters and result, and the runtime function implementing
-/// it, which also receives the source location when `located` (to report panics).
-struct NumberMethod {
+/// A method of a number: its name, parameters (named as in docs/spec/02-types.md, separated by
+/// spaces) and result, and the runtime function implementing it, which also receives the source
+/// location when `located` (to report panics).
+pub struct NumberMethod {
   pub name: String;
+  pub param_names: String;
   pub params: List<Type>;
   pub ret: Type;
   pub function: String;
   pub located: bool;
 }
 
-fn method(name: String, params: List<Type>, ret: Type, function: String) -> NumberMethod {
-  NumberMethod { name: name, params: params, ret: ret, function: function, located: false }
+fn method(name: String, param_names: String, params: List<Type>, ret: Type, function: String) -> NumberMethod {
+  NumberMethod { name: name, param_names: param_names, params: params, ret: ret, function: function, located: false }
 }
 
-fn located(name: String, params: List<Type>, ret: Type, function: String) -> NumberMethod {
-  NumberMethod { name: name, params: params, ret: ret, function: function, located: true }
+fn located(name: String, param_names: String, params: List<Type>, ret: Type, function: String) -> NumberMethod {
+  NumberMethod { name: name, param_names: param_names, params: params, ret: ret, function: function, located: true }
+}
+
+/// The methods of a number type, empty for other types; the language server lists them.
+pub fn methods_of(ty: Type) -> List<NumberMethod> {
+  match ty.kind {
+    TypeKind::Int(int_ty) => int_methods(int_ty),
+    TypeKind::Float(float_ty) => float_methods(float_ty),
+    _ => new List(),
+  }
+}
+
+/// How a method is shown: `fn clamp(self, min: f64, max: f64) -> f64`.
+pub fn signature(found: NumberMethod) -> String {
+  var text = "fn " + found.name + "(self";
+
+  if !found.params.is_empty() {
+    const names = found.param_names.split(" ");
+
+    for index in 0..found.params.len() {
+      text = text + ", " + names[index] + ": " + types::text(found.params[index]);
+    }
+  }
+
+  text + ") -> " + types::text(found.ret)
 }
 
 /// The methods of an integer type; `abs` and `signum` only exist on signed ones.
@@ -34,15 +60,15 @@ fn int_methods(int_ty: IntTy) -> List<NumberMethod> {
   const ty = types::int(int_ty);
   const name = types::int_name(int_ty);
   const methods = List::from([
-    method("min", List::from([ty]), ty, `sag_min_${name}`),
-    method("max", List::from([ty]), ty, `sag_max_${name}`),
-    located("clamp", List::from([ty, ty]), ty, `sag_clamp_${name}_at`),
-    located("pow", List::from([types::int(IntTy::U32)]), ty, `sag_pow_${name}_at`),
+    method("min", "other", List::from([ty]), ty, `sag_min_${name}`),
+    method("max", "other", List::from([ty]), ty, `sag_max_${name}`),
+    located("clamp", "min max", List::from([ty, ty]), ty, `sag_clamp_${name}_at`),
+    located("pow", "exp", List::from([types::int(IntTy::U32)]), ty, `sag_pow_${name}_at`),
   ]);
 
   if types::is_signed(int_ty) {
-    methods.push(located("abs", new List(), ty, `sag_abs_${name}_at`));
-    methods.push(method("signum", new List(), ty, `sag_signum_${name}`));
+    methods.push(located("abs", "", new List(), ty, `sag_abs_${name}_at`));
+    methods.push(method("signum", "", new List(), ty, `sag_signum_${name}`));
   }
 
   methods
@@ -53,19 +79,34 @@ fn float_methods(float_ty: FloatTy) -> List<NumberMethod> {
   const bool_ty = types::of(TypeKind::Bool);
   const prefix = if float_ty == FloatTy::F32 { "sag_f32_" } else { "sag_f64_" };
   const methods = List::from([
-    method("copysign", List::from([ty]), ty, prefix + "copysign"),
-    method("min", List::from([ty]), ty, prefix + "min"),
-    method("max", List::from([ty]), ty, prefix + "max"),
-    located("clamp", List::from([ty, ty]), ty, prefix + "clamp_at"),
-    method("lerp", List::from([ty, ty]), ty, prefix + "lerp"),
+    method("copysign", "sign", List::from([ty]), ty, prefix + "copysign"),
+    method("min", "other", List::from([ty]), ty, prefix + "min"),
+    method("max", "other", List::from([ty]), ty, prefix + "max"),
+    located("clamp", "min max", List::from([ty, ty]), ty, prefix + "clamp_at"),
+    method("lerp", "b t", List::from([ty, ty]), ty, prefix + "lerp"),
+    method("powi", "n", List::from([types::int(IntTy::I32)]), ty, prefix + "powi"),
+    method("powf", "y", List::from([ty]), ty, prefix + "powf"),
+    method("log", "base", List::from([ty]), ty, prefix + "log"),
+    method("hypot", "y", List::from([ty]), ty, prefix + "hypot"),
+    method("mul_add", "a b", List::from([ty, ty]), ty, prefix + "mul_add"),
+    method("atan2", "x", List::from([ty]), ty, prefix + "atan2"),
   ]);
+  const unary = List::from(["abs", "signum", "floor", "ceil", "round", "trunc", "fract"]);
 
-  for name in List::from(["abs", "signum", "floor", "ceil", "round", "trunc", "fract"]) {
-    methods.push(method(name, new List(), ty, prefix + name));
+  for name in List::from(["sqrt", "cbrt", "exp", "exp2", "ln", "log2", "log10"]) {
+    unary.push(name);
+  }
+
+  for name in List::from(["sin", "cos", "tan", "asin", "acos", "atan", "sinh", "cosh", "tanh", "to_degrees", "to_radians"]) {
+    unary.push(name);
+  }
+
+  for name in unary {
+    methods.push(method(name, "", new List(), ty, prefix + name));
   }
 
   for name in List::from(["is_nan", "is_infinite", "is_finite"]) {
-    methods.push(method(name, new List(), bool_ty, prefix + name));
+    methods.push(method(name, "", new List(), bool_ty, prefix + name));
   }
 
   methods

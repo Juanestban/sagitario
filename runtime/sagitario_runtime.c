@@ -33,6 +33,7 @@
 #ifdef __APPLE__
 #include <sys/sysctl.h>
 #endif
+#include <dlfcn.h>
 #endif
 
 /* ---- Reference counts and thread-local state ------------------------------------------- */
@@ -895,6 +896,7 @@ sag_object *sag_list_new(size_t size, void (*release)(void *element)) {
   list->size = size == 0 ? 1 : size;
   list->data = NULL;
   list->release = release;
+  list->lent = 0;
   sag_object_init(&list->header, sag_list_drop, NULL);
   return &list->header;
 }
@@ -910,14 +912,23 @@ sag_object *sag_list_from(size_t size, void (*release)(void *element), const voi
   return object;
 }
 
+/* A list lent as a slice keeps its length, so that its elements do not move. */
+static void sag_list_check_unlent(sag_list *list) {
+  if (list->lent > 0) {
+    sag_panic("cannot change the length of a list while it is borrowed");
+  }
+}
+
 void *sag_list_push(sag_object *object) {
   sag_list *list = (sag_list *)object;
+  sag_list_check_unlent(list);
   sag_list_grow(list);
   return list->data + list->len++ * list->size;
 }
 
 void *sag_list_insert(sag_object *object, size_t index, const char *file, int line) {
   sag_list *list = (sag_list *)object;
+  sag_list_check_unlent(list);
   if (index > list->len) {
     char message[128];
     snprintf(message, sizeof message, "insertion index (is %zu) should be <= len (is %zu)", index, list->len);
@@ -932,6 +943,7 @@ void *sag_list_insert(sag_object *object, size_t index, const char *file, int li
 
 void *sag_list_pop(sag_object *object) {
   sag_list *list = (sag_list *)object;
+  sag_list_check_unlent(list);
   if (list->len == 0) {
     sag_panic("pop from an empty list");
   }
@@ -940,6 +952,7 @@ void *sag_list_pop(sag_object *object) {
 
 void *sag_list_remove(sag_object *object, size_t index, const char *file, int line) {
   sag_list *list = (sag_list *)object;
+  sag_list_check_unlent(list);
   if (index >= list->len) {
     char message[128];
     snprintf(message, sizeof message, "removal index (is %zu) should be < len (is %zu)", index, list->len);
@@ -955,6 +968,7 @@ void *sag_list_remove(sag_object *object, size_t index, const char *file, int li
 
 void sag_list_clear(sag_object *object) {
   sag_list *list = (sag_list *)object;
+  sag_list_check_unlent(list);
   size_t len = list->len;
   /* Emptied first: releasing an element cannot reach the list again. */
   list->len = 0;
@@ -962,6 +976,80 @@ void sag_list_clear(sag_object *object) {
     for (size_t i = 0; i < len; i++) {
       list->release(list->data + i * list->size);
     }
+  }
+}
+
+/* ---- Slices ---------------------------------------------------------------------------- */
+
+/* Checks `start..end` (or `start..=end`) against `len` with Rust's messages, and returns the
+ * number of elements; `*first` gets the first one. */
+static size_t sag_slice_range(size_t len, bool whole, size_t start, size_t end, bool inclusive, size_t *first, const char *file, int line) {
+  if (whole) {
+    *first = 0;
+    return len;
+  }
+  char message[128];
+  if (inclusive) {
+    if (end == SIZE_MAX) {
+      sag_panic_at("attempted to index slice up to maximum usize", file, line);
+    }
+    end++;
+  }
+  if (start > end) {
+    snprintf(message, sizeof message, "slice index starts at %zu but ends at %zu", start, end);
+    sag_panic_at(message, file, line);
+  }
+  if (end > len) {
+    snprintf(message, sizeof message, "range end index %zu out of range for slice of length %zu", end, len);
+    sag_panic_at(message, file, line);
+  }
+  *first = start;
+  return end - start;
+}
+
+/* `count` elements from the element `first` of `data`; a null `data` holds no elements. */
+static sag_slice sag_slice_make(void *data, size_t size, size_t first, size_t count, sag_object *owner) {
+  sag_slice slice;
+  slice.data = data == NULL ? NULL : (unsigned char *)data + first * size;
+  slice.len = count;
+  slice.owner = owner;
+  return slice;
+}
+
+sag_slice sag_slice_list(sag_object *object, bool whole, size_t start, size_t end, bool inclusive, const char *file, int line) {
+  sag_list *list = (sag_list *)object;
+  size_t first = 0;
+  size_t count = sag_slice_range(list->len, whole, start, end, inclusive, &first, file, line);
+  sag_object_retain(object);
+  list->lent++;
+  return sag_slice_make(list->data, list->size, first, count, object);
+}
+
+sag_slice sag_slice_array(void *data, size_t len, size_t size, bool whole, size_t start, size_t end, bool inclusive, const char *file, int line) {
+  size_t first = 0;
+  size_t count = sag_slice_range(len, whole, start, end, inclusive, &first, file, line);
+  return sag_slice_make(data, size, first, count, NULL);
+}
+
+sag_slice sag_slice_sub(sag_slice slice, size_t size, bool whole, size_t start, size_t end, bool inclusive, const char *file, int line) {
+  size_t first = 0;
+  size_t count = sag_slice_range(slice.len, whole, start, end, inclusive, &first, file, line);
+  sag_slice part = sag_slice_make(slice.data, size, first, count, slice.owner);
+  sag_slice_retain(part);
+  return part;
+}
+
+void sag_slice_retain(sag_slice slice) {
+  if (slice.owner != NULL) {
+    sag_object_retain(slice.owner);
+    ((sag_list *)slice.owner)->lent++;
+  }
+}
+
+void sag_slice_release(sag_slice slice) {
+  if (slice.owner != NULL) {
+    ((sag_list *)slice.owner)->lent--;
+    sag_object_release(slice.owner);
   }
 }
 
@@ -1672,21 +1760,18 @@ static int32_t sag_fs_file_error(sag_string path, int32_t code) {
   return code != 0 && sag_fs_kind(path) == SAG_FS_DIR ? EISDIR : code;
 }
 
-sag_string sag_fs_read(sag_string path, int32_t *status) {
-  sag_sb sb;
-  sag_sb_init(&sb);
+/* Reads the whole file at `path` into `sb`; 0, or the error code. */
+static int32_t sag_fs_read_all(sag_string path, sag_sb *sb) {
 #ifdef _WIN32
   wchar_t *wide = sag_wide(path);
   if (wide == NULL) {
-    *status = EINVAL;
-    return sag_string_empty();
+    return EINVAL;
   }
   /* GENERIC_READ, sharing everything, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL. */
   void *file = CreateFileW(wide, 0x80000000ul, 7ul, NULL, 3ul, 0x80ul, NULL);
   free(wide);
   if (file == SAG_WIN_INVALID_HANDLE) {
-    *status = sag_fs_file_error(path, sag_win_last_errno());
-    return sag_string_empty();
+    return sag_fs_file_error(path, sag_win_last_errno());
   }
   char chunk[4096];
   unsigned long count;
@@ -1699,33 +1784,38 @@ sag_string sag_fs_read(sag_string path, int32_t *status) {
     if (count == 0) {
       break;
     }
-    sag_sb_push_bytes(&sb, chunk, count);
+    sag_sb_push_bytes(sb, chunk, count);
   }
   CloseHandle(file);
 #else
   char *cpath = sag_cpath(path);
   if (cpath == NULL) {
-    *status = EINVAL;
-    return sag_string_empty();
+    return EINVAL;
   }
   errno = 0;
   FILE *file = fopen(cpath, "rb");
   free(cpath);
   if (file == NULL) {
-    *status = sag_fs_file_error(path, sag_io_errno());
-    return sag_string_empty();
+    return sag_fs_file_error(path, sag_io_errno());
   }
   char chunk[4096];
   size_t count;
   int32_t code = 0;
   while ((count = fread(chunk, 1, sizeof chunk, file)) > 0) {
-    sag_sb_push_bytes(&sb, chunk, count);
+    sag_sb_push_bytes(sb, chunk, count);
   }
   if (ferror(file)) {
     code = sag_fs_file_error(path, sag_io_errno());
   }
   fclose(file);
 #endif
+  return code;
+}
+
+sag_string sag_fs_read(sag_string path, int32_t *status) {
+  sag_sb sb;
+  sag_sb_init(&sb);
+  int32_t code = sag_fs_read_all(path, &sb);
   if (code != 0) {
     free(sb.data);
     *status = code;
@@ -1734,7 +1824,22 @@ sag_string sag_fs_read(sag_string path, int32_t *status) {
   return sag_io_finish_read(&sb, status);
 }
 
-int32_t sag_fs_write(sag_string path, sag_string text, bool append) {
+/* The bytes of the file at `path`, whatever they are, in a string `std::fs` only reads bytes of. */
+sag_string sag_fs_read_bytes(sag_string path, int32_t *status) {
+  sag_sb sb;
+  sag_sb_init(&sb);
+  int32_t code = sag_fs_read_all(path, &sb);
+  if (code != 0) {
+    free(sb.data);
+    *status = code;
+    return sag_string_empty();
+  }
+  *status = 0;
+  return sag_sb_finish(&sb);
+}
+
+/* Writes `len` bytes at `data` (NULL when `len` is 0) to the file at `path`. */
+static int32_t sag_fs_write_data(sag_string path, const unsigned char *data, size_t len, bool append) {
 #ifdef _WIN32
   wchar_t *wide = sag_wide(path);
   if (wide == NULL) {
@@ -1748,11 +1853,11 @@ int32_t sag_fs_write(sag_string path, sag_string text, bool append) {
   }
   int32_t code = 0;
   size_t done = 0;
-  while (done < text.len) {
-    size_t left = text.len - done;
+  while (done < len) {
+    size_t left = len - done;
     unsigned long size = left > 0x40000000u ? 0x40000000ul : (unsigned long)left;
     unsigned long written;
-    if (!WriteFile(file, text.ptr + done, size, &written, NULL)) {
+    if (!WriteFile(file, data + done, size, &written, NULL)) {
       code = sag_win_last_errno();
       break;
     }
@@ -1774,7 +1879,7 @@ int32_t sag_fs_write(sag_string path, sag_string text, bool append) {
     return sag_fs_file_error(path, sag_io_errno());
   }
   int32_t code = 0;
-  if (text.len > 0 && fwrite(text.ptr, 1, text.len, file) != text.len) {
+  if (len > 0 && fwrite(data, 1, len, file) != len) {
     code = sag_io_errno();
   }
   if (fclose(file) != 0 && code == 0) {
@@ -1782,6 +1887,14 @@ int32_t sag_fs_write(sag_string path, sag_string text, bool append) {
   }
   return code;
 #endif
+}
+
+int32_t sag_fs_write(sag_string path, sag_string text, bool append) {
+  return sag_fs_write_data(path, (const unsigned char *)text.ptr, text.len, append);
+}
+
+int32_t sag_fs_write_bytes(sag_string path, const uint8_t *data, size_t len) {
+  return sag_fs_write_data(path, data, len, false);
 }
 
 int32_t sag_fs_create_dir(sag_string path) {
@@ -3429,6 +3542,95 @@ static void sag_task_close_inbox(void) {
   sag_object_release(&inbox->header);
 }
 #endif
+
+/* ---- Dynamic libraries (docs/adr/0078-ffi-without-c-shims.md) --------------------------- */
+
+#ifdef _WIN32
+extern void *SAG_WINAPI LoadLibraryW(const wchar_t *name);
+extern sag_symbol SAG_WINAPI GetProcAddress(void *library, const char *name);
+extern unsigned long SAG_WINAPI GetLastError(void);
+#endif
+
+/* Why the last library of this thread did not load. */
+static SAG_THREAD_LOCAL char sag_library_reason[256];
+
+static void sag_library_set_reason(const char *text) {
+  size_t len = strlen(text);
+  if (len >= sizeof sag_library_reason) {
+    len = sizeof sag_library_reason - 1;
+  }
+  memcpy(sag_library_reason, text, len);
+  sag_library_reason[len] = '\0';
+}
+
+/* A C string with the text of `name`, or NULL if it contains a NUL character. */
+static char *sag_library_c_name(sag_string name) {
+  if (memchr(name.ptr, 0, name.len) != NULL) {
+    return NULL;
+  }
+  char *text = sag_alloc(name.len + 1);
+  memcpy(text, name.ptr, name.len);
+  text[name.len] = 0;
+  return text;
+}
+
+void *sag_library_open(sag_string path) {
+#ifdef _WIN32
+  wchar_t *wide = sag_wide(path);
+  if (wide == NULL) {
+    sag_library_set_reason("the path contains a NUL character");
+    return NULL;
+  }
+  void *library = LoadLibraryW(wide);
+  free(wide);
+  if (library == NULL) {
+    char reason[64];
+    snprintf(reason, sizeof reason, "Windows error %lu", GetLastError());
+    sag_library_set_reason(reason);
+  }
+  return library;
+#else
+  char *cpath = sag_library_c_name(path);
+  if (cpath == NULL) {
+    sag_library_set_reason("the path contains a NUL character");
+    return NULL;
+  }
+  void *library = dlopen(cpath, RTLD_NOW | RTLD_LOCAL);
+  free(cpath);
+  if (library == NULL) {
+    const char *reason = dlerror();
+    sag_library_set_reason(reason != NULL ? reason : "unknown error");
+  }
+  return library;
+#endif
+}
+
+sag_string sag_library_error(void) {
+  sag_sb sb;
+  sag_sb_init(&sb);
+  sag_sb_push_bytes(&sb, sag_library_reason, strlen(sag_library_reason));
+  return sag_sb_finish(&sb);
+}
+
+sag_symbol sag_library_symbol(void *library, sag_string name) {
+  char *cname = sag_library_c_name(name);
+  if (cname == NULL) {
+    return NULL;
+  }
+#ifdef _WIN32
+  sag_symbol symbol = GetProcAddress(library, cname);
+#else
+  /* POSIX guarantees that a data pointer from `dlsym` holds a function's address; ISO C does not
+   * define the cast, so the bits are copied. */
+  void *address = dlsym(library, cname);
+  sag_symbol symbol = NULL;
+  if (address != NULL) {
+    memcpy(&symbol, &address, sizeof symbol);
+  }
+#endif
+  free(cname);
+  return symbol;
+}
 
 /* ---- Program lifecycle ----------------------------------------------------------------- */
 

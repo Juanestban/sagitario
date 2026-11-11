@@ -619,10 +619,16 @@ fn library_source() -> String {
     "  unsafe { *out = Point { x: 1.5, y: 2.5 }; }",
     "}",
     "",
+    "/// References are pointers that are never null.",
+    "pub extern \"C\" fn geo_scale(point: &mut Point, by: &f64) {",
+    "  point.x *= *by;",
+    "  point.y *= *by;",
+    "}",
+    "",
   ]).join("\n")
 }
 
-const HOST_SOURCE: String = "#include <stdio.h>\n#include \"geo.h\"\n\nint main(void) {\n  Point a = {0.0, 0.0};\n  Point b = {3.0, 4.0};\n  Point c;\n  geo_fill(&c);\n  printf(\"%.1f %d %.1f %.1f\\n\", geo_distance2(a, b), geo_twice(21), c.x, c.y);\n  return 0;\n}\n";
+const HOST_SOURCE: String = "#include <stdio.h>\n#include \"geo.h\"\n\nint main(void) {\n  Point a = {0.0, 0.0};\n  Point b = {3.0, 4.0};\n  Point c;\n  geo_fill(&c);\n  double by = 2.0;\n  geo_scale(&c, &by);\n  printf(\"%.1f %d %.1f %.1f\\n\", geo_distance2(a, b), geo_twice(21), c.x, c.y);\n  return 0;\n}\n";
 
 /// The library `geo`, with a C source of its own, in `dir`.
 fn geo_package(dir: String, extra: String) -> Result<(), String> {
@@ -646,13 +652,14 @@ fn builds_a_library_that_c_programs_use(cx: Context) -> Result<(), String> {
     "/* The squared distance between\n * two points. */\ndouble geo_distance2(Point a, Point b);",
     "int32_t geo_twice(int32_t x);",
     "void geo_fill(Point *out);",
+    "void geo_scale(Point *point, const double *by);",
     "extern \"C\" {",
   ] {
     expect_contains("the header", header, expected)?;
   }
 
   support::write_file(path::join(target, "host.c"), HOST_SOURCE)?;
-  run_c_programs(target, "geo", "host.c", new List(), "25.0 42 1.5 2.5\n")
+  run_c_programs(target, "geo", "host.c", new List(), "25.0 42 3.0 5.0\n")
 }
 
 fn builds_only_the_chosen_library_outputs(cx: Context) -> Result<(), String> {
