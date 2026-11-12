@@ -43,6 +43,12 @@ fn main() -> Result<(), io::Error> {
 }
 ```
 
+## `std::collections`
+
+Rust's collections beyond the prelude's `List`, `Map` and `HashSet`
+([ADR-0095](../adr/0095-collections.md)): `VecDeque`, `BTreeMap`, `BTreeSet` and `BinaryHeap`,
+written in Sagitario, which the increments of the record add.
+
 ## `std::env`
 
 | Function | Result |

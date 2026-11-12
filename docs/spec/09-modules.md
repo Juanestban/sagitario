@@ -93,6 +93,7 @@ Every module implicitly sees these names, without `use`:
 | Functions | `print(s: String)`, `println(s: String)`, `eprintln(s: String)`, `panic(message: String)` | F1 |
 | Types | `Error` (an interface) and `Error(message)` | F2 |
 | Types | `List`, `Map`, `Iter`, `Entry`, `Ordering`; the interfaces `Eq`, `Ord`, `Hash` | F2 |
+| Types | The interfaces `Iterable` and `FromIterator` ([iteration](05-interfaces-generics.md#iteration-and-collection)) | S2 |
 | Functions | `min<T: Ord>(a, b)`, `max<T: Ord>(a, b)` ([order](05-interfaces-generics.md#equality-order-and-hashing-f2)) | S2 |
 | Types | The interface `Display` ([format strings](02-types.md#string-f1)) | S2 |
 | Types | The interfaces `From`, `Into`, `TryFrom`, `TryInto` ([conversions](05-interfaces-generics.md#conversions)) and `Default` ([defaults](05-interfaces-generics.md#defaults)) | S2 |

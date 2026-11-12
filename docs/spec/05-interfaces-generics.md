@@ -347,6 +347,36 @@ const clip = projection * view * model * position;   // Mat4 * Mat4 * Mat4 * Vec
 - A block for an interface that extends another one the type implements itself, such as
   `impl Ord for P` beside `impl Eq for P`, holds only its own methods.
 
+## Iteration and collection
+
+Rationale: [ADR-0095](../adr/0095-collections.md), Q645 and Q646. Two prelude interfaces give
+`for` and `collect()` to any type, as Rust's `IntoIterator` and `FromIterator`:
+
+```sag
+interface Iterable<T> { fn iter(self) -> Iter<T>; }
+interface FromIterator<T> { fn from_iter(iter: Iter<T>) -> Self; }
+
+class Bag impl Iterable<i32>, FromIterator<i32> {
+  pub const items: List<i32>;
+
+  pub fn new(self, items: List<i32>) { self.items = items; }
+  pub fn iter(self) -> Iter<i32> { self.items.iter() }
+  pub fn from_iter(iter: Iter<i32>) -> Bag { new Bag(iter.collect()) }
+}
+
+const bag: Bag = (1..4).collect();   // Bag::from_iter
+for n in bag { ... }                 // over bag.iter()
+```
+
+- `for x in value` runs over `value.iter()` when the type of `value` implements `Iterable<T>`,
+  and binds `x` to each `T`. Lists, arrays and iterators implement it, so a bound
+  `T: Iterable<i32>` takes them; a `Map` does not, since its `iter()` gives pairs and `for` gives
+  its entries.
+- `collect()` makes the type expected when it implements `FromIterator` of the elements, through
+  its `from_iter`; lists, maps, strings (of `char` or `String`) and `Result<List<T>, E>`
+  implement it, as [`collect`](08-closures.md#iterators) makes them, so a bound
+  `C: FromIterator<i32>` takes them, and `C::from_iter(iter)` is called as any static function.
+
 ## Indexing
 
 Rationale: [ADR-0094](../adr/0094-conversions-and-defaults.md), Q639. The prelude declares Rust's

@@ -15,6 +15,7 @@ use pkg::types::classes::PlaceUse;
 use pkg::types::exprs;
 use pkg::types::generic;
 use pkg::types::inheritance;
+use pkg::types::interfaces;
 use pkg::types::typed::{BuiltinMethod, ListMethod, PreludeItems, ToIter};
 
 /// The methods of `Iter` that lists and arrays also have, as shorthands for `.iter().method()`.
@@ -79,6 +80,8 @@ pub fn prelude_items(cx: Checker) {
     default: prelude_interface(cx, "Default"),
     index: prelude_interface(cx, "Index"),
     index_mut: prelude_interface(cx, "IndexMut"),
+    iterable: prelude_interface(cx, "Iterable"),
+    from_iterator: prelude_interface(cx, "FromIterator"),
   };
 }
 
@@ -597,6 +600,13 @@ pub fn iter_method(cx: Checker, value: Expr, receiver_ty: Type, elem: Type, meth
   if name == "collect" && args.is_empty() {
     if let Some(function) = collect_target(cx, elem, expected) {
       return Some(inferred_prelude_method(cx, value, function, receiver_ty, args));
+    }
+
+    // Any other type implementing `FromIterator` of the elements (docs/adr/0095-collections.md, Q646).
+    if let Some(target) = expected {
+      if let Some(ty) = interfaces::collect_into(cx, value, elem, target) {
+        return Some(ty);
+      }
     }
   }
 

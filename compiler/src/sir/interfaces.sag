@@ -314,6 +314,79 @@ pub fn convert_value(lw: Lowering, value: Operand, conversion: Conversion) -> Re
   Ok(lw.call(Callee::Fn(function), List::from([value]), ret))
 }
 
+/// Whether `function` is `from_iter` of the prelude's `FromIterator`.
+pub fn is_from_iter(lw: Lowering, function: u32) -> bool {
+  match lw.typed.prelude.from_iterator {
+    Some(id) => match lw.typed.interface_def(id) {
+      Some(def) => match def.methods.first() {
+        Some(found) => found == function,
+        None => false,
+      },
+      None => false,
+    },
+    None => false,
+  }
+}
+
+/// The value of type `to` that `from_iter` (`function`) makes of `iter`, an iterator of `elem`: a
+/// list, a string, a map or a result through the prelude's functions, or the `from_iter` of the
+/// type (docs/adr/0095-collections.md, Q646).
+pub fn from_iter_value(lw: Lowering, iter: Operand, elem: Type, to: Type, function: u32) -> Result<Operand, String> {
+  match to.kind {
+    TypeKind::List(_) => {
+      const iter_class = match lw.typed.prelude.iter {
+        Some(found) => found,
+        None => return Err("`collect` without `Iter`"),
+      };
+      const collect = match lw.resolution.type_function(lw.package, TypeItem::Class(iter_class), "collect") {
+        Some(found) => found,
+        None => return Err("`Iter` without `collect`"),
+      };
+      const target = mono::instance(lw, collect, Subst::of(ParamOwner::Item(TypeItem::Class(iter_class)), List::from([elem])));
+
+      return Ok(lw.call(Callee::Fn(target), List::from([iter]), to));
+    }
+    TypeKind::String => {
+      const name = match elem.kind {
+        TypeKind::Char => "iter_collect_chars",
+        _ => "iter_collect_strings",
+      };
+
+      return prelude_call(lw, name, iter, to);
+    }
+    TypeKind::Result { value, error } => {
+      if let TypeKind::List(item) = value.kind {
+        return generic_prelude_call(lw, "iter_collect_result", List::from([item, error]), iter, to);
+      }
+    }
+    TypeKind::Class(named) => {
+      if lw.typed.map_args(to).is_some() {
+        return generic_prelude_call(lw, "iter_collect_map", named.args, iter, to);
+      }
+    }
+    _ => {}
+  }
+
+  const interface_id = match lw.typed.prelude.from_iterator {
+    Some(found) => found,
+    None => return Err("`FromIterator` without the prelude"),
+  };
+  const subst = Subst::of(ParamOwner::Item(TypeItem::Interface(interface_id)), List::from([elem])).with_self(to);
+  const target = static_for(lw, function, to, subst, new List());
+
+  Ok(lw.call(Callee::Fn(target), List::from([iter]), to))
+}
+
+/// A call of the generic prelude function `name` with the type arguments `args` and one argument.
+fn generic_prelude_call(lw: Lowering, name: String, args: List<Type>, value: Operand, ret: Type) -> Result<Operand, String> {
+  const function = match lw.resolution.prelude_fn(name) {
+    Some(found) => found,
+    None => return Err("the prelude has no `" + name + "`"),
+  };
+
+  Ok(lw.call(Callee::Fn(mono::instance(lw, function, Subst::of(ParamOwner::Fn(function), args))), List::from([value]), ret))
+}
+
 /// A call of the prelude function `name` with one argument.
 fn prelude_call(lw: Lowering, name: String, value: Operand, ret: Type) -> Result<Operand, String> {
   const function = match lw.resolution.prelude_fn(name) {

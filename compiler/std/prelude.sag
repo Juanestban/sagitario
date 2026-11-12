@@ -190,6 +190,18 @@ pub interface TryInto<U, E> {
   fn try_into(self) -> Result<U, E>;
 }
 
+/// What `for` iterates over, as Rust's `IntoIterator` (docs/adr/0095-collections.md, Q645):
+/// `for x in value` runs over `value.iter()`. Lists, arrays and iterators implement it.
+pub interface Iterable<T> {
+  fn iter(self) -> Iter<T>;
+}
+
+/// What `collect()` makes, as Rust's `FromIterator` (Q646): `const set: Bag = values.collect();`
+/// calls `Bag::from_iter`. Lists, maps, strings and `Result<List<T>, E>` implement it.
+pub interface FromIterator<T> {
+  fn from_iter(iter: Iter<T>) -> Self;
+}
+
 /// `value[index]` for a type other than lists, arrays and slices, as Rust's `Index`
 /// (docs/adr/0094-conversions-and-defaults.md, Q639). A reference cannot be a result, so `index`
 /// gives the value: a copy of a struct, the same instance of a class.
@@ -2166,5 +2178,12 @@ impl<K, V> Index<K, V> for Map<K, V> {
       Some(value) => value,
       None => panic("no entry found for key"),
     }
+  }
+}
+
+/// An iterator is iterated as itself (Q645).
+impl<T> Iterable<T> for Iter<T> {
+  fn iter(self) -> Iter<T> {
+    self
   }
 }

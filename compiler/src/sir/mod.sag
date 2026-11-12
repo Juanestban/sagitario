@@ -1717,12 +1717,12 @@ pub class Lowering {
     if node.id == target.id && op.is_none() {
       const stored = self.operand_as(value, args[1])?;
 
-      self.index_method(set, args, base_place, List::from([position, stored]), types::unit())?;
+      self.interface_method_call(set, args, base_place, List::from([position, stored]), types::unit())?;
 
       return Ok(true);
     }
 
-    const copy = self.index_method(call.index, args, base_place, List::from([position]), args[1])?;
+    const copy = self.interface_method_call(call.index, args, base_place, List::from([position]), args[1])?;
     const copy_place = self.operand_place(copy, args[1])?;
 
     self.index_places.insert(node.id, copy_place);
@@ -1731,14 +1731,15 @@ pub class Lowering {
 
     self.index_places.remove(node.id);
     assigned?;
-    self.index_method(set, args, base_place, List::from([position, Operand::Place(copy_place)]), types::unit())?;
+    self.interface_method_call(set, args, base_place, List::from([position, Operand::Place(copy_place)]), types::unit())?;
 
     Ok(true)
   }
 
-  /// A call of `index` or `index_set` (of `Index` or `IndexMut` with `args`) on the value in
-  /// `base_place`, through its type's implementation, or the itable of an interface value.
-  prv fn index_method(self, function: u32, args: List<Type>, base_place: Place, operands: List<Operand>, ret: Type) -> Result<Operand, String> {
+  /// A call of the interface method `function` (of its interface with `args`, such as `index` of
+  /// `Index`) on the value in `base_place`, through its type's implementation, or the itable of
+  /// an interface value.
+  pub fn interface_method_call(self, function: u32, args: List<Type>, base_place: Place, operands: List<Operand>, ret: Type) -> Result<Operand, String> {
     const receiver_ty = base_place.ty;
     const owner = match self.resolution.owner(function) {
       Some(found) => found,
@@ -1888,7 +1889,7 @@ pub class Lowering {
 
           const base_place = self.base_place(base)?;
           const position = self.operand_as(index, args[0])?;
-          const read = self.index_method(call.index, args, base_place, List::from([position]), ty)?;
+          const read = self.interface_method_call(call.index, args, base_place, List::from([position]), ty)?;
 
           return self.operand_place(read, ty);
         }
@@ -2780,6 +2781,15 @@ pub class Lowering {
       return closures::field_call(self, receiver, method.name, args);
     }
 
+    // `collect()` into a type implementing `FromIterator` (docs/adr/0095-collections.md, Q646).
+    if let Some(call) = self.typed.collect_calls.get(value.id) {
+      const receiver_ty = self.type_of(receiver)?;
+      const elem = self.typed.iter_elem(receiver_ty).unwrap_or(types::error());
+      const iter = self.expr(receiver)?;
+
+      return interfaces::from_iter_value(self, iter, elem, types::substitute(call.self_ty, self.subst), call.function);
+    }
+
     // `into` and `try_into` (docs/adr/0094-conversions-and-defaults.md, Q633 and Q634).
     if let Some(conversion) = self.typed.conversions.get(value.id) {
       const operand = self.operand_as(receiver, types::substitute(conversion.from, self.subst))?;
@@ -3366,6 +3376,15 @@ pub class Lowering {
     if let Some(call) = self.typed.static_calls.get(value.id) {
       if self.is_default_fn(call.function) {
         return self.default_value(types::substitute(call.self_ty, self.subst));
+      }
+
+      // `T::from_iter(iter)`, which the prelude's collections answer too (docs/adr/0095-collections.md, Q646).
+      if interfaces::is_from_iter(self, call.function) && args.len() == 1 {
+        const iter_ty = self.type_of(args[0])?;
+        const elem = self.typed.iter_elem(iter_ty).unwrap_or(types::error());
+        const iter = self.expr(args[0])?;
+
+        return interfaces::from_iter_value(self, iter, elem, types::substitute(call.self_ty, self.subst), call.function);
       }
     }
 

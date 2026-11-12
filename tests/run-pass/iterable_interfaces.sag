@@ -1,0 +1,85 @@
+// `Iterable` and `FromIterator`: `for` over a type of the program, `collect()` into one, and both
+// as bounds, met by the program's types and by lists, arrays, iterators, strings, maps and
+// results (docs/adr/0095-collections.md, Q645 and Q646).
+// expect-stdout: 1 2 3 | 10 20 | 6 6 6
+// expect-stdout: Bag { items: [3, 1, 2] } Bag { items: [0, 1, 2] } [1, 2, 3] abc {"a": 1} Ok([1, 2])
+// expect-stdout: 3 [4, 5] "xy" Bag { items: [7] }
+
+/// The numbers from 1 to `count`.
+struct Countdown impl Iterable<i32> {
+  pub count: i32;
+
+  pub fn iter(self) -> Iter<i32> {
+    (1..=self.count).map((n) => n)
+  }
+}
+
+class Bag impl Iterable<i32>, FromIterator<i32> {
+  pub const items: List<i32>;
+
+  pub fn new(self, items: List<i32>) {
+    self.items = items;
+  }
+
+  pub fn iter(self) -> Iter<i32> {
+    self.items.iter()
+  }
+
+  pub fn from_iter(iter: Iter<i32>) -> Bag {
+    new Bag(iter.collect())
+  }
+}
+
+fn total<T: Iterable<i32>>(values: T) -> i32 {
+  var sum = 0;
+
+  for value in values {
+    sum += value;
+  }
+
+  sum
+}
+
+fn first_of<T: Iterable<i32>>(values: T) -> i32 {
+  values.iter().next().unwrap_or(-1)
+}
+
+fn build<C: FromIterator<i32>>(limit: i32) -> C {
+  (0..limit).collect()
+}
+
+fn make<C: FromIterator<i32>>(values: List<i32>) -> C {
+  C::from_iter(values.iter())
+}
+
+fn main() {
+  const three = Countdown { count: 3 };
+  const parts = List::from(["1", "2", "3"]);
+
+  for n in three {
+    print(f"{n} ");
+  }
+
+  print("| ");
+
+  for n in new Bag(List::from([10, 20])) {
+    print(f"{n} ");
+  }
+
+  println(f"| {total(three)} {total(List::from([1, 2, 3]))} {total([3, 3])}");
+
+  const bag: Bag = List::from([3, 1, 2]).iter().collect();
+  const built: Bag = build(3);
+  const list: List<i32> = build(3);
+  const text: String = "abc".chars().collect();
+  const map: Map<String, i32> = List::from([("a", 1)]).iter().collect();
+  const parsed: Result<List<i32>, String> = parts.iter().take(2).map((s) => s.parse_i32()).collect();
+
+  println(f"{bag:?} {built:?} {list.iter().map((n) => n + 1).collect():?} {text} {map:?} {parsed:?}");
+
+  const doubled: List<i32> = make(List::from([4, 5]));
+  const chars: String = List::from(['x', 'y']).iter().collect();
+  const single: Bag = make(List::from([7]));
+
+  println(f"{first_of(bag)} {doubled:?} {chars:?} {single:?}");
+}

@@ -403,6 +403,20 @@ fn is_primitive(ty: Type) -> bool {
   }
 }
 
+/// Whether `function` is `iter` of `Iterable`.
+fn is_iterable_iter(lw: Lowering, function: u32) -> bool {
+  match lw.typed.prelude.iterable {
+    Some(id) => match lw.typed.interface_def(id) {
+      Some(def) => match def.methods.first() {
+        Some(found) => found == function,
+        None => false,
+      },
+      None => false,
+    },
+    None => false,
+  }
+}
+
 /// Whether `function` is `to_string` of `Display`.
 fn is_display(lw: Lowering, function: u32) -> bool {
   match lw.resolution.owner(function) {
@@ -421,6 +435,15 @@ fn same_option(id: u32, found: Option<u32>) -> bool {
 /// Whether `function` is a method of the prelude's `Eq`, `Ord` or `Hash`, called on an integer,
 /// `bool`, `char` or `String`.
 pub fn is_primitive_method(lw: Lowering, function: u32, receiver_ty: Type) -> bool {
+  // `iter` of `Iterable` on a list or an array, called in generic code
+  // (docs/adr/0095-collections.md, Q645).
+  if is_iterable_iter(lw, function) {
+    return match receiver_ty.kind {
+      TypeKind::List(_) | TypeKind::Array { .. } => true,
+      _ => false,
+    };
+  }
+
   const numeric = match receiver_ty.kind {
     TypeKind::Int(_) | TypeKind::Float(_) | TypeKind::String => true,
     _ => false,
@@ -513,6 +536,20 @@ pub fn primitive_operator(lw: Lowering, function: u32, receiver_ty: Type, lhs: O
 /// number or a `String`.
 pub fn primitive_method(lw: Lowering, function: u32, ty: Type, receiver: Expr, args: List<Expr>) -> Result<Operand, String> {
   const receiver_ty = lw.type_of(receiver)?;
+
+  if is_iterable_iter(lw, function) {
+    const elem = match receiver_ty.kind {
+      TypeKind::List(found) | TypeKind::Array { elem: found, .. } => found,
+      _ => return Err("`iter` of `Iterable` on another type"),
+    };
+    const to_iter = match lw.resolution.prelude_fn("list_iter") {
+      Some(found) => found,
+      None => return Err("the prelude has no `list_iter`"),
+    };
+
+    return iter_of(lw, receiver, to_iter, List::from([elem]));
+  }
+
   const lhs = lw.expr(receiver)?;
 
   if is_display(lw, function) {
@@ -948,6 +985,38 @@ pub fn for_collection(lw: Lowering, variable: u32, iter: Expr, body: Block) -> R
       source = lw.call(Callee::Fn(target), List::from([map]), iter_of_entries);
     }
     None => {
+      if let Some(elem) = lw.typed.iterable_fors.get(iter.id) {
+        // `for x in value` over `value.iter()` of `Iterable` (docs/adr/0095-collections.md, Q645),
+        // unless the instance's type is iterated by itself: an iterator, or an array, whose loop
+        // is its own.
+        const own_loop = match iter_ty.kind {
+          TypeKind::Array { .. } => true,
+          _ => lw.typed.iter_elem(iter_ty).is_some(),
+        };
+
+        if !own_loop {
+          const iterable = match lw.typed.prelude.iterable {
+            Some(found) => found,
+            None => return Err("`Iterable` without the prelude"),
+          };
+          const function = match lw.typed.interface_def(iterable) {
+            Some(def) => match def.methods.first() {
+              Some(found) => found,
+              None => return Err("`Iterable` without `iter`"),
+            },
+            None => return Err("`Iterable` without the prelude"),
+          };
+          const item = types::substitute(elem, lw.subst);
+          const value = lw.expr(iter)?;
+          const place = lw.operand_place(value, iter_ty)?;
+
+          source = lw.interface_method_call(function, List::from([item]), place, new List(), lw.typed.iter_type(item))?;
+          for_iter(lw, variable, source, body)?;
+
+          return Ok(true);
+        }
+      }
+
       if lw.typed.iter_elem(iter_ty).is_none() {
         return Ok(false);
       }

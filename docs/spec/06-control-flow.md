@@ -63,7 +63,9 @@ for i in 0..10 { ... }
   the type. A `loop` without any `break` never finishes.
 - `break` and `continue` apply to the innermost loop. Labels are post-MVP.
 - `for` iterates over ranges, arrays and `s.chars()`/`s.bytes()` (F1) and, from F2, over lists,
-  maps (their entries) and iterators (`Iter<T>`). The loop variable is a new `const` binding on
+  maps (their entries) and iterators (`Iter<T>`), and over the values of any type implementing
+  [`Iterable<T>`](05-interfaces-generics.md#iteration-and-collection), whose `iter()` it runs
+  over ([ADR-0095](../adr/0095-collections.md), Q645). The loop variable is a new `const` binding on
   each iteration, or a tuple pattern whose parts always match, which binds each of its names:
   `for (index, c) in text.char_indices() { ... }`. An array is iterated through a copy taken before the loop, so assigning to it
   inside the body does not change the iteration. A list is read by position at every step, so

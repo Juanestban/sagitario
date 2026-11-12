@@ -1522,9 +1522,16 @@ fn for_iter(cx: Checker, iter: Expr) -> Type {
         TypeKind::Array { elem, .. } | TypeKind::Slice { elem, .. } => elem,
         TypeKind::Error | TypeKind::Never => types::error(),
         _ => {
+          // A type implementing `Iterable` (docs/adr/0095-collections.md, Q645).
+          if let Some(elem) = interfaces::iterable_elem(cx, ty) {
+            cx.typed.iterable_fors.insert(iter.id, elem);
+
+            return elem;
+          }
+
           cx.diagnostics.push(
             Diagnostic::error(codes::INVALID_OPERAND, iter.span, "cannot iterate over a value of type `" + types::text(ty) + "`")
-              .with_note("`for` iterates over ranges, arrays, lists, maps and iterators"),
+              .with_note("`for` iterates over ranges, arrays, lists, maps, iterators and the types implementing `Iterable`"),
           );
 
           types::error()

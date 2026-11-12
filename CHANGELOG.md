@@ -15,6 +15,10 @@ The sources say 0.32.0.
 
 ### Added
 
+- `Iterable` and `FromIterator`, as Rust's `IntoIterator` and `FromIterator`: `for` iterates over
+  any type implementing `Iterable`, `collect()` makes any type implementing `FromIterator`, and
+  lists, arrays, iterators, strings, maps and results implement them for bounds; and the module
+  `std::collections` ([ADR-0095](docs/adr/0095-collections.md), increment 1).
 - `Index` and `IndexMut`, as Rust's: `value[i]` calls `index`, and `value[i] = v`,
   `value[i] += v` or `value[i].field = v` read the element, change it and write it back with
   `index_set`; a type may be indexed by several types, and `map[key]` gives the value of a key

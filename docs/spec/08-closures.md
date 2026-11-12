@@ -175,7 +175,9 @@ const total = (1..=10).fold(0, (sum, n) => sum + n);
 - **`collect`** (Q628) makes the type the context expects: a `List<T>` without one, a
   `Map<K, V>` from an iterator of `(K, V)`, a `String` from one of `char` or of `String`, and a
   `Result<List<T>, E>` from one of `Result<T, E>`, which stops at the first `Err`:
-  `const counts: Map<String, i32> = pairs.iter().collect();`.
+  `const counts: Map<String, i32> = pairs.iter().collect();`. Any other type implementing
+  [`FromIterator<T>`](05-interfaces-generics.md#iteration-and-collection) of the elements is
+  made by its `from_iter` ([ADR-0095](../adr/0095-collections.md), Q646).
 - A lambda argument takes its type from the parameter: one whose body gives an instance of a
   subclass of the result expected has the result expected, as a `return` would, so
   `words.flat_map((w) => w.chars())` gives the `Iter<char>` `flat_map` expects.

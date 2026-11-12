@@ -25,6 +25,7 @@ const PRELUDE: String = include_str("../std/prelude.sag");
 /// The file of `std` itself: helpers shared by its modules, which programs cannot name.
 const STD_ROOT: String = include_str("../std/mod.sag");
 
+const STD_COLLECTIONS: String = include_str("../std/collections.sag");
 const STD_ENV: String = include_str("../std/env.sag");
 const STD_FFI: String = include_str("../std/ffi.sag");
 const STD_FS: String = include_str("../std/fs.sag");
@@ -48,7 +49,9 @@ const CORE_STD: String = "env time";
 /// The source of the standard library module `std::name` written in Sagitario.
 fn std_source(name: String) -> Option<String> {
   // Change this and use match for improve the design
-  if name == "env" {
+  if name == "collections" {
+    Some(STD_COLLECTIONS)
+  } else if name == "env" {
     Some(STD_ENV)
   } else if name == "ffi" {
     Some(STD_FFI)

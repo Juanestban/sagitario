@@ -103,6 +103,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0092](0092-tuples.md) | Tuples: types, values, patterns and their interfaces (S2) | Accepted |
 | [0093](0093-everyday-methods.md) | The everyday methods of the standard library (S2) | Accepted |
 | [0094](0094-conversions-and-defaults.md) | Conversions, defaults, generic `min` and `max`, and indexing (S2) | Accepted |
+| [0095](0095-collections.md) | The collections of Rust's std, `Iterable` and `FromIterator` (S2) | Accepted |
 
 ## Template
 

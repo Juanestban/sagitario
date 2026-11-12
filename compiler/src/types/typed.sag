@@ -40,6 +40,9 @@ pub struct PreludeItems {
   /// `Index` and `IndexMut` (docs/adr/0094-conversions-and-defaults.md, Q639).
   pub index: Option<u32>;
   pub index_mut: Option<u32>;
+  /// `Iterable` and `FromIterator` (docs/adr/0095-collections.md).
+  pub iterable: Option<u32>;
+  pub from_iterator: Option<u32>;
 }
 
 /// The methods of `List<T>` implemented by the compiler (docs/spec/02-types.md#arrays-and-lists).
@@ -237,6 +240,11 @@ pub class TypedModule {
   pub var conversions: Map<u32, Conversion>;
   /// `base[index]` on a type implementing `Index`, by the id of the index expression (Q639).
   pub var index_calls: Map<u32, IndexCall>;
+  /// The iterable of a `for` over a type implementing `Iterable`, by the id of the iterable: the
+  /// type of its elements (docs/adr/0095-collections.md, Q645).
+  pub var iterable_fors: Map<u32, Type>;
+  /// `collect()` into a type implementing `FromIterator`, by call id (Q646).
+  pub var collect_calls: Map<u32, StaticCall>;
   /// The structs and enums written after `@default`, by `item_key` (Q636).
   pub var derived_defaults: Map<String, bool>;
   /// The variant marked `@default` of each such enum, by enum id.
@@ -292,6 +300,8 @@ pub class TypedModule {
       default: None,
       index: None,
       index_mut: None,
+      iterable: None,
+      from_iterator: None,
     };
     self.sync_classes = new List();
     self.const_types = new List();
@@ -302,6 +312,8 @@ pub class TypedModule {
     self.static_calls = new Map<u32, StaticCall>();
     self.conversions = new Map<u32, Conversion>();
     self.index_calls = new Map<u32, IndexCall>();
+    self.iterable_fors = new Map<u32, Type>();
+    self.collect_calls = new Map<u32, StaticCall>();
     self.derived_defaults = new Map<String, bool>();
     self.default_variants = new Map<u32, u32>();
     self.local_types = new List();
@@ -802,6 +814,11 @@ pub class TypedModule {
             if let Some(default) = self.default_ref() {
               direct.push(default);
             }
+
+            // `collect()` into a map (docs/adr/0095-collections.md, Q646).
+            if named.args.len() == 2 {
+              self.push_ref(direct, self.prelude.from_iterator, "FromIterator", types::of(TypeKind::Tuple(List::from([named.args[0], named.args[1]]))));
+            }
           }
         }
       }
@@ -825,16 +842,24 @@ pub class TypedModule {
       }
       TypeKind::Result { value, error } => {
         direct = self.tuple_impls(List::from([value, error]));
+
+        // `collect()` of results into a list of the values or the first error (Q646).
+        if let TypeKind::List(elem) = value.kind {
+          self.push_ref(direct, self.prelude.from_iterator, "FromIterator", types::result(elem, error));
+        }
       }
       // Lists and arrays compare by value, as Rust's `Vec` (Q623). An empty list is a default,
       // and an array of defaults (Q636).
       TypeKind::List(elem) => {
         direct = self.tuple_impls(List::from([elem]));
         self.push_default_of(direct, new List());
+        self.push_ref(direct, self.prelude.iterable, "Iterable", elem);
+        self.push_ref(direct, self.prelude.from_iterator, "FromIterator", elem);
       }
       TypeKind::Array { elem, .. } => {
         direct = self.tuple_impls(List::from([elem]));
         self.push_default_of(direct, List::from([elem]));
+        self.push_ref(direct, self.prelude.iterable, "Iterable", elem);
       }
       _ => {
         direct = self.primitive_impls(ty);
@@ -859,6 +884,13 @@ pub class TypedModule {
     match self.prelude.default {
       Some(id) => Some(NamedRef { id: id, name: "Default", args: new List() }),
       None => None,
+    }
+  }
+
+  /// Adds the prelude interface `id`, named `name`, with the one type argument `arg`.
+  prv fn push_ref(self, found: List<NamedRef>, id: Option<u32>, name: String, arg: Type) {
+    if let Some(found_id) = id {
+      found.push(NamedRef { id: found_id, name: name, args: List::from([arg]) });
     }
   }
 
@@ -962,6 +994,10 @@ pub class TypedModule {
       if let Some(id) = self.prelude.add {
         result.push(NamedRef { id: id, name: "Add", args: pair });
       }
+
+      // `collect()` of characters or strings (docs/adr/0095-collections.md, Q646).
+      self.push_ref(result, self.prelude.from_iterator, "FromIterator", types::of(TypeKind::Char));
+      self.push_ref(result, self.prelude.from_iterator, "FromIterator", types::string());
     }
 
     // Numbers, `bool`, `char`, `String` and `StringBuilder` start from zero, `false`, `'\0'` and

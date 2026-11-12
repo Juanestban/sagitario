@@ -651,18 +651,24 @@ fn check_implementations(cx: Checker) {
       }
     }
 
-    // The compiler makes the default of a type written after `@default`, and of `Map`
-    // (docs/adr/0094-conversions-and-defaults.md, Q636).
-    const made_default = cx.typed.derived_defaults.contains_key(item_key(item)) || match item {
+    // The compiler makes the default of a type written after `@default`, and the default of
+    // `Map` and what it collects into (docs/adr/0094-conversions-and-defaults.md, Q636, and
+    // docs/adr/0095-collections.md, Q646).
+    const is_map = match item {
       TypeItem::Class(id) => is_prelude(cx.typed.prelude.map, id),
       _ => false,
     };
+    const made_default = is_map || cx.typed.derived_defaults.contains_key(item_key(item));
 
     for interface_ref in implemented {
       var is_own = false;
       var block: Option<u32> = None;
 
       if made_default && is_prelude(cx.typed.prelude.default, interface_ref.id) {
+        continue;
+      }
+
+      if is_map && is_prelude(cx.typed.prelude.from_iterator, interface_ref.id) {
         continue;
       }
 
@@ -1720,4 +1726,39 @@ pub fn assigned_indexes(cx: Checker, target: Expr) {
       _ => break,
     }
   }
+}
+
+/// The type of the elements of a type implementing `Iterable` once, or `None`
+/// (docs/adr/0095-collections.md, Q645).
+pub fn iterable_elem(cx: Checker, ty: Type) -> Option<Type> {
+  var found: Option<Type> = None;
+
+  for interface_ref in cx.typed.implemented_refs(ty) {
+    if is_prelude(cx.typed.prelude.iterable, interface_ref.id) && interface_ref.args.len() == 1 && found.is_none() {
+      found = Some(interface_ref.args[0]);
+    }
+  }
+
+  found
+}
+
+/// `iter.collect()` into `target`, a type other than a list that implements `FromIterator` of the
+/// elements: its `from_iter` (Q646).
+pub fn collect_into(cx: Checker, value: Expr, elem: Type, target: Type) -> Option<Type> {
+  if let TypeKind::List(_) = target.kind {
+    return None;
+  }
+
+  const from_iterator = cx.typed.prelude.from_iterator?;
+  const wanted = NamedRef { id: from_iterator, name: "FromIterator", args: List::from([elem]) };
+
+  if !cx.typed.implements(target, wanted) {
+    return None;
+  }
+
+  const function = cx.typed.interface_def(from_iterator)?.methods.first()?;
+
+  cx.typed.collect_calls.insert(value.id, StaticCall { function: function, self_ty: target });
+
+  Some(target)
 }
