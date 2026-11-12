@@ -1231,13 +1231,6 @@ void sag_list_reverse(sag_object *object) {
 /* ---- Hashing and order ------------------------------------------------------------------- */
 
 /* The finalizer of SplitMix64: every input bit affects every output bit. */
-uint64_t sag_hash_u64(uint64_t value) {
-  value += UINT64_C(0x9e3779b97f4a7c15);
-  value = (value ^ (value >> 30)) * UINT64_C(0xbf58476d1ce4e5b9);
-  value = (value ^ (value >> 27)) * UINT64_C(0x94d049bb133111eb);
-  return value ^ (value >> 31);
-}
-
 /* FNV-1a. */
 uint64_t sag_string_hash(sag_string text) {
   uint64_t hash = UINT64_C(0xcbf29ce484222325);

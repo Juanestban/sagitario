@@ -2,11 +2,14 @@
 //! root of the repository (docs/adr/0090-benchmarks.md):
 //!
 //!     sag run tools/bench.sag -- [names] [--runs N] [--langs sag,rust,c,cs,js,py] [--sag path]
+//!     sag run tools/bench.sag -- --race benchmarks/results/<file>.json [--video]
 //!
 //! Each program is built optimized, run once to warm up and `N` times (5 by default), once when
 //! the warm-up takes more than 5 seconds; every language must print the same output. The median
 //! wall time of each, its size and the versions of the toolchains go to
-//! `benchmarks/results/<date>-<os>-<arch>.json`.
+//! `benchmarks/results/<date>-<os>-<arch>.json`. With `--race`, it writes the race of the
+//! languages of a results file as an HTML page beside it, and with `--video` also as an MP4 when
+//! `ffmpeg` is on `PATH`.
 
 use std::env;
 use std::fs;
@@ -16,7 +19,8 @@ use std::process;
 use std::process::Command;
 use std::time::{Instant, SystemTime};
 
-const USAGE: String = "Usage: sag run tools/bench.sag -- [names] [--runs N] [--langs sag,rust,c,cs,js,py] [--sag path]";
+const USAGE: String = "Usage: sag run tools/bench.sag -- [names] [--runs N] [--langs sag,rust,c,cs,js,py] [--sag path]
+       sag run tools/bench.sag -- --race <results.json> [--video]";
 
 /// Every language of the suite, by the name of its source file `main.<name>`.
 const LANGUAGES: String = "sag rust c cs js py";
@@ -51,6 +55,9 @@ struct Options {
   pub runs: usize;
   pub langs: List<String>;
   pub sag: String;
+  /// The results file of `--race`, and whether `--video` asks for an MP4 too.
+  pub race: Option<String>;
+  pub video: bool;
 }
 
 /// A language that can run: its name and the version of its toolchain.
@@ -89,12 +96,20 @@ fn options() -> Result<Options, String> {
   var runs = 5usize;
   var langs = LANGUAGES.split(" ");
   var sag = env::variable("SAG").unwrap_or("sag");
+  var race: Option<String> = None;
+  var video = false;
   var index = 1usize;
 
   while index < args.len() {
     const arg = args[index];
 
-    if arg == "--runs" || arg == "--langs" || arg == "--sag" {
+    if arg == "--video" {
+      video = true;
+      index += 1;
+      continue;
+    }
+
+    if arg == "--runs" || arg == "--langs" || arg == "--sag" || arg == "--race" {
       if index + 1 >= args.len() {
         return Err(f"`{arg}` needs a value\n{USAGE}");
       }
@@ -114,6 +129,8 @@ fn options() -> Result<Options, String> {
             return Err(f"unknown language `{lang}`: the languages are {LANGUAGES}");
           }
         }
+      } else if arg == "--race" {
+        race = Some(value);
       } else {
         sag = value;
       }
@@ -131,7 +148,12 @@ fn options() -> Result<Options, String> {
     return Err("`--runs` must be at least 1");
   }
 
-  Ok(Options { names: names, runs: runs, langs: langs, sag: sag })
+  if video && race.is_none() {
+    return Err(f"`--video` goes with `--race`
+{USAGE}");
+  }
+
+  Ok(Options { names: names, runs: runs, langs: langs, sag: sag, race: race, video: video })
 }
 
 /// The first line a command prints, or `None` if it cannot run.
@@ -382,6 +404,17 @@ fn main() -> Result<(), io::Error> {
       process::exit(2);
     }
   };
+
+  if let Some(file) = options.race {
+    match race(file, options.video) {
+      Ok(_) => return Ok(()),
+      Err(message) => {
+        io::eprintln(f"cannot write the race: {message}")?;
+        process::exit(1);
+      }
+    }
+  }
+
   const versions: List<String> = new List();
   const chains: List<Toolchain> = new List();
 
@@ -436,4 +469,572 @@ fn main() -> Result<(), io::Error> {
   io::println(f"results in {file}")?;
 
   Ok(())
+}
+
+// ---- The race of the languages (docs/adr/0090-benchmarks.md, Q597) ----------------------------
+
+/// The fastest language reaches the end in this many seconds, the others in proportion to their
+/// times; the race stops at `RACE_END`, where a slower one shows how far it got.
+const RACE_UNIT: f64 = 1.0;
+const RACE_END: f64 = 8.0;
+/// Seconds the finished race stays on screen in the video.
+const RACE_HOLD: f64 = 1.5;
+const FPS: u32 = 20;
+const WIDTH: usize = 640;
+const HEIGHT: usize = 360;
+
+/// A value of a results file: the little of JSON they use.
+enum Json {
+  Number(f64),
+  Text(String),
+  Array(List<Json>),
+  Object(List<Member>),
+  Other,
+}
+
+struct Member {
+  pub name: String;
+  pub value: Json;
+}
+
+/// Reads JSON from `text`, as `tools/bench.sag` writes it.
+class JsonReader {
+  prv const chars: List<char>;
+  prv var at: usize;
+
+  pub fn new(self, text: String) {
+    self.chars = text.chars().collect();
+    self.at = 0;
+  }
+
+  prv fn skip_space(self) {
+    while self.at < self.chars.len() && (self.chars[self.at] == ' ' || self.chars[self.at] == '\n' || self.chars[self.at] == '\r' || self.chars[self.at] == '\t') {
+      self.at += 1;
+    }
+  }
+
+  prv fn peek(self) -> char {
+    self.skip_space();
+
+    if self.at < self.chars.len() { self.chars[self.at] } else { '\0' }
+  }
+
+  prv fn expect(self, c: char) -> Result<(), String> {
+    if self.peek() != c {
+      return Err(f"expected `{c}` at character {self.at}");
+    }
+
+    self.at += 1;
+    Ok(())
+  }
+
+  pub fn value(self) -> Result<Json, String> {
+    const c = self.peek();
+
+    if c == '{' {
+      self.at += 1;
+
+      const members: List<Member> = new List();
+
+      if self.peek() == '}' {
+        self.at += 1;
+        return Ok(Json::Object(members));
+      }
+
+      loop {
+        const name = self.text()?;
+
+        self.expect(':')?;
+        members.push(Member { name: name, value: self.value()? });
+
+        if self.peek() == ',' {
+          self.at += 1;
+        } else {
+          self.expect('}')?;
+          return Ok(Json::Object(members));
+        }
+      }
+    }
+
+    if c == '[' {
+      self.at += 1;
+
+      const items: List<Json> = new List();
+
+      if self.peek() == ']' {
+        self.at += 1;
+        return Ok(Json::Array(items));
+      }
+
+      loop {
+        items.push(self.value()?);
+
+        if self.peek() == ',' {
+          self.at += 1;
+        } else {
+          self.expect(']')?;
+          return Ok(Json::Array(items));
+        }
+      }
+    }
+
+    if c == '"' {
+      return Ok(Json::Text(self.text()?));
+    }
+
+    if c == '-' || c.is_ascii_digit() {
+      const start = self.at;
+
+      while self.at < self.chars.len() && (self.chars[self.at].is_ascii_digit() || self.chars[self.at] == '.' || self.chars[self.at] == '-' || self.chars[self.at] == 'e' || self.chars[self.at] == 'E' || self.chars[self.at] == '+') {
+        self.at += 1;
+      }
+
+      const digits = new StringBuilder();
+
+      for index in start..self.at {
+        digits.append_char(self.chars[index]);
+      }
+
+      return match digits.to_string().parse_f64() {
+        Ok(number) => Ok(Json::Number(number)),
+        Err(message) => Err(message),
+      };
+    }
+
+    // `true`, `false` and `null`, which results files do not hold.
+    while self.at < self.chars.len() && self.chars[self.at].is_ascii_alphabetic() {
+      self.at += 1;
+    }
+
+    Ok(Json::Other)
+  }
+
+  prv fn text(self) -> Result<String, String> {
+    self.expect('"')?;
+
+    const out = new StringBuilder();
+
+    while self.at < self.chars.len() && self.chars[self.at] != '"' {
+      var c = self.chars[self.at];
+
+      if c == '\\' && self.at + 1 < self.chars.len() {
+        self.at += 1;
+        c = self.chars[self.at];
+
+        if c == 'n' {
+          c = '\n';
+        } else if c == 't' {
+          c = '\t';
+        }
+      }
+
+      out.append_char(c);
+      self.at += 1;
+    }
+
+    self.expect('"')?;
+    Ok(out.to_string())
+  }
+}
+
+fn member(value: Json, name: String) -> Option<Json> {
+  if let Json::Object(members) = value {
+    for found in members {
+      if found.name == name {
+        return Some(found.value);
+      }
+    }
+  }
+
+  None
+}
+
+/// One language of one benchmark in the race.
+struct Runner {
+  pub lang: String;
+  pub median: f64;
+}
+
+struct Heat {
+  pub name: String;
+  pub runners: List<Runner>;
+}
+
+/// The benchmarks of a results file, each with its languages in the order of the suite.
+fn heats(text: String) -> Result<List<Heat>, String> {
+  const root = new JsonReader(text).value()?;
+  const benchmarks = match member(root, "benchmarks") {
+    Some(Json::Object(found)) => found,
+    _ => return Err("the file has no `benchmarks`"),
+  };
+  const result: List<Heat> = new List();
+
+  for benchmark in benchmarks {
+    const runners: List<Runner> = new List();
+
+    for lang in LANGUAGES.split(" ") {
+      if let Some(entry) = member(benchmark.value, lang) {
+        if let Some(Json::Number(median)) = member(entry, "median") {
+          runners.push(Runner { lang: lang, median: median });
+        }
+      }
+    }
+
+    if !runners.is_empty() {
+      result.push(Heat { name: benchmark.name, runners: runners });
+    }
+  }
+
+  Ok(result)
+}
+
+fn fastest(heat: Heat) -> f64 {
+  var best = 0.0;
+
+  for runner in heat.runners {
+    if best == 0.0 || runner.median < best {
+      best = runner.median;
+    }
+  }
+
+  best
+}
+
+/// When `runner` reaches the end of the race, in seconds of the race.
+fn arrival(heat: Heat, runner: Runner) -> f64 {
+  const best = fastest(heat);
+
+  if best > 0.0 { RACE_UNIT * runner.median / best } else { RACE_UNIT }
+}
+
+fn display_name(lang: String) -> String {
+  if lang == "sag" {
+    "Sagitario"
+  } else if lang == "rust" {
+    "Rust"
+  } else if lang == "c" {
+    "C"
+  } else if lang == "cs" {
+    "C#"
+  } else if lang == "js" {
+    "JavaScript"
+  } else {
+    "Python"
+  }
+}
+
+/// The color of a language's bar, as red, green and blue.
+fn color(lang: String) -> List<u8> {
+  if lang == "sag" {
+    List::from([139u8, 92, 246])
+  } else if lang == "rust" {
+    List::from([222u8, 165, 132])
+  } else if lang == "c" {
+    List::from([92u8, 124, 250])
+  } else if lang == "cs" {
+    List::from([104u8, 189, 69])
+  } else if lang == "js" {
+    List::from([240u8, 219, 79])
+  } else {
+    List::from([55u8, 160, 220])
+  }
+}
+
+fn hex_color(lang: String) -> String {
+  const rgb = color(lang);
+
+  f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
+}
+
+/// The time of a run as people read it.
+fn duration_text(seconds: f64) -> String {
+  if seconds >= 1.0 { f"{seconds:.2} s" } else { f"{seconds * 1000.0:.1} ms" }
+}
+
+/// Writes the race as an HTML page, and as an MP4 when asked and `ffmpeg` can.
+fn race(file: String, video: bool) -> Result<(), String> {
+  const text = fs::read_to_string(file).map_err((error) => error.message())?;
+  const all = heats(text)?;
+
+  if all.is_empty() {
+    return Err(f"`{file}` has no results");
+  }
+
+  const base = if file.ends_with(".json") { file.substring(0, file.len() - 5) } else { file };
+  const html = base + ".html";
+
+  fs::write(html, race_page(file, all)).map_err((error) => error.message())?;
+  io::println(f"race in {html}").map_err((error) => error.message())?;
+
+  if !video {
+    return Ok(());
+  }
+
+  if first_line("ffmpeg", "-version").is_none() {
+    io::println("no MP4: `ffmpeg` is not on PATH; the HTML page can be recorded with any screen recorder").map_err((error) => error.message())?;
+    return Ok(());
+  }
+
+  const mp4 = base + ".mp4";
+
+  race_video(all, mp4)?;
+  io::println(f"video in {mp4}").map_err((error) => error.message())
+}
+
+/// `text` safe inside HTML.
+fn escape_html(text: String) -> String {
+  text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+}
+
+fn race_page(file: String, all: List<Heat>) -> String {
+  const data: List<String> = new List();
+
+  for heat in all {
+    const runners: List<String> = new List();
+
+    for runner in heat.runners {
+      runners.push(f"{{\"name\": {json(display_name(runner.lang))}, \"color\": {json(hex_color(runner.lang))}, \"median\": {runner.median:.6}, \"arrival\": {arrival(heat, runner):.4}, \"label\": {json(duration_text(runner.median))}}}");
+    }
+
+    data.push(f"{{\"name\": {json(heat.name)}, \"runners\": [" + runners.join(", ") + "]}");
+  }
+
+  const page = new StringBuilder();
+
+  page.append("<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n");
+  page.append("<title>Sagitario benchmarks</title>\n<style>\n");
+  page.append(":root { --bg: #0f1420; --fg: #e8ecf4; --muted: #8b93a7; --track: #1d2433; }\n");
+  page.append("@media (prefers-color-scheme: light) { :root { --bg: #f6f7fb; --fg: #161a24; --muted: #5b6275; --track: #e3e6ee; } }\n");
+  page.append("body { margin: 0; padding: 24px 16px; background: var(--bg); color: var(--fg); font: 15px/1.4 system-ui, sans-serif; }\n");
+  page.append("main { max-width: 860px; margin: 0 auto; } h1 { font-size: 22px; margin: 0 0 4px; } p { color: var(--muted); margin: 0 0 20px; }\n");
+  page.append("section { margin: 0 0 28px; } h2 { font-size: 17px; margin: 0 0 10px; }\n");
+  page.append(".row { display: grid; grid-template-columns: 96px 1fr 92px; gap: 10px; align-items: center; margin: 6px 0; }\n");
+  page.append(".track { background: var(--track); border-radius: 6px; height: 18px; overflow: hidden; } .bar { height: 100%; width: 0; border-radius: 6px; }\n");
+  page.append(".time { font-variant-numeric: tabular-nums; color: var(--muted); text-align: right; } button { font: inherit; padding: 6px 14px; border-radius: 6px; border: 1px solid var(--muted); background: transparent; color: var(--fg); cursor: pointer; }\n");
+  page.append("</style>\n</head>\n<body>\n<main>\n<h1>The race of the languages</h1>\n");
+  page.append(f"<p>{escape_html(path::file_name(file).unwrap_or(file))}: the median time of each program. The fastest arrives in {RACE_UNIT:.0} s, the others in proportion; the race stops at {RACE_END:.0} s.</p>\n");
+  page.append("<p><button id=\"replay\">Replay</button></p>\n<div id=\"heats\"></div>\n</main>\n<script>\n");
+  page.append(f"const END = {RACE_END:.1};\nconst heats = [\n  " + data.join(",\n  ") + "\n];\n");
+  page.append("const root = document.getElementById('heats');\nconst rows = [];\n");
+  page.append("for (const heat of heats) {\n  const section = document.createElement('section');\n  const title = document.createElement('h2');\n  title.textContent = heat.name;\n  section.append(title);\n");
+  page.append("  for (const runner of heat.runners) {\n    const row = document.createElement('div');\n    row.className = 'row';\n    const name = document.createElement('div');\n    name.textContent = runner.name;\n");
+  page.append("    const track = document.createElement('div');\n    track.className = 'track';\n    const bar = document.createElement('div');\n    bar.className = 'bar';\n    bar.style.background = runner.color;\n    track.append(bar);\n");
+  page.append("    const time = document.createElement('div');\n    time.className = 'time';\n    row.append(name, track, time);\n    section.append(row);\n    rows.push({ runner, bar, time });\n  }\n  root.append(section);\n}\n");
+  page.append("let start = 0;\nfunction frame(now) {\n  const t = (now - start) / 1000;\n  for (const { runner, bar, time } of rows) {\n    const done = Math.min(t / runner.arrival, 1);\n    bar.style.width = (done * 100) + '%';\n");
+  page.append("    if (t >= runner.arrival) { time.textContent = runner.label; }\n    else if (t >= END) { time.textContent = runner.label + ' (' + (runner.arrival / 1).toFixed(0) + 'x)'; }\n    else { time.textContent = ''; }\n  }\n  if (t < END) { requestAnimationFrame(frame); }\n}\n");
+  page.append("function play() { start = performance.now(); requestAnimationFrame(frame); }\ndocument.getElementById('replay').addEventListener('click', play);\nplay();\n</script>\n</body>\n</html>\n");
+  page.to_string()
+}
+
+// ---- The video: frames drawn here, encoded by `ffmpeg` -----------------------------------------
+
+/// A 5x7 font of the characters the race writes, upper case: each glyph is a character and seven
+/// rows of five bits, the leftmost in the bit of 16.
+const FONT: String = "A0E11111F111111 B1E11111E11111E C0E11101010110E D1E11111111111E E1F10101E10101F F1F10101E101010 G0E11101711110F H1111111F111111 I0E04040404040E J0702020202120C K11121418141211 L1010101010101F M111B1515111111 N11111915131111 O0E11111111110E P1E11111E101010 Q0E11111115120D R1E11111E141211 S0F10100E01011E T1F040404040404 U1111111111110E V11111111110A04 W1111111515150A X11110A040A1111 Y11110A04040404 Z1F01020408101F 00E11131519110E 1040C040404040E 20E11010204081F 31F02040201110E 402060A121F0202 51F101E0101110E 60608101E11110E 71F010204080808 80E11110E11110E 90E11110F01020C .00000000000C0C -0000001F000000 #0A0A1F0A1F0A0A :000C0C000C0C00 (02040808080402 )08040202020408 /01010204081010";
+
+/// The rows of each glyph, by character.
+fn glyphs() -> Map<char, List<u8>> {
+  const found = new Map<char, List<u8>>();
+
+  for entry in FONT.split(" ") {
+    const chars = entry.chars().collect();
+
+    if chars.len() < 15 {
+      continue;
+    }
+
+    const rows: List<u8> = new List();
+
+    for row in 0..7usize {
+      const high = chars[1 + row * 2].to_digit(16).unwrap_or(0);
+      const low = chars[2 + row * 2].to_digit(16).unwrap_or(0);
+
+      rows.push((high * 16 + low) as u8);
+    }
+
+    found.insert(chars[0], rows);
+  }
+
+  found
+}
+
+/// An image of `WIDTH` by `HEIGHT` pixels, three bytes each.
+class Canvas {
+  pub const pixels: List<u8>;
+
+  pub fn new(self, background: List<u8>) {
+    self.pixels = new List<u8>();
+
+    for _ in 0..WIDTH * HEIGHT {
+      self.pixels.push(background[0]);
+      self.pixels.push(background[1]);
+      self.pixels.push(background[2]);
+    }
+  }
+
+  pub fn copy(self) -> Canvas {
+    const copy = new Canvas(List::from([0u8, 0, 0]));
+
+    for index in 0..self.pixels.len() {
+      copy.pixels[index] = self.pixels[index];
+    }
+
+    copy
+  }
+
+  pub fn rect(self, x: usize, y: usize, w: usize, h: usize, rgb: List<u8>) {
+    const pixels = self.pixels;
+
+    for row in y..smallest(y + h, HEIGHT) {
+      for column in x..smallest(x + w, WIDTH) {
+        const at = (row * WIDTH + column) * 3;
+
+        pixels[at] = rgb[0];
+        pixels[at + 1] = rgb[1];
+        pixels[at + 2] = rgb[2];
+      }
+    }
+  }
+
+  /// `text` in upper case, each dot of the font `scale` pixels wide.
+  pub fn text(self, font: Map<char, List<u8>>, x: usize, y: usize, scale: usize, text: String, rgb: List<u8>) {
+    var left = x;
+
+    for c in text.to_ascii_uppercase().chars() {
+      if let Some(rows) = font.get(c) {
+        for row in 0..7usize {
+          for column in 0..5usize {
+            if (rows[row] >> (4 - column as u32)) & 1 == 1 {
+              self.rect(left + column * scale, y + row * scale, scale, scale, rgb);
+            }
+          }
+        }
+      }
+
+      left += 6 * scale;
+    }
+  }
+
+  /// The image as a binary PPM file, which `ffmpeg` reads.
+  pub fn ppm(self) -> List<u8> {
+    const bytes: List<u8> = new List();
+
+    for b in f"P6\n{WIDTH} {HEIGHT}\n255\n".bytes() {
+      bytes.push(b);
+    }
+
+    for index in 0..self.pixels.len() {
+      bytes.push(self.pixels[index]);
+    }
+
+    bytes
+  }
+}
+
+fn smallest(a: usize, b: usize) -> usize {
+  if a < b { a } else { b }
+}
+
+/// Encodes the frames of a directory into an MP4, with H.264 when `ffmpeg` has it.
+fn encode(dir: String, out: String) -> Result<(), String> {
+  const pattern = path::join(dir, "f%04d.ppm");
+  const h264 = new Command("ffmpeg").args(List::from(["-y", "-loglevel", "error", "-framerate", f"{FPS}", "-i", pattern, "-c:v", "libx264", "-pix_fmt", "yuv420p", out]));
+
+  if output_of(h264).is_ok() {
+    return Ok(());
+  }
+
+  output_of(new Command("ffmpeg").args(List::from(["-y", "-loglevel", "error", "-framerate", f"{FPS}", "-i", pattern, "-c:v", "mpeg4", "-q:v", "3", out])))
+}
+
+fn race_video(all: List<Heat>, out: String) -> Result<(), String> {
+  const font = glyphs();
+  const work = path::join(path::join("build", "bench"), "race");
+  const background = List::from([15u8, 20, 32]);
+  const white = List::from([232u8, 236, 244]);
+  const muted = List::from([139u8, 147, 167]);
+  const track_color = List::from([29u8, 36, 51]);
+  const parts: List<String> = new List();
+  const left = 150usize;
+  const bar_width = 360usize;
+
+  fs::create_dir_all(work).map_err((error) => error.message())?;
+
+  for heat_index in 0..all.len() {
+    const heat = all[heat_index];
+    const dir = path::join(work, f"heat{heat_index}");
+
+    fs::create_dir_all(dir).map_err((error) => error.message())?;
+
+    // What does not move: the title and the names.
+    const base = new Canvas(background);
+
+    base.text(font, 24, 20, 4, heat.name, white);
+
+    for index in 0..heat.runners.len() {
+      const y = 80 + index * 44;
+
+      base.text(font, 24, y + 4, 2, display_name(heat.runners[index].lang), white);
+      base.rect(left, y, bar_width, 22, track_color);
+    }
+
+    var longest = 0.0;
+
+    for runner in heat.runners {
+      const end = arrival(heat, runner);
+
+      if end > longest {
+        longest = end;
+      }
+    }
+
+    const race_length = if longest < RACE_END { longest } else { RACE_END };
+    const frames = ((race_length + RACE_HOLD) * FPS as f64) as usize;
+
+    for frame in 0..frames {
+      const t = frame as f64 / FPS as f64;
+      const canvas = base.copy();
+
+      for index in 0..heat.runners.len() {
+        const runner = heat.runners[index];
+        const end = arrival(heat, runner);
+        const done = if t >= end { 1.0 } else { t / end };
+        const y = 80 + index * 44;
+
+        canvas.rect(left, y, (done * bar_width as f64) as usize, 22, color(runner.lang));
+
+        if t >= end {
+          canvas.text(font, left + bar_width + 12, y + 4, 2, duration_text(runner.median), white);
+        } else if t >= race_length {
+          canvas.text(font, left + bar_width + 12, y + 4, 2, f"{end / RACE_UNIT:.0}X", muted);
+        }
+      }
+
+      fs::write_bytes(path::join(dir, f"f{frame:04}.ppm"), &canvas.ppm()).map_err((error) => error.message())?;
+    }
+
+    const part = path::join(work, f"heat{heat_index}.mp4");
+
+    encode(dir, part)?;
+
+    for frame in 0..frames {
+      fs::remove_file(path::join(dir, f"f{frame:04}.ppm")).map_err((error) => error.message())?;
+    }
+
+    fs::remove_dir(dir).map_err((error) => error.message())?;
+    parts.push(part);
+    io::println(f"  {heat.name}: {frames} frames").map_err((error) => error.message())?;
+  }
+
+  // The parts one after the other, without encoding them again.
+  const list = path::join(work, "parts.txt");
+  const lines: List<String> = new List();
+  const root = fs::current_dir().map_err((error) => error.message())?;
+
+  for part in parts {
+    lines.push("file '" + path::join(root, part).replace("\\", "/") + "'");
+  }
+
+  fs::write(list, lines.join("\n") + "\n").map_err((error) => error.message())?;
+  output_of(new Command("ffmpeg").args(List::from(["-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", list, "-c", "copy", out])))
 }

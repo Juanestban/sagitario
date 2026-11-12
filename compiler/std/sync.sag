@@ -53,12 +53,16 @@ pub class Channel<T: Send> {
   /// Values to receive, the next one last.
   prv const outbox: List<T>;
   prv var closed: bool;
+  /// The receivers waiting for a value: a send wakes them only when there are some, since a wake
+  /// is a call to the system (docs/adr/0090-benchmarks.md).
+  prv var waiting: usize;
 
   pub fn new(self) {
     self.lock = new sys::Lock();
     self.inbox = new List();
     self.outbox = new List();
     self.closed = false;
+    self.waiting = 0;
   }
 
   /// Adds `value` at the end of the queue. Sending on a closed channel panics.
@@ -71,7 +75,11 @@ pub class Channel<T: Send> {
     }
 
     self.inbox.push(value);
-    self.lock.notify_all();
+
+    if self.waiting > 0 {
+      self.lock.notify_all();
+    }
+
     self.lock.unlock();
   }
 
@@ -88,7 +96,9 @@ pub class Channel<T: Send> {
         self.lock.unlock();
         return None;
       } else {
+        self.waiting += 1;
         self.lock.wait();
+        self.waiting -= 1;
       }
     }
 

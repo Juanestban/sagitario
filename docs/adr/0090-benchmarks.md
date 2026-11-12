@@ -102,3 +102,14 @@ sag run tools/bench.sag -- --race benchmarks/results/2026-11-11-windows-x86_64.j
   numeric loops (`n-body`, `spectral-norm`, `parallel-sum`), but `List::sort` is about 15 times
   slower than Rust's, the map of strings of `word-count` about 7 times and a `Channel` about 13
   times, which increment 4 records with the full results.
+- The first bottlenecks, attacked in the standard library before increment 3: `List::sort` was a
+  recursive merge sort that made two lists per level and compared through a function value; it
+  is now insertion sort in runs of 32 and a bottom-up merge through one buffer, still stable, and
+  `sort` compares with `<` (2,000,000 integers: 1245 ms before, 221 ms after, faster than C's
+  `qsort` and .NET's sort). `Map` keeps the hash of each entry beside it, so a probe compares keys
+  only when the hashes match, masks instead of dividing, reads its lists from its fields once per
+  lookup, and its `get` makes no closure; the hash of an integer is inline in the runtime's
+  header (`map-count`: 259 ms before, about 185 after). A `Channel` wakes its receivers only when
+  one waits (`channels`: 50 ms before, 45 after). What remains of `Map` and `word-count` is the
+  reference counting of every read of a list and of a field holding one, which the compiler must
+  remove where a value is only lent: the next work on speed, outside the standard library.

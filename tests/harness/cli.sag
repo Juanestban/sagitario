@@ -123,7 +123,30 @@ fn the_benchmarks_compile(cx: Context) -> Result<(), String> {
   const rejected = sag(cx, List::from(["run", "tools/bench.sag", "--", "--bogus"]))?;
 
   expect_exit("sag run tools/bench.sag -- --bogus", rejected, 2)?;
-  expect_contains("sag run tools/bench.sag -- --bogus", rejected.stderr, "unknown option")
+  expect_contains("sag run tools/bench.sag -- --bogus", rejected.stderr, "unknown option")?;
+
+  // The race of a results file, without `--video`, needs nothing but the runner (Q597).
+  const dir = cx.temp_dir("race")?;
+  const results = path::join(dir, "results.json");
+
+  support::write_file(results, "{
+  \"benchmarks\": {
+    \"n-body\": {
+      \"sag\": { \"median\": 0.111, \"times\": [0.111], \"size\": 1 },
+      \"rust\": { \"median\": 0.085, \"times\": [0.085], \"size\": 1 }
+    }
+  }
+}
+")?;
+
+  const raced = sag(cx, List::from(["run", "tools/bench.sag", "--", "--race", results]))?;
+
+  support::expect_success("sag run tools/bench.sag -- --race", raced)?;
+
+  const page = support::read_file(path::join(dir, "results.html"))?;
+
+  expect_contains("the race page", page, "\"name\": \"n-body\"")?;
+  expect_contains("the race page", page, "\"name\": \"Sagitario\"")
 }
 
 fn help_succeeds(cx: Context) -> Result<(), String> {

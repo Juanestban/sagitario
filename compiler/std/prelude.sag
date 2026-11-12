@@ -276,8 +276,11 @@ pub class Iter<T> {
 pub class Map<K: Hash, V> {
   /// The entries in insertion order; `None` where one was removed.
   prv var items: List<Option<Entry<K, V>>>;
-  /// The open-addressing table: the index of an entry, -1 for a free slot or -2 for a removed
-  /// one.
+  /// The hash of the key of each entry, beside it, so a lookup compares keys only when their
+  /// hashes match and a rebuild needs none again.
+  prv var hashes: List<u64>;
+  /// The open-addressing table, whose size is a power of two: the index of an entry, -1 for a
+  /// free slot or -2 for a removed one.
   prv var slots: List<i64>;
   /// The number of entries.
   prv var count: usize;
@@ -286,6 +289,7 @@ pub class Map<K: Hash, V> {
 
   pub fn new(self) {
     self.items = new List<Option<Entry<K, V>>>();
+    self.hashes = new List<u64>();
     self.slots = new List<i64>();
     self.count = 0;
     self.used = 0;
@@ -301,33 +305,43 @@ pub class Map<K: Hash, V> {
 
   /// A copy of the value of `key`.
   pub fn get(self, key: K) -> Option<V> {
-    match self.slot_of(key) {
-      Some(slot) => self.items[self.slots[slot] as usize].map(entry => entry.value),
+    match self.slot_of(key, key.hash()) {
+      Some(slot) => match self.items[self.slots[slot] as usize] {
+        Some(entry) => Some(entry.value),
+        None => None,
+      },
       None => None,
     }
   }
 
   pub fn contains_key(self, key: K) -> bool {
-    self.slot_of(key).is_some()
+    self.slot_of(key, key.hash()).is_some()
   }
 
   /// Sets the value of `key`, and returns its previous value. A new key goes last.
   pub fn insert(self, key: K, value: V) -> Option<V> {
-    match self.slot_of(key) {
+    const hash = key.hash();
+
+    match self.slot_of(key, hash) {
       Some(slot) => {
         const index = self.slots[slot] as usize;
         const previous = self.items[index];
 
         self.items[index] = Some(Entry { key: key, value: value });
-        previous.map(entry => entry.value)
+
+        match previous {
+          Some(entry) => Some(entry.value),
+          None => None,
+        }
       }
       None => {
         if (self.used + 1) * 4 > self.slots.len() * 3 {
           self.rebuild();
         }
 
-        self.place(key.hash(), self.items.len());
+        self.place(hash, self.items.len());
         self.items.push(Some(Entry { key: key, value: value }));
+        self.hashes.push(hash);
         self.count += 1;
         self.used += 1;
         None
@@ -337,7 +351,7 @@ pub class Map<K: Hash, V> {
 
   /// Removes `key`, and returns its value.
   pub fn remove(self, key: K) -> Option<V> {
-    match self.slot_of(key) {
+    match self.slot_of(key, key.hash()) {
       Some(slot) => {
         const index = self.slots[slot] as usize;
         const previous = self.items[index];
@@ -345,7 +359,11 @@ pub class Map<K: Hash, V> {
         self.items[index] = None;
         self.slots[slot] = -2;
         self.count -= 1;
-        previous.map(entry => entry.value)
+
+        match previous {
+          Some(entry) => Some(entry.value),
+          None => None,
+        }
       }
       None => None,
     }
@@ -353,6 +371,7 @@ pub class Map<K: Hash, V> {
 
   pub fn clear(self) {
     self.items = new List<Option<Entry<K, V>>>();
+    self.hashes = new List<u64>();
     self.slots = new List<i64>();
     self.count = 0;
     self.used = 0;
@@ -386,25 +405,31 @@ pub class Map<K: Hash, V> {
     self.entries().map(entry => entry.value)
   }
 
-  /// The slot holding `key`.
-  prv fn slot_of(self, key: K) -> Option<usize> {
-    const capacity = self.slots.len();
+  /// The slot holding `key`, whose hash is `hash`. The lists are read from the fields once: each
+  /// read of a field holding a list counts a reference.
+  prv fn slot_of(self, key: K, hash: u64) -> Option<usize> {
+    const slots = self.slots;
+    const hashes = self.hashes;
+    const items = self.items;
+    const capacity = slots.len();
 
     if capacity == 0 {
       return None;
     }
 
-    var slot = (key.hash() % capacity as u64) as usize;
+    const mask = capacity - 1;
+    var slot = (hash as usize) & mask;
 
     loop {
-      const index = self.slots[slot];
+      const index = slots[slot];
 
       if index == -1 {
         return None;
       }
 
-      if index >= 0 {
-        match self.items[index as usize] {
+      // The key is read, and compared, only when the hashes match.
+      if index >= 0 && hashes[index as usize] == hash {
+        match items[index as usize] {
           Some(entry) => {
             if entry.key.equals(key) {
               return Some(slot);
@@ -414,29 +439,34 @@ pub class Map<K: Hash, V> {
         }
       }
 
-      slot = (slot + 1) % capacity;
+      slot = (slot + 1) & mask;
     }
   }
 
   /// Records entry `index`, whose key has hash `hash`, in the first free slot of its chain.
   prv fn place(self, hash: u64, index: usize) {
-    const capacity = self.slots.len();
-    var slot = (hash % capacity as u64) as usize;
+    const slots = self.slots;
+    const mask = slots.len() - 1;
+    var slot = (hash as usize) & mask;
 
-    while self.slots[slot] != -1 {
-      slot = (slot + 1) % capacity;
+    while slots[slot] != -1 {
+      slot = (slot + 1) & mask;
     }
 
-    self.slots[slot] = index as i64;
+    slots[slot] = index as i64;
   }
 
   /// Drops removed entries and makes the table large enough for one more entry.
   prv fn rebuild(self) {
     const live = new List<Option<Entry<K, V>>>();
+    const hashes = new List<u64>();
 
-    for entry in self.items {
+    for index in 0..self.items.len() {
+      const entry = self.items[index];
+
       if entry.is_some() {
         live.push(entry);
+        hashes.push(self.hashes[index]);
       }
     }
 
@@ -448,19 +478,14 @@ pub class Map<K: Hash, V> {
 
     const slots = new List<i64>();
 
-    for _ in 0..capacity {
-      slots.push(-1);
-    }
-
+    slots.resize(capacity, -1);
     self.items = live;
+    self.hashes = hashes;
     self.slots = slots;
     self.used = live.len();
 
     for index in 0..live.len() {
-      match live[index] {
-        Some(entry) => self.place(entry.key.hash(), index),
-        None => {}
-      }
+      self.place(hashes[index], index);
     }
   }
 }
@@ -519,61 +544,193 @@ fn list_resize<T>(list: List<T>, len: usize, value: T) {
   }
 }
 
+/// The length of the runs the sorts order by insertion before merging them.
+const SORT_RUN: usize = 32;
+
+fn smaller(a: usize, b: usize) -> usize {
+  if a < b { a } else { b }
+}
+
+/// A stable sort: runs of `SORT_RUN` elements ordered by insertion, then merged bottom-up from
+/// the list into one buffer and back, so it makes no list but that buffer
+/// (docs/adr/0090-benchmarks.md). `list_sort_by` is the same with `compare` instead of `<`: a
+/// function value called for every comparison would make `sort` slower.
 fn list_sort<T: Ord>(list: List<T>) {
-  list_sort_by(list, (a: T, b: T) => a.compare(b));
-}
+  const count = list.len();
+  var start = 0usize;
 
-/// A stable merge sort.
-fn list_sort_by<T>(list: List<T>, compare: fn(T, T) -> Ordering) {
-  const sorted = merge_sort(list, compare);
+  while start < count {
+    const end = smaller(start + SORT_RUN, count);
 
-  for index in 0..sorted.len() {
-    list[index] = sorted[index];
+    for i in start + 1..end {
+      const item = list[i];
+      var j = i;
+
+      // Equal elements keep their order: only a smaller one moves before another.
+      while j > start && item < list[j - 1] {
+        list[j] = list[j - 1];
+        j -= 1;
+      }
+
+      list[j] = item;
+    }
+
+    start = end;
   }
-}
 
-fn merge_sort<T>(items: List<T>, compare: fn(T, T) -> Ordering) -> List<T> {
-  const count = items.len();
-
-  if count <= 1 {
-    return items;
+  if count <= SORT_RUN {
+    return;
   }
 
-  const left = new List<T>();
-  const right = new List<T>();
+  var source = list;
+  var target = new List<T>();
+  var in_list = true;
 
   for index in 0..count {
-    if index < count / 2 { left.push(items[index]); } else { right.push(items[index]); }
+    target.push(list[index]);
   }
 
-  const a = merge_sort(left, compare);
-  const b = merge_sort(right, compare);
-  const merged = new List<T>();
-  var i: usize = 0;
-  var j: usize = 0;
+  var width = SORT_RUN;
 
-  while i < a.len() && j < b.len() {
-    // Equal elements keep their order: the one from the left goes first.
-    if compare(b[j], a[i]) == Ordering::Less {
-      merged.push(b[j]);
-      j += 1;
-    } else {
-      merged.push(a[i]);
-      i += 1;
+  while width < count {
+    var left = 0usize;
+
+    while left < count {
+      const mid = smaller(left + width, count);
+      const right = smaller(left + 2 * width, count);
+      var i = left;
+      var j = mid;
+      var k = left;
+
+      while i < mid && j < right {
+        // The left one goes first when they are equal.
+        if source[j] < source[i] {
+          target[k] = source[j];
+          j += 1;
+        } else {
+          target[k] = source[i];
+          i += 1;
+        }
+
+        k += 1;
+      }
+
+      while i < mid {
+        target[k] = source[i];
+        i += 1;
+        k += 1;
+      }
+
+      while j < right {
+        target[k] = source[j];
+        j += 1;
+        k += 1;
+      }
+
+      left = right;
+    }
+
+    const merged = target;
+
+    target = source;
+    source = merged;
+    in_list = !in_list;
+    width *= 2;
+  }
+
+  if !in_list {
+    for index in 0..count {
+      list[index] = source[index];
     }
   }
+}
 
-  while i < a.len() {
-    merged.push(a[i]);
-    i += 1;
+fn list_sort_by<T>(list: List<T>, compare: fn(T, T) -> Ordering) {
+  const count = list.len();
+  var start = 0usize;
+
+  while start < count {
+    const end = smaller(start + SORT_RUN, count);
+
+    for i in start + 1..end {
+      const item = list[i];
+      var j = i;
+
+      while j > start && compare(item, list[j - 1]) == Ordering::Less {
+        list[j] = list[j - 1];
+        j -= 1;
+      }
+
+      list[j] = item;
+    }
+
+    start = end;
   }
 
-  while j < b.len() {
-    merged.push(b[j]);
-    j += 1;
+  if count <= SORT_RUN {
+    return;
   }
 
-  merged
+  var source = list;
+  var target = new List<T>();
+  var in_list = true;
+
+  for index in 0..count {
+    target.push(list[index]);
+  }
+
+  var width = SORT_RUN;
+
+  while width < count {
+    var left = 0usize;
+
+    while left < count {
+      const mid = smaller(left + width, count);
+      const right = smaller(left + 2 * width, count);
+      var i = left;
+      var j = mid;
+      var k = left;
+
+      while i < mid && j < right {
+        if compare(source[j], source[i]) == Ordering::Less {
+          target[k] = source[j];
+          j += 1;
+        } else {
+          target[k] = source[i];
+          i += 1;
+        }
+
+        k += 1;
+      }
+
+      while i < mid {
+        target[k] = source[i];
+        i += 1;
+        k += 1;
+      }
+
+      while j < right {
+        target[k] = source[j];
+        j += 1;
+        k += 1;
+      }
+
+      left = right;
+    }
+
+    const merged = target;
+
+    target = source;
+    source = merged;
+    in_list = !in_list;
+    width *= 2;
+  }
+
+  if !in_list {
+    for index in 0..count {
+      list[index] = source[index];
+    }
+  }
 }
 
 fn list_join(list: List<String>, separator: String) -> String {

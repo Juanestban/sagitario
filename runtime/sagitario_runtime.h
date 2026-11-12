@@ -1011,7 +1011,14 @@ static inline void *sag_slice_at(sag_slice slice, size_t index, size_t size, con
 
 /* ---- Hashing and order (docs/spec/05-interfaces-generics.md) ------------------------------ */
 
-uint64_t sag_hash_u64(uint64_t value);
+/* SplitMix64's finalizer; inline, so the hash of an integer key costs no call (`Map`,
+ * docs/adr/0090-benchmarks.md). */
+static inline uint64_t sag_hash_u64(uint64_t value) {
+  value += UINT64_C(0x9e3779b97f4a7c15);
+  value = (value ^ (value >> 30)) * UINT64_C(0xbf58476d1ce4e5b9);
+  value = (value ^ (value >> 27)) * UINT64_C(0x94d049bb133111eb);
+  return value ^ (value >> 31);
+}
 uint64_t sag_string_hash(sag_string text);
 /* -1, 0 or 1 by the IEEE 754 total order: -NaN < -inf < ... < -0 < +0 < ... < inf < NaN. */
 int32_t sag_f32_total_compare(float a, float b);
