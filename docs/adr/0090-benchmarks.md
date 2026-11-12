@@ -113,3 +113,13 @@ sag run tools/bench.sag -- --race benchmarks/results/2026-11-11-windows-x86_64.j
   one waits (`channels`: 50 ms before, 45 after). What remains of `Map` and `word-count` is the
   reference counting of every read of a list and of a field holding one, which the compiler must
   remove where a value is only lent: the next work on speed, outside the standard library.
+- Three changes to the code the compiler generates, measured as the least of 15 alternated runs,
+  since the machine was noisy: the fast paths of `sag_object_retain` and `sag_object_release`
+  are inline in the runtime's header, so a count is no opaque call and the C compiler keeps the
+  values around it in registers (`map-count` 1.49 times faster, `binary-trees` 1.16); an element
+  of a list is reached with the size of its type as a constant of the C (`sag_list_at_sized`)
+  and `push` is inline while the list has room (`sort` 1.15 times faster, `map-count` 1.07); and a
+  comparison through `Eq` or `Ord` of a type parameter that an instance makes an integer, `bool`,
+  `char` or `String` is C's own (`Lowering::binary`). `sort` still reloads the length and data of
+  its lists after every store, since a `u64` element and the length of a list have the same C
+  type: `restrict`, which Rust's `noalias` gives, is the work that would remove it.

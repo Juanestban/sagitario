@@ -58,6 +58,9 @@ The sources say 0.25.0.
   of the child with overlapped I/O instead of threads. The atomics of `std::sync` are `_Atomic`
   fields of an intrinsic type of the standard library, `std::sys::Atomic`, instead of runtime
   objects ([ADR-0087](docs/adr/0087-atomic-storage-and-std-sync.md)).
+- Generated programs count references through inline functions, reach list elements with the
+  size of their type as a constant, push inline while a list has room, and compare primitives in
+  generic code with C's own operators.
 - `List::sort` and `sort_by` are a merge sort through one buffer with runs sorted by insertion,
   about 5 times faster; `Map` compares keys only when their hashes match, and a `Channel` wakes
   its receivers only when one waits.

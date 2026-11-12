@@ -325,6 +325,10 @@ fn int_bits(int_ty: IntTy, pointer_width: u32) -> u64 {
   }
 }
 
+fn is_comparison(op: BinaryOp) -> bool {
+  op == BinaryOp::Eq || op == BinaryOp::Ne || op == BinaryOp::Lt || op == BinaryOp::Le || op == BinaryOp::Gt || op == BinaryOp::Ge
+}
+
 /// An id no expression has.
 const NO_EXPR: u32 = 4294967295;
 
@@ -2691,8 +2695,16 @@ pub class Lowering {
   }
 
   prv fn binary(self, value: Expr, ty: Type, op: BinaryOp, lhs: Expr, rhs: Expr) -> Result<Operand, String> {
+    // A comparison through `Eq` or `Ord` of a type parameter that this instance makes an integer,
+    // `bool`, `char` or `String` is C's own comparison: `compare` and its `Ordering` would cost a
+    // call and a branch per comparison (docs/adr/0090-benchmarks.md).
+    const primitive_comparison = is_comparison(op) && match self.type_of(lhs)?.kind {
+      TypeKind::Int(_) | TypeKind::Bool | TypeKind::Char | TypeKind::String => true,
+      _ => false,
+    };
+
     // An operator implemented by the type of `lhs` (docs/adr/0081-operator-overloading.md).
-    if self.typed.method_calls.contains_key(value.id) {
+    if self.typed.method_calls.contains_key(value.id) && !primitive_comparison {
       if op == BinaryOp::Eq || op == BinaryOp::Ne {
         const equal = self.method_call_with(value, lhs, List::from([rhs]), ty, None, true)?;
 

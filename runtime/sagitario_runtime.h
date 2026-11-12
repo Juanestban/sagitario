@@ -980,8 +980,24 @@ static inline void *sag_list_at(sag_object *list, size_t index, const char *file
   return self->data + sag_index_at(index, self->len, file, line) * self->size;
 }
 
-/* The slot of a new last element, which the caller fills. */
-void *sag_list_push(sag_object *list);
+/* The same for a list whose elements have `size` bytes, a constant of the generated C: the
+ * address costs no multiplication by a field read at run time, so the C compiler can optimize
+ * the loops around it. */
+static inline void *sag_list_at_sized(sag_object *list, size_t index, size_t size, const char *file, int line) {
+  sag_list *self = (sag_list *)list;
+  return self->data + sag_index_at(index, self->len, file, line) * size;
+}
+
+/* The slot of a new last element, which the caller fills. Inline while the list has room and
+ * lends no slice; `sag_list_push_slow` grows it or panics. */
+void *sag_list_push_slow(sag_object *list);
+static inline void *sag_list_push(sag_object *object) {
+  sag_list *list = (sag_list *)object;
+  if (list->len < list->cap && list->lent == 0) {
+    return list->data + list->len++ * list->size;
+  }
+  return sag_list_push_slow(object);
+}
 /* The slot of a new element at `index` (after moving the following ones), which the caller
  * fills; panics if `index` is past the end. */
 void *sag_list_insert(sag_object *list, size_t index, const char *file, int line);

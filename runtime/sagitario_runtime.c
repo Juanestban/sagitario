@@ -1071,7 +1071,7 @@ static void sag_list_check_unlent(sag_list *list) {
   }
 }
 
-void *sag_list_push(sag_object *object) {
+void *sag_list_push_slow(sag_object *object) {
   sag_list *list = (sag_list *)object;
   sag_list_check_unlent(list);
   sag_list_grow(list);

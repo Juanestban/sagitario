@@ -2267,7 +2267,9 @@ class Generator {
           out = out + ".data[sag_index_at(" + self.operand(index) + `, ${len}, __FILE__, __LINE__)]`;
         }
         Projection::ListElem { index, elem } => {
-          out = "(*(" + self.c_type(elem) + " *)sag_list_at(" + out + ", " + self.operand(index) + ", __FILE__, __LINE__))";
+          const elem_type = self.c_type(elem);
+
+          out = "(*(" + elem_type + " *)sag_list_at_sized(" + out + ", " + self.operand(index) + ", sizeof(" + elem_type + "), __FILE__, __LINE__))";
         }
         Projection::Tag => {
           out = out + ".tag";
