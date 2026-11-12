@@ -13,6 +13,7 @@
 // expect-stdout: ["ccc", "bb", "a"] [25, 16, 9, 4, 1] [9, 6, 3, 0]
 // expect-stdout: ['o', 'l', 'l', 'é', 'h'] [(3, 'b'), (1, 'ñ'), (0, 'a')]
 // expect-stdout: Some(1) Some(6) Some(2) Some(5) [3, 4]
+// expect-stdout: Some(1) Some(2) Some(1) None
 // expect-stdout: 9 [0, 2, 4, 6] [1, 2, 0, 2, 4]
 // expect-stdout: hi abbccc {"Ada": 36} Ok([1, 2]) Err("invalid digit found in string")
 // expect-stdout: [1, 2, 3] 3
@@ -42,6 +43,11 @@ fn main() {
   const both = (1..=6).map((n) => n);
 
   println(f"{both.next():?} {both.next_back():?} {both.next():?} {both.next_back():?} {both.collect():?}");
+
+  // What `peek` read ahead is the last value `next_back` gives.
+  const peeked = (1..=2).map((n) => n);
+
+  println(f"{peeked.peek():?} {peeked.next_back():?} {peeked.next_back():?} {peeked.next():?}");
 
   var total = 0;
 
