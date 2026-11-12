@@ -2746,6 +2746,35 @@ pub class Lowering {
     Ok(self.new_value(ty, Rvalue::Unary { op: op, ty: operand_ty, operand: operand_value }))
   }
 
+  /// `a == b`, `a < b`... on tuples: `Eq` and `Ord` of their elements.
+  prv fn tuple_comparison(self, op: BinaryOp, ty: Type, operand_ty: Type, lhs: Expr, rhs: Expr) -> Result<Operand, String> {
+    const left = self.expr(lhs)?;
+    const right = self.expr(rhs)?;
+
+    if op == BinaryOp::Eq || op == BinaryOp::Ne {
+      const equal = collections::values_equal(self, operand_ty, left, right)?;
+
+      if op == BinaryOp::Eq {
+        return Ok(equal);
+      }
+
+      return Ok(self.new_value(ty, Rvalue::Unary { op: UnaryOp::Not, ty: ty, operand: equal }));
+    }
+
+    // `a < b` is `Less`, `a <= b` is not `Greater`.
+    const ordering_ty = self.typed.ordering_type();
+    const order = collections::values_order(self, ordering_ty, operand_ty, left, right)?;
+    const place = self.operand_place(order, ordering_ty)?;
+    const variant = if op == BinaryOp::Lt || op == BinaryOp::Ge { 0u32 } else { 2u32 };
+    const found = matching::tag_is(self, place, variant)?;
+
+    if op == BinaryOp::Lt || op == BinaryOp::Gt {
+      return Ok(found);
+    }
+
+    Ok(self.new_value(ty, Rvalue::Unary { op: UnaryOp::Not, ty: ty, operand: found }))
+  }
+
   prv fn binary(self, value: Expr, ty: Type, op: BinaryOp, lhs: Expr, rhs: Expr) -> Result<Operand, String> {
     // A comparison through `Eq` or `Ord` of a type parameter that this instance makes an integer,
     // `bool`, `char` or `String` is C's own comparison: `compare` and its `Ordering` would cost a
@@ -2754,6 +2783,15 @@ pub class Lowering {
       TypeKind::Int(_) | TypeKind::Bool | TypeKind::Char | TypeKind::String => true,
       _ => false,
     };
+
+    // Tuples compare element by element (docs/adr/0092-tuples.md, Q611).
+    if is_comparison(op) {
+      const operand_ty = self.type_of(lhs)?;
+
+      if let TypeKind::Tuple(_) = operand_ty.kind {
+        return self.tuple_comparison(op, ty, operand_ty, lhs, rhs);
+      }
+    }
 
     // An operator implemented by the type of `lhs` (docs/adr/0081-operator-overloading.md).
     if self.typed.method_calls.contains_key(value.id) && !primitive_comparison {

@@ -1,0 +1,149 @@
+// Tuples: types, values, reading their elements, and the `Eq`, `Ord`, `Hash` and debug form
+// the compiler gives them (docs/adr/0092-tuples.md, increment 1).
+// expect-stdout: divmod 3 2 Ada is 36 (3.5, -2)
+// expect-stdout: swapped (36, "Ada") x deep
+// expect-stdout: holder list: [1, 2, 3, 4]
+// expect-stdout: a=1
+// expect-stdout: b=2
+// expect-stdout: compare false true true Less true true
+// expect-stdout: map Some("second") false
+// expect-stdout: sorted [(1, 'a'), (1, 'b'), (2, 'z'), (3, 'c')] (3, 'c') true
+// expect-stdout: versions true true Greater (Version { major: 1, minor: 2 }, "x")
+// expect-stdout: classes true
+// expect-stdout: nested true ((1, (2, "z")), Some((4, 5)))
+// expect-stdout: keyed Some(1)
+// expect-stdout: captured hihi 7
+// expect-stdout: options [Some((1, "one")), None]
+// expect-stdout: pretty (
+// expect-stdout:     1,
+// expect-stdout:     [
+// expect-stdout:         "a",
+// expect-stdout:     ],
+// expect-stdout: )
+
+struct Version impl Ord, Hash {
+  pub major: u32;
+  pub minor: u32;
+
+  pub fn equals(self, other: Version) -> bool {
+    self.major == other.major && self.minor == other.minor
+  }
+
+  pub fn compare(self, other: Version) -> Ordering {
+    if self.major != other.major { self.major.compare(other.major) } else { self.minor.compare(other.minor) }
+  }
+
+  pub fn hash(self) -> u64 {
+    (self.major as u64) * 1000 + self.minor as u64
+  }
+}
+
+class Name impl Eq {
+  pub const text: String;
+
+  pub fn new(self, text: String) {
+    self.text = text;
+  }
+
+  pub fn equals(self, other: Name) -> bool {
+    self.text == other.text
+  }
+}
+
+struct Holder {
+  pub pair: (String, List<i32>);
+}
+
+fn divmod(a: i32, b: i32) -> (i32, i32) {
+  (a / b, a % b)
+}
+
+fn swap<A, B>(pair: (A, B)) -> (B, A) {
+  (pair.1, pair.0)
+}
+
+fn pair_of<T>(value: T) -> (T, T) {
+  (value, value)
+}
+
+fn largest<T: Ord>(items: List<T>) -> T {
+  var best = items[0];
+
+  for item in items {
+    if item > best {
+      best = item;
+    }
+  }
+
+  best
+}
+
+fn main() {
+  const result = divmod(17, 5);
+  const pair = ("Ada", 36);
+  var point = (1.5, -2.0);
+
+  point.0 = 3.5;
+  println(f"divmod {result.0} {result.1} {pair.0} is {pair.1} {point:?}");
+
+  const nested = ((1, 'x'), "deep", [1, 2]);
+
+  println(f"swapped {swap(pair):?} {nested.0.1} {nested.1}");
+
+  const holder = Holder { pair: ("list", List::from([1, 2, 3])) };
+
+  holder.pair.1.push(4);
+  println(f"holder {holder.pair.0}: {holder.pair.1:?}");
+
+  const items: List<(String, i32)> = new List();
+
+  items.push(("a", 1));
+  items.push(("b", 2));
+
+  for item in items {
+    println(f"{item.0}={item.1}");
+  }
+
+  // Element by element, the first one first.
+  const a = (1, "x");
+  const b = (1, "y");
+
+  println(f"compare {a == b} {a != b} {a < b} {a.compare(b):?} {a.equals(a)} {a.hash() == (1, "x").hash()}");
+
+  const seen = new Map<(i32, i32), String>();
+
+  seen.insert((0, 1), "first");
+  seen.insert((2, 3), "second");
+  println(f"map {seen.get((2, 3)):?} {seen.contains_key((9, 9))}");
+
+  const points = List::from([(3, 'c'), (1, 'b'), (1, 'a'), (2, 'z')]);
+
+  points.sort();
+  println(f"sorted {points:?} {largest(points):?} {points.contains((2, 'z'))}");
+
+  // Elements of user types compare through their own `Eq` and `Ord`.
+  const first = (Version { major: 1, minor: 2 }, "x");
+  const second = (Version { major: 1, minor: 10 }, "a");
+
+  println(f"versions {first < second} {first == first} {second.compare(first):?} {first:?}");
+  println(f"classes {(new Name("Ada"), 3) == (new Name("Ada"), 3)}");
+
+  const deep = ((1, (2, "z")), Some((4, 5)));
+
+  println(f"nested {deep.0 == (1, (2, "z"))} {deep:?}");
+
+  const versions = new Map<(Version, String), i32>();
+
+  versions.insert((Version { major: 2, minor: 0 }, "beta"), 1);
+  println(f"keyed {versions.get((Version { major: 2, minor: 0 }, "beta")):?}");
+
+  const pairs = pair_of("hi");
+  const joined = () => pairs.0 + pairs.1;
+
+  println(f"captured {joined()} {pair_of(7).1}");
+
+  const options: List<Option<(i32, String)>> = List::from([Some((1, "one")), None]);
+
+  println(f"options {options:?}");
+  println(f"pretty {(1, List::from(["a"])):#?}");
+}

@@ -705,6 +705,9 @@ pub class TypedModule {
       TypeKind::Param(param) => {
         direct = self.param_bounds(param);
       }
+      TypeKind::Tuple(elems) => {
+        direct = self.tuple_impls(elems);
+      }
       _ => {
         direct = self.primitive_impls(ty);
       }
@@ -738,6 +741,26 @@ pub class TypedModule {
 
   /// The interfaces integers, `bool`, `char` and `String` implement: `Ord` and `Hash`; and those
   /// of the operators that numbers and `String` have, with their own type (Q513 of ADR-0081).
+  /// `Eq`, `Ord` and `Hash`, each when every element of a tuple implements it
+  /// (docs/adr/0092-tuples.md, Q611).
+  prv fn tuple_impls(self, elems: List<Type>) -> List<NamedRef> {
+    const result: List<NamedRef> = new List();
+    const ids = List::from([self.prelude.eq, self.prelude.ord, self.prelude.hash]);
+    const names = List::from(["Eq", "Ord", "Hash"]);
+
+    for index in 0..ids.len() {
+      if let Some(id) = ids[index] {
+        const interface_ref = NamedRef { id: id, name: names[index], args: new List() };
+
+        if elems.iter().all((elem) => self.implements(elem, interface_ref)) {
+          result.push(interface_ref);
+        }
+      }
+    }
+
+    result
+  }
+
   pub fn primitive_impls(self, ty: Type) -> List<NamedRef> {
     const result: List<NamedRef> = new List();
     var numeric = false;

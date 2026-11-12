@@ -74,3 +74,19 @@ fn main() {
   float literal after a `.`.
 - Generic code over tuples is monomorphized as everything else: each tuple type is a C struct,
   and the compiler gives each one its `Eq`, `Ord`, `Hash` and debug form.
+
+## Notes
+
+- Increment 1 is done. The lexer reads a number right after a `.` as the index of an element,
+  without a fraction or an exponent, so `t.0.1` is two reads; the parser takes it as the name of
+  a field. `TypeKind::Tuple` is a value type everywhere a struct is: an instance of the C
+  generator (`sag_tN`, fields `f0`, `f1`...), with its retain, release and debug functions, and
+  `Projection::Field` reads an element. `Eq`, `Ord` and `Hash` are lowered by the compiler in
+  `sir/collections.sag` (`values_equal`, `values_order`, `value_hash`): primitives with C's
+  operators, tuples element by element, each one only while the earlier ones were equal, and
+  other elements through their own methods (`interfaces::concrete_method`); the hash of a tuple
+  mixes each element's hash into the earlier ones with `sag_hash_u64`. A tuple of one element is
+  `E0106`; the other errors use the codes of types, fields, interfaces and C that already exist.
+- `try_type_args`, which tries `<...>` after a name in an expression and goes back when it is a
+  comparison, now gives back the ids of the nodes it parsed: with tuple types, `a < (b + 1)`
+  parsed a path inside the parentheses first. The ids of the expected dumps change, nothing else.

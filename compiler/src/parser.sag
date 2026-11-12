@@ -2279,6 +2279,7 @@ class Parser {
   /// no diagnostic remains.
   prv fn try_type_args(self, segment: usize) -> Option<TypeArgs> {
     const pos = self.pos;
+    const next_id = self.ids.next;
     const reported = self.diagnostics.len();
     const parsed = self.type_args(segment);
     const follows = self.at("(") || self.at("::") || (self.at("{") && !self.no_struct_literal);
@@ -2286,7 +2287,9 @@ class Parser {
     match parsed {
       Ok(args) if follows => Some(args),
       _ => {
+        // The ids of the paths parsed meanwhile are given again.
         self.pos = pos;
+        self.ids.next = next_id;
         self.diagnostics.truncate(reported);
 
         None

@@ -387,7 +387,7 @@ pub fn primitive_method(cx: Checker, value: Expr, receiver_ty: Type, method: Ide
   }
 
   const primitive = match receiver_ty.kind {
-    TypeKind::Int(_) | TypeKind::Bool | TypeKind::Char | TypeKind::String => true,
+    TypeKind::Int(_) | TypeKind::Bool | TypeKind::Char | TypeKind::String | TypeKind::Tuple(_) => true,
     _ => false,
   };
 
@@ -404,6 +404,14 @@ pub fn primitive_method(cx: Checker, value: Expr, receiver_ty: Type, method: Ide
   } else {
     None
   }?;
+
+  // A tuple has the methods of the interfaces all its elements implement
+  // (docs/adr/0092-tuples.md, Q611).
+  if let TypeKind::Tuple(_) = receiver_ty.kind {
+    if !cx.typed.implemented_refs(receiver_ty).iter().any((found) => found.id == interface_id) {
+      return None;
+    }
+  }
   const function = cx.typed.interface_def(interface_id)?.methods.first()?;
 
   cx.typed.method_calls.insert(value.id, function);

@@ -718,6 +718,12 @@ fn fields_of(typed: TypedModule, ty: Type) -> List<FieldItem> {
         }
       }
     }
+    // The elements of a tuple, by their indices (docs/adr/0092-tuples.md, Q615).
+    TypeKind::Tuple(elems) => {
+      for index in 0..elems.len() {
+        found.push(FieldItem { name: `${index}`, ty: elems[index] });
+      }
+    }
     _ => {}
   }
 

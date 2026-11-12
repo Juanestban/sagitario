@@ -11,10 +11,13 @@ followed them.
 
 ## [Unreleased]
 
-The sources say 0.31.0.
+The sources say 0.32.0.
 
 ### Added
 
+- Tuples: `(i32, String)` types, `(a, b)` values and `t.0` reads, compared, ordered and hashed
+  when their elements are, so they sort and key maps, with a debug form `(1, "a")`
+  ([ADR-0092](docs/adr/0092-tuples.md), increment 1).
 - Global state: `static` and `static var`, one `Send` value for the program computed on its first
   use ([ADR-0083](docs/adr/0083-global-state.md)), and `@thread_local static var`, one value per
   thread.

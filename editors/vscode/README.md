@@ -4,14 +4,15 @@ Support for the [Sagitario](https://github.com/Juanestban/sagitario) programming
 
 - The language server (`sag lsp`): the errors and warnings of `sag check` while typing, the type
   of what is under the cursor, go to definition (`F12` or `Ctrl+Click`, also on the modules of
-  `use` and of paths), completion of members after `.` (the methods of numbers too), of items after `::` (`MIN` and `MAX` after an integer type, the functions of `std::mem` and `std::hint`), of attributes after
+  `use` and of paths), completion of members after `.` (the methods of numbers too, and the indices of a tuple's
+  elements), of items after `::` (`MIN` and `MAX` after an integer type, the functions of `std::mem` and `std::hint`), of attributes after
   `@` (`@cfg`, `@export`, `@repr`, `@thread_local`), of their representations after `@repr(` and
   of the conditions of `@cfg(`, of names
   (module-level constants and statics with their types) and of types, the outline of a document (`Ctrl+Shift+O`), and the colors of modules, functions and
   types in paths (semantic tokens). Inside the braces of format strings, as rust-analyzer does
   in Rust's, it also colors the variables, parameters, fields, methods and functions.
 - Syntax highlighting of `.sag` files: keywords, types, operators (the bitwise ones and shifts
-  too), numbers with their suffixes, characters,
+  too), numbers with their suffixes, the indices of tuples' elements (`pair.0`), characters,
   strings, format strings `f"...{expr}..."` with their specifiers (`{x:>8.2}`) and template strings with their interpolations,
   whose expressions are highlighted as code and whose braces as punctuation, nested block
   comments, documentation comments and attributes.

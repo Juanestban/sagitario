@@ -529,7 +529,7 @@ class Generator {
 
         return self.visit_instance(ty, done, order);
       }
-      TypeKind::Array { .. } | TypeKind::Result { .. } => return self.visit_instance(ty, done, order),
+      TypeKind::Array { .. } | TypeKind::Result { .. } | TypeKind::Tuple(_) => return self.visit_instance(ty, done, order),
       TypeKind::Ptr { pointee, .. } | TypeKind::Ref { pointee, .. } | TypeKind::Slice { elem: pointee, .. } => {
         self.pointees.push(pointee);
 
@@ -609,6 +609,7 @@ class Generator {
         None => List::from([new List<Type>()]),
       },
       TypeKind::Array { elem, .. } => List::from([List::from([elem])]),
+      TypeKind::Tuple(elems) => List::from([elems]),
       _ => self.layouts.variants(ty).unwrap_or(new List()),
     }
   }
@@ -1089,7 +1090,7 @@ class Generator {
 
         members = base + text.to_string();
       }
-      TypeKind::Struct(_) => {
+      TypeKind::Struct(_) | TypeKind::Tuple(_) => {
         const fields = self.flat_parts(ty);
         const parts: List<String> = new List();
 
@@ -1159,7 +1160,7 @@ class Generator {
       const body: List<String> = new List();
 
       match ty.kind {
-        TypeKind::Struct(_) => {
+        TypeKind::Struct(_) | TypeKind::Tuple(_) => {
           const fields = self.flat_parts(ty);
 
           for index in 0..fields.len() {
@@ -1355,7 +1356,7 @@ class Generator {
       },
       TypeKind::Class(_) | TypeKind::List(_) => "sag_object *",
       TypeKind::Option(inner) => if pkg::sir::is_nullable_pointer(ty) { self.c_type(inner) } else { `sag_t${self.instance_index(ty)}` },
-      TypeKind::Array { .. } | TypeKind::Result { .. } => `sag_t${self.instance_index(ty)}`,
+      TypeKind::Array { .. } | TypeKind::Result { .. } | TypeKind::Tuple(_) => `sag_t${self.instance_index(ty)}`,
       TypeKind::CFn { .. } => `sag_p${self.fn_pointer_index(ty)}`,
       TypeKind::CString => "sag_cstring",
       TypeKind::CVoid => "void",
@@ -1433,6 +1434,11 @@ class Generator {
         }
       }
       TypeKind::Array { elem, .. } | TypeKind::List(elem) | TypeKind::Slice { elem, .. } => result.push(elem),
+      TypeKind::Tuple(elems) => {
+        for elem in elems {
+          result.push(elem);
+        }
+      }
       TypeKind::Class(class_ref) => {
         if is_map(program, class_ref) {
           for arg in class_ref.args {
@@ -1531,6 +1537,16 @@ class Generator {
         }
 
         debug_named(body, name, items, all, "  ");
+      }
+      // `(1, "a")` (docs/adr/0092-tuples.md, Q611).
+      TypeKind::Tuple(elems) => {
+        const items: List<DebugItem> = new List();
+
+        for index in 0..elems.len() {
+          items.push(DebugItem { label: "", ty: elems[index], access: `v.f${index}` });
+        }
+
+        debug_tuple(body, "", items, all, "  ");
       }
       TypeKind::Array { elem, len } => {
         body.push("  sag_sb_push_bytes(sb, \"[\", 1);");
@@ -2136,7 +2152,7 @@ class Generator {
       const ty = function.locals[index];
       const init = match ty.kind {
         TypeKind::String | TypeKind::Interface(_) | TypeKind::Function { .. } | TypeKind::Struct(_) | TypeKind::Enum(_) | TypeKind::Array { .. } | TypeKind::Option(_)
-          | TypeKind::Result { .. } | TypeKind::Slice { .. } => "{0}",
+          | TypeKind::Result { .. } | TypeKind::Slice { .. } | TypeKind::Tuple(_) => "{0}",
         _ => "0",
       };
 

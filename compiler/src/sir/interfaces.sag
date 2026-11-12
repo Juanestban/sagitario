@@ -255,6 +255,24 @@ pub fn concrete_interface_call(lw: Lowering, id: u32, function: u32, concrete: T
   }
 }
 
+/// The call of the interface method `function`, which has no type parameters of its own, on a
+/// value of the type `concrete`, outside of any expression: an element of a tuple.
+pub fn concrete_method(lw: Lowering, function: u32, concrete: Type) -> ConcreteCall {
+  const target = method_for(lw, function, concrete, Subst::empty().with_self(concrete), new List());
+  const by_ref = match lw.typed.sig(template_of(lw, target.function)) {
+    Some(sig) => match sig.receiver {
+      Some(receiver) => receiver == Receiver::Var,
+      None => false,
+    },
+    None => false,
+  };
+
+  match target.slot {
+    Some(slot) => ConcreteCall { callee: Callee::Virtual { slot: slot, function: target.function }, by_ref: false },
+    None => ConcreteCall { callee: Callee::Fn(target.function), by_ref: by_ref },
+  }
+}
+
 /// The template an instance comes from, or the function itself.
 pub fn template_of(lw: Lowering, function: u32) -> u32 {
   if function < lw.registry.first_instance {
