@@ -23,7 +23,7 @@ Support for the [Sagitario](https://github.com/Juanestban/sagitario) programming
 - Snippets: `main`, `mainr`, `asyncmain`, `asyncfn`, `fn`, `pfn`, `static`, `staticvar`,
   `threadlocal`, `cfg`, `struct`, `class`, `enum`, `interface`, `implfor`, `match`, `iflet`, `whilelet`, `for`,
   `forin`, `fortuple`, `consttuple`, `assert`, `asserteq`, `if`, `ifelse`, `println`, `fstr` (a format string) and `use`; for operators and text, `impleq`, `implord`, `impldisplay`, `implop` (`+`, `-`, `*`,
-  `/`, `%`) and `implneg`; for conversions and defaults, `implfrom`, `impltryfrom`, `impldefault` and `default` (a struct with `@default`); and for the FFI, `extern` (a block of C functions), `externstatic` (a global variable of C), `externfn`,
+  `/`, `%`) and `implneg`; for conversions, defaults and indexing, `implfrom`, `impltryfrom`, `impldefault`, `default` (a struct with `@default`) and `implindex`; and for the FFI, `extern` (a block of C functions), `externstatic` (a global variable of C), `externfn`,
   `export`, `reprc`, `union`, `reprenum`, `cfn`, `unsafe`, `cstring` and `library` (a function
   loaded from a dynamic library).
 

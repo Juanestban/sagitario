@@ -443,6 +443,8 @@ fn assign(cx: Checker, target: Expr, op: Option<BinaryOp>, value: Expr) -> Type 
 
     cx.union_write = None;
 
+    // `grid[i] = v` on a type implementing `IndexMut` (docs/adr/0094-conversions-and-defaults.md, Q639).
+    interfaces::assigned_indexes(cx, target);
     classes::check_mutable_place(cx, target, PlaceUse::Assign);
 
     var checked = false;
@@ -901,7 +903,7 @@ fn other_expr_kind(cx: Checker, value: Expr, expected: Option<Type>) -> Type {
     ExprKind::Match { scrutinee, arms } => patterns::match_expr(cx, scrutinee, arms, expected),
     ExprKind::MethodCall { receiver, method, args } => method_call(cx, value, receiver, method, args, expected),
     ExprKind::Field { base, name } => field(cx, base, name),
-    ExprKind::Index { base, index: position } => index(cx, base, position),
+    ExprKind::Index { base, index: position } => index(cx, value, base, position),
     ExprKind::StructLit { path, fields, base } => struct_literal(cx, value, path, fields, base, expected),
     ExprKind::ArrayLit(elems) => array_literal(cx, value.span, elems, expected),
     ExprKind::Tuple(elems) => tuple_literal(cx, elems, expected),
@@ -2227,11 +2229,32 @@ fn field(cx: Checker, base: Expr, name: Ident) -> Type {
   types::substitute(found_field.ty, Subst::of(ParamOwner::Item(TypeItem::Struct(owner.id)), owner.args))
 }
 
-fn index(cx: Checker, base: Expr, position: Expr) -> Type {
+fn index(cx: Checker, value: Expr, base: Expr, position: Expr) -> Type {
   const base_ty = borrow::deref_base(cx, base);
 
   if let ExprKind::Range { start, end, .. } = position.kind {
     return borrow::range_index(cx, base, base_ty, start, end);
+  }
+
+  // A type of the program, or a type parameter, through `Index`
+  // (docs/adr/0094-conversions-and-defaults.md, Q639).
+  const user_type = match base_ty.kind {
+    TypeKind::Struct(_) | TypeKind::Enum(_) | TypeKind::Class(_) | TypeKind::Interface(_) | TypeKind::Param(_) => true,
+    _ => false,
+  };
+
+  if user_type {
+    if let Some(ty) = interfaces::user_index(cx, value, base_ty, position) {
+      return ty;
+    }
+
+    cx.diagnostics.push(
+      Diagnostic::error(codes::INVALID_OPERAND, base.span, "cannot index a value of type `" + types::text(base_ty) + "`")
+        .with_help("implement `Index<Idx, Out>` for `" + types::text(base_ty) + "`, whose `index` gives `value[i]`"),
+    );
+    expr(cx, position, None);
+
+    return types::error();
   }
 
   expect(cx, position, types::int(IntTy::Usize));

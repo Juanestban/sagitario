@@ -1,0 +1,166 @@
+// `Index` and `IndexMut`: reading `value[i]`, and `value[i] = v`, `value[i] += v`,
+// `value[i].field = v` and `value[i][j] = v` through `index` and `index_set`, on structs and
+// classes, with several index types, in generic code, and `map[key]`
+// (docs/adr/0094-conversions-and-defaults.md, Q639).
+// expect-stdout: 0 5 7 [0, 7, 0, 12]
+// expect-stdout: Cell { alive: true, age: 3 } Cell { alive: false, age: 0 } 2
+// expect-stdout: [[1, 0], [0, 9]] 9 [10, 20, 30]
+// expect-stdout: "two" "b" 1 [7, 2]
+// expect-stdout: 36 index 0 index 1 set 1 0 36
+// expect-stdout: 9 7
+
+struct Grid {
+  pub cells: List<i32>;
+  prv width: usize;
+
+  pub fn new(width: usize, height: usize) -> Grid {
+    const cells = new List<i32>();
+
+    for _ in 0..width * height {
+      cells.push(0);
+    }
+
+    Grid { cells: cells, width: width }
+  }
+}
+
+impl Index<(usize, usize), i32> for Grid {
+  fn index(self, at: (usize, usize)) -> i32 { self.cells[at.1 * self.width + at.0] }
+}
+
+impl IndexMut<(usize, usize), i32> for Grid {
+  fn index_set(self, at: (usize, usize), value: i32) { self.cells[at.1 * self.width + at.0] = value; }
+}
+
+struct Cell {
+  pub alive: bool;
+  pub age: i32;
+}
+
+/// A struct whose `index_set` changes its own field: its value must be `var`.
+struct Board {
+  pub cells: [Cell; 2];
+  pub writes: i32;
+}
+
+impl Index<usize, Cell> for Board {
+  fn index(self, at: usize) -> Cell { self.cells[at] }
+}
+
+impl IndexMut<usize, Cell> for Board {
+  fn index_set(self, at: usize, value: Cell) {
+    self.cells[at] = value;
+    self.writes += 1;
+  }
+}
+
+/// Indexed by position and by name.
+class Table {
+  pub const rows: List<List<i32>>;
+  pub const names: List<String>;
+
+  pub fn new(self) {
+    self.rows = List::from([List::from([1, 0]), List::from([0, 2])]);
+    self.names = List::from(["one", "two"]);
+  }
+}
+
+impl Index<usize, List<i32>> for Table {
+  fn index(self, at: usize) -> List<i32> { self.rows[at] }
+}
+
+impl IndexMut<usize, List<i32>> for Table {
+  fn index_set(self, at: usize, value: List<i32>) { self.rows[at] = value; }
+}
+
+impl Index<String, String> for Table {
+  fn index(self, name: String) -> String { self.names[self.names.index_of(name).unwrap()] }
+}
+
+/// Logs its calls, to show the order and that the base and index run once.
+class Logged {
+  pub const log: List<String>;
+  pub var value: i32;
+
+  pub fn new(self) {
+    self.log = new List();
+    self.value = 1;
+  }
+}
+
+impl Index<usize, i32> for Logged {
+  fn index(self, at: usize) -> i32 {
+    self.log.push(f"index {at}");
+    self.value
+  }
+}
+
+impl IndexMut<usize, i32> for Logged {
+  fn index_set(self, at: usize, value: i32) {
+    self.log.push(f"set {at}");
+    self.value = value;
+  }
+}
+
+/// Through interface values, whose itables call the implementations.
+class Squares {
+  pub fn new(self) {}
+}
+
+impl Index<usize, usize> for Squares {
+  fn index(self, at: usize) -> usize { at * at }
+}
+
+impl Index<usize, usize> for Cell {
+  fn index(self, at: usize) -> usize { at * 2 + self.age as usize }
+}
+
+fn first<T: Index<usize, i32>>(values: T) -> i32 {
+  values[0]
+}
+
+fn bump<T: IndexMut<usize, i32>>(values: T) {
+  values[1] += 1;
+}
+
+fn main() {
+  const grid = Grid::new(2, 2);
+
+  grid[(1, 0)] = 5;
+  grid[(1, 0)] += 2;
+  grid[(1, 1)] = 12;
+  println(f"{grid[(0, 0)]} {grid[(1, 0)] - 2} {grid[(1, 0)]} {grid.cells:?}");
+
+  var board = Board { cells: [Cell { alive: false, age: 0 }, Cell { alive: false, age: 0 }], writes: 0 };
+
+  board[0].alive = true;
+  board[0].age += 3;
+  println(f"{board[0]:?} {board[1]:?} {board.writes}");
+
+  const table = new Table();
+
+  table[1][1] = 9;
+  println(f"{table.rows:?} {table[1][1]} {List::from([10, 20, 30]):?}");
+
+  const ages = Map::from(List::from([("a", 1), ("b", 2)]));
+  const rows = new Table();
+
+  rows[0] = List::from([7, 2]);
+  println(f"{table["two"]:?} {max("a", "b"):?} {ages["a"]} {rows[0]:?}");
+
+  const logged = new Logged();
+
+  logged[0] = 35;
+  logged.log.clear();
+
+  const scores = List::from([36]);
+  const read = first(logged);
+
+  bump(logged);
+  println(f"{scores[0]} {logged.log.join(" ")} {read - 35} {logged.value}");
+
+  const squares: Index<usize, usize> = new Squares();
+  const doubles: Index<usize, usize> = Cell { alive: true, age: 1 };
+
+  println(f"{squares[3]} {doubles[3]}");
+}

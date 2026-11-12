@@ -37,6 +37,9 @@ pub struct PreludeItems {
   pub try_from: Option<u32>;
   pub try_into: Option<u32>;
   pub default: Option<u32>;
+  /// `Index` and `IndexMut` (docs/adr/0094-conversions-and-defaults.md, Q639).
+  pub index: Option<u32>;
+  pub index_mut: Option<u32>;
 }
 
 /// The methods of `List<T>` implemented by the compiler (docs/spec/02-types.md#arrays-and-lists).
@@ -100,6 +103,14 @@ pub enum BuiltinMethod {
 pub struct StaticCall {
   pub function: u32;
   pub self_ty: Type;
+}
+
+/// `base[index]` on a type implementing `Index<Idx, Out>` with these `args`: its `index`, and the
+/// `index_set` of `IndexMut` when the expression is assigned to (Q639).
+pub struct IndexCall {
+  pub index: u32;
+  pub set: Option<u32>;
+  pub args: List<Type>;
 }
 
 /// A value of type `from` made a `to`: by `From`, or by `TryFrom` with the error `error`. The
@@ -224,6 +235,8 @@ pub class TypedModule {
   /// The conversions of `from`, `try_from`, `into`, `try_into` and `?`, by the id of the call or
   /// of the operand of `?` (docs/adr/0094-conversions-and-defaults.md, Q632–Q635).
   pub var conversions: Map<u32, Conversion>;
+  /// `base[index]` on a type implementing `Index`, by the id of the index expression (Q639).
+  pub var index_calls: Map<u32, IndexCall>;
   /// The structs and enums written after `@default`, by `item_key` (Q636).
   pub var derived_defaults: Map<String, bool>;
   /// The variant marked `@default` of each such enum, by enum id.
@@ -277,6 +290,8 @@ pub class TypedModule {
       try_from: None,
       try_into: None,
       default: None,
+      index: None,
+      index_mut: None,
     };
     self.sync_classes = new List();
     self.const_types = new List();
@@ -286,6 +301,7 @@ pub class TypedModule {
     self.builtin_methods = new Map<u32, BuiltinMethod>();
     self.static_calls = new Map<u32, StaticCall>();
     self.conversions = new Map<u32, Conversion>();
+    self.index_calls = new Map<u32, IndexCall>();
     self.derived_defaults = new Map<String, bool>();
     self.default_variants = new Map<u32, u32>();
     self.local_types = new List();

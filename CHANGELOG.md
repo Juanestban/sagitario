@@ -15,6 +15,10 @@ The sources say 0.32.0.
 
 ### Added
 
+- `Index` and `IndexMut`, as Rust's: `value[i]` calls `index`, and `value[i] = v`,
+  `value[i] += v` or `value[i].field = v` read the element, change it and write it back with
+  `index_set`; a type may be indexed by several types, and `map[key]` gives the value of a key
+  or panics ([ADR-0094](docs/adr/0094-conversions-and-defaults.md), increment 5).
 - The prelude functions `min` and `max` of any `Ord` type, `clamp` on every `Ord` type, and
   Rust's methods of `Ordering`: `reverse`, `then`, `then_with`, `is_eq`, `is_lt`...
   ([ADR-0094](docs/adr/0094-conversions-and-defaults.md), increment 4).

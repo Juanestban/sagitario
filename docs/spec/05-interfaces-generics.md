@@ -341,11 +341,51 @@ const clip = projection * view * model * position;   // Mat4 * Mat4 * Mat4 * Vec
   generic code uses them through bounds: `fn sum<T: Add<T, T>>(a: T, b: T) -> T { a + b }`
   works for `i32`, `f64`, `String` and a `Vec2` implementing `Add<Vec2, Vec2>`. As with `Ord`,
   numbers and strings satisfy these bounds but do not convert to values of the interfaces.
-- `&&`, `||`, `!`, the bitwise operators and shifts, and indexing are not overloadable;
-  comparisons go through
-  [`Eq` and `Ord`](#equality-order-and-hashing-f2).
+- `&&`, `||`, `!`, the bitwise operators and shifts are not overloadable; comparisons go through
+  [`Eq` and `Ord`](#equality-order-and-hashing-f2), and indexing through
+  [`Index` and `IndexMut`](#indexing).
 - A block for an interface that extends another one the type implements itself, such as
   `impl Ord for P` beside `impl Eq for P`, holds only its own methods.
+
+## Indexing
+
+Rationale: [ADR-0094](../adr/0094-conversions-and-defaults.md), Q639. The prelude declares Rust's
+`Index` and `IndexMut`. A reference cannot be a result
+([ADR-0079](../adr/0079-references-and-borrowing.md)), so `index` gives the value, and the
+compiler writes a changed element back with `index_set`:
+
+```sag
+interface Index<Idx, Out> { fn index(self, index: Idx) -> Out; }
+interface IndexMut<Idx, Out> extends Index<Idx, Out> { fn index_set(self, index: Idx, value: Out); }
+
+struct Grid { pub cells: List<i32>; pub width: usize; }
+
+impl Index<(usize, usize), i32> for Grid {
+  fn index(self, at: (usize, usize)) -> i32 { self.cells[at.1 * self.width + at.0] }
+}
+
+impl IndexMut<(usize, usize), i32> for Grid {
+  fn index_set(self, at: (usize, usize), value: i32) { self.cells[at.1 * self.width + at.0] = value; }
+}
+
+grid[(1, 1)] = 5;    // grid.index_set((1, 1), 5)
+grid[(1, 1)] += 2;   // the element read with `index`, changed, and written back
+```
+
+- On a struct, enum, class, interface value or type parameter `a`, `a[i]` calls the `index` of the
+  implementation of `Index` whose `Idx` is the type of `i`, and has the type of its `Out`; a type
+  may implement `Index` once per index type, chosen as the conversions of `From` are. Without one
+  it is an error (`E0310`).
+- `a[i] = v` calls `index_set(i, v)`. `a[i] += v`, `a[i].x = v`, `a[i][j] = v` and other
+  assignments through `a[i]` read the element with `index` into a copy, assign to the copy, and
+  write it back with `index_set`; `a` and `i` are evaluated once, before the value. Assigning
+  through an index needs the `IndexMut` with the same arguments (`E0310`), and its `index_set` is
+  a method of `a`: when it modifies `self`, a struct or enum `a` must be `var` (`E0313`), as for
+  any such method.
+- `index` gives a copy of a struct and the same instance of a class, so a change through a method
+  that modifies `self`, or `&mut a[i]`, would be lost: both are errors (`E0313`, `E0340`).
+- Lists, arrays, slices and strings keep their own indexing, and implement neither interface. A
+  `Map<K, V>` implements `Index<K, V>`, which panics without the key.
 
 ## Conversions
 

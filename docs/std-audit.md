@@ -99,7 +99,7 @@ The audit of the library found gaps of the language itself, which the library ne
 | `cmp::min`, `max`, `Reverse`, `then_with` | `min`, `max`, `clamp`, the methods of `Ordering` | ✅ | ADR-0094; `Reverse` ➖ until structs with unnamed fields: `sort_by((a, b) => b.compare(a))` |
 | `Hash`, `Hasher` | `Hash` | 🟡 | Types implement `hash`; a `Hasher` to combine fields, and a choice of hash function, are missing |
 | `Add`, `Sub`, `Mul`, `Div`, `Rem`, `Neg` | ✅ | ✅ | ADR-0081 |
-| `Index`, `IndexMut`, `Bit*`, `Shl`, `Shr`, `*Assign` | — | ❌ | `Index` for user collections; the bitwise ones after the operators exist |
+| `Index`, `IndexMut`, `Bit*`, `Shl`, `Shr`, `*Assign` | `Index`, `IndexMut` | 🟡 | ADR-0094: `index` gives the value and `index_set` writes it back, and `map[key]`; the bitwise interfaces and `*Assign` are missing |
 | `Range`, `RangeInclusive` | `a..b`, `a..=b` | 🟡 | In `for` and slices; not values with methods (`contains`, `len`) |
 | `From`, `Into`, `TryFrom`, `AsRef` | `From`, `Into`, `TryFrom`, `TryInto` | ✅ | ADR-0094: Rust's conversions of numbers, `char`, `String`, lists and maps, and `?` through `From`; `AsRef` ➖, a `&T` parameter does its work |
 | `Default` | `Default`, `@default` | ✅ | ADR-0094: Rust's defaults of the prelude's types, `@default` for `#[derive(Default)]`, `unwrap_or_default`, `mem::take` and struct update |
@@ -224,7 +224,7 @@ From what most programs need to what fewer do. Each line is one record, or a few
    `Iter`, `Option` and `Result`, and `assert`, `assert_eq`, `unreachable`, `todo`. ✅
    ([ADR-0093](adr/0093-everyday-methods.md))
 5. **Conversion and defaults:** `From`, `Into`, `TryFrom`, `Default`, generic `min`/`max`,
-   `Index`.
+   `Index`. ✅ ([ADR-0094](adr/0094-conversions-and-defaults.md))
 6. **Collections:** `Set`, `Deque`, `SortedMap`, `SortedSet` and `PriorityQueue` (names to be
    settled), and `collect` into them.
 7. **Streams and files:** `Read`, `Write`, buffered readers and writers, `File`, metadata,

@@ -9,11 +9,12 @@ use pkg::resolve::{ParamOwner, TypeItem, TypeRes};
 use pkg::span::Span;
 use pkg::types::{Checker, FieldDef, FnSig, InterfaceDef, NamedRef, ParamRef, SELF_PARAM, SpanInterface, Subst, Type, TypeKind};
 use pkg::types;
+use pkg::types::classes;
 use pkg::types::exprs;
 use pkg::types::generic;
 use pkg::types::inheritance;
 use pkg::types::send;
-use pkg::types::typed::{Conversion, ErrorTypes, ImplEntry, StaticCall, item_key, owner_key};
+use pkg::types::typed::{Conversion, ErrorTypes, ImplEntry, IndexCall, StaticCall, item_key, owner_key};
 
 /// Resolves the parents, fields and methods of every interface.
 pub fn interface_defs(cx: Checker) {
@@ -1571,4 +1572,152 @@ pub fn into_call(cx: Checker, value: Expr, receiver_ty: Type, method: Ident, fal
   cx.typed.conversions.insert(value.id, Conversion { from: receiver_ty, to: to, error: if fallible { Some(err) } else { None } });
 
   if fallible { types::result(to, err) } else { to }
+}
+
+/// The implementations of `wanted` (`Index` or `IndexMut`) by `ty`, each once.
+fn index_refs(cx: Checker, ty: Type, wanted: Option<u32>) -> List<NamedRef> {
+  const found: List<NamedRef> = new List();
+
+  for interface_ref in cx.typed.implemented_refs(ty) {
+    if is_prelude(wanted, interface_ref.id) && interface_ref.args.len() == 2 && !types::contains_ref(found, interface_ref) {
+      found.push(interface_ref);
+    }
+  }
+
+  found
+}
+
+/// `base[position]` on a type implementing `Index<Idx, Out>`: the implementation whose `Idx` is the
+/// type of `position`, chosen as `U::from(x)` chooses its conversion, or `None` without one
+/// (docs/adr/0094-conversions-and-defaults.md, Q639).
+pub fn user_index(cx: Checker, value: Expr, base_ty: Type, position: Expr) -> Option<Type> {
+  const refs = index_refs(cx, base_ty, cx.typed.prelude.index);
+
+  if refs.is_empty() {
+    return None;
+  }
+
+  const function = cx.typed.interface_def(cx.typed.prelude.index?)?.methods.first()?;
+  var expected: Option<Type> = None;
+
+  if refs.len() == 1 {
+    expected = Some(refs[0].args[0]);
+  } else if let Some(integer) = literal_kind(position) {
+    const of_kind: List<Type> = new List();
+
+    for interface_ref in refs {
+      const matches = match interface_ref.args[0].kind {
+        TypeKind::Int(_) => integer,
+        TypeKind::Float(_) => !integer,
+        _ => false,
+      };
+
+      if matches {
+        of_kind.push(interface_ref.args[0]);
+      }
+    }
+
+    if of_kind.len() == 1 {
+      expected = Some(of_kind[0]);
+    }
+  }
+
+  const position_ty = exprs::expr(cx, position, expected);
+
+  if types::is_error(position_ty) {
+    return Some(types::error());
+  }
+
+  var chosen: Option<NamedRef> = None;
+
+  for interface_ref in refs {
+    if chosen.is_none() && types::same_type(position_ty, interface_ref.args[0]) {
+      chosen = Some(interface_ref);
+    }
+  }
+
+  for interface_ref in refs {
+    if chosen.is_none() && cx.fits(position_ty, interface_ref.args[0]) {
+      chosen = Some(interface_ref);
+    }
+  }
+
+  const found = match chosen {
+    Some(found) => found,
+    None => {
+      const names: List<String> = new List();
+
+      for interface_ref in refs {
+        names.push("`" + types::text(interface_ref.args[0]) + "`");
+      }
+
+      cx.diagnostics.push(
+        Diagnostic::error(codes::INVALID_OPERAND, position.span, "`" + types::text(base_ty) + "` cannot be indexed by `" + types::text(position_ty) + "`")
+          .with_note("it is indexed by " + names.join(", ")),
+      );
+
+      return Some(types::error());
+    }
+  };
+
+  cx.typed.index_calls.insert(value.id, IndexCall { index: function, set: None, args: found.args });
+
+  Some(found.args[1])
+}
+
+/// The indexes of types implementing `Index` in the place `target` assigns to: each needs the
+/// `IndexMut` with the same arguments, whose `index_set` writes the element back as a method of its
+/// base would (Q639).
+pub fn assigned_indexes(cx: Checker, target: Expr) {
+  var current = target;
+
+  while true {
+    match current.kind {
+      ExprKind::Field { base, .. } => {
+        current = base;
+      }
+      ExprKind::Index { base, .. } => {
+        if let Some(call) = cx.typed.index_calls.get(current.id) {
+          const base_ty = cx.typed.expr_types.get(base.id).unwrap_or(types::error());
+          var set: Option<u32> = None;
+          // The function of the type, whose changes to `self` the receiver must allow.
+          var implementation: Option<u32> = None;
+
+          for interface_ref in index_refs(cx, base_ty, cx.typed.prelude.index_mut) {
+            if types::same_types(interface_ref.args, call.args) {
+              if let Some(def) = cx.typed.interface_def(interface_ref.id) {
+                set = def.methods.first();
+              }
+
+              implementation = cx.typed.block_method(cx.resolution, cx.package, base_ty, interface_ref, "index_set");
+
+              if implementation.is_none() {
+                if let Some(item) = types::type_item_of(base_ty) {
+                  implementation = cx.resolution.type_function(cx.package, item, "index_set");
+                }
+              }
+            }
+          }
+
+          match set {
+            Some(function) => {
+              cx.typed.index_calls.insert(current.id, IndexCall { index: call.index, set: Some(function), args: call.args });
+              classes::receiver_use(cx, base, implementation.unwrap_or(function), "index_set");
+            }
+            None => {
+              const wanted = "IndexMut<" + types::text(call.args[0]) + ", " + types::text(call.args[1]) + ">";
+
+              cx.diagnostics.push(
+                Diagnostic::error(codes::INVALID_OPERAND, current.span, "cannot assign through an index of `" + types::text(base_ty) + "`, which does not implement `" + wanted + "`")
+                  .with_help("implement `" + wanted + "`, whose `index_set` writes the element back"),
+              );
+            }
+          }
+        }
+
+        current = base;
+      }
+      _ => break,
+    }
+  }
 }

@@ -1,0 +1,59 @@
+// `Index` and `IndexMut` (docs/adr/0094-conversions-and-defaults.md, Q639).
+
+struct Plain {
+  pub x: i32;
+}
+
+struct Counter {
+  pub value: i32;
+
+  pub fn increment(self) {
+    self.value += 1;
+  }
+}
+
+struct Readable {
+  pub values: List<Counter>;
+}
+
+impl Index<usize, Counter> for Readable {
+  fn index(self, at: usize) -> Counter { self.values[at] }
+}
+
+struct Writes {
+  pub counters: [Counter; 2];
+}
+
+impl Index<usize, Counter> for Writes {
+  fn index(self, at: usize) -> Counter { self.counters[at] }
+}
+
+impl IndexMut<usize, Counter> for Writes {
+  fn index_set(self, at: usize, value: Counter) { self.counters[at] = value; }
+}
+
+fn lend(_counter: &mut Counter) {}
+
+fn main() {
+  const plain = Plain { x: 1 };
+  const _a = plain[0]; //~ ERROR E0310
+  const readable = Readable { values: List::from([Counter { value: 1 }]) };
+
+  readable[0] = Counter { value: 2 }; //~ ERROR E0310
+  readable[0].value += 1; //~ ERROR E0310
+
+  const _b = readable["a"]; //~ ERROR E0310
+  const writes = Writes { counters: [Counter { value: 0 }, Counter { value: 0 }] };
+
+  writes[0].value = 1; //~ ERROR E0313
+  lend(&mut writes[1]); //~ ERROR E0340
+
+  var changed = Writes { counters: [Counter { value: 0 }, Counter { value: 0 }] };
+
+  changed[0].increment(); //~ ERROR E0313
+  changed[1] = Counter { value: 3 };
+
+  const ages = Map::from(List::from([("a", 1)]));
+
+  ages["b"] = 2; //~ ERROR E0310
+}

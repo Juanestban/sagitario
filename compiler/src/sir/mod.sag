@@ -1234,6 +1234,9 @@ pub class Lowering {
   pub var pending: List<u32>;
   pub var loops: List<LoopCx>;
   pub var vtable_after: Option<VtableAfter>;
+  /// The places that stand for indexes of types implementing `Index` while an assignment
+  /// through them runs: the copy `index` gave (docs/adr/0094-conversions-and-defaults.md, Q639).
+  pub var index_places: Map<u32, Place>;
   /// The type arguments of the instance being lowered; empty outside generic code.
   pub var subst: Subst;
   /// Where the code being lowered is, for errors found while instantiating.
@@ -1261,6 +1264,7 @@ pub class Lowering {
     self.pending = new List();
     self.loops = new List();
     self.vtable_after = None;
+    self.index_places = new Map<u32, Place>();
     self.subst = subst;
     self.span = span;
     self.source_fn = 0;
@@ -1509,6 +1513,10 @@ pub class Lowering {
   }
 
   prv fn assign(self, target: Expr, op: Option<BinaryOp>, value: Expr) -> Result<(), String> {
+    if self.assign_indexed(target, op, value)? {
+      return Ok(());
+    }
+
     if self.is_interface_field(target) {
       const base = match target.kind {
         ExprKind::Field { base, .. } => base,
@@ -1651,6 +1659,127 @@ pub class Lowering {
     Ok(())
   }
 
+  /// An assignment through `base[index]` of a type implementing `IndexMut`: the index nearest the
+  /// root of the place is read with `index` into a copy, the rest of the assignment changes the
+  /// copy, and `index_set` writes it back; `base[index] = value` only calls `index_set`. The base
+  /// and the index are evaluated once (docs/adr/0094-conversions-and-defaults.md, Q639).
+  prv fn assign_indexed(self, target: Expr, op: Option<BinaryOp>, value: Expr) -> Result<bool, String> {
+    var indexed: Option<Expr> = None;
+    var current = target;
+
+    while true {
+      if self.index_places.contains_key(current.id) {
+        break;
+      }
+
+      match current.kind {
+        ExprKind::Field { base, .. } => {
+          current = base;
+        }
+        ExprKind::Index { base, .. } => {
+          if self.typed.index_calls.contains_key(current.id) {
+            indexed = Some(current);
+          }
+
+          current = base;
+        }
+        _ => break,
+      }
+    }
+
+    const node = match indexed {
+      Some(found) => found,
+      None => return Ok(false),
+    };
+    const call = match self.typed.index_calls.get(node.id) {
+      Some(found) => found,
+      None => return Err("an index without its call"),
+    };
+    const set = match call.set {
+      Some(found) => found,
+      None => return Err("an assigned index without `index_set`"),
+    };
+    const parts = match node.kind {
+      ExprKind::Index { base, index } => List::from([base, index]),
+      _ => return Err("an index of another kind"),
+    };
+    const base = parts[0];
+    const position_expr = parts[1];
+    const args: List<Type> = new List();
+
+    for arg in call.args {
+      args.push(types::substitute(arg, self.subst));
+    }
+
+    const base_place = self.base_place(base)?;
+    const position = self.owned_copy(args[0], self.operand_as(position_expr, args[0])?);
+
+    if node.id == target.id && op.is_none() {
+      const stored = self.operand_as(value, args[1])?;
+
+      self.index_method(set, args, base_place, List::from([position, stored]), types::unit())?;
+
+      return Ok(true);
+    }
+
+    const copy = self.index_method(call.index, args, base_place, List::from([position]), args[1])?;
+    const copy_place = self.operand_place(copy, args[1])?;
+
+    self.index_places.insert(node.id, copy_place);
+
+    const assigned = self.assign(target, op, value);
+
+    self.index_places.remove(node.id);
+    assigned?;
+    self.index_method(set, args, base_place, List::from([position, Operand::Place(copy_place)]), types::unit())?;
+
+    Ok(true)
+  }
+
+  /// A call of `index` or `index_set` (of `Index` or `IndexMut` with `args`) on the value in
+  /// `base_place`, through its type's implementation, or the itable of an interface value.
+  prv fn index_method(self, function: u32, args: List<Type>, base_place: Place, operands: List<Operand>, ret: Type) -> Result<Operand, String> {
+    const receiver_ty = base_place.ty;
+    const owner = match self.resolution.owner(function) {
+      Some(found) => found,
+      None => return Err("an index function without its interface"),
+    };
+    var callee = Callee::Fn(function);
+    var by_ref = false;
+
+    match receiver_ty.kind {
+      TypeKind::Interface(interface_ref) => {
+        callee = interfaces::dyn_method(self, interface_ref, function)?;
+      }
+      _ => {
+        const subst = Subst::of(ParamOwner::Item(owner), args).with_self(receiver_ty);
+        const target = interfaces::method_for(self, function, receiver_ty, subst, new List());
+
+        callee = match target.slot {
+          Some(slot) => Callee::Virtual { slot: slot, function: target.function },
+          None => Callee::Fn(target.function),
+        };
+        by_ref = match self.typed.sig(interfaces::template_of(self, target.function)) {
+          Some(sig) => match sig.receiver {
+            Some(receiver) => receiver == Receiver::Var,
+            None => false,
+          },
+          None => false,
+        };
+      }
+    }
+
+    const all = List::from([if by_ref { Operand::Ref(base_place) } else { Operand::Place(base_place) }]);
+
+    // The operands are an `Idx` and an `Out`, the arguments of the interface; a method that
+    // modifies its base must not see them borrow from it.
+    for index in 0..operands.len() {
+      all.push(if by_ref { self.owned_copy(args.get(index).unwrap_or(types::error()), operands[index]) } else { operands[index] });
+    }
+
+    Ok(self.call(callee, all, ret))
+  }
+
   /// `text += more` becomes `text = text + more`; other operators stay.
   /// The amount of a shift, as a `u64`, which keeps a negative amount out of range.
   prv fn shift_amount(self, amount: Expr) -> Result<Operand, String> {
@@ -1745,6 +1874,25 @@ pub class Lowering {
         Ok(place)
       }
       ExprKind::Index { base, index } => {
+        // The copy an assignment through `IndexMut` changes, or the value `index` gives (Q639).
+        if let Some(found) = self.index_places.get(value.id) {
+          return Ok(found);
+        }
+
+        if let Some(call) = self.typed.index_calls.get(value.id) {
+          const args: List<Type> = new List();
+
+          for arg in call.args {
+            args.push(types::substitute(arg, self.subst));
+          }
+
+          const base_place = self.base_place(base)?;
+          const position = self.operand_as(index, args[0])?;
+          const read = self.index_method(call.index, args, base_place, List::from([position]), ty)?;
+
+          return self.operand_place(read, ty);
+        }
+
         const base_ty = self.type_of(base)?;
 
         if let TypeKind::List(_) = base_ty.kind {

@@ -190,6 +190,19 @@ pub interface TryInto<U, E> {
   fn try_into(self) -> Result<U, E>;
 }
 
+/// `value[index]` for a type other than lists, arrays and slices, as Rust's `Index`
+/// (docs/adr/0094-conversions-and-defaults.md, Q639). A reference cannot be a result, so `index`
+/// gives the value: a copy of a struct, the same instance of a class.
+pub interface Index<Idx, Out> {
+  fn index(self, index: Idx) -> Out;
+}
+
+/// `value[index] = new`, `value[index] += x` and `value[index].field = x`, as Rust's `IndexMut`:
+/// the compiler reads the element with `index`, changes it, and writes it back with `index_set`.
+pub interface IndexMut<Idx, Out> extends Index<Idx, Out> {
+  fn index_set(self, index: Idx, value: Out);
+}
+
 /// The value a type starts from, as Rust's `Default` (docs/adr/0094-conversions-and-defaults.md,
 /// Q636): `0` for numbers, `false`, `'\0'`, `""`, empty collections, `None`, and for tuples and
 /// arrays the default of each element. A struct or enum written after `@default` has the default
@@ -2141,6 +2154,17 @@ pub class Task<T> {
     match self.result {
       Some(value) => value,
       None => panic("the task has not finished"),
+    }
+  }
+}
+
+/// `map[key]`: the value of a key, which must be present, as Rust's (Q639). `get` gives an
+/// `Option` instead.
+impl<K, V> Index<K, V> for Map<K, V> {
+  fn index(self, key: K) -> V {
+    match self.get(key) {
+      Some(value) => value,
+      None => panic("no entry found for key"),
     }
   }
 }

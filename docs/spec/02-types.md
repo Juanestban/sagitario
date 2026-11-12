@@ -498,7 +498,10 @@ for entry in ages {
   keeps the order in which keys were first inserted.
 - Methods: `insert(k, v) -> Option<V>` (the previous value), `get(k) -> Option<V>` (a copy),
   `contains_key(k) -> bool`, `remove(k) -> Option<V>`, `len()`, `is_empty()`, `clear()`, and the
-  iterators `keys()`, `values()` and `entries()`. There is no `map[k]`.
+  iterators `keys()`, `values()` and `entries()`. `map[k]` gives the value of a key that must be
+  present, and panics without it (`no entry found for key`), as Rust's: a map implements
+  [`Index<K, V>`](05-interfaces-generics.md#indexing), and not `IndexMut`, so `map[k] = v` is an
+  error that `insert` replaces.
 - Rust's other methods ([ADR-0093](../adr/0093-everyday-methods.md), Q625): `iter()` gives the
   entries as `(K, V)` pairs, `retain(keep)` keeps those for which `keep(k, v)` is `true`,
   `extend(pairs)` inserts the pairs of an `Iter<(K, V)>`, and `Map::from(pairs)` makes a map of

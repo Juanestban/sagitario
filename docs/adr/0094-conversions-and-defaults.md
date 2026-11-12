@@ -174,3 +174,11 @@ fn main() {
   `hash` as their own operations, and now leaves the other methods of those interfaces to their
   defaults. Integers and floats keep their `clamp`, which reports the line of its call; that of
   `Ord`, as Rust's, panics in the prelude.
+- Increment 5 is done, and with it the record. The checker records each `base[i]` of a type
+  implementing `Index` with the implementation chosen (`typed.IndexCall`), and, in an assignment,
+  the `index_set` of each index of the place, which it checks as a call of that method on the
+  base. Lowering assigns through the index nearest the root: it reads it with `index` into a
+  copy, lowers the same assignment with that copy as the place of the index, which handles the
+  indexes and fields above it, and calls `index_set` with the copy; the base and the index are
+  evaluated once. `map[key]` is an `impl Index<K, V> for Map<K, V>` of the prelude. Only the
+  bitwise interfaces of the audit's row of `ops` remain, with the operators they would overload.

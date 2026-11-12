@@ -379,6 +379,9 @@ enum PlaceBase {
   Temporary,
   /// A `static`, or a part of one (docs/adr/0083-global-state.md): only a `static var` changes.
   Static(u32),
+  /// What `index` gives for a type implementing `Index`, or a part of it: `IndexMut` writes it
+  /// back when it is assigned to (docs/adr/0094-conversions-and-defaults.md, Q639).
+  Indexed,
   /// A name that is not a binding: already reported.
   Unknown,
 }
@@ -409,6 +412,10 @@ fn place_base(cx: Checker, place: Expr) -> PlaceBase {
       None => part_of(cx, base),
     },
     ExprKind::Index { base, .. } => {
+      if cx.typed.index_calls.contains_key(place.id) {
+        return PlaceBase::Indexed;
+      }
+
       if let Some(ty) = cx.typed.expr_types.get(base.id) {
         if let TypeKind::List(_) = ty.kind {
           return PlaceBase::ListElement(true);
@@ -476,6 +483,24 @@ fn place_access(cx: Checker, place: Expr, place_use: PlaceUse) -> PlaceAccess {
 
   match place_base(cx, place) {
     PlaceBase::Unknown => PlaceAccess::Mutable,
+    PlaceBase::Indexed => {
+      if is_assign {
+        return PlaceAccess::Mutable;
+      }
+
+      // A change in place would be lost in the copy `index` gives.
+      const diagnostic = if is_borrow {
+        Diagnostic::error(codes::INVALID_BORROW, place.span, "cannot lend an element that `index` gives")
+      } else {
+        Diagnostic::error(code, place.span, "cannot call the method `" + method_name + "`, which modifies `self`, on an element that `index` gives")
+      };
+
+      PlaceAccess::Immutable(
+        diagnostic
+          .with_note("`value[i]` gives a copy, which `IndexMut` writes back only when it is assigned to")
+          .with_help("modify a copy and store it back: `var item = value[i]; ...; value[i] = item;`"),
+      )
+    }
     PlaceBase::Static(id) => {
       const decl = match cx.resolution.static_decl(cx.package, id) {
         Some(found) => found,
