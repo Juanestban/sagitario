@@ -45,8 +45,11 @@ pub struct PreludeItems {
   pub from_iterator: Option<u32>;
   /// `HashSet` (docs/adr/0095-collections.md, Q647).
   pub hash_set: Option<u32>;
-  /// `std::collections::VecDeque`, when the program uses the module (Q648).
+  /// `std::collections::VecDeque`, `BTreeMap` and `BTreeSet`, when the program uses the module
+  /// (Q648-Q650).
   pub vec_deque: Option<u32>;
+  pub btree_map: Option<u32>;
+  pub btree_set: Option<u32>;
 }
 
 /// The methods of `List<T>` implemented by the compiler (docs/spec/02-types.md#arrays-and-lists).
@@ -308,6 +311,8 @@ pub class TypedModule {
       from_iterator: None,
       hash_set: None,
       vec_deque: None,
+      btree_map: None,
+      btree_set: None,
     };
     self.sync_classes = new List();
     self.const_types = new List();
@@ -805,10 +810,10 @@ pub class TypedModule {
           }
         }
 
-        // A `VecDeque` compares, orders and hashes as a list of its elements
-        // (docs/adr/0095-collections.md, Q648).
-        if is_id(self.prelude.vec_deque, named.id) && named.args.len() == 1 {
-          for found in self.tuple_impls(List::from([named.args[0]])) {
+        // A `VecDeque`, `BTreeMap` or `BTreeSet` compares, orders and hashes as a list of its
+        // elements (docs/adr/0095-collections.md, Q648-Q650).
+        if let Some(elem) = self.compared_element(named) {
+          for found in self.tuple_impls(List::from([elem])) {
             direct.push(found);
           }
         }
@@ -896,7 +901,27 @@ pub class TypedModule {
   /// Whether `==` compares instances of the class `id` by value, as Rust's: a `Map` and a
   /// `HashSet` (docs/adr/0093-everyday-methods.md, Q623, and docs/adr/0095-collections.md, Q647).
   pub fn compares_by_value(self, id: u32) -> bool {
-    is_id(self.prelude.map, id) || is_id(self.prelude.hash_set, id) || is_id(self.prelude.vec_deque, id)
+    is_id(self.prelude.map, id) || is_id(self.prelude.hash_set, id) || self.compared_elements(id)
+  }
+
+  /// Whether the class `id` is compared, ordered and hashed as a list of its elements: a
+  /// `VecDeque`, a `BTreeMap` or a `BTreeSet` (docs/adr/0095-collections.md, Q648-Q650).
+  pub fn compared_elements(self, id: u32) -> bool {
+    is_id(self.prelude.vec_deque, id) || is_id(self.prelude.btree_map, id) || is_id(self.prelude.btree_set, id)
+  }
+
+  /// The type of the elements such a class compares by: a pair of a key and its value for a
+  /// `BTreeMap`, the element for the others.
+  pub fn compared_element(self, named: NamedRef) -> Option<Type> {
+    if !self.compared_elements(named.id) {
+      return None;
+    }
+
+    if is_id(self.prelude.btree_map, named.id) && named.args.len() == 2 {
+      return Some(types::of(TypeKind::Tuple(List::from([named.args[0], named.args[1]]))));
+    }
+
+    named.args.first()
   }
 
   /// `Default`, without type arguments.

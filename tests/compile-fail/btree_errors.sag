@@ -1,0 +1,17 @@
+// `std::collections::BTreeMap` and `BTreeSet` (docs/adr/0095-collections.md, Q649 and Q650).
+use std::collections::{BTreeMap, BTreeSet};
+
+struct Plain {
+  pub x: i32;
+}
+
+fn main() {
+  const _floats = new BTreeMap<f64, i32>(); //~ ERROR E0330
+  const _points = new BTreeSet<Plain>(); //~ ERROR E0330
+  const scores = BTreeMap::from(List::from([("a", 1)]));
+
+  scores.insert(1, 1); //~ ERROR E0300
+  scores["b"] = 2; //~ ERROR E0310
+
+  const _range = scores.range(1, 2); //~ ERROR E0300, ERROR E0300
+}

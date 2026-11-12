@@ -50,7 +50,7 @@ The audit of the library found gaps of the language itself, which the library ne
 | `&[T]`, `&mut [T]` | slices | ✅ | Views of arrays and lists, only as parameters, with `contains`, `binary_search`, `min`, `max`, and on `&mut [T]` `sort`, `reverse`, `fill`, `swap`, `copy_from_slice` (ADR-0093, increment 3); `split_at`, `windows` and `chunks` of slices are ranges and the methods of lists (➖) |
 | `HashMap<K, V>` | `Map<K, V>` | ✅ | Keeps insertion order (like `IndexMap`). `update`, `upsert` and `get_or_insert` stand for `entry`, which lends the map; `retain`, `extend`, `Map::from` of a list of pairs, `iter` and `==` ([ADR-0093](adr/0093-everyday-methods.md), increments 3 and 4) |
 | `HashSet<T>` | `HashSet<T: Hash>` | ✅ | In the prelude, on `Map`: keeps insertion order; the operations between sets give iterators of copies ([ADR-0095](adr/0095-collections.md), increment 2) |
-| `BTreeMap`, `BTreeSet` | — | ❌ | Ordered by `Ord`, with ranges |
+| `BTreeMap`, `BTreeSet` | `std::collections::BTreeMap`, `BTreeSet` | ✅ | B-trees ordered by `Ord`, with `range`, `range_from` and `range_to` ([ADR-0095](adr/0095-collections.md), increment 4); their iterators gather their entries when made |
 | `VecDeque<T>` | `std::collections::VecDeque<T>` | ✅ | A ring buffer ([ADR-0095](adr/0095-collections.md), increment 3); `contains` waits for bounds on methods (`iter().any(...)`); `Channel` keeps its two lists |
 | `BinaryHeap<T>` | — | ❌ | A priority queue on `Ord` |
 | `LinkedList<T>` | — | ⛔ | Rarely the right structure; Rust itself discourages it |

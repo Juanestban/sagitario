@@ -165,6 +165,20 @@ fn is_vec_deque(program: Program, class_ref: NamedRef) -> bool {
   }
 }
 
+fn is_btree_map(program: Program, class_ref: NamedRef) -> bool {
+  match program.btree_map_class {
+    Some(id) => id == class_ref.id,
+    None => false,
+  }
+}
+
+fn is_btree_set(program: Program, class_ref: NamedRef) -> bool {
+  match program.btree_set_class {
+    Some(id) => id == class_ref.id,
+    None => false,
+  }
+}
+
 /// `sag_sb_push_bytes` of a text without quotes or backslashes.
 fn push_text(text: String) -> String {
   "  sag_sb_push_bytes(sb, " + c_string_literal(text) + `, ${text.len()});`
@@ -1454,7 +1468,7 @@ class Generator {
         }
       }
       TypeKind::Class(class_ref) => {
-        if is_map(program, class_ref) || is_hash_set(program, class_ref) || is_vec_deque(program, class_ref) {
+        if is_map(program, class_ref) || is_hash_set(program, class_ref) || is_vec_deque(program, class_ref) || is_btree_map(program, class_ref) || is_btree_set(program, class_ref) {
           for arg in class_ref.args {
             result.push(arg);
           }
@@ -1677,6 +1691,30 @@ class Generator {
           return;
         }
 
+        if is_btree_map(program, class_ref) {
+          self.debug_btree(class_ref, "v", true, all, body);
+          return;
+        }
+
+        // A `BTreeSet` is written as the keys of its map.
+        if is_btree_set(program, class_ref) {
+          const set_index = self.class_index(class_ref);
+
+          if let Some(set) = self.classes.get(set_index) {
+            for field in 0..set.field_names.len() {
+              if set.field_names[field] == "map" {
+                if let Some(map_ty) = set.fields.get(field) {
+                  if let TypeKind::Class(map_ref) = map_ty.kind {
+                    self.debug_btree(map_ref, `((sag_c${set_index} *)v)->f${field}`, false, all, body);
+                  }
+                }
+              }
+            }
+          }
+
+          return;
+        }
+
         // A cycle writes the class again without its fields.
         body.push("  if (!sag_debug_enter(v)) {");
         body.push("  " + push_text(class_ref.name + " { .. }"));
@@ -1866,6 +1904,102 @@ class Generator {
     body.push("    }");
     body.push("  }");
     body.push("  sag_debug_end(sb, sag_n > 0, indent, pretty, false, \"]\");");
+  }
+
+  /// `{1: 2}`, or `{1, 2}` without the values: the entries of the `BTreeMap` that `map` (C code)
+  /// points to, in order, by a walk of its tree with a stack, whose steps alternate between the
+  /// children and the keys of a node (docs/adr/0095-collections.md, Q652). A B-tree of nodes of 5
+  /// keys at least never needs 64 levels.
+  prv fn debug_btree(self, map_ref: NamedRef, map: String, with_values: bool, all: List<Type>, body: List<String>) {
+    const map_index = self.class_index(map_ref);
+    const instance = match self.classes.get(map_index) {
+      Some(found) => found,
+      None => return,
+    };
+    var root_field = 0usize;
+
+    for field in 0..instance.field_names.len() {
+      if instance.field_names[field] == "root" {
+        root_field = field;
+      }
+    }
+
+    const node_ref = match instance.fields.get(root_field) {
+      Some(found) => match found.kind {
+        TypeKind::Class(named) => named,
+        _ => return,
+      },
+      None => return,
+    };
+    const node_index = self.class_index(node_ref);
+    const node = match self.classes.get(node_index) {
+      Some(found) => found,
+      None => return,
+    };
+    var keys_field = 0usize;
+    var values_field = 0usize;
+    var children_field = 0usize;
+
+    for field in 0..node.field_names.len() {
+      const name = node.field_names[field];
+
+      if name == "keys" {
+        keys_field = field;
+      } else if name == "values" {
+        values_field = field;
+      } else if name == "children" {
+        children_field = field;
+      }
+    }
+
+    const key_ty = map_ref.args.get(0).unwrap_or(types::unit());
+    const value_ty = map_ref.args.get(1).unwrap_or(types::unit());
+    const key_type = self.c_type(key_ty);
+    const value_type = self.c_type(value_ty);
+    const child_type = self.c_type(types::of(TypeKind::Class(node_ref)));
+    const at = `((sag_c${node_index} *)sag_node)`;
+
+    body.push(`  sag_object *sag_stack[64];`);
+    body.push(`  size_t sag_step[64];`);
+    body.push(`  int sag_depth = 0;`);
+    body.push(`  bool sag_any = false;`);
+    body.push(`  sag_stack[0] = ((sag_c${map_index} *)${map})->f${root_field};`);
+    body.push(`  sag_step[0] = 0;`);
+    body.push("  sag_sb_push_bytes(sb, \"{\", 1);");
+    body.push("  while (sag_depth >= 0) {");
+    body.push("    sag_object *sag_node = sag_stack[sag_depth];");
+    body.push("    size_t sag_s = sag_step[sag_depth]++;");
+    body.push(`    sag_object *sag_keys = ${at}->f${keys_field};`);
+    body.push(`    sag_object *sag_children = ${at}->f${children_field};`);
+    body.push("    size_t sag_nk = sag_list_len(sag_keys);");
+    body.push("    if (sag_s > 2 * sag_nk) {");
+    body.push("      sag_depth--;");
+    body.push("      continue;");
+    body.push("    }");
+    body.push("    if (sag_s % 2 == 0) {");
+    body.push("      if (sag_list_len(sag_children) > 0 && sag_depth < 63) {");
+    body.push("        sag_depth++;");
+    body.push("        sag_stack[sag_depth] = *(" + child_type + " *)sag_list_at(sag_children, sag_s / 2, __FILE__, __LINE__);");
+    body.push("        sag_step[sag_depth] = 0;");
+    body.push("      }");
+    body.push("      continue;");
+    body.push("    }");
+    body.push("    " + key_type + " sag_key = *(" + key_type + " *)sag_list_at(sag_keys, sag_s / 2, __FILE__, __LINE__);");
+    body.push("    sag_debug_next(sb, !sag_any, indent + 1, pretty, false);");
+    body.push("    sag_any = true;");
+    body.push(`    sag_debug_${debug_position(all, key_ty).unwrap_or(0)}(sb, sag_key, indent + 1, pretty);`);
+
+    if with_values {
+      body.push(`    ${value_type} sag_value = *(${value_type} *)sag_list_at(${at}->f${values_field}, sag_s / 2, __FILE__, __LINE__);`);
+      body.push("    sag_sb_push_bytes(sb, \": \", 2);");
+      body.push(`    sag_debug_${debug_position(all, value_ty).unwrap_or(0)}(sb, sag_value, indent + 1, pretty);`);
+    }
+
+    body.push("    if (pretty) {");
+    body.push("      sag_sb_push_bytes(sb, \",\", 1);");
+    body.push("    }");
+    body.push("  }");
+    body.push("  sag_debug_end(sb, sag_any, indent, pretty, false, \"}\");");
   }
 
   /// The C `main`, which calls the program's `main`; a library has none.

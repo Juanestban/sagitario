@@ -672,9 +672,10 @@ fn check_implementations(cx: Checker) {
         continue;
       }
 
-      // A `VecDeque` compares as a list of its elements (docs/adr/0095-collections.md, Q648).
+      // A `VecDeque`, `BTreeMap` or `BTreeSet` compares as a list of its elements
+      // (docs/adr/0095-collections.md, Q648-Q650).
       const by_elements = match item {
-        TypeItem::Class(id) => is_prelude(cx.typed.prelude.vec_deque, id),
+        TypeItem::Class(id) => cx.typed.compared_elements(id),
         _ => false,
       };
 

@@ -15,6 +15,11 @@ The sources say 0.32.0.
 
 ### Added
 
+- `std::collections::BTreeMap` and `BTreeSet`, as Rust's: B-trees ordered by their keys, with the
+  methods of `Map` and `HashSet` in order, `first_key_value`, `pop_first`, `pop_last`, `range`,
+  `range_from` and `range_to`, `for (key, value) in map`, comparison, order and hash by their
+  entries, and the debug forms `{"a": 1}` and `{1, 2}`
+  ([ADR-0095](docs/adr/0095-collections.md), increment 4).
 - `std::collections::VecDeque`, as Rust's: a ring buffer with both ends, `deque[i]`, an iterator
   of two ends, comparison, order and hash by its elements, and the debug form `[1, 2]`; the
   method of an interface a type implements may return a subclass of the class declared

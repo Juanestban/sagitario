@@ -108,3 +108,13 @@ fn main() {
   subclass of the class its interface declares. The compiler gives it
   `Eq`, `Ord` and `Hash` when its elements have them, compared, ordered and hashed through a list
   of its elements, as it gives `Map` its `Eq`, and writes its debug form from its ring.
+- Increment 4 is done. `BTreeMap` is the B-tree of minimum degree 6 of Cormen, Leiserson, Rivest
+  and Stein: inserting splits each full node on the way down, and removing makes each node it
+  descends into hold a key more than the least, by borrowing from a sibling or merging with one;
+  the test checks it against a `Map` over thousands of random insertions and removals. Two
+  departures from Q649: `for` over a `BTreeMap` gives `(K, V)` pairs, as Rust's does and as its
+  `iter()` gives, rather than `Entry` values, since `Iterable` goes through `iter()`; and its
+  iterators go over a list of the entries a walk of the tree gathers when they are made, which
+  costs that list but gives two ends at once, where Rust's walk the tree lazily. The compiler
+  gives both types `Eq`, `Ord` and `Hash` as it gives `VecDeque` (`typed.compared_element`), and
+  writes their debug forms by walking the tree with a stack.

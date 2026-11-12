@@ -59,6 +59,9 @@ pub struct Program {
   pub hash_set_class: Option<u32>;
   /// `std::collections::VecDeque`, written as a list of its elements.
   pub vec_deque_class: Option<u32>;
+  /// `std::collections::BTreeMap` and `BTreeSet`, written as a map and a set of their entries.
+  pub btree_map_class: Option<u32>;
+  pub btree_set_class: Option<u32>;
 }
 
 /// A `static`: its storage, reached through `sag_static_N(file, line)`, which gives its address.
@@ -1018,6 +1021,8 @@ pub fn lower(package: Package, resolution: Resolution, typed: TypedModule, sourc
     map_class: typed.prelude.map,
     hash_set_class: typed.prelude.hash_set,
     vec_deque_class: typed.prelude.vec_deque,
+    btree_map_class: typed.prelude.btree_map,
+    btree_set_class: typed.prelude.btree_set,
   })
 }
 

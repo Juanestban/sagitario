@@ -46,8 +46,8 @@ fn main() -> Result<(), io::Error> {
 ## `std::collections`
 
 Rust's collections beyond the prelude's `List`, `Map` and `HashSet`
-([ADR-0095](../adr/0095-collections.md)), written in Sagitario. `BTreeMap`, `BTreeSet` and
-`BinaryHeap` come in the next increments of the record.
+([ADR-0095](../adr/0095-collections.md)), written in Sagitario. `BinaryHeap` comes in the last
+increment of the record.
 
 ```sag
 use std::collections::VecDeque;
@@ -78,6 +78,39 @@ println(f"{queue.pop_back():?} {queue:?}");   // Some(3) [0, 10, 2]
 - Rust's `contains` needs `T: Eq` on the method alone, which Sagitario cannot write:
   `deque.iter().any((x) => x == value)` stands for it. `make_contiguous` is not needed, since the
   ring is never lent.
+
+```sag
+use std::collections::{BTreeMap, BTreeSet};
+
+const scores = BTreeMap::from(List::from([("bob", 3), ("ada", 5)]));
+
+for (name, score) in scores {
+  println(f"{name} {score}");                    // ada 5, then bob 3
+}
+
+println(f"{scores.range_from("b").collect():?} {BTreeSet::from(List::from([3, 1, 2])):?}");   // [("bob", 3)] {1, 2, 3}
+```
+
+**`BTreeMap<K: Ord, V>`** (Q649), a map ordered by its keys, in a B-tree of nodes of 5 to 11 keys:
+
+- The methods of `Map`, in the order of the keys: `new`, `BTreeMap::from(pairs)`, `insert(k, v) ->
+  Option<V>`, `get`, `get_key_value`, `contains_key`, `remove`, `remove_entry`, `update`, `upsert`,
+  `get_or_insert`, `retain`, `extend`, `len`, `is_empty`, `clear`, `iter()`, `keys()` and
+  `values()` (each a `DoubleEndedIter`), and `map[key]` through `Index`, which panics without the
+  key (`no entry found for key`).
+- The ordered ones: `first_key_value()` and `last_key_value()` (`Option<(K, V)>`), `pop_first()`
+  and `pop_last()`, and, since ranges are not values, `range(low, high)` (`low` included, `high`
+  not), `range_from(low)` and `range_to(high)`, each a `DoubleEndedIter<(K, V)>`.
+- `for (key, value) in map` goes over its pairs, as Rust's, since it implements
+  `Iterable<(K, V)>`; it implements `FromIterator<(K, V)>` and `Default` too. Its iterators go over
+  the entries a walk of the tree gathers when they are made, not lazily as Rust's.
+
+**`BTreeSet<T: Ord>`** (Q650), a set ordered by its values, on a `BTreeMap`: the methods of
+`HashSet`, in order (`union` and `symmetric_difference` give their values in order too), with
+`first`, `last`, `pop_first`, `pop_last`, `range`, `range_from` and `range_to`.
+
+Both compare, order and hash as a list of their entries when these allow it, as the compiler
+gives `VecDeque`, and their debug forms are `{"a": 1}` and `{1, 2}`.
 
 ## `std::env`
 
