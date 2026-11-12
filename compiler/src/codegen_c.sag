@@ -158,6 +158,13 @@ fn is_hash_set(program: Program, class_ref: NamedRef) -> bool {
   }
 }
 
+fn is_vec_deque(program: Program, class_ref: NamedRef) -> bool {
+  match program.vec_deque_class {
+    Some(id) => id == class_ref.id,
+    None => false,
+  }
+}
+
 /// `sag_sb_push_bytes` of a text without quotes or backslashes.
 fn push_text(text: String) -> String {
   "  sag_sb_push_bytes(sb, " + c_string_literal(text) + `, ${text.len()});`
@@ -1447,7 +1454,7 @@ class Generator {
         }
       }
       TypeKind::Class(class_ref) => {
-        if is_map(program, class_ref) || is_hash_set(program, class_ref) {
+        if is_map(program, class_ref) || is_hash_set(program, class_ref) || is_vec_deque(program, class_ref) {
           for arg in class_ref.args {
             result.push(arg);
           }
@@ -1665,6 +1672,11 @@ class Generator {
           return;
         }
 
+        if is_vec_deque(program, class_ref) {
+          self.debug_deque(class_ref, all, body);
+          return;
+        }
+
         // A cycle writes the class again without its fields.
         body.push("  if (!sag_debug_enter(v)) {");
         body.push("  " + push_text(class_ref.name + " { .. }"));
@@ -1802,6 +1814,58 @@ class Generator {
     body.push("    }");
     body.push("  }");
     body.push("  sag_debug_end(sb, sag_any, indent, pretty, false, \"}\");");
+  }
+
+  /// `[1, 2]`: the elements of a `VecDeque` from the front, which start at the slot `head` of its
+  /// ring and wrap around its end (docs/adr/0095-collections.md, Q652).
+  prv fn debug_deque(self, class_ref: NamedRef, all: List<Type>, body: List<String>) {
+    const index = self.class_index(class_ref);
+    const instance = match self.classes.get(index) {
+      Some(found) => found,
+      None => return,
+    };
+    var buffer_field = 0usize;
+    var head_field = 0usize;
+    var count_field = 0usize;
+
+    for field in 0..instance.field_names.len() {
+      const name = instance.field_names[field];
+
+      if name == "buffer" {
+        buffer_field = field;
+      } else if name == "head" {
+        head_field = field;
+      } else if name == "count" {
+        count_field = field;
+      }
+    }
+
+    const slot_ty = match instance.fields.get(buffer_field) {
+      Some(found) => match found.kind {
+        TypeKind::List(elem) => elem,
+        _ => return,
+      },
+      None => return,
+    };
+    const elem_ty = class_ref.args.get(0).unwrap_or(types::unit());
+    const slot_type = self.c_type(slot_ty);
+    // An `Option` of a C function pointer is the pointer itself.
+    const element = if pkg::sir::is_nullable_pointer(slot_ty) { "sag_e" } else { "sag_e.u.v1.f0" };
+
+    body.push(`  sag_object *sag_buffer = ((sag_c${index} *)v)->f${buffer_field};`);
+    body.push(`  size_t sag_head = ((sag_c${index} *)v)->f${head_field};`);
+    body.push(`  size_t sag_n = ((sag_c${index} *)v)->f${count_field};`);
+    body.push("  size_t sag_cap = sag_list_len(sag_buffer);");
+    body.push("  sag_sb_push_bytes(sb, \"[\", 1);");
+    body.push("  for (size_t sag_k = 0; sag_k < sag_n; sag_k++) {");
+    body.push("    " + slot_type + " sag_e = *(" + slot_type + " *)sag_list_at(sag_buffer, (sag_head + sag_k) % sag_cap, __FILE__, __LINE__);");
+    body.push("    sag_debug_next(sb, sag_k == 0, indent + 1, pretty, false);");
+    body.push(`    sag_debug_${debug_position(all, elem_ty).unwrap_or(0)}(sb, ${element}, indent + 1, pretty);`);
+    body.push("    if (pretty) {");
+    body.push("      sag_sb_push_bytes(sb, \",\", 1);");
+    body.push("    }");
+    body.push("  }");
+    body.push("  sag_debug_end(sb, sag_n > 0, indent, pretty, false, \"]\");");
   }
 
   /// The C `main`, which calls the program's `main`; a library has none.

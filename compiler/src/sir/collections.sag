@@ -463,7 +463,7 @@ pub fn is_primitive_method(lw: Lowering, function: u32, receiver_ty: Type) -> bo
 
   const tuple = match receiver_ty.kind {
     TypeKind::Tuple(_) | TypeKind::Option(_) | TypeKind::Result { .. } | TypeKind::List(_) | TypeKind::Array { .. } => true,
-    TypeKind::Class(named) => is_map(lw, named),
+    TypeKind::Class(named) => compared_by_compiler(lw, named),
     _ => false,
   };
 
@@ -744,6 +744,34 @@ pub fn is_map(lw: Lowering, class_ref: NamedRef) -> bool {
   }
 }
 
+/// Whether a class type is `std::collections::VecDeque`, compared as a list of its elements
+/// (docs/adr/0095-collections.md, Q648).
+pub fn is_vec_deque(lw: Lowering, class_ref: NamedRef) -> bool {
+  match lw.typed.prelude.vec_deque {
+    Some(id) => id == class_ref.id,
+    None => false,
+  }
+}
+
+/// Whether instances of the class compare as values of the compiler: a map, or a `VecDeque`.
+pub fn compared_by_compiler(lw: Lowering, class_ref: NamedRef) -> bool {
+  is_map(lw, class_ref) || is_vec_deque(lw, class_ref)
+}
+
+/// The list of the elements of a `VecDeque`, from the front, which it compares and hashes as.
+fn deque_list(lw: Lowering, value: Operand, deque: NamedRef) -> Result<Operand, String> {
+  const elem = deque.args.get(0).unwrap_or(types::error());
+  const iter = match lw.resolution.type_function(lw.package, TypeItem::Class(deque.id), "iter") {
+    Some(found) => found,
+    None => return Err("`VecDeque` without `iter`"),
+  };
+  const target = mono::instance(lw, iter, Subst::of(ParamOwner::Item(TypeItem::Class(deque.id)), deque.args));
+  const values = lw.call(Callee::Fn(target), List::from([value]), lw.typed.double_iter_type(elem));
+  const list_ty = types::of(TypeKind::List(elem));
+
+  interfaces::from_iter_value(lw, values, elem, list_ty, 0)
+}
+
 /// `equals`, `compare` or `hash` of lists, arrays and maps: the prelude's `slice_<action>` on
 /// slices of all their elements, or `map_equals` (docs/adr/0093-everyday-methods.md, Q623).
 /// `None` for other types.
@@ -758,6 +786,16 @@ fn collection_call(lw: Lowering, action: String, ty: Type, values: List<Operand>
       args = List::from([found]);
     }
     TypeKind::Class(named) => {
+      if is_vec_deque(lw, named) {
+        const lists: List<Operand> = new List();
+
+        for value in values {
+          lists.push(deque_list(lw, value, named)?);
+        }
+
+        return collection_call(lw, action, types::of(TypeKind::List(named.args.get(0).unwrap_or(types::error()))), lists, result);
+      }
+
       if !is_map(lw, named) || action != "equals" {
         return Ok(None);
       }

@@ -57,6 +57,8 @@ pub struct Program {
   pub map_class: Option<u32>;
   /// `HashSet`, whose debug form is that of its elements (docs/adr/0095-collections.md, Q652).
   pub hash_set_class: Option<u32>;
+  /// `std::collections::VecDeque`, written as a list of its elements.
+  pub vec_deque_class: Option<u32>;
 }
 
 /// A `static`: its storage, reached through `sag_static_N(file, line)`, which gives its address.
@@ -1015,6 +1017,7 @@ pub fn lower(package: Package, resolution: Resolution, typed: TypedModule, sourc
     debug_types: registry.debug_types,
     map_class: typed.prelude.map,
     hash_set_class: typed.prelude.hash_set,
+    vec_deque_class: typed.prelude.vec_deque,
   })
 }
 
@@ -3072,7 +3075,7 @@ pub class Lowering {
           return self.tuple_comparison(op, ty, operand_ty, lhs, rhs);
         }
         TypeKind::Class(named) => {
-          if collections::is_map(self, named) {
+          if collections::compared_by_compiler(self, named) {
             return self.tuple_comparison(op, ty, operand_ty, lhs, rhs);
           }
         }

@@ -672,6 +672,16 @@ fn check_implementations(cx: Checker) {
         continue;
       }
 
+      // A `VecDeque` compares as a list of its elements (docs/adr/0095-collections.md, Q648).
+      const by_elements = match item {
+        TypeItem::Class(id) => is_prelude(cx.typed.prelude.vec_deque, id),
+        _ => false,
+      };
+
+      if by_elements && (is_prelude(cx.typed.prelude.eq, interface_ref.id) || is_prelude(cx.typed.prelude.ord, interface_ref.id) || is_prelude(cx.typed.prelude.hash, interface_ref.id)) {
+        continue;
+      }
+
       for index in 0..own.len() {
         if !is_own && types::same_ref(own[index], interface_ref) {
           is_own = true;
@@ -962,7 +972,7 @@ fn check_methods(cx: Checker, item: TypeItem, interface_ref: NamedRef, own: bool
       );
     } else if let Some(expected_sig) = expected {
       if let Some(actual_sig) = actual {
-        if !same_generics || !types::same_types(actual_sig.params, expected_sig.params) || !types::same_type(actual_sig.ret, expected_sig.ret) {
+        if !same_generics || !types::same_types(actual_sig.params, expected_sig.params) || !same_or_subclass(cx, actual_sig.ret, expected_sig.ret) {
           cx.diagnostics.push(
             Diagnostic::error(codes::INVALID_IMPL, implementation.name.span, "`" + name + "` must have the signature declared in `" + interface_name + "`")
               .with_label(decl.name.span, "declared here")
@@ -971,6 +981,23 @@ fn check_methods(cx: Checker, item: TypeItem, interface_ref: NamedRef, own: bool
         }
       }
     }
+  }
+}
+
+/// Whether the result of an implementation fits the one its interface declares: the same type,
+/// or an instance of a subclass of the class declared, as `iter()` of a `VecDeque` gives a
+/// `DoubleEndedIter<T>` for `Iter<T>` (docs/adr/0095-collections.md, Q648).
+fn same_or_subclass(cx: Checker, actual: Type, expected: Type) -> bool {
+  if types::same_type(actual, expected) {
+    return true;
+  }
+
+  match actual.kind {
+    TypeKind::Class(actual_ref) => match expected.kind {
+      TypeKind::Class(expected_ref) => types::contains_ref(cx.typed.class_ancestors(actual_ref), expected_ref),
+      _ => false,
+    },
+    _ => false,
   }
 }
 

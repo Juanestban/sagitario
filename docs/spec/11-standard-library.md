@@ -46,8 +46,38 @@ fn main() -> Result<(), io::Error> {
 ## `std::collections`
 
 Rust's collections beyond the prelude's `List`, `Map` and `HashSet`
-([ADR-0095](../adr/0095-collections.md)): `VecDeque`, `BTreeMap`, `BTreeSet` and `BinaryHeap`,
-written in Sagitario, which the increments of the record add.
+([ADR-0095](../adr/0095-collections.md)), written in Sagitario. `BTreeMap`, `BTreeSet` and
+`BinaryHeap` come in the next increments of the record.
+
+```sag
+use std::collections::VecDeque;
+
+const queue = VecDeque::from(List::from([1, 2, 3]));
+
+queue.push_front(0);
+queue[1] = 10;
+println(f"{queue.pop_back():?} {queue:?}");   // Some(3) [0, 10, 2]
+```
+
+**`VecDeque<T>`** (Q648), a queue with two ends in a ring buffer:
+
+| Method | Result |
+|---|---|
+| `new VecDeque<T>()`, `VecDeque::with_capacity(n)`, `VecDeque::from(list)` | A queue, the first element of the list at the front |
+| `push_back(v)`, `push_front(v)` | `()` |
+| `pop_back()`, `pop_front()`, `front()`, `back()`, `get(i)` | `Option<T>` |
+| `len()`, `is_empty()`, `capacity()`, `clear()` | |
+| `iter()` | `DoubleEndedIter<T>`, from the front; `rev()` from the back |
+| `extend(iter)`, `retain(keep)`, `truncate(len)` | `()` |
+| `swap(i, j)`, `rotate_left(n)`, `rotate_right(n)` | `()`; panic outside the queue, with Rust's messages |
+| `deque[i]`, `deque[i] = v` | through `Index` and `IndexMut`; outside the queue they panic (`Out of bounds access`) |
+
+- It implements `Iterable`, `FromIterator` and `Default`, and, when its elements do, `Eq`, `Ord`
+  and `Hash`, compared, ordered and hashed as a list of its elements, which the compiler gives as
+  for `Map`. Its debug form is `[1, 2]`.
+- Rust's `contains` needs `T: Eq` on the method alone, which Sagitario cannot write:
+  `deque.iter().any((x) => x == value)` stands for it. `make_contiguous` is not needed, since the
+  ring is never lent.
 
 ## `std::env`
 

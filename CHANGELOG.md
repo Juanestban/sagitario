@@ -15,6 +15,10 @@ The sources say 0.32.0.
 
 ### Added
 
+- `std::collections::VecDeque`, as Rust's: a ring buffer with both ends, `deque[i]`, an iterator
+  of two ends, comparison, order and hash by its elements, and the debug form `[1, 2]`; the
+  method of an interface a type implements may return a subclass of the class declared
+  ([ADR-0095](docs/adr/0095-collections.md), increment 3).
 - `HashSet` in the prelude, as Rust's, keeping insertion order, with `==` by value, the operations
   between sets and the debug form `{1, 2}`; and `Map::get_key_value` and `Map::remove_entry`
   ([ADR-0095](docs/adr/0095-collections.md), increment 2).

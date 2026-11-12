@@ -51,7 +51,7 @@ The audit of the library found gaps of the language itself, which the library ne
 | `HashMap<K, V>` | `Map<K, V>` | ✅ | Keeps insertion order (like `IndexMap`). `update`, `upsert` and `get_or_insert` stand for `entry`, which lends the map; `retain`, `extend`, `Map::from` of a list of pairs, `iter` and `==` ([ADR-0093](adr/0093-everyday-methods.md), increments 3 and 4) |
 | `HashSet<T>` | `HashSet<T: Hash>` | ✅ | In the prelude, on `Map`: keeps insertion order; the operations between sets give iterators of copies ([ADR-0095](adr/0095-collections.md), increment 2) |
 | `BTreeMap`, `BTreeSet` | — | ❌ | Ordered by `Ord`, with ranges |
-| `VecDeque<T>` | — | ❌ | A ring buffer; `Channel` keeps two lists for want of it |
+| `VecDeque<T>` | `std::collections::VecDeque<T>` | ✅ | A ring buffer ([ADR-0095](adr/0095-collections.md), increment 3); `contains` waits for bounds on methods (`iter().any(...)`); `Channel` keeps its two lists |
 | `BinaryHeap<T>` | — | ❌ | A priority queue on `Ord` |
 | `LinkedList<T>` | — | ⛔ | Rarely the right structure; Rust itself discourages it |
 

@@ -1,0 +1,88 @@
+// `std::collections::VecDeque`: both ends, a ring that wraps around, `deque[i]`, the iterator of two
+// ends, its other methods, equality, order and hash by its elements, its debug form, `for` and
+// `collect` (docs/adr/0095-collections.md, Q648 and Q652).
+// expect-stdout: [0, 10, 2, 3, 4] 5 Some(0) Some(4) 10 [4, 3, 2, 10, 0]
+// expect-stdout: Some(0) Some(4) [10, 2, 3] 3 None None
+// expect-stdout: [5, 6, 7, 8, 9, 10] [9, 10, 5, 6, 7, 8] [5, 6, 7, 8, 9, 10]
+// expect-stdout: true false false true 1
+// expect-stdout: [2, 4] [2] [] 6 [1, 2]
+// expect-stdout: ["a", "b"] true true [3, 2, 1]
+// expect-stdout: [
+// expect-stdout:     1,
+// expect-stdout: ]
+
+use std::collections::VecDeque;
+
+fn total<T: Iterable<i32>>(values: T) -> i32 {
+  var sum = 0;
+
+  for value in values {
+    sum += value;
+  }
+
+  sum
+}
+
+fn main() {
+  const deque = VecDeque::from(List::from([1, 2, 3]));
+
+  deque.push_front(0);
+  deque.push_back(4);
+  deque[1] = 10;
+  println(f"{deque:?} {deque.len()} {deque.front():?} {deque.back():?} {deque[1]} {deque.iter().rev().collect():?}");
+  println(f"{deque.pop_front():?} {deque.pop_back():?} {deque:?} {deque.len()} {deque.get(3):?} {new VecDeque<i32>().pop_front():?}");
+
+  // Pushing at the front of a full ring, and popping, makes the elements wrap around its end.
+  const ring = VecDeque<i32>::with_capacity(4);
+
+  for n in 5..11 {
+    ring.push_back(n);
+  }
+
+  const before = ring.iter().collect();
+
+  ring.rotate_right(2);
+
+  const rotated = ring.iter().collect();
+
+  ring.rotate_left(2);
+  println(f"{before:?} {rotated:?} {ring:?}");
+
+  const same = VecDeque::from(List::from([5, 6, 7, 8, 9, 10]));
+  const keys = new Map<VecDeque<i32>, i32>();
+
+  keys.insert(same, 1);
+  println(f"{ring == same} {ring == deque} {deque < ring} {List::from([same]) == List::from([ring])} {keys.get(ring).unwrap_or(0)}");
+
+  const evens = VecDeque::from(List::from([1, 2, 3, 4]));
+
+  evens.retain((n) => n % 2 == 0);
+
+  const short = VecDeque::from(List::from([2, 4]));
+
+  short.truncate(1);
+
+  const empty: VecDeque<i32> = VecDeque::default();
+  const built: VecDeque<i32> = (1..3).collect();
+
+  println(f"{evens:?} {short:?} {empty:?} {total(evens)} {built:?}");
+
+  const words = VecDeque::from(List::from(["b", "a"]));
+  const counted = VecDeque::from(List::from([1, 2, 3]));
+
+  words.swap(0, 1);
+  counted.extend(List::from([4]).iter());
+  counted.truncate(3);
+
+  const reversed = new List<i32>();
+
+  for n in counted.iter().rev() {
+    reversed.push(n);
+  }
+
+  println(f"{words:?} {words.iter().any((w) => w == "a")} {words.capacity() >= words.len()} {reversed:?}");
+
+  const one = VecDeque::from(List::from([1]));
+
+  println(f"{one:#?}");
+}

@@ -100,3 +100,11 @@ fn main() {
   holds. Its `Eq` is an implementation of the class; the checker lets `==` reach it, as it does
   for a map, instead of comparing instances (`typed.compares_by_value`). Its debug form is
   written by codegen from the entries of its map, as that of a map is.
+- Increment 3 is done. `VecDeque` is a ring of `Option<T>` slots in a list, written in
+  `std::collections`. Two departures from this record: `contains` is not a method, since it needs
+  `T: Eq` on the method alone, which a class cannot say (`iter().any(...)` stands for it, and a
+  record on bounds of methods may add it); and `iter()` gives a `DoubleEndedIter<T>` for the
+  `Iter<T>` of `Iterable`, which needed an implementation's result to be allowed an instance of a
+  subclass of the class its interface declares. The compiler gives it
+  `Eq`, `Ord` and `Hash` when its elements have them, compared, ordered and hashed through a list
+  of its elements, as it gives `Map` its `Eq`, and writes its debug form from its ring.

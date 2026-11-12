@@ -45,6 +45,8 @@ pub struct PreludeItems {
   pub from_iterator: Option<u32>;
   /// `HashSet` (docs/adr/0095-collections.md, Q647).
   pub hash_set: Option<u32>;
+  /// `std::collections::VecDeque`, when the program uses the module (Q648).
+  pub vec_deque: Option<u32>;
 }
 
 /// The methods of `List<T>` implemented by the compiler (docs/spec/02-types.md#arrays-and-lists).
@@ -305,6 +307,7 @@ pub class TypedModule {
       iterable: None,
       from_iterator: None,
       hash_set: None,
+      vec_deque: None,
     };
     self.sync_classes = new List();
     self.const_types = new List();
@@ -802,6 +805,14 @@ pub class TypedModule {
           }
         }
 
+        // A `VecDeque` compares, orders and hashes as a list of its elements
+        // (docs/adr/0095-collections.md, Q648).
+        if is_id(self.prelude.vec_deque, named.id) && named.args.len() == 1 {
+          for found in self.tuple_impls(List::from([named.args[0]])) {
+            direct.push(found);
+          }
+        }
+
         // A map is equal to another with the same keys and equal values (docs/adr/0093-everyday-methods.md, Q623).
         if let Some(map) = self.prelude.map {
           if map == named.id {
@@ -885,7 +896,7 @@ pub class TypedModule {
   /// Whether `==` compares instances of the class `id` by value, as Rust's: a `Map` and a
   /// `HashSet` (docs/adr/0093-everyday-methods.md, Q623, and docs/adr/0095-collections.md, Q647).
   pub fn compares_by_value(self, id: u32) -> bool {
-    is_id(self.prelude.map, id) || is_id(self.prelude.hash_set, id)
+    is_id(self.prelude.map, id) || is_id(self.prelude.hash_set, id) || is_id(self.prelude.vec_deque, id)
   }
 
   /// `Default`, without type arguments.

@@ -38,6 +38,21 @@ fn prelude_interface(cx: Checker, name: String) -> Option<u32> {
   }
 }
 
+/// The class `name` of the module `std::module`, when the program uses it.
+fn std_class(cx: Checker, module: String, name: String) -> Option<u32> {
+  for info in cx.resolution.modules {
+    if info.in_std && info.path.len() == 2 && info.path[0] == "std" && info.path[1] == module {
+      if let Some(declared) = info.items.get(name) {
+        if let ItemRef::Type(TypeItem::Class(id)) = declared.item {
+          return Some(id);
+        }
+      }
+    }
+  }
+
+  None
+}
+
 fn prelude_class(cx: Checker, name: String) -> Option<u32> {
   match cx.resolution.prelude_type(name) {
     Some(TypeItem::Class(id)) => Some(id),
@@ -83,6 +98,7 @@ pub fn prelude_items(cx: Checker) {
     iterable: prelude_interface(cx, "Iterable"),
     from_iterator: prelude_interface(cx, "FromIterator"),
     hash_set: prelude_class(cx, "HashSet"),
+    vec_deque: std_class(cx, "collections", "VecDeque"),
   };
 }
 

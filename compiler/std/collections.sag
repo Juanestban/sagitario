@@ -1,3 +1,270 @@
 //! `std::collections`: the collections of Rust's std beyond the prelude's `List`, `Map` and
 //! `HashSet` (docs/spec/11-standard-library.md#stdcollections, docs/adr/0095-collections.md).
-//! `VecDeque`, `BTreeMap`, `BTreeSet` and `BinaryHeap` come in the increments of the record.
+//! `BTreeMap`, `BTreeSet` and `BinaryHeap` come in the increments of the record.
+
+/// A position an iterator moves, which its closures share.
+class Position {
+  pub var value: usize;
+
+  pub fn new(self, value: usize) {
+    self.value = value;
+  }
+}
+
+/// A queue with two ends, as Rust's `VecDeque`: a ring buffer in a list, whose elements start at
+/// `head` and wrap around its end (docs/adr/0095-collections.md, Q648). The compiler compares,
+/// orders and hashes it by its elements, as a list, when they allow it.
+pub class VecDeque<T> impl Iterable<T>, FromIterator<T>, Default {
+  /// The slots of the ring; `None` outside the elements.
+  prv var buffer: List<Option<T>>;
+  /// The slot of the first element.
+  prv var head: usize;
+  /// The number of elements.
+  prv var count: usize;
+
+  pub fn new(self) {
+    self.buffer = new List<Option<T>>();
+    self.head = 0;
+    self.count = 0;
+  }
+
+  /// An empty queue with room for `capacity` elements before it grows.
+  pub fn with_capacity(capacity: usize) -> VecDeque<T> {
+    const deque = new VecDeque<T>();
+
+    deque.grow_to(capacity);
+    deque
+  }
+
+  /// The queue of the elements of a list, the first at the front.
+  pub fn from(values: List<T>) -> VecDeque<T> {
+    VecDeque::from_iter(values.iter())
+  }
+
+  pub fn from_iter(iter: Iter<T>) -> VecDeque<T> {
+    const deque = new VecDeque<T>();
+
+    deque.extend(iter);
+    deque
+  }
+
+  pub fn default() -> VecDeque<T> {
+    new VecDeque<T>()
+  }
+
+  pub fn len(self) -> usize {
+    self.count
+  }
+
+  pub fn is_empty(self) -> bool {
+    self.count == 0
+  }
+
+  /// The elements it holds without growing.
+  pub fn capacity(self) -> usize {
+    self.buffer.len()
+  }
+
+  /// The slot of the element at `index` from the front.
+  prv fn slot(self, index: usize) -> usize {
+    (self.head + index) % self.buffer.len()
+  }
+
+  /// Room for one more element.
+  prv fn grow(self) {
+    if self.count == self.buffer.len() {
+      self.grow_to(max(4, self.buffer.len() * 2));
+    }
+  }
+
+  /// A ring of `capacity` slots at least, its elements from the first slot.
+  prv fn grow_to(self, capacity: usize) {
+    if capacity <= self.buffer.len() {
+      return;
+    }
+
+    const slots = new List<Option<T>>();
+
+    for index in 0..capacity {
+      slots.push(if index < self.count { self.buffer[self.slot(index)] } else { None });
+    }
+
+    self.buffer = slots;
+    self.head = 0;
+  }
+
+  pub fn push_back(self, value: T) {
+    self.grow();
+    self.buffer[self.slot(self.count)] = Some(value);
+    self.count += 1;
+  }
+
+  pub fn push_front(self, value: T) {
+    self.grow();
+    self.head = (self.head + self.buffer.len() - 1) % self.buffer.len();
+    self.buffer[self.head] = Some(value);
+    self.count += 1;
+  }
+
+  pub fn pop_front(self) -> Option<T> {
+    if self.count == 0 {
+      return None;
+    }
+
+    const value = self.buffer[self.head];
+
+    self.buffer[self.head] = None;
+    self.head = (self.head + 1) % self.buffer.len();
+    self.count -= 1;
+    value
+  }
+
+  pub fn pop_back(self) -> Option<T> {
+    if self.count == 0 {
+      return None;
+    }
+
+    const last = self.slot(self.count - 1);
+    const value = self.buffer[last];
+
+    self.buffer[last] = None;
+    self.count -= 1;
+    value
+  }
+
+  pub fn front(self) -> Option<T> {
+    self.get(0)
+  }
+
+  pub fn back(self) -> Option<T> {
+    if self.count == 0 { None } else { self.get(self.count - 1) }
+  }
+
+  /// The element at `index` from the front.
+  pub fn get(self, index: usize) -> Option<T> {
+    if index >= self.count { None } else { self.buffer[self.slot(index)] }
+  }
+
+  pub fn clear(self) {
+    self.buffer = new List<Option<T>>();
+    self.head = 0;
+    self.count = 0;
+  }
+
+  /// The elements from the front to the back, and from the back with `rev()`.
+  pub fn iter(self) -> DoubleEndedIter<T> {
+    const deque = self;
+    const front = new Position(0);
+    const back = new Position(self.count);
+    const forward: fn() -> Option<T> = () => {
+      if front.value >= back.value {
+        return None;
+      }
+
+      const value = deque.get(front.value);
+
+      front.value += 1;
+      value
+    };
+    const backward: fn() -> Option<T> = () => {
+      if front.value >= back.value {
+        return None;
+      }
+
+      back.value -= 1;
+      deque.get(back.value)
+    };
+
+    new DoubleEndedIter<T>(forward, backward)
+  }
+
+  pub fn extend(self, values: Iter<T>) {
+    for value in values {
+      self.push_back(value);
+    }
+  }
+
+  /// Keeps the elements for which `keep` holds, in order.
+  pub fn retain(self, keep: fn(T) -> bool) {
+    const kept = new List<T>();
+
+    for value in self.iter() {
+      if keep(value) {
+        kept.push(value);
+      }
+    }
+
+    self.clear();
+    self.extend(kept.iter());
+  }
+
+  /// Keeps the first `len` elements.
+  pub fn truncate(self, len: usize) {
+    while self.count > len {
+      self.pop_back();
+    }
+  }
+
+  /// Exchanges the elements at `i` and `j`, which must be in the queue.
+  pub fn swap(self, i: usize, j: usize) {
+    if i >= self.count {
+      panic("assertion failed: i < self.len()");
+    }
+
+    if j >= self.count {
+      panic("assertion failed: j < self.len()");
+    }
+
+    const first = self.buffer[self.slot(i)];
+
+    self.buffer[self.slot(i)] = self.buffer[self.slot(j)];
+    self.buffer[self.slot(j)] = first;
+  }
+
+  /// Moves the first `n` elements to the back.
+  pub fn rotate_left(self, n: usize) {
+    if n > self.count {
+      panic("assertion failed: n <= self.len()");
+    }
+
+    for _ in 0..n {
+      if let Some(value) = self.pop_front() {
+        self.push_back(value);
+      }
+    }
+  }
+
+  /// Moves the last `n` elements to the front.
+  pub fn rotate_right(self, n: usize) {
+    if n > self.count {
+      panic("assertion failed: n <= self.len()");
+    }
+
+    for _ in 0..n {
+      if let Some(value) = self.pop_back() {
+        self.push_front(value);
+      }
+    }
+  }
+}
+
+/// `deque[i]`, which panics outside the queue, as Rust's.
+impl<T> Index<usize, T> for VecDeque<T> {
+  fn index(self, at: usize) -> T {
+    match self.get(at) {
+      Some(value) => value,
+      None => panic("Out of bounds access"),
+    }
+  }
+}
+
+/// `deque[i] = value`.
+impl<T> IndexMut<usize, T> for VecDeque<T> {
+  fn index_set(self, at: usize, value: T) {
+    if at >= self.count {
+      panic("Out of bounds access");
+    }
+
+    self.buffer[self.slot(at)] = Some(value);
+  }
+}

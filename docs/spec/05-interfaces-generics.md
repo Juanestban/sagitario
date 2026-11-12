@@ -40,8 +40,11 @@ class Dog impl Pet {
     the interface's is `var`. Enums have no fields, so they only implement interfaces without
     fields.
   - for each method or static function without a default, a `pub fn` with the same name and
-    signature, with `Self` replaced by the type. Defining one that has a default replaces the
-    default. These methods do not take `override`, which is for class inheritance.
+    signature, with `Self` replaced by the type; its result may also be an instance of a subclass
+    of the class declared, as `iter()` of a `VecDeque` gives a `DoubleEndedIter<T>` for
+    `Iterable`'s `Iter<T>` ([ADR-0095](../adr/0095-collections.md), Q648). Defining one that has
+    a default replaces the default. These methods do not take `override`, which is for class
+    inheritance.
 - A subclass inherits its parent's interfaces, and inherited fields and methods count. An
   `abstract` class may leave required methods to its concrete subclasses.
 - Inside an interface, `Self` names the implementing type:
