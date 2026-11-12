@@ -73,6 +73,33 @@ pub fn is_signed(ty: IntTy) -> bool {
   ty == IntTy::I8 || ty == IntTy::I16 || ty == IntTy::I32 || ty == IntTy::I64 || ty == IntTy::Isize
 }
 
+pub fn int_bits(ty: IntTy) -> u32 {
+  match ty {
+    IntTy::I8 | IntTy::U8 => 8,
+    IntTy::I16 | IntTy::U16 => 16,
+    IntTy::I32 | IntTy::U32 => 32,
+    IntTy::I64 | IntTy::U64 | IntTy::Isize | IntTy::Usize => 64,
+  }
+}
+
+/// Whether every value of `from` is a value of `to` on every target, as Rust's `From` between
+/// integers (docs/adr/0094-conversions-and-defaults.md, Q632): `isize` and `usize` take only the
+/// types of 8 and 16 bits, and give no other type.
+pub fn int_widens(to: IntTy, from: IntTy) -> bool {
+  const sized = to == IntTy::Isize || to == IntTy::Usize;
+
+  if from == IntTy::Isize || from == IntTy::Usize {
+    return false;
+  }
+
+  if is_signed(to) == is_signed(from) {
+    return if sized { int_bits(from) <= 16 } else { int_bits(from) < int_bits(to) };
+  }
+
+  // Signed from unsigned, which needs a bit more.
+  is_signed(to) && if sized { int_bits(from) < 16 } else { int_bits(from) < int_bits(to) }
+}
+
 /// The largest value of the type on a target whose pointers have `pointer_width` bits.
 pub fn int_max(ty: IntTy, pointer_width: u32) -> u64 {
   const narrow = pointer_width == 32;
@@ -202,6 +229,10 @@ pub fn string() -> Type {
 
 pub fn option(value: Type) -> Type {
   new Type(TypeKind::Option(value))
+}
+
+pub fn result(value: Type, error: Type) -> Type {
+  new Type(TypeKind::Result { value: value, error: error })
 }
 
 pub fn class_type(id: u32, name: String, args: List<Type>) -> Type {

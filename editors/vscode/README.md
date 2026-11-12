@@ -5,8 +5,8 @@ Support for the [Sagitario](https://github.com/Juanestban/sagitario) programming
 - The language server (`sag lsp`): the errors and warnings of `sag check` while typing, the type
   of what is under the cursor, go to definition (`F12` or `Ctrl+Click`, also on the modules of
   `use` and of paths), completion of members after `.` (the methods of numbers, text, characters, lists, arrays, slices, maps, iterators, `Option` and
-  `Result` too, and the
-  indices of a tuple's elements), of items after `::` (`MIN` and `MAX` after an integer type, the functions of `std::mem` and `std::hint`, the static functions of a type's interfaces and of a type parameter's bounds after `Type::` and `T::`), of attributes after
+  `Result` too, `into` and `try_into` on every value, and the
+  indices of a tuple's elements), of items after `::` (`MIN` and `MAX` after an integer type, the functions of `std::mem` and `std::hint`, the static functions of a type's interfaces and of a type parameter's bounds after `Type::` and `T::`, and `from` and `try_from` after the types of numbers, `char` and `String`), of attributes after
   `@` (`@cfg`, `@export`, `@repr`, `@thread_local`), of their representations after `@repr(` and
   of the conditions of `@cfg(`, of names
   (module-level constants and statics with their types, and the builtins, `assert` and `assert_eq` among them) and of types, the outline of a document (`Ctrl+Shift+O`), and the colors of modules, functions and
@@ -23,7 +23,7 @@ Support for the [Sagitario](https://github.com/Juanestban/sagitario) programming
 - Snippets: `main`, `mainr`, `asyncmain`, `asyncfn`, `fn`, `pfn`, `static`, `staticvar`,
   `threadlocal`, `cfg`, `struct`, `class`, `enum`, `interface`, `implfor`, `match`, `iflet`, `whilelet`, `for`,
   `forin`, `fortuple`, `consttuple`, `assert`, `asserteq`, `if`, `ifelse`, `println`, `fstr` (a format string) and `use`; for operators and text, `impleq`, `implord`, `impldisplay`, `implop` (`+`, `-`, `*`,
-  `/`, `%`) and `implneg`; and for the FFI, `extern` (a block of C functions), `externstatic` (a global variable of C), `externfn`,
+  `/`, `%`) and `implneg`; for conversions, `implfrom` and `impltryfrom`; and for the FFI, `extern` (a block of C functions), `externstatic` (a global variable of C), `externfn`,
   `export`, `reprc`, `union`, `reprenum`, `cfn`, `unsafe`, `cstring` and `library` (a function
   loaded from a dynamic library).
 

@@ -162,8 +162,30 @@ fn sum_template() -> String {
   lines.join("\n")
 }
 
+/// `TO::try_from(value)` of an integer of type `FROM`, with Rust's message
+/// (docs/adr/0094-conversions-and-defaults.md, Q634): the value fits when converting it back gives
+/// it again and, between signed and unsigned types, keeps its sign (`SIGN`).
+fn try_from_template() -> String {
+  const lines = List::from([
+    "",
+    "fn int_try_from_TO_FROM(value: FROM) -> Result<TO, String> {",
+    "  const converted = value as TO;",
+    "",
+    "  if converted as FROM != value SIGN {",
+    "    return Err(\"out of range integral type conversion attempted\");",
+    "  }",
+    "",
+    "  Ok(converted)",
+    "}",
+    "",
+  ]);
+
+  lines.join("
+")
+}
+
 /// The prelude's source: `prelude.sag` (or the text given in its place) followed by the range
-/// functions.
+/// functions, `sum` and `product`, and the conversions between integers.
 fn prelude_source(prelude: String) -> String {
   const source = new StringBuilder();
   const template = range_template();
@@ -177,6 +199,17 @@ fn prelude_source(prelude: String) -> String {
 
   for ty in List::from(["f32", "f64"]) {
     source.append(sum_template().replace("TYPE", ty).replace("ZERO", "0.0").replace("ONE", "1.0"));
+  }
+
+  for to in INT_TYPES.split(" ") {
+    for from in INT_TYPES.split(" ") {
+      if to != from {
+        // Only a signed value can be below zero.
+        const sign = if to.starts_with("i") == from.starts_with("i") { "" } else if to.starts_with("i") { "|| converted < 0" } else { "|| value < 0" };
+
+        source.append(try_from_template().replace("TO", to).replace("FROM", from).replace("SIGN", sign));
+      }
+    }
   }
 
   source.to_string()

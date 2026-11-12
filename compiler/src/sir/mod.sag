@@ -2169,7 +2169,7 @@ pub class Lowering {
         }
         _ => Err("unsupported path operand"),
       },
-      ExprKind::Try(inner) => matching::try_expr(self, inner),
+      ExprKind::Try(inner) => matching::try_expr(self, value, inner),
       ExprKind::Await(inner) => tasks::await_expr(self, inner, ty),
       ExprKind::New { args, .. } => self.new_expr(ty, args),
       ExprKind::Match { scrutinee, arms } => matching::match_expr(self, ty, scrutinee, arms),
@@ -2533,6 +2533,13 @@ pub class Lowering {
   prv fn method_call_expr(self, value: Expr, ty: Type, receiver: Expr, method: Ident, args: List<Expr>) -> Result<Operand, String> {
     if self.typed.field_calls.contains_key(value.id) {
       return closures::field_call(self, receiver, method.name, args);
+    }
+
+    // `into` and `try_into` (docs/adr/0094-conversions-and-defaults.md, Q633 and Q634).
+    if let Some(conversion) = self.typed.conversions.get(value.id) {
+      const operand = self.operand_as(receiver, types::substitute(conversion.from, self.subst))?;
+
+      return interfaces::convert_value(self, operand, conversion);
     }
 
     if let Some(builtin) = self.typed.builtin_methods.get(value.id) {
@@ -3085,6 +3092,17 @@ pub class Lowering {
 
   prv fn call_expr(self, value: Expr, callee: Expr, args: List<Expr>, ty: Type) -> Result<Operand, String> {
     var target: Option<Callee> = None;
+
+    // `U::from(x)` and `U::try_from(x)` (docs/adr/0094-conversions-and-defaults.md, Q632 and Q634).
+    if let Some(conversion) = self.typed.conversions.get(value.id) {
+      if args.len() != 1 {
+        return Err("a conversion without one argument");
+      }
+
+      const operand = self.operand_as(args[0], types::substitute(conversion.from, self.subst))?;
+
+      return interfaces::convert_value(self, operand, conversion);
+    }
 
     match self.resolution.paths.get(callee.id) {
       Some(Res::Fn(id)) => {

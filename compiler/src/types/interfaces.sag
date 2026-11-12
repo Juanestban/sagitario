@@ -2,7 +2,7 @@
 //! the types that implement them and interfaces used as types. The port of the declarations part
 //! of `sagitario_types::interfaces`.
 
-use pkg::ast::{Expr, Ident, ImplBlock, Path, TypeExpr};
+use pkg::ast::{Expr, ExprKind, Ident, ImplBlock, Path, TypeExpr};
 use pkg::diagnostics::Diagnostic;
 use pkg::diagnostics::codes;
 use pkg::resolve::{ParamOwner, TypeItem, TypeRes};
@@ -13,7 +13,7 @@ use pkg::types::exprs;
 use pkg::types::generic;
 use pkg::types::inheritance;
 use pkg::types::send;
-use pkg::types::typed::{ErrorTypes, ImplEntry, StaticCall, item_key, owner_key};
+use pkg::types::typed::{Conversion, ErrorTypes, ImplEntry, StaticCall, item_key, owner_key};
 
 /// Resolves the parents, fields and methods of every interface.
 pub fn interface_defs(cx: Checker) {
@@ -316,6 +316,11 @@ fn collect_impls(cx: Checker) {
     for ty in entry.types {
       if let Some(interface_ref) = supertype_interface(cx, ty) {
         check_new_impl(cx, entry.item, implemented, blocks, interface_ref, None, ty.span);
+
+        if is_mirrored(cx, interface_ref) {
+          continue;
+        }
+
         implemented.push(interface_ref);
         blocks.push(None);
         spans.push(ty.span);
@@ -332,6 +337,11 @@ fn collect_impls(cx: Checker) {
 
       if let Some(interface_ref) = supertype_interface(cx, block.implemented) {
         check_new_impl(cx, entry.item, implemented, blocks, interface_ref, Some(block_id), block.implemented.span);
+
+        if is_mirrored(cx, interface_ref) {
+          continue;
+        }
+
         implemented.push(interface_ref);
         blocks.push(Some(block_id));
         spans.push(block.implemented.span);
@@ -346,11 +356,29 @@ fn collect_impls(cx: Checker) {
   cx.owner = None;
 }
 
+/// `Into` or `TryInto`, which mirror `From` and `TryFrom`.
+fn is_mirrored(cx: Checker, interface_ref: NamedRef) -> bool {
+  is_prelude(cx.typed.prelude.into, interface_ref.id) || is_prelude(cx.typed.prelude.try_into, interface_ref.id)
+}
+
 /// A type implements each instantiation of an interface once; its header names each interface
 /// once, the other instantiations going in blocks (docs/adr/0081-operator-overloading.md, Q508).
 fn check_new_impl(cx: Checker, item: TypeItem, implemented: List<NamedRef>, blocks: List<Option<u32>>, interface_ref: NamedRef, block: Option<u32>, span: Span) {
   const type_name = cx.resolution.type_name(cx.package, item);
   const shown = types::text(types::interface_type(interface_ref));
+
+  // The compiler gives `Into` and `TryInto` from `From` and `TryFrom`, so the two cannot disagree
+  // (docs/adr/0094-conversions-and-defaults.md, Q633).
+  if is_mirrored(cx, interface_ref) {
+    const mirrored = if is_prelude(cx.typed.prelude.into, interface_ref.id) { "From" } else { "TryFrom" };
+
+    cx.diagnostics.push(
+      Diagnostic::error(codes::INVALID_IMPL, span, "`" + shown + "` cannot be implemented: the compiler gives it from `" + mirrored + "`")
+        .with_help("implement `" + mirrored + "<" + type_name + ">` for the type it converts into"),
+    );
+
+    return;
+  }
 
   for index in 0..implemented.len() {
     const previous = implemented[index];
@@ -936,6 +964,21 @@ pub fn static_call(cx: Checker, value: Expr, path: Path, target: TypeRes, name: 
 
   const shown = types::text(self_ty);
 
+  // `U::from(x)` and `U::try_from(x)` choose among the conversions of `U` by the type of `x`
+  // (docs/adr/0094-conversions-and-defaults.md, Q632 and Q634).
+  if name == "from" || name == "try_from" {
+    const conversion = if name == "from" { cx.typed.prelude.from } else { cx.typed.prelude.try_from };
+    var only_conversions = conversion.is_some();
+
+    for interface_ref in refs {
+      only_conversions = only_conversions && is_prelude(conversion, interface_ref.id);
+    }
+
+    if only_conversions && (name == "from" || !functions.is_empty()) {
+      return conversion_call(cx, value, path, self_ty, item, name == "try_from", args, expected);
+    }
+  }
+
   if functions.is_empty() {
     var diagnostic = Diagnostic::error(codes::UNRESOLVED_NAME, span, "no function `" + name + "` in `" + shown + "`");
 
@@ -1031,4 +1074,315 @@ pub fn static_call(cx: Checker, value: Expr, path: Path, target: TypeRes, name: 
   cx.typed.static_calls.insert(value.id, StaticCall { function: function, self_ty: types::substitute(self_ty, subst) });
 
   types::substitute(sig.ret, subst)
+}
+
+fn is_prelude(found: Option<u32>, id: u32) -> bool {
+  match found {
+    Some(other) => other == id,
+    None => false,
+  }
+}
+
+/// The conversions into a type: the source of each `From` it implements, itself first, or the
+/// source and the error of each `TryFrom`.
+struct Sources {
+  pub from: List<Type>;
+  pub errors: List<Type>;
+}
+
+fn conversion_sources(cx: Checker, self_ty: Type, fallible: bool) -> Sources {
+  const sources = Sources { from: new List(), errors: new List() };
+  const conversion = if fallible { cx.typed.prelude.try_from } else { cx.typed.prelude.from };
+  const arity = if fallible { 2usize } else { 1usize };
+
+  // Every type is `From` itself (Q632); `TryFrom` has no such implementation (Q634).
+  if !fallible {
+    sources.from.push(self_ty);
+    sources.errors.push(types::error());
+  }
+
+  for interface_ref in cx.typed.implemented_refs(self_ty) {
+    if is_prelude(conversion, interface_ref.id) && interface_ref.args.len() == arity {
+      const source = interface_ref.args[0];
+
+      if !sources.from.iter().any((known) => types::same_type(known, source)) {
+        sources.from.push(source);
+        sources.errors.push(if fallible { interface_ref.args[1] } else { types::error() });
+      }
+    }
+  }
+
+  sources
+}
+
+/// The kind of number an unsuffixed literal is: `1` an integer (`true`), `1.5` a float.
+fn literal_kind(arg: Expr) -> Option<bool> {
+  match arg.kind {
+    ExprKind::Int { suffix: None, .. } => Some(true),
+    ExprKind::Float { suffix: None, .. } => Some(false),
+    _ => None,
+  }
+}
+
+/// `U::from(x)` or `U::try_from(x)`: the conversion of `U` whose source is the type of `x`
+/// (Q632, Q634). With one, `x` is checked against it; an unsuffixed literal takes the one source of
+/// its kind of number, as the operand of an operator does.
+fn conversion_call(cx: Checker, value: Expr, path: Path, written: Type, item: Option<TypeItem>, fallible: bool, args: List<Expr>, expected: Option<Type>) -> Type {
+  const what = if fallible { "TryFrom" } else { "From" };
+
+  if args.len() != 1 {
+    exprs::check_args(cx, value.span, "function", List::from([types::error()]), args);
+
+    return types::error();
+  }
+
+  const arg = args[0];
+  var self_ty = written;
+
+  // A generic type takes its arguments from the path, from `Self`, from the type expected, or
+  // from the argument of its one conversion besides itself.
+  if let Some(found) = item {
+    const count = cx.generic_count(ParamOwner::Item(found));
+
+    if count > 0 {
+      const explicit = generic::explicit_args(cx, path);
+      const last = if path.segments.is_empty() { 0usize } else { path.segments.len() - 1 };
+      const unknowns = new generic::Unknowns();
+      var given: Option<List<Type>> = None;
+
+      if let Some(found_args) = explicit {
+        if found_args.segment != last {
+          given = Some(generic::given_args(cx, path.span, "`" + cx.resolution.type_name(cx.package, found) + "`", count, found_args.args));
+        }
+      }
+
+      if given.is_none() {
+        if let Some(first) = path.segments.first() {
+          if first.name == "Self" {
+            given = Some(cx.identity_args(ParamOwner::Item(found)));
+          }
+        }
+      }
+
+      unknowns.add(ParamOwner::Item(found), count, given);
+
+      if let Some(ty) = expected {
+        var wanted = ty;
+
+        if fallible {
+          if let TypeKind::Result { value: ok, .. } = ty.kind {
+            wanted = ok;
+          }
+        }
+
+        unknowns.unify(written, wanted);
+      }
+
+      const sources = conversion_sources(cx, written, fallible);
+      const others: List<Type> = new List();
+
+      for source in sources.from {
+        if !types::same_type(source, written) {
+          others.push(source);
+        }
+      }
+
+      if others.len() == 1 {
+        generic::generic_args(cx, value.span, "function", others, args, Subst::empty(), unknowns);
+
+        const subst = generic::finish_inference(cx, value.span, "`" + what + "`", unknowns);
+
+        return record_conversion(cx, value, types::substitute(others[0], subst), types::substitute(written, subst), sources, others[0], fallible);
+      }
+
+      self_ty = types::substitute(written, generic::finish_inference(cx, value.span, "`" + what + "`", unknowns));
+    }
+  }
+
+  const sources = conversion_sources(cx, self_ty, fallible);
+  var expected_arg: Option<Type> = None;
+
+  if sources.from.len() == 1 {
+    expected_arg = Some(sources.from[0]);
+  } else if let Some(integer) = literal_kind(arg) {
+    const of_kind: List<Type> = new List();
+
+    for source in sources.from {
+      const matches = match source.kind {
+        TypeKind::Int(_) => integer,
+        TypeKind::Float(_) => !integer,
+        _ => false,
+      };
+
+      if matches {
+        of_kind.push(source);
+      }
+    }
+
+    if of_kind.len() == 1 {
+      expected_arg = Some(of_kind[0]);
+    }
+  }
+
+  const arg_ty = exprs::expr(cx, arg, expected_arg);
+
+  if types::is_error(arg_ty) || types::is_error(self_ty) {
+    return types::error();
+  }
+
+  var chosen: Option<Type> = None;
+
+  for source in sources.from {
+    if chosen.is_none() && types::same_type(arg_ty, source) {
+      chosen = Some(source);
+    }
+  }
+
+  for source in sources.from {
+    if chosen.is_none() && cx.fits(arg_ty, source) {
+      chosen = Some(source);
+    }
+  }
+
+  const source = match chosen {
+    Some(found) => found,
+    None => {
+      const names: List<String> = new List();
+
+      for known in sources.from {
+        names.push("`" + types::text(known) + "`");
+      }
+
+      const wanted = what + "<" + types::text(arg_ty) + (if fallible { ", E" } else { "" }) + ">";
+      var diagnostic = Diagnostic::error(codes::UNSATISFIED_BOUND, arg.span, "`" + types::text(self_ty) + "` does not implement `" + wanted + "`");
+
+      if !names.is_empty() {
+        diagnostic = diagnostic.with_note("it converts from " + names.join(", "));
+      }
+
+      cx.diagnostics.push(diagnostic.with_help("implement `" + wanted + "` for `" + types::text(self_ty) + "`"));
+
+      return types::error();
+    }
+  };
+
+  record_conversion(cx, value, source, self_ty, sources, source, fallible)
+}
+
+/// `i64::from(x)`, `char::try_from(n)`, `String::from(c)`...: a conversion into a number, a
+/// character or a string, named by the prelude function's `name` (`i64::from`).
+pub fn primitive_conversion(cx: Checker, value: Expr, path: Path, name: String, args: List<Expr>, expected: Option<Type>) -> Option<Type> {
+  const fallible = name.ends_with("::try_from");
+
+  if !fallible && !name.ends_with("::from") {
+    return None;
+  }
+
+  const prefix = match name.split("::").first() {
+    Some(found) => found,
+    None => return None,
+  };
+  var self_ty: Option<Type> = None;
+
+  if let Some(int_ty) = types::int_from_name(prefix) {
+    self_ty = Some(types::int(int_ty));
+  } else if let Some(float_ty) = types::float_from_name(prefix) {
+    self_ty = Some(types::of(TypeKind::Float(float_ty)));
+  } else if prefix == "char" {
+    self_ty = Some(types::of(TypeKind::Char));
+  } else if prefix == "String" {
+    self_ty = Some(types::string());
+  }
+
+  Some(conversion_call(cx, value, path, self_ty?, None, fallible, args, expected))
+}
+
+/// Records the conversion of `value` from `from` into `to`, with the error of the source `pattern`
+/// of `sources` for `TryFrom`, and gives the type of the call.
+fn record_conversion(cx: Checker, value: Expr, from: Type, to: Type, sources: Sources, pattern: Type, fallible: bool) -> Type {
+  var error: Option<Type> = None;
+
+  if fallible {
+    for index in 0..sources.from.len() {
+      if error.is_none() && types::same_type(sources.from[index], pattern) {
+        error = Some(sources.errors[index]);
+      }
+    }
+  }
+
+  cx.typed.conversions.insert(value.id, Conversion { from: from, to: to, error: error });
+
+  match error {
+    Some(found) => types::result(to, found),
+    None => to,
+  }
+}
+
+/// `x.into()` or `x.try_into()`: the conversion into the type expected, or into the one a bound
+/// `Into<U>` of the type parameter of `x` names (Q633, Q634).
+pub fn into_call(cx: Checker, value: Expr, receiver_ty: Type, method: Ident, fallible: bool, expected: Option<Type>) -> Type {
+  const name = method.name;
+  const bound_interface = if fallible { cx.typed.prelude.try_into } else { cx.typed.prelude.into };
+  var target: Option<Type> = None;
+  var error: Option<Type> = None;
+
+  if let Some(ty) = expected {
+    if fallible {
+      if let TypeKind::Result { value: ok, error: err } = ty.kind {
+        target = Some(ok);
+        error = Some(err);
+      }
+    } else {
+      target = Some(ty);
+    }
+  }
+
+  // A bound `T: Into<U>` or `T: TryInto<U, E>` names the target.
+  if target.is_none() {
+    for interface_ref in cx.typed.implemented_refs(receiver_ty) {
+      if target.is_none() && is_prelude(bound_interface, interface_ref.id) && !interface_ref.args.is_empty() {
+        target = Some(interface_ref.args[0]);
+        error = interface_ref.args.get(1);
+      }
+    }
+  }
+
+  const to = match target {
+    Some(found) => found,
+    None => {
+      cx.diagnostics.push(
+        Diagnostic::error(codes::UNKNOWN_TYPE, method.span, "cannot infer the type `" + name + "` converts `" + types::text(receiver_ty) + "` into")
+          .with_help("give the result a type: `const value: Type = x." + name + "();`"),
+      );
+
+      return types::error();
+    }
+  };
+
+  // The conversions of the prelude fail with a `String`.
+  const err = error.unwrap_or(types::string());
+
+  if types::is_error(to) || types::is_error(receiver_ty) {
+    return types::error();
+  }
+
+  const holds = match bound_interface {
+    Some(id) => cx.typed.implements(receiver_ty, NamedRef { id: id, name: if fallible { "TryInto" } else { "Into" }, args: if fallible { List::from([to, err]) } else { List::from([to]) } }),
+    None => false,
+  };
+
+  if !holds {
+    const wanted = if fallible { "TryFrom<" + types::text(receiver_ty) + ", " + types::text(err) + ">" } else { "From<" + types::text(receiver_ty) + ">" };
+
+    cx.diagnostics.push(
+      Diagnostic::error(codes::UNSATISFIED_BOUND, method.span, "`" + types::text(receiver_ty) + "` does not convert into `" + types::text(to) + "`")
+        .with_help("implement `" + wanted + "` for `" + types::text(to) + "`"),
+    );
+
+    return types::error();
+  }
+
+  cx.typed.conversions.insert(value.id, Conversion { from: receiver_ty, to: to, error: if fallible { Some(err) } else { None } });
+
+  if fallible { types::result(to, err) } else { to }
 }

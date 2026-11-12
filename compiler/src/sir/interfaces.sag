@@ -5,10 +5,11 @@
 
 use pkg::resolve::{ParamOwner, TypeItem};
 use pkg::sir::{Callee, FieldAt, Itable, ItableEntry, Lowering, Operand, Rvalue, Stmt, type_key};
+use pkg::sir::collections;
 use pkg::sir::mono;
 use pkg::types::{NamedRef, Receiver, Subst, Type, TypeKind};
 use pkg::types;
-use pkg::types::typed::{TypedModule, item_key, owner_key};
+use pkg::types::typed::{Conversion, TypedModule, builtin_from, builtin_try_from, item_key, owner_key};
 
 /// The slot of the getter of a field, after the interface's methods; the setter follows it.
 pub fn field_slot(typed: TypedModule, interface_id: u32, index: usize) -> usize {
@@ -230,6 +231,97 @@ pub fn static_for(lw: Lowering, function: u32, concrete: Type, subst: Subst, own
       mono::instance(lw, function, chosen)
     }
   }
+}
+
+/// `value`, of the type `from` of a recorded conversion, made a value of its type `to`: itself, a
+/// conversion of the prelude, or the `from` or `try_from` of the type `to`
+/// (docs/adr/0094-conversions-and-defaults.md, Q632–Q635). The types are those of the instance.
+pub fn convert_value(lw: Lowering, value: Operand, conversion: Conversion) -> Result<Operand, String> {
+  const from = types::substitute(conversion.from, lw.subst);
+  const to = types::substitute(conversion.to, lw.subst);
+  const error = match conversion.error {
+    Some(found) => Some(types::substitute(found, lw.subst)),
+    None => None,
+  };
+
+  match error {
+    None => {
+      if types::same_type(from, to) {
+        return Ok(value);
+      }
+
+      if builtin_from(to, from) {
+        if types::is_string(to) {
+          return prelude_call(lw, "string_from_char", value, to);
+        }
+
+        return Ok(lw.new_value(to, Rvalue::Cast { from: from, to: to, operand: value }));
+      }
+
+      // `List::from(array)` and `Map::from(pairs)`.
+      if lw.typed.collection_from(to, from) {
+        if let TypeKind::Class(named) = to.kind {
+          const function = match lw.resolution.type_function(lw.package, TypeItem::Class(named.id), "from") {
+            Some(found) => found,
+            None => return Err("`Map` without `from`"),
+          };
+          const target = mono::instance(lw, function, Subst::of(ParamOwner::Item(TypeItem::Class(named.id)), named.args));
+
+          return Ok(lw.call(Callee::Fn(target), List::from([value]), to));
+        }
+
+        return Ok(collections::list_from_array(lw, to, from, value));
+      }
+    }
+    Some(err) => {
+      if builtin_try_from(to, from) && types::is_string(err) {
+        const name = match to.kind {
+          TypeKind::Char => "char_try_from_u32",
+          _ => "int_try_from_" + types::text(to) + "_" + types::text(from),
+        };
+
+        return prelude_call(lw, name, value, types::result(to, err));
+      }
+    }
+  }
+
+  const conversion_interface = match error {
+    Some(_) => lw.typed.prelude.try_from,
+    None => lw.typed.prelude.from,
+  };
+  const interface_id = match conversion_interface {
+    Some(found) => found,
+    None => return Err("a conversion without its interface"),
+  };
+  const method = match lw.typed.interface_def(interface_id) {
+    Some(def) => match def.methods.first() {
+      Some(found) => found,
+      None => return Err("a conversion interface without its function"),
+    },
+    None => return Err("a conversion without its interface"),
+  };
+  const args = match error {
+    Some(err) => List::from([from, err]),
+    None => List::from([from]),
+  };
+  const subst = Subst::of(ParamOwner::Item(TypeItem::Interface(interface_id)), args).with_self(to);
+  const function = static_for(lw, method, to, subst, new List());
+  const ret = match error {
+    Some(err) => types::result(to, err),
+    None => to,
+  };
+
+  Ok(lw.call(Callee::Fn(function), List::from([value]), ret))
+}
+
+/// A call of the prelude function `name` with one argument.
+fn prelude_call(lw: Lowering, name: String, value: Operand, ret: Type) -> Result<Operand, String> {
+  const function = match lw.resolution.prelude_fn(name) {
+    Some(found) => found,
+    None => return Err("the prelude has no `" + name + "`"),
+  };
+
+  Ok(lw.call(Callee::Fn(mono::instance(lw, function, Subst::empty())), List::from([value]), ret))
 }
 
 /// The type arguments that the type declaring `function` receives in `concrete`.
@@ -454,7 +546,12 @@ pub fn message_error(lw: Lowering, text: Operand) -> Result<Operand, String> {
 
 /// An error value of type `from` for a function returning errors of type `to`: converted to an
 /// interface, or, from a `String`, made an `Error`.
-pub fn convert_error(lw: Lowering, value: Operand, from: Type, to: Type) -> Result<Operand, String> {
+pub fn convert_error(lw: Lowering, value: Operand, from: Type, to: Type, conversion: Option<Conversion>) -> Result<Operand, String> {
+  // Through `From` (docs/adr/0094-conversions-and-defaults.md, Q635).
+  if let Some(found) = conversion {
+    return convert_value(lw, value, found);
+  }
+
   var into_error = false;
 
   if types::is_string(from) {

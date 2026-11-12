@@ -27,7 +27,7 @@ use pkg::types::operators;
 use pkg::types::patterns;
 use pkg::types::send;
 use pkg::types::strings;
-use pkg::types::typed::{BuiltinMethod, item_key};
+use pkg::types::typed::{BuiltinMethod, Conversion, item_key};
 
 /// The signature of a builtin, by its name.
 pub fn builtin_sig(name: String, target: TargetInfo) -> FnSig {
@@ -895,7 +895,7 @@ fn other_expr_kind(cx: Checker, value: Expr, expected: Option<Type>) -> Type {
 
       call(cx, value, callee, args, expected)
     }
-    ExprKind::Try(inner) => try_expr(cx, inner),
+    ExprKind::Try(inner) => try_expr(cx, value.id, inner),
     ExprKind::Await(inner) => await_expr(cx, value, inner, expected),
     ExprKind::New { path, args } => strings::new_expr(cx, value, path, args, expected),
     ExprKind::Match { scrutinee, arms } => patterns::match_expr(cx, scrutinee, arms, expected),
@@ -1643,6 +1643,9 @@ fn call(cx: Checker, value: Expr, callee: Expr, args: List<Expr>, expected: Opti
         return collections::list_from(cx, value, callee, args, expected);
       } else if name == "List::with_capacity" {
         return collections::inferred_call_expecting(cx, value, cx.resolution.prelude_fn("list_with_capacity"), name, args, expected);
+      } else if let Some(ty) = interfaces::primitive_conversion(cx, value, path, name, args, expected) {
+        // Conversions of the prelude (docs/adr/0094-conversions-and-defaults.md, Q632 and Q634).
+        return ty;
       } else if name == "char::from_digit" || name.starts_with("String::from_") {
         // Written in the root of `std` (docs/adr/0093-everyday-methods.md, Q620 and Q621).
         const function = if name == "char::from_digit" { "char_from_digit" } else { "text_" + name.substring(8, name.len()) };
@@ -1795,6 +1798,17 @@ fn ambiguous_method(cx: Checker, method: Ident, receiver_ty: Type, own: Option<u
   );
 }
 
+/// Whether a struct, enum or class (or an ancestor) declares a function `name`.
+fn declares_method(cx: Checker, ty: Type, name: String) -> bool {
+  match ty.kind {
+    TypeKind::Class(class_ref) => inheritance::class_method(cx, class_ref.id, name).is_some(),
+    _ => match types::type_item_of(ty) {
+      Some(item) => cx.resolution.type_function(cx.package, item, name).is_some(),
+      None => false,
+    },
+  }
+}
+
 /// `(a..b).rev()`, which `for` runs as a loop.
 fn is_range_rev(receiver: Expr, name: String) -> bool {
   match receiver.kind {
@@ -1810,6 +1824,12 @@ fn method_call(cx: Checker, value: Expr, receiver: Expr, method: Ident, args: Li
 
   const receiver_ty = borrow::deref_base(cx, receiver);
   const name = method.name;
+
+  // `into` and `try_into`, unless the type declares a method of that name
+  // (docs/adr/0094-conversions-and-defaults.md, Q633 and Q634).
+  if (name == "into" || name == "try_into") && args.is_empty() && !declares_method(cx, receiver_ty, name) {
+    return interfaces::into_call(cx, value, receiver_ty, method, name == "try_into", expected);
+  }
 
   // The methods of iterators that need more of their values, keep both ends, or make what the
   // context expects (docs/adr/0093-everyday-methods.md, Q626-Q628).
@@ -2836,7 +2856,7 @@ fn await_expr(cx: Checker, value: Expr, inner: Expr, expected: Option<Type>) -> 
   }
 }
 
-fn try_expr(cx: Checker, inner: Expr) -> Type {
+fn try_expr(cx: Checker, id: u32, inner: Expr) -> Type {
   const ty = expr(cx, inner, None);
   const ret = cx.ret;
 
@@ -2864,14 +2884,19 @@ fn try_expr(cx: Checker, inner: Expr) -> Type {
             }
           }
 
-          if !cx.fits(error, expected) && !into_error {
-            try_fails(
-              cx,
-              inner,
-              ret,
-              "the error type `" + types::text(error) + "` does not match the function's error type `" + types::text(expected) + "`",
-              Some("convert the error explicitly with a `match`; `?` never converts errors (`map_err` arrives with closures in F2)"),
-            );
+          if !cx.fits(error, expected) && !into_error && !types::is_error(expected) {
+            // Through `From`, as Rust's `?` (docs/adr/0094-conversions-and-defaults.md, Q635).
+            if cx.typed.converts(error, expected) {
+              cx.typed.conversions.insert(id, Conversion { from: error, to: expected, error: None });
+            } else {
+              try_fails(
+                cx,
+                inner,
+                ret,
+                "the error type `" + types::text(error) + "` does not match the function's error type `" + types::text(expected) + "`",
+                Some("implement `From<" + types::text(error) + ">` for `" + types::text(expected) + "`, or convert the error with `map_err`"),
+              );
+            }
           }
         }
         TypeKind::Error => {}

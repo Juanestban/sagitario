@@ -1442,6 +1442,8 @@ pub enum Start {
   /// An integer type, by name, with the constants `MIN` and `MAX`
   /// (docs/adr/0088-bitwise-operators-and-integer-methods.md, Q580).
   Int(String),
+  /// `f32` or `f64`, with the static function `from` (docs/adr/0094-conversions-and-defaults.md).
+  Float(String),
 }
 
 /// What a qualified path names so far, the last segment consumed and the segments left.
@@ -2174,7 +2176,7 @@ pub class Resolver {
           return None;
         }
         Start::Char => {
-          self.error(last.span, "`char` has the static functions `char::from_u32` and `char::from_digit`");
+          self.error(last.span, "`char` has the static functions `char::from_u32`, `char::from_digit`, `char::from` and `char::try_from`");
 
           return None;
         }
@@ -2183,7 +2185,7 @@ pub class Resolver {
 
           return None;
         }
-        Start::Int(_) => {
+        Start::Int(_) | Start::Float(_) => {
           self.error(last.span, "`" + last.name + "` is a type, not a value");
 
           return None;
@@ -2223,29 +2225,39 @@ pub class Resolver {
           return None;
         }
         Start::Char => {
-          if member.name == "from_u32" || member.name == "from_digit" {
+          if member.name == "from_u32" || member.name == "from_digit" || member.name == "from" || member.name == "try_from" {
             return Some(Res::Builtin("char::" + member.name));
           }
 
-          self.error(last.span, "`char` has the static functions `char::from_u32` and `char::from_digit`");
+          self.error(last.span, "`char` has the static functions `char::from_u32`, `char::from_digit`, `char::from` and `char::try_from`");
 
           return None;
         }
         Start::Text => {
-          if member.name == "from_utf8" || member.name == "from_utf8_lossy" || member.name == "from_utf16" {
+          if member.name == "from_utf8" || member.name == "from_utf8_lossy" || member.name == "from_utf16" || member.name == "from" {
             return Some(Res::Builtin("String::" + member.name));
           }
 
-          self.error(member.span, "`String` has the static functions `String::from_utf8`, `String::from_utf8_lossy` and `String::from_utf16`");
+          self.error(member.span, "`String` has the static functions `String::from`, `String::from_utf8`, `String::from_utf8_lossy` and `String::from_utf16`");
 
           return None;
         }
         Start::Int(int_name) => {
-          if member.name == "MIN" || member.name == "MAX" {
+          // Conversions (docs/adr/0094-conversions-and-defaults.md, Q632 and Q634).
+          if member.name == "MIN" || member.name == "MAX" || member.name == "from" || member.name == "try_from" {
             return Some(Res::Builtin(int_name + "::" + member.name));
           }
 
-          self.error(member.span, "no constant `" + member.name + "` in `" + int_name + "`; integer types have `MIN` and `MAX`");
+          self.error(member.span, "no constant or function `" + member.name + "` in `" + int_name + "`; integer types have `MIN`, `MAX`, `from` and `try_from`");
+
+          return None;
+        }
+        Start::Float(float_name) => {
+          if member.name == "from" {
+            return Some(Res::Builtin(float_name + "::from"));
+          }
+
+          self.error(member.span, "no function `" + member.name + "` in `" + float_name + "`; float types have `from`");
 
           return None;
         }
@@ -2463,6 +2475,8 @@ pub class Resolver {
             start = Start::Text;
           } else if INT_TYPE_NAMES.split(" ").contains(name) {
             start = Start::Int(name);
+          } else if name == "f32" || name == "f64" {
+            start = Start::Float(name);
           } else if name == "std" {
             start = Start::Item(ItemRef::Std(StdItem::Root));
           } else if let Some(root) = self.resolution.dependency_root(self.package, self.module, name) {
@@ -2793,6 +2807,12 @@ pub class Resolver {
       }
     }
 
+    // A function of the type that a block declares too, as `from` of two instantiations of
+    // `From`: the checker chooses by the arguments.
+    if self.resolution.type_function(self.package, item, name).is_some() && self.in_block(item, name) {
+      return Some(Res::InterfaceFn { target: TypeRes::Item(item), name: name });
+    }
+
     const function = match self.resolution.type_function(self.package, item, name) {
       Some(function) => function,
       None => {
@@ -2886,10 +2906,8 @@ pub class Resolver {
     false
   }
 
-  /// Whether a static function `name` that `item` does not declare may come from an interface:
-  /// an `impl ... for` block of `item` or an interface declares one (Q631). The checker tells
-  /// whether `item` implements it.
-  prv fn from_interface(self, item: TypeItem, name: String) -> bool {
+  /// Whether an `impl ... for` block of `item` declares a function `name` without `self`.
+  prv fn in_block(self, item: TypeItem, name: String) -> bool {
     for block in self.resolution.blocks {
       if same_type_item(block.target, item) {
         for function in block.functions {
@@ -2900,6 +2918,17 @@ pub class Resolver {
           }
         }
       }
+    }
+
+    false
+  }
+
+  /// Whether a static function `name` that `item` does not declare may come from an interface:
+  /// an `impl ... for` block of `item` or an interface declares one (Q631). The checker tells
+  /// whether `item` implements it.
+  prv fn from_interface(self, item: TypeItem, name: String) -> bool {
+    if self.in_block(item, name) {
+      return true;
     }
 
     for index in 0..self.resolution.interfaces.len() {

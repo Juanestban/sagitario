@@ -163,7 +163,7 @@ pub fn builtin_method(lw: Lowering, method: BuiltinMethod, ty: Type, receiver: E
 }
 
 /// `value?`: returns `None` or `Err(e)` from the function, or evaluates to the inner value.
-pub fn try_expr(lw: Lowering, inner: Expr) -> Result<Operand, String> {
+pub fn try_expr(lw: Lowering, value: Expr, inner: Expr) -> Result<Operand, String> {
   const inner_ty = lw.type_of(inner)?;
   const place = value_place(lw, inner)?;
   const success = success_variant(inner_ty);
@@ -188,7 +188,7 @@ pub fn try_expr(lw: Lowering, inner: Expr) -> Result<Operand, String> {
       TypeKind::Result { error, .. } => error,
       _ => field_place.ty,
     };
-    const field = interfaces::convert_error(lw, Operand::Place(field_place), field_place.ty, to)?;
+    const field = interfaces::convert_error(lw, Operand::Place(field_place), field_place.ty, to, lw.typed.conversions.get(value.id))?;
 
     if lw.managed(to) {
       lw.emit(Stmt::Retain(field));

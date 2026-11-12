@@ -485,6 +485,23 @@ fn path_members(items: Items, analysis: Analysis, module: Option<Module>, module
   // `i32::MAX` (docs/adr/0088-bitwise-operators-and-integer-methods.md, Q581).
   if chain.len() == 1 && types::int_from_name(first).is_some() {
     items.add_words("MIN MAX", CONSTANT);
+    items.add_words("from try_from", FUNCTION);
+    return;
+  }
+
+  // The conversions of the prelude (docs/adr/0094-conversions-and-defaults.md, Q632 and Q634).
+  if chain.len() == 1 && (first == "f32" || first == "f64") {
+    items.add("from", FUNCTION, "");
+    return;
+  }
+
+  if chain.len() == 1 && first == "String" {
+    items.add_words("from from_utf8 from_utf8_lossy from_utf16", FUNCTION);
+    return;
+  }
+
+  if chain.len() == 1 && first == "char" {
+    items.add_words("from from_digit from_u32 try_from", FUNCTION);
     return;
   }
 
@@ -914,6 +931,10 @@ fn members(items: Items, analysis: Analysis, reference: Type) {
   if typed.iter_elem(ty).is_some() {
     items.add_words(ITER_COMPILER_METHODS, METHOD);
   }
+
+  // `Into` and `TryInto`, which every value has (docs/adr/0094-conversions-and-defaults.md, Q633).
+  items.add("into", METHOD, "fn into(self) -> U");
+  items.add("try_into", METHOD, "fn try_into(self) -> Result<U, E>");
 
   // `Display` of numbers, `bool`, `char` and `String` (docs/adr/0089-display-debug-and-format-specifiers.md).
   match ty.kind {

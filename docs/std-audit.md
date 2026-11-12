@@ -36,7 +36,7 @@ The audit of the library found gaps of the language itself, which the library ne
 | `wrapping_*`, `checked_*` and `saturating_*` are promised by spec 2 ("Integer arithmetic") but not implemented | Code that must not panic on overflow in debug builds cannot say so | ✅ [ADR-0088](adr/0088-bitwise-operators-and-integer-methods.md), increment 2 |
 | No `Display`: user types cannot be interpolated or turned into text (spec 2, "post-MVP") | No `to_string()`, no formatting of user types | ✅ [ADR-0089](adr/0089-display-debug-and-format-specifiers.md), increment 1 |
 | No tuples (spec 2: "may be added later") | `enumerate`, `zip`, `unzip`, `partition`, `split_once` and `char_indices` cannot have Rust's signatures | ✅ [ADR-0092](adr/0092-tuples.md), increments 1 and 2; the methods returning tuples come with record 4 |
-| No conversion interfaces (`From`, `Into`, `TryFrom`) nor `Default` | Conversions are named functions; `?` converts errors only to `Error` | ❌ a record of its own |
+| No conversion interfaces (`From`, `Into`, `TryFrom`) nor `Default` | Conversions are named functions; `?` converts errors only to `Error` | 🟡 [ADR-0094](adr/0094-conversions-and-defaults.md): the conversions are done (increments 1 and 2); `Default` is increment 3 |
 | `@cfg` is not allowed on fields | Classes of `std::sys` that differ by system are written twice whole | 🟡 a small record, when it hurts |
 
 ## Modules
@@ -101,7 +101,7 @@ The audit of the library found gaps of the language itself, which the library ne
 | `Add`, `Sub`, `Mul`, `Div`, `Rem`, `Neg` | ✅ | ✅ | ADR-0081 |
 | `Index`, `IndexMut`, `Bit*`, `Shl`, `Shr`, `*Assign` | — | ❌ | `Index` for user collections; the bitwise ones after the operators exist |
 | `Range`, `RangeInclusive` | `a..b`, `a..=b` | 🟡 | In `for` and slices; not values with methods (`contains`, `len`) |
-| `From`, `Into`, `TryFrom`, `AsRef` | — | ❌ | See the language gaps |
+| `From`, `Into`, `TryFrom`, `AsRef` | `From`, `Into`, `TryFrom`, `TryInto` | ✅ | ADR-0094: Rust's conversions of numbers, `char`, `String`, lists and maps, and `?` through `From`; `AsRef` ➖, a `&T` parameter does its work |
 | `Default` | — | ❌ | See the language gaps |
 | `Clone`, `Copy` | ➖ | ➖ | Structs copy, classes share |
 | `Send`, `Sync` | `Send` | ➖ | Inferred; sharing is capturing a `Send` value |

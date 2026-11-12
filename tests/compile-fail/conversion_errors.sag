@@ -1,0 +1,40 @@
+// `From`, `Into`, `TryFrom`, `TryInto` and `?` through `From`
+// (docs/adr/0094-conversions-and-defaults.md, Q632–Q635).
+
+struct Celsius { pub degrees: f64; }
+struct Fahrenheit { pub degrees: f64; }
+
+impl From<Celsius> for Fahrenheit {
+  fn from(value: Celsius) -> Fahrenheit { Fahrenheit { degrees: value.degrees * 1.8 + 32.0 } }
+}
+
+struct Meters impl Into<f64> { //~ ERROR E0329
+  pub value: f64;
+}
+
+impl TryInto<u8, String> for Celsius { //~ ERROR E0329
+  fn try_into(self) -> Result<u8, String> { Err("no") }
+}
+
+fn failing() -> Result<i32, i32> {
+  Err(1)
+}
+
+fn wrong() -> Result<i32, String> {
+  Ok(failing()?) //~ ERROR E0321
+}
+
+fn unbounded<T>(value: T) -> String {
+  value.into() //~ ERROR E0330
+}
+
+fn main() {
+  const _a = Fahrenheit::from(5); //~ ERROR E0330
+  const _b = Celsius { degrees: 1.0 }.into(); //~ ERROR E0311
+  const _c: Celsius = Fahrenheit { degrees: 1.0 }.into(); //~ ERROR E0330
+  const _d = u64::from(5usize); //~ ERROR E0330
+  const _e = f64::from(5i64); //~ ERROR E0330
+  const _f = i32::try_from(5i32); //~ ERROR E0330
+  const _g = String::try_from('c'); //~ ERROR E0200
+  const _h = f32::try_from(1.0); //~ ERROR E0200
+}

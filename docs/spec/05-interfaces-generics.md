@@ -336,6 +336,65 @@ const clip = projection * view * model * position;   // Mat4 * Mat4 * Mat4 * Vec
 - A block for an interface that extends another one the type implements itself, such as
   `impl Ord for P` beside `impl Eq for P`, holds only its own methods.
 
+## Conversions
+
+Rationale: [ADR-0094](../adr/0094-conversions-and-defaults.md), Q632–Q634. The prelude declares
+Rust's conversion interfaces, with the error of `TryFrom` as a type argument:
+
+```sag
+interface From<T> { fn from(value: T) -> Self; }
+interface Into<U> { fn into(self) -> U; }
+interface TryFrom<T, E> { fn try_from(value: T) -> Result<Self, E>; }
+interface TryInto<U, E> { fn try_into(self) -> Result<U, E>; }
+```
+
+```sag
+struct Celsius { pub degrees: f64; }
+struct Fahrenheit { pub degrees: f64; }
+
+impl From<Celsius> for Fahrenheit {
+  fn from(value: Celsius) -> Fahrenheit { Fahrenheit { degrees: value.degrees * 1.8 + 32.0 } }
+}
+
+const hot = Fahrenheit::from(Celsius { degrees: 100.0 });   // 212
+const also: Fahrenheit = Celsius { degrees: 0.0 }.into();    // 32
+const small = u8::try_from(300i32);                         // Err("out of range integral type conversion attempted")
+```
+
+- A type implements `From<T>` once per source type, in its header or in
+  [blocks](#impl--for-blocks), in the module that declares it. `U::from(x)` calls the
+  implementation whose `T` is the type of `x`; with one, `x` is checked against its `T`, and with
+  several, an unsuffixed literal takes the one `T` of its kind of number (`AppError::from(5)` with
+  `From<i32>` and `From<String>`). A type that implements none for `x` is an error (`E0330`) that
+  names the sources it has. `TryFrom<T, E>` is chosen the same way.
+- Every type is `From` itself: `U::from(u)` gives `u`. A `From` gives no `TryFrom`.
+- `Into<U>` and `TryInto<U, E>` are given by the compiler: `T` implements `Into<U>` when `U`
+  implements `From<T>`, and `TryInto<U, E>` when `U` implements `TryFrom<T, E>`. Programs
+  implement `From` and `TryFrom` instead; implementing `Into` or `TryInto` is an error (`E0329`).
+- `x.into()` converts into the type expected (`const f: Fahrenheit = c.into();`), or into the
+  `U` of a bound `T: Into<U>` of the type of `x`; without either it is an error (`E0311`), and so
+  is a type that does not convert (`E0330`). `x.try_into()` expects a `Result<U, E>`, or a bound
+  `TryInto<U, E>`; without one, its error is `String`, that of the prelude's conversions. A type
+  that declares a method `into` or `try_into` keeps it.
+- Bounds use them as Rust's: `fn label<T: Into<String>>(value: T) -> String` accepts `char` and
+  `String`, and `fn make<T: From<i32>>(n: i32) -> T { T::from(n) }` every type with that
+  `From`.
+- The prelude implements Rust's conversions between numbers, characters and strings:
+
+  | Into | `From` | `TryFrom<_, String>` |
+  |---|---|---|
+  | an integer | the narrower integers of its signedness and the narrower unsigned ones; `isize` and `usize` only those of 8 and 16 bits | every other integer |
+  | `u32`, `u64` | also `char` | |
+  | `f64` | `f32`, and integers of up to 32 bits except `isize` and `usize` | |
+  | `f32` | integers of up to 16 bits | |
+  | `char` | `u8` | `u32` |
+  | `String` | `char` | |
+
+  `try_from` between integers fails when the value does not fit, with Rust's message `out of
+  range integral type conversion attempted`, and `char::try_from` with `converted integer out of
+  range for `char``. They are called as `i64::from(x)`, `u8::try_from(x)`, `f64::from(x)`,
+  `char::from(b)`, `String::from(c)`. `as` keeps its conversions, which never fail.
+
 ## Standard generic types (F2)
 
 `List<T>` (see [lists](02-types.md#lists-f2)), `Map<K, V>` (see [maps](02-types.md#maps-f2)) and

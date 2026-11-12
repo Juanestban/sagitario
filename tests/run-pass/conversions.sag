@@ -1,0 +1,108 @@
+// `From`, `Into`, `TryFrom` and `TryInto`: implemented by programs, chosen by the type of the
+// argument, reflexive, those of the prelude between numbers, characters, strings and collections,
+// in bounds, and `?` through `From` (docs/adr/0094-conversions-and-defaults.md, Q632–Q635).
+// expect-stdout: 212 32 32 Io(5) 5 7 3 A x 97
+// expect-stdout: Err("out of range integral type conversion attempted") Ok(200) Err("out of range integral type conversion attempted") Ok('😀') Err("converted integer out of range for `char`")
+// expect-stdout: Ok(4) true Err("out of range integral type conversion attempted") Ada 3
+// expect-stdout: Ok(12) Err(Parse("invalid digit found in string")) Err(Io(7))
+// expect-stdout: <c> <s> 5 -3 9 Io(2)
+// expect-stdout: [1, 2] {"a": 1} [3] 255 -128
+
+struct Celsius { pub degrees: f64; }
+struct Fahrenheit { pub degrees: f64; }
+
+impl From<Celsius> for Fahrenheit {
+  fn from(value: Celsius) -> Fahrenheit { Fahrenheit { degrees: value.degrees * 1.8 + 32.0 } }
+}
+
+enum AppError { Parse(String), Io(i32) }
+
+impl From<String> for AppError {
+  fn from(message: String) -> AppError { AppError::Parse(message) }
+}
+
+impl From<i32> for AppError {
+  fn from(code: i32) -> AppError { AppError::Io(code) }
+}
+
+struct Even impl TryFrom<i32, String> {
+  pub value: i32;
+
+  pub fn try_from(value: i32) -> Result<Even, String> {
+    if value % 2 == 0 { Ok(Even { value: value }) } else { Err(f"{value} is odd") }
+  }
+}
+
+class Name {
+  pub const text: String;
+
+  pub fn new(self, text: String) { self.text = text; }
+}
+
+impl From<String> for Name {
+  fn from(text: String) -> Name { new Name(text) }
+}
+
+fn parse(text: String) -> Result<i32, AppError> {
+  Ok(text.parse_i32()?)
+}
+
+fn failing() -> Result<i32, i32> {
+  Err(7)
+}
+
+fn io() -> Result<i32, AppError> {
+  Ok(failing()?)
+}
+
+fn label<T: Into<String>>(value: T) -> String {
+  const text: String = value.into();
+
+  "<" + text + ">"
+}
+
+fn widen<T: Into<i64>>(value: T) -> i64 {
+  value.into()
+}
+
+fn make<T: From<i32>>(n: i32) -> T {
+  T::from(n)
+}
+
+fn main() {
+  const hot: Fahrenheit = Celsius { degrees: 100.0 }.into();
+  const also = Fahrenheit::from(Celsius { degrees: 0.0 });
+  const same = Fahrenheit::from(also);
+  const code = AppError::from(5);
+  const big = i64::from(5i32);
+  const lit = i64::from(7);
+  const f = f64::from(3u8);
+  const c = char::from(65u8);
+  const s = String::from('x');
+  const n = u32::from('a');
+  const small = u8::try_from(300i32);
+  const fits = u8::try_from(200i32);
+  const neg = u32::try_from(-1i64);
+  const ch = char::try_from(0x1F600u32);
+  const bad_ch = char::try_from(0xD800u32);
+  const even = Even::try_from(4);
+  const odd: Result<Even, String> = 3.try_into();
+  const byte: Result<u8, String> = 256u16.try_into();
+  const name: Name = "Ada".into();
+  const wide: i64 = 3i8.into();
+
+  println(f"{hot.degrees} {also.degrees} {same.degrees} {code:?} {big} {lit} {f} {c} {s} {n}");
+  println(f"{small:?} {fits:?} {neg:?} {ch:?} {bad_ch:?}");
+  println(f"{even.map((e) => e.value):?} {odd.is_err()} {byte:?} {name.text} {wide}");
+  println(f"{parse("12"):?} {parse("x"):?} {io():?}");
+  println(f"{label('c')} {label("s")} {widen(5u8)} {widen(-3i32)} {make<i64>(9)} {make<AppError>(2):?}");
+
+  // Collections, and the bounds of the integer types.
+  const list: List<i32> = [1, 2].into();
+  const map: Map<String, i32> = List::from([("a", 1)]).into();
+  const single = List::from([3]);
+  const top = u8::try_from(255u64).unwrap();
+  const bottom = i8::try_from(-128i64).unwrap();
+
+  println(f"{list:?} {map:?} {single:?} {top} {bottom}");
+}

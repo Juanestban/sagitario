@@ -37,7 +37,9 @@ Sagitario is statically typed with **local type inference**:
 ## Conversions
 
 - There are **no implicit numeric conversions**. `i32 + i64` is a compile error.
-- Explicit conversion uses `as`: `x as i64`. `as` never panics, in any build mode.
+- Explicit conversion uses `as`: `x as i64`. `as` never panics, in any build mode. Conversions
+  that keep every value or report the ones that do not fit are `From` and `TryFrom`
+  (`i64::from(x)`, `u8::try_from(x)`; [conversions](05-interfaces-generics.md#conversions)).
 - Conditions of `if` and `while` must have type `bool`; there is no "truthiness".
 
 | Conversion | Result |

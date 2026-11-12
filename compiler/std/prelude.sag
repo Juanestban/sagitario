@@ -84,6 +84,45 @@ pub interface Neg<Out> {
   fn neg(self) -> Out;
 }
 
+/// A value of the implementing type made from a `T`, without failing, as Rust's `From`
+/// (docs/adr/0094-conversions-and-defaults.md, Q632): `Celsius::from(f)`. Every type is `From`
+/// itself. Numbers are `From` the narrower ones that fit them, `u32` and `u64` from `char`,
+/// `char` from `u8` and `String` from `char`.
+pub interface From<T> {
+  fn from(value: T) -> Self;
+}
+
+/// A value converted into a `U`, as Rust's `Into` (Q633). The compiler implements it for every
+/// type `U` is `From`; programs implement `From` instead: `const f: Fahrenheit = c.into();`.
+pub interface Into<U> {
+  fn into(self) -> U;
+}
+
+/// A value of the implementing type made from a `T`, or the error `E` (Q634): integers try every
+/// other integer type, with Rust's message, and `char` tries `u32`.
+pub interface TryFrom<T, E> {
+  fn try_from(value: T) -> Result<Self, E>;
+}
+
+/// A value converted into a `U`, or the error `E`: the compiler implements it for every type `U`
+/// is `TryFrom`.
+pub interface TryInto<U, E> {
+  fn try_into(self) -> Result<U, E>;
+}
+
+/// `String::from(c)` of a `char`.
+fn string_from_char(c: char) -> String {
+  c.to_string()
+}
+
+/// `char::try_from(n)` of a `u32`, with Rust's message.
+fn char_try_from_u32(n: u32) -> Result<char, String> {
+  match char::from_u32(n) {
+    Some(c) => Ok(c),
+    None => Err("converted integer out of range for `char`"),
+  }
+}
+
 /// Values that can cross to another thread (docs/spec/05-interfaces-generics.md#send): those
 /// no other thread can change. The compiler infers which types are `Send`; no type names it
 /// after `impl`, and it is only a bound (`T: Send`), not a type.

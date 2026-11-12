@@ -49,7 +49,7 @@ pub fn list_from(lw: Lowering, ty: Type, args: List<Expr>) -> Result<Operand, St
   Ok(list_from_array(lw, ty, array_ty, value))
 }
 
-fn list_from_array(lw: Lowering, list_ty: Type, array_ty: Type, value: Operand) -> Operand {
+pub fn list_from_array(lw: Lowering, list_ty: Type, array_ty: Type, value: Operand) -> Operand {
   if lw.managed(array_ty) {
     lw.emit(Stmt::Retain(value));
   }

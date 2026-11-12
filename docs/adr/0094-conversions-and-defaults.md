@@ -147,3 +147,15 @@ fn main() {
   methods of interfaces. Making the check of interfaces used as types reach the types written in
   function bodies was needed too: it saw only declarations, and an interface with static
   functions as the type of a binding compiled to an itable that called them with a receiver.
+- Increment 2 is done. One relation serves `U::from`, `U::try_from`, `into`, `try_into` and `?`:
+  the checker records, for the call or the `?`, the type converted, the type made and, for
+  `TryFrom`, the error (`typed::Conversion`); lowering makes it the value itself, a cast or a
+  function of the prelude for its conversions, or a call of the `from` or `try_from` of the
+  type, found as any static function of an interface. The prelude's conversions are the
+  implementations primitives list (`typed::builtin_from`), so bounds see them; `Into`,
+  `TryInto` and reflexivity are answered by `implements` without being listed, since they are
+  as many as the types. The `try_from` between integers are written by the loader, one per pair,
+  as the ranges are. `List<T>` is `From<[T; N]>` and `Map<K, V>` `From<List<(K, V)>>`, with the
+  calls `List::from` and `Map::from` had. A function a type declares in its body that one of its
+  blocks declares too, as `from` of two instantiations of `From`, is resolved by the checker, so
+  that the argument chooses.

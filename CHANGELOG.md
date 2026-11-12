@@ -15,6 +15,11 @@ The sources say 0.32.0.
 
 ### Added
 
+- `From`, `Into`, `TryFrom` and `TryInto`, as Rust's: `Type::from(x)` chooses the implementation
+  by the type of `x`, every type is `From` itself, `x.into()` converts into the type expected or
+  that of a bound `T: Into<U>`, and the prelude has Rust's conversions between numbers
+  (`i64::from(5i32)`, `u8::try_from(300i32)`), characters, strings, lists and maps; `?` converts
+  an error through `From` ([ADR-0094](docs/adr/0094-conversions-and-defaults.md), increment 2).
 - Static functions in interfaces, such as `fn zero() -> Self;`, with or without a default,
   implemented by a type's body or an `impl ... for` block and called as `Type::zero()`,
   `Self::zero()` or `T::zero()` for a type parameter bounded by the interface

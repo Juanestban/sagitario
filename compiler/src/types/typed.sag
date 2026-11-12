@@ -5,7 +5,7 @@
 use pkg::resolve::{ParamOwner, Resolution, TypeItem};
 use pkg::ast::Package;
 use pkg::types::{
-  ClassDef, EnumDef, FieldDef, FnSig, GenericDef, InterfaceDef, NamedRef, ParamRef, SELF_PARAM, StructDef, Subst, Type, TypeKind, VariantDef,
+  ClassDef, EnumDef, FieldDef, FloatTy, FnSig, GenericDef, IntTy, InterfaceDef, NamedRef, ParamRef, SELF_PARAM, StructDef, Subst, Type, TypeKind, VariantDef,
 };
 use pkg::types;
 use pkg::types::consts::ConstValue;
@@ -31,6 +31,11 @@ pub struct PreludeItems {
   pub div: Option<u32>;
   pub rem: Option<u32>;
   pub neg: Option<u32>;
+  /// `From`, `Into`, `TryFrom` and `TryInto` (docs/adr/0094-conversions-and-defaults.md).
+  pub from: Option<u32>;
+  pub into: Option<u32>;
+  pub try_from: Option<u32>;
+  pub try_into: Option<u32>;
 }
 
 /// The methods of `List<T>` implemented by the compiler (docs/spec/02-types.md#arrays-and-lists).
@@ -94,6 +99,14 @@ pub enum BuiltinMethod {
 pub struct StaticCall {
   pub function: u32;
   pub self_ty: Type;
+}
+
+/// A value of type `from` made a `to`: by `From`, or by `TryFrom` with the error `error`. The
+/// types may name type parameters until monomorphization.
+pub struct Conversion {
+  pub from: Type;
+  pub to: Type;
+  pub error: Option<Type>;
 }
 
 /// A list or array used as an iterator: the prelude function making the iterator and its type
@@ -207,6 +220,9 @@ pub class TypedModule {
   pub var builtin_methods: Map<u32, BuiltinMethod>;
   /// The calls of static functions of interfaces, by call id.
   pub var static_calls: Map<u32, StaticCall>;
+  /// The conversions of `from`, `try_from`, `into`, `try_into` and `?`, by the id of the call or
+  /// of the operand of `?` (docs/adr/0094-conversions-and-defaults.md, Q632–Q635).
+  pub var conversions: Map<u32, Conversion>;
   /// Type of each local binding, indexed by function id then local id.
   pub var local_types: List<List<Type>>;
   pub var expr_types: Map<u32, Type>;
@@ -251,6 +267,10 @@ pub class TypedModule {
       div: None,
       rem: None,
       neg: None,
+      from: None,
+      into: None,
+      try_from: None,
+      try_into: None,
     };
     self.sync_classes = new List();
     self.const_types = new List();
@@ -259,6 +279,7 @@ pub class TypedModule {
     self.call_args = new Map<u32, List<Type>>();
     self.builtin_methods = new Map<u32, BuiltinMethod>();
     self.static_calls = new Map<u32, StaticCall>();
+    self.conversions = new Map<u32, Conversion>();
     self.local_types = new List();
     self.expr_types = new Map<u32, Type>();
     self.method_calls = new Map<u32, u32>();
@@ -875,6 +896,19 @@ pub class TypedModule {
       }
     }
 
+    // Rust's conversions between numbers, characters and strings (Q632, Q634).
+    for source in conversion_sources() {
+      if builtin_from(ty, source) {
+        if let Some(id) = self.prelude.from {
+          result.push(NamedRef { id: id, name: "From", args: List::from([source]) });
+        }
+      } else if builtin_try_from(ty, source) {
+        if let Some(id) = self.prelude.try_from {
+          result.push(NamedRef { id: id, name: "TryFrom", args: List::from([source, types::string()]) });
+        }
+      }
+    }
+
     const primitive = match ty.kind {
       TypeKind::Int(_) | TypeKind::Bool | TypeKind::Char | TypeKind::String => true,
       _ => false,
@@ -983,7 +1017,68 @@ pub class TypedModule {
       }
     }
 
-    types::contains_ref(self.implemented_refs(ty), interface_ref)
+    if types::contains_ref(self.implemented_refs(ty), interface_ref) {
+      return true;
+    }
+
+    // Every type is `From` itself, and `Into` and `TryInto` mirror `From` and `TryFrom`
+    // (docs/adr/0094-conversions-and-defaults.md, Q632–Q634).
+    const args = interface_ref.args;
+
+    if is_id(self.prelude.from, interface_ref.id) && args.len() == 1 {
+      return types::same_type(args[0], ty) || self.collection_from(ty, args[0]);
+    }
+
+    if is_id(self.prelude.into, interface_ref.id) && args.len() == 1 {
+      return self.converts(ty, args[0]);
+    }
+
+    if is_id(self.prelude.try_into, interface_ref.id) && args.len() == 2 {
+      return match self.prelude.try_from {
+        Some(id) => self.implements(args[0], NamedRef { id: id, name: "TryFrom", args: List::from([ty, args[1]]) }),
+        None => false,
+      };
+    }
+
+    false
+  }
+
+  /// Whether `to` is a list made from an array of its elements (`List::from`), or a map from a
+  /// list of its pairs (`Map::from`), as Rust's (Q632).
+  pub fn collection_from(self, to: Type, from: Type) -> bool {
+    match to.kind {
+      TypeKind::List(elem) => match from.kind {
+        TypeKind::Array { elem: from_elem, .. } => types::same_type(elem, from_elem),
+        _ => false,
+      },
+      TypeKind::Class(named) => {
+        if !is_id(self.prelude.map, named.id) || named.args.len() != 2 {
+          return false;
+        }
+
+        if let TypeKind::List(pair) = from.kind {
+          if let TypeKind::Tuple(elems) = pair.kind {
+            return elems.len() == 2 && types::same_type(elems[0], named.args[0]) && types::same_type(elems[1], named.args[1]);
+          }
+        }
+
+        false
+      }
+      _ => false,
+    }
+  }
+
+  /// Whether a `from` converts into a `to` without failing: the same type, or `to` is
+  /// `From<from>`.
+  pub fn converts(self, from: Type, to: Type) -> bool {
+    if types::same_type(from, to) {
+      return true;
+    }
+
+    match self.prelude.from {
+      Some(id) => self.implements(to, NamedRef { id: id, name: "From", args: List::from([from]) }),
+      None => false,
+    }
   }
 
   /// The field types of a struct type, with its type arguments.
@@ -1242,5 +1337,72 @@ pub class TypedModule {
     }
 
     None
+  }
+}
+
+fn is_id(found: Option<u32>, id: u32) -> bool {
+  match found {
+    Some(other) => other == id,
+    None => false,
+  }
+}
+
+/// The types the prelude converts from: integers, `f32` and `char`.
+fn conversion_sources() -> List<Type> {
+  const sources: List<Type> = new List();
+
+  for int_ty in types::int_types() {
+    sources.push(types::int(int_ty));
+  }
+
+  sources.push(types::of(TypeKind::Float(FloatTy::F32)));
+  sources.push(types::of(TypeKind::Char));
+  sources
+}
+
+/// Whether the prelude makes a `to` from every `from`, as Rust's `From`
+/// (docs/adr/0094-conversions-and-defaults.md, Q632).
+pub fn builtin_from(to: Type, from: Type) -> bool {
+  match to.kind {
+    TypeKind::Int(to_int) => match from.kind {
+      TypeKind::Int(from_int) => types::int_widens(to_int, from_int),
+      TypeKind::Char => to_int == IntTy::U32 || to_int == IntTy::U64,
+      _ => false,
+    },
+    TypeKind::Float(to_float) => match from.kind {
+      TypeKind::Float(from_float) => to_float == FloatTy::F64 && from_float == FloatTy::F32,
+      TypeKind::Int(from_int) => {
+        const sized = from_int == IntTy::Isize || from_int == IntTy::Usize;
+        const bits = if to_float == FloatTy::F64 { 32u32 } else { 16u32 };
+
+        !sized && types::int_bits(from_int) <= bits
+      }
+      _ => false,
+    },
+    TypeKind::Char => match from.kind {
+      TypeKind::Int(from_int) => from_int == IntTy::U8,
+      _ => false,
+    },
+    TypeKind::String => match from.kind {
+      TypeKind::Char => true,
+      _ => false,
+    },
+    _ => false,
+  }
+}
+
+/// Whether the prelude tries to make a `to` from a `from`, with a `String` error (Q634): between
+/// integers without a `From`, and `char` from `u32`.
+pub fn builtin_try_from(to: Type, from: Type) -> bool {
+  match to.kind {
+    TypeKind::Int(to_int) => match from.kind {
+      TypeKind::Int(from_int) => to_int != from_int && !types::int_widens(to_int, from_int),
+      _ => false,
+    },
+    TypeKind::Char => match from.kind {
+      TypeKind::Int(from_int) => from_int == IntTy::U32,
+      _ => false,
+    },
+    _ => false,
   }
 }
