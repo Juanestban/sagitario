@@ -242,7 +242,8 @@ const text = builder.to_string();
   enum implementing `Eq` uses its `equals` too. Classes call `a.equals(b)`, since their `==` stays
   identity.
 - Arrays, lists, maps, iterators, interface values and function values cannot be compared with
-  `==`. Tuples compare when their elements do ([tuples](#tuples-s2)).
+  `==`. Tuples, `Option` and `Result` compare when the values they hold do
+  ([tuples](#tuples-s2), [`Option` and `Result`](#optiont-and-resultt-e-f1)).
 - [Arithmetic operators](05-interfaces-generics.md#operators) (`+`, `-`, `*`, `/`, `%`, unary
   `-`) apply to other types through the prelude interfaces `Add`, `Sub`, `Mul`, `Div`, `Rem` and
   `Neg` ([ADR-0081](../adr/0081-operator-overloading.md)).
@@ -466,3 +467,13 @@ for entry in ages {
   value is `None` or `Err`, with Rust's message (``called `Option::unwrap()` on a `None` value``)
   or the one given to `expect`. Methods taking closures (`map`, `map_err`, `and_then`,
   `unwrap_or_else`, `filter`) are described in [08-closures.md](08-closures.md).
+- Rust's other methods ([ADR-0093](../adr/0093-everyday-methods.md), Q619): on `Option`,
+  `ok_or`, `ok_or_else`, `or`, `or_else`, `and`, `xor`, `map_or`, `map_or_else`, `is_some_and`,
+  `is_none_or`, `zip` (an `Option` of a tuple), `flatten` (of an `Option<Option<T>>`) and `iter`;
+  on `Result`, `ok`, `err`, `and`, `or`, `or_else`, `map_or`, `map_or_else`, `is_ok_and`,
+  `is_err_and`, `iter` and `expect_err(message)`, which panics on `Ok`. `take` and `replace`
+  change the place that holds the value, which `mem::replace` does.
+- `Option<T>` and `Result<T, E>` implement `Eq`, `Ord` and `Hash` when the types they hold do:
+  equal when they are the same variant holding equal values, and ordered by variant as declared
+  (`None` before `Some`, `Ok` before `Err`), then by those values: `Some(1) == Some(1)`,
+  `None < Some(0)`.

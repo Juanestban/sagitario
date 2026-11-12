@@ -1,0 +1,16 @@
+// The patterns of `const`, `var` and `for` match every value, `..` stands once in a tuple
+// pattern, and a tuple pattern has two or more elements (docs/adr/0092-tuples.md, Q608 and Q610).
+fn main() {
+  const (1, i) = (1, 2); //~ ERROR E0107
+
+  for (l, Some(m)) in List::from([(1, Some(2))]) { //~ ERROR E0107
+    println(f"{l} {m}");
+  }
+
+  match (1, 2) {
+    (.., x, ..) => println(f"{x}"), //~ ERROR E0100
+  }
+
+  const (one,) = (1, 2); //~ ERROR E0106
+  println(f"{i} {one}");
+}

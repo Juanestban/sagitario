@@ -101,6 +101,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0090](0090-benchmarks.md) | A suite of benchmarks against other languages, and `std::hint::black_box` (S2) | Accepted |
 | [0091](0091-fewer-reference-counts.md) | Fewer reference counts: an optimization pass over SIR (S2) | Accepted |
 | [0092](0092-tuples.md) | Tuples: types, values, patterns and their interfaces (S2) | Accepted |
+| [0093](0093-everyday-methods.md) | The everyday methods of the standard library (S2) | Accepted |
 
 ## Template
 

@@ -17,10 +17,12 @@ use pkg::span::Span;
 /// The builtins a single name can refer to, besides `Error`, `List::from`, `CString::new`,
 /// `string_from_c`, `exit` and `char::from_u32`.
 fn builtin_from_name(name: String) -> Option<String> {
-  if name == "print" || name == "println" || name == "eprintln" || name == "panic" || name == "include_str" { Some(name) } else { None }
+  if BUILTIN_NAMES.split(" ").contains(name) { Some(name) } else { None }
 }
 
-const BUILTIN_NAMES: String = "print println eprintln panic include_str";
+/// The assertions are builtins, so that they panic at the line of their call
+/// (docs/adr/0093-everyday-methods.md, Q618).
+const BUILTIN_NAMES: String = "print println eprintln panic include_str assert assert_eq assert_ne unreachable todo";
 
 /// The C types of `std::ffi`, by name.
 const C_TYPES: String = "c_char c_schar c_uchar c_short c_ushort c_int c_uint c_long c_ulong c_longlong c_ulonglong c_float c_double c_void";
@@ -1954,6 +1956,11 @@ pub class Resolver {
 
         for field in fields {
           self.pattern(field.pattern, binds, reuse);
+        }
+      }
+      PatternKind::Elements { elems, .. } => {
+        for elem in elems {
+          self.pattern(elem, binds, reuse);
         }
       }
       PatternKind::Or(alternatives) => {

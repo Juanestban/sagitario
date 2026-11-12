@@ -35,7 +35,7 @@ The audit of the library found gaps of the language itself, which the library ne
 | No bitwise operators (`&`, `\|`, `^`, `!` on integers, `<<`, `>>`) | Hashing, flags, bit sets, UTF-8 and parsing are written with `*`, `/` and `%`, slower and harder to read; `BitAnd`... cannot be implemented | ✅ [ADR-0088](adr/0088-bitwise-operators-and-integer-methods.md), increment 1; the interfaces `BitAnd`... are still missing |
 | `wrapping_*`, `checked_*` and `saturating_*` are promised by spec 2 ("Integer arithmetic") but not implemented | Code that must not panic on overflow in debug builds cannot say so | ✅ [ADR-0088](adr/0088-bitwise-operators-and-integer-methods.md), increment 2 |
 | No `Display`: user types cannot be interpolated or turned into text (spec 2, "post-MVP") | No `to_string()`, no formatting of user types | ✅ [ADR-0089](adr/0089-display-debug-and-format-specifiers.md), increment 1 |
-| No tuples (spec 2: "may be added later") | `enumerate`, `zip`, `unzip`, `partition`, `split_once` and `char_indices` cannot have Rust's signatures | 🟡 [ADR-0092](adr/0092-tuples.md), before record 4 |
+| No tuples (spec 2: "may be added later") | `enumerate`, `zip`, `unzip`, `partition`, `split_once` and `char_indices` cannot have Rust's signatures | ✅ [ADR-0092](adr/0092-tuples.md), increments 1 and 2; the methods returning tuples come with record 4 |
 | No conversion interfaces (`From`, `Into`, `TryFrom`) nor `Default` | Conversions are named functions; `?` converts errors only to `Error` | ❌ a record of its own |
 | `@cfg` is not allowed on fields | Classes of `std::sys` that differ by system are written twice whole | 🟡 a small record, when it hurts |
 
@@ -87,9 +87,9 @@ The audit of the library found gaps of the language itself, which the library ne
 
 | Rust | Sagitario | State | Notes |
 |---|---|---|---|
-| `Option`, `Result` | ✅ | 🟡 | Has `is_*`, `unwrap`, `expect`, `unwrap_or`, `unwrap_err`, `map`, `map_err`, `and_then`, `unwrap_or_else`, `filter`, `?`. Missing: `ok_or`, `ok`, `err`, `or`, `or_else`, `map_or`, `map_or_else`, `is_some_and`, `zip`, `flatten`, `take`, `replace`, `unwrap_or_default`, `expect_err`, `and`, `xor`, `iter` |
+| `Option`, `Result` | ✅ | ✅ | Rust's methods, `Eq`, `Ord` and `Hash` ([ADR-0093](adr/0093-everyday-methods.md), increment 1). `take` and `replace` are `mem::replace` (➖); `unwrap_or_default` waits for `Default` (record 5) |
 | `std::error::Error` | the prelude's `Error` interface | 🟡 | Missing: `source()` chains and backtraces (spec 7, post-MVP) |
-| `panic!`, `assert!`, `unreachable!`, `todo!` | `panic` | 🟡 | Missing: `assert`, `assert_eq`, `unreachable`, `todo`, which tests and contracts use |
+| `panic!`, `assert!`, `unreachable!`, `todo!` | `panic`, `assert`, `assert_eq`, `assert_ne`, `unreachable`, `todo` | ✅ | Functions that panic at the line of their call, without a message argument (ADR-0093, increment 1) |
 
 ### Comparison, hashing, operators, conversion (`cmp`, `hash`, `ops`, `convert`, `default`, `marker`)
 

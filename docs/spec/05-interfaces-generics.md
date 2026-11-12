@@ -171,7 +171,8 @@ Rationale: [ADR-0032](../adr/0032-generics.md).
 - A type argument must implement the bounds of its parameter. Classes, structs and enums
   implementing an interface satisfy it, and so do the interface type itself and type parameters
   bounded by it. Integers, `bool`, `char` and `String` implement the prelude's `Eq`, `Ord` and
-  `Hash`, and no other interface; tuples implement each of them when all their elements do.
+  `Hash`, and no other interface; tuples, `Option` and `Result` implement each of them when all
+  the values they hold do.
 - In a call, a lambda argument whose parameter types are known infers type parameters from its
   result: `iter.map(n => n * 2)` infers the `U` of `map<U>(f: fn(T) -> U)`.
 - Generic interfaces (`interface Source<T>`) can be implemented several times by one type, with

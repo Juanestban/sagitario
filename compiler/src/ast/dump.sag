@@ -778,6 +778,21 @@ class Dumper {
 
         self.depth -= 1;
       }
+      PatternKind::Elements { elems, rest } => {
+        const shown = match rest {
+          Some(position) => `rest=${position}`,
+          None => "",
+        };
+
+        self.line(label, "ElementsPattern", Some(pattern.span), Some(pattern.id), shown);
+        self.depth += 1;
+
+        for elem in elems {
+          self.pattern("elem", elem);
+        }
+
+        self.depth -= 1;
+      }
       PatternKind::Or(alternatives) => {
         self.line(label, "OrPattern", Some(pattern.span), Some(pattern.id), "");
         self.depth += 1;

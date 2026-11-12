@@ -15,9 +15,15 @@ The sources say 0.32.0.
 
 ### Added
 
+- `assert`, `assert_eq`, `assert_ne`, `unreachable` and `todo`, which panic at the line of their
+  call, and Rust's other methods of `Option` and `Result` (`ok_or`, `or`, `and`, `xor`, `map_or`,
+  `zip`, `flatten`, `ok`, `err`, `expect_err`...); `Option` and `Result` are compared, ordered and
+  hashed when the values they hold are ([ADR-0093](docs/adr/0093-everyday-methods.md), increment 1).
 - Tuples: `(i32, String)` types, `(a, b)` values and `t.0` reads, compared, ordered and hashed
   when their elements are, so they sort and key maps, with a debug form `(1, "a")`
-  ([ADR-0092](docs/adr/0092-tuples.md), increment 1).
+  ([ADR-0092](docs/adr/0092-tuples.md), increment 1), and tuple patterns, `(a, b)` and
+  `(first, .., last)`, in `match`, `if let`, `while let`, `const`, `var` and `for`
+  (`for (index, value) in pairs`), with matches on tuples checked for every case (increment 2).
 - Global state: `static` and `static var`, one `Send` value for the program computed on its first
   use ([ADR-0083](docs/adr/0083-global-state.md)), and `@thread_local static var`, one value per
   thread.

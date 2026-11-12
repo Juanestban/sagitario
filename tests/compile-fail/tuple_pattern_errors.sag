@@ -1,0 +1,24 @@
+// Tuple patterns against values of other shapes, and matches on tuples that miss a case
+// (docs/adr/0092-tuples.md, Q610 and Q614).
+fn main() {
+  const (a, b, c) = (1, 2); //~ ERROR E0300
+  const (d, .., e, f) = (1, 2); //~ ERROR E0300
+  const (g, h) = 5; //~ ERROR E0300
+  var (j, k) = (1, 2); //~ WARN W0002
+
+  k += 1;
+
+  match (true, 1) { //~ ERROR E0319
+    (true, _) => println("t"),
+  }
+
+  match (1, 2) {
+    (x, y, z) => println(f"{x}{y}{z}"), //~ ERROR E0300
+  }
+
+  match 3 {
+    (p, q) => println(f"{p}{q}"), //~ ERROR E0300
+  }
+
+  println(f"{a}{b}{c}{d}{e}{f}{g}{h}{j}{k}");
+}

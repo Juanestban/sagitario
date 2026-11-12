@@ -102,18 +102,22 @@ pub fn builtin_method(lw: Lowering, method: BuiltinMethod, ty: Type, receiver: E
   match method {
     BuiltinMethod::IsSome | BuiltinMethod::IsOk => tag_is(lw, place, success),
     BuiltinMethod::IsNone | BuiltinMethod::IsErr => tag_is(lw, place, 1 - success),
-    BuiltinMethod::Unwrap | BuiltinMethod::Expect | BuiltinMethod::UnwrapErr => {
+    BuiltinMethod::Unwrap | BuiltinMethod::Expect | BuiltinMethod::UnwrapErr | BuiltinMethod::ExpectErr => {
       var wanted = success;
       var message = PanicMessage::Static("called `Result::unwrap_err()` on an `Ok` value");
 
       match method {
-        BuiltinMethod::Expect => {
+        BuiltinMethod::Expect | BuiltinMethod::ExpectErr => {
           const text = match args.first() {
             Some(found) => found,
             None => return Err("`expect` without a message"),
           };
 
           message = PanicMessage::Value(lw.operand_as(text, types::string())?);
+
+          if let BuiltinMethod::ExpectErr = method {
+            wanted = 1;
+          }
         }
         BuiltinMethod::Unwrap => {
           message = PanicMessage::Static(if option { "called `Option::unwrap()` on a `None` value" } else { "called `Result::unwrap()` on an `Err` value" });
@@ -371,6 +375,25 @@ fn sub_patterns(lw: Lowering, pattern: Pattern, place: Place, variant_index: u32
   Ok(result)
 }
 
+/// The places of the elements of a tuple pattern, with their patterns; those after `..` count
+/// from the end (docs/adr/0092-tuples.md, Q610).
+fn element_patterns(elems: List<Pattern>, rest: Option<usize>, place: Place) -> Result<List<SubPattern>, String> {
+  const elem_types = match place.ty.kind {
+    TypeKind::Tuple(found) => found,
+    _ => return Err("tuple pattern on a value that is not a tuple"),
+  };
+  const result: List<SubPattern> = new List();
+
+  for index in 0..elems.len() {
+    const position = types::pattern_position(index, elems.len(), rest, elem_types.len());
+    const elem_ty = elem_types.get(position).unwrap_or(types::error());
+
+    result.push(SubPattern { pattern: elems[index], place: project(place, Projection::Field(position), elem_ty) });
+  }
+
+  Ok(result)
+}
+
 /// Whether the value at `place` matches `pattern`, without binding anything.
 fn test(lw: Lowering, pattern: Pattern, place: Place) -> Result<Operand, String> {
   if irrefutable(lw, pattern) {
@@ -393,6 +416,26 @@ fn test(lw: Lowering, pattern: Pattern, place: Place) -> Result<Operand, String>
 
         lw.emit(Stmt::If { cond: matched, then_body: List::from([Stmt::Assign { dest: result, value: Rvalue::Use(bool_operand(true)) }]), else_body: new List() });
       }
+
+      Ok(Operand::Local(result))
+    }
+    PatternKind::Elements { elems, rest } => {
+      const subs: List<SubPattern> = new List();
+
+      for sub in element_patterns(elems, rest, place)? {
+        if !irrefutable(lw, sub.pattern) {
+          subs.push(sub);
+        }
+      }
+
+      if subs.is_empty() {
+        return Ok(bool_operand(true));
+      }
+
+      const result = lw.temp(types::of(TypeKind::Bool));
+
+      lw.emit(Stmt::Assign { dest: result, value: Rvalue::Use(bool_operand(false)) });
+      test_all(lw, subs, 0, result)?;
 
       Ok(Operand::Local(result))
     }
@@ -478,6 +521,13 @@ fn bind(lw: Lowering, pattern: Pattern, place: Place) -> Result<(), String> {
 
       Ok(())
     }
+    PatternKind::Elements { elems, rest } => {
+      for sub in element_patterns(elems, rest, place)? {
+        bind(lw, sub.pattern, sub.place)?;
+      }
+
+      Ok(())
+    }
     PatternKind::Or(alternatives) => {
       const bound: List<u32> = new List();
 
@@ -526,7 +576,7 @@ fn pattern_locals(lw: Lowering, pattern: Pattern, out: List<u32>) {
         out.push(closures::local_id(lw, local));
       }
     }
-    PatternKind::Tuple { elems, .. } => {
+    PatternKind::Tuple { elems, .. } | PatternKind::Elements { elems, .. } => {
       for elem in elems {
         pattern_locals(lw, elem, out);
       }

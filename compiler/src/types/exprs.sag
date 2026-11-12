@@ -2,7 +2,7 @@
 //! (docs/spec/02-types.md, 06-control-flow.md). The port of the expression checking of
 //! `sagitario_types` (its `lib.rs`), as functions taking the checker.
 
-use pkg::ast::{BinaryOp, Block, Expr, ExprKind, FieldInit, FnDecl, FormatSpec, Ident, Path, Stmt, TemplatePart, TypeExpr, UnaryOp};
+use pkg::ast::{BinaryOp, Block, Expr, ExprKind, FieldInit, FnDecl, FormatSpec, Ident, Path, Stmt, TemplatePart, TupleShape, TypeExpr, UnaryOp};
 use pkg::ast;
 use pkg::diagnostics;
 use pkg::diagnostics::Diagnostic;
@@ -39,6 +39,14 @@ pub fn builtin_sig(name: String, target: TargetInfo) -> FnSig {
 
   if name == "panic" {
     return FnSig { receiver: None, params: List::from([string]), ret: types::of(TypeKind::Never) };
+  }
+
+  if name == "assert" {
+    return FnSig { receiver: None, params: List::from([types::of(TypeKind::Bool)]), ret: types::unit() };
+  }
+
+  if name == "unreachable" || name == "todo" {
+    return FnSig { receiver: None, params: new List(), ret: types::of(TypeKind::Never) };
   }
 
   if name == "exit" {
@@ -307,6 +315,33 @@ pub fn block(cx: Checker, body: Block, expected: Option<Type>) -> Type {
   }
 }
 
+/// Whether `ty` is a tuple a pattern with `shape` takes apart; reports it when it is not.
+fn tuple_fits_shape(cx: Checker, ty: Type, shape: TupleShape) -> bool {
+  const len = match ty.kind {
+    TypeKind::Tuple(elems) => elems.len(),
+    TypeKind::Error | TypeKind::Never => return false,
+    _ => {
+      cx.error(codes::MISMATCHED_TYPES, shape.span, "expected a value of type `" + types::text(ty) + "`, found a tuple pattern");
+
+      return false;
+    }
+  };
+
+  if len == shape.count || (shape.rest && len >= shape.count) {
+    return true;
+  }
+
+  const wanted = if shape.rest { `at least ${shape.count}` } else { `${shape.count}` };
+
+  cx.diagnostics.push(
+    Diagnostic::error(codes::MISMATCHED_TYPES, shape.span, `this pattern takes ${wanted} elements, but the tuple has ${len}`)
+      .with_note("the value has type `" + types::text(ty) + "`")
+      .with_help("name or ignore with `_` each element, or write `..` for the rest"),
+  );
+
+  false
+}
+
 /// Checks a statement and returns `never` if it diverges.
 fn stmt(cx: Checker, statement: Stmt) -> Type {
   match statement {
@@ -347,6 +382,16 @@ fn stmt(cx: Checker, statement: Stmt) -> Type {
         None => {
           if let Some(ty) = init_ty {
             local_ty = Some(if types::is_never(ty) { types::error() } else { ty });
+          }
+        }
+      }
+
+      // The hidden binding of a tuple pattern holds a tuple with the elements the pattern takes
+      // apart (docs/adr/0092-tuples.md, Q610).
+      if let Some(shape) = decl.shape {
+        if let Some(ty) = local_ty {
+          if !tuple_fits_shape(cx, ty, shape) {
+            local_ty = Some(types::error());
           }
         }
       }
@@ -1586,6 +1631,11 @@ fn call(cx: Checker, value: Expr, callee: Expr, args: List<Expr>, expected: Opti
         sig = Some(FnSig { receiver: None, params: List::from([types::string()]), ret: ret });
       } else if name == "List::from" {
         return collections::list_from(cx, value, callee, args, expected);
+      } else if name == "assert_eq" || name == "assert_ne" {
+        // The message comes from a generic function of the prelude, which also checks `Eq`.
+        collections::inferred_prelude_call(cx, value, name + "_failure", args);
+
+        return types::unit();
       } else if name == "Atomic::new" {
         return atomic_new(cx, value, args, expected);
       } else if name == "hint::black_box" {
@@ -2014,13 +2064,8 @@ fn tuple_literal(cx: Checker, elems: List<Expr>, expected: Option<Type>) -> Type
 
 /// `t.0`: the element of a tuple at the index the name gives.
 fn tuple_element(cx: Checker, base_ty: Type, elems: List<Type>, name: Ident) -> Type {
-  const position = match name.name.parse_u64() {
-    Ok(found) => found,
-    Err(_) => elems.len() as u64,
-  };
-
-  if position < elems.len() as u64 {
-    return elems[position as usize];
+  if let Some(position) = types::tuple_index(name.name, elems.len()) {
+    return elems[position];
   }
 
   cx.diagnostics.push(
@@ -2585,6 +2630,12 @@ fn named_variant_literal(cx: Checker, path: Path, variant: VariantRef, fields: L
   ty
 }
 
+/// The methods of `Option` written in the prelude, as `option_<name>`.
+const OPTION_PRELUDE_METHODS: String = "ok_or ok_or_else or or_else and xor map_or map_or_else is_some_and is_none_or zip flatten iter";
+
+/// The methods of `Result` written in the prelude, as `result_<name>`.
+const RESULT_PRELUDE_METHODS: String = "ok err and or or_else map_or map_or_else is_ok_and is_err_and iter";
+
 /// A method of `Option` or `Result` (docs/spec/07-errors.md).
 fn builtin_method(cx: Checker, value: Expr, receiver_ty: Type, method: Ident, args: List<Expr>) -> Type {
   if let Some(ty) = closures::closure_method(cx, value, receiver_ty, method, args) {
@@ -2645,22 +2696,41 @@ fn builtin_method(cx: Checker, value: Expr, receiver_ty: Type, method: Ident, ar
         builtin = Some(BuiltinMethod::UnwrapErr);
         ret = error;
       }
+    } else if name == "expect_err" {
+      if let Some(error) = result_error {
+        builtin = Some(BuiltinMethod::ExpectErr);
+        params = List::from([types::string()]);
+        ret = error;
+      }
+    }
+  }
+
+  // The methods written in the prelude (docs/adr/0093-everyday-methods.md, Q619).
+  if builtin.is_none() {
+    var nested = false;
+
+    if let Some(found) = option_value {
+      if let TypeKind::Option(_) = found.kind {
+        nested = true;
+      }
+    }
+
+    const prelude_names = if option_value.is_some() { OPTION_PRELUDE_METHODS } else { RESULT_PRELUDE_METHODS };
+
+    if prelude_names.split(" ").contains(name) && (name != "flatten" || nested) {
+      const prefix = if option_value.is_some() { "option_" } else { "result_" };
+
+      return collections::inferred_prelude_method(cx, value, prefix + name, receiver_ty, args);
     }
   }
 
   const chosen = match builtin {
     Some(chosen) => chosen,
     None => {
-      const available = if option_value.is_some() {
-        "`is_some`, `is_none`, `unwrap`, `expect` and `unwrap_or`"
-      } else {
-        "`is_ok`, `is_err`, `unwrap`, `expect`, `unwrap_or` and `unwrap_err`"
-      };
+      const flattening = name == "flatten" && option_value.is_some();
+      const note = if flattening { "only an `Option<Option<T>>` is flattened" } else { "the methods of `Option` and `Result` are those of Rust's, except `take` and `replace`, which `mem::replace` does" };
 
-      cx.diagnostics.push(
-        Diagnostic::error(codes::UNKNOWN_MEMBER, method.span, "no method `" + name + "` on type `" + types::text(receiver_ty) + "`")
-          .with_note("in F1 its methods are " + available + "; methods taking closures arrive in F2"),
-      );
+      cx.diagnostics.push(Diagnostic::error(codes::UNKNOWN_MEMBER, method.span, "no method `" + name + "` on type `" + types::text(receiver_ty) + "`").with_note(note));
       unchecked_args(cx, args);
 
       return types::error();

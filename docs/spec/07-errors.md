@@ -43,6 +43,21 @@ message with the source file and line to stderr and **aborts the process**.
 `panic(message)` (prelude) panics explicitly; it never returns, so it fits where any type is
 expected: `_ => panic("unsupported shape"),`.
 
+Assertions ([ADR-0093](../adr/0093-everyday-methods.md), Q618) are prelude functions that panic,
+in every build mode, at the file and line of their call:
+
+| Call | Panics when | Message |
+|---|---|---|
+| `assert(condition)` | `condition` is `false` | `assertion failed` |
+| `assert_eq(left, right)` | `left != right` (`T: Eq`) | `assertion failed: left == right`, then `  left: ` and ` right: ` with the debug form of each |
+| `assert_ne(left, right)` | `left == right` (`T: Eq`) | `assertion failed: left != right`, then both values |
+| `unreachable()` | always | `entered unreachable code` |
+| `todo()` | always | `not yet implemented` |
+
+`unreachable()` and `todo()` never return, as `panic`. There is no message argument: a message
+is `if !condition { panic(f"...") }`. A function of a program with one of these names takes
+their place in that program.
+
 Operations that always panic, in every build mode:
 
 - Integer division by zero.

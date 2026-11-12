@@ -1970,9 +1970,9 @@ pub class Lowering {
         Some(index) => Ok(Projection::Field(index)),
         None => Err("unknown field `" + name + "`"),
       },
-      TypeKind::Tuple(_) => match name.parse_u64() {
-        Ok(index) => Ok(Projection::Field(index as usize)),
-        Err(_) => Err("unknown element `" + name + "`"),
+      TypeKind::Tuple(elems) => match types::tuple_index(name, elems.len()) {
+        Some(index) => Ok(Projection::Field(index)),
+        None => Err("unknown element `" + name + "`"),
       },
       TypeKind::Class(owner) => match self.typed.class_field_type(owner, name) {
         Some(found) => Ok(Projection::ClassField { class_id: mono::class_instance(self, found.ancestor), index: found.index }),
@@ -2003,9 +2003,9 @@ pub class Lowering {
           projection = Some(Projection::Field(index));
         }
       }
-      TypeKind::Tuple(_) => {
-        if let Ok(index) = name.parse_u64() {
-          projection = Some(Projection::Field(index as usize));
+      TypeKind::Tuple(elems) => {
+        if let Some(index) = types::tuple_index(name, elems.len()) {
+          projection = Some(Projection::Field(index));
         }
       }
       TypeKind::Class(owner) => {
@@ -2788,8 +2788,9 @@ pub class Lowering {
     if is_comparison(op) {
       const operand_ty = self.type_of(lhs)?;
 
-      if let TypeKind::Tuple(_) = operand_ty.kind {
-        return self.tuple_comparison(op, ty, operand_ty, lhs, rhs);
+      match operand_ty.kind {
+        TypeKind::Tuple(_) | TypeKind::Option(_) | TypeKind::Result { .. } => return self.tuple_comparison(op, ty, operand_ty, lhs, rhs),
+        _ => {}
       }
     }
 
@@ -3136,6 +3137,52 @@ pub class Lowering {
           const text = self.operand_as(args[0], types::string())?;
 
           return interfaces::message_error(self, text);
+        }
+
+        // At the line of the call (docs/adr/0093-everyday-methods.md, Q618).
+        if name == "assert" {
+          if args.len() != 1 {
+            return Err("`assert` without one argument");
+          }
+
+          const holds = self.operand_as(args[0], types::of(TypeKind::Bool))?;
+
+          self.emit(Stmt::If { cond: holds, then_body: new List(), else_body: List::from([Stmt::Panic(PanicMessage::Static("assertion failed"))]) });
+
+          return Ok(unit_operand());
+        }
+
+        if name == "unreachable" || name == "todo" {
+          self.emit(Stmt::Panic(PanicMessage::Static(if name == "todo" { "not yet implemented" } else { "entered unreachable code" })));
+
+          return Ok(unit_operand());
+        }
+
+        if name == "assert_eq" || name == "assert_ne" {
+          const function = match self.typed.builtin_methods.get(value.id) {
+            Some(BuiltinMethod::Prelude(found)) => found,
+            _ => return Err("an assertion without its prelude function"),
+          };
+          const subst = mono::call_subst(self, value.id, function, None);
+          const params = match self.typed.sig(function) {
+            Some(sig) => types::substitute_sig(sig, subst).params,
+            None => new List(),
+          };
+
+          if args.len() != 2 || params.len() != 2 {
+            return Err("an assertion without two arguments");
+          }
+
+          const operands = List::from([self.operand_as(args[0], params[0])?, self.operand_as(args[1], params[1])?]);
+          const message_ty = types::option(types::string());
+          const failure = self.call(Callee::Fn(mono::instance(self, function, subst)), operands, message_ty);
+          const place = self.operand_place(failure, message_ty)?;
+          const failed = matching::tag_is(self, place, 1)?;
+          const message = Operand::Place(project(place, Projection::VariantField { variant: 1, field: 0 }, types::string()));
+
+          self.emit(Stmt::If { cond: failed, then_body: List::from([Stmt::Panic(PanicMessage::Value(message))]), else_body: new List() });
+
+          return Ok(unit_operand());
         }
 
         if name == "char::from_u32" {

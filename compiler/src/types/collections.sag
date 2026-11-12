@@ -322,6 +322,83 @@ pub fn prelude_method(cx: Checker, value: Expr, name: String, type_args: List<Ty
   types::substitute(found_sig.ret, subst)
 }
 
+/// A method of a built-in type written as the prelude function `name`, whose first parameter is
+/// the receiver: its type parameters come from the receiver's type, then from the arguments, as
+/// a generic call infers them (docs/adr/0093-everyday-methods.md, Q617).
+pub fn inferred_prelude_method(cx: Checker, value: Expr, name: String, receiver_ty: Type, args: List<Expr>) -> Type {
+  const function = match cx.resolution.prelude_fn(name) {
+    Some(found) => found,
+    None => {
+      exprs::unchecked_args(cx, args);
+
+      return types::error();
+    }
+  };
+  const sig = match cx.typed.sig(function) {
+    Some(found) => found,
+    None => {
+      exprs::unchecked_args(cx, args);
+
+      return types::error();
+    }
+  };
+  const unknowns = new generic::Unknowns();
+
+  unknowns.add(ParamOwner::Fn(function), cx.generic_count(ParamOwner::Fn(function)), None);
+
+  if let Some(receiver_param) = sig.params.first() {
+    unknowns.unify(receiver_param, receiver_ty);
+  }
+
+  const params: List<Type> = new List();
+
+  for index in 1..sig.params.len() {
+    params.push(sig.params[index]);
+  }
+
+  generic::generic_args(cx, value.span, "method", params, args, Subst::empty(), unknowns);
+
+  const subst = generic::finish_inference(cx, value.span, "`" + name + "`", unknowns);
+
+  cx.typed.call_args.insert(value.id, subst.args_of(ParamOwner::Fn(function)).unwrap_or(new List()));
+  cx.typed.builtin_methods.insert(value.id, BuiltinMethod::Prelude(function));
+
+  types::substitute(sig.ret, subst)
+}
+
+/// A call of the generic prelude function `name` for a builtin, its type parameters inferred
+/// from the arguments: its result.
+pub fn inferred_prelude_call(cx: Checker, value: Expr, name: String, args: List<Expr>) -> Type {
+  const function = match cx.resolution.prelude_fn(name) {
+    Some(found) => found,
+    None => {
+      exprs::unchecked_args(cx, args);
+
+      return types::error();
+    }
+  };
+  const sig = match cx.typed.sig(function) {
+    Some(found) => found,
+    None => {
+      exprs::unchecked_args(cx, args);
+
+      return types::error();
+    }
+  };
+  const unknowns = new generic::Unknowns();
+
+  unknowns.add(ParamOwner::Fn(function), cx.generic_count(ParamOwner::Fn(function)), None);
+  generic::generic_args(cx, value.span, "function", sig.params, args, Subst::empty(), unknowns);
+
+  const shown = name.substring(0, name.len() - "_failure".len());
+  const subst = generic::finish_inference(cx, value.span, "`" + shown + "`", unknowns);
+
+  cx.typed.call_args.insert(value.id, subst.args_of(ParamOwner::Fn(function)).unwrap_or(new List()));
+  cx.typed.builtin_methods.insert(value.id, BuiltinMethod::Prelude(function));
+
+  types::substitute(sig.ret, subst)
+}
+
 /// `receiver.method(args)` on a list or array, for a method of `Iter`: the receiver becomes an
 /// iterator first.
 fn iter_shorthand(cx: Checker, value: Expr, receiver: Expr, elem: Type, method: Ident, args: List<Expr>) -> Type {
@@ -387,7 +464,7 @@ pub fn primitive_method(cx: Checker, value: Expr, receiver_ty: Type, method: Ide
   }
 
   const primitive = match receiver_ty.kind {
-    TypeKind::Int(_) | TypeKind::Bool | TypeKind::Char | TypeKind::String | TypeKind::Tuple(_) => true,
+    TypeKind::Int(_) | TypeKind::Bool | TypeKind::Char | TypeKind::String | TypeKind::Tuple(_) | TypeKind::Option(_) | TypeKind::Result { .. } => true,
     _ => false,
   };
 
@@ -407,10 +484,13 @@ pub fn primitive_method(cx: Checker, value: Expr, receiver_ty: Type, method: Ide
 
   // A tuple has the methods of the interfaces all its elements implement
   // (docs/adr/0092-tuples.md, Q611).
-  if let TypeKind::Tuple(_) = receiver_ty.kind {
-    if !cx.typed.implemented_refs(receiver_ty).iter().any((found) => found.id == interface_id) {
-      return None;
-    }
+  const compared = match receiver_ty.kind {
+    TypeKind::Tuple(_) | TypeKind::Option(_) | TypeKind::Result { .. } => true,
+    _ => false,
+  };
+
+  if compared && !cx.typed.implemented_refs(receiver_ty).iter().any((found) => found.id == interface_id) {
+    return None;
   }
   const function = cx.typed.interface_def(interface_id)?.methods.first()?;
 

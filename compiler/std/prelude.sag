@@ -733,6 +733,186 @@ fn list_sort_by<T>(list: List<T>, compare: fn(T, T) -> Ordering) {
   }
 }
 
+// ---- The methods of `Option` and `Result` (docs/adr/0093-everyday-methods.md, Q619) -----------
+//
+// Called as methods: `value.ok_or(error)` is `option_ok_or(value, error)`. `take` and `replace`
+// change the place holding the value, which `mem::replace` does.
+
+/// The message of a failed `assert_eq`, or `None` (docs/adr/0093-everyday-methods.md, Q618).
+fn assert_eq_failure<T: Eq>(left: T, right: T) -> Option<String> {
+  if left == right { None } else { Some(f"assertion failed: left == right\n  left: {left:?}\n right: {right:?}") }
+}
+
+/// The message of a failed `assert_ne`, or `None`.
+fn assert_ne_failure<T: Eq>(left: T, right: T) -> Option<String> {
+  if left != right { None } else { Some(f"assertion failed: left != right\n  left: {left:?}\n right: {right:?}") }
+}
+
+fn option_ok_or<T, E>(value: Option<T>, error: E) -> Result<T, E> {
+  match value {
+    Some(found) => Ok(found),
+    None => Err(error),
+  }
+}
+
+fn option_ok_or_else<T, E>(value: Option<T>, error: fn() -> E) -> Result<T, E> {
+  match value {
+    Some(found) => Ok(found),
+    None => Err(error()),
+  }
+}
+
+fn option_or<T>(value: Option<T>, other: Option<T>) -> Option<T> {
+  match value {
+    Some(found) => Some(found),
+    None => other,
+  }
+}
+
+fn option_or_else<T>(value: Option<T>, other: fn() -> Option<T>) -> Option<T> {
+  match value {
+    Some(found) => Some(found),
+    None => other(),
+  }
+}
+
+fn option_and<T, U>(value: Option<T>, other: Option<U>) -> Option<U> {
+  match value {
+    Some(_) => other,
+    None => None,
+  }
+}
+
+fn option_xor<T>(value: Option<T>, other: Option<T>) -> Option<T> {
+  match value {
+    Some(found) => if other.is_none() { Some(found) } else { None },
+    None => other,
+  }
+}
+
+fn option_map_or<T, U>(value: Option<T>, default: U, f: fn(T) -> U) -> U {
+  match value {
+    Some(found) => f(found),
+    None => default,
+  }
+}
+
+fn option_map_or_else<T, U>(value: Option<T>, default: fn() -> U, f: fn(T) -> U) -> U {
+  match value {
+    Some(found) => f(found),
+    None => default(),
+  }
+}
+
+fn option_is_some_and<T>(value: Option<T>, f: fn(T) -> bool) -> bool {
+  match value {
+    Some(found) => f(found),
+    None => false,
+  }
+}
+
+fn option_is_none_or<T>(value: Option<T>, f: fn(T) -> bool) -> bool {
+  match value {
+    Some(found) => f(found),
+    None => true,
+  }
+}
+
+fn option_zip<T, U>(value: Option<T>, other: Option<U>) -> Option<(T, U)> {
+  match value {
+    Some(first) => match other {
+      Some(second) => Some((first, second)),
+      None => None,
+    },
+    None => None,
+  }
+}
+
+fn option_flatten<T>(value: Option<Option<T>>) -> Option<T> {
+  match value {
+    Some(inner) => inner,
+    None => None,
+  }
+}
+
+fn option_iter<T>(value: Option<T>) -> Iter<T> {
+  const left = new Cell<Option<T>>(value);
+
+  new Iter<T>(() => {
+    const found = left.value;
+
+    left.value = None;
+    found
+  })
+}
+
+fn result_ok<T, E>(value: Result<T, E>) -> Option<T> {
+  match value {
+    Ok(found) => Some(found),
+    Err(_) => None,
+  }
+}
+
+fn result_err<T, E>(value: Result<T, E>) -> Option<E> {
+  match value {
+    Ok(_) => None,
+    Err(error) => Some(error),
+  }
+}
+
+fn result_and<T, E, U>(value: Result<T, E>, other: Result<U, E>) -> Result<U, E> {
+  match value {
+    Ok(_) => other,
+    Err(error) => Err(error),
+  }
+}
+
+fn result_or<T, E, F>(value: Result<T, E>, other: Result<T, F>) -> Result<T, F> {
+  match value {
+    Ok(found) => Ok(found),
+    Err(_) => other,
+  }
+}
+
+fn result_or_else<T, E, F>(value: Result<T, E>, other: fn(E) -> Result<T, F>) -> Result<T, F> {
+  match value {
+    Ok(found) => Ok(found),
+    Err(error) => other(error),
+  }
+}
+
+fn result_map_or<T, E, U>(value: Result<T, E>, default: U, f: fn(T) -> U) -> U {
+  match value {
+    Ok(found) => f(found),
+    Err(_) => default,
+  }
+}
+
+fn result_map_or_else<T, E, U>(value: Result<T, E>, default: fn(E) -> U, f: fn(T) -> U) -> U {
+  match value {
+    Ok(found) => f(found),
+    Err(error) => default(error),
+  }
+}
+
+fn result_is_ok_and<T, E>(value: Result<T, E>, f: fn(T) -> bool) -> bool {
+  match value {
+    Ok(found) => f(found),
+    Err(_) => false,
+  }
+}
+
+fn result_is_err_and<T, E>(value: Result<T, E>, f: fn(E) -> bool) -> bool {
+  match value {
+    Ok(_) => false,
+    Err(error) => f(error),
+  }
+}
+
+fn result_iter<T, E>(value: Result<T, E>) -> Iter<T> {
+  option_iter(result_ok(value))
+}
+
 fn list_join(list: List<String>, separator: String) -> String {
   const builder = new StringBuilder();
 

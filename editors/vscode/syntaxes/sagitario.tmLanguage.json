@@ -376,6 +376,55 @@
               "name": "variable.other.readwrite.declaration.sagitario"
             }
           }
+        },
+        {
+          "comment": "`const (a, b) = ...` and `for (index, value) in ...` (docs/adr/0092-tuples.md)",
+          "begin": "\\b(?:(const|var)|(for))\\s*(?=\\()",
+          "beginCaptures": {
+            "1": {
+              "name": "storage.type.sagitario"
+            },
+            "2": {
+              "name": "keyword.control.sagitario"
+            }
+          },
+          "end": "(?<=\\))",
+          "patterns": [
+            {
+              "include": "#tuple-pattern"
+            }
+          ]
+        }
+      ]
+    },
+    "tuple-pattern": {
+      "begin": "\\(",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.section.parens.begin.sagitario"
+        }
+      },
+      "end": "\\)",
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.section.parens.end.sagitario"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#tuple-pattern"
+        },
+        {
+          "name": "keyword.operator.range.sagitario",
+          "match": "\\.\\."
+        },
+        {
+          "name": "variable.other.readwrite.declaration.sagitario",
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b"
+        },
+        {
+          "name": "punctuation.separator.comma.sagitario",
+          "match": ","
         }
       ]
     },
@@ -475,7 +524,7 @@
       "patterns": [
         {
           "name": "support.function.builtin.sagitario",
-          "match": "\\b(print|println|eprintln|panic|include_str)\\b(?=\\s*\\()"
+          "match": "\\b(print|println|eprintln|panic|include_str|assert|assert_eq|assert_ne|unreachable|todo)\\b(?=\\s*\\()"
         },
         {
           "name": "entity.name.function.call.sagitario",

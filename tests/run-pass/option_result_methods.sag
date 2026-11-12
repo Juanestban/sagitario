@@ -1,0 +1,30 @@
+// The methods of `Option` and `Result` written in the prelude: `ok_or`, `or`, `and`, `xor`,
+// `map_or`, `zip`, `flatten`, `ok`, `err`, `expect_err`... (docs/adr/0093-everyday-methods.md, Q619).
+// expect-stdout: Ok(3) Err("lazy")
+// expect-stdout: Some(9) Some(8) Some("b") Some(3) None
+// expect-stdout: 6 -1 true true
+// expect-stdout: Some((3, 'z')) Some(4) 1
+// expect-stdout: Some(12) Some("not a number: x") Ok(5) Ok(7)
+// expect-stdout: Ok(1) 13 15
+// expect-stdout: true true not a number: x 1
+
+fn parse(text: String) -> Result<i32, String> {
+  text.parse_i32().map_err((_) => f"not a number: {text}")
+}
+
+fn main() {
+  const some: Option<i32> = Some(3);
+  const none: Option<i32> = None;
+
+  println(f"{some.ok_or("missing"):?} {none.ok_or_else(() => "lazy"):?}");
+  println(f"{none.or(Some(9)):?} {none.or_else(() => Some(8)):?} {some.and(Some("b")):?} {some.xor(none):?} {some.xor(Some(1)):?}");
+  println(f"{some.map_or(0, (n) => n * 2)} {none.map_or_else(() => -1, (n) => n)} {some.is_some_and((n) => n > 2)} {none.is_none_or((n) => n > 5)}");
+  println(f"{some.zip(Some('z')):?} {Some(Some(4)).flatten():?} {some.iter().count()}");
+
+  const good = parse("12");
+  const bad = parse("x");
+
+  println(f"{good.ok():?} {bad.err():?} {good.and(parse("5")):?} {bad.or(parse("7")):?}");
+  println(f"{bad.or_else((_e) => parse("1")):?} {good.map_or(0, (n) => n + 1)} {bad.map_or_else((e) => e.len() as i32, (n) => n)}");
+  println(f"{good.is_ok_and((n) => n == 12)} {bad.is_err_and((e) => e.contains("x"))} {bad.expect_err("should fail")} {good.iter().count()}");
+}

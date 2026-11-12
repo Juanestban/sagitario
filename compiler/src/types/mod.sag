@@ -447,6 +447,36 @@ pub fn texts(types: List<Type>) -> List<String> {
   parts
 }
 
+/// The position in a tuple of `len` elements that the name of an element gives: `0`, `1`... from
+/// the start, or `-1`, `-2`... from the end, as the elements after `..` of a pattern are read
+/// (docs/adr/0092-tuples.md).
+pub fn tuple_index(name: String, len: usize) -> Option<usize> {
+  if name.starts_with("-") {
+    const back = match name.substring(1, name.len()).parse_u64() {
+      Ok(found) => found,
+      Err(_) => return None,
+    };
+
+    return if back >= 1 && back <= len as u64 { Some(len - back as usize) } else { None };
+  }
+
+  const position = match name.parse_u64() {
+    Ok(found) => found,
+    Err(_) => return None,
+  };
+
+  if position < len as u64 { Some(position as usize) } else { None }
+}
+
+/// The position in a tuple of `len` elements of the element `index` of a pattern with `count`
+/// elements and `..` at `rest`: those after `..` count from the end.
+pub fn pattern_position(index: usize, count: usize, rest: Option<usize>, len: usize) -> usize {
+  match rest {
+    Some(position) => if index < position { index } else { len - (count - index) },
+    None => index,
+  }
+}
+
 /// The type as messages write it (Rust's `Display` for `Type`).
 pub fn text(ty: Type) -> String {
   match ty.kind {

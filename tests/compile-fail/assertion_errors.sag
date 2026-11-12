@@ -1,0 +1,14 @@
+// The arguments of the assertions, and the methods `Option` and `Result` do not have
+// (docs/adr/0093-everyday-methods.md, Q618 and Q619).
+fn main() {
+  assert(1); //~ ERROR E0300
+  assert_eq(1.5, 1.5); //~ ERROR E0330
+  assert_eq(1, "a"); //~ ERROR E0300
+  assert_ne(1); //~ ERROR E0301
+  const option: Option<i32> = Some(1);
+  const _taken = option.take(); //~ ERROR E0316
+  const _flat = option.flatten(); //~ ERROR E0316
+  const result: Result<i32, String> = Ok(1);
+  const _error = result.expect_err(5); //~ ERROR E0300
+  const _floats = Some(1.5) == Some(1.5); //~ ERROR E0310
+}

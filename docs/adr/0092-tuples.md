@@ -90,3 +90,15 @@ fn main() {
 - `try_type_args`, which tries `<...>` after a name in an expression and goes back when it is a
   comparison, now gives back the ids of the nodes it parsed: with tuple types, `a < (b + 1)`
   parsed a path inside the parentheses first. The ids of the expected dumps change, nothing else.
+- Increment 2 is done. In `match`, `if let` and `while let`, `PatternKind::Elements` is a pattern
+  of its own: a tuple has one constructor for the exhaustiveness of a match (`Ctor::Tuple`),
+  with an argument per element, so `(false, _)` is reported as not covered, and SIR tests and
+  binds each element at its place. In `const`, `var` and `for`, the parser takes the pattern
+  apart instead: a hidden binding (`_tuple#N`, a name no source can write) holds the value, then
+  each name is a binding of its own read from it, so scopes, definite assignment, the warning on
+  a `var` never reassigned and the counts of references are those of ordinary bindings. The
+  elements after `..` are read from the end (`-1` is the last one, `types::tuple_index`), and the
+  checker tests the number of elements on the hidden binding (`LetStmt::shape`). A pattern that
+  might not match there is `E0107`, from the parser. `sag lsp` leaves the hidden parts out of its
+  tokens, hovers and definitions; the grammar highlights the names a declaration's pattern
+  binds, and the snippets `fortuple` and `consttuple` write them.

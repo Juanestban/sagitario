@@ -55,6 +55,8 @@ pub enum BuiltinMethod {
   IsErr,
   Unwrap,
   Expect,
+  /// `expect_err(message)` on a `Result`.
+  ExpectErr,
   UnwrapOr,
   UnwrapErr,
   /// A runtime function taking the receiver and the arguments in order; `located` functions
@@ -707,6 +709,13 @@ pub class TypedModule {
       }
       TypeKind::Tuple(elems) => {
         direct = self.tuple_impls(elems);
+      }
+      // As Rust's (docs/adr/0093-everyday-methods.md, Q619).
+      TypeKind::Option(value) => {
+        direct = self.tuple_impls(List::from([value]));
+      }
+      TypeKind::Result { value, error } => {
+        direct = self.tuple_impls(List::from([value, error]));
       }
       _ => {
         direct = self.primitive_impls(ty);

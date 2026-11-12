@@ -427,7 +427,7 @@ pub fn is_primitive_method(lw: Lowering, function: u32, receiver_ty: Type) -> bo
   }
 
   const tuple = match receiver_ty.kind {
-    TypeKind::Tuple(_) => true,
+    TypeKind::Tuple(_) | TypeKind::Option(_) | TypeKind::Result { .. } => true,
     _ => false,
   };
 
@@ -578,6 +578,10 @@ pub fn values_equal(lw: Lowering, ty: Type, lhs: Operand, rhs: Operand) -> Resul
     return Ok(pkg::sir::strings::binary(lw, BinaryOp::Eq, ty, lhs, rhs));
   }
 
+  if is_option_or_result(ty) {
+    return variants_equal(lw, ty, lhs, rhs);
+  }
+
   const elems = match ty.kind {
     TypeKind::Tuple(found) => found,
     _ => return element_call(lw, lw.typed.prelude.eq, ty, lhs, List::from([rhs]), bool_type()),
@@ -628,6 +632,10 @@ pub fn values_order(lw: Lowering, ordering_ty: Type, ty: Type, lhs: Operand, rhs
     return Ok(ordering(lw, ordering_ty, order));
   }
 
+  if is_option_or_result(ty) {
+    return variants_order(lw, ordering_ty, ty, lhs, rhs);
+  }
+
   const elems = match ty.kind {
     TypeKind::Tuple(found) => found,
     _ => return element_call(lw, lw.typed.prelude.ord, ty, lhs, List::from([rhs]), ordering_ty),
@@ -659,6 +667,123 @@ pub fn values_order(lw: Lowering, ordering_ty: Type, ty: Type, lhs: Operand, rhs
   Ok(Operand::Local(result))
 }
 
+fn is_option_or_result(ty: Type) -> bool {
+  match ty.kind {
+    TypeKind::Option(_) | TypeKind::Result { .. } => true,
+    _ => false,
+  }
+}
+
+/// The value held by the variant `variant` of an `Option` or a `Result`.
+fn held(lw: Lowering, value: Operand, ty: Type, variant: u32, held_ty: Type) -> Result<Operand, String> {
+  Ok(Operand::Place(project(lw.operand_place(value, ty)?, Projection::VariantField { variant: variant, field: 0 }, held_ty)))
+}
+
+/// Each variant of an `Option` or a `Result` with the type of the value it holds.
+fn holding_variants(lw: Lowering, ty: Type) -> List<VariantHolding> {
+  const result: List<VariantHolding> = new List();
+
+  if let Some(variants) = lw.layouts.variants(ty) {
+    for index in 0..variants.len() {
+      if let Some(held_ty) = variants[index].first() {
+        result.push(VariantHolding { variant: index as u32, ty: held_ty });
+      }
+    }
+  }
+
+  result
+}
+
+struct VariantHolding {
+  pub variant: u32;
+  pub ty: Type;
+}
+
+/// `Option` and `Result` are equal when they are the same variant holding equal values
+/// (docs/adr/0093-everyday-methods.md, Q619).
+fn variants_equal(lw: Lowering, ty: Type, lhs: Operand, rhs: Operand) -> Result<Operand, String> {
+  const left_tag = matching::tag(lw, lhs, ty)?;
+  const right_tag = matching::tag(lw, rhs, ty)?;
+  const result = lw.temp(bool_type());
+
+  lw.emit(Stmt::Assign { dest: result, value: Rvalue::Binary { op: BinaryOp::Eq, ty: pkg::sir::tag_type(), lhs: left_tag, rhs: right_tag } });
+
+  for holding in holding_variants(lw, ty) {
+    const mark = lw.open_buffer();
+    const left = held(lw, lhs, ty, holding.variant, holding.ty)?;
+    const right = held(lw, rhs, ty, holding.variant, holding.ty)?;
+    const equal = values_equal(lw, holding.ty, left, right)?;
+
+    lw.emit(Stmt::Assign { dest: result, value: Rvalue::Use(equal) });
+
+    const body = lw.close_buffer(mark);
+    const this_variant = binary_value(lw, bool_type(), BinaryOp::Eq, pkg::sir::tag_type(), left_tag, int_operand(holding.variant as u64, false, IntTy::U32));
+    const both = lw.temp(bool_type());
+
+    lw.emit(Stmt::Assign { dest: both, value: Rvalue::Use(bool_operand(false)) });
+    lw.emit(Stmt::If { cond: Operand::Local(result), then_body: List::from([Stmt::Assign { dest: both, value: Rvalue::Use(this_variant) }]), else_body: new List() });
+    lw.emit(Stmt::If { cond: Operand::Local(both), then_body: body, else_body: new List() });
+  }
+
+  Ok(Operand::Local(result))
+}
+
+/// The order of `Option` and `Result` values: by variant, as they are declared (`None` before
+/// `Some`, `Ok` before `Err`), then by the values they hold.
+fn variants_order(lw: Lowering, ordering_ty: Type, ty: Type, lhs: Operand, rhs: Operand) -> Result<Operand, String> {
+  const left_tag = matching::tag(lw, lhs, ty)?;
+  const right_tag = matching::tag(lw, rhs, ty)?;
+  const order = values_order(lw, ordering_ty, types::int(IntTy::U32), left_tag, right_tag)?;
+  const result = lw.temp(ordering_ty);
+
+  lw.emit(Stmt::Assign { dest: result, value: Rvalue::Use(order) });
+
+  for holding in holding_variants(lw, ty) {
+    const mark = lw.open_buffer();
+    const left = held(lw, lhs, ty, holding.variant, holding.ty)?;
+    const right = held(lw, rhs, ty, holding.variant, holding.ty)?;
+    const inner = values_order(lw, ordering_ty, holding.ty, left, right)?;
+
+    lw.emit(Stmt::Assign { dest: result, value: Rvalue::Use(inner) });
+
+    const body = lw.close_buffer(mark);
+    const equal = matching::tag_is(lw, local_place(result, ordering_ty), 1)?;
+    const this_variant = binary_value(lw, bool_type(), BinaryOp::Eq, pkg::sir::tag_type(), left_tag, int_operand(holding.variant as u64, false, IntTy::U32));
+    const both = lw.temp(bool_type());
+
+    lw.emit(Stmt::Assign { dest: both, value: Rvalue::Use(bool_operand(false)) });
+    lw.emit(Stmt::If { cond: equal, then_body: List::from([Stmt::Assign { dest: both, value: Rvalue::Use(this_variant) }]), else_body: new List() });
+    lw.emit(Stmt::If { cond: Operand::Local(both), then_body: body, else_body: new List() });
+  }
+
+  Ok(Operand::Local(result))
+}
+
+/// The hash of an `Option` or a `Result`: its variant's, with the hash of the value it holds.
+fn variants_hash(lw: Lowering, ty: Type, value: Operand) -> Result<Operand, String> {
+  const u64_type = types::int(IntTy::U64);
+  const tag = matching::tag(lw, value, ty)?;
+  const bits = lw.new_value(u64_type, Rvalue::Cast { from: types::int(IntTy::U32), to: u64_type, operand: tag });
+  const result = lw.temp(u64_type);
+
+  lw.emit(Stmt::Assign { dest: result, value: Rvalue::Call { callee: runtime("sag_hash_u64"), args: List::from([bits]) } });
+
+  for holding in holding_variants(lw, ty) {
+    const mark = lw.open_buffer();
+    const part = value_hash(lw, holding.ty, held(lw, value, ty, holding.variant, holding.ty)?)?;
+    const mixed = binary_value(lw, u64_type, BinaryOp::BitXor, u64_type, Operand::Local(result), part);
+
+    lw.emit(Stmt::Assign { dest: result, value: Rvalue::Call { callee: runtime("sag_hash_u64"), args: List::from([mixed]) } });
+
+    const body = lw.close_buffer(mark);
+    const this_variant = binary_value(lw, bool_type(), BinaryOp::Eq, pkg::sir::tag_type(), tag, int_operand(holding.variant as u64, false, IntTy::U32));
+
+    lw.emit(Stmt::If { cond: this_variant, then_body: body, else_body: new List() });
+  }
+
+  Ok(Operand::Local(result))
+}
+
 /// The hash of `value`, of type `ty`: a `u64`. A tuple mixes the hash of each element into the
 /// hash of those before it.
 pub fn value_hash(lw: Lowering, ty: Type, value: Operand) -> Result<Operand, String> {
@@ -672,6 +797,10 @@ pub fn value_hash(lw: Lowering, ty: Type, value: Operand) -> Result<Operand, Str
     const bits = lw.new_value(u64_type, Rvalue::Cast { from: ty, to: u64_type, operand: value });
 
     return Ok(lw.new_value(u64_type, Rvalue::Call { callee: runtime("sag_hash_u64"), args: List::from([bits]) }));
+  }
+
+  if is_option_or_result(ty) {
+    return variants_hash(lw, ty, value);
   }
 
   const elems = match ty.kind {

@@ -5,7 +5,7 @@
 use pkg::ast::{
   ArrayLen, BinaryOp, Block, ClassDecl, ConstDecl, StaticDecl, Discriminant, EnumDecl, Export, Expr, ExprKind, ExternBlock, ExternFn, FieldDecl, FieldInit, FieldPattern,
   FnDecl, GenericParam, Ident, ImplBlock, InterfaceDecl, Item, LambdaParam, LetStmt, MatchArm, Module, Param, Path, Pattern, PatternKind, Stmt,
-  StructDecl, TargetInfo, FormatSpec, TemplatePart, TypeArgs, TypeExpr, TypeExprKind, UnaryOp, UseDecl, UseTree, UseTreeKind, VariantDecl, VariantFieldDecl,
+  StructDecl, TargetInfo, FormatSpec, TemplatePart, TupleShape, TypeArgs, TypeExpr, TypeExprKind, UnaryOp, UseDecl, UseTree, UseTreeKind, VariantDecl, VariantFieldDecl,
   VariantFields, Visibility,
 };
 use pkg::cfg;
@@ -254,6 +254,8 @@ enum Body {
 
 enum StmtOrTail {
   Stmt(Stmt),
+  /// The statements a declaration with a tuple pattern becomes.
+  Stmts(List<Stmt>),
   /// An expression without `;`: the block's value if `}` follows, otherwise a block-like
   /// expression statement.
   Tail(Expr),
@@ -2421,6 +2423,11 @@ class Parser {
 
       match self.stmt() {
         Ok(StmtOrTail::Stmt(stmt)) => stmts.push(stmt),
+        Ok(StmtOrTail::Stmts(several)) => {
+          for stmt in several {
+            stmts.push(stmt);
+          }
+        }
         Ok(StmtOrTail::Tail(expr)) => {
           tail = Some(expr);
         }
@@ -2434,6 +2441,10 @@ class Parser {
   }
 
   prv fn stmt(self) -> Result<StmtOrTail, ()> {
+    if (self.at_keyword("const") || self.at_keyword("var")) && is_punct(self.nth_kind(1), "(") {
+      return Ok(StmtOrTail::Stmts(self.let_pattern()?));
+    }
+
     if self.at_keyword("const") || self.at_keyword("var") {
       return Ok(StmtOrTail::Stmt(self.let_stmt()?));
     }
@@ -2479,7 +2490,100 @@ class Parser {
     const init: Option<Expr> = if self.eat("=") { Some(self.expr()?) } else { None };
     const end = self.expect(";")?.span;
 
-    Ok(Stmt::Let(LetStmt { id: id, mutable: mutable, name: name, ty: ty, init: init, span: start.to(end) }))
+    Ok(Stmt::Let(LetStmt { id: id, mutable: mutable, name: name, ty: ty, init: init, span: start.to(end), shape: None }))
+  }
+
+  /// `const (a, b) = value;` or `var (a, b): (A, B) = value;`: a hidden binding holding the value,
+  /// then a binding for each name, read from it (docs/adr/0092-tuples.md, Q610).
+  prv fn let_pattern(self) -> Result<List<Stmt>, ()> {
+    const start = self.span();
+    const mutable = is_keyword(self.advance().kind, "var");
+    const pattern = self.pattern()?;
+    const ty: Option<TypeExpr> = if self.eat(":") { Some(self.type_expr()?) } else { None };
+
+    self.expect("=")?;
+
+    const init = self.expr()?;
+    const end = self.expect(";")?.span;
+    const stmts: List<Stmt> = new List();
+
+    if self.always_matches(pattern) {
+      self.take_apart(pattern, mutable, ty, init, start.to(end), stmts);
+    }
+
+    Ok(stmts)
+  }
+
+  /// Whether every value matches `pattern`, as a declaration requires: names, `_` and tuple
+  /// patterns of them. Reports the first part that might not match.
+  prv fn always_matches(self, pattern: Pattern) -> bool {
+    match pattern.kind {
+      PatternKind::Wildcard => true,
+      // `None` is the prelude's variant, not a new name.
+      PatternKind::Ident(name) if name.name != "None" => true,
+      PatternKind::Elements { elems, .. } => {
+        for elem in elems {
+          if !self.always_matches(elem) {
+            return false;
+          }
+        }
+
+        true
+      }
+      _ => {
+        self.diagnostics.push(
+          Diagnostic::error(codes::REFUTABLE_PATTERN, pattern.span, "this pattern might not match the value")
+            .with_note("a declaration and a `for` take every value apart: their patterns are names, `_`, `..` and tuples of them")
+            .with_help("use `if let` or `match` to test the value"),
+        );
+
+        false
+      }
+    }
+  }
+
+  /// The statements binding the names of `pattern` to the parts of `value`: a hidden binding for
+  /// a tuple pattern, then one for each element; a name binds the value itself.
+  prv fn take_apart(self, pattern: Pattern, mutable: bool, ty: Option<TypeExpr>, value: Expr, span: Span, stmts: List<Stmt>) {
+    match pattern.kind {
+      PatternKind::Ident(name) => {
+        stmts.push(Stmt::Let(LetStmt { id: self.next_id(), mutable: mutable, name: name, ty: ty, init: Some(value), span: span, shape: None }));
+      }
+      PatternKind::Elements { elems, rest } => {
+        const hidden = Ident { name: `_tuple#${pattern.id}`, span: pattern.span };
+        const count = elems.len();
+
+        stmts.push(Stmt::Let(LetStmt {
+          id: self.next_id(),
+          mutable: false,
+          name: hidden,
+          ty: ty,
+          init: Some(value),
+          span: span,
+          shape: Some(TupleShape { count: count, rest: rest.is_some(), span: pattern.span }),
+        }));
+
+        for index in 0..count {
+          const elem = elems[index];
+
+          if let PatternKind::Wildcard = elem.kind {
+            continue;
+          }
+
+          // After `..`, elements count from the end: `-1` is the last one.
+          const after_rest = match rest {
+            Some(position) => index >= position,
+            None => false,
+          };
+          const element = if after_rest { `-${count - index}` } else { `${index}` };
+          const base = self.expr_node(ExprKind::Path(Path { id: self.next_id(), segments: List::from([hidden]), type_args: None, span: pattern.span }), pattern.span);
+          const read = self.expr_node(ExprKind::Field { base: base, name: Ident { name: element, span: elem.span } }, elem.span);
+
+          self.take_apart(elem, mutable, None, read, elem.span, stmts);
+        }
+      }
+      _ => {}
+    }
   }
 
   /// Skips to just after the next `;`, or to the `}` closing the current block, at depth zero.
@@ -2968,12 +3072,39 @@ class Parser {
     if self.at_keyword("for") {
       self.advance();
 
-      const var_name = self.ident("a loop variable")?;
+      // `for (index, value) in ...`: a hidden loop variable, taken apart at the start of the body.
+      var pattern: Option<Pattern> = None;
+      var var_name = Ident { name: "", span: self.span() };
+
+      if self.at("(") {
+        const found = self.pattern()?;
+
+        var_name = Ident { name: `_tuple#${found.id}`, span: found.span };
+        pattern = Some(found);
+      } else {
+        var_name = self.ident("a loop variable")?;
+      }
 
       self.expect_keyword("in")?;
 
       const iter = self.expr_with_struct_literals(false)?;
-      const body = self.block()?;
+      var body = self.block()?;
+
+      if let Some(found) = pattern {
+        const stmts: List<Stmt> = new List();
+
+        if self.always_matches(found) {
+          const variable = self.expr_node(ExprKind::Path(Path { id: self.next_id(), segments: List::from([var_name]), type_args: None, span: found.span }), found.span);
+
+          self.take_apart(found, false, None, variable, found.span, stmts);
+        }
+
+        for stmt in body.stmts {
+          stmts.push(stmt);
+        }
+
+        body = Block { stmts: stmts, tail: body.tail, span: body.span };
+      }
 
       return Ok(self.expr_node(ExprKind::For { variable: var_name, iter: iter, body: body }, span.to(body.span)));
     }
@@ -3319,6 +3450,11 @@ class Parser {
   prv fn pattern_alternative(self) -> Result<Pattern, ()> {
     const start = self.span();
     const kind = self.kind();
+
+    if is_punct(kind, "(") {
+      return self.tuple_pattern();
+    }
+
     const literal = match kind {
       TokenKind::Int { .. } | TokenKind::Float { .. } | TokenKind::Str(_) | TokenKind::Char(_) => true,
       TokenKind::Keyword(keyword) => keyword == "true" || keyword == "false",
@@ -3397,6 +3533,55 @@ class Parser {
     }
 
     Ok(new Pattern(self.next_id(), pattern_kind, path.span))
+  }
+
+  /// `(a, b)`, `(first, ..)` or `(a, .., z)`; `(p)` is `p` (docs/adr/0092-tuples.md, Q610).
+  prv fn tuple_pattern(self) -> Result<Pattern, ()> {
+    const start = self.expect("(")?.span;
+    const elems: List<Pattern> = new List();
+    var rest: Option<usize> = None;
+    var commas = 0usize;
+
+    while !self.at(")") {
+      if self.at("..") {
+        const dots = self.advance().span;
+
+        if rest.is_some() {
+          self.diagnostics.push(
+            Diagnostic::error(codes::UNEXPECTED_TOKEN, dots, "`..` can stand only once in a tuple pattern")
+              .with_help("name or ignore with `_` the elements between"),
+          );
+        }
+
+        rest = Some(elems.len());
+      } else {
+        elems.push(self.pattern()?);
+      }
+
+      if !self.at(",") {
+        break;
+      }
+
+      const comma = self.advance().span;
+
+      commas += 1;
+
+      if self.at(")") && commas == 1 && elems.len() == 1 && rest.is_none() {
+        self.one_element_tuple(comma, "pattern");
+      }
+    }
+
+    const end = self.expect(")")?.span;
+
+    if commas == 0 && rest.is_none() {
+      if let Some(only) = elems.first() {
+        return Ok(only);
+      }
+
+      return Err(self.unexpected("a pattern"));
+    }
+
+    Ok(new Pattern(self.next_id(), PatternKind::Elements { elems: elems, rest: rest }, start.to(end)))
   }
 
   /// `[a, b, c]` or `[value; N]`.

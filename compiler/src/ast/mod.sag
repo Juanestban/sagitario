@@ -380,6 +380,38 @@ pub struct LetStmt {
   pub ty: Option<TypeExpr>;
   pub init: Option<Expr>;
   pub span: Span;
+  /// Set on the hidden binding a tuple pattern of `const`, `var` or `for` becomes: the parser
+  /// reads each element from it into a binding of its own (docs/adr/0092-tuples.md, Q610).
+  pub shape: Option<TupleShape>;
+}
+
+/// Whether `name` is that of a hidden binding the parser makes for a tuple pattern: no source
+/// can write it.
+pub fn is_hidden(name: String) -> bool {
+  name.starts_with("_tuple#")
+}
+
+/// Whether `value` reads an element of the hidden binding of a tuple pattern: the parser wrote
+/// it, at the place of the name it binds.
+pub fn is_hidden_read(value: Expr) -> bool {
+  match value.kind {
+    ExprKind::Field { base, .. } => match base.kind {
+      ExprKind::Path(path) => path.segments.len() == 1 && is_hidden(path.segments[0].name),
+      _ => false,
+    },
+    ExprKind::Path(path) => path.segments.len() == 1 && is_hidden(path.segments[0].name),
+    _ => false,
+  }
+}
+
+/// The elements a tuple pattern of a declaration takes apart.
+pub struct TupleShape {
+  /// The elements named or `_`, without `..`.
+  pub count: usize;
+  /// Whether `..` stands for any number of elements.
+  pub rest: bool;
+  /// The pattern.
+  pub span: Span;
 }
 
 pub enum BinaryOp {
@@ -552,6 +584,9 @@ pub enum PatternKind {
   Tuple { path: Path, elems: List<Pattern> },
   /// `Shape::Rect { w, h: 0.0, .. }`; `rest` is set by `..`.
   Named { path: Path, fields: List<FieldPattern>, rest: bool },
+  /// `(a, b)`, or `(a, .., z)` with `rest` the position of `..` among `elems`
+  /// (docs/adr/0092-tuples.md, Q610).
+  Elements { elems: List<Pattern>, rest: Option<usize> },
   /// `a | b`
   Or(List<Pattern>),
 }

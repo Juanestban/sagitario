@@ -288,7 +288,7 @@ pub fn neg_call(cx: Checker, value: Expr, ty: Type) -> Type {
 /// identity of class instances (Q514). Both operands were checked and have type `ty`.
 pub fn comparison_call(cx: Checker, value: Expr, op: BinaryOp, ty: Type, span: Span) -> Option<Type> {
   const by_interface = match ty.kind {
-    TypeKind::Struct(_) | TypeKind::Enum(_) | TypeKind::Param(_) | TypeKind::Tuple(_) => true,
+    TypeKind::Struct(_) | TypeKind::Enum(_) | TypeKind::Param(_) | TypeKind::Tuple(_) | TypeKind::Option(_) | TypeKind::Result { .. } => true,
     _ => false,
   };
 
@@ -326,6 +326,7 @@ pub fn comparison_call(cx: Checker, value: Expr, op: BinaryOp, ty: Type, span: S
   cx.diagnostics.push(match ty.kind {
     TypeKind::Param(_) => diagnostic.with_help("bound the type parameter: `" + shown + ": " + interface_name + "`"),
     TypeKind::Tuple(_) => diagnostic.with_note("a tuple implements `" + interface_name + "` when every element does"),
+    TypeKind::Option(_) | TypeKind::Result { .. } => diagnostic.with_note("`Option` and `Result` implement `" + interface_name + "` when the values they hold do"),
     _ => diagnostic.with_help("implement `" + interface_name + "` for `" + shown + "`: `" + impl_header(cx, ty, interface_name) + " { " + method + " { ... } }`"),
   });
 

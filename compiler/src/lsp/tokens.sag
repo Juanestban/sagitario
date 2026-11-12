@@ -5,6 +5,7 @@
 //! variables, parameters, fields and methods, which would otherwise take the color of the string.
 
 use pkg::ast::{Block, Expr, ExprKind, FnDecl, Ident, Item, Module, Path, Pattern, PatternKind, Stmt, TypeExpr, TypeExprKind, UseTree, UseTreeKind};
+use pkg::ast;
 use pkg::lsp::analysis::Analysis;
 use pkg::lsp::json;
 use pkg::lsp::json::{Json, member};
@@ -380,8 +381,11 @@ class Collector {
             self.type_expr(ty);
           }
 
+          // What the parser wrote for a tuple pattern has no tokens of its own.
           if let Some(init) = decl.init {
-            self.expr(init);
+            if !ast::is_hidden_read(init) {
+              self.expr(init);
+            }
           }
         }
         Stmt::Assign { target, value, .. } => {
@@ -414,7 +418,7 @@ class Collector {
           self.pattern(field.pattern);
         }
       }
-      PatternKind::Or(alternatives) => {
+      PatternKind::Or(alternatives) | PatternKind::Elements { elems: alternatives, .. } => {
         for alternative in alternatives {
           self.pattern(alternative);
         }

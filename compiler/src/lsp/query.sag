@@ -2,6 +2,7 @@
 //! its type for hover, and where it is declared (docs/adr/0058-language-server.md).
 
 use pkg::ast::{Block, Expr, ExprKind, FnDecl, Ident, Item, Module, Package, Path, Pattern, PatternKind, Stmt, TypeExpr, TypeExprKind, UseTree, UseTreeKind};
+use pkg::ast;
 use pkg::lsp::analysis::Analysis;
 use pkg::resolve::{EnumKind, ItemRef, Res, Resolution, TypeItem, TypeRes};
 use pkg::span::Span;
@@ -301,7 +302,10 @@ class Finder {
     for stmt in block.stmts {
       match stmt {
         Stmt::Let(decl) => {
-          self.name(decl.name);
+          // The hidden binding of a tuple pattern spans the pattern, whose names come next.
+          if !ast::is_hidden(decl.name.name) {
+            self.name(decl.name);
+          }
 
           if let Some(ty) = decl.ty {
             self.type_expr(ty);
@@ -346,7 +350,7 @@ class Finder {
           self.pattern(field.pattern);
         }
       }
-      PatternKind::Or(alternatives) => {
+      PatternKind::Or(alternatives) | PatternKind::Elements { elems: alternatives, .. } => {
         for alternative in alternatives {
           self.pattern(alternative);
         }
@@ -464,7 +468,10 @@ class Finder {
       }
       ExprKind::Loop(body) => self.block(body),
       ExprKind::For { variable, iter, body } => {
-        self.name(variable);
+        if !ast::is_hidden(variable.name) {
+          self.name(variable);
+        }
+
         self.expr(iter);
         self.block(body);
       }
