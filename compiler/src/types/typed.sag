@@ -702,6 +702,19 @@ pub class TypedModule {
             direct.push(interface_ref);
           }
         }
+
+        // A map is equal to another with the same keys and equal values (docs/adr/0093-everyday-methods.md, Q623).
+        if let Some(map) = self.prelude.map {
+          if map == named.id {
+            if let Some(eq) = self.prelude.eq {
+              const eq_ref = NamedRef { id: eq, name: "Eq", args: new List() };
+
+              if named.args.len() == 2 && self.implements(named.args[1], eq_ref) {
+                direct.push(eq_ref);
+              }
+            }
+          }
+        }
       }
       TypeKind::Interface(named) => {
         direct = List::from([named]);
@@ -718,6 +731,10 @@ pub class TypedModule {
       }
       TypeKind::Result { value, error } => {
         direct = self.tuple_impls(List::from([value, error]));
+      }
+      // Lists and arrays compare by value, as Rust's `Vec` (Q623).
+      TypeKind::List(elem) | TypeKind::Array { elem, .. } => {
+        direct = self.tuple_impls(List::from([elem]));
       }
       _ => {
         direct = self.primitive_impls(ty);

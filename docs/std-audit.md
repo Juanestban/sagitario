@@ -45,10 +45,10 @@ The audit of the library found gaps of the language itself, which the library ne
 
 | Rust | Sagitario | State | Notes |
 |---|---|---|---|
-| `Vec<T>` | `List<T>` | 🟡 | Has `push`, `pop`, `get`, `first`, `last`, `insert`, `remove`, `clear`, `reverse`, `contains`, `index_of`, `sort`, `sort_by`, `join`, `resize`, `iter`. Missing: `extend`, `append`, `truncate`, `retain`, `dedup`, `swap`, `split_off`, `drain`, `binary_search`, `sort_by_key`, `sort_unstable`, `with_capacity`/`reserve`, `windows`, `chunks`, `concat`, `fill`, `iter().rev()`, `min`/`max`, equality of lists |
-| `[T; N]` | arrays | 🟡 | Values with `len`, indexing, `for`, `iter()` and the iterator methods, `as_ptr`. Missing: `contains`, `sort`, `==`, and the rest of the methods of lists that do not change the length |
-| `&[T]`, `&mut [T]` | slices | 🟡 | Views of arrays and lists, only as parameters, with `len`, `is_empty`, indexing, `for` and `iter()`. Missing: `contains`, `sort`, `binary_search`, `split_at`, `windows`, `chunks`, `copy_from_slice`, `fill` |
-| `HashMap<K, V>` | `Map<K, V>` | 🟡 | Keeps insertion order (like `IndexMap`). Missing: `entry` (insert-or-update), `get_mut`-style update (`update(k, f)`), `retain`, `extend`, `from` a list of pairs, equality |
+| `Vec<T>` | `List<T>` | ✅ | Rust's methods and its equality, order and hash ([ADR-0093](adr/0093-everyday-methods.md), increment 3): `drain` takes indices, `windows` and `chunks` give copies, `sort_unstable` is `sort` (➖); `iter().rev()` comes with the iterators of increment 5 |
+| `[T; N]` | arrays | ✅ | The methods of slices, lent all their elements, those that change them on a `var` array; `==`, `<` and `Hash` (ADR-0093, increment 3) |
+| `&[T]`, `&mut [T]` | slices | ✅ | Views of arrays and lists, only as parameters, with `contains`, `binary_search`, `min`, `max`, and on `&mut [T]` `sort`, `reverse`, `fill`, `swap`, `copy_from_slice` (ADR-0093, increment 3); `split_at`, `windows` and `chunks` of slices are ranges and the methods of lists (➖) |
+| `HashMap<K, V>` | `Map<K, V>` | 🟡 | Keeps insertion order (like `IndexMap`). Missing: `entry` (insert-or-update), `get_mut`-style update (`update(k, f)`), `retain`, `extend`, `from` a list of pairs (record 4, increment 4); `==` is done (ADR-0093, increment 3) |
 | `HashSet<T>` | — | ❌ | A `Set<T: Hash>` class in the prelude, on `Map` |
 | `BTreeMap`, `BTreeSet` | — | ❌ | Ordered by `Ord`, with ranges |
 | `VecDeque<T>` | — | ❌ | A ring buffer; `Channel` keeps two lists for want of it |

@@ -596,6 +596,17 @@ class Flow {
           as_mut_ptr = function == "SAG_ARRAY_MUT_PTR";
         }
 
+        // An array lent as `&mut [T]` to a method of slices changes in place.
+        if let Some(BuiltinMethod::Prelude(function)) = self.typed.builtin_methods.get(value.id) {
+          if let Some(sig) = self.typed.sig(function) {
+            if let Some(first) = sig.params.first() {
+              if let TypeKind::Slice { mutable: true, .. } = first.kind {
+                as_mut_ptr = true;
+              }
+            }
+          }
+        }
+
         var by_var = false;
 
         if let Some(function) = self.typed.method_calls.get(value.id) {

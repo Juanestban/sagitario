@@ -1194,6 +1194,21 @@ void *sag_list_remove(sag_object *object, size_t index, const char *file, int li
   return spare;
 }
 
+size_t sag_list_capacity(sag_object *object) {
+  return ((sag_list *)object)->cap;
+}
+
+void sag_list_reserve_more(sag_object *object, size_t additional) {
+  sag_list *list = (sag_list *)object;
+  if (additional > SIZE_MAX - list->len) {
+    sag_panic("capacity overflow");
+  }
+  if (list->len + additional > list->cap) {
+    sag_list_check_unlent(list);
+    sag_list_reserve(list, list->len + additional);
+  }
+}
+
 void sag_list_clear(sag_object *object) {
   sag_list *list = (sag_list *)object;
   sag_list_check_unlent(list);

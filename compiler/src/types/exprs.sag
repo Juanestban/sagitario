@@ -1631,6 +1631,8 @@ fn call(cx: Checker, value: Expr, callee: Expr, args: List<Expr>, expected: Opti
         sig = Some(FnSig { receiver: None, params: List::from([types::string()]), ret: ret });
       } else if name == "List::from" {
         return collections::list_from(cx, value, callee, args, expected);
+      } else if name == "List::with_capacity" {
+        return collections::inferred_call_expecting(cx, value, cx.resolution.prelude_fn("list_with_capacity"), name, args, expected);
       } else if name == "char::from_digit" || name.starts_with("String::from_") {
         // Written in the root of `std` (docs/adr/0093-everyday-methods.md, Q620 and Q621).
         const function = if name == "char::from_digit" { "char_from_digit" } else { "text_" + name.substring(8, name.len()) };
@@ -1861,16 +1863,21 @@ fn method_call(cx: Checker, value: Expr, receiver: Expr, method: Ident, args: Li
       return types::error();
     }
     TypeKind::String | TypeKind::Char | TypeKind::StringBuilder => return strings::text_method(cx, value, receiver_ty, method, args),
-    TypeKind::Array { .. } => {
+    TypeKind::Array { elem, .. } => {
       if name == "len" {
         check_args(cx, value.span, "method", new List(), args);
 
         return types::int(IntTy::Usize);
       }
 
+      // Lent as a slice (docs/adr/0093-everyday-methods.md, Q624).
+      if collections::SLICE_METHODS.split(" ").contains(name) {
+        return collections::slice_method_of(cx, value, receiver, receiver_ty, elem, method, args);
+      }
+
       cx.diagnostics.push(
         Diagnostic::error(codes::UNKNOWN_MEMBER, method.span, "no method `" + name + "` on type `" + types::text(receiver_ty) + "`")
-          .with_help("arrays have the methods `len()`, `iter()` and those of iterators, `as_ptr()` and `as_mut_ptr()`"),
+          .with_help("arrays have the methods `len()`, `iter()` and those of iterators, `as_ptr()`, `as_mut_ptr()` and those of slices, such as `contains` and `sort`"),
       );
       unchecked_args(cx, args);
 

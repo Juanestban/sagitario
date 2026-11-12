@@ -1839,7 +1839,7 @@ pub class Lowering {
 
   /// A slice `ty` of an array, a list or a slice, or of a range of one (`&list[a..b]`): a new
   /// value, which keeps a list it views alive and lent until it is released.
-  prv fn slice(self, operand: Expr, ty: Type) -> Result<Operand, String> {
+  pub fn slice(self, operand: Expr, ty: Type) -> Result<Operand, String> {
     const elem = match ty.kind {
       TypeKind::Slice { elem, .. } => elem,
       _ => return Err("slice of another type"),
@@ -2790,7 +2790,14 @@ pub class Lowering {
       const operand_ty = self.type_of(lhs)?;
 
       match operand_ty.kind {
-        TypeKind::Tuple(_) | TypeKind::Option(_) | TypeKind::Result { .. } => return self.tuple_comparison(op, ty, operand_ty, lhs, rhs),
+        TypeKind::Tuple(_) | TypeKind::Option(_) | TypeKind::Result { .. } | TypeKind::List(_) | TypeKind::Array { .. } => {
+          return self.tuple_comparison(op, ty, operand_ty, lhs, rhs);
+        }
+        TypeKind::Class(named) => {
+          if collections::is_map(self, named) {
+            return self.tuple_comparison(op, ty, operand_ty, lhs, rhs);
+          }
+        }
         _ => {}
       }
     }
@@ -3187,7 +3194,7 @@ pub class Lowering {
         }
 
         // Functions of the root of `std` (docs/adr/0093-everyday-methods.md, Q620 and Q621).
-        if name == "char::from_digit" || name.starts_with("String::from_") {
+        if name == "char::from_digit" || name.starts_with("String::from_") || name == "List::with_capacity" {
           const function = match self.typed.builtin_methods.get(value.id) {
             Some(BuiltinMethod::Prelude(found)) => found,
             _ => return Err("`" + name + "` without its function"),

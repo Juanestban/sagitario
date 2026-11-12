@@ -10,6 +10,8 @@ use pkg::diagnostics::codes;
 use pkg::resolve::{ItemRef, ParamOwner, TypeItem};
 use pkg::types::{Checker, IntTy, Subst, Type, TypeKind};
 use pkg::types;
+use pkg::types::classes;
+use pkg::types::classes::PlaceUse;
 use pkg::types::exprs;
 use pkg::types::generic;
 use pkg::types::inheritance;
@@ -22,7 +24,11 @@ const ITER_METHODS: String = "map filter take skip step_by collect count fold fo
 const LIST_METHODS: String = "len is_empty push pop get first last insert remove clear reverse";
 
 /// The methods of `List` implemented by prelude functions.
-const LIST_PRELUDE_METHODS: String = "iter contains index_of sort sort_by join resize";
+const LIST_PRELUDE_METHODS: String = "iter contains index_of sort sort_by join resize extend append truncate retain dedup split_off drain windows chunks";
+
+/// The methods of slices, written once in the prelude as `slice_<name>`, which arrays and lists
+/// have too (docs/adr/0093-everyday-methods.md, Q622 and Q624).
+pub const SLICE_METHODS: String = "contains index_of binary_search binary_search_by min max sort sort_by sort_by_key reverse fill swap copy_from_slice";
 
 fn prelude_interface(cx: Checker, name: String) -> Option<u32> {
   match cx.resolution.prelude_type(name) {
@@ -224,6 +230,37 @@ pub fn list_method(cx: Checker, value: Expr, receiver: Expr, list_ty: Type, meth
     return ret;
   }
 
+  // In the runtime, which knows the room a list has (docs/adr/0093-everyday-methods.md, Q622).
+  if name == "capacity" || name == "reserve" {
+    const capacity = name == "capacity";
+
+    exprs::check_args(cx, value.span, "method", if capacity { new List() } else { List::from([position]) }, args);
+    cx.typed.builtin_methods.insert(value.id, BuiltinMethod::Runtime { function: if capacity { "sag_list_capacity" } else { "sag_list_reserve_more" }, located: false });
+
+    return if capacity { position } else { types::unit() };
+  }
+
+  if name == "concat" {
+    if let TypeKind::List(inner) = elem.kind {
+      return prelude_method(cx, value, "list_concat", List::from([inner]), args);
+    }
+
+    if !types::is_error(elem) {
+      cx.diagnostics.push(
+        Diagnostic::error(codes::UNKNOWN_MEMBER, method.span, "no method `concat` on type `" + types::text(list_ty) + "`")
+          .with_note("only lists of lists (`List<List<T>>`) are concatenated; lists of strings are joined with `join`"),
+      );
+    }
+
+    exprs::unchecked_args(cx, args);
+
+    return types::error();
+  }
+
+  if SLICE_METHODS.split(" ").contains(name) && !LIST_PRELUDE_METHODS.split(" ").contains(name) {
+    return slice_method_of(cx, value, receiver, list_ty, elem, method, args);
+  }
+
   if LIST_PRELUDE_METHODS.split(" ").contains(name) {
     const is_text = match elem.kind {
       TypeKind::String | TypeKind::Error => true,
@@ -391,6 +428,11 @@ pub fn inferred_prelude_call(cx: Checker, value: Expr, name: String, args: List<
 
 /// `inferred_prelude_call` for the function `found`, named `name` in messages.
 pub fn inferred_call_of(cx: Checker, value: Expr, found: Option<u32>, name: String, args: List<Expr>) -> Type {
+  inferred_call_expecting(cx, value, found, name, args, None)
+}
+
+/// `inferred_call_of`, also inferring the type parameters from the type the context expects.
+pub fn inferred_call_expecting(cx: Checker, value: Expr, found: Option<u32>, name: String, args: List<Expr>, expected: Option<Type>) -> Type {
   const function = match found {
     Some(found) => found,
     None => {
@@ -410,6 +452,11 @@ pub fn inferred_call_of(cx: Checker, value: Expr, found: Option<u32>, name: Stri
   const unknowns = new generic::Unknowns();
 
   unknowns.add(ParamOwner::Fn(function), cx.generic_count(ParamOwner::Fn(function)), None);
+
+  if let Some(ty) = expected {
+    unknowns.unify(sig.ret, ty);
+  }
+
   generic::generic_args(cx, value.span, "function", sig.params, args, Subst::empty(), unknowns);
 
   const shown = if name.ends_with("_failure") { name.substring(0, name.len() - "_failure".len()) } else { name };
@@ -419,6 +466,44 @@ pub fn inferred_call_of(cx: Checker, value: Expr, found: Option<u32>, name: Stri
   cx.typed.builtin_methods.insert(value.id, BuiltinMethod::Prelude(function));
 
   types::substitute(sig.ret, subst)
+}
+
+/// A method of slices, called on a slice, an array or a list, which is lent to `slice_<name>` as
+/// a slice of all its elements; one that changes the elements needs a `&mut [T]` or a `var`
+/// array (docs/adr/0093-everyday-methods.md, Q624).
+pub fn slice_method_of(cx: Checker, value: Expr, receiver: Expr, receiver_ty: Type, elem: Type, method: Ident, args: List<Expr>) -> Type {
+  const function = match cx.resolution.prelude_fn("slice_" + method.name) {
+    Some(found) => found,
+    None => {
+      exprs::unchecked_args(cx, args);
+
+      return types::error();
+    }
+  };
+  var mutable = false;
+
+  if let Some(sig) = cx.typed.sig(function) {
+    if let Some(first) = sig.params.first() {
+      if let TypeKind::Slice { mutable: found, .. } = first.kind {
+        mutable = found;
+      }
+    }
+  }
+
+  if mutable {
+    match receiver_ty.kind {
+      TypeKind::Slice { mutable: false, .. } => {
+        cx.diagnostics.push(
+          Diagnostic::error(codes::IMMUTABLE_RECEIVER, method.span, "cannot call `" + method.name + "`, which changes the elements, on a `&[" + types::text(elem) + "]` slice")
+            .with_help("take a `&mut [" + types::text(elem) + "]` parameter, and lend it with `&mut`"),
+        );
+      }
+      TypeKind::Array { .. } => classes::check_mutable_place(cx, receiver, PlaceUse::Receiver(method.name)),
+      _ => {}
+    }
+  }
+
+  inferred_method_of(cx, value, Some(function), method.name, types::of(TypeKind::Slice { mutable: mutable, elem: elem }), args)
 }
 
 /// `receiver.method(args)` on a list or array, for a method of `Iter`: the receiver becomes an
@@ -486,7 +571,8 @@ pub fn primitive_method(cx: Checker, value: Expr, receiver_ty: Type, method: Ide
   }
 
   const primitive = match receiver_ty.kind {
-    TypeKind::Int(_) | TypeKind::Bool | TypeKind::Char | TypeKind::String | TypeKind::Tuple(_) | TypeKind::Option(_) | TypeKind::Result { .. } => true,
+    TypeKind::Int(_) | TypeKind::Bool | TypeKind::Char | TypeKind::String | TypeKind::Tuple(_) | TypeKind::Option(_) | TypeKind::Result { .. }
+      | TypeKind::Array { .. } | TypeKind::List(_) => true,
     _ => false,
   };
 
@@ -507,7 +593,7 @@ pub fn primitive_method(cx: Checker, value: Expr, receiver_ty: Type, method: Ide
   // A tuple has the methods of the interfaces all its elements implement
   // (docs/adr/0092-tuples.md, Q611).
   const compared = match receiver_ty.kind {
-    TypeKind::Tuple(_) | TypeKind::Option(_) | TypeKind::Result { .. } => true,
+    TypeKind::Tuple(_) | TypeKind::Option(_) | TypeKind::Result { .. } | TypeKind::Array { .. } | TypeKind::List(_) => true,
     _ => false,
   };
 

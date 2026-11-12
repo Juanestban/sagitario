@@ -288,7 +288,13 @@ pub fn neg_call(cx: Checker, value: Expr, ty: Type) -> Type {
 /// identity of class instances (Q514). Both operands were checked and have type `ty`.
 pub fn comparison_call(cx: Checker, value: Expr, op: BinaryOp, ty: Type, span: Span) -> Option<Type> {
   const by_interface = match ty.kind {
-    TypeKind::Struct(_) | TypeKind::Enum(_) | TypeKind::Param(_) | TypeKind::Tuple(_) | TypeKind::Option(_) | TypeKind::Result { .. } => true,
+    TypeKind::Struct(_) | TypeKind::Enum(_) | TypeKind::Param(_) | TypeKind::Tuple(_) | TypeKind::Option(_) | TypeKind::Result { .. }
+      | TypeKind::List(_) | TypeKind::Array { .. } => true,
+    // A map compares by value; other class instances by identity.
+    TypeKind::Class(named) => match cx.typed.prelude.map {
+      Some(map) => map == named.id,
+      None => false,
+    },
     _ => false,
   };
 
@@ -327,6 +333,8 @@ pub fn comparison_call(cx: Checker, value: Expr, op: BinaryOp, ty: Type, span: S
     TypeKind::Param(_) => diagnostic.with_help("bound the type parameter: `" + shown + ": " + interface_name + "`"),
     TypeKind::Tuple(_) => diagnostic.with_note("a tuple implements `" + interface_name + "` when every element does"),
     TypeKind::Option(_) | TypeKind::Result { .. } => diagnostic.with_note("`Option` and `Result` implement `" + interface_name + "` when the values they hold do"),
+    TypeKind::List(_) | TypeKind::Array { .. } => diagnostic.with_note("lists and arrays implement `" + interface_name + "` when their elements do"),
+    TypeKind::Class(_) => diagnostic.with_note(if equality { "a map implements `Eq` when its values do" } else { "maps are not ordered" }),
     _ => diagnostic.with_help("implement `" + interface_name + "` for `" + shown + "`: `" + impl_header(cx, ty, interface_name) + " { " + method + " { ... } }`"),
   });
 

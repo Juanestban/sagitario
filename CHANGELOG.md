@@ -15,6 +15,11 @@ The sources say 0.32.0.
 
 ### Added
 
+- Rust's methods of lists (`extend`, `append`, `retain`, `dedup`, `drain`, `split_off`,
+  `binary_search`, `sort_by_key`, `windows`, `chunks`, `min`, `max`, `List::with_capacity`...), and
+  those of slices, which arrays and lists have too (`contains`, `sort`, `reverse`, `fill`, `swap`,
+  `copy_from_slice`...); lists and arrays are compared, ordered and hashed by their elements, and
+  maps compared by their entries ([ADR-0093](docs/adr/0093-everyday-methods.md), increment 3).
 - Rust's methods of `String` (`rfind`, `split_once`, `strip_prefix`, `split_whitespace`,
   `char_indices`, `to_uppercase` with Unicode's full mappings...), `String::from_utf8` and
   `from_utf16`, the Unicode properties of `char` (`is_alphabetic`, `is_numeric`, `is_uppercase`...)

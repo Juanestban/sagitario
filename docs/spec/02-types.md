@@ -263,9 +263,10 @@ const text = builder.to_string();
   compare by `a.compare(b)` ([ADR-0081](../adr/0081-operator-overloading.md), Q514). A data-less
   enum implementing `Eq` uses its `equals` too. Classes call `a.equals(b)`, since their `==` stays
   identity.
-- Arrays, lists, maps, iterators, interface values and function values cannot be compared with
-  `==`. Tuples, `Option` and `Result` compare when the values they hold do
-  ([tuples](#tuples-s2), [`Option` and `Result`](#optiont-and-resultt-e-f1)).
+- Iterators, interface values and function values cannot be compared with `==`. Tuples,
+  `Option`, `Result`, arrays, lists and maps compare when the values they hold do
+  ([tuples](#tuples-s2), [`Option` and `Result`](#optiont-and-resultt-e-f1),
+  [lists](#lists-f2), [maps](#maps-f2)); a map is the one class instance `==` compares by value.
 - [Arithmetic operators](05-interfaces-generics.md#operators) (`+`, `-`, `*`, `/`, `%`, unary
   `-`) apply to other types through the prelude interfaces `Add`, `Sub`, `Mul`, `Div`, `Rem` and
   `Neg` ([ADR-0081](../adr/0081-operator-overloading.md)).
@@ -361,7 +362,12 @@ println(f"{pair.0} is {pair.1}, {q} rest {r}, {pair:?}");   // Ada is 36, 3 rest
 - Indices have type `usize` and `a.len()` returns `usize`. An index out of bounds panics in
   every build mode: `index out of bounds: the len is 3 but the index is 5`.
 - Arrays are copied when assigned, passed or returned (copying retains the `String`s inside).
-  They are not compared with `==` and cannot be interpolated.
+  They cannot be interpolated. They compare with `==` and order with `<` when their elements
+  do, element by element, as lists ([ADR-0093](../adr/0093-everyday-methods.md), Q623).
+- Arrays have the [methods of slices](#slices) below, lent all their elements: `contains`,
+  `index_of`, `binary_search`, `min`, `max`, and, on a `var` array, `sort`, `sort_by`,
+  `sort_by_key`, `reverse`, `fill`, `swap` and `copy_from_slice` ([ADR-0093](../adr/0093-everyday-methods.md),
+  Q624).
 - `for x in a` iterates over a copy of `a` taken before the first iteration (see
   [control flow](06-control-flow.md#loops)).
 - From F2, arrays expose iterators: `[1, 2, 3].map((x) => x * 2)` returns an iterator that can
@@ -398,10 +404,28 @@ Rationale: [ADR-0034](../adr/0034-collections-and-iterators.md).
   | `resize(n, value)` | `()`: removes the elements past `n`, or adds copies of `value` up to `n` (Rust's `Vec::resize`) |
   | `as_ptr()`, `as_mut_ptr()` | `*const T`, `*mut T` to the first element, for C ([FFI](10-ffi.md#raw-pointers)) |
   | `iter()` and the methods of `Iter<T>` | see [iterators](08-closures.md#iterators) |
+  | `extend(values)`, `append(other)` | `()`: adds the values of an `Iter<T>`, or moves every element of `other`, which is left empty |
+  | `truncate(n)`, `retain(keep)`, `dedup()` | `()`: keeps the first `n`, those for which `keep(v)` is `true`, or drops each element equal to the one before it (`T: Eq`) |
+  | `split_off(at)`, `drain(start, end)` | `List<T>`: the elements from `at`, or from `start` to `end`, removed; past the end panics |
+  | `binary_search(v)`, `binary_search_by(f)` | `Result<usize, usize>`: where `v` is in a sorted list (`T: Ord`), or `Err` with where it would go |
+  | `sort_by_key(key)` | `()`: stable, by `key: fn(T) -> K` with `K: Ord` |
+  | `min()`, `max()` | `Option<T>` (`T: Ord`): the first smallest, the last largest |
+  | `fill(v)`, `swap(a, b)` | `()` |
+  | `windows(n)`, `chunks(n)` | `Iter<List<T>>`: each run of `n` elements, or the elements in lists of `n`, as copies; `n == 0` panics |
+  | `concat()` | `List<T>`, only on a `List<List<T>>` |
+  | `capacity()`, `reserve(n)` | `usize`, `()`: the room for elements without growing, and room for `n` more |
+
+  `List::with_capacity(n)` is an empty list with room for `n` elements; its element type comes
+  from the context. These are Rust's ([ADR-0093](../adr/0093-everyday-methods.md), Q622):
+  `drain` takes indices, since ranges are not values, and `windows` and `chunks` give copies,
+  since slices are only parameters.
 
 - `for x in list` visits the elements by position and reads the length at every step:
   elements added or removed by the body are seen, and the loop never reads out of bounds.
-- Lists are not compared with `==` and cannot be interpolated.
+- A list implements `Eq`, `Ord` and `Hash` when its elements do, as Rust's `Vec`: `==` compares
+  their lengths and elements, and `<` orders by the first element that differs, then by length
+  ([ADR-0093](../adr/0093-everyday-methods.md), Q623). A list that is the key of a map must not
+  change while it is one. Lists cannot be interpolated.
 
 ### Slices
 
@@ -438,6 +462,11 @@ double(&mut list);
   outlive the call), `as_ptr()` and, through a `&mut [T]`, `as_mut_ptr()` for C. Through a
   `&mut [T]`, `s[i] = value`, `s[i].field = value`, methods that modify `self` on `s[i]`, and
   `&mut s[i]` change the viewed elements; through a `&[T]` they are errors (`E0312`, `E0313`).
+- **Methods** ([ADR-0093](../adr/0093-everyday-methods.md), Q624): `contains(v)`, `index_of(v)`
+  (`T: Eq`), `binary_search(v)` (`T: Ord`), `binary_search_by(f)`, `min()` and `max()`; through a
+  `&mut [T]`, `sort()`, `sort_by(f)`, `sort_by_key(key)`, `reverse()`, `fill(v)`, `swap(a, b)` and
+  `copy_from_slice(source)`, which panics unless `source` has as many elements. Arrays and lists
+  have them too, lent as slices of all their elements. `split_at` is `&s[..i]` and `&s[i..]`.
 - **Mutability.** `&mut array` needs an array that can be modified (a `var` binding, a `&mut`
   parameter, a `var` field). A list is a reference, so `&mut list` works through any binding, as
   `list[i] = value` does. `&mut slice` needs a `&mut [T]` slice.
@@ -470,7 +499,9 @@ for entry in ages {
   iterators `keys()`, `values()` and `entries()`. There is no `map[k]`.
 - `for entry in map` iterates over `entries()`: values of the prelude struct
   `Entry<K, V> { key: K, value: V }`.
-- Maps are not compared with `==` and cannot be interpolated.
+- A map implements `Eq` when its values do: two maps are equal when they hold the same keys with
+  equal values, in any order ([ADR-0093](../adr/0093-everyday-methods.md), Q623). Maps are not
+  ordered and cannot be interpolated.
 
 ## `Option<T>` and `Result<T, E>` (F1)
 

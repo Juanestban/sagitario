@@ -2202,11 +2202,11 @@ pub class Resolver {
           return None;
         }
         Start::List => {
-          if member.name == "from" {
-            return Some(Res::Builtin("List::from"));
+          if member.name == "from" || member.name == "with_capacity" {
+            return Some(Res::Builtin("List::" + member.name));
           }
 
-          self.error(member.span, "no function `" + member.name + "` in `List`");
+          self.error(member.span, "no function `" + member.name + "` in `List`; it has `List::from` and `List::with_capacity`");
 
           return None;
         }

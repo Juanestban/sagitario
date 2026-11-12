@@ -373,6 +373,10 @@ pub fn slice_method(cx: Checker, value: Expr, receiver_ty: Type, method: Ident, 
     return collections::prelude_method(cx, value, "slice_iter", List::from([elem]), args);
   }
 
+  if collections::SLICE_METHODS.split(" ").contains(name) {
+    return collections::slice_method_of(cx, value, value, receiver_ty, elem, method, args);
+  }
+
   var function = "";
   var ret = types::error();
 
@@ -401,7 +405,7 @@ pub fn slice_method(cx: Checker, value: Expr, receiver_ty: Type, method: Ident, 
   } else {
     cx.diagnostics.push(
       Diagnostic::error(codes::UNKNOWN_MEMBER, method.span, "no method `" + name + "` on type `" + types::text(receiver_ty) + "`")
-        .with_note("the methods of slices are `len`, `is_empty`, `iter`, `as_ptr` and `as_mut_ptr`"),
+        .with_note("the methods of slices are `len`, `is_empty`, `iter`, `as_ptr`, `as_mut_ptr` and " + collections::SLICE_METHODS.split(" ").map((found) => "`" + found + "`").collect().join(", ")),
     );
     exprs::unchecked_args(cx, args);
 
@@ -680,6 +684,18 @@ class Walker {
   }
 
   prv fn method_params(self, value: Expr) -> Option<List<Type>> {
+    // A function of the prelude or of `std` called as a method takes its receiver first.
+    if let Some(BuiltinMethod::Prelude(function)) = self.cx.typed.builtin_methods.get(value.id) {
+      const params = self.cx.typed.sig(function)?.params;
+      const rest: List<Type> = new List();
+
+      for index in 1..params.len() {
+        rest.push(params[index]);
+      }
+
+      return Some(rest);
+    }
+
     const function = self.cx.typed.method_calls.get(value.id)?;
 
     Some(self.cx.typed.sig(function)?.params)

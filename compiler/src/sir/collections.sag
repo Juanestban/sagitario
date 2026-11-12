@@ -4,11 +4,11 @@
 
 use pkg::ast::{BinaryOp, Block, Expr, ExprKind, UnaryOp};
 use pkg::resolve::{ParamOwner, Res, TypeItem};
-use pkg::sir::{Callee, Lowering, Operand, Place, Projection, Rvalue, Stmt, TemplatePiece, bool_operand, int_operand, local_place, project, unit_operand};
+use pkg::sir::{Callee, Lowering, Operand, Place, Projection, Rvalue, SliceSource, Stmt, TemplatePiece, bool_operand, int_operand, local_place, project, unit_operand};
 use pkg::sir::interfaces;
 use pkg::sir::matching;
 use pkg::sir::mono;
-use pkg::types::{FloatTy, IntTy, Subst, Type, TypeKind};
+use pkg::types::{FloatTy, IntTy, NamedRef, Subst, Type, TypeKind};
 use pkg::types;
 use pkg::types::typed::{BuiltinMethod, ListMethod};
 
@@ -265,12 +265,24 @@ pub fn prelude_method(lw: Lowering, value: Expr, function: u32, ty: Type, receiv
   };
   const target = mono::instance(lw, function, subst);
   const receiver_ty = lw.type_of(receiver)?;
-  var receiver_value = lw.expr(receiver)?;
+  const first = params.first().unwrap_or(types::error());
+  var lent = false;
+
+  // An array or a list calling a method of slices is lent as a slice of all its elements
+  // (docs/adr/0093-everyday-methods.md, Q624).
+  if let TypeKind::Slice { .. } = first.kind {
+    lent = match receiver_ty.kind {
+      TypeKind::Array { .. } | TypeKind::List(_) => true,
+      _ => false,
+    };
+  }
+
+  var receiver_value = if lent { lw.slice(receiver, first)? } else { lw.expr(receiver)? };
 
   // Arrays become lists.
   if let TypeKind::Array { .. } = receiver_ty.kind {
-    if let Some(list_ty) = params.first() {
-      receiver_value = list_from_array(lw, list_ty, receiver_ty, receiver_value);
+    if !lent {
+      receiver_value = list_from_array(lw, first, receiver_ty, receiver_value);
     }
   }
 
@@ -427,7 +439,8 @@ pub fn is_primitive_method(lw: Lowering, function: u32, receiver_ty: Type) -> bo
   }
 
   const tuple = match receiver_ty.kind {
-    TypeKind::Tuple(_) | TypeKind::Option(_) | TypeKind::Result { .. } => true,
+    TypeKind::Tuple(_) | TypeKind::Option(_) | TypeKind::Result { .. } | TypeKind::List(_) | TypeKind::Array { .. } => true,
+    TypeKind::Class(named) => is_map(lw, named),
     _ => false,
   };
 
@@ -582,6 +595,10 @@ pub fn values_equal(lw: Lowering, ty: Type, lhs: Operand, rhs: Operand) -> Resul
     return variants_equal(lw, ty, lhs, rhs);
   }
 
+  if let Some(result) = collection_call(lw, "equals", ty, List::from([lhs, rhs]), bool_type())? {
+    return Ok(result);
+  }
+
   const elems = match ty.kind {
     TypeKind::Tuple(found) => found,
     _ => return element_call(lw, lw.typed.prelude.eq, ty, lhs, List::from([rhs]), bool_type()),
@@ -636,6 +653,10 @@ pub fn values_order(lw: Lowering, ordering_ty: Type, ty: Type, lhs: Operand, rhs
     return variants_order(lw, ordering_ty, ty, lhs, rhs);
   }
 
+  if let Some(result) = collection_call(lw, "compare", ty, List::from([lhs, rhs]), ordering_ty)? {
+    return Ok(result);
+  }
+
   const elems = match ty.kind {
     TypeKind::Tuple(found) => found,
     _ => return element_call(lw, lw.typed.prelude.ord, ty, lhs, List::from([rhs]), ordering_ty),
@@ -665,6 +686,62 @@ pub fn values_order(lw: Lowering, ordering_ty: Type, ty: Type, lhs: Operand, rhs
   }
 
   Ok(Operand::Local(result))
+}
+
+/// Whether a class type is the prelude's `Map`.
+pub fn is_map(lw: Lowering, class_ref: NamedRef) -> bool {
+  match lw.typed.prelude.map {
+    Some(map) => map == class_ref.id,
+    None => false,
+  }
+}
+
+/// `equals`, `compare` or `hash` of lists, arrays and maps: the prelude's `slice_<action>` on
+/// slices of all their elements, or `map_equals` (docs/adr/0093-everyday-methods.md, Q623).
+/// `None` for other types.
+fn collection_call(lw: Lowering, action: String, ty: Type, values: List<Operand>, result: Type) -> Result<Option<Operand>, String> {
+  var elem = types::error();
+  var name = "slice_" + action;
+  var args: List<Type> = new List();
+
+  match ty.kind {
+    TypeKind::List(found) | TypeKind::Array { elem: found, .. } => {
+      elem = found;
+      args = List::from([found]);
+    }
+    TypeKind::Class(named) => {
+      if !is_map(lw, named) || action != "equals" {
+        return Ok(None);
+      }
+
+      name = "map_equals";
+      args = named.args;
+    }
+    _ => return Ok(None),
+  }
+
+  const function = match lw.resolution.prelude_fn(name) {
+    Some(found) => found,
+    None => return Err("`" + name + "` is missing from the prelude"),
+  };
+  const operands: List<Operand> = new List();
+
+  for value in values {
+    // Lists and arrays are lent as slices of all their elements.
+    operands.push(match ty.kind {
+      TypeKind::List(_) => lw.new_value(types::of(TypeKind::Slice { mutable: false, elem: elem }), Rvalue::Slice { source: SliceSource::List(value), elem: elem, range: None }),
+      TypeKind::Array { len, .. } => {
+        const place = lw.operand_place(value, ty)?;
+
+        lw.new_value(types::of(TypeKind::Slice { mutable: false, elem: elem }), Rvalue::Slice { source: SliceSource::Array { place: place, len: len }, elem: elem, range: None })
+      }
+      _ => value,
+    });
+  }
+
+  const target = mono::instance(lw, function, Subst::of(ParamOwner::Fn(function), args));
+
+  Ok(Some(lw.call(Callee::Fn(target), operands, result)))
 }
 
 fn is_option_or_result(ty: Type) -> bool {
@@ -801,6 +878,10 @@ pub fn value_hash(lw: Lowering, ty: Type, value: Operand) -> Result<Operand, Str
 
   if is_option_or_result(ty) {
     return variants_hash(lw, ty, value);
+  }
+
+  if let Some(result) = collection_call(lw, "hash", ty, List::from([value]), u64_type)? {
+    return Ok(result);
   }
 
   const elems = match ty.kind {

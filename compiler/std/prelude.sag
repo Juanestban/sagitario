@@ -913,6 +913,407 @@ fn result_iter<T, E>(value: Result<T, E>) -> Iter<T> {
   option_iter(result_ok(value))
 }
 
+// ---- The methods of slices, arrays and lists (docs/adr/0093-everyday-methods.md, Q622, Q624) ----
+//
+// Written once on slices: an array or a list calling one is lent as a slice of all its elements.
+
+fn slice_contains<T: Eq>(items: &[T], value: T) -> bool {
+  slice_index_of(items, value).is_some()
+}
+
+fn slice_index_of<T: Eq>(items: &[T], value: T) -> Option<usize> {
+  for index in 0..items.len() {
+    if items[index] == value {
+      return Some(index);
+    }
+  }
+
+  None
+}
+
+/// The index of `value` in sorted `items`, or `Err` with the index where it would go.
+fn slice_binary_search<T: Ord>(items: &[T], value: T) -> Result<usize, usize> {
+  var low = 0usize;
+  var high = items.len();
+
+  while low < high {
+    const middle = low + (high - low) / 2;
+    const found = items[middle];
+
+    if found < value {
+      low = middle + 1;
+    } else if found > value {
+      high = middle;
+    } else {
+      return Ok(middle);
+    }
+  }
+
+  Err(low)
+}
+
+/// As `binary_search`, with `compare` telling how each element orders against the one sought.
+fn slice_binary_search_by<T>(items: &[T], compare: fn(T) -> Ordering) -> Result<usize, usize> {
+  var low = 0usize;
+  var high = items.len();
+
+  while low < high {
+    const middle = low + (high - low) / 2;
+
+    match compare(items[middle]) {
+      Ordering::Less => {
+        low = middle + 1;
+      }
+      Ordering::Greater => {
+        high = middle;
+      }
+      Ordering::Equal => return Ok(middle),
+    }
+  }
+
+  Err(low)
+}
+
+/// The first of the smallest elements, as Rust's `Iterator::min`.
+fn slice_min<T: Ord>(items: &[T]) -> Option<T> {
+  if items.is_empty() {
+    return None;
+  }
+
+  var best = items[0];
+
+  for index in 1..items.len() {
+    if items[index] < best {
+      best = items[index];
+    }
+  }
+
+  Some(best)
+}
+
+/// The last of the largest elements, as Rust's `Iterator::max`.
+fn slice_max<T: Ord>(items: &[T]) -> Option<T> {
+  if items.is_empty() {
+    return None;
+  }
+
+  var best = items[0];
+
+  for index in 1..items.len() {
+    if items[index] >= best {
+      best = items[index];
+    }
+  }
+
+  Some(best)
+}
+
+/// Copies the elements of a slice into a new list.
+fn slice_to_list<T>(items: &[T]) -> List<T> {
+  const copy = new List<T>();
+
+  for value in items {
+    copy.push(value);
+  }
+
+  copy
+}
+
+/// Puts the elements of `sorted` back into `items`, which has as many.
+fn slice_copy_back<T>(items: &mut [T], sorted: List<T>) {
+  for index in 0..sorted.len() {
+    items[index] = sorted[index];
+  }
+}
+
+fn slice_sort<T: Ord>(items: &mut [T]) {
+  const copy = slice_to_list(items);
+
+  list_sort(copy);
+  slice_copy_back(items, copy);
+}
+
+fn slice_sort_by<T>(items: &mut [T], compare: fn(T, T) -> Ordering) {
+  const copy = slice_to_list(items);
+
+  list_sort_by(copy, compare);
+  slice_copy_back(items, copy);
+}
+
+/// Stable, by the key each element gives, which is computed once per comparison as Rust's.
+fn slice_sort_by_key<T, K: Ord>(items: &mut [T], key: fn(T) -> K) {
+  slice_sort_by(items, (a, b) => key(a).compare(key(b)));
+}
+
+fn slice_reverse<T>(items: &mut [T]) {
+  var low = 0usize;
+  var high = items.len();
+
+  while low + 1 < high {
+    high -= 1;
+
+    const first = items[low];
+
+    items[low] = items[high];
+    items[high] = first;
+    low += 1;
+  }
+}
+
+fn slice_fill<T>(items: &mut [T], value: T) {
+  for index in 0..items.len() {
+    items[index] = value;
+  }
+}
+
+/// Swaps two elements; an index past the end panics.
+fn slice_swap<T>(items: &mut [T], a: usize, b: usize) {
+  const first = items[a];
+
+  items[a] = items[b];
+  items[b] = first;
+}
+
+/// Copies `source`, which must have as many elements, into `items`.
+fn slice_copy_from_slice<T>(items: &mut [T], source: &[T]) {
+  if items.len() != source.len() {
+    panic(`source slice length (${source.len()}) does not match destination slice length (${items.len()})`);
+  }
+
+  for index in 0..source.len() {
+    items[index] = source[index];
+  }
+}
+
+/// `==` on lists and arrays: as many elements, equal one by one (docs/adr/0093-everyday-methods.md,
+/// Q623).
+fn slice_equals<T: Eq>(a: &[T], b: &[T]) -> bool {
+  if a.len() != b.len() {
+    return false;
+  }
+
+  for index in 0..a.len() {
+    if a[index] != b[index] {
+      return false;
+    }
+  }
+
+  true
+}
+
+/// The order of lists and arrays: by the first element that differs, then by length.
+fn slice_compare<T: Ord>(a: &[T], b: &[T]) -> Ordering {
+  const common = smaller(a.len(), b.len());
+
+  for index in 0..common {
+    const order = a[index].compare(b[index]);
+
+    if order != Ordering::Equal {
+      return order;
+    }
+  }
+
+  a.len().compare(b.len())
+}
+
+fn slice_hash<T: Hash>(items: &[T]) -> u64 {
+  var hash = items.len().hash();
+
+  for value in items {
+    hash = (hash ^ value.hash()).hash();
+  }
+
+  hash
+}
+
+/// `==` on maps: the same keys, with equal values, in any order.
+fn map_equals<K: Hash, V: Eq>(a: Map<K, V>, b: Map<K, V>) -> bool {
+  if a.len() != b.len() {
+    return false;
+  }
+
+  for entry in a {
+    if b.get(entry.key) != Some(entry.value) {
+      return false;
+    }
+  }
+
+  true
+}
+
+fn list_extend<T>(list: List<T>, values: Iter<T>) {
+  for value in values {
+    list.push(value);
+  }
+}
+
+/// Moves every element of `other` to the end of `list`, leaving `other` empty. A list appended to
+/// itself is doubled, since there is no other list to empty.
+fn list_append<T>(list: List<T>, other: List<T>) {
+  const count = other.len();
+
+  for index in 0..count {
+    list.push(other[index]);
+  }
+
+  if other.len() == count {
+    other.clear();
+  }
+}
+
+fn list_truncate<T>(list: List<T>, len: usize) {
+  while list.len() > len {
+    list.pop();
+  }
+}
+
+/// Keeps the elements for which `keep` returns `true`, in their order.
+fn list_retain<T>(list: List<T>, keep: fn(T) -> bool) {
+  var kept = 0usize;
+
+  for index in 0..list.len() {
+    const value = list[index];
+
+    if keep(value) {
+      list[kept] = value;
+      kept += 1;
+    }
+  }
+
+  list_truncate(list, kept);
+}
+
+/// Removes the elements equal to the one before them.
+fn list_dedup<T: Eq>(list: List<T>) {
+  if list.is_empty() {
+    return;
+  }
+
+  var kept = 1usize;
+
+  for index in 1..list.len() {
+    const value = list[index];
+
+    if value != list[kept - 1] {
+      list[kept] = value;
+      kept += 1;
+    }
+  }
+
+  list_truncate(list, kept);
+}
+
+/// The elements from `at` on, removed from `list`.
+fn list_split_off<T>(list: List<T>, at: usize) -> List<T> {
+  if at > list.len() {
+    panic(`\`at\` split index (is ${at}) should be <= len (is ${list.len()})`);
+  }
+
+  const tail = new List<T>();
+
+  for index in at..list.len() {
+    tail.push(list[index]);
+  }
+
+  list_truncate(list, at);
+  tail
+}
+
+/// The elements from `start` to `end`, removed from `list`; those after them move down.
+fn list_drain<T>(list: List<T>, start: usize, end: usize) -> List<T> {
+  if start > end {
+    panic(`slice index starts at ${start} but ends at ${end}`);
+  }
+
+  if end > list.len() {
+    panic(`range end index ${end} out of range for slice of length ${list.len()}`);
+  }
+
+  const removed = new List<T>();
+  const count = end - start;
+
+  for index in start..end {
+    removed.push(list[index]);
+  }
+
+  for index in end..list.len() {
+    list[index - count] = list[index];
+  }
+
+  list_truncate(list, list.len() - count);
+  removed
+}
+
+/// A list with room for `capacity` elements, as Rust's `Vec::with_capacity`.
+fn list_with_capacity<T>(capacity: usize) -> List<T> {
+  const list = new List<T>();
+
+  list.reserve(capacity);
+  list
+}
+
+/// Every run of `size` consecutive elements, as copies; a size of 0 panics.
+fn list_windows<T>(list: List<T>, size: usize) -> Iter<List<T>> {
+  if size == 0 {
+    panic("window size must be non-zero");
+  }
+
+  const next = new Cell<usize>(0);
+
+  new Iter<List<T>>(() => {
+    if next.value + size > list.len() {
+      return None;
+    }
+
+    const window = new List<T>();
+
+    for index in next.value..next.value + size {
+      window.push(list[index]);
+    }
+
+    next.value += 1;
+    Some(window)
+  })
+}
+
+/// The elements in lists of `size`, the last one shorter; a size of 0 panics.
+fn list_chunks<T>(list: List<T>, size: usize) -> Iter<List<T>> {
+  if size == 0 {
+    panic("chunk size must be non-zero");
+  }
+
+  const next = new Cell<usize>(0);
+
+  new Iter<List<T>>(() => {
+    if next.value >= list.len() {
+      return None;
+    }
+
+    const chunk = new List<T>();
+    const end = smaller(next.value + size, list.len());
+
+    for index in next.value..end {
+      chunk.push(list[index]);
+    }
+
+    next.value = end;
+    Some(chunk)
+  })
+}
+
+/// The elements of the lists of `lists`, one list after another.
+fn list_concat<T>(lists: List<List<T>>) -> List<T> {
+  const all = new List<T>();
+
+  for list in lists {
+    for value in list {
+      all.push(value);
+    }
+  }
+
+  all
+}
+
 fn list_join(list: List<String>, separator: String) -> String {
   const builder = new StringBuilder();
 

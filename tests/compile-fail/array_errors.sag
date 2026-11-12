@@ -11,6 +11,7 @@ pub fn main() {
   const _g = values.first(); //~ ERROR E0316
   const _h = values.size; //~ ERROR E0316
   const _i = [0; 3u8]; //~ ERROR E0300
-  const _j = values == values; //~ ERROR E0310
+  // Arrays compare when their elements do (docs/adr/0093-everyday-methods.md, Q623); floats do not.
+  const _j = [1.5] == [1.5]; //~ ERROR E0310
   const _k = `${values}`; //~ ERROR E0306
 }

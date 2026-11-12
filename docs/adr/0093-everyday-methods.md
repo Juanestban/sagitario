@@ -112,3 +112,16 @@ fn main() {
   cased character before it and none after it; Rust also skips the case-ignorable characters
   around it, which the tables do not have. `insert`, `truncate`, `pop`, `capacity` and `reserve`
   of `StringBuilder` are runtime functions, since they reach its buffer.
+- Increment 3 is done. The methods of slices are written once in the prelude (`slice_<name>`,
+  taking `&[T]` or `&mut [T]`); a slice calls them as they are, and SIR lends an array or a list
+  calling one as a slice of all its elements (`Lowering::slice`), so a `var` array changes in
+  place and counts as changed for the warning on a `var` never reassigned. `sort` of a slice
+  sorts a copy in a list, with the stable sort of lists, and copies it back. The new methods of
+  lists are prelude functions as the others; `capacity` and `reserve` are runtime functions
+  (`sag_list_capacity`, `sag_list_reserve_more`), and `reserve` on a lent list panics as a change
+  of its length does, since its elements would move. `List::with_capacity` infers its element
+  type from the context. A list appended to itself is doubled: there is no other list to empty.
+  `==`, `<` and `hash` of lists and arrays call `slice_equals`, `slice_compare` and `slice_hash`
+  on slices of them, and `==` of maps `map_equals`, from `sir/collections.sag` as the
+  comparisons of tuples do. The checker of references now knows the parameters of prelude
+  functions called as methods, so `target.copy_from_slice(&[1, 2])` lends its argument.

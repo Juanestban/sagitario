@@ -1015,6 +1015,10 @@ void *sag_list_pop(sag_object *list);
 void *sag_list_remove(sag_object *list, size_t index, const char *file, int line);
 void sag_list_clear(sag_object *list);
 void sag_list_reverse(sag_object *list);
+/* `capacity()` and `reserve(additional)` (docs/adr/0093-everyday-methods.md, Q622): room for at
+ * least `additional` more elements, which a lent list cannot make, since its elements would move. */
+size_t sag_list_capacity(sag_object *list);
+void sag_list_reserve_more(sag_object *list, size_t additional);
 
 /* ---- Slices (docs/adr/0079-references-and-borrowing.md, Q494) ----------------------------- */
 
