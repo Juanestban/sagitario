@@ -36,6 +36,7 @@ pub struct PreludeItems {
   pub into: Option<u32>;
   pub try_from: Option<u32>;
   pub try_into: Option<u32>;
+  pub default: Option<u32>;
 }
 
 /// The methods of `List<T>` implemented by the compiler (docs/spec/02-types.md#arrays-and-lists).
@@ -223,6 +224,10 @@ pub class TypedModule {
   /// The conversions of `from`, `try_from`, `into`, `try_into` and `?`, by the id of the call or
   /// of the operand of `?` (docs/adr/0094-conversions-and-defaults.md, Q632–Q635).
   pub var conversions: Map<u32, Conversion>;
+  /// The structs and enums written after `@default`, by `item_key` (Q636).
+  pub var derived_defaults: Map<String, bool>;
+  /// The variant marked `@default` of each such enum, by enum id.
+  pub var default_variants: Map<u32, u32>;
   /// Type of each local binding, indexed by function id then local id.
   pub var local_types: List<List<Type>>;
   pub var expr_types: Map<u32, Type>;
@@ -271,6 +276,7 @@ pub class TypedModule {
       into: None,
       try_from: None,
       try_into: None,
+      default: None,
     };
     self.sync_classes = new List();
     self.const_types = new List();
@@ -280,6 +286,8 @@ pub class TypedModule {
     self.builtin_methods = new Map<u32, BuiltinMethod>();
     self.static_calls = new Map<u32, StaticCall>();
     self.conversions = new Map<u32, Conversion>();
+    self.derived_defaults = new Map<String, bool>();
+    self.default_variants = new Map<u32, u32>();
     self.local_types = new List();
     self.expr_types = new Map<u32, Type>();
     self.method_calls = new Map<u32, u32>();
@@ -750,9 +758,11 @@ pub class TypedModule {
     match ty.kind {
       TypeKind::Struct(named) => {
         direct = self.impls_of(TypeItem::Struct(named.id), named.args);
+        self.push_derived_default(direct, TypeItem::Struct(named.id));
       }
       TypeKind::Enum(named) => {
         direct = self.impls_of(TypeItem::Enum(named.id), named.args);
+        self.push_derived_default(direct, TypeItem::Enum(named.id));
       }
       TypeKind::Class(named) => {
         for class_ref in self.class_ancestors(named) {
@@ -771,6 +781,11 @@ pub class TypedModule {
                 direct.push(eq_ref);
               }
             }
+
+            // An empty map (docs/adr/0094-conversions-and-defaults.md, Q636).
+            if let Some(default) = self.default_ref() {
+              direct.push(default);
+            }
           }
         }
       }
@@ -782,17 +797,28 @@ pub class TypedModule {
       }
       TypeKind::Tuple(elems) => {
         direct = self.tuple_impls(elems);
+        self.push_default_of(direct, elems);
       }
-      // As Rust's (docs/adr/0093-everyday-methods.md, Q619).
+      // As Rust's (docs/adr/0093-everyday-methods.md, Q619); `None` is the default (Q636).
       TypeKind::Option(value) => {
         direct = self.tuple_impls(List::from([value]));
+
+        if let Some(default) = self.default_ref() {
+          direct.push(default);
+        }
       }
       TypeKind::Result { value, error } => {
         direct = self.tuple_impls(List::from([value, error]));
       }
-      // Lists and arrays compare by value, as Rust's `Vec` (Q623).
-      TypeKind::List(elem) | TypeKind::Array { elem, .. } => {
+      // Lists and arrays compare by value, as Rust's `Vec` (Q623). An empty list is a default,
+      // and an array of defaults (Q636).
+      TypeKind::List(elem) => {
         direct = self.tuple_impls(List::from([elem]));
+        self.push_default_of(direct, new List());
+      }
+      TypeKind::Array { elem, .. } => {
+        direct = self.tuple_impls(List::from([elem]));
+        self.push_default_of(direct, List::from([elem]));
       }
       _ => {
         direct = self.primitive_impls(ty);
@@ -810,6 +836,32 @@ pub class TypedModule {
     }
 
     found
+  }
+
+  /// `Default`, without type arguments.
+  pub fn default_ref(self) -> Option<NamedRef> {
+    match self.prelude.default {
+      Some(id) => Some(NamedRef { id: id, name: "Default", args: new List() }),
+      None => None,
+    }
+  }
+
+  /// Adds `Default` when `item` was written after `@default`.
+  prv fn push_derived_default(self, found: List<NamedRef>, item: TypeItem) {
+    if self.derived_defaults.contains_key(item_key(item)) {
+      if let Some(default) = self.default_ref() {
+        found.push(default);
+      }
+    }
+  }
+
+  /// Adds `Default` when every one of `parts` has a default.
+  prv fn push_default_of(self, found: List<NamedRef>, parts: List<Type>) {
+    if let Some(default) = self.default_ref() {
+      if parts.iter().all((part) => self.implements(part, default)) {
+        found.push(default);
+      }
+    }
   }
 
   prv fn impls_of(self, item: TypeItem, args: List<Type>) -> List<NamedRef> {
@@ -894,6 +946,17 @@ pub class TypedModule {
       if let Some(id) = self.prelude.add {
         result.push(NamedRef { id: id, name: "Add", args: pair });
       }
+    }
+
+    // Numbers, `bool`, `char`, `String` and `StringBuilder` start from zero, `false`, `'\0'` and
+    // empty text (Q636).
+    match ty.kind {
+      TypeKind::Int(_) | TypeKind::Float(_) | TypeKind::Bool | TypeKind::Char | TypeKind::String | TypeKind::StringBuilder => {
+        if let Some(default) = self.default_ref() {
+          result.push(default);
+        }
+      }
+      _ => {}
     }
 
     // Rust's conversions between numbers, characters and strings (Q632, Q634).

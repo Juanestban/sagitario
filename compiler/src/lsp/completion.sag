@@ -48,11 +48,11 @@ const POINTER_METHODS: String = "is_null add";
 /// The methods of iterators the compiler gives by the kind of their values.
 const ITER_COMPILER_METHODS: String = "sum product min max unzip flatten";
 
-const OPTION_METHODS: String = "is_some is_none unwrap expect unwrap_or map and_then unwrap_or_else filter ok_or ok_or_else or or_else and xor map_or map_or_else is_some_and is_none_or zip flatten iter";
-const RESULT_METHODS: String = "is_ok is_err unwrap expect unwrap_or unwrap_err map map_err and_then unwrap_or_else expect_err ok err and or or_else map_or map_or_else is_ok_and is_err_and iter";
+const OPTION_METHODS: String = "is_some is_none unwrap expect unwrap_or map and_then unwrap_or_else filter ok_or ok_or_else or or_else and xor map_or map_or_else is_some_and is_none_or zip flatten iter unwrap_or_default";
+const RESULT_METHODS: String = "is_ok is_err unwrap expect unwrap_or unwrap_err map map_err and_then unwrap_or_else expect_err ok err and or or_else map_or map_or_else is_ok_and is_err_and iter unwrap_or_default";
 const BUILDER_METHODS: String = "append append_char len is_empty clear to_string insert truncate pop capacity reserve";
 /// The attributes (docs/spec/01-lexical.md#attributes-f1), with what they are written as.
-const ATTRIBUTES: String = "cfg export repr thread_local";
+const ATTRIBUTES: String = "cfg default export repr thread_local";
 /// The representations of `@repr(...)`: `C` for structs, unions and enums, an integer type for
 /// enums.
 const REPRESENTATIONS: String = "C i8 i16 i32 i64 isize u8 u16 u32 u64 usize";
@@ -276,6 +276,8 @@ fn attributes(items: Items) {
       items.add_snippet(name, KEYWORD, "@cfg(condition): keeps the item only on the systems where the condition holds", "cfg(${1:windows})");
     } else if name == "export" {
       items.add_snippet(name, KEYWORD, "@export(\"symbol\"): the C symbol of an `extern \"C\"` function", "export(\"${1:symbol}\")");
+    } else if name == "default" {
+      items.add_snippet(name, KEYWORD, "@default on a struct or enum, and before the default variant: implements `Default`", "default");
     } else if name == "repr" {
       items.add_snippet(name, KEYWORD, "@repr(C) on structs, unions and enums, or an integer type on enums", "repr(${1:C})");
     } else {
@@ -485,23 +487,23 @@ fn path_members(items: Items, analysis: Analysis, module: Option<Module>, module
   // `i32::MAX` (docs/adr/0088-bitwise-operators-and-integer-methods.md, Q581).
   if chain.len() == 1 && types::int_from_name(first).is_some() {
     items.add_words("MIN MAX", CONSTANT);
-    items.add_words("from try_from", FUNCTION);
+    items.add_words("default from try_from", FUNCTION);
     return;
   }
 
   // The conversions of the prelude (docs/adr/0094-conversions-and-defaults.md, Q632 and Q634).
   if chain.len() == 1 && (first == "f32" || first == "f64") {
-    items.add("from", FUNCTION, "");
+    items.add_words("default from", FUNCTION);
     return;
   }
 
   if chain.len() == 1 && first == "String" {
-    items.add_words("from from_utf8 from_utf8_lossy from_utf16", FUNCTION);
+    items.add_words("default from from_utf8 from_utf8_lossy from_utf16", FUNCTION);
     return;
   }
 
   if chain.len() == 1 && first == "char" {
-    items.add_words("from from_digit from_u32 try_from", FUNCTION);
+    items.add_words("default from from_digit from_u32 try_from", FUNCTION);
     return;
   }
 

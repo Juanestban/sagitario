@@ -2,7 +2,7 @@
 //! the types that implement them and interfaces used as types. The port of the declarations part
 //! of `sagitario_types::interfaces`.
 
-use pkg::ast::{Expr, ExprKind, Ident, ImplBlock, Path, TypeExpr};
+use pkg::ast::{Expr, ExprKind, Ident, ImplBlock, Path, TypeExpr, VariantFields};
 use pkg::diagnostics::Diagnostic;
 use pkg::diagnostics::codes;
 use pkg::resolve::{ParamOwner, TypeItem, TypeRes};
@@ -203,9 +203,184 @@ pub fn check_interfaces(cx: Checker) {
 
   check_used_interfaces(cx);
   check_interface_members(cx);
+  derive_defaults(cx);
   collect_impls(cx);
+  check_derived_defaults(cx);
   check_implementations(cx);
   generic::check_type_bounds(cx);
+}
+
+/// The structs and enums written after `@default`, and the variant each such enum marks
+/// (docs/adr/0094-conversions-and-defaults.md, Q636).
+fn derive_defaults(cx: Checker) {
+  for index in 0..cx.resolution.structs.len() {
+    if let Some(decl) = cx.resolution.struct_decl(cx.package, index as u32) {
+      if decl.default.is_some() && !decl.is_union {
+        cx.typed.derived_defaults.insert(item_key(TypeItem::Struct(index as u32)), true);
+      }
+    }
+  }
+
+  for index in 0..cx.resolution.enums.len() {
+    const decl = match cx.resolution.enum_decl(cx.package, index as u32) {
+      Some(found) => found,
+      None => continue,
+    };
+    var marked: Option<u32> = None;
+
+    for position in 0..decl.variants.len() {
+      const variant = decl.variants[position];
+      const span = match variant.default {
+        Some(found) => found,
+        None => continue,
+      };
+
+      if decl.default.is_none() {
+        cx.diagnostics.push(
+          Diagnostic::error(codes::INVALID_ATTRIBUTE, span, "`@default` marks a variant of an enum written after `@default`")
+            .with_help("write `@default` before `enum " + decl.name.name + "` too"),
+        );
+        continue;
+      }
+
+      const has_fields = match variant.fields {
+        VariantFields::Unit => false,
+        _ => true,
+      };
+
+      if has_fields {
+        cx.diagnostics.push(
+          Diagnostic::error(codes::INVALID_ATTRIBUTE, span, "the default variant `" + variant.name.name + "` has fields")
+            .with_note("as in Rust, the default of an enum is a variant without fields")
+            .with_help("implement `Default` for `" + decl.name.name + "` by hand to give its fields values"),
+        );
+      } else if marked.is_some() {
+        cx.error(codes::INVALID_ATTRIBUTE, span, "only one variant of `" + decl.name.name + "` is its default");
+      } else {
+        marked = Some(position as u32);
+      }
+    }
+
+    if let Some(span) = decl.default {
+      match marked {
+        Some(position) => {
+          cx.typed.derived_defaults.insert(item_key(TypeItem::Enum(index as u32)), true);
+          cx.typed.default_variants.insert(index as u32, position);
+        }
+        None => {
+          var any_marked = false;
+
+          for variant in decl.variants {
+            any_marked = any_marked || variant.default.is_some();
+          }
+
+          // A variant with fields was reported.
+          if !any_marked {
+            cx.diagnostics.push(
+              Diagnostic::error(codes::INVALID_ATTRIBUTE, span, "the enum `" + decl.name.name + "` marks no variant as its default")
+                .with_help("write `@default` before the variant without fields that is the default"),
+            );
+          }
+        }
+      }
+    }
+  }
+}
+
+/// The fields of a struct written after `@default` have defaults, and the type does not also
+/// implement `Default` by hand.
+fn check_derived_defaults(cx: Checker) {
+  const default = match cx.typed.default_ref() {
+    Some(found) => found,
+    None => return,
+  };
+  const items: List<TypeItem> = new List();
+
+  for index in 0..cx.resolution.structs.len() {
+    items.push(TypeItem::Struct(index as u32));
+  }
+
+  for index in 0..cx.resolution.enums.len() {
+    items.push(TypeItem::Enum(index as u32));
+  }
+
+  for item in items {
+    if !cx.typed.derived_defaults.contains_key(item_key(item)) {
+      continue;
+    }
+
+    const written = match item {
+      TypeItem::Struct(id) => match cx.resolution.struct_decl(cx.package, id) {
+        Some(decl) => decl.default,
+        None => None,
+      },
+      TypeItem::Enum(id) => match cx.resolution.enum_decl(cx.package, id) {
+        Some(decl) => decl.default,
+        None => None,
+      },
+      _ => None,
+    };
+    const span = match written {
+      Some(found) => found,
+      None => continue,
+    };
+    const name = cx.resolution.type_name(cx.package, item);
+
+    if let Some(entry) = cx.typed.impls.get(item_key(item)) {
+      if types::contains_ref(entry.interfaces, default) {
+        cx.diagnostics.push(
+          Diagnostic::error(codes::DUPLICATE_IMPL, span, "`" + name + "` implements `Default` by hand and with `@default`")
+            .with_help("remove `@default` or the implementation"),
+        );
+      }
+    }
+
+    if let TypeItem::Struct(id) = item {
+      if let Some(def) = cx.typed.struct_def(id) {
+        for field in def.fields {
+          if !types::is_error(field.ty) && !cx.typed.implements(field.ty, default) {
+            cx.diagnostics.push(
+              Diagnostic::error(codes::UNSATISFIED_BOUND, field.span, "the field `" + field.name + "` of `" + name + "` has no default: `" + types::text(field.ty) + "` does not implement `Default`")
+                .with_label(span, "`@default` gives every field its default")
+                .with_help("implement `Default` for `" + types::text(field.ty) + "`, or for `" + name + "` by hand"),
+            );
+          }
+        }
+      }
+    }
+  }
+}
+
+/// `i32::default()`, `String::default()`...: the default of a number, a character or a string
+/// (Q636), named by the prelude function's `name`.
+pub fn primitive_default(cx: Checker, value: Expr, name: String, args: List<Expr>) -> Option<Type> {
+  if !name.ends_with("::default") {
+    return None;
+  }
+
+  const prefix = name.split("::").first()?;
+  var self_ty: Option<Type> = None;
+
+  if let Some(int_ty) = types::int_from_name(prefix) {
+    self_ty = Some(types::int(int_ty));
+  } else if let Some(float_ty) = types::float_from_name(prefix) {
+    self_ty = Some(types::of(TypeKind::Float(float_ty)));
+  } else if prefix == "char" {
+    self_ty = Some(types::of(TypeKind::Char));
+  } else if prefix == "String" {
+    self_ty = Some(types::string());
+  }
+
+  const ty = self_ty?;
+  const function = match cx.typed.prelude.default {
+    Some(id) => cx.typed.interface_def(id)?.methods.first()?,
+    None => return None,
+  };
+
+  exprs::check_args(cx, value.span, "function", new List(), args);
+  cx.typed.static_calls.insert(value.id, StaticCall { function: function, self_ty: ty });
+
+  Some(ty)
 }
 
 /// The interfaces written as types since the last call, in declarations or, called again after
@@ -475,9 +650,20 @@ fn check_implementations(cx: Checker) {
       }
     }
 
+    // The compiler makes the default of a type written after `@default`, and of `Map`
+    // (docs/adr/0094-conversions-and-defaults.md, Q636).
+    const made_default = cx.typed.derived_defaults.contains_key(item_key(item)) || match item {
+      TypeItem::Class(id) => is_prelude(cx.typed.prelude.map, id),
+      _ => false,
+    };
+
     for interface_ref in implemented {
       var is_own = false;
       var block: Option<u32> = None;
+
+      if made_default && is_prelude(cx.typed.prelude.default, interface_ref.id) {
+        continue;
+      }
 
       for index in 0..own.len() {
         if !is_own && types::same_ref(own[index], interface_ref) {

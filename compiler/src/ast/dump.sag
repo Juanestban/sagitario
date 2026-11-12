@@ -538,7 +538,7 @@ class Dumper {
         self.expr("index", index);
         self.depth -= 1;
       }
-      ExprKind::StructLit { path, fields } => {
+      ExprKind::StructLit { path, fields, base } => {
         self.node(label, expr, "StructLit", "");
         self.depth += 1;
         self.path("path", path);
@@ -548,6 +548,10 @@ class Dumper {
           self.depth += 1;
           self.expr("value", field.value);
           self.depth -= 1;
+        }
+
+        if let Some(found) = base {
+          self.expr("base", found);
         }
 
         self.depth -= 1;

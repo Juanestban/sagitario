@@ -189,6 +189,9 @@ var properties: PhysicalDeviceProperties = unsafe { mem::zeroed() };
 | `size_of<T>() -> usize` | The size of `T` in bytes, as C's `sizeof` on the target |
 | `align_of<T>() -> usize` | The alignment of `T` in bytes, as C's `_Alignof` |
 | `zeroed<T>() -> T` | A value with every byte zero; needs `unsafe` |
+| `replace<T>(place: &mut T, value: T) -> T` | Puts `value` in the place and gives what was there |
+| `take<T: Default>(place: &mut T) -> T` | Gives what is in the place and leaves its [default](05-interfaces-generics.md#defaults) there |
+| `swap<T>(a: &mut T, b: &mut T)` | Exchanges the values of two places |
 
 - `size_of` and `align_of` take any type, written as a type argument.
 - `zeroed` takes its type as a type argument or from the expected type. It only makes types valid

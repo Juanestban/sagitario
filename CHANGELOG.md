@@ -15,6 +15,12 @@ The sources say 0.32.0.
 
 ### Added
 
+- `Default`, as Rust's: implemented by hand or with the attribute `@default` before a struct (the
+  default of each field) or an enum (the variant marked `@default`), and by numbers, `bool`,
+  `char`, strings, lists, maps, `Option`, tuples and arrays; `Type::default()` and
+  `T::default()`, `unwrap_or_default` on `Option` and `Result`, `mem::take`, `mem::replace` and
+  `mem::swap`, and struct update, `Config { verbose: true, ..Config::default() }`
+  ([ADR-0094](docs/adr/0094-conversions-and-defaults.md), increment 3).
 - `From`, `Into`, `TryFrom` and `TryInto`, as Rust's: `Type::from(x)` chooses the implementation
   by the type of `x`, every type is `From` itself, `x.into()` converts into the type expected or
   that of a bound `T: Into<U>`, and the prelude has Rust's conversions between numbers

@@ -209,6 +209,9 @@ pub struct Export {
 pub struct EnumDecl {
   /// The integer type of `@repr(i32)`, or `C` for `@repr(C)` (docs/spec/10-ffi.md).
   pub repr: Option<Ident>;
+  /// `@default`: the variant marked `@default` is its `Default`
+  /// (docs/adr/0094-conversions-and-defaults.md, Q636).
+  pub default: Option<Span>;
   pub visibility: Visibility;
   pub name: Ident;
   pub generics: List<GenericParam>;
@@ -219,6 +222,8 @@ pub struct EnumDecl {
 }
 
 pub struct VariantDecl {
+  /// `@default` before the variant of an enum marked `@default`.
+  pub default: Option<Span>;
   pub name: Ident;
   pub fields: VariantFields;
   /// `= 7` or `= -1` after a variant of an enum with an integer representation.
@@ -247,6 +252,8 @@ pub struct VariantFieldDecl {
 
 pub struct StructDecl {
   pub repr_c: bool;
+  /// `@default`: the default of every field is its `Default` (Q636).
+  pub default: Option<Span>;
   /// `union`: its fields share their memory (docs/spec/10-ffi.md).
   pub is_union: bool;
   pub visibility: Visibility;
@@ -507,7 +514,9 @@ pub enum ExprKind {
   /// `base[index]`
   Index { base: Expr, index: Expr },
   /// `Name { field: value, ... }`; the shorthand `{ x }` is stored as `{ x: x }`.
-  StructLit { path: Path, fields: List<FieldInit> },
+  /// `Name { a: 1, ..base }`: the fields not written come from `base`
+  /// (docs/adr/0094-conversions-and-defaults.md, Q643).
+  StructLit { path: Path, fields: List<FieldInit>, base: Option<Expr> },
   /// `[a, b, c]`
   ArrayLit(List<Expr>),
   /// `[value; N]`

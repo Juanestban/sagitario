@@ -74,6 +74,7 @@ struct Timespec { pub tv_sec: i64; pub tv_nsec: i64; }
 - The set of attributes is **closed**: unknown attributes are a compile error. There are no
   user-defined attributes.
 - Attributes: `@cfg(condition)` on items ([conditional compilation](09-modules.md#conditional-compilation-s1));
+  `@default` on structs, enums and the variants of enums ([defaults](05-interfaces-generics.md#defaults));
   `@export("symbol")`; `@repr(C)` on structs and unions, and `@repr(C)` or an
   integer type (`@repr(i32)`) on enums (see [FFI](10-ffi.md)); `@thread_local` on a
   `static var` (see [global state](03-memory.md#global-state-g1)).

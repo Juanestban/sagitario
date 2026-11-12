@@ -902,7 +902,7 @@ fn other_expr_kind(cx: Checker, value: Expr, expected: Option<Type>) -> Type {
     ExprKind::MethodCall { receiver, method, args } => method_call(cx, value, receiver, method, args, expected),
     ExprKind::Field { base, name } => field(cx, base, name),
     ExprKind::Index { base, index: position } => index(cx, base, position),
-    ExprKind::StructLit { path, fields } => struct_literal(cx, value, path, fields, expected),
+    ExprKind::StructLit { path, fields, base } => struct_literal(cx, value, path, fields, base, expected),
     ExprKind::ArrayLit(elems) => array_literal(cx, value.span, elems, expected),
     ExprKind::Tuple(elems) => tuple_literal(cx, elems, expected),
     ExprKind::ArrayRepeat { value: repeated, len } => {
@@ -1643,6 +1643,9 @@ fn call(cx: Checker, value: Expr, callee: Expr, args: List<Expr>, expected: Opti
         return collections::list_from(cx, value, callee, args, expected);
       } else if name == "List::with_capacity" {
         return collections::inferred_call_expecting(cx, value, cx.resolution.prelude_fn("list_with_capacity"), name, args, expected);
+      } else if let Some(ty) = interfaces::primitive_default(cx, value, name, args) {
+        // Defaults of the prelude (docs/adr/0094-conversions-and-defaults.md, Q636).
+        return ty;
       } else if let Some(ty) = interfaces::primitive_conversion(cx, value, path, name, args, expected) {
         // Conversions of the prelude (docs/adr/0094-conversions-and-defaults.md, Q632 and Q634).
         return ty;
@@ -2269,13 +2272,28 @@ pub fn find_seen(seen: List<Seen>, name: String) -> Option<Span> {
   None
 }
 
-fn struct_literal(cx: Checker, value: Expr, path: Path, fields: List<FieldInit>, expected: Option<Type>) -> Type {
+fn struct_literal(cx: Checker, value: Expr, path: Path, fields: List<FieldInit>, base: Option<Expr>, expected: Option<Type>) -> Type {
   const id = match cx.resolution.paths.get(value.id) {
     Some(Res::Struct(id)) => id,
-    Some(Res::Variant(variant)) => return named_variant_literal(cx, path, variant, fields, expected),
+    Some(Res::Variant(variant)) => {
+      // As in Rust, only structs take a base (docs/adr/0094-conversions-and-defaults.md, Q643).
+      if let Some(found) = base {
+        cx.diagnostics.push(
+          Diagnostic::error(codes::INVALID_STRUCT_BASE, found.span, "`..base` builds structs, not the variants of enums")
+            .with_help("write every field of the variant"),
+        );
+        expr(cx, found, None);
+      }
+
+      return named_variant_literal(cx, path, variant, fields, expected);
+    }
     _ => {
       for init in fields {
         expr(cx, init.value, None);
+      }
+
+      if let Some(found) = base {
+        expr(cx, found, None);
       }
 
       return types::error();
@@ -2359,6 +2377,30 @@ fn struct_literal(cx: Checker, value: Expr, path: Path, fields: List<FieldInit>,
     };
 
     ty = cx.named_type(TypeItem::Struct(id), struct_args);
+  }
+
+  // The fields not written come from a value of the same struct, checked after the fields, as
+  // it runs after them (Q643).
+  if let Some(found) = base {
+    const base_ty = expr(cx, found, Some(ty));
+
+    if !types::is_error(base_ty) && !types::same_type(base_ty, ty) {
+      cx.diagnostics.push(
+        Diagnostic::error(codes::INVALID_STRUCT_BASE, found.span, "the base of a literal of `" + types::text(ty) + "` has the type `" + types::text(base_ty) + "`")
+          .with_note("`..base` gives the fields not written, from a value of the same struct"),
+      );
+    }
+
+    if def.is_union {
+      cx.diagnostics.push(Diagnostic::error(codes::INVALID_STRUCT_BASE, found.span, "a union literal takes no base"));
+    }
+
+    // Every field is given.
+    for candidate in def.fields {
+      if find_seen(seen, candidate.name).is_none() {
+        seen.push(Seen { name: candidate.name, span: found.span });
+      }
+    }
   }
 
   const missing: List<String> = new List();
@@ -2691,10 +2733,10 @@ fn named_variant_literal(cx: Checker, path: Path, variant: VariantRef, fields: L
 }
 
 /// The methods of `Option` written in the prelude, as `option_<name>`.
-const OPTION_PRELUDE_METHODS: String = "ok_or ok_or_else or or_else and xor map_or map_or_else is_some_and is_none_or zip flatten iter";
+const OPTION_PRELUDE_METHODS: String = "ok_or ok_or_else or or_else and xor map_or map_or_else is_some_and is_none_or zip flatten iter unwrap_or_default";
 
 /// The methods of `Result` written in the prelude, as `result_<name>`.
-const RESULT_PRELUDE_METHODS: String = "ok err and or or_else map_or map_or_else is_ok_and is_err_and iter";
+const RESULT_PRELUDE_METHODS: String = "ok err and or or_else map_or map_or_else is_ok_and is_err_and iter unwrap_or_default";
 
 /// A method of `Option` or `Result` (docs/spec/07-errors.md).
 fn builtin_method(cx: Checker, value: Expr, receiver_ty: Type, method: Ident, args: List<Expr>) -> Type {

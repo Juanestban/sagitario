@@ -94,7 +94,7 @@ Every module implicitly sees these names, without `use`:
 | Types | `Error` (an interface) and `Error(message)` | F2 |
 | Types | `List`, `Map`, `Iter`, `Entry`, `Ordering`; the interfaces `Eq`, `Ord`, `Hash` | F2 |
 | Types | The interface `Display` ([format strings](02-types.md#string-f1)) | S2 |
-| Types | The interfaces `From`, `Into`, `TryFrom`, `TryInto` ([conversions](05-interfaces-generics.md#conversions)) | S2 |
+| Types | The interfaces `From`, `Into`, `TryFrom`, `TryInto` ([conversions](05-interfaces-generics.md#conversions)) and `Default` ([defaults](05-interfaces-generics.md#defaults)) | S2 |
 | Types | `Task` ([`async` and `await`](12-async.md)) | F8 |
 
 - `print` and `println` write to stdout, `eprintln` to stderr (`println`/`eprintln` add a

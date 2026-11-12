@@ -72,6 +72,8 @@ enum AttributeTarget {
   Use,
   /// A function inside an `extern "C"` block.
   ExternBlockFn,
+  /// A variant of an enum.
+  Variant,
 }
 
 /// What the attributes of an item set.
@@ -82,6 +84,8 @@ struct Applied {
   pub repr: Option<Ident>;
   /// `@thread_local` on a static.
   pub thread_local: Option<Span>;
+  /// `@default` on a struct, an enum or a variant (docs/adr/0094-conversions-and-defaults.md).
+  pub default: Option<Span>;
 }
 
 /// The parameters and result of a function type, and where it ends.
@@ -604,8 +608,10 @@ class Parser {
 
     if is_keyword(kind, "struct") {
       var decl = self.struct_decl(visibility, start, false)?;
+      const applied = self.apply_attributes(attributes, AttributeTarget::Struct);
 
-      decl.repr_c = self.apply_attributes(attributes, AttributeTarget::Struct).repr_c;
+      decl.repr_c = applied.repr_c;
+      decl.default = applied.default;
 
       return Ok(Some(Item::Struct(decl)));
     }
@@ -613,8 +619,14 @@ class Parser {
     // `union` is a keyword only before the name of a union, as in Rust.
     if is_contextual(kind, "union") && is_ident(self.nth_kind(1)) {
       var decl = self.struct_decl(visibility, start, true)?;
+      const applied = self.apply_attributes(attributes, AttributeTarget::Struct);
 
-      decl.repr_c = self.apply_attributes(attributes, AttributeTarget::Struct).repr_c;
+      decl.repr_c = applied.repr_c;
+
+      // The fields of a union share their memory: none is the default of the others.
+      if let Some(span) = applied.default {
+        self.attribute_error(span, "`@default` applies to structs and enums, not to unions", None);
+      }
 
       if !decl.repr_c {
         self.diagnostics.push(
@@ -627,8 +639,10 @@ class Parser {
 
     if is_keyword(kind, "enum") {
       var decl = self.enum_decl(visibility, start)?;
+      const applied = self.apply_attributes(attributes, AttributeTarget::Enum);
 
-      decl.repr = self.apply_attributes(attributes, AttributeTarget::Enum).repr;
+      decl.repr = applied.repr;
+      decl.default = applied.default;
 
       return Ok(Some(Item::Enum(decl)));
     }
@@ -955,7 +969,7 @@ class Parser {
   /// Checks the attributes of an item: `@export("symbol")` on an `extern "C" fn`, `@repr(C)` on
   /// a struct. Errors are reported and the attribute is ignored.
   prv fn apply_attributes(self, attributes: List<Attribute>, target: AttributeTarget) -> Applied {
-    var applied = Applied { export: None, repr_c: false, repr: None, thread_local: None };
+    var applied = Applied { export: None, repr_c: false, repr: None, thread_local: None, default: None };
     const seen: List<String> = new List();
 
     for attribute in attributes {
@@ -986,6 +1000,16 @@ class Parser {
         AttributeTarget::Static => true,
         _ => false,
       };
+      const is_variant = match target {
+        AttributeTarget::Variant => true,
+        _ => false,
+      };
+
+      // A variant takes `@default` only.
+      if is_variant && name != "default" {
+        self.attribute_error(attribute.span, "a variant takes only `@default`", None);
+        continue;
+      }
 
       if name == "export" && extern_fn {
         var symbol: Option<String> = None;
@@ -1052,6 +1076,14 @@ class Parser {
         } else {
           self.attribute_error(attribute.span, "`@thread_local` takes no arguments", None);
         }
+      } else if name == "default" && (is_struct || is_enum || is_variant) {
+        if attribute.args.is_empty() {
+          applied.default = Some(attribute.span);
+        } else {
+          self.attribute_error(attribute.span, "`@default` takes no arguments", None);
+        }
+      } else if name == "default" {
+        self.attribute_error(attribute.span, "`@default` applies to structs, enums and the variants of enums", Some("implement `Default` for other types: `impl Default for Name { fn default() -> Name { ... } }`"));
       } else if name == "test" || name == "deprecated" {
         self.diagnostics.push(Diagnostic::error(codes::NOT_IMPLEMENTED, attribute.span, "the attribute `@" + name + "` is not implemented yet"));
       } else if name == "export" {
@@ -1064,7 +1096,7 @@ class Parser {
         self.attribute_error(
           attribute.span,
           "unknown attribute `@" + name + "`",
-          Some("the attributes are `@cfg(condition)`, `@export(\"symbol\")`, `@repr(C)` and `@thread_local`"),
+          Some("the attributes are `@cfg(condition)`, `@default`, `@export(\"symbol\")`, `@repr(C)` and `@thread_local`"),
         );
       }
     }
@@ -1358,6 +1390,7 @@ class Parser {
 
     Ok(StructDecl {
       repr_c: false,
+      default: None,
       is_union: is_union,
       visibility: visibility,
       name: name,
@@ -1527,10 +1560,18 @@ class Parser {
 
     const variants: List<VariantDecl> = new List();
 
-    // Variants come first, separated by commas.
-    while is_ident(self.kind()) {
+    // Variants come first, separated by commas; `@default` may mark one.
+    while is_ident(self.kind()) || self.attributed_variant() {
+      const attributes = self.attributes()?;
+      const default = self.apply_attributes(attributes, AttributeTarget::Variant).default;
+
       match self.variant() {
-        Ok(variant) => variants.push(variant),
+        Ok(found) => {
+          var variant = found;
+
+          variant.default = default;
+          variants.push(variant);
+        }
         Err(_) => self.skip_variant(),
       }
 
@@ -1572,7 +1613,42 @@ class Parser {
 
     const end = self.expect("}")?.span;
 
-    Ok(EnumDecl { repr: None, visibility: visibility, name: name, generics: generics, impls: impls, variants: variants, functions: functions, span: start.to(end) })
+    Ok(EnumDecl { repr: None, default: None, visibility: visibility, name: name, generics: generics, impls: impls, variants: variants, functions: functions, span: start.to(end) })
+  }
+
+  /// Whether attributes before a name start the next variant: `@default Normal`, not the
+  /// attributes of the functions that follow the variants.
+  prv fn attributed_variant(self) -> bool {
+    var offset = 0usize;
+
+    while is_punct(self.nth_kind(offset), "@") {
+      offset += 2;
+
+      // The arguments of the attribute, up to their closing parenthesis.
+      if is_punct(self.nth_kind(offset), "(") {
+        var depth = 0usize;
+
+        while true {
+          const kind = self.nth_kind(offset);
+
+          if is_punct(kind, "(") {
+            depth += 1;
+          } else if is_punct(kind, ")") {
+            depth -= 1;
+          } else if let TokenKind::Eof = kind {
+            return false;
+          }
+
+          offset += 1;
+
+          if depth == 0 {
+            break;
+          }
+        }
+      }
+    }
+
+    offset > 0 && is_ident(self.nth_kind(offset))
   }
 
   prv fn empty_variant(self, span: Span, name: Ident) {
@@ -1603,7 +1679,7 @@ class Parser {
         self.empty_variant(name.span.to(end), name);
       }
 
-      return Ok(VariantDecl { span: name.span.to(end), name: name, fields: VariantFields::Tuple(types), discriminant: None });
+      return Ok(VariantDecl { default: None, span: name.span.to(end), name: name, fields: VariantFields::Tuple(types), discriminant: None });
     }
 
     if self.eat("{") {
@@ -1629,7 +1705,7 @@ class Parser {
         self.empty_variant(name.span.to(end), name);
       }
 
-      return Ok(VariantDecl { span: name.span.to(end), name: name, fields: VariantFields::Named(fields), discriminant: None });
+      return Ok(VariantDecl { default: None, span: name.span.to(end), name: name, fields: VariantFields::Named(fields), discriminant: None });
     }
 
     // `Name = 7`: an explicit discriminant.
@@ -1649,13 +1725,13 @@ class Parser {
 
           const discriminant = Discriminant { value: value, negative: negative, span: start.to(end) };
 
-          return Ok(VariantDecl { span: name.span.to(end), name: name, fields: VariantFields::Unit, discriminant: Some(discriminant) });
+          return Ok(VariantDecl { default: None, span: name.span.to(end), name: name, fields: VariantFields::Unit, discriminant: Some(discriminant) });
         }
         _ => return Err(self.unexpected("an integer literal")),
       }
     }
 
-    Ok(VariantDecl { span: name.span, name: name, fields: VariantFields::Unit, discriminant: None })
+    Ok(VariantDecl { default: None, span: name.span, name: name, fields: VariantFields::Unit, discriminant: None })
   }
 
   /// Skips a malformed variant: to the next `,` or the `}` closing the enum, at depth zero.
@@ -3310,13 +3386,28 @@ class Parser {
     Ok(self.expr_node(ExprKind::Loop(Block { stmts: List::from([Stmt::Expr(matching)]), tail: None, span: span }), span))
   }
 
-  /// `Name { a: 1, b }` after its path.
+  /// `Name { a: 1, b }` or `Name { a: 1, ..base }` after its path.
   prv fn struct_literal(self, path: Path) -> Result<Expr, ()> {
     self.expect("{")?;
 
     const fields: List<FieldInit> = new List();
+    var base: Option<Expr> = None;
 
     while !self.at("}") {
+      // The base comes last (docs/adr/0094-conversions-and-defaults.md, Q643).
+      if self.eat("..") {
+        base = Some(self.expr_with_struct_literals(true)?);
+
+        if self.at(",") {
+          self.diagnostics.push(
+            Diagnostic::error(codes::UNEXPECTED_TOKEN, self.advance().span, "`..base` comes last in a struct literal, without a comma after it")
+              .with_help("remove the comma"),
+          );
+        }
+
+        break;
+      }
+
       const name = self.ident("a field name")?;
       var value: Option<Expr> = None;
 
@@ -3339,7 +3430,7 @@ class Parser {
 
     const end = self.expect("}")?.span;
 
-    Ok(self.expr_node(ExprKind::StructLit { path: path, fields: fields }, path.span.to(end)))
+    Ok(self.expr_node(ExprKind::StructLit { path: path, fields: fields, base: base }, path.span.to(end)))
   }
 
   /// `match scrutinee { pattern if guard => body, ... }`

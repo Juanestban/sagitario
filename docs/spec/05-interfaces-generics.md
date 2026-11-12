@@ -395,6 +395,55 @@ const small = u8::try_from(300i32);                         // Err("out of range
   range for `char``. They are called as `i64::from(x)`, `u8::try_from(x)`, `f64::from(x)`,
   `char::from(b)`, `String::from(c)`. `as` keeps its conversions, which never fail.
 
+## Defaults
+
+Rationale: [ADR-0094](../adr/0094-conversions-and-defaults.md), Q636, Q637 and Q643. `Default`
+is the prelude's interface of the value a type starts from, as Rust's:
+
+```sag
+interface Default { fn default() -> Self; }
+
+@default
+struct Config {
+  pub name: String;
+  pub retries: u32;
+  pub level: Level;
+}
+
+@default
+enum Level {
+  Quiet,
+  @default
+  Normal,
+}
+
+const config = Config::default();                          // Config { name: "", retries: 0, level: Normal }
+const loud = Config { retries: 3, ..Config::default() };    // the other fields from the default
+```
+
+- The prelude's types implement it: numbers are `0`, `bool` is `false`, `char` is `'\0'`,
+  `String` is `""`, `StringBuilder`, `List` and `Map` are empty, `Option` is `None`, and tuples and
+  arrays are the default of each element when every element has one.
+- A struct or enum implements it by hand (`impl Default for Port { fn default() -> Port { ... } }`)
+  or with `@default` before its declaration, as Rust's `#[derive(Default)]`. On a struct, every
+  field takes its default; a field whose type has none is an error (`E0330`) naming it, so a
+  generic struct bounds its parameters (`@default struct Wrap<T: Default>`). On an enum, `@default`
+  is also written before the variant without fields that is the default; an enum that marks none,
+  a marked variant with fields, two marked variants, or a marked variant of an enum without
+  `@default` are errors (`E0105`). `@default` takes no arguments, does not apply to classes,
+  unions or other items (`E0105`), and a type with `@default` that also implements `Default` by
+  hand is an error (`E0342`). A class implements it by hand, since `new` builds its instances.
+- `Type::default()` and `T::default()`, for a type parameter bounded by `Default`, give it;
+  `i32::default()`, `f64::default()`, `char::default()` and `String::default()` too.
+- `Option::unwrap_or_default()` and `Result::unwrap_or_default()` give the value or the default
+  of its type, and `std::mem` has `take(&mut place)`, which leaves the default in the place,
+  `replace(&mut place, value)` and `swap(&mut a, &mut b)`.
+- **Struct update.** A struct literal may end with `..base`, after its fields and a comma: an
+  expression of the same struct type (`E0345` otherwise) whose values give the fields not written.
+  `base` is evaluated after the fields written, once; it may give every field (`Config { ..other }`)
+  or none. The fields it gives must be visible where the literal is, as the fields written. It is
+  only for structs, not for the variants of enums (`E0345`), and nothing may follow it (`E0100`).
+
 ## Standard generic types (F2)
 
 `List<T>` (see [lists](02-types.md#lists-f2)), `Map<K, V>` (see [maps](02-types.md#maps-f2)) and

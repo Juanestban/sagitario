@@ -22,7 +22,7 @@ use pkg::types::{FloatTy, IntTy, NamedRef, Receiver, Subst, Type, TypeKind};
 use pkg::types;
 use pkg::types::consts::ConstValue;
 use pkg::types::numbers;
-use pkg::types::typed::{BuiltinMethod, TypedModule};
+use pkg::types::typed::{BuiltinMethod, TypedModule, item_key};
 use std::env;
 
 pub struct Program {
@@ -2190,7 +2190,7 @@ pub class Lowering {
         self.call_expr(value, callee, args, ty)
       }
       ExprKind::MethodCall { receiver, method, args } => self.method_call_expr(value, ty, receiver, method, args),
-      ExprKind::StructLit { fields, .. } => self.struct_lit(value, ty, fields),
+      ExprKind::StructLit { fields, base, .. } => self.struct_lit(value, ty, fields, base),
       ExprKind::ArrayLit(elems) => self.array_lit(ty, elems),
       ExprKind::Tuple(elems) => self.tuple_lit(ty, elems),
       ExprKind::ArrayRepeat { value: repeated, .. } => self.array_repeat(ty, repeated),
@@ -2236,6 +2236,103 @@ pub class Lowering {
       ExprKind::Return(result) => self.return_expr(result),
       ExprKind::Range { .. } => collections::range_iter(self, value, false, ty),
     }
+  }
+
+  /// Whether `function` is `default` of the prelude's `Default`.
+  prv fn is_default_fn(self, function: u32) -> bool {
+    match self.typed.prelude.default {
+      Some(id) => match self.typed.interface_def(id) {
+        Some(def) => match def.methods.first() {
+          Some(found) => found == function,
+          None => false,
+        },
+        None => false,
+      },
+      None => false,
+    }
+  }
+
+  /// The default of a type of the instance: zero, `false`, `' '`, empty text and collections,
+  /// `None`, the default of each part of a tuple or array or of each field of a struct written
+  /// after `@default`, the variant an enum marks, or the `default` a type implements (Q636).
+  pub fn default_value(self, ty: Type) -> Result<Operand, String> {
+    match ty.kind {
+      TypeKind::Int(int_ty) => return Ok(int_operand(0, false, int_ty)),
+      TypeKind::Float(float_ty) => return Ok(Operand::Const(Const::Float { text: "0.0", ty: float_ty })),
+      TypeKind::Bool => return Ok(bool_operand(false)),
+      TypeKind::Char => return Ok(Operand::Const(Const::Char(0u8 as char))),
+      TypeKind::String => return Ok(Operand::Const(Const::Str(""))),
+      TypeKind::StringBuilder => return Ok(strings::new_string_builder(self)),
+      TypeKind::List(_) => return Ok(self.new_value(ty, Rvalue::ListNew)),
+      TypeKind::Option(_) => return Ok(matching::variant(self, ty, 0, new List())),
+      TypeKind::Tuple(elems) => {
+        const parts: List<Operand> = new List();
+
+        for elem in elems {
+          parts.push(self.default_value(elem)?);
+        }
+
+        return Ok(self.aggregate(ty, parts, elems));
+      }
+      TypeKind::Array { elem, len } => {
+        if !self.managed(elem) {
+          const element = self.default_value(elem)?;
+
+          return Ok(self.new_value(ty, Rvalue::Repeat(element)));
+        }
+
+        const parts: List<Operand> = new List();
+        const part_types: List<Type> = new List();
+
+        for _ in 0..len {
+          parts.push(self.default_value(elem)?);
+          part_types.push(elem);
+        }
+
+        return Ok(self.aggregate(ty, parts, part_types));
+      }
+      TypeKind::Struct(named) => {
+        if self.typed.derived_defaults.contains_key(item_key(TypeItem::Struct(named.id))) {
+          const field_types = self.layouts.struct_fields(named);
+          const parts: List<Operand> = new List();
+
+          for field_ty in field_types {
+            parts.push(self.default_value(field_ty)?);
+          }
+
+          return Ok(self.aggregate(ty, parts, field_types));
+        }
+      }
+      TypeKind::Enum(named) => {
+        if let Some(index) = self.typed.default_variants.get(named.id) {
+          return Ok(matching::variant(self, ty, index, new List()));
+        }
+      }
+      TypeKind::Class(named) => {
+        if let Some(map) = self.typed.prelude.map {
+          if map == named.id {
+            return self.new_instance(ty, new List());
+          }
+        }
+      }
+      _ => {}
+    }
+
+    // The `default` the type implements.
+    const default_id = match self.typed.prelude.default {
+      Some(found) => found,
+      None => return Err("`Default` without the prelude"),
+    };
+    const function = match self.typed.interface_def(default_id) {
+      Some(def) => match def.methods.first() {
+        Some(found) => found,
+        None => return Err("`Default` without `default`"),
+      },
+      None => return Err("`Default` without the prelude"),
+    };
+    const target = interfaces::static_for(self, function, ty, Subst::empty().with_self(ty), new List());
+
+    Ok(self.call(Callee::Fn(target), new List(), ty))
   }
 
   prv fn new_expr(self, ty: Type, args: List<Expr>) -> Result<Operand, String> {
@@ -2566,7 +2663,7 @@ pub class Lowering {
     self.method_call(value, receiver, args, ty)
   }
 
-  prv fn struct_lit(self, value: Expr, ty: Type, fields: List<FieldInit>) -> Result<Operand, String> {
+  prv fn struct_lit(self, value: Expr, ty: Type, fields: List<FieldInit>, base: Option<Expr>) -> Result<Operand, String> {
     if let TypeKind::Enum(_) = ty.kind {
       const variant = match self.resolution.paths.get(value.id) {
         Some(Res::Variant(found)) => found,
@@ -2656,6 +2753,19 @@ pub class Lowering {
       const stored = self.operand_as(init.value, field_types.get(index).unwrap_or(types::error()))?;
 
       operands[index] = Some(stored);
+    }
+
+    // The fields not written are read from the base, which runs after them
+    // (docs/adr/0094-conversions-and-defaults.md, Q643).
+    if let Some(found) = base {
+      const base_value = self.operand_as(found, ty)?;
+      const base_place = self.operand_place(base_value, ty)?;
+
+      for index in 0..operands.len() {
+        if operands[index].is_none() {
+          operands[index] = Some(Operand::Place(project(base_place, Projection::Field(index), field_types.get(index).unwrap_or(types::error()))));
+        }
+      }
     }
 
     const complete: List<Operand> = new List();
@@ -3102,6 +3212,13 @@ pub class Lowering {
       const operand = self.operand_as(args[0], types::substitute(conversion.from, self.subst))?;
 
       return interfaces::convert_value(self, operand, conversion);
+    }
+
+    // `Type::default()` and `T::default()` (docs/adr/0094-conversions-and-defaults.md, Q636).
+    if let Some(call) = self.typed.static_calls.get(value.id) {
+      if self.is_default_fn(call.function) {
+        return self.default_value(types::substitute(call.self_ty, self.subst));
+      }
     }
 
     match self.resolution.paths.get(callee.id) {

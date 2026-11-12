@@ -467,11 +467,15 @@ class Collector {
         self.expr(base);
         self.expr(index);
       }
-      ExprKind::StructLit { path, fields } => {
+      ExprKind::StructLit { path, fields, base } => {
         self.value_path(path, expr.id);
 
         for field in fields {
           self.expr(field.value);
+        }
+
+        if let Some(found) = base {
+          self.expr(found);
         }
       }
       ExprKind::ArrayLit(elems) | ExprKind::Tuple(elems) => self.exprs(elems),

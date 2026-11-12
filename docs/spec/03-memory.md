@@ -208,8 +208,10 @@ struct Point impl Display {
   `pub` or `prv`, as in classes. `prv` means visible only inside the struct.
 - A struct literal `Point { ... }` is only valid where **all** its fields are accessible.
   Structs with `prv` fields are built from outside through a static function.
-- A struct literal initializes every field exactly once, in any order; there are no default
-  values and no `..base` syntax. `Point { x, y }` is shorthand for `Point { x: x, y: y }`.
+- A struct literal initializes every field exactly once, in any order, or takes the fields it
+  does not write from a base, `..base` ([struct update](05-interfaces-generics.md#defaults));
+  fields have no default values of their own. `Point { x, y }` is shorthand for
+  `Point { x: x, y: y }`.
 - Fields and functions of a struct share one namespace: a field and a method cannot have the
   same name.
 - Structs are copied when assigned, passed or returned; copying retains the `String`s they

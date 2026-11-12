@@ -110,6 +110,14 @@ pub interface TryInto<U, E> {
   fn try_into(self) -> Result<U, E>;
 }
 
+/// The value a type starts from, as Rust's `Default` (docs/adr/0094-conversions-and-defaults.md,
+/// Q636): `0` for numbers, `false`, `'\0'`, `""`, empty collections, `None`, and for tuples and
+/// arrays the default of each element. A struct or enum written after `@default` has the default
+/// of each field, or the variant marked `@default`: `Config::default()`, `T::default()`.
+pub interface Default {
+  fn default() -> Self;
+}
+
 /// `String::from(c)` of a `char`.
 fn string_from_char(c: char) -> String {
   c.to_string()
@@ -1427,6 +1435,22 @@ fn option_iter<T>(value: Option<T>) -> Iter<T> {
     left.value = None;
     found
   })
+}
+
+/// The value, or the default of its type (docs/adr/0094-conversions-and-defaults.md, Q637).
+fn option_unwrap_or_default<T: Default>(value: Option<T>) -> T {
+  match value {
+    Some(found) => found,
+    None => T::default(),
+  }
+}
+
+/// The value, or the default of its type when it is an error.
+fn result_unwrap_or_default<T: Default, E>(value: Result<T, E>) -> T {
+  match value {
+    Ok(found) => found,
+    Err(_) => T::default(),
+  }
 }
 
 fn result_ok<T, E>(value: Result<T, E>) -> Option<T> {

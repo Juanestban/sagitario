@@ -664,9 +664,13 @@ class Flow {
         self.expr(base);
         self.expr(index);
       }
-      ExprKind::StructLit { fields, .. } => {
+      ExprKind::StructLit { fields, base, .. } => {
         for field in fields {
           self.expr(field.value);
+        }
+
+        if let Some(found) = base {
+          self.expr(found);
         }
       }
       ExprKind::ArrayLit(elems) | ExprKind::Tuple(elems) => self.exprs(elems),

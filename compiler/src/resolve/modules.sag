@@ -987,11 +987,15 @@ fn expr_paths(expr: Expr, out: List<Path>) {
       expr_paths(base, out);
       expr_paths(index, out);
     }
-    ExprKind::StructLit { path, fields } => {
+    ExprKind::StructLit { path, fields, base } => {
       expr_path(path, out);
 
       for field in fields {
         expr_paths(field.value, out);
+      }
+
+      if let Some(found) = base {
+        expr_paths(found, out);
       }
     }
     ExprKind::ArrayLit(elems) | ExprKind::Tuple(elems) => exprs_paths(elems, out),
