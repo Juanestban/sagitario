@@ -8,7 +8,7 @@ use pkg::sir::{Callee, FieldAt, Itable, ItableEntry, Lowering, Operand, Rvalue, 
 use pkg::sir::mono;
 use pkg::types::{NamedRef, Receiver, Subst, Type, TypeKind};
 use pkg::types;
-use pkg::types::typed::{TypedModule, owner_key};
+use pkg::types::typed::{TypedModule, item_key, owner_key};
 
 /// The slot of the getter of a field, after the interface's methods; the setter follows it.
 pub fn field_slot(typed: TypedModule, interface_id: u32, index: usize) -> usize {
@@ -170,6 +170,64 @@ pub fn method_for(lw: Lowering, method: u32, concrete: Type, subst: Subst, own: 
       const chosen = if has_own_params(lw, method) { subst.with(ParamOwner::Fn(method), own) } else { subst };
 
       MethodTarget { function: mono::instance(lw, method, chosen), slot: None }
+    }
+  }
+}
+
+/// The function implementing the static function `function` of an interface for `concrete`: the
+/// function of the type's own `impl ... for` block, the type's own static function, or else the
+/// default instantiated for the type. Subclasses do not inherit them
+/// (docs/adr/0094-conversions-and-defaults.md, Q631).
+pub fn static_for(lw: Lowering, function: u32, concrete: Type, subst: Subst, own: List<Type>) -> u32 {
+  const name = match lw.resolution.fn_decl(lw.package, function) {
+    Some(decl) => decl.name.name,
+    None => "",
+  };
+  const item = types::type_item_of(concrete);
+  var found: Option<u32> = None;
+
+  if let Some(TypeItem::Interface(interface_id)) = lw.resolution.owner(function) {
+    const name_of = match lw.typed.interface_def(interface_id) {
+      Some(def) => def.name,
+      None => "",
+    };
+    const args = subst.args_of(ParamOwner::Item(TypeItem::Interface(interface_id))).unwrap_or(new List());
+    const interface_ref = NamedRef { id: interface_id, name: name_of, args: args };
+
+    if let Some(block_fn) = lw.typed.block_method(lw.resolution, lw.package, concrete, interface_ref, name) {
+      if let Some(own_item) = item {
+        if let Some(block_owner) = lw.resolution.owner(block_fn) {
+          if item_key(block_owner) == item_key(own_item) {
+            found = Some(block_fn);
+          }
+        }
+      }
+    }
+  }
+
+  if found.is_none() {
+    if let Some(own_item) = item {
+      if let Some(declared) = lw.resolution.type_function(lw.package, own_item, name) {
+        if let Some(decl) = lw.resolution.fn_decl(lw.package, declared) {
+          if decl.self_param.is_none() {
+            found = Some(declared);
+          }
+        }
+      }
+    }
+  }
+
+  match found {
+    Some(implementation) => {
+      const owner = owner_subst(lw, concrete, implementation);
+      const chosen = if has_own_params(lw, implementation) { owner.with(ParamOwner::Fn(implementation), own) } else { owner };
+
+      mono::instance(lw, implementation, chosen)
+    }
+    None => {
+      const chosen = if has_own_params(lw, function) { subst.with(ParamOwner::Fn(function), own) } else { subst };
+
+      mono::instance(lw, function, chosen)
     }
   }
 }

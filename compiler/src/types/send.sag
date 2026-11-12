@@ -8,7 +8,7 @@ use pkg::diagnostics::Diagnostic;
 use pkg::diagnostics::codes;
 use pkg::resolve::{ItemRef, Res, TypeItem};
 use pkg::span::Span;
-use pkg::types::{Checker, SpanInterface};
+use pkg::types::Checker;
 use pkg::types;
 use pkg::types::exprs;
 
@@ -44,19 +44,6 @@ pub fn send_used_as_type(cx: Checker, span: Span) {
   cx.diagnostics.push(
     Diagnostic::error(codes::INVALID_IMPL, span, "`Send` cannot be used as a type").with_help("use it as the bound of a type parameter: `T: Send`"),
   );
-}
-
-/// `Send` written as a type inside function bodies, which are checked after the interfaces.
-pub fn check_send_types(cx: Checker) {
-  const used = cx.interface_types;
-
-  cx.interface_types = new List<SpanInterface>();
-
-  for entry in used {
-    if is_send_interface(cx, entry.id) {
-      send_used_as_type(cx, entry.span);
-    }
-  }
 }
 
 /// The module `std::name`, if the program uses it.

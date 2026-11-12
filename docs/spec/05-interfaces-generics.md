@@ -29,8 +29,8 @@ class Dog impl Pet {
 - **Fields** are declared `const` (they can only be read through the interface) or `var` (they
   can also be assigned through it).
 - **Methods** take `self`. A method without body is required. A method with a body is a
-  default, used by implementing types that do not define it. There are no static functions in
-  interfaces.
+  default, used by implementing types that do not define it. An interface may also declare
+  [static functions](#static-functions), without `self`.
 - `interface A extends B, C` composes interfaces; `extends` cannot loop, and an interface cannot
   redeclare a method or field of a parent.
 - `class`, `struct` and `enum` implement interfaces with the same form:
@@ -39,9 +39,9 @@ class Dog impl Pet {
   - for each field, a `pub` field with the same name and type; in a class, a `var` field when
     the interface's is `var`. Enums have no fields, so they only implement interfaces without
     fields.
-  - for each method without a default, a `pub fn` with the same name and signature, with
-    `Self` replaced by the type. Defining a method that has a default replaces the default.
-    These methods do not take `override`, which is for class inheritance.
+  - for each method or static function without a default, a `pub fn` with the same name and
+    signature, with `Self` replaced by the type. Defining one that has a default replaces the
+    default. These methods do not take `override`, which is for class inheritance.
 - A subclass inherits its parent's interfaces, and inherited fields and methods count. An
   `abstract` class may leave required methods to its concrete subclasses.
 - Inside an interface, `Self` names the implementing type:
@@ -100,6 +100,50 @@ impl Scale<Vec2, Vec2> for Vec2 {
 - A subclass inherits the blocks of its classes. Their methods are not virtual: a subclass does
   not override them.
 
+### Static functions
+
+Rationale: [ADR-0094](../adr/0094-conversions-and-defaults.md), Q631. A function without `self`
+in an interface is a static function of the types implementing it, as Rust's associated
+functions of traits:
+
+```sag
+interface Zero {
+  fn zero() -> Self;
+  fn label() -> String { "zero of " + Self::kind() }   // a default
+  fn kind() -> String;
+}
+
+struct Point impl Zero {
+  pub x: i32;
+  pub y: i32;
+
+  pub fn zero() -> Point { Point { x: 0, y: 0 } }
+  pub fn kind() -> String { "Point" }
+}
+
+fn zeros<T: Zero>() -> (T, String) {
+  (T::zero(), T::label())
+}
+
+const origin = Point::zero();
+const pair: (Point, String) = zeros();   // (Point { x: 0, y: 0 }, "zero of Point")
+```
+
+- A type provides each one as its methods: a `pub fn` without `self` in its body, or a `fn` in an
+  `impl ... for` block, with `Self` replaced by the type (`E0329` when it is missing, takes
+  `self`, or is private).
+- It is called through a type: `Point::zero()`, `Self::kind()` inside the interface or the
+  type, `Wrap<i32>::zero()` with the type's arguments written or inferred from the expected
+  type, and `T::zero()` for a type parameter bounded by the interface, whose instance calls the
+  implementation of its type argument. Through the interface itself (`Zero::zero()`) it is an
+  error (`E0314`): no value chooses the implementation. A static function declared by two
+  interfaces of a type parameter is ambiguous (`E0344`).
+- It is not a method: `point.zero()` is an error (`E0314`), and so is using `T::zero` as a value
+  (`E0314`); a lambda wraps it, `() => T::zero()`.
+- A subclass does not inherit the static functions of the interfaces of its classes, nor those of
+  their blocks, as the static functions of classes: a concrete subclass declares its own, unless
+  the interface gives a default.
+
 ## Interfaces as types
 
 An interface can be used as a type (`const shapes: [Shape; 2] = [square, circle];`). Such values
@@ -114,9 +158,10 @@ Java/C# or `dyn Trait` in Rust, but without extra syntax.
 - Interface values are references: copying one shares the instance or box, and assigning a
   `var` field through it changes that instance or box.
 - Interface values cannot be compared with `==` in the MVP.
-- An interface that uses `Self` in a parameter, result or field, itself or through a parent, or
-  that has methods with type parameters, cannot be used as a type (e.g. `[Clone; 2]` is an
-  error): the value could not know the concrete type or the instances. It can still be a bound.
+- An interface that uses `Self` in a parameter, result or field, itself or through a parent,
+  that has methods with type parameters, or that has static functions, cannot be used as a type,
+  in a declaration or inside a function body (e.g. `[Clone; 2]` is an error, `E0329`): the value
+  could not know the concrete type, the instances or the implementation. It can still be a bound.
 
 ## The `Error` interface (F2)
 

@@ -9,10 +9,10 @@ use pkg::lsp::analysis::Analysis;
 use pkg::lsp::json;
 use pkg::lsp::json::{Json, member};
 use pkg::lsp::query;
-use pkg::resolve::{ItemRef, ModuleInfo, Resolution, StdItem, TypeItem};
+use pkg::resolve::{ItemRef, ModuleInfo, ParamOwner, Resolution, StdItem, TypeItem};
 use pkg::types;
 use pkg::types::numbers;
-use pkg::types::{Type, TypeKind};
+use pkg::types::{NamedRef, Type, TypeKind};
 use pkg::types::typed::TypedModule;
 
 /// Kinds of completion items (LSP's `CompletionItemKind`).
@@ -255,7 +255,7 @@ pub fn complete(analysis: Option<Analysis>, module: Option<Module>, module_index
     }
 
     if double_colon {
-      path_members(items, found, module_index, path_chain(chars, start - 2));
+      path_members(items, found, module, module_index, path_chain(chars, start - 2), offset);
       return Json::Array(items.list);
     }
 
@@ -467,7 +467,7 @@ fn names(items: Items, analysis: Analysis, module: Option<Module>, module_index:
 // ---- Paths ------------------------------------------------------------------------------------
 
 /// The items after `a::b::`.
-fn path_members(items: Items, analysis: Analysis, module_index: Option<usize>, chain: List<String>) {
+fn path_members(items: Items, analysis: Analysis, module: Option<Module>, module_index: Option<usize>, chain: List<String>, offset: u32) {
   const resolution = match analysis.resolution {
     Some(found) => found,
     None => return,
@@ -486,6 +486,15 @@ fn path_members(items: Items, analysis: Analysis, module_index: Option<usize>, c
   if chain.len() == 1 && types::int_from_name(first).is_some() {
     items.add_words("MIN MAX", CONSTANT);
     return;
+  }
+
+  // `T::`: the static functions of the interfaces bounding a type parameter in scope
+  // (docs/adr/0094-conversions-and-defaults.md, Q631).
+  if chain.len() == 1 {
+    if let Some(ty) = param_in_scope(analysis, module, first, offset) {
+      interface_statics(items, analysis, ty);
+      return;
+    }
   }
 
   // The module the path starts from.
@@ -580,10 +589,87 @@ fn type_functions(items: Items, analysis: Analysis, item: TypeItem) {
     }
   }
 
-  for function in functions_of(resolution, item) {
+  // An interface's static functions are called through the types implementing it.
+  if let TypeItem::Interface(_) = item {
+    return;
+  }
+
+  const found = functions_of(resolution, item);
+
+  add_block_functions(found, resolution, item);
+
+  for function in found {
     if let Some(decl) = resolution.fn_decl(package, function) {
       if decl.self_param.is_none() {
         items.add(decl.name.name, FUNCTION, query::signature(analysis, function).unwrap_or(""));
+      }
+    }
+  }
+
+  // The defaults of the static functions of its interfaces.
+  if let Some(typed) = analysis.typed {
+    const name = resolution.type_name(package, item);
+    const args = typed.identity_args(ParamOwner::Item(item));
+    const ty = match item {
+      TypeItem::Struct(id) => types::of(TypeKind::Struct(NamedRef { id: id, name: name, args: args })),
+      TypeItem::Enum(id) => types::of(TypeKind::Enum(NamedRef { id: id, name: name, args: args })),
+      TypeItem::Class(id) => types::of(TypeKind::Class(NamedRef { id: id, name: name, args: args })),
+      TypeItem::Interface(_) => return,
+    };
+
+    interface_statics(items, analysis, ty);
+  }
+}
+
+/// The type parameter `name` of the function around `offset` or of its type.
+fn param_in_scope(analysis: Analysis, module: Option<Module>, name: String, offset: u32) -> Option<Type> {
+  const typed = analysis.typed?;
+  const resolution = analysis.resolution?;
+  const function = query::enclosing_function(analysis, module?, offset)?;
+  const owners = List::from([ParamOwner::Fn(function)]);
+
+  if let Some(item) = resolution.owner(function) {
+    owners.push(ParamOwner::Item(item));
+  }
+
+  for owner in owners {
+    if let Some(params) = typed.generic_params(owner) {
+      for index in 0..params.len() {
+        if params[index].name == name {
+          return typed.identity_args(owner).get(index);
+        }
+      }
+    }
+  }
+
+  None
+}
+
+/// The static functions of the interfaces `ty` implements or is bounded by, and their ancestors.
+fn interface_statics(items: Items, analysis: Analysis, ty: Type) {
+  const typed = match analysis.typed {
+    Some(found) => found,
+    None => return,
+  };
+  const resolution = match analysis.resolution {
+    Some(found) => found,
+    None => return,
+  };
+  const package = match analysis.package {
+    Some(found) => found,
+    None => return,
+  };
+
+  for implemented in typed.implemented_refs(ty) {
+    for interface_ref in typed.interface_ancestor_refs(implemented) {
+      if let Some(def) = typed.interface_def(interface_ref.id) {
+        for method in def.methods {
+          if let Some(decl) = resolution.fn_decl(package, method) {
+            if decl.self_param.is_none() {
+              items.add(decl.name.name, FUNCTION, query::signature(analysis, method).unwrap_or(""));
+            }
+          }
+        }
       }
     }
   }

@@ -2,17 +2,18 @@
 //! the types that implement them and interfaces used as types. The port of the declarations part
 //! of `sagitario_types::interfaces`.
 
-use pkg::ast::{Ident, ImplBlock, TypeExpr};
+use pkg::ast::{Expr, Ident, ImplBlock, Path, TypeExpr};
 use pkg::diagnostics::Diagnostic;
 use pkg::diagnostics::codes;
-use pkg::resolve::{ParamOwner, TypeItem};
+use pkg::resolve::{ParamOwner, TypeItem, TypeRes};
 use pkg::span::Span;
-use pkg::types::{Checker, FieldDef, FnSig, InterfaceDef, NamedRef, SpanInterface, Subst, Type, TypeKind};
+use pkg::types::{Checker, FieldDef, FnSig, InterfaceDef, NamedRef, ParamRef, SELF_PARAM, SpanInterface, Subst, Type, TypeKind};
 use pkg::types;
+use pkg::types::exprs;
 use pkg::types::generic;
 use pkg::types::inheritance;
 use pkg::types::send;
-use pkg::types::typed::{ErrorTypes, ImplEntry, item_key, owner_key};
+use pkg::types::typed::{ErrorTypes, ImplEntry, StaticCall, item_key, owner_key};
 
 /// Resolves the parents, fields and methods of every interface.
 pub fn interface_defs(cx: Checker) {
@@ -168,10 +169,11 @@ pub fn check_interfaces(cx: Checker) {
     }
 
     // Methods with type parameters cannot be called through a value either: their instances are
-    // not known.
+    // not known; nor can static functions, which no value chooses
+    // (docs/adr/0094-conversions-and-defaults.md, Q631).
     for method in def.methods {
       if let Some(sig) = cx.typed.sig(method) {
-        if sig_mentions_self(sig) {
+        if sig_mentions_self(sig) || sig.receiver.is_none() {
           mentions_self = true;
         }
       }
@@ -199,6 +201,16 @@ pub fn check_interfaces(cx: Checker) {
     cx.typed.interfaces[index].uses_self = uses_self;
   }
 
+  check_used_interfaces(cx);
+  check_interface_members(cx);
+  collect_impls(cx);
+  check_implementations(cx);
+  generic::check_type_bounds(cx);
+}
+
+/// The interfaces written as types since the last call, in declarations or, called again after
+/// them, in function bodies: `Send` and those that mention `Self` cannot be types.
+pub fn check_used_interfaces(cx: Checker) {
   const used = cx.interface_types;
 
   cx.interface_types = new List<SpanInterface>();
@@ -210,20 +222,15 @@ pub fn check_interfaces(cx: Checker) {
       if def.uses_self {
         cx.diagnostics.push(
           Diagnostic::error(codes::INVALID_IMPL, entry.span, "the interface `" + def.name + "` cannot be used as a type")
-            .with_note("it mentions `Self` or has methods with type parameters, which a value of the interface could not resolve")
+            .with_note("it mentions `Self`, has methods with type parameters or has static functions, which a value of the interface could not resolve")
             .with_help("use it as the bound of a type parameter instead"),
         );
       }
     }
   }
-
-  check_interface_members(cx);
-  collect_impls(cx);
-  check_implementations(cx);
-  generic::check_type_bounds(cx);
 }
 
-/// The methods of interfaces take `self` and have unique names among their ancestors.
+/// The methods and static functions of interfaces have unique names among their ancestors.
 fn check_interface_members(cx: Checker) {
   for index in 0..cx.typed.interfaces.len() {
     const id = index as u32;
@@ -239,10 +246,6 @@ fn check_interface_members(cx: Checker) {
       const function = decl.functions[position];
 
       position += 1;
-
-      if function.self_param.is_none() {
-        cx.error(codes::INVALID_IMPL, function.name.span, "the interface method `" + function.name.name + "` must take `self`");
-      }
 
       // A method reached through two parents is the same method; two with one name are not.
       for parent in cx.typed.interfaces[index].parents {
@@ -647,6 +650,10 @@ fn check_methods(cx: Checker, item: TypeItem, interface_ref: NamedRef, own: bool
       None => continue,
     };
     const name = decl.name.name;
+    // A static function is the type's own: subclasses do not inherit it, nor the blocks of
+    // their ancestors (Q631).
+    const is_static = decl.self_param.is_none();
+    const what = if is_static { "static function" } else { "method" };
     var candidate: Option<u32> = None;
 
     if let Some(block_id) = block {
@@ -659,6 +666,8 @@ fn check_methods(cx: Checker, item: TypeItem, interface_ref: NamedRef, own: bool
           }
         }
       }
+    } else if is_static {
+      candidate = cx.resolution.type_function(cx.package, item, name);
     } else {
       // An inherited block of an ancestor class, or else the type's own methods.
       candidate = cx.typed.block_method(cx.resolution, cx.package, self_ty, interface_ref, name);
@@ -674,7 +683,14 @@ fn check_methods(cx: Checker, item: TypeItem, interface_ref: NamedRef, own: bool
     var found: Option<u32> = None;
 
     if let Some(function) = candidate {
-      if cx.resolution.is_method(cx.package, function) {
+      const takes_self = match cx.resolution.fn_decl(cx.package, function) {
+        Some(found_decl) => found_decl.self_param.is_some(),
+        None => false,
+      };
+
+      const fits = if is_static { !takes_self } else { cx.resolution.is_method(cx.package, function) };
+
+      if fits {
         found = Some(function);
       }
     }
@@ -684,7 +700,7 @@ fn check_methods(cx: Checker, item: TypeItem, interface_ref: NamedRef, own: bool
       None => {
         if decl.is_abstract && !is_abstract {
           cx.diagnostics.push(
-            Diagnostic::error(codes::INVALID_IMPL, span, "`" + type_name + "` does not implement the method `" + name + "` of `" + interface_name + "`")
+            Diagnostic::error(codes::INVALID_IMPL, span, "`" + type_name + "` does not implement the " + what + " `" + name + "` of `" + interface_name + "`")
               .with_label(decl.name.span, "required here")
               .with_help(if block.is_some() { "add `fn " + name + "(...)` to the block" } else { "add `pub fn " + name + "(...)`" }),
           );
@@ -862,4 +878,157 @@ pub fn interface_method_of(cx: Checker, ty: Type, name: String) -> Option<u32> {
   }
 
   None
+}
+
+/// `T::name(args)`, `Self::name(args)` inside an interface, or `Type::name(args)`: a static
+/// function of an interface the type implements or is bounded by
+/// (docs/adr/0094-conversions-and-defaults.md, Q631).
+pub fn static_call(cx: Checker, value: Expr, path: Path, target: TypeRes, name: String, args: List<Expr>, expected: Option<Type>) -> Type {
+  const span = match path.segments.last() {
+    Some(last) => last.span,
+    None => path.span,
+  };
+  var item: Option<TypeItem> = None;
+  const self_ty = match target {
+    TypeRes::Param { owner, index } => cx.identity_args(owner).get(index as usize).unwrap_or(types::error()),
+    TypeRes::Builtin => match cx.owner {
+      Some(TypeItem::Interface(id)) => types::of(TypeKind::Param(ParamRef { owner: ParamOwner::Item(TypeItem::Interface(id)), index: SELF_PARAM, name: "Self" })),
+      _ => types::error(),
+    },
+    TypeRes::Item(found) => {
+      item = Some(found);
+      cx.type_ref(found)
+    }
+    _ => types::error(),
+  };
+
+  if types::is_error(self_ty) {
+    exprs::unchecked_args(cx, args);
+
+    return types::error();
+  }
+
+  // The static functions of that name in the interfaces of the type and their ancestors.
+  const seen: List<NamedRef> = new List();
+  const refs: List<NamedRef> = new List();
+  const functions: List<u32> = new List();
+
+  for implemented in cx.typed.implemented_refs(self_ty) {
+    for interface_ref in cx.typed.interface_ancestor_refs(implemented) {
+      if types::contains_ref(seen, interface_ref) {
+        continue;
+      }
+
+      seen.push(interface_ref);
+
+      if let Some(def) = cx.typed.interface_def(interface_ref.id) {
+        for method in def.methods {
+          if let Some(decl) = cx.resolution.fn_decl(cx.package, method) {
+            if decl.name.name == name && decl.self_param.is_none() {
+              refs.push(interface_ref);
+              functions.push(method);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  const shown = types::text(self_ty);
+
+  if functions.is_empty() {
+    var diagnostic = Diagnostic::error(codes::UNRESOLVED_NAME, span, "no function `" + name + "` in `" + shown + "`");
+
+    if let TypeKind::Param(_) = self_ty.kind {
+      diagnostic = diagnostic.with_help("bound `" + shown + "` by an interface that declares `fn " + name + "(...)`");
+    }
+
+    cx.diagnostics.push(diagnostic);
+    exprs::unchecked_args(cx, args);
+
+    return types::error();
+  }
+
+  if functions.len() > 1 {
+    const names: List<String> = new List();
+
+    for interface_ref in refs {
+      names.push("`" + types::text(types::interface_type(interface_ref)) + "`");
+    }
+
+    cx.diagnostics.push(
+      Diagnostic::error(codes::AMBIGUOUS_METHOD, span, "the static function `" + name + "` of `" + shown + "` is ambiguous")
+        .with_note("it is declared in " + names.join(" and ")),
+    );
+    exprs::unchecked_args(cx, args);
+
+    return types::error();
+  }
+
+  const function = functions[0];
+  const interface_ref = refs[0];
+  const sig = match cx.typed.sig(function) {
+    Some(found) => types::substitute_sig(found, interface_subst(interface_ref, self_ty)),
+    None => {
+      exprs::unchecked_args(cx, args);
+
+      return types::error();
+    }
+  };
+  const owner_count = match item {
+    Some(found) => cx.generic_count(ParamOwner::Item(found)),
+    None => 0,
+  };
+  const own_count = cx.generic_count(ParamOwner::Fn(function));
+  const explicit = generic::explicit_args(cx, path);
+  const last = if path.segments.is_empty() { 0usize } else { path.segments.len() - 1 };
+  const unknowns = new generic::Unknowns();
+
+  // The type's arguments are written (`Box<i32>::default()`), its own with `Self`, or inferred.
+  if let Some(found) = item {
+    if owner_count > 0 {
+      var given: Option<List<Type>> = None;
+
+      if let Some(written) = explicit {
+        if written.segment != last {
+          given = Some(generic::given_args(cx, path.span, "`" + cx.resolution.type_name(cx.package, found) + "`", owner_count, written.args));
+        }
+      }
+
+      if given.is_none() {
+        if let Some(first) = path.segments.first() {
+          if first.name == "Self" {
+            given = Some(cx.identity_args(ParamOwner::Item(found)));
+          }
+        }
+      }
+
+      unknowns.add(ParamOwner::Item(found), owner_count, given);
+    }
+  }
+
+  var own_given: Option<List<Type>> = None;
+
+  if let Some(written) = explicit {
+    if written.segment == last {
+      own_given = Some(generic::given_args(cx, path.span, "`" + name + "`", own_count, written.args));
+    }
+  }
+
+  unknowns.add(ParamOwner::Fn(function), own_count, own_given);
+
+  if let Some(ty) = expected {
+    unknowns.unify(sig.ret, ty);
+  }
+
+  generic::generic_args(cx, value.span, "function", sig.params, args, Subst::empty(), unknowns);
+
+  const subst = generic::finish_inference(cx, value.span, "`" + name + "`", unknowns);
+  const chosen = types::substitute_ref(interface_ref, subst);
+  const own = subst.args_of(ParamOwner::Fn(function)).unwrap_or(new List());
+
+  generic::record_call_args(cx, value.id, Subst::of(ParamOwner::Item(TypeItem::Interface(chosen.id)), chosen.args), function, own);
+  cx.typed.static_calls.insert(value.id, StaticCall { function: function, self_ty: types::substitute(self_ty, subst) });
+
+  types::substitute(sig.ret, subst)
 }

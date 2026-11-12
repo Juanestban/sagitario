@@ -39,7 +39,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0028](0028-inferred-self-mutation.md) | `self` without `var`: methods that modify `self` are inferred | Accepted |
 | [0029](0029-inheritance.md) | Inheritance: construction, overriding, subtyping and dispatch | Accepted |
 | [0030](0030-weak-references.md) | Weak references: initialization, scope and runtime | Accepted |
-| [0031](0031-interfaces.md) | Interfaces: fields, implementation, interface values and `Error` | Accepted (completed by 0032) |
+| [0031](0031-interfaces.md) | Interfaces: fields, implementation, interface values and `Error` | Accepted (completed by 0032; refined by 0094) |
 | [0032](0032-generics.md) | Generics: type arguments, inference, bounds and monomorphization | Accepted (refined by 0034) |
 | [0033](0033-closures-details.md) | Closures: arrow functions, function values and their representation | Accepted |
 | [0034](0034-collections-and-iterators.md) | Collections, iterators, and equality, order and hashing | Accepted |
@@ -89,7 +89,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0078](0078-ffi-without-c-shims.md) | A complete FFI: C libraries without C shims | Accepted |
 | [0079](0079-references-and-borrowing.md) | References and borrowing in parameters | Accepted |
 | [0080](0080-std-math-trigonometry.md) | Trigonometry in `std::math` | Accepted |
-| [0081](0081-operator-overloading.md) | Operator overloading through interfaces | Accepted |
+| [0081](0081-operator-overloading.md) | Operator overloading through interfaces | Accepted (refined by 0094) |
 | [0082](0082-format-strings.md) | Format strings `f"..."` | Accepted |
 | [0083](0083-global-state.md) | Global state: `static`, `static var` and `@thread_local` | Accepted |
 | [0084](0084-a-complete-language-and-the-engine-apart.md) | Roadmap v2: a complete language, with the game engine as a project apart | Accepted |
@@ -102,6 +102,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0091](0091-fewer-reference-counts.md) | Fewer reference counts: an optimization pass over SIR (S2) | Accepted |
 | [0092](0092-tuples.md) | Tuples: types, values, patterns and their interfaces (S2) | Accepted |
 | [0093](0093-everyday-methods.md) | The everyday methods of the standard library (S2) | Accepted |
+| [0094](0094-conversions-and-defaults.md) | Conversions, defaults, generic `min` and `max`, and indexing (S2) | Accepted |
 
 ## Template
 

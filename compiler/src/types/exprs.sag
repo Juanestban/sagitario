@@ -857,6 +857,15 @@ fn other_expr_kind(cx: Checker, value: Expr, expected: Option<Type>) -> Type {
 
         types::error()
       }
+      // Its implementation is chosen by the type in the call (docs/adr/0094-conversions-and-defaults.md, Q631).
+      Some(Res::InterfaceFn { name, .. }) => {
+        cx.diagnostics.push(
+          Diagnostic::error(codes::WRONG_CALL_FORM, value.span, "the static function `" + name + "` of an interface cannot be used as a value")
+            .with_help("wrap the call in a lambda: `(x) => Type::" + name + "(x)`"),
+        );
+
+        types::error()
+      }
       // `i32::MAX` (docs/adr/0088-bitwise-operators-and-integer-methods.md, Q580).
       Some(Res::Builtin(name)) if numbers::int_limit(name).is_some() => match numbers::int_limit(name) {
         Some(limit) => types::int(limit.ty),
@@ -1609,6 +1618,7 @@ fn call(cx: Checker, value: Expr, callee: Expr, args: List<Expr>, expected: Opti
 
       return ty;
     }
+    Some(Res::InterfaceFn { target, name }) => return interfaces::static_call(cx, value, path, target, name, args, expected),
     Some(Res::Extern(id)) => {
       sig = ffi::extern_call_sig(cx, callee, id);
     }

@@ -66,3 +66,22 @@ fn kept() -> i32 {
 fn first_of(pair: (i32, String)) -> i32 {
   pair.0
 }
+
+/// Static functions of an interface, completed after `Origin::` and after `T::`, defaults included
+/// (docs/adr/0094-conversions-and-defaults.md, Q631).
+interface Zero {
+  fn zero() -> Self;
+  fn label() -> String { "zero" }
+}
+
+struct Origin impl Zero {
+  pub x: i32;
+
+  pub fn zero() -> Origin { Origin { x: 0 } }
+}
+
+fn zeros<T: Zero>() -> String {
+  const _origin = Origin::label();
+
+  T::label()
+}

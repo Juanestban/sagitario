@@ -162,6 +162,11 @@ pub enum Res {
   Static(u32),
   /// `Name::from_raw` of the enum `Name`, which has an integer representation.
   FromRaw(u32),
+  /// A static function of an interface called through a type: `T::default()` for a type
+  /// parameter, `Self::from(x)` inside an interface (`Builtin`), or `Type::from(x)` for one the
+  /// type does not declare itself. The checker finds the interface
+  /// (docs/adr/0094-conversions-and-defaults.md, Q631).
+  InterfaceFn { target: TypeRes, name: String },
 }
 
 /// The declaration a type parameter belongs to.
@@ -2120,6 +2125,13 @@ pub class Resolver {
       return self.value_name(segment.name, segment.span);
     }
 
+    // `T::name`: a static function of an interface bounding the type parameter `T`.
+    if path.segments.len() == 2 {
+      if let Some(generic) = self.lookup_generic(path.segments[0].name) {
+        return Some(Res::InterfaceFn { target: TypeRes::Param { owner: generic.owner, index: generic.index }, name: path.segments[1].name });
+      }
+    }
+
     const qualified = self.qualified(path.segments)?;
     const last = qualified.last;
     const rest = qualified.rest;
@@ -2259,6 +2271,13 @@ pub class Resolver {
                   return Some(Res::FromRaw(id));
                 }
               }
+            }
+          }
+
+          // `Self::name` inside an interface: a static function of the type implementing it.
+          if let TypeItem::Interface(_) = item {
+            if last.name == "Self" {
+              return Some(Res::InterfaceFn { target: TypeRes::Builtin, name: member.name });
             }
           }
 
@@ -2761,9 +2780,26 @@ pub class Resolver {
   /// `Type::function`: a static function of a struct, enum or class.
   prv fn type_function(self, item: TypeItem, name: String, span: Span) -> Option<Res> {
     const type_name = self.resolution.type_name(self.package, item);
+
+    // A static function of an interface has no value to choose its implementation by.
+    if let TypeItem::Interface(_) = item {
+      if self.is_interface_static(item, name) {
+        self.diagnostics.push(
+          Diagnostic::error(codes::WRONG_CALL_FORM, span, "the static function `" + name + "` of `" + type_name + "` is called through a type")
+            .with_help("name a type that implements `" + type_name + "`: `Type::" + name + "(...)`"),
+        );
+
+        return None;
+      }
+    }
+
     const function = match self.resolution.type_function(self.package, item, name) {
       Some(function) => function,
       None => {
+        if self.from_interface(item, name) {
+          return Some(Res::InterfaceFn { target: TypeRes::Item(item), name: name });
+        }
+
         const candidates: List<String> = new List();
 
         for function in self.resolution.type_functions(self.package, item) {
@@ -2831,6 +2867,48 @@ pub class Resolver {
     }
 
     Some(Res::Fn(function))
+  }
+
+  /// Whether the interface `item` declares a function `name` without `self`.
+  prv fn is_interface_static(self, item: TypeItem, name: String) -> bool {
+    if let TypeItem::Interface(id) = item {
+      if let Some(info) = self.resolution.interfaces.get(id as usize) {
+        for function in info.functions {
+          if let Some(decl) = self.resolution.fn_decl(self.package, function) {
+            if decl.name.name == name && decl.self_param.is_none() {
+              return true;
+            }
+          }
+        }
+      }
+    }
+
+    false
+  }
+
+  /// Whether a static function `name` that `item` does not declare may come from an interface:
+  /// an `impl ... for` block of `item` or an interface declares one (Q631). The checker tells
+  /// whether `item` implements it.
+  prv fn from_interface(self, item: TypeItem, name: String) -> bool {
+    for block in self.resolution.blocks {
+      if same_type_item(block.target, item) {
+        for function in block.functions {
+          if let Some(decl) = self.resolution.fn_decl(self.package, function) {
+            if decl.name.name == name && decl.self_param.is_none() {
+              return true;
+            }
+          }
+        }
+      }
+    }
+
+    for index in 0..self.resolution.interfaces.len() {
+      if self.is_interface_static(TypeItem::Interface(index as u32), name) {
+        return true;
+      }
+    }
+
+    false
   }
 
   /// The types named in a type expression.

@@ -3104,6 +3104,31 @@ pub class Lowering {
 
         return Ok(self.call(Callee::Fn(function), operands, ty));
       }
+      // The implementation of the type the call names, known once monomorphized
+      // (docs/adr/0094-conversions-and-defaults.md, Q631).
+      Some(Res::InterfaceFn { .. }) => {
+        const recorded = match self.typed.static_calls.get(value.id) {
+          Some(found) => found,
+          None => return Err("a static function of an interface without its type"),
+        };
+        const concrete = types::substitute(recorded.self_ty, self.subst);
+        const subst = mono::call_subst(self, value.id, recorded.function, Some(concrete));
+        const own = subst.args_of(ParamOwner::Fn(recorded.function)).unwrap_or(new List());
+        const params = match self.typed.sig(recorded.function) {
+          Some(sig) => types::substitute_sig(sig, subst).params,
+          None => new List(),
+        };
+        const function = interfaces::static_for(self, recorded.function, concrete, subst, own);
+        const operands: List<Operand> = new List();
+        var index = 0usize;
+
+        while index < args.len() && index < params.len() {
+          operands.push(self.operand_as(args[index], params[index])?);
+          index += 1;
+        }
+
+        return Ok(self.call(Callee::Fn(function), operands, ty));
+      }
       Some(Res::Extern(id)) => {
         target = Some(Callee::Extern(id));
       }

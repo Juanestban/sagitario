@@ -15,6 +15,10 @@ The sources say 0.32.0.
 
 ### Added
 
+- Static functions in interfaces, such as `fn zero() -> Self;`, with or without a default,
+  implemented by a type's body or an `impl ... for` block and called as `Type::zero()`,
+  `Self::zero()` or `T::zero()` for a type parameter bounded by the interface
+  ([ADR-0094](docs/adr/0094-conversions-and-defaults.md), increment 1).
 - Rust's adapters and consumers of iterators (`enumerate`, `zip`, `chain`, `flat_map`, `flatten`,
   `take_while`, `sum`, `min`, `max`, `position`, `partition`, `unzip`...), `peek` on every
   iterator, `DoubleEndedIter<T>` with `rev` and `next_back` for those of lists, slices, ranges
@@ -107,6 +111,9 @@ The sources say 0.32.0.
 
 ### Fixed
 
+- An interface that cannot be a type (one that mentions `Self`, has methods with type parameters
+  or, now, static functions) written as a type inside a function body is an error (`E0329`), as
+  it already was in declarations; it was accepted there.
 - On Windows, `Command` runs a program given by a relative path written with `/`
   (`build/tool.exe`), which `CreateProcessW` did not find.
 - A statement starting with a block-like expression (`if`, `match`, `unsafe { }`, a block) ends at

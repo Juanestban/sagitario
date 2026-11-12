@@ -1023,7 +1023,8 @@ pub fn check_until(package: Package, resolution: Resolution, diagnostics: Diagno
   classes::infer_mutating_methods(checker);
   // The bounds of the types written inside function bodies.
   generic::check_type_bounds(checker);
-  send::check_send_types(checker);
+  // The interfaces written as types inside function bodies, which are checked after them.
+  interfaces::check_used_interfaces(checker);
   send::check_statics(checker);
 
   // The borrow checker needs the types and which methods modify `self`; after type errors, it

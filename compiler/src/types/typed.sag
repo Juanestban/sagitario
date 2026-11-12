@@ -88,6 +88,14 @@ pub enum BuiltinMethod {
   Checked(String),
 }
 
+/// A call of the static function `function` of an interface, for the type `self_ty`, whose
+/// implementation runs: a type parameter or `Self` until monomorphization
+/// (docs/adr/0094-conversions-and-defaults.md, Q631).
+pub struct StaticCall {
+  pub function: u32;
+  pub self_ty: Type;
+}
+
 /// A list or array used as an iterator: the prelude function making the iterator and its type
 /// arguments.
 pub struct ToIter {
@@ -197,6 +205,8 @@ pub class TypedModule {
   pub var call_args: Map<u32, List<Type>>;
   /// Calls to built-in methods, by node id.
   pub var builtin_methods: Map<u32, BuiltinMethod>;
+  /// The calls of static functions of interfaces, by call id.
+  pub var static_calls: Map<u32, StaticCall>;
   /// Type of each local binding, indexed by function id then local id.
   pub var local_types: List<List<Type>>;
   pub var expr_types: Map<u32, Type>;
@@ -248,6 +258,7 @@ pub class TypedModule {
     self.const_values = new List();
     self.call_args = new Map<u32, List<Type>>();
     self.builtin_methods = new Map<u32, BuiltinMethod>();
+    self.static_calls = new Map<u32, StaticCall>();
     self.local_types = new List();
     self.expr_types = new Map<u32, Type>();
     self.method_calls = new Map<u32, u32>();
