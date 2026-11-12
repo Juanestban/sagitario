@@ -1,0 +1,58 @@
+// The generic `min` and `max`, `clamp` of `Ord` and the methods of `Ordering`
+// (docs/adr/0094-conversions-and-defaults.md, Q638).
+// expect-stdout: 3 7 "a" "b" Version { major: 1, minor: 2 } Version { major: 1, minor: 9 }
+// expect-stdout: 5 1 3 "m" Version { major: 1, minor: 5 } 4 2.5
+// expect-stdout: Greater Equal Less Less Greater Less
+// expect-stdout: true false true false true false true true
+// expect-stdout: [Version { major: 2, minor: 0 }, Version { major: 1, minor: 9 }, Version { major: 1, minor: 2 }]
+// expect-stdout: ["ccc", "a", "bb"] first second
+
+struct Version impl Ord {
+  pub major: i32;
+  pub minor: i32;
+
+  pub fn equals(self, other: Version) -> bool {
+    self.major == other.major && self.minor == other.minor
+  }
+
+  pub fn compare(self, other: Version) -> Ordering {
+    self.major.compare(other.major).then(self.minor.compare(other.minor))
+  }
+}
+
+/// Which of two equal values `min` and `max` give.
+struct Tagged impl Ord {
+  pub key: i32;
+  pub name: String;
+
+  pub fn equals(self, other: Tagged) -> bool { self.key == other.key }
+  pub fn compare(self, other: Tagged) -> Ordering { self.key.compare(other.key) }
+}
+
+fn bounded<T: Ord>(value: T, low: T, high: T) -> T {
+  value.clamp(low, high)
+}
+
+fn main() {
+  const old = Version { major: 1, minor: 2 };
+  const newer = Version { major: 1, minor: 9 };
+
+  println(f"{min(3, 7)} {max(3, 7)} {min("a", "b"):?} {max("a", "b"):?} {min(old, newer):?} {max(newer, old):?}");
+  println(f"{bounded(9, 1, 5)} {bounded(-2, 1, 5)} {3.clamp(1, 5)} {"z".clamp("a", "m"):?} {Version { major: 3, minor: 0 }.clamp(old, Version { major: 1, minor: 5 }):?} {bounded(4u8, 0u8, 10u8)} {2.5.clamp(1.0, 3.0)}");
+  println(f"{Ordering::Less.reverse():?} {Ordering::Equal.reverse():?} {Ordering::Greater.reverse():?} {Ordering::Equal.then(Ordering::Less):?} {Ordering::Greater.then(Ordering::Less):?} {Ordering::Equal.then_with(() => 1.compare(2)):?}");
+  println(f"{Ordering::Equal.is_eq()} {Ordering::Equal.is_ne()} {Ordering::Less.is_lt()} {Ordering::Less.is_gt()} {Ordering::Less.is_le()} {Ordering::Less.is_ge()} {Ordering::Greater.is_ge()} {Ordering::Equal.is_le()}");
+
+  const versions = List::from([old, Version { major: 2, minor: 0 }, newer]);
+
+  versions.sort_by((a, b) => a.compare(b).reverse());
+  println(f"{versions:?}");
+
+  const words = List::from(["ccc", "a", "bb"]);
+
+  words.sort_by((a, b) => (a.len() % 3).compare(b.len() % 3).then_with(() => a.compare(b)));
+
+  const first = Tagged { key: 1, name: "first" };
+  const second = Tagged { key: 1, name: "second" };
+
+  println(f"{words:?} {min(first, second).name} {max(first, second).name}");
+}

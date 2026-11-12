@@ -749,6 +749,36 @@ pub fn primitive_method(cx: Checker, value: Expr, receiver_ty: Type, method: Ide
     return None;
   }
 
+  // `clamp`, the default method of `Ord`, for the types without their own: integers have one
+  // (docs/adr/0094-conversions-and-defaults.md, Q638).
+  if name == "clamp" {
+    if let TypeKind::Int(_) = receiver_ty.kind {
+      return None;
+    }
+
+    const ord = cx.typed.prelude.ord?;
+
+    if !cx.typed.implemented_refs(receiver_ty).iter().any((found) => found.id == ord) {
+      return None;
+    }
+
+    var clamp: Option<u32> = None;
+
+    for function in cx.typed.interface_def(ord)?.methods {
+      if let Some(decl) = cx.resolution.fn_decl(cx.package, function) {
+        if decl.name.name == "clamp" {
+          clamp = Some(function);
+        }
+      }
+    }
+
+    const function = clamp?;
+
+    cx.typed.method_calls.insert(value.id, function);
+
+    return Some(generic::generic_method_call(cx, value, receiver_ty, function, args));
+  }
+
   const interface_id = if name == "equals" {
     cx.typed.prelude.eq
   } else if name == "compare" {

@@ -26,6 +26,76 @@ pub enum Ordering {
   Less,
   Equal,
   Greater,
+
+  /// `Greater` for `Less` and `Less` for `Greater`, as Rust's
+  /// (docs/adr/0094-conversions-and-defaults.md, Q638).
+  pub fn reverse(self) -> Ordering {
+    match self {
+      Ordering::Less => Ordering::Greater,
+      Ordering::Equal => Ordering::Equal,
+      Ordering::Greater => Ordering::Less,
+    }
+  }
+
+  /// This order, or `other` when this one is `Equal`: the order by a first key, then a second.
+  pub fn then(self, other: Ordering) -> Ordering {
+    match self {
+      Ordering::Equal => other,
+      _ => self,
+    }
+  }
+
+  /// This order, or the one `f` gives when this one is `Equal`; `f` runs only then.
+  pub fn then_with(self, f: fn() -> Ordering) -> Ordering {
+    match self {
+      Ordering::Equal => f(),
+      _ => self,
+    }
+  }
+
+  pub fn is_eq(self) -> bool {
+    match self {
+      Ordering::Equal => true,
+      _ => false,
+    }
+  }
+
+  pub fn is_ne(self) -> bool {
+    !self.is_eq()
+  }
+
+  pub fn is_lt(self) -> bool {
+    match self {
+      Ordering::Less => true,
+      _ => false,
+    }
+  }
+
+  pub fn is_gt(self) -> bool {
+    match self {
+      Ordering::Greater => true,
+      _ => false,
+    }
+  }
+
+  pub fn is_le(self) -> bool {
+    !self.is_gt()
+  }
+
+  pub fn is_ge(self) -> bool {
+    !self.is_lt()
+  }
+}
+
+/// The smaller of two values, `a` when they are equal, as Rust's `cmp::min` (Q638). Floats,
+/// which are not `Ord`, have their own `min`.
+pub fn min<T: Ord>(a: T, b: T) -> T {
+  if b < a { b } else { a }
+}
+
+/// The larger of two values, `b` when they are equal, as Rust's `cmp::max`.
+pub fn max<T: Ord>(a: T, b: T) -> T {
+  if b < a { a } else { b }
 }
 
 /// Values that can be compared for equality. Integers, `bool`, `char` and `String` implement
@@ -37,6 +107,16 @@ pub interface Eq {
 /// Values with a total order. Integers, `bool`, `char` and `String` implement it.
 pub interface Ord extends Eq {
   fn compare(self, other: Self) -> Ordering;
+
+  /// The value restricted to `low..=high`; panics unless `low <= high`, as Rust's (Q638).
+  /// Numbers have their own, which floats need too.
+  fn clamp(self, low: Self, high: Self) -> Self {
+    if high < low {
+      panic("`clamp` needs min <= max");
+    }
+
+    if self < low { low } else if high < self { high } else { self }
+  }
 }
 
 /// Values that can be keys of a `Map`: equal values must have the same hash. Integers, `bool`,

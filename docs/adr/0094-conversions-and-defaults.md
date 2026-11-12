@@ -168,3 +168,9 @@ fn main() {
   `replace` and `swap` in `std::mem`, on `&mut` parameters. `..base` reads the fields not written
   from the place of the base, once it is evaluated. In an enum, attributes start a variant only
   when a name follows them, so those of the functions after the variants stay theirs.
+- Increment 4 is done. `min`, `max` and the methods of `Ordering` are written in the prelude, and
+  `clamp` is a default method of `Ord`, which lowering compiles for each type as other default
+  methods; for numbers, `bool`, `char` and `String`, it compiled only `equals`, `compare` and
+  `hash` as their own operations, and now leaves the other methods of those interfaces to their
+  defaults. Integers and floats keep their `clamp`, which reports the line of its call; that of
+  `Ord`, as Rust's, panics in the prelude.

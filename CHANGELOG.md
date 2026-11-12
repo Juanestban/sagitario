@@ -15,6 +15,9 @@ The sources say 0.32.0.
 
 ### Added
 
+- The prelude functions `min` and `max` of any `Ord` type, `clamp` on every `Ord` type, and
+  Rust's methods of `Ordering`: `reverse`, `then`, `then_with`, `is_eq`, `is_lt`...
+  ([ADR-0094](docs/adr/0094-conversions-and-defaults.md), increment 4).
 - `Default`, as Rust's: implemented by hand or with the attribute `@default` before a struct (the
   default of each field) or an enum (the variant marked `@default`), and by numbers, `bool`,
   `char`, strings, lists, maps, `Option`, tuples and arrays; `Type::default()` and

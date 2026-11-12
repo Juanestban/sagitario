@@ -448,6 +448,17 @@ pub fn is_primitive_method(lw: Lowering, function: u32, receiver_ty: Type) -> bo
     return false;
   }
 
+  // `equals`, `compare` and `hash`; the default methods of these interfaces, such as `clamp`, are
+  // compiled for the type (docs/adr/0094-conversions-and-defaults.md, Q638).
+  const name = match lw.resolution.fn_decl(lw.package, function) {
+    Some(decl) => decl.name.name,
+    None => "",
+  };
+
+  if name != "equals" && name != "compare" && name != "hash" {
+    return false;
+  }
+
   match lw.resolution.owner(function) {
     Some(TypeItem::Interface(id)) => same_option(id, lw.typed.prelude.eq) || same_option(id, lw.typed.prelude.ord) || same_option(id, lw.typed.prelude.hash),
     _ => false,

@@ -96,7 +96,7 @@ The audit of the library found gaps of the language itself, which the library ne
 | Rust | Sagitario | State | Notes |
 |---|---|---|---|
 | `PartialEq`, `Eq`, `PartialOrd`, `Ord`, `Ordering` | `Eq`, `Ord`, `Ordering` | ✅ | ADR-0081; floats have `total_compare` |
-| `cmp::min`, `max`, `Reverse`, `then_with` | — | 🟡 | Numbers have `min`/`max`; generic `min`/`max` and `Ordering::then` are missing |
+| `cmp::min`, `max`, `Reverse`, `then_with` | `min`, `max`, `clamp`, the methods of `Ordering` | ✅ | ADR-0094; `Reverse` ➖ until structs with unnamed fields: `sort_by((a, b) => b.compare(a))` |
 | `Hash`, `Hasher` | `Hash` | 🟡 | Types implement `hash`; a `Hasher` to combine fields, and a choice of hash function, are missing |
 | `Add`, `Sub`, `Mul`, `Div`, `Rem`, `Neg` | ✅ | ✅ | ADR-0081 |
 | `Index`, `IndexMut`, `Bit*`, `Shl`, `Shr`, `*Assign` | — | ❌ | `Index` for user collections; the bitwise ones after the operators exist |

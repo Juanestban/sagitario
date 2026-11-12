@@ -1,0 +1,13 @@
+// The generic `min` and `max` and `clamp` of `Ord` (docs/adr/0094-conversions-and-defaults.md, Q638).
+
+struct Point {
+  pub x: i32;
+}
+
+fn main() {
+  const _a = min(1.0, 2.0); //~ ERROR E0330
+  const _b = max(Point { x: 1 }, Point { x: 2 }); //~ ERROR E0330
+  const _c = Point { x: 1 }.clamp(Point { x: 0 }, Point { x: 2 }); //~ ERROR E0316
+  const _d = min(1, "a"); //~ ERROR E0300
+  const _e = Ordering::Less.then(1); //~ ERROR E0300
+}

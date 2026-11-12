@@ -287,6 +287,17 @@ interface Hash extends Eq {
   without the interface is an error (`E0310`) naming it.
 - `List::contains`, `List::index_of` and `List::sort` need `Eq` or `Ord`, and the keys of a
   `Map` need `Hash`.
+- Rust's helpers of `cmp` ([ADR-0094](../adr/0094-conversions-and-defaults.md), Q638):
+  - the prelude functions `min<T: Ord>(a: T, b: T) -> T` and `max`, which give `a` when the
+    two are equal for `min` and `b` for `max`; floats, which are not `Ord`, have their own
+    `min` and `max` methods;
+  - `clamp(self, low: Self, high: Self) -> Self`, a default method of `Ord`: the value restricted
+    to `low..=high`, panicking unless `low <= high` (`` `clamp` needs min <= max ``); numbers
+    have their own `clamp`;
+  - the methods of `Ordering`: `reverse()`, `then(other)` (this order, or `other` when it is
+    `Equal`), `then_with(f)` (the same, calling `f` only then), and `is_eq`, `is_ne`, `is_lt`,
+    `is_gt`, `is_le`, `is_ge`. `sort_by((a, b) => b.compare(a))` sorts in reverse, which Rust's
+    `Reverse` does.
 
 ## Operators
 
