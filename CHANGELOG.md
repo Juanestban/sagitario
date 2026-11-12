@@ -15,6 +15,9 @@ The sources say 0.32.0.
 
 ### Added
 
+- `Map::update`, `upsert` and `get_or_insert`, which do what Rust's `entry` is used for, with
+  `retain`, `extend`, `iter` (pairs) and `Map::from` a list of pairs
+  ([ADR-0093](docs/adr/0093-everyday-methods.md), increment 4).
 - Rust's methods of lists (`extend`, `append`, `retain`, `dedup`, `drain`, `split_off`,
   `binary_search`, `sort_by_key`, `windows`, `chunks`, `min`, `max`, `List::with_capacity`...), and
   those of slices, which arrays and lists have too (`contains`, `sort`, `reverse`, `fill`, `swap`,

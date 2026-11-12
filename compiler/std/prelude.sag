@@ -401,6 +401,77 @@ pub class Map<K: Hash, V> {
     self.entries().map(entry => entry.key)
   }
 
+  // ---- Rust's other methods (docs/adr/0093-everyday-methods.md, Q625). `entry` lends the map in
+  // Rust; `update`, `upsert` and `get_or_insert` do what it is used for.
+
+  /// The entries as pairs, in insertion order.
+  pub fn iter(self) -> Iter<(K, V)> {
+    self.entries().map((entry) => (entry.key, entry.value))
+  }
+
+  /// Changes the value of `key` to what `f` gives for it, if `key` is present: whether it was.
+  pub fn update(self, key: K, f: fn(V) -> V) -> bool {
+    match self.slot_of(key, key.hash()) {
+      Some(slot) => {
+        const index = self.slots[slot] as usize;
+
+        if let Some(entry) = self.items[index] {
+          const changed = f(entry.value);
+
+          self.items[index] = Some(Entry { key: entry.key, value: changed });
+        }
+
+        true
+      }
+      None => false,
+    }
+  }
+
+  /// Inserts `default` for `key`, or changes the value present with `f`: Rust's
+  /// `entry(key).and_modify(f).or_insert(default)`.
+  pub fn upsert(self, key: K, default: V, f: fn(V) -> V) {
+    if !self.update(key, f) {
+      self.insert(key, default);
+    }
+  }
+
+  /// The value of `key`, inserting `value` first if `key` is not present.
+  pub fn get_or_insert(self, key: K, value: V) -> V {
+    match self.get(key) {
+      Some(found) => found,
+      None => {
+        self.insert(key, value);
+        value
+      }
+    }
+  }
+
+  /// Keeps the entries for which `keep` returns `true`.
+  pub fn retain(self, keep: fn(K, V) -> bool) {
+    for index in 0..self.items.len() {
+      if let Some(entry) = self.items[index] {
+        if !keep(entry.key, entry.value) {
+          self.remove(entry.key);
+        }
+      }
+    }
+  }
+
+  /// Inserts each pair, in order; a later value of a key replaces an earlier one.
+  pub fn extend(self, pairs: Iter<(K, V)>) {
+    for (key, value) in pairs {
+      self.insert(key, value);
+    }
+  }
+
+  /// A map of the pairs, in order, as Rust's `HashMap::from`.
+  pub fn from(pairs: List<(K, V)>) -> Map<K, V> {
+    const map = new Map<K, V>();
+
+    map.extend(pairs.iter());
+    map
+  }
+
   pub fn values(self) -> Iter<V> {
     self.entries().map(entry => entry.value)
   }

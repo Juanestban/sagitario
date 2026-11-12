@@ -497,6 +497,14 @@ for entry in ages {
 - Methods: `insert(k, v) -> Option<V>` (the previous value), `get(k) -> Option<V>` (a copy),
   `contains_key(k) -> bool`, `remove(k) -> Option<V>`, `len()`, `is_empty()`, `clear()`, and the
   iterators `keys()`, `values()` and `entries()`. There is no `map[k]`.
+- Rust's other methods ([ADR-0093](../adr/0093-everyday-methods.md), Q625): `iter()` gives the
+  entries as `(K, V)` pairs, `retain(keep)` keeps those for which `keep(k, v)` is `true`,
+  `extend(pairs)` inserts the pairs of an `Iter<(K, V)>`, and `Map::from(pairs)` makes a map of
+  a `List<(K, V)>`. Rust's `entry` lends the map; three methods do what it is used for:
+  `update(k, f) -> bool` changes the value of a key that is present to `f(value)`,
+  `upsert(k, default, f)` inserts `default` or changes the value present with `f`
+  (`entry(k).and_modify(f).or_insert(default)`), and `get_or_insert(k, v) -> V` gives the value
+  present or inserts `v`.
 - `for entry in map` iterates over `entries()`: values of the prelude struct
   `Entry<K, V> { key: K, value: V }`.
 - A map implements `Eq` when its values do: two maps are equal when they hold the same keys with

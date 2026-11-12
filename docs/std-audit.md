@@ -48,7 +48,7 @@ The audit of the library found gaps of the language itself, which the library ne
 | `Vec<T>` | `List<T>` | ✅ | Rust's methods and its equality, order and hash ([ADR-0093](adr/0093-everyday-methods.md), increment 3): `drain` takes indices, `windows` and `chunks` give copies, `sort_unstable` is `sort` (➖); `iter().rev()` comes with the iterators of increment 5 |
 | `[T; N]` | arrays | ✅ | The methods of slices, lent all their elements, those that change them on a `var` array; `==`, `<` and `Hash` (ADR-0093, increment 3) |
 | `&[T]`, `&mut [T]` | slices | ✅ | Views of arrays and lists, only as parameters, with `contains`, `binary_search`, `min`, `max`, and on `&mut [T]` `sort`, `reverse`, `fill`, `swap`, `copy_from_slice` (ADR-0093, increment 3); `split_at`, `windows` and `chunks` of slices are ranges and the methods of lists (➖) |
-| `HashMap<K, V>` | `Map<K, V>` | 🟡 | Keeps insertion order (like `IndexMap`). Missing: `entry` (insert-or-update), `get_mut`-style update (`update(k, f)`), `retain`, `extend`, `from` a list of pairs (record 4, increment 4); `==` is done (ADR-0093, increment 3) |
+| `HashMap<K, V>` | `Map<K, V>` | ✅ | Keeps insertion order (like `IndexMap`). `update`, `upsert` and `get_or_insert` stand for `entry`, which lends the map; `retain`, `extend`, `Map::from` of a list of pairs, `iter` and `==` ([ADR-0093](adr/0093-everyday-methods.md), increments 3 and 4) |
 | `HashSet<T>` | — | ❌ | A `Set<T: Hash>` class in the prelude, on `Map` |
 | `BTreeMap`, `BTreeSet` | — | ❌ | Ordered by `Ord`, with ranges |
 | `VecDeque<T>` | — | ❌ | A ring buffer; `Channel` keeps two lists for want of it |

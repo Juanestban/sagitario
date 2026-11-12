@@ -125,3 +125,9 @@ fn main() {
   on slices of them, and `==` of maps `map_equals`, from `sir/collections.sag` as the
   comparisons of tuples do. The checker of references now knows the parameters of prelude
   functions called as methods, so `target.copy_from_slice(&[1, 2])` lends its argument.
+- Increment 4 is done. The new methods are methods of the prelude's `Map` class, so `sag lsp`
+  completes them as any class's: `update` replaces the entry in place, `upsert` is `update` and,
+  for a key not present, `insert`, `retain` removes entries while it walks them by position,
+  which removal leaves in place, and `Map::from` is a static function whose `K` and `V` come
+  from the list of pairs. An array of pairs is not a list, so `Map::from([("a", 1)])`, Rust's
+  form, is an error that asks for the types; `Map::from(List::from([("a", 1)]))` is the form.
