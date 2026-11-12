@@ -948,12 +948,6 @@ void sag_object_init(sag_object *object, void (*drop)(sag_object *object), const
   sag_count_inc(&sag_live_objects);
 }
 
-void sag_object_retain(void *pointer) {
-  sag_object *object = pointer;
-  if (object != NULL) {
-    sag_count_inc(&object->strong);
-  }
-}
 
 static void sag_drop_push(sag_object *object) {
   if (sag_drop_len == sag_drop_cap) {
@@ -972,11 +966,7 @@ static void sag_drop_push(sag_object *object) {
   sag_drop_stack[sag_drop_len++] = object;
 }
 
-void sag_object_release(void *pointer) {
-  sag_object *object = pointer;
-  if (object == NULL || sag_count_dec(&object->strong) != 0) {
-    return;
-  }
+void sag_object_destroy(sag_object *object) {
   sag_drop_push(object);
   if (sag_dropping) {
     return;

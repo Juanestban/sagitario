@@ -25,8 +25,15 @@ _Noreturn void sag_panic_at(const char *message, const char *file, int line);
 #ifdef SAG_THREADS
 #include <stdatomic.h>
 typedef atomic_size_t sag_count;
+/* Inline, so a count costs no call: the C compiler sees through it and keeps the values around
+ * it in registers. The release ordering publishes a thread's writes to an object; the acquire
+ * ordering lets the thread that drops it see the writes of every other one. */
+#define SAG_COUNT_INC(count) ((void)atomic_fetch_add_explicit((count), 1, memory_order_relaxed))
+#define SAG_COUNT_DEC(count) (atomic_fetch_sub_explicit((count), 1, memory_order_acq_rel) - 1)
 #else
 typedef size_t sag_count;
+#define SAG_COUNT_INC(count) ((void)++*(count))
+#define SAG_COUNT_DEC(count) (--*(count))
 #endif
 
 /* ---- Strings (ARC) --------------------------------------------------------------------- */
@@ -196,10 +203,22 @@ void *sag_object_alloc(size_t size);
 /* Gives a new object one reference, its drop function and its vtable. */
 void sag_object_init(sag_object *object, void (*drop)(sag_object *object), const sag_method *vtable);
 /* Both take a pointer to an object (whose first member is its `sag_object`), or NULL. */
-void sag_object_retain(void *object);
-/* Objects whose last reference goes away while another is being destroyed are destroyed after
- * it, in a loop, so long chains of objects do not exhaust the stack. */
-void sag_object_release(void *object);
+/* Destroys an object whose last strong reference went away (`sag_object_release`). Objects whose
+ * last reference goes away while another is being destroyed are destroyed after it, in a loop,
+ * so long chains of objects do not exhaust the stack. */
+void sag_object_destroy(sag_object *object);
+
+static inline void sag_object_retain(void *object) {
+  if (object != NULL) {
+    SAG_COUNT_INC(&((sag_object *)object)->strong);
+  }
+}
+
+static inline void sag_object_release(void *object) {
+  if (object != NULL && SAG_COUNT_DEC(&((sag_object *)object)->strong) == 0) {
+    sag_object_destroy((sag_object *)object);
+  }
+}
 /* Weak references: they keep the memory of an object, not the object, alive. */
 void sag_object_weak_release(sag_object *object);
 /* Makes `*slot` refer weakly to `object` (or NULL), dropping its previous weak reference. */
