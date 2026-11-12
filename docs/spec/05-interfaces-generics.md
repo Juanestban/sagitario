@@ -171,7 +171,7 @@ Rationale: [ADR-0032](../adr/0032-generics.md).
 - A type argument must implement the bounds of its parameter. Classes, structs and enums
   implementing an interface satisfy it, and so do the interface type itself and type parameters
   bounded by it. Integers, `bool`, `char` and `String` implement the prelude's `Eq`, `Ord` and
-  `Hash`, and no other interface.
+  `Hash`, and no other interface; tuples implement each of them when all their elements do.
 - In a call, a lambda argument whose parameter types are known infers type parameters from its
   result: `iter.map(n => n * 2)` infers the `U` of `map<U>(f: fn(T) -> U)`.
 - Generic interfaces (`interface Source<T>`) can be implemented several times by one type, with
@@ -196,7 +196,7 @@ the thread that gave it; `Send` is the only marker, and `Sync` stays reserved.
 - The compiler infers it; no type names it after `impl`, no interface extends it, and it is not
   a type (`const x: Send` is an error). It is a bound: `fn f<T: Send>(value: T)`.
 - These types are `Send`: integers, floats, `bool`, `char`, `()`, `String`, `CString`; arrays,
-  `Option` and `Result` of `Send` types; structs and enums whose fields are all `Send`; type
+  tuples, `Option` and `Result` of `Send` types; structs and enums whose fields are all `Send`; type
   parameters bounded by `Send`; classes whose fields, their own and inherited, are all
   `const` and `Send`, if every subclass is `Send` as well (a reference to a class can refer to
   an instance of a subclass); and the classes of `std::sync` (`Mutex<T>` when `T` is `Send`),

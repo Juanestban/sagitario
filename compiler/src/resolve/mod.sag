@@ -1778,7 +1778,7 @@ pub class Resolver {
           self.expr(field.value);
         }
       }
-      ExprKind::ArrayLit(elems) => self.exprs(elems),
+      ExprKind::ArrayLit(elems) | ExprKind::Tuple(elems) => self.exprs(elems),
       ExprKind::ArrayRepeat { value, .. } => self.expr(value),
       ExprKind::Try(inner) | ExprKind::Await(inner) => self.expr(inner),
       ExprKind::New { path, args } => {
@@ -2812,6 +2812,11 @@ pub class Resolver {
   pub fn type_expr(self, ty: TypeExpr) {
     match ty.kind {
       TypeExprKind::Unit => {}
+      TypeExprKind::Tuple(elems) => {
+        for elem in elems {
+          self.type_expr(elem);
+        }
+      }
       TypeExprKind::Path(path) => self.type_path(path),
       TypeExprKind::Fn { params, ret } => {
         for param in params {

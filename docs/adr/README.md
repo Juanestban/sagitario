@@ -100,6 +100,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0089](0089-display-debug-and-format-specifiers.md) | `Display`, the debug form of values, and format specifiers (S2) | Accepted |
 | [0090](0090-benchmarks.md) | A suite of benchmarks against other languages, and `std::hint::black_box` (S2) | Accepted |
 | [0091](0091-fewer-reference-counts.md) | Fewer reference counts: an optimization pass over SIR (S2) | Accepted |
+| [0092](0092-tuples.md) | Tuples: types, values, patterns and their interfaces (S2) | Accepted |
 
 ## Template
 

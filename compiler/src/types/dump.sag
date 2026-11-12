@@ -388,6 +388,7 @@ pub fn ty(value: Type) -> String {
       (if is_unsafe { "unsafe " } else { "" }) + "extern \"C\" fn(" + parts.join(", ") + ")" + result
     }
     TypeKind::Array { elem, len } => "[" + ty(elem) + `; ${len}]`,
+    TypeKind::Tuple(elems) => "(" + elems.iter().map((elem) => ty(elem)).collect().join(", ") + ")",
     TypeKind::List(elem) => "List<" + ty(elem) + ">",
     TypeKind::Option(inner) => "Option<" + ty(inner) + ">",
     TypeKind::Result { value: ok, error } => "Result<" + ty(ok) + ", " + ty(error) + ">",

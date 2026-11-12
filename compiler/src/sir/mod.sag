@@ -137,6 +137,15 @@ pub struct Layouts {
       // A slice of a list holds the list, and counts in its loans.
       TypeKind::Slice { .. } => true,
       TypeKind::Array { elem, .. } => self.is_managed(elem),
+      TypeKind::Tuple(elems) => {
+        for elem in elems {
+          if self.is_managed(elem) {
+            return true;
+          }
+        }
+
+        false
+      }
       TypeKind::Struct(named) => {
         for field in self.struct_fields(named) {
           if self.is_managed(field) {
@@ -601,6 +610,7 @@ pub fn type_key(ty: Type) -> String {
     TypeKind::Function { params, ret } => "fn" + args_key(params) + ">" + type_key(ret),
     TypeKind::CFn { is_unsafe, params, ret } => (if is_unsafe { "ucfn" } else { "cfn" }) + args_key(params) + ">" + type_key(ret),
     TypeKind::Array { elem, len } => "[" + type_key(elem) + `;${len}]`,
+    TypeKind::Tuple(elems) => "T" + args_key(elems),
     TypeKind::List(elem) => "L(" + type_key(elem) + ")",
     TypeKind::Option(value) => "O(" + type_key(value) + ")",
     TypeKind::Result { value, error } => "R(" + type_key(value) + "," + type_key(error) + ")",
@@ -1960,6 +1970,10 @@ pub class Lowering {
         Some(index) => Ok(Projection::Field(index)),
         None => Err("unknown field `" + name + "`"),
       },
+      TypeKind::Tuple(_) => match name.parse_u64() {
+        Ok(index) => Ok(Projection::Field(index as usize)),
+        Err(_) => Err("unknown element `" + name + "`"),
+      },
       TypeKind::Class(owner) => match self.typed.class_field_type(owner, name) {
         Some(found) => Ok(Projection::ClassField { class_id: mono::class_instance(self, found.ancestor), index: found.index }),
         None => Err("unknown field `" + name + "`"),
@@ -1987,6 +2001,11 @@ pub class Lowering {
       TypeKind::Struct(owner) => {
         if let Some(index) = self.typed.field_index(owner.id, name) {
           projection = Some(Projection::Field(index));
+        }
+      }
+      TypeKind::Tuple(_) => {
+        if let Ok(index) = name.parse_u64() {
+          projection = Some(Projection::Field(index as usize));
         }
       }
       TypeKind::Class(owner) => {
@@ -2173,6 +2192,7 @@ pub class Lowering {
       ExprKind::MethodCall { receiver, method, args } => self.method_call_expr(value, ty, receiver, method, args),
       ExprKind::StructLit { fields, .. } => self.struct_lit(value, ty, fields),
       ExprKind::ArrayLit(elems) => self.array_lit(ty, elems),
+      ExprKind::Tuple(elems) => self.tuple_lit(ty, elems),
       ExprKind::ArrayRepeat { value: repeated, .. } => self.array_repeat(ty, repeated),
       ExprKind::Unary { op, operand } => self.unary(value, ty, op, operand),
       ExprKind::Binary { op, lhs, rhs } => self.binary(value, ty, op, lhs, rhs),
@@ -2320,6 +2340,11 @@ pub class Lowering {
         }
       }
       TypeKind::Array { elem, .. } | TypeKind::List(elem) | TypeKind::Slice { elem, .. } => self.reach_debug(elem),
+      TypeKind::Tuple(elems) => {
+        for elem in elems {
+          self.reach_debug(elem);
+        }
+      }
       TypeKind::Atomic(inner) => self.reach_debug(inner),
       _ => {}
     }
@@ -2635,6 +2660,21 @@ pub class Lowering {
     }
 
     Ok(self.aggregate(ty, complete, field_types))
+  }
+
+  /// `(a, b, ...)`: its elements, in order, as the fields of a struct (docs/adr/0092-tuples.md).
+  prv fn tuple_lit(self, ty: Type, elems: List<Expr>) -> Result<Operand, String> {
+    const elem_types = match ty.kind {
+      TypeKind::Tuple(found) => found,
+      _ => return Err("tuple literal without a tuple type"),
+    };
+    const operands: List<Operand> = new List();
+
+    for index in 0..elems.len() {
+      operands.push(self.operand_as(elems[index], elem_types.get(index).unwrap_or(types::error()))?);
+    }
+
+    Ok(self.aggregate(ty, operands, elem_types))
   }
 
   prv fn array_lit(self, ty: Type, elems: List<Expr>) -> Result<Operand, String> {

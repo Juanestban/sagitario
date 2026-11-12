@@ -531,6 +531,11 @@ fn signature_types(decl: FnDecl) -> List<TypeExpr> {
 fn type_paths(ty: TypeExpr, out: List<Path>) {
   match ty.kind {
     TypeExprKind::Unit => {}
+    TypeExprKind::Tuple(elems) => {
+      for elem in elems {
+        type_paths(elem, out);
+      }
+    }
     TypeExprKind::Path(path) => out.push(path),
     TypeExprKind::Generic { path, args } => {
       out.push(path);
@@ -989,7 +994,7 @@ fn expr_paths(expr: Expr, out: List<Path>) {
         expr_paths(field.value, out);
       }
     }
-    ExprKind::ArrayLit(elems) => exprs_paths(elems, out),
+    ExprKind::ArrayLit(elems) | ExprKind::Tuple(elems) => exprs_paths(elems, out),
     ExprKind::ArrayRepeat { value, .. } => expr_paths(value, out),
     ExprKind::Try(value) | ExprKind::Await(value) => expr_paths(value, out),
     ExprKind::Unary { operand, .. } => expr_paths(operand, out),

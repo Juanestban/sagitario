@@ -1032,6 +1032,15 @@ pub class TypedModule {
         if bounded { None } else { Some("the type parameter `" + param.name + "` is not bounded by `Send`") }
       }
       TypeKind::Array { elem, .. } => self.not_send(elem, visiting),
+      TypeKind::Tuple(elems) => {
+        for elem in elems {
+          if let Some(reason) = self.not_send(elem, visiting) {
+            return Some(reason);
+          }
+        }
+
+        None
+      }
       TypeKind::Option(elem) => self.not_send(elem, visiting),
       TypeKind::Result { value, error } => {
         if let Some(reason) = self.not_send(value, visiting) {

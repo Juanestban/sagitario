@@ -113,6 +113,14 @@ sag run tools/bench.sag -- --race benchmarks/results/2026-11-11-windows-x86_64.j
   one waits (`channels`: 50 ms before, 45 after). What remains of `Map` and `word-count` is the
   reference counting of every read of a list and of a field holding one, which the compiler must
   remove where a value is only lent: the next work on speed, outside the standard library.
+- Increment 3 is done. `--race` reads a results file with a small reader of JSON, of the little
+  the runner writes, and writes the page: the data of each heat and a script that animates it,
+  with a button to run it again. `--video` draws the same race frame by frame in the tool itself,
+  on a canvas of 640 by 360 pixels with a font of 5 by 7 dots, writes each frame as a PPM in
+  `build/bench/race/`, and has `ffmpeg` encode each heat (H.264, or MPEG-4 when the build of
+  `ffmpeg` has no H.264) and join them; the frames are removed as each heat is encoded. A heat
+  lasts until its slowest bar stops, at most eight seconds (`RACE_END`), and stays a second and a
+  half on screen. `cli::the_benchmarks_compile` writes the page of a small results file.
 - Three changes to the code the compiler generates, measured as the least of 15 alternated runs,
   since the machine was noisy: the fast paths of `sag_object_retain` and `sag_object_release`
   are inline in the runtime's header, so a count is no opaque call and the C compiler keeps the
@@ -123,3 +131,11 @@ sag run tools/bench.sag -- --race benchmarks/results/2026-11-11-windows-x86_64.j
   `char` or `String` is C's own (`Lowering::binary`). `sort` still reloads the length and data of
   its lists after every store, since a `u64` element and the length of a list have the same C
   type: `restrict`, which Rust's `noalias` gives, is the work that would remove it.
+- Increment 4 is done. `std::process` does not give a child's process, so the runner measures
+  peak memory in one more run that it starts itself through the C API of each system, with the
+  output going to `NUL` or `/dev/null`: `CreateProcessW` and `K32GetProcessMemoryInfo` (the peak
+  working set) on Windows, `posix_spawnp` and `wait4` (`ru_maxrss`) on Linux and macOS. A
+  results file has `memory`, in bytes, for each language where it was read. The first full run,
+  and what it points at, is [`docs/benchmarks.md`](../benchmarks.md): code without allocation at
+  the speed of C and Rust, and the counting of references, the size of objects' headers and
+  `restrict` as the gaps. S2's benchmarks are done.

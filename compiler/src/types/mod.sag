@@ -149,6 +149,8 @@ pub enum TypeKind {
   /// `extern "C" fn(A) -> R`, or `unsafe extern "C" fn(A) -> R`: a C function pointer, never null.
   CFn { is_unsafe: bool, params: List<Type>, ret: Type },
   Array { elem: Type, len: u64 },
+  /// `(A, B, ...)`, with two or more elements: a value, as a struct (docs/adr/0092-tuples.md).
+  Tuple(List<Type>),
   List(Type),
   Option(Type),
   Result { value: Type, error: Type },
@@ -325,6 +327,10 @@ pub fn same_type(a: Type, b: Type) -> bool {
       TypeKind::Array { elem: other_elem, len: other_len } => len == other_len && same_type(elem, other_elem),
       _ => false,
     },
+    TypeKind::Tuple(elems) => match b.kind {
+      TypeKind::Tuple(other_elems) => same_types(elems, other_elems),
+      _ => false,
+    },
     TypeKind::List(x) => match b.kind {
       TypeKind::List(y) => same_type(x, y),
       _ => false,
@@ -466,6 +472,7 @@ pub fn text(ty: Type) -> String {
       if is_unit(ret) { head } else { head + " -> " + text(ret) }
     }
     TypeKind::Array { elem, len } => `[${text(elem)}; ${len}]`,
+    TypeKind::Tuple(elems) => "(" + texts(elems).join(", ") + ")",
     TypeKind::List(elem) => "List<" + text(elem) + ">",
     TypeKind::Option(value) => "Option<" + text(value) + ">",
     TypeKind::Result { value, error } => "Result<" + text(value) + ", " + text(error) + ">",
@@ -622,6 +629,7 @@ pub fn substitute(ty: Type, subst: Subst) -> Type {
     TypeKind::Class(named) => of(TypeKind::Class(substitute_ref(named, subst))),
     TypeKind::Interface(named) => of(TypeKind::Interface(substitute_ref(named, subst))),
     TypeKind::Array { elem, len } => of(TypeKind::Array { elem: substitute(elem, subst), len: len }),
+    TypeKind::Tuple(elems) => of(TypeKind::Tuple(substitute_all(elems, subst))),
     TypeKind::List(elem) => of(TypeKind::List(substitute(elem, subst))),
     TypeKind::Option(value) => of(TypeKind::Option(substitute(value, subst))),
     TypeKind::Result { value, error } => of(TypeKind::Result { value: substitute(value, subst), error: substitute(error, subst) }),
@@ -646,6 +654,7 @@ pub fn depth(ty: Type) -> usize {
     TypeKind::Class(named) => 1 + max_depth(named.args),
     TypeKind::Interface(named) => 1 + max_depth(named.args),
     TypeKind::Array { elem, .. } => 1 + depth(elem),
+    TypeKind::Tuple(elems) => 1 + max_depth(elems),
     TypeKind::List(elem) => 1 + depth(elem),
     TypeKind::Option(elem) => 1 + depth(elem),
     TypeKind::Ptr { pointee, .. } | TypeKind::Ref { pointee, .. } | TypeKind::Slice { elem: pointee, .. } => 1 + depth(pointee),
@@ -694,6 +703,7 @@ pub fn has_self(ty: Type) -> bool {
     TypeKind::Class(named) => any_has_self(named.args),
     TypeKind::Interface(named) => any_has_self(named.args),
     TypeKind::Array { elem, .. } => has_self(elem),
+    TypeKind::Tuple(elems) => any_has_self(elems),
     TypeKind::List(elem) => has_self(elem),
     TypeKind::Option(elem) => has_self(elem),
     TypeKind::Ptr { pointee, .. } | TypeKind::Ref { pointee, .. } | TypeKind::Slice { elem: pointee, .. } => has_self(pointee),
@@ -1428,6 +1438,15 @@ pub class Checker {
 
     match ty.kind {
       TypeKind::Array { elem, .. } => return self.contains_item(elem, target, visited),
+      TypeKind::Tuple(elems) => {
+        for elem in elems {
+          if self.contains_item(elem, target, visited) {
+            return true;
+          }
+        }
+
+        return false;
+      }
       TypeKind::Option(elem) => return self.contains_item(elem, target, visited),
       TypeKind::Result { value, error } => return self.contains_item(value, target, visited) || self.contains_item(error, target, visited),
       TypeKind::Struct(named) => {
@@ -1650,6 +1669,15 @@ pub class Checker {
         of(TypeKind::CFn { is_unsafe: is_unsafe, params: types, ret: result })
       }
       TypeExprKind::Unit => unit(),
+      TypeExprKind::Tuple(elems) => {
+        const types: List<Type> = new List();
+
+        for elem in elems {
+          types.push(self.type_expr(elem));
+        }
+
+        of(TypeKind::Tuple(types))
+      }
       TypeExprKind::Array { elem, len } => {
         const elem_ty = self.type_expr(elem);
 

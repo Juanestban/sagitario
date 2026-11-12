@@ -165,6 +165,11 @@ class Finder {
         }
       }
       TypeExprKind::Unit => {}
+      TypeExprKind::Tuple(elems) => {
+        for elem in elems {
+          self.type_expr(elem);
+        }
+      }
     }
   }
 
@@ -393,7 +398,7 @@ class Finder {
           self.expr(field.value);
         }
       }
-      ExprKind::ArrayLit(elems) => self.exprs(elems),
+      ExprKind::ArrayLit(elems) | ExprKind::Tuple(elems) => self.exprs(elems),
       ExprKind::ArrayRepeat { value, .. } => self.expr(value),
       ExprKind::Unary { operand, .. } => self.expr(operand),
       ExprKind::AddrOf { place, .. } => self.expr(place),

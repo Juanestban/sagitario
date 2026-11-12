@@ -135,8 +135,8 @@ Integers, floats, `bool`, raw pointers, references to FFI-safe types (non-null p
 C function pointers (also in an `Option`), `@repr(C)` structs and unions, and enums with an
 integer representation. Fields of `@repr(C)` structs and
 unions may also be fixed arrays of these (`[c_char; 256]`), laid out as C's `T name[N]`; an array
-is never a parameter or a result, since C passes a pointer to its first element instead. `String`, `char`, enums, arrays
-and other structs cannot cross the boundary: strings travel as `CString` pointers, and
+is never a parameter or a result, since C passes a pointer to its first element instead. `String`, `char`, enums, arrays,
+tuples and other structs cannot cross the boundary: strings travel as `CString` pointers, and
 characters as `u32`.
 
 ## Raw pointers

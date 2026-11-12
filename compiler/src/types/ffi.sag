@@ -174,6 +174,7 @@ fn not_ffi_safe(cx: Checker, span: Span, ty: Type, context: String) {
     TypeKind::String => "pass a `CString` with `as_ptr()`, a `*const c_char`",
     TypeKind::Char => "pass the code point as `u32`",
     TypeKind::Struct(_) => "mark the struct `@repr(C)`",
+    TypeKind::Tuple(_) => "declare a `@repr(C)` struct with a field for each element",
     TypeKind::Array { .. } => "pass a pointer to the first element with `as_ptr()`, as C does; arrays of C types can be fields of `@repr(C)` structs",
     TypeKind::Function { .. } => "C calls functions through pointers: use an `extern \"C\" fn(..)` type, and pass an `extern \"C\" fn` of Sagitario",
     _ => "C takes numbers, `bool`, raw pointers, `extern \"C\" fn` pointers and `@repr(C)` structs",
@@ -443,6 +444,7 @@ pub fn is_managed(cx: Checker, ty: Type, visited: List<TypeItem>) -> bool {
   match ty.kind {
     TypeKind::String | TypeKind::StringBuilder | TypeKind::CString | TypeKind::Class(_) | TypeKind::List(_) => true,
     TypeKind::Array { elem, .. } => is_managed(cx, elem, visited),
+    TypeKind::Tuple(elems) => elems.iter().any((elem) => is_managed(cx, elem, visited)),
     TypeKind::Option(elem) => is_managed(cx, elem, visited),
     TypeKind::Result { value, error } => is_managed(cx, value, visited) || is_managed(cx, error, visited),
     TypeKind::Struct(named) => {

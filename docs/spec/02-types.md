@@ -11,8 +11,8 @@ Sagitario is statically typed with **local type inference**:
 ## Unit type
 
 `()` is both a type and its only value. It is the implicit return type of functions without
-`->` and is used in `Result<(), E>`. There are no general tuples (`(i32, String)`) in the
-MVP; they may be added later.
+`->` and is used in `Result<(), E>`. Tuples of two or more values are
+[below](#tuples-s2).
 
 ## `Self`
 
@@ -242,7 +242,7 @@ const text = builder.to_string();
   enum implementing `Eq` uses its `equals` too. Classes call `a.equals(b)`, since their `==` stays
   identity.
 - Arrays, lists, maps, iterators, interface values and function values cannot be compared with
-  `==`.
+  `==`. Tuples compare when their elements do ([tuples](#tuples-s2)).
 - [Arithmetic operators](05-interfaces-generics.md#operators) (`+`, `-`, `*`, `/`, `%`, unary
   `-`) apply to other types through the prelude interfaces `Add`, `Sub`, `Mul`, `Div`, `Rem` and
   `Neg` ([ADR-0081](../adr/0081-operator-overloading.md)).
@@ -288,6 +288,36 @@ enum Shape impl Display {
   and only those with an integer representation (`@repr(i32)`, for C) are converted with `as`,
   to integers ([FFI](10-ffi.md#enums-with-an-integer-representation)).
 - Values are inspected with an exhaustive `match` (see [control flow](06-control-flow.md#match)).
+
+## Tuples (S2)
+
+Rationale: [ADR-0092](../adr/0092-tuples.md).
+
+```sag
+fn divmod(a: i32, b: i32) -> (i32, i32) {
+  (a / b, a % b)
+}
+
+const pair = ("Ada", 36);
+const (q, r) = divmod(17, 5);
+println(f"{pair.0} is {pair.1}, {q} rest {r}, {pair:?}");   // Ada is 36, 3 rest 2, ("Ada", 36)
+```
+
+- `(T1, T2, ..., Tn)` is a tuple of two or more values, of any types, with a trailing comma
+  allowed. `()` is the unit type and `(T)` is `T`; there are no tuples of one element, and
+  `(T,)` is an error.
+- `(a, b)` makes a tuple; `t.0`, `t.1`... read its elements, by a decimal index without a
+  suffix (`t.0.1` reads element 1 of element 0). An index past the last element is an error.
+- Tuples are value types, as structs: copied on assignment, with the references they hold
+  counted, and mutable through a `var` binding, `self` or a `var` field of a class
+  ([struct mutability](03-memory.md#struct-mutability-f1)): `t.0 = 1`.
+- A tuple implements `Eq`, `Ord` and `Hash` when every element does: `==` compares element by
+  element, and `<` orders by the first element that differs, the first one first. It is `Send`
+  when every element is. It has a debug form, `(1, "a")`, but no `Display`, so `{t:?}`
+  interpolates it and `{t}` does not. A program cannot implement interfaces for tuple types.
+- Tuple patterns, `(p1, p2)` and `(first, ..)`, take tuples apart in `match`, `if let`,
+  `while let`, `const`, `var` and `for` ([control flow](06-control-flow.md#match)).
+- Tuples cannot cross to C: `extern` declarations take `@repr(C)` structs.
 
 ## Arrays and lists
 

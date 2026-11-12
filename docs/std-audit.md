@@ -35,6 +35,7 @@ The audit of the library found gaps of the language itself, which the library ne
 | No bitwise operators (`&`, `\|`, `^`, `!` on integers, `<<`, `>>`) | Hashing, flags, bit sets, UTF-8 and parsing are written with `*`, `/` and `%`, slower and harder to read; `BitAnd`... cannot be implemented | ✅ [ADR-0088](adr/0088-bitwise-operators-and-integer-methods.md), increment 1; the interfaces `BitAnd`... are still missing |
 | `wrapping_*`, `checked_*` and `saturating_*` are promised by spec 2 ("Integer arithmetic") but not implemented | Code that must not panic on overflow in debug builds cannot say so | ✅ [ADR-0088](adr/0088-bitwise-operators-and-integer-methods.md), increment 2 |
 | No `Display`: user types cannot be interpolated or turned into text (spec 2, "post-MVP") | No `to_string()`, no formatting of user types | ✅ [ADR-0089](adr/0089-display-debug-and-format-specifiers.md), increment 1 |
+| No tuples (spec 2: "may be added later") | `enumerate`, `zip`, `unzip`, `partition`, `split_once` and `char_indices` cannot have Rust's signatures | 🟡 [ADR-0092](adr/0092-tuples.md), before record 4 |
 | No conversion interfaces (`From`, `Into`, `TryFrom`) nor `Default` | Conversions are named functions; `?` converts errors only to `Error` | ❌ a record of its own |
 | `@cfg` is not allowed on fields | Classes of `std::sys` that differ by system are written twice whole | 🟡 a small record, when it hurts |
 
@@ -208,16 +209,17 @@ its record settles the open questions below.
   allocation, and close to it elsewhere.
 - They run locally, with the median of five runs after a warm-up by default; each results file
   names its machine, and files of different machines are not compared (ADR-0090).
+- ✅ Done: the first full run and what it points at are in [`docs/benchmarks.md`](benchmarks.md).
 
 ## Order of the records
 
 From what most programs need to what fewer do. Each line is one record, or a few small ones:
 
 1. **The language gaps:** bitwise operators and shifts; `wrapping_*`, `checked_*` and
-   `saturating_*` (or the spec corrected); integer `MIN`/`MAX`.
+   `saturating_*` (or the spec corrected); integer `MIN`/`MAX`. ✅
 2. **`fmt`:** `Display` and `to_string()` for user types, a `Debug` form of any value, and
-   width, precision, alignment and radix in format strings.
-3. **The benchmarks** (above), with `hint::black_box`, so that later work is measured.
+   width, precision, alignment and radix in format strings. ✅
+3. **The benchmarks** (above), with `hint::black_box`, so that later work is measured. ✅
 4. **The everyday methods:** those missing from `String`, `char` (Unicode), `List`, slices, `Map`,
    `Iter`, `Option` and `Result`, and `assert`, `assert_eq`, `unreachable`, `todo`.
 5. **Conversion and defaults:** `From`, `Into`, `TryFrom`, `Default`, generic `min`/`max`,

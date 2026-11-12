@@ -17,9 +17,25 @@ level `sag` gives its C; `dotnet build -c Release`, from a project the runner wr
 and then `--runs` times, or once more when the warm-up takes over 5 seconds, so a slow
 interpreter does not take minutes; every language must print the same output. The runner prints
 the median wall time of the whole process, so the start of a program counts, its ratio to the
-fastest and the size of the program, and writes them with the versions of the toolchains to
-`results/<date>-<os>-<arch>.json`. A language whose toolchain is not installed is skipped.
+fastest, the size of the program and its peak memory, and writes them with the versions of the
+toolchains to `results/<date>-<os>-<arch>.json`. Peak memory comes from one more run, with its
+output thrown away, that the runner starts through the system itself, since `std::process` does
+not give a child's process: the peak working set on Windows (`K32GetProcessMemoryInfo`), the
+largest resident set on Linux and macOS (`wait4`). An interpreter's memory includes the
+interpreter's own. A language whose toolchain is not installed is skipped.
 Results from different machines are not compared with each other.
+
+```sh
+sag run tools/bench.sag -- --race benchmarks/results/<file>.json           # the race, as HTML
+sag run tools/bench.sag -- --race benchmarks/results/<file>.json --video   # and as an MP4
+```
+
+`--race` turns a results file into a race of the languages, `<file>.html` beside it: a page with
+no dependency, one heat per benchmark, where each language's bar grows for a time in proportion to
+its median, the fastest in one second, and stops at eight seconds for the slowest. `--video` also
+writes `<file>.mp4` with `ffmpeg`, if it is on `PATH` (H.264, or MPEG-4 when `ffmpeg` has no
+H.264), drawing its frames in `build/bench/race/`; without `ffmpeg`, it says so and writes the
+page alone. `ffmpeg` is a tool of the race only, never of Sagitario or its tests.
 
 | Benchmark | Measures | Argument |
 |---|---|---|

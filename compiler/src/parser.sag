@@ -1943,7 +1943,8 @@ class Parser {
     }
   }
 
-  /// The name of a struct member, which may be `new` (the conventional constructor name).
+  /// The name of a struct member, which may be `new` (the conventional constructor name), or the
+  /// index of an element of a tuple, a decimal integer without a suffix.
   prv fn member_name(self, expected: String) -> Result<Ident, ()> {
     if self.at_keyword("new") {
       const span = self.advance().span;
@@ -1951,7 +1952,21 @@ class Parser {
       return Ok(Ident { name: "new", span: span });
     }
 
+    if let TokenKind::Int { value, suffix: None } = self.kind() {
+      const span = self.advance().span;
+
+      return Ok(Ident { name: value, span: span });
+    }
+
     self.ident(expected)
+  }
+
+  /// A tuple of one element, `(x,)`, reported where its comma is.
+  prv fn one_element_tuple(self, comma: Span, what: String) {
+    self.diagnostics.push(
+      Diagnostic::error(codes::ONE_ELEMENT_TUPLE, comma, "a tuple " + what + " has two or more elements")
+        .with_help("remove the comma: `(x)` is `x`"),
+    );
   }
 
   /// The type of a parameter: a type, `&T` or `&mut T` (docs/spec/03-memory.md#references).
@@ -2028,6 +2043,39 @@ class Parser {
       const end = self.advance().span;
 
       return Ok(new TypeExpr(TypeExprKind::Unit, start.to(end)));
+    }
+
+    // `(T)` is `T`; `(A, B)` is a tuple (docs/adr/0092-tuples.md, Q608).
+    if is_punct(kind, "(") {
+      self.advance();
+
+      const first = self.type_expr()?;
+
+      if !self.at(",") {
+        self.expect(")")?;
+
+        return Ok(first);
+      }
+
+      const elems = List::from([first]);
+
+      while self.at(",") {
+        const comma = self.advance().span;
+
+        if self.at(")") {
+          if elems.len() == 1 {
+            self.one_element_tuple(comma, "type");
+          }
+
+          break;
+        }
+
+        elems.push(self.type_expr()?);
+      }
+
+      const end = self.expect(")")?.span;
+
+      return Ok(new TypeExpr(TypeExprKind::Tuple(elems), start.to(end)));
     }
 
     if is_ident(kind) || is_keyword(kind, "pkg") || is_keyword(kind, "super") || is_keyword(kind, "self") {
@@ -2857,9 +2905,32 @@ class Parser {
 
       const inner = self.expr_with_struct_literals(true)?;
 
-      self.expect(")")?;
+      if !self.at(",") {
+        self.expect(")")?;
 
-      return Ok(inner);
+        return Ok(inner);
+      }
+
+      // `(a, b)`: a tuple (docs/adr/0092-tuples.md, Q609).
+      const elems = List::from([inner]);
+
+      while self.at(",") {
+        const comma = self.advance().span;
+
+        if self.at(")") {
+          if elems.len() == 1 {
+            self.one_element_tuple(comma, "value");
+          }
+
+          break;
+        }
+
+        elems.push(self.expr_with_struct_literals(true)?);
+      }
+
+      const end = self.expect(")")?.span;
+
+      return Ok(self.expr_node(ExprKind::Tuple(elems), span.to(end)));
     }
 
     if self.at_keyword("while") {

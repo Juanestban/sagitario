@@ -92,7 +92,8 @@ The standard library a general-purpose language needs, with Rust's std as the re
 
 **Status:** in progress. The audit is written, [`docs/std-audit.md`](std-audit.md), with the order
 of the records that fill its gaps; the first are gaps of the language itself (bitwise operators,
-the integer helpers spec 2 promises, `Display`).
+the integer helpers spec 2 promises, `Display`), done with `fmt` and the benchmarks, whose first
+results are [`docs/benchmarks.md`](benchmarks.md).
 
 - An audit first, `docs/std-audit.md`, which compares each module of Rust's std with Sagitario
   and records what exists, what is missing, and what is out of scope with the reason. The modules

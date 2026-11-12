@@ -314,6 +314,8 @@ pub class TypeExpr {
 pub enum TypeExprKind {
   /// `()`
   Unit,
+  /// `(A, B, ...)`, with two or more elements (docs/adr/0092-tuples.md).
+  Tuple(List<TypeExpr>),
   /// A named type; `Self` is a path with the single segment `Self`.
   Path(Path),
   /// `Option<T>`, `Result<T, E>`
@@ -462,11 +464,13 @@ pub enum ExprKind {
   Template(List<TemplatePart>),
   /// `()`
   Unit,
+  /// `(a, b, ...)`, with two or more elements (docs/adr/0092-tuples.md).
+  Tuple(List<Expr>),
   Path(Path),
   Call { callee: Expr, args: List<Expr> },
   /// `receiver.method(args)`
   MethodCall { receiver: Expr, method: Ident, args: List<Expr> },
-  /// `base.name`
+  /// `base.name`, or `base.0` for an element of a tuple, whose name is the index.
   Field { base: Expr, name: Ident },
   /// `base[index]`
   Index { base: Expr, index: Expr },

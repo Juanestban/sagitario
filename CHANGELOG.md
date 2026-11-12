@@ -11,7 +11,7 @@ followed them.
 
 ## [Unreleased]
 
-The sources say 0.25.0.
+The sources say 0.31.0.
 
 ### Added
 
@@ -40,7 +40,10 @@ The sources say 0.25.0.
   type: `Point { x: 1, y: 2 }`, `Some(1)`, `[1, 2]`, `{"a": 1}`, strings with Rust's escapes, and
   cycles of classes cut as `Name { .. }`.
 - `std::hint::black_box`, and a suite of nine benchmarks against Rust, C, C#, JavaScript and
-  Python, run with `sag run tools/bench.sag` ([ADR-0090](docs/adr/0090-benchmarks.md)).
+  Python, run with `sag run tools/bench.sag` ([ADR-0090](docs/adr/0090-benchmarks.md)); with
+  `--race`, the results as a race of the languages, an HTML page, and with `--video` an MP4 when
+  `ffmpeg` is installed. The runner records the peak memory of each program, and
+  [`docs/benchmarks.md`](docs/benchmarks.md) the first results and the work they point at.
 - An audit of the standard library against Rust's ([`docs/std-audit.md`](docs/std-audit.md)), the
   plan of S2, with a suite of benchmarks against Rust, C, C#, JavaScript and Python.
 - The language server completes `@cfg` conditions, attributes and their representations, and

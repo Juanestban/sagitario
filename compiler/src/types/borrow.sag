@@ -86,7 +86,7 @@ fn lent(cx: Checker, value: Expr) -> Lent {
     ExprKind::Field { base, name } => match cx.typed.expr_types.get(base.id) {
       Some(ty) => match ty.kind {
         TypeKind::Class(_) => Lent::ClassField(name.name),
-        TypeKind::Struct(_) => match lent(cx, base) {
+        TypeKind::Struct(_) | TypeKind::Tuple(_) => match lent(cx, base) {
           Lent::Temporary => Lent::Temporary,
           other => other,
         },
@@ -597,7 +597,7 @@ class Walker {
           self.expr(field.value);
         }
       }
-      ExprKind::ArrayLit(elems) => self.exprs(elems),
+      ExprKind::ArrayLit(elems) | ExprKind::Tuple(elems) => self.exprs(elems),
       ExprKind::ArrayRepeat { value: repeated, .. } => self.expr(repeated),
       ExprKind::Unary { op, operand } => self.lent(operand, op == UnaryOp::Deref),
       ExprKind::Binary { lhs, rhs, .. } => {

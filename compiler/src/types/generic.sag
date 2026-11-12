@@ -243,6 +243,15 @@ pub class Unknowns {
           self.unify(elem, actual_elem);
         }
       }
+      TypeKind::Tuple(elems) => {
+        if let TypeKind::Tuple(actual_elems) = actual.kind {
+          if elems.len() == actual_elems.len() {
+            for index in 0..elems.len() {
+              self.unify(elems[index], actual_elems[index]);
+            }
+          }
+        }
+      }
       TypeKind::List(elem) => {
         if let TypeKind::List(actual_elem) = actual.kind {
           self.unify(elem, actual_elem);
@@ -343,6 +352,7 @@ fn mentions_unknown(ty: Type, unknowns: Unknowns) -> bool {
     TypeKind::Class(named) => any_unknown(named.args, unknowns),
     TypeKind::Interface(named) => any_unknown(named.args, unknowns),
     TypeKind::Array { elem, .. } => mentions_unknown(elem, unknowns),
+    TypeKind::Tuple(elems) => any_unknown(elems, unknowns),
     TypeKind::List(elem) => mentions_unknown(elem, unknowns),
     TypeKind::Option(elem) => mentions_unknown(elem, unknowns),
     TypeKind::Ptr { pointee, .. } | TypeKind::Ref { pointee, .. } | TypeKind::Slice { elem: pointee, .. } => mentions_unknown(pointee, unknowns),
@@ -458,6 +468,7 @@ pub fn mentions_params(ty: Type) -> bool {
     TypeKind::Param(_) => true,
     TypeKind::Struct(named) | TypeKind::Enum(named) | TypeKind::Class(named) | TypeKind::Interface(named) => named.args.iter().any((arg) => mentions_params(arg)),
     TypeKind::Array { elem, .. } | TypeKind::List(elem) | TypeKind::Option(elem) => mentions_params(elem),
+    TypeKind::Tuple(elems) => elems.iter().any((elem) => mentions_params(elem)),
     TypeKind::Ptr { pointee, .. } | TypeKind::Ref { pointee, .. } | TypeKind::Slice { elem: pointee, .. } => mentions_params(pointee),
     TypeKind::Result { value, error } => mentions_params(value) || mentions_params(error),
     TypeKind::Function { params, ret } | TypeKind::CFn { params, ret, .. } => params.iter().any((param) => mentions_params(param)) || mentions_params(ret),

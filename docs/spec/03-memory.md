@@ -10,7 +10,8 @@
 | Identity | None | Yes (`==` is identity) |
 | Inheritance | No (may implement interfaces) | Single inheritance |
 
-`new` is only valid with classes, so `new` always means "ARC heap allocation".
+`new` is only valid with classes, so `new` always means "ARC heap allocation". Enums, tuples
+and arrays are value types too ([types](02-types.md#tuples-s2)).
 
 ## Automatic Reference Counting (F2)
 
@@ -40,6 +41,10 @@ total += x;
 - There is no `mut`, and `let` only appears in `if let` and `while let`
   ([control flow](06-control-flow.md#if-let-and-while-let)).
 - The type annotation is optional: `const x: i64 = 5;` or `const x = 5;`.
+- A tuple pattern declares a binding for each name in it, `const (q, r) = divmod(a, b);`, with
+  `_` and `..` for elements left unnamed; its parts must always match (names, `_`, `..` and
+  tuple patterns of them), and an annotation, if any, is the type of the whole:
+  `var (low, high): (i32, i32) = (0, 9);` ([ADR-0092](../adr/0092-tuples.md)).
 - A binding may be declared without a value (`var x: i32;`) if the compiler can prove it is
   assigned before every use (*definite assignment*); a `const` declared this way must be
   assigned exactly once. Reading a possibly unassigned binding is an error.

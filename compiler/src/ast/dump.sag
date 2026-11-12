@@ -343,6 +343,12 @@ class Dumper {
   pub fn type_expr(self, label: String, ty: TypeExpr) {
     match ty.kind {
       TypeExprKind::Unit => self.line(label, "UnitType", Some(ty.span), None, ""),
+      TypeExprKind::Tuple(elems) => {
+        self.line(label, "TupleType", Some(ty.span), None, "");
+        self.depth += 1;
+        self.types("elem", elems);
+        self.depth -= 1;
+      }
       TypeExprKind::Path(path) => {
         self.line(label, "PathType", Some(ty.span), None, "");
         self.depth += 1;
@@ -548,6 +554,12 @@ class Dumper {
       }
       ExprKind::ArrayLit(elems) => {
         self.node(label, expr, "ArrayLit", "");
+        self.depth += 1;
+        self.exprs("elem", elems);
+        self.depth -= 1;
+      }
+      ExprKind::Tuple(elems) => {
+        self.node(label, expr, "Tuple", "");
         self.depth += 1;
         self.exprs("elem", elems);
         self.depth -= 1;

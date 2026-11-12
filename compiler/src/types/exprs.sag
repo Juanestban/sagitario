@@ -850,6 +850,7 @@ fn other_expr_kind(cx: Checker, value: Expr, expected: Option<Type>) -> Type {
     ExprKind::Index { base, index: position } => index(cx, base, position),
     ExprKind::StructLit { path, fields } => struct_literal(cx, value, path, fields, expected),
     ExprKind::ArrayLit(elems) => array_literal(cx, value.span, elems, expected),
+    ExprKind::Tuple(elems) => tuple_literal(cx, elems, expected),
     ExprKind::ArrayRepeat { value: repeated, len } => {
       var elem: Option<Type> = None;
 
@@ -1989,9 +1990,54 @@ fn resolve_same(a: TypeItem, b: TypeItem) -> bool {
   pkg::resolve::same_type_item(a, b)
 }
 
+/// `(a, b, ...)`: a tuple of the types of its elements, each expected to be the element of an
+/// expected tuple of as many (docs/adr/0092-tuples.md, Q609).
+fn tuple_literal(cx: Checker, elems: List<Expr>, expected: Option<Type>) -> Type {
+  var hints: List<Type> = new List();
+
+  if let Some(ty) = expected {
+    if let TypeKind::Tuple(expected_elems) = ty.kind {
+      if expected_elems.len() == elems.len() {
+        hints = expected_elems;
+      }
+    }
+  }
+
+  const types: List<Type> = new List();
+
+  for index in 0..elems.len() {
+    types.push(expr(cx, elems[index], hints.get(index)));
+  }
+
+  types::of(TypeKind::Tuple(types))
+}
+
+/// `t.0`: the element of a tuple at the index the name gives.
+fn tuple_element(cx: Checker, base_ty: Type, elems: List<Type>, name: Ident) -> Type {
+  const position = match name.name.parse_u64() {
+    Ok(found) => found,
+    Err(_) => elems.len() as u64,
+  };
+
+  if position < elems.len() as u64 {
+    return elems[position as usize];
+  }
+
+  cx.diagnostics.push(
+    Diagnostic::error(codes::UNKNOWN_MEMBER, name.span, "no field `" + name.name + "` on type `" + types::text(base_ty) + "`")
+      .with_note(`its elements are \`0\` to \`${elems.len() - 1}\``),
+  );
+
+  types::error()
+}
+
 fn field(cx: Checker, base: Expr, name: Ident) -> Type {
   const base_ty = borrow::deref_base(cx, base);
   const field_name = name.name;
+
+  if let TypeKind::Tuple(elems) = base_ty.kind {
+    return tuple_element(cx, base_ty, elems, name);
+  }
 
   if let TypeKind::Class(class_ref) = base_ty.kind {
     return classes::class_field(cx, class_ref.id, base_ty, name);

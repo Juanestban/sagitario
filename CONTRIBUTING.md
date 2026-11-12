@@ -88,6 +88,8 @@ sh install/install.sh --from "file://$PWD/build/dist" --dir /tmp/sagitario --no-
 - Compiler structure: [`docs/architecture.md`](docs/architecture.md).
 - Test harness: [`docs/testing.md`](docs/testing.md).
 - Package manager: [`docs/nova.md`](docs/nova.md).
+- Benchmarks against other languages: [`benchmarks/`](benchmarks/README.md), with the results in
+  [`docs/benchmarks.md`](docs/benchmarks.md).
 - Phases and acceptance criteria: [`docs/roadmap.md`](docs/roadmap.md).
 
 ## Definition of Done (every language feature)

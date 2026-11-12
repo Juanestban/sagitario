@@ -6,14 +6,19 @@
 //!
 //! Each program is built optimized, run once to warm up and `N` times (5 by default), once when
 //! the warm-up takes more than 5 seconds; every language must print the same output. The median
-//! wall time of each, its size and the versions of the toolchains go to
+//! wall time of each, its size, its peak memory and the versions of the toolchains go to
 //! `benchmarks/results/<date>-<os>-<arch>.json`. With `--race`, it writes the race of the
 //! languages of a results file as an HTML page beside it, and with `--video` also as an MP4 when
 //! `ffmpeg` is on `PATH`.
 
 use std::env;
+use std::ffi::{c_int, c_void};
+@cfg(unix)
+use std::ffi::{c_char, CString};
 use std::fs;
 use std::io;
+@cfg(windows)
+use std::mem;
 use std::path;
 use std::process;
 use std::process::Command;
@@ -82,6 +87,8 @@ struct Measured {
   pub times: List<f64>;
   pub median: f64;
   pub size: usize;
+  /// The peak memory of a run, in bytes, where the system gives it.
+  pub memory: Option<u64>;
 }
 
 /// One run of a program: its time in seconds and its output, with `\r\n` as `\n`.
@@ -291,6 +298,278 @@ fn run(invocation: Invocation, args: List<String>) -> Result<Run, String> {
   }
 }
 
+// ---- Peak memory (docs/adr/0090-benchmarks.md, Q595) ------------------------------------------
+//
+// `std::process` does not give the process of a child, so the runner starts the run that measures
+// memory itself, through the C API of each system, with its output going nowhere.
+
+/// `SECURITY_ATTRIBUTES`.
+@cfg(windows)
+@repr(C)
+struct SecurityAttributes {
+  pub length: u32;
+  pub descriptor: *mut c_void;
+  pub inherit: c_int;
+}
+
+/// `STARTUPINFOW`.
+@cfg(windows)
+@repr(C)
+struct StartupInfo {
+  pub size: u32;
+  pub reserved: *mut u16;
+  pub desktop: *mut u16;
+  pub title: *mut u16;
+  pub x: u32;
+  pub y: u32;
+  pub x_size: u32;
+  pub y_size: u32;
+  pub x_count_chars: u32;
+  pub y_count_chars: u32;
+  pub fill_attribute: u32;
+  pub flags: u32;
+  pub show_window: u16;
+  pub reserved2_size: u16;
+  pub reserved2: *mut u8;
+  pub std_input: *mut c_void;
+  pub std_output: *mut c_void;
+  pub std_error: *mut c_void;
+}
+
+/// `PROCESS_INFORMATION`.
+@cfg(windows)
+@repr(C)
+struct ProcessInformation {
+  pub process: *mut c_void;
+  pub thread: *mut c_void;
+  pub process_id: u32;
+  pub thread_id: u32;
+}
+
+/// `PROCESS_MEMORY_COUNTERS`.
+@cfg(windows)
+@repr(C)
+struct MemoryCounters {
+  pub size: u32;
+  pub page_faults: u32;
+  pub peak_working_set: usize;
+  pub working_set: usize;
+  pub quota_peak_paged_pool: usize;
+  pub quota_paged_pool: usize;
+  pub quota_peak_non_paged_pool: usize;
+  pub quota_non_paged_pool: usize;
+  pub pagefile: usize;
+  pub peak_pagefile: usize;
+}
+
+@cfg(windows)
+extern "C" {
+  fn CreateFileW(name: *const u16, access: u32, share: u32, security: *mut SecurityAttributes, disposition: u32, flags: u32, template: *mut c_void) -> *mut c_void;
+  fn CreateProcessW(application: *const u16, command_line: *mut u16, process_security: *mut c_void, thread_security: *mut c_void, inherit_handles: c_int, flags: u32, environment: *mut c_void, directory: *const u16, startup: *mut StartupInfo, information: *mut ProcessInformation) -> c_int;
+  fn WaitForSingleObject(handle: *mut c_void, milliseconds: u32) -> u32;
+  fn K32GetProcessMemoryInfo(process: *mut c_void, counters: *mut MemoryCounters, size: u32) -> c_int;
+  fn CloseHandle(handle: *mut c_void) -> c_int;
+}
+
+/// `text` in UTF-16, ending in NUL.
+@cfg(windows)
+fn wide(text: String) -> List<u16> {
+  const units = new List<u16>();
+
+  for c in text.chars() {
+    const code = c as u32;
+
+    if code >= 0x10000 {
+      units.push((0xD800 + ((code - 0x10000) >> 10)) as u16);
+      units.push((0xDC00 + ((code - 0x10000) & 0x3FF)) as u16);
+    } else {
+      units.push(code as u16);
+    }
+  }
+
+  units.push(0);
+  units
+}
+
+/// The peak working set of `argv[0]` run with `argv`, in bytes, or `None` if it cannot be read.
+@cfg(windows)
+fn peak_memory_of(argv: List<String>) -> Option<u64> {
+  const quoted: List<String> = new List();
+
+  for arg in argv {
+    quoted.push("\"" + arg + "\"");
+  }
+
+  // A relative path is found only with `\`.
+  quoted[0] = "\"" + argv[0].replace("/", "\\") + "\"";
+
+  const line = wide(quoted.join(" "));
+  const name = wide("NUL");
+  var security = SecurityAttributes { length: mem::size_of<SecurityAttributes>() as u32, descriptor: 0 as *mut c_void, inherit: 1 };
+  // GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, OPEN_EXISTING
+  const nothing = unsafe { CreateFileW(name.as_ptr(), 0xC000_0000, 3, &mut security, 3, 0, 0 as *mut c_void) };
+
+  if nothing as usize == usize::MAX {
+    return None;
+  }
+
+  const none = 0 as *mut u16;
+  // STARTF_USESTDHANDLES
+  var startup = StartupInfo {
+    size: mem::size_of<StartupInfo>() as u32,
+    reserved: none,
+    desktop: none,
+    title: none,
+    x: 0,
+    y: 0,
+    x_size: 0,
+    y_size: 0,
+    x_count_chars: 0,
+    y_count_chars: 0,
+    fill_attribute: 0,
+    flags: 0x100,
+    show_window: 0,
+    reserved2_size: 0,
+    reserved2: 0 as *mut u8,
+    std_input: nothing,
+    std_output: nothing,
+    std_error: nothing,
+  };
+  var process = ProcessInformation { process: 0 as *mut c_void, thread: 0 as *mut c_void, process_id: 0, thread_id: 0 };
+  const started = (unsafe { CreateProcessW(0 as *const u16, line.as_mut_ptr(), 0 as *mut c_void, 0 as *mut c_void, 1, 0, 0 as *mut c_void, 0 as *const u16, &mut startup, &mut process) }) != 0;
+
+  unsafe { CloseHandle(nothing); }
+
+  if !started {
+    return None;
+  }
+
+  var counters = MemoryCounters {
+    size: mem::size_of<MemoryCounters>() as u32,
+    page_faults: 0,
+    peak_working_set: 0,
+    working_set: 0,
+    quota_peak_paged_pool: 0,
+    quota_paged_pool: 0,
+    quota_peak_non_paged_pool: 0,
+    quota_non_paged_pool: 0,
+    pagefile: 0,
+    peak_pagefile: 0,
+  };
+
+  // INFINITE
+  unsafe { WaitForSingleObject(process.process, 0xFFFF_FFFF); }
+
+  const read = (unsafe { K32GetProcessMemoryInfo(process.process, &mut counters, mem::size_of<MemoryCounters>() as u32) }) != 0;
+
+  unsafe {
+    CloseHandle(process.process);
+    CloseHandle(process.thread);
+  }
+
+  if read { Some(counters.peak_working_set as u64) } else { None }
+}
+
+/// `struct rusage`: two `struct timeval` and fourteen `long`, the same on Linux and macOS.
+@cfg(unix)
+@repr(C)
+struct Usage {
+  pub user: [i64; 2];
+  pub system: [i64; 2];
+  pub max_rss: i64;
+  pub rest: [i64; 13];
+}
+
+@cfg(unix)
+extern "C" {
+  fn posix_spawnp(pid: *mut c_int, file: *const c_char, actions: *const c_void, attributes: *const c_void, argv: *const *mut c_char, envp: *const *mut c_char) -> c_int;
+  fn posix_spawn_file_actions_init(actions: *mut c_void) -> c_int;
+  fn posix_spawn_file_actions_addopen(actions: *mut c_void, fd: c_int, path: *const c_char, flags: c_int, mode: u32) -> c_int;
+  fn posix_spawn_file_actions_destroy(actions: *mut c_void) -> c_int;
+  fn wait4(pid: c_int, status: *mut c_int, options: c_int, usage: *mut Usage) -> c_int;
+}
+
+/// The environment of this program. A program, unlike a shared library, can name `environ` on
+/// Apple systems too.
+@cfg(unix)
+extern "C" {
+  static environ: *const *mut c_char;
+}
+
+/// `ru_maxrss` is in kibibytes on Linux and in bytes on Apple systems.
+@cfg(any(target_os = "macos", target_os = "ios"))
+const RSS_UNIT: u64 = 1;
+@cfg(any(target_os = "linux", target_os = "android"))
+const RSS_UNIT: u64 = 1024;
+
+/// The largest resident set of `argv[0]` run with `argv`, in bytes, or `None` if it cannot be read.
+@cfg(unix)
+fn peak_memory_of(argv: List<String>) -> Option<u64> {
+  const strings: List<CString> = new List();
+  const pointers = new List<*mut c_char>();
+
+  for arg in argv {
+    match CString::new(arg) {
+      Ok(text) => strings.push(text),
+      Err(_) => return None,
+    }
+  }
+
+  for text in strings {
+    pointers.push(text.as_ptr() as *mut c_char);
+  }
+
+  pointers.push(0 as *mut c_char);
+
+  const null = CString::new("/dev/null").unwrap();
+  // `posix_spawn_file_actions_t`: 80 bytes on Linux, a pointer on Apple systems.
+  var actions = [0u64; 32];
+  const handle = actions.as_mut_ptr() as *mut c_void;
+  var pid = 0;
+  var status = 0;
+  var usage = Usage { user: [0; 2], system: [0; 2], max_rss: 0, rest: [0; 13] };
+
+  if (unsafe { posix_spawn_file_actions_init(handle) }) != 0 {
+    return None;
+  }
+
+  // O_RDONLY for stdin, O_WRONLY for stdout and stderr.
+  var code = unsafe { posix_spawn_file_actions_addopen(handle, 0, null.as_ptr(), 0, 0) };
+
+  for fd in 1..3 {
+    if code == 0 {
+      code = unsafe { posix_spawn_file_actions_addopen(handle, fd, null.as_ptr(), 1, 0) };
+    }
+  }
+
+  if code == 0 {
+    code = unsafe { posix_spawnp(&raw mut pid, strings[0].as_ptr(), handle as *const c_void, 0 as *const c_void, pointers.as_ptr(), environ) };
+  }
+
+  unsafe { posix_spawn_file_actions_destroy(handle); }
+
+  if code != 0 || (unsafe { wait4(pid, &raw mut status, 0, &mut usage) }) < 0 {
+    return None;
+  }
+
+  Some(usage.max_rss as u64 * RSS_UNIT)
+}
+
+/// The peak memory of a run of `invocation` with `args`, in bytes, where the system gives it.
+fn peak_memory(invocation: Invocation, args: List<String>) -> Option<u64> {
+  const argv = List::from([invocation.program]);
+
+  for arg in invocation.prefix {
+    argv.push(arg);
+  }
+
+  for arg in args {
+    argv.push(arg);
+  }
+
+  peak_memory_of(argv)
+}
+
 fn median(times: List<f64>) -> f64 {
   const sorted: List<f64> = new List();
 
@@ -390,7 +669,10 @@ fn benchmark(name: String, options: Options, chains: List<Toolchain>) -> Result<
       Err(_) => 0,
     };
 
-    results.push(Measured { lang: lang, times: times, median: median(times), size: size });
+    // A run of its own, so that measuring memory does not change the times.
+    const memory = peak_memory(invocation, args);
+
+    results.push(Measured { lang: lang, times: times, median: median(times), size: size, memory: memory });
   }
 
   Ok(results)
@@ -447,8 +729,17 @@ fn main() -> Result<(), io::Error> {
           const ratio = if fastest > 0.0 { result.median / fastest } else { 1.0 };
           const times = result.times.iter().map((time) => f"{time:.6}").collect();
 
-          io::println(f"  {result.lang:<6} {result.median * 1000.0:>10.1} ms  {ratio:>6.2}x  {result.size / 1024:>6} KiB")?;
-          languages.push(f"        {json(result.lang)}: {{ \"median\": {result.median:.6}, \"times\": [{times.join(", ")}], \"size\": {result.size} }}");
+          const memory = match result.memory {
+            Some(bytes) => f"{bytes as f64 / 1048576.0:>8.1} MiB",
+            None => "       - MiB",
+          };
+          const memory_json = match result.memory {
+            Some(bytes) => f", \"memory\": {bytes}",
+            None => "",
+          };
+
+          io::println(f"  {result.lang:<6} {result.median * 1000.0:>10.1} ms  {ratio:>6.2}x  {result.size / 1024:>6} KiB  {memory}")?;
+          languages.push(f"        {json(result.lang)}: {{ \"median\": {result.median:.6}, \"times\": [{times.join(", ")}], \"size\": {result.size}{memory_json} }}");
         }
 
         entries.push(f"    {json(name)}: {{\n" + languages.join(",\n") + "\n    }");

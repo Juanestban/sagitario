@@ -323,10 +323,19 @@ class Lexer {
     const valid = new Flag();
     const text = new StringBuilder();
     var is_float = false;
+    // After a `.`, a number is the index of a tuple's element: `t.0.1` reads two of them
+    // (docs/adr/0092-tuples.md, Q609).
+    const after_dot = match self.tokens.last() {
+      Some(token) => match token.kind {
+        TokenKind::Punct(punct) => punct == "." && token.span.end as usize == start,
+        _ => false,
+      },
+      None => false,
+    };
 
     text.append(self.digit_run(radix, valid));
 
-    if radix == 10 {
+    if radix == 10 && !after_dot {
       if self.at(0, '.') && is_ascii_digit(self.peek_at(1)) {
         self.bump();
         text.append(".");

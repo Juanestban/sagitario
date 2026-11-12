@@ -64,7 +64,8 @@ for i in 0..10 { ... }
 - `break` and `continue` apply to the innermost loop. Labels are post-MVP.
 - `for` iterates over ranges, arrays and `s.chars()`/`s.bytes()` (F1) and, from F2, over lists,
   maps (their entries) and iterators (`Iter<T>`). The loop variable is a new `const` binding on
-  each iteration. An array is iterated through a copy taken before the loop, so assigning to it
+  each iteration, or a tuple pattern whose parts always match, which binds each of its names:
+  `for (index, c) in text.char_indices() { ... }`. An array is iterated through a copy taken before the loop, so assigning to it
   inside the body does not change the iteration. A list is read by position at every step, so
   changes made by the body are seen (see [lists](02-types.md#lists-f2)).
 - The condition of `if`/`while` and the iterable of `for` cannot be a struct literal written
@@ -119,6 +120,8 @@ match s {
   | `None`, `Shape::Empty` | that variant without data |
   | `Some(p)`, `Shape::Circle(p)` | that variant, with its fields matching the sub-patterns |
   | `Shape::Rect { w, h: p, .. }` | that variant by field name; `w` is shorthand for `w: w`, `..` ignores the rest (otherwise every field is listed) |
+  | `(p1, p2, ...)` | a tuple with as many elements, each matching its sub-pattern |
+  | `(p1, .., pn)` | a tuple, `..` standing once for any number of elements |
   | `p1 \| p2` | either pattern |
 
 - A guard, `pattern if condition => ...`, only takes the arm when the condition holds; guarded
