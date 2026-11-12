@@ -73,6 +73,10 @@ fn main() { ... }
   UBSan, with any undefined behavior aborting the program, so a report fails the test. Toolchains
   without sanitizers (MinGW) build without them. `SAG_TEST_SANITIZE=0` turns them off for faster
   local runs ([ADR-0036](adr/0036-sanitizers-and-the-reference-zoo.md)).
+- `SAG_NO_ARC_PASS=1` makes the compiler skip the pass that removes reference counts
+  (`sir/arc.sag`), to tell a fault of the pass from one elsewhere;
+  `cli::the_arc_pass_keeps_what_programs_do` compares programs built with and without it
+  ([ADR-0091](adr/0091-fewer-reference-counts.md)).
 - `tests/run-pass/reference_zoo/` is the reference program of the F2 acceptance criteria.
 - `tests/run-pass/reference_wordcount/` is the reference program of the F4 acceptance
   criteria, run with ThreadSanitizer ([ADR-0048](adr/0048-async-await.md)).

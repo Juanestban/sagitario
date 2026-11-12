@@ -61,6 +61,9 @@ The sources say 0.25.0.
 - Generated programs count references through inline functions, reach list elements with the
   size of their type as a constant, push inline while a list has room, and compare primitives in
   generic code with C's own operators.
+- A pass over SIR removes the retain and the release of a temporary moved into a binding, a
+  field or an element, and pairs of counts with nothing between them
+  ([ADR-0091](docs/adr/0091-fewer-reference-counts.md)).
 - `List::sort` and `sort_by` are a merge sort through one buffer with runs sorted by insertion,
   about 5 times faster; `Map` compares keys only when their hashes match, and a `Channel` wakes
   its receivers only when one waits.

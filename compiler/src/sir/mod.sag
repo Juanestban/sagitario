@@ -10,6 +10,7 @@ use pkg::ast::{BinaryOp, Block, Expr, ExprKind, FieldInit, FnDecl, FormatSpec, I
 use pkg::diagnostics::{Diagnostic, Diagnostics};
 use pkg::resolve::{ItemRef, ParamOwner, Res, Resolution, TypeItem};
 use pkg::span::{SourceMap, Span};
+use pkg::sir::arc;
 use pkg::sir::closures;
 use pkg::sir::collections;
 use pkg::sir::interfaces;
@@ -22,6 +23,7 @@ use pkg::types;
 use pkg::types::consts::ConstValue;
 use pkg::types::numbers;
 use pkg::types::typed::{BuiltinMethod, TypedModule};
+use std::env;
 
 pub struct Program {
   /// Indexed by function id: the program's functions (templates are placeholders), then the
@@ -973,6 +975,16 @@ pub fn lower(package: Package, resolution: Resolution, typed: TypedModule, sourc
     }
 
     statics.push(StaticDef { name: decl.name.name, ty: ty, init: resolution.statics[index].init, mutable: decl.mutable, thread_local: decl.thread_local, value: value, extern_c: decl.extern_c, in_std: resolution.is_std_source(resolution.statics[index].module) });
+  }
+
+  // Fewer reference counts (docs/adr/0091-fewer-reference-counts.md); `SAG_NO_ARC_PASS` turns
+  // the pass off, for the tests that compare both.
+  if env::variable("SAG_NO_ARC_PASS").is_none() {
+    for function in functions {
+      if !function.template {
+        arc::optimize(function);
+      }
+    }
   }
 
   Ok(Program {

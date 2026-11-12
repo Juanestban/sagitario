@@ -66,3 +66,18 @@ fn slot_of(self, key: K, hash: u64) -> Option<usize> {
   to tell a fault of the pass from one elsewhere.
 
 ## Notes
+
+- Increment 1 is done. `sir/arc.sag` runs on the body of every function that is not a template,
+  inner bodies first, and only deletes statements. A move (Q602) is a `Retain(t)` followed, past
+  the markers of lines, by `t` stored into another binding or into a place that does not read
+  `t`, and later a `Release(t)` with no mention of `t` between them; a pair (Q603) is a
+  `Retain(x)` and a `Release(x)` with only markers of lines between them, which is narrower than
+  Q603 allows and leaves calls and stores to increment 2. A statement the pass does not know
+  counts as mentioning every local, so it never moves past one. `SAG_NO_ARC_PASS` turns the pass
+  off; `cli::the_arc_pass_keeps_what_programs_do` runs five `run-pass` programs built with and
+  without it, under the sanitizers and the leak check, and checks that they print the same and
+  that the C has no more counts with it. The compiler built with the pass reaches the fixed point
+  of the bootstrap. The C of `word-count` goes from 206 lines that count to 148; the times
+  improve less, since most counts left are the lent reads of Q604 (Windows, x86-64, release, the
+  least of 15 alternated runs, without and with the pass): binary-trees 1032 and 978 ms,
+  map-count 240 and 205 ms, word-count 282 and 275 ms, sort 199 and 196 ms.

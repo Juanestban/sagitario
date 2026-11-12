@@ -19,6 +19,7 @@ pub fn tests() -> List<Test> {
     support::test("targets_lists_the_cross_compilation_targets", targets_lists_the_targets),
     support::test("cl_needs_a_developer_command_prompt", cl_needs_a_developer_command_prompt),
     support::test("checks_deeply_nested_code", checks_deeply_nested_code),
+    support::test("the_arc_pass_keeps_what_programs_do", the_arc_pass_keeps_what_programs_do),
     support::test("check_follows_the_target_of_cfg", check_follows_the_target_of_cfg),
     support::test("missing_output_directory_exits_with_1", missing_output_directory_exits_with_1),
   ])
@@ -147,6 +148,62 @@ fn the_benchmarks_compile(cx: Context) -> Result<(), String> {
 
   expect_contains("the race page", page, "\"name\": \"n-body\"")?;
   expect_contains("the race page", page, "\"name\": \"Sagitario\"")
+}
+
+/// The number of retains and releases in generated C.
+fn counts_in(c: String) -> usize {
+  var count = 0usize;
+
+  for line in c.lines() {
+    if line.contains("retain(") || line.contains("release(") {
+      count += 1;
+    }
+  }
+
+  count
+}
+
+/// The pass that removes reference counts (docs/adr/0091-fewer-reference-counts.md, Q606) keeps
+/// what programs print and their leak check, and leaves fewer counts in the C.
+fn the_arc_pass_keeps_what_programs_do(cx: Context) -> Result<(), String> {
+  const dir = cx.temp_dir("arc")?;
+  var fewer = false;
+
+  for name in List::from(["classes", "lists", "iterators_maps", "debug_format", "closures"]) {
+    const source = cx.file(`tests/run-pass/${name}.sag`);
+    const outputs = List::from([path::join(dir, name + "_pass"), path::join(dir, name + "_none")]);
+    const printed: List<String> = new List();
+    const counts: List<usize> = new List();
+
+    for out in outputs {
+      const args = List::from(["run", "--emit-c", "--output", out + support::exe_suffix()]);
+
+      if cx.sanitize {
+        args.push("--sanitize");
+      }
+
+      args.push(source);
+
+      // Programs fail with exit code 102 if ARC objects leak (docs/testing.md#memory-checks).
+      const command = cx.sag_command(args).env("SAG_LEAK_CHECK", "1").current_dir(dir);
+
+      if out.ends_with("_none") {
+        command.env("SAG_NO_ARC_PASS", "1");
+      }
+
+      const ran = support::run(command)?;
+
+      support::expect_success(`sag run ${out}`, ran)?;
+      printed.push(ran.stdout);
+      counts.push(counts_in(support::read_file(out + ".c")?));
+    }
+
+    support::expect_equal(`${name} with and without the pass`, printed[0], printed[1])?;
+    expect(counts[0] <= counts[1], `${name}: the pass added reference counts`)?;
+    fewer = fewer || counts[0] < counts[1];
+  }
+
+  expect(fewer, "the pass removed no reference count")
 }
 
 fn help_succeeds(cx: Context) -> Result<(), String> {

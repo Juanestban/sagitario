@@ -109,7 +109,9 @@ list's length panic while `lent` is not zero. `Projection::SliceElem` reads an e
 `sag_slice_at`.
 
 SIR is the place for ARC optimizations and the boundary behind which other backends (LLVM)
-could be added.
+could be added. After lowering, `sir/arc.sag` deletes the retain and the release of a temporary
+moved into a binding or a place, and a retain followed by a release of the same local
+([ADR-0091](adr/0091-fewer-reference-counts.md)); `SAG_NO_ARC_PASS` turns it off.
 
 An `async fn` (`sir/tasks.sag`, [ADR-0072](adr/0072-async-await-increments.md)) becomes two
 functions. The one callers call creates the `Task` (a class of the prelude) and a frame, the

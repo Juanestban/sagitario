@@ -1,0 +1,259 @@
+//! A pass over the bodies of SIR that removes reference counts which change no count at the
+//! moments an object could be destroyed or a weak reference read
+//! (docs/adr/0091-fewer-reference-counts.md). Increment 1: moves of temporaries (Q602) and
+//! adjacent pairs (Q603). It only removes `Retain` and `Release` statements, in place: the lists
+//! of statements are references.
+
+use pkg::sir::{Function, Operand, PanicMessage, Place, Projection, Rvalue, SliceSource, Stmt, TemplatePiece};
+
+/// Removes the counts the pass can in the body of `function`, and in the bodies inside it.
+pub fn optimize(function: Function) {
+  body(function.body);
+}
+
+fn body(statements: List<Stmt>) {
+  // Inner bodies first: what they hold is independent of the moves around them.
+  for statement in statements {
+    match statement {
+      Stmt::If { then_body, else_body, .. } => {
+        body(then_body);
+        body(else_body);
+      }
+      Stmt::Loop(inner) | Stmt::ForRange { body: inner, .. } | Stmt::ForArray { body: inner, .. } | Stmt::ForText { body: inner, .. } => body(inner),
+      _ => {}
+    }
+  }
+
+  var index = 0usize;
+
+  while index < statements.len() {
+    if !moved(statements, index) && !cancelled(statements, index) {
+      index += 1;
+    }
+  }
+}
+
+/// The local a statement retains, if it retains one.
+fn retained(statement: Stmt) -> Option<u32> {
+  match statement {
+    Stmt::Retain(Operand::Local(local)) => Some(local),
+    _ => None,
+  }
+}
+
+/// The next statement after `from` that is not a marker of a source line.
+fn next_real(statements: List<Stmt>, from: usize) -> usize {
+  var index = from;
+
+  while index < statements.len() {
+    if let Stmt::Line { .. } = statements[index] {
+      index += 1;
+    } else {
+      return index;
+    }
+  }
+
+  index
+}
+
+/// Q602: `Retain(t)`, then `t` stored into a binding or a place, then `Release(t)` with no other
+/// mention of `t` in between, which is a temporary giving its reference away. The store keeps
+/// the reference `t` held; the retain and the release go. Whether it applied.
+fn moved(statements: List<Stmt>, at: usize) -> bool {
+  const temp = match retained(statements[at]) {
+    Some(found) => found,
+    None => return false,
+  };
+  const store_at = next_real(statements, at + 1);
+
+  if store_at >= statements.len() || !stores_local(statements[store_at], temp) {
+    return false;
+  }
+
+  var index = store_at + 1;
+
+  while index < statements.len() {
+    const statement = statements[index];
+
+    if let Stmt::Release(released) = statement {
+      if released == temp {
+        statements.remove(index);
+        statements.remove(at);
+        return true;
+      }
+    }
+
+    if mentions(statement, temp) {
+      return false;
+    }
+
+    index += 1;
+  }
+
+  false
+}
+
+/// Whether a statement stores the value of local `temp`, without another use of it: into a
+/// binding other than itself, or into a field or element whose place does not read it.
+fn stores_local(statement: Stmt, temp: u32) -> bool {
+  match statement {
+    Stmt::Assign { dest, value: Rvalue::Use(Operand::Local(local)) } => local == temp && dest != temp,
+    Stmt::AssignPlace { dest, value: Rvalue::Use(Operand::Local(local)) } => local == temp && !place_mentions(dest, temp),
+    _ => false,
+  }
+}
+
+/// Q603: `Retain(x)` and `Release(x)` with only markers of lines between them. Whether it
+/// applied.
+fn cancelled(statements: List<Stmt>, at: usize) -> bool {
+  const local = match retained(statements[at]) {
+    Some(found) => found,
+    None => return false,
+  };
+  const release_at = next_real(statements, at + 1);
+
+  if release_at >= statements.len() {
+    return false;
+  }
+
+  if let Stmt::Release(released) = statements[release_at] {
+    if released == local {
+      statements.remove(release_at);
+      statements.remove(at);
+      return true;
+    }
+  }
+
+  false
+}
+
+// ---- Whether a statement mentions a local --------------------------------------------------
+//
+// Anything the pass does not know mentions every local, so it never moves past it.
+
+fn mentions(statement: Stmt, local: u32) -> bool {
+  match statement {
+    Stmt::Line { .. } | Stmt::Break | Stmt::Continue | Stmt::Resumed(_) => false,
+    Stmt::Assign { dest, value } => dest == local || rvalue_mentions(value, local),
+    Stmt::AssignPlace { dest, value } => place_mentions(dest, local) || rvalue_mentions(value, local),
+    Stmt::WeakStore { dest, value } => place_mentions(dest, local) || operand_mentions(value, local),
+    Stmt::Eval(value) => rvalue_mentions(value, local),
+    Stmt::Retain(value) => operand_mentions(value, local),
+    Stmt::Release(released) | Stmt::Reset(released) => released == local,
+    Stmt::ReleasePlace(place) => place_mentions(place, local),
+    Stmt::If { cond, then_body, else_body } => operand_mentions(cond, local) || list_mentions(then_body, local) || list_mentions(else_body, local),
+    Stmt::Loop(inner) => list_mentions(inner, local),
+    Stmt::ForRange { variable, start, end, step, body: inner, .. } => {
+      const stepped = match step {
+        Some(found) => operand_mentions(found, local),
+        None => false,
+      };
+
+      variable == local || operand_mentions(start, local) || operand_mentions(end, local) || stepped || list_mentions(inner, local)
+    }
+    Stmt::ListPush { list, value } => operand_mentions(list, local) || operand_mentions(value, local),
+    Stmt::ListInsert { list, index, value } => operand_mentions(list, local) || operand_mentions(index, local) || operand_mentions(value, local),
+    Stmt::ListClear(list) | Stmt::ListReverse(list) => operand_mentions(list, local),
+    Stmt::ForArray { variable, array, body: inner, .. } => variable == local || array == local || list_mentions(inner, local),
+    Stmt::ForText { variable, text, body: inner, .. } => variable == local || text == local || list_mentions(inner, local),
+    Stmt::SetVtable { object, .. } => object == local,
+    Stmt::Return(value) => match value {
+      Some(found) => operand_mentions(found, local),
+      None => false,
+    },
+    Stmt::Panic(message) => match message {
+      PanicMessage::Value(value) => operand_mentions(value, local),
+      _ => false,
+    },
+    _ => true,
+  }
+}
+
+fn list_mentions(statements: List<Stmt>, local: u32) -> bool {
+  for statement in statements {
+    if mentions(statement, local) {
+      return true;
+    }
+  }
+
+  false
+}
+
+fn operand_mentions(operand: Operand, local: u32) -> bool {
+  match operand {
+    Operand::Local(found) => found == local,
+    Operand::Place(place) | Operand::Ref(place) => place_mentions(place, local),
+    Operand::Const(_) => false,
+  }
+}
+
+fn place_mentions(place: Place, local: u32) -> bool {
+  if place.local == local {
+    return true;
+  }
+
+  for projection in place.projections {
+    const found = match projection {
+      Projection::Index { index, .. } | Projection::ListElem { index, .. } | Projection::SliceElem { index, .. } => operand_mentions(index, local),
+      _ => false,
+    };
+
+    if found {
+      return true;
+    }
+  }
+
+  false
+}
+
+fn operands_mention(operands: List<Operand>, local: u32) -> bool {
+  for operand in operands {
+    if operand_mentions(operand, local) {
+      return true;
+    }
+  }
+
+  false
+}
+
+fn rvalue_mentions(value: Rvalue, local: u32) -> bool {
+  match value {
+    Rvalue::Use(operand) | Rvalue::Unary { operand, .. } | Rvalue::Cast { operand, .. } | Rvalue::Repeat(operand) => operand_mentions(operand, local),
+    Rvalue::Binary { lhs, rhs, .. } => operand_mentions(lhs, local) || operand_mentions(rhs, local),
+    Rvalue::Call { args, .. } => operands_mention(args, local),
+    Rvalue::Aggregate(operands) => operands_mention(operands, local),
+    Rvalue::Variant { fields, .. } => operands_mention(fields, local),
+    Rvalue::Closure { captures, .. } => operands_mention(captures, local),
+    Rvalue::Template(pieces) => {
+      for piece in pieces {
+        if let TemplatePiece::Value { value, .. } = piece {
+          if operand_mentions(value, local) {
+            return true;
+          }
+        }
+      }
+
+      false
+    }
+    Rvalue::WeakLoad(place) => place_mentions(place, local),
+    Rvalue::UnionValue { value, .. } | Rvalue::ToDyn { value, .. } | Rvalue::DynUpcast { value, .. } => operand_mentions(value, local),
+    Rvalue::EnumValid { operand, .. } => operand_mentions(operand, local),
+    Rvalue::ListLen(list) | Rvalue::ListPop(list) => operand_mentions(list, local),
+    Rvalue::ListRemove { list, index } => operand_mentions(list, local) || operand_mentions(index, local),
+    Rvalue::ListFromArray { array, .. } => operand_mentions(array, local),
+    Rvalue::Slice { source, range, .. } => {
+      const in_source = match source {
+        SliceSource::Array { place, .. } => place_mentions(place, local),
+        SliceSource::List(operand) | SliceSource::Slice(operand) => operand_mentions(operand, local),
+      };
+      const in_range = match range {
+        Some(found) => operand_mentions(found.start, local) || operand_mentions(found.end, local),
+        None => false,
+      };
+
+      in_source || in_range
+    }
+    Rvalue::Alloc(_) | Rvalue::FnValue(_) | Rvalue::CFnValue(_) | Rvalue::ExternFnValue(_) | Rvalue::SizeOf(_) | Rvalue::AlignOf(_) | Rvalue::Zeroed
+      | Rvalue::ListNew | Rvalue::ResumeFn => false,
+  }
+}
