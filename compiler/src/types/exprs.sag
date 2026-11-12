@@ -890,7 +890,7 @@ fn other_expr_kind(cx: Checker, value: Expr, expected: Option<Type>) -> Type {
     ExprKind::Await(inner) => await_expr(cx, value, inner, expected),
     ExprKind::New { path, args } => strings::new_expr(cx, value, path, args, expected),
     ExprKind::Match { scrutinee, arms } => patterns::match_expr(cx, scrutinee, arms, expected),
-    ExprKind::MethodCall { receiver, method, args } => method_call(cx, value, receiver, method, args),
+    ExprKind::MethodCall { receiver, method, args } => method_call(cx, value, receiver, method, args, expected),
     ExprKind::Field { base, name } => field(cx, base, name),
     ExprKind::Index { base, index: position } => index(cx, base, position),
     ExprKind::StructLit { path, fields } => struct_literal(cx, value, path, fields, expected),
@@ -1785,13 +1785,31 @@ fn ambiguous_method(cx: Checker, method: Ident, receiver_ty: Type, own: Option<u
   );
 }
 
-fn method_call(cx: Checker, value: Expr, receiver: Expr, method: Ident, args: List<Expr>) -> Type {
+/// `(a..b).rev()`, which `for` runs as a loop.
+fn is_range_rev(receiver: Expr, name: String) -> bool {
+  match receiver.kind {
+    ExprKind::Range { .. } => name == "rev",
+    _ => false,
+  }
+}
+
+fn method_call(cx: Checker, value: Expr, receiver: Expr, method: Ident, args: List<Expr>, expected: Option<Type>) -> Type {
   if let ExprKind::Zod = receiver.kind {
     return inheritance::zod_call(cx, value, receiver, method, args);
   }
 
   const receiver_ty = borrow::deref_base(cx, receiver);
   const name = method.name;
+
+  // The methods of iterators that need more of their values, keep both ends, or make what the
+  // context expects (docs/adr/0093-everyday-methods.md, Q626-Q628).
+  if let Some(elem) = cx.typed.iter_elem(receiver_ty) {
+    if !is_range_rev(receiver, name) {
+      if let Some(ty) = collections::iter_method(cx, value, receiver_ty, elem, method, args, expected) {
+        return ty;
+      }
+    }
+  }
 
   if let TypeKind::Atomic(inner) = receiver_ty.kind {
     return atomic_method(cx, value, receiver, inner, method, args);

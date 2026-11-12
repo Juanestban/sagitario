@@ -18,6 +18,8 @@ pub struct PreludeItems {
   pub hash: Option<u32>;
   pub entry: Option<u32>;
   pub iter: Option<u32>;
+  /// `DoubleEndedIter<T>`, the iterators with two ends (docs/adr/0093-everyday-methods.md, Q627).
+  pub double_iter: Option<u32>;
   pub map: Option<u32>;
   pub send: Option<u32>;
   /// `Display` (docs/adr/0089-display-debug-and-format-specifiers.md).
@@ -229,6 +231,7 @@ pub class TypedModule {
       hash: None,
       entry: None,
       iter: None,
+      double_iter: None,
       map: None,
       send: None,
       display: None,
@@ -276,7 +279,15 @@ pub class TypedModule {
     }
   }
 
-  /// The element type of an `Iter<T>`.
+  /// `DoubleEndedIter<elem>`.
+  pub fn double_iter_type(self, elem: Type) -> Type {
+    match self.prelude.double_iter {
+      Some(id) => types::class_type(id, "DoubleEndedIter", List::from([elem])),
+      None => types::error(),
+    }
+  }
+
+  /// The element type of an `Iter<T>` or a `DoubleEndedIter<T>`.
   pub fn iter_elem(self, ty: Type) -> Option<Type> {
     if let TypeKind::Class(class_ref) = ty.kind {
       if let Some(iter) = self.prelude.iter {
@@ -284,9 +295,24 @@ pub class TypedModule {
           return class_ref.args.first();
         }
       }
+
+      if self.is_double_iter(ty) {
+        return class_ref.args.first();
+      }
     }
 
     None
+  }
+
+  /// Whether `ty` is a `DoubleEndedIter<T>`.
+  pub fn is_double_iter(self, ty: Type) -> bool {
+    match ty.kind {
+      TypeKind::Class(class_ref) => match self.prelude.double_iter {
+        Some(id) => id == class_ref.id,
+        None => false,
+      },
+      _ => false,
+    }
   }
 
   /// The key and value types of a `Map<K, V>`.

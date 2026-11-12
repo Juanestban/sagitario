@@ -125,8 +125,8 @@ const total = (1..=10).fold(0, (sum, n) => sum + n);
 - `Iter<T>` is a prelude class: a lazy sequence that computes each value when `next()` is
   called, giving `None` once it is exhausted. Iterators are references; consuming one through
   any copy advances it.
-- Lists, arrays, ranges outside of `for`, `s.chars()`, `s.bytes()` and the `keys()`, `values()`
-  and `entries()` of maps are iterators or give them. `list.iter()` reads the list by position
+- Lists, arrays, ranges outside of `for`, `s.chars()`, `s.bytes()` and the `keys()`, `values()`,
+  `entries()` and `iter()` of maps are iterators or give them. `list.iter()` reads the list by position
   at every step, like `for`.
 - `new Iter(step)` makes a custom iterator from a function `step: fn() -> Option<T>`. Its state
   lives in class instances it captures, since captures cannot be assigned.
@@ -147,6 +147,38 @@ const total = (1..=10).fold(0, (sum, n) => sum + n);
 
 - The first five are lazy: nothing runs until the iterator is consumed by one of the others or
   by `for`.
+- Rust's other methods ([ADR-0093](../adr/0093-everyday-methods.md), Q626), which lists and
+  arrays also have directly except where noted:
+
+  | Method | Result |
+  |---|---|
+  | `enumerate()`, `zip(other)` | `Iter<(usize, T)>`, `Iter<(T, U)>`: each value with its position, or with a value of `other`, until either ends |
+  | `chain(other)` | the values, then those of `other` |
+  | `flat_map(f)`, `flatten()` | the values of the iterators `f` gives; `flatten` of an iterator of iterators, lists or options |
+  | `take_while(f)`, `skip_while(f)`, `map_while(f)` | the values while `f` holds, those from the first for which it does not, or what `f` gives until `None` |
+  | `inspect(f)`, `cycle()` | the same values, calling `f` with each; the values over and over, kept as they are given |
+  | `sum()`, `product()` | `T`, of an iterator of numbers: `0` and `1` when empty; an overflow panics in debug builds |
+  | `min()`, `max()` (`T: Ord`), `min_by(f)`, `max_by(f)`, `min_by_key(k)`, `max_by_key(k)` | `Option<T>`: the first smallest, the last largest |
+  | `position(f)`, `last()`, `nth(n)` | `Option<usize>`, `Option<T>`, `Option<T>` |
+  | `partition(f)`, `unzip()` | `(List<T>, List<T>)`; `(List<A>, List<B>)` of an iterator of pairs |
+  | `peek()` | `Option<T>`: the next value, which the following `next()` gives |
+
+  Every iterator has `peek()`: Rust's `Peekable` lends its iterator, which Sagitario cannot.
+  `sum`, `product`, `unzip`, `flatten` and `peek` are on iterators only; lists and arrays have
+  `min` and `max` of their own ([lists](02-types.md#lists-f2)).
+- **Two ends** (Q627). An iterator that can also give its last value is a
+  `DoubleEndedIter<T>`, a prelude class that extends `Iter<T>` with `next_back()` and `rev()`:
+  `list.iter()`, the iterators of arrays and slices, ranges, `s.chars()`, `s.bytes()` and
+  `s.char_indices()` are, and `map`, `filter`, `inspect` and `chain` of two keep both ends.
+  `rev()` on any other iterator is an error (`E0316`): collect its values into a list and call
+  `reverse`. A `DoubleEndedIter<T>` is an `Iter<T>` wherever one is expected.
+- **`collect`** (Q628) makes the type the context expects: a `List<T>` without one, a
+  `Map<K, V>` from an iterator of `(K, V)`, a `String` from one of `char` or of `String`, and a
+  `Result<List<T>, E>` from one of `Result<T, E>`, which stops at the first `Err`:
+  `const counts: Map<String, i32> = pairs.iter().collect();`.
+- A lambda argument takes its type from the parameter: one whose body gives an instance of a
+  subclass of the result expected has the result expected, as a `return` would, so
+  `words.flat_map((w) => w.chars())` gives the `Iter<char>` `flat_map` expects.
 - Iterators are not compared with `==` and cannot be interpolated.
 
 ## Representation

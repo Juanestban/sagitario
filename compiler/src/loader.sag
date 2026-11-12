@@ -92,53 +92,69 @@ const INT_TYPES: String = "i8 i16 i32 i64 isize u8 u16 u32 u64 usize";
 fn range_template() -> String {
   const lines = List::from([
     "",
-    "fn range_TYPE(start: TYPE, end: TYPE, inclusive: bool, reverse: bool) -> Iter<TYPE> {",
-    "  const cursor = new Cell<TYPE>(if reverse { end } else { start });",
-    "  const done = new Cell<bool>(false);",
+    "fn range_TYPE(start: TYPE, end: TYPE, inclusive: bool, reverse: bool) -> DoubleEndedIter<TYPE> {",
+    "  // The values left are `low` to `high`, both included, while `left` holds.",
+    "  const low = new Cell<TYPE>(start);",
+    "  const high = new Cell<TYPE>(end);",
+    "  const left = new Cell<bool>(if inclusive { start <= end } else { start < end });",
     "",
-    "  new Iter<TYPE>(() => {",
-    "    if done.value {",
+    "  if !inclusive && start < end {",
+    "    high.value = end - 1;",
+    "  }",
+    "",
+    "  const front: fn() -> Option<TYPE> = () => {",
+    "    if !left.value {",
     "      return None;",
     "    }",
     "",
-    "    const value = cursor.value;",
+    "    const value = low.value;",
     "",
-    "    if reverse {",
-    "      if inclusive {",
-    "        if value < start {",
-    "          done.value = true;",
-    "          return None;",
-    "        }",
-    "",
-    "        if value == start { done.value = true; } else { cursor.value = value - 1; }",
-    "        Some(value)",
-    "      } else {",
-    "        if value <= start {",
-    "          done.value = true;",
-    "          return None;",
-    "        }",
-    "",
-    "        cursor.value = value - 1;",
-    "        Some(value - 1)",
-    "      }",
-    "    } else if inclusive {",
-    "      if value > end {",
-    "        done.value = true;",
-    "        return None;",
-    "      }",
-    "",
-    "      if value == end { done.value = true; } else { cursor.value = value + 1; }",
-    "      Some(value)",
-    "    } else {",
-    "      if value >= end {",
-    "        done.value = true;",
-    "        return None;",
-    "      }",
-    "",
-    "      cursor.value = value + 1;",
-    "      Some(value)",
+    "    if value == high.value { left.value = false; } else { low.value = value + 1; }",
+    "    Some(value)",
+    "  };",
+    "  const back: fn() -> Option<TYPE> = () => {",
+    "    if !left.value {",
+    "      return None;",
     "    }",
-    "  })",
+    "",
+    "    const value = high.value;",
+    "",
+    "    if value == low.value { left.value = false; } else { high.value = value - 1; }",
+    "    Some(value)",
+    "  };",
+    "",
+    "  if reverse { new DoubleEndedIter<TYPE>(back, front) } else { new DoubleEndedIter<TYPE>(front, back) }",
+    "}",
+    "",
+  ]);
+
+  lines.join("\n")
+}
+
+/// `sum` and `product` of an iterator of numbers of type `TYPE`, whose zero and one are `ZERO`
+/// and `ONE` (docs/adr/0093-everyday-methods.md, Q626). As Rust's, an overflow panics in debug
+/// builds.
+fn sum_template() -> String {
+  const lines = List::from([
+    "",
+    "fn iter_sum_TYPE(iter: Iter<TYPE>) -> TYPE {",
+    "  var total: TYPE = ZERO;",
+    "",
+    "  for value in iter {",
+    "    total += value;",
+    "  }",
+    "",
+    "  total",
+    "}",
+    "",
+    "fn iter_product_TYPE(iter: Iter<TYPE>) -> TYPE {",
+    "  var total: TYPE = ONE;",
+    "",
+    "  for value in iter {",
+    "    total *= value;",
+    "  }",
+    "",
+    "  total",
     "}",
     "",
   ]);
@@ -156,6 +172,11 @@ fn prelude_source(prelude: String) -> String {
 
   for ty in INT_TYPES.split(" ") {
     source.append(template.replace("TYPE", ty));
+    source.append(sum_template().replace("TYPE", ty).replace("ZERO", "0").replace("ONE", "1"));
+  }
+
+  for ty in List::from(["f32", "f64"]) {
+    source.append(sum_template().replace("TYPE", ty).replace("ZERO", "0.0").replace("ONE", "1.0"));
   }
 
   source.to_string()

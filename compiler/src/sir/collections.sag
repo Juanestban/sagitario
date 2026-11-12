@@ -1034,11 +1034,18 @@ fn for_iter(lw: Lowering, variable: u32, source: Operand, body: Block) -> Result
   lw.store(iter, source);
   lw.pending.push(iter);
 
-  const next = match lw.resolution.type_function(lw.package, TypeItem::Class(class_ref.id), "next") {
+  // A `DoubleEndedIter<T>` inherits `next` from `Iter<T>`, with the same argument.
+  var owner = class_ref.id;
+
+  if lw.typed.is_double_iter(iter_ty) {
+    owner = lw.typed.prelude.iter.unwrap_or(owner);
+  }
+
+  const next = match lw.resolution.type_function(lw.package, TypeItem::Class(owner), "next") {
     Some(found) => found,
     None => return Err("`Iter` without `next`"),
   };
-  const target = mono::instance(lw, next, Subst::of(ParamOwner::Item(TypeItem::Class(class_ref.id)), class_ref.args));
+  const target = mono::instance(lw, next, Subst::of(ParamOwner::Item(TypeItem::Class(owner)), class_ref.args));
   const option_ty = types::option(elem);
   const mark = lw.open_loop(None);
   // Not pending: the value moves into `var`.

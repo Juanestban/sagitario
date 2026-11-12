@@ -80,7 +80,7 @@ The audit of the library found gaps of the language itself, which the library ne
 
 | Rust | Sagitario | State | Notes |
 |---|---|---|---|
-| `Iterator` | `Iter<T>`, a class over `fn() -> Option<T>` | 🟡 | Has `map`, `filter`, `take`, `skip`, `step_by`, `collect`, `count`, `fold`, `for_each`, `any`, `all`, `find`, and `(a..b).rev()` in `for`. Missing: `enumerate`, `zip`, `chain`, `rev` of any iterator, `flat_map`, `flatten`, `take_while`, `skip_while`, `peekable`, `sum`, `product`, `min`, `max`, `min_by`, `position`, `last`, `nth`, `inspect`, `partition`, `unzip`, `cycle`, `scan`; `collect` into a `Map` or a `String` |
+| `Iterator`, `DoubleEndedIterator`, `Peekable` | `Iter<T>`, a class over `fn() -> Option<T>`, and `DoubleEndedIter<T>` | ✅ | Rust's adapters and consumers, `peek` on every iterator, `rev` and `next_back` on those with two ends, `collect` into a list, a map, a string or a `Result` ([ADR-0093](adr/0093-everyday-methods.md), increment 5). `scan` waits for closures that assign their captures; `enumerate`, `zip`, `take` and `skip` keep one end only until a record on lengths (`ExactSizeIterator`) |
 | `IntoIterator` for user types | — | ❌ | `for` over a user collection needs `.iter()` |
 
 ### Options, results and errors (`option`, `result`, `error`)
@@ -221,7 +221,8 @@ From what most programs need to what fewer do. Each line is one record, or a few
    width, precision, alignment and radix in format strings. ✅
 3. **The benchmarks** (above), with `hint::black_box`, so that later work is measured. ✅
 4. **The everyday methods:** those missing from `String`, `char` (Unicode), `List`, slices, `Map`,
-   `Iter`, `Option` and `Result`, and `assert`, `assert_eq`, `unreachable`, `todo`.
+   `Iter`, `Option` and `Result`, and `assert`, `assert_eq`, `unreachable`, `todo`. ✅
+   ([ADR-0093](adr/0093-everyday-methods.md))
 5. **Conversion and defaults:** `From`, `Into`, `TryFrom`, `Default`, generic `min`/`max`,
    `Index`.
 6. **Collections:** `Set`, `Deque`, `SortedMap`, `SortedSet` and `PriorityQueue` (names to be

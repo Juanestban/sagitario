@@ -18,7 +18,7 @@ use pkg::types::inheritance;
 use pkg::types::typed::{BuiltinMethod, ListMethod, PreludeItems, ToIter};
 
 /// The methods of `Iter` that lists and arrays also have, as shorthands for `.iter().method()`.
-const ITER_METHODS: String = "map filter take skip step_by collect count fold for_each any all find";
+const ITER_METHODS: String = "map filter take skip step_by collect count fold for_each any all find enumerate zip chain flat_map take_while skip_while map_while inspect cycle min_by max_by min_by_key max_by_key position last nth partition";
 
 /// The methods of `List` implemented by the compiler.
 const LIST_METHODS: String = "len is_empty push pop get first last insert remove clear reverse";
@@ -62,6 +62,7 @@ pub fn prelude_items(cx: Checker) {
     hash: prelude_interface(cx, "Hash"),
     entry: entry,
     iter: prelude_class(cx, "Iter"),
+    double_iter: prelude_class(cx, "DoubleEndedIter"),
     map: prelude_class(cx, "Map"),
     send: prelude_interface(cx, "Send"),
     display: prelude_interface(cx, "Display"),
@@ -398,6 +399,7 @@ pub fn inferred_method_of(cx: Checker, value: Expr, found: Option<u32>, name: St
   };
   const unknowns = new generic::Unknowns();
 
+  unknowns.typed = Some(cx.typed);
   unknowns.add(ParamOwner::Fn(function), cx.generic_count(ParamOwner::Fn(function)), None);
 
   if let Some(receiver_param) = sig.params.first() {
@@ -504,6 +506,168 @@ pub fn slice_method_of(cx: Checker, value: Expr, receiver: Expr, receiver_ty: Ty
   }
 
   inferred_method_of(cx, value, Some(function), method.name, types::of(TypeKind::Slice { mutable: mutable, elem: elem }), args)
+}
+
+/// A method of an iterator the compiler gives by the kind of its values or because it has two
+/// ends, or `None` for the methods of the class (docs/adr/0093-everyday-methods.md, Q626-Q628).
+pub fn iter_method(cx: Checker, value: Expr, receiver_ty: Type, elem: Type, method: Ident, args: List<Expr>, expected: Option<Type>) -> Option<Type> {
+  const name = method.name;
+  const double = cx.typed.is_double_iter(receiver_ty);
+
+  if double && (name == "map" || name == "filter" || name == "inspect") {
+    return Some(inferred_prelude_method(cx, value, "double_" + name, receiver_ty, args));
+  }
+
+  if double && name == "chain" && args.len() == 1 {
+    return Some(double_chain(cx, value, receiver_ty, elem, args[0]));
+  }
+
+  if name == "rev" && !double {
+    cx.diagnostics.push(
+      Diagnostic::error(codes::UNKNOWN_MEMBER, method.span, "no method `rev` on type `" + types::text(receiver_ty) + "`")
+        .with_note("only an iterator with two ends, a `DoubleEndedIter`, is reversed: those of lists, arrays, slices, ranges and strings, and `map`, `filter`, `inspect` and `chain` of them")
+        .with_help("collect the values into a list and call `reverse`"),
+    );
+    exprs::unchecked_args(cx, args);
+
+    return Some(types::error());
+  }
+
+  if name == "min" || name == "max" {
+    return Some(inferred_prelude_method(cx, value, "iter_" + name, receiver_ty, args));
+  }
+
+  if name == "sum" || name == "product" {
+    const numeric = match elem.kind {
+      TypeKind::Int(_) | TypeKind::Float(_) => true,
+      _ => false,
+    };
+
+    if !numeric {
+      if !types::is_error(elem) {
+        cx.diagnostics.push(
+          Diagnostic::error(codes::UNKNOWN_MEMBER, method.span, "no method `" + name + "` on type `" + types::text(receiver_ty) + "`")
+            .with_note("only iterators of numbers are summed and multiplied"),
+        );
+      }
+
+      exprs::unchecked_args(cx, args);
+
+      return Some(types::error());
+    }
+
+    return Some(prelude_method(cx, value, "iter_" + name + "_" + types::text(elem), new List(), args));
+  }
+
+  if name == "unzip" {
+    if let TypeKind::Tuple(elems) = elem.kind {
+      if elems.len() == 2 {
+        return Some(inferred_prelude_method(cx, value, "iter_unzip", receiver_ty, args));
+      }
+    }
+
+    return Some(no_such_iter_method(cx, receiver_ty, method, args, "only an iterator of pairs is unzipped"));
+  }
+
+  if name == "flatten" {
+    var function = "";
+
+    if cx.typed.iter_elem(elem).is_some() {
+      function = "iter_flatten";
+    } else if let TypeKind::List(_) = elem.kind {
+      function = "iter_flatten_lists";
+    } else if let TypeKind::Option(_) = elem.kind {
+      function = "iter_flatten_options";
+    }
+
+    if function.is_empty() {
+      return Some(no_such_iter_method(cx, receiver_ty, method, args, "only iterators of iterators, lists or options are flattened"));
+    }
+
+    return Some(inferred_prelude_method(cx, value, function, receiver_ty, args));
+  }
+
+  if name == "collect" && args.is_empty() {
+    if let Some(function) = collect_target(cx, elem, expected) {
+      return Some(inferred_prelude_method(cx, value, function, receiver_ty, args));
+    }
+  }
+
+  None
+}
+
+fn no_such_iter_method(cx: Checker, receiver_ty: Type, method: Ident, args: List<Expr>, note: String) -> Type {
+  cx.diagnostics.push(Diagnostic::error(codes::UNKNOWN_MEMBER, method.span, "no method `" + method.name + "` on type `" + types::text(receiver_ty) + "`").with_note(note));
+  exprs::unchecked_args(cx, args);
+
+  types::error()
+}
+
+/// What `collect` makes for the type the context expects: the prelude function, or `None` for a
+/// list (docs/adr/0093-everyday-methods.md, Q628).
+fn collect_target(cx: Checker, elem: Type, expected: Option<Type>) -> Option<String> {
+  const target = expected?;
+
+  if types::is_string(target) {
+    return match elem.kind {
+      TypeKind::Char => Some("iter_collect_chars"),
+      TypeKind::String => Some("iter_collect_strings"),
+      _ => None,
+    };
+  }
+
+  if cx.typed.map_args(target).is_some() {
+    if let TypeKind::Tuple(elems) = elem.kind {
+      if elems.len() == 2 {
+        return Some("iter_collect_map");
+      }
+    }
+
+    return None;
+  }
+
+  if let TypeKind::Result { value, .. } = target.kind {
+    if let TypeKind::List(_) = value.kind {
+      if let TypeKind::Result { .. } = elem.kind {
+        return Some("iter_collect_result");
+      }
+    }
+  }
+
+  None
+}
+
+/// `a.chain(b)` on an iterator with two ends: one with two ends when `b` has them too, else an
+/// `Iter<T>`. The argument is checked once, here.
+fn double_chain(cx: Checker, value: Expr, receiver_ty: Type, elem: Type, arg: Expr) -> Type {
+  const arg_ty = exprs::expr(cx, arg, Some(cx.typed.iter_type(elem)));
+  const both = cx.typed.is_double_iter(arg_ty);
+  const function = match cx.resolution.prelude_fn(if both { "double_chain" } else { "iter_chain" }) {
+    Some(found) => found,
+    None => return types::error(),
+  };
+  const sig = match cx.typed.sig(function) {
+    Some(found) => found,
+    None => return types::error(),
+  };
+  const unknowns = new generic::Unknowns();
+
+  unknowns.typed = Some(cx.typed);
+  unknowns.add(ParamOwner::Fn(function), cx.generic_count(ParamOwner::Fn(function)), None);
+  unknowns.unify(sig.params[0], receiver_ty);
+  unknowns.unify(sig.params[1], arg_ty);
+
+  const subst = generic::finish_inference(cx, value.span, "`chain`", unknowns);
+  const expected = types::substitute(sig.params[1], subst);
+
+  if !cx.fits(arg_ty, expected) {
+    exprs::mismatch(cx, arg.span, expected, arg_ty);
+  }
+
+  cx.typed.call_args.insert(value.id, subst.args_of(ParamOwner::Fn(function)).unwrap_or(new List()));
+  cx.typed.builtin_methods.insert(value.id, BuiltinMethod::Prelude(function));
+
+  types::substitute(sig.ret, subst)
 }
 
 /// `receiver.method(args)` on a list or array, for a method of `Iter`: the receiver becomes an
@@ -636,7 +800,7 @@ pub fn range_value(cx: Checker, value: Expr, start: Expr, end: Expr, expected: O
 
   cx.typed.ranges.insert(value.id, function);
 
-  cx.typed.iter_type(types::int(int_ty))
+  cx.typed.double_iter_type(types::int(int_ty))
 }
 
 /// `(start..end).rev()`: the range's integers from the last one down.
@@ -650,14 +814,9 @@ pub fn range_rev(cx: Checker, value: Expr, receiver: Expr, receiver_ty: Type, me
     _ => false,
   };
 
+  // Other iterators with two ends have the method `rev` of their class; the others were reported.
   if !is_range {
-    cx.diagnostics.push(
-      Diagnostic::error(codes::UNKNOWN_MEMBER, method.span, "no method `rev` on type `" + types::text(receiver_ty) + "`")
-        .with_note("only ranges can be reversed, as in `(0..10).rev()`; collect other iterators into a list and call `reverse`"),
-    );
-    exprs::unchecked_args(cx, args);
-
-    return Some(types::error());
+    return None;
   }
 
   exprs::check_args(cx, value.span, "method", new List(), args);

@@ -108,15 +108,38 @@ class Cell<T> {
 /// (docs/spec/08-closures.md#iterators).
 pub class Iter<T> {
   prv const step: fn() -> Option<T>;
+  /// What `peek` read ahead: `Some` of the next value, which `next` gives first.
+  prv var waiting: Option<Option<T>>;
 
   /// An iterator whose values `step` returns, until it returns `None`.
   pub fn new(self, step: fn() -> Option<T>) {
     self.step = step;
+    self.waiting = None;
   }
 
   /// The next value, or `None` once the iterator is exhausted.
   pub fn next(self) -> Option<T> {
-    self.step()
+    match self.waiting {
+      Some(found) => {
+        self.waiting = None;
+        found
+      }
+      None => self.step(),
+    }
+  }
+
+  /// The next value, without consuming it: the following `next` gives it. Rust's `Peekable`
+  /// lends its iterator, so every iterator peeks here (docs/adr/0093-everyday-methods.md, Q626).
+  pub fn peek(self) -> Option<T> {
+    match self.waiting {
+      Some(found) => found,
+      None => {
+        const found = self.step();
+
+        self.waiting = Some(found);
+        found
+      }
+    }
   }
 
   pub fn map<U>(self, f: fn(T) -> U) -> Iter<U> {
@@ -268,6 +291,442 @@ pub class Iter<T> {
 
     None
   }
+
+  // ---- Rust's other adapters and consumers (docs/adr/0093-everyday-methods.md, Q626) ---------
+
+  /// Each value with its position, from 0.
+  pub fn enumerate(self) -> Iter<(usize, T)> {
+    const source = self;
+    const position = new Cell<usize>(0);
+
+    new Iter<(usize, T)>(() => {
+      const value = source.next()?;
+      const index = position.value;
+
+      position.value = index + 1;
+      Some((index, value))
+    })
+  }
+
+  /// Pairs of a value of each, until either ends.
+  pub fn zip<U>(self, other: Iter<U>) -> Iter<(T, U)> {
+    const source = self;
+
+    new Iter<(T, U)>(() => {
+      const first = source.next()?;
+      const second = other.next()?;
+
+      Some((first, second))
+    })
+  }
+
+  /// The values of this iterator, then those of `other`.
+  pub fn chain(self, other: Iter<T>) -> Iter<T> {
+    const source = self;
+
+    new Iter<T>(() => {
+      match source.next() {
+        Some(found) => Some(found),
+        None => other.next(),
+      }
+    })
+  }
+
+  /// The values of the iterators `f` gives for each value, one after another.
+  pub fn flat_map<U>(self, f: fn(T) -> Iter<U>) -> Iter<U> {
+    const source = self;
+    const current = new Cell<Option<Iter<U>>>(None);
+
+    new Iter<U>(() => {
+      loop {
+        if let Some(inner) = current.value {
+          if let Some(found) = inner.next() {
+            return Some(found);
+          }
+        }
+
+        match source.next() {
+          Some(value) => {
+            current.value = Some(f(value));
+          }
+          None => return None,
+        }
+      }
+    })
+  }
+
+  /// The values while `keep` returns `true` for them.
+  pub fn take_while(self, keep: fn(T) -> bool) -> Iter<T> {
+    const source = self;
+    const done = new Cell<bool>(false);
+
+    new Iter<T>(() => {
+      if done.value {
+        return None;
+      }
+
+      const value = source.next()?;
+
+      if keep(value) {
+        return Some(value);
+      }
+
+      done.value = true;
+      None
+    })
+  }
+
+  /// The values from the first for which `skip` returns `false`.
+  pub fn skip_while(self, skip: fn(T) -> bool) -> Iter<T> {
+    const source = self;
+    const started = new Cell<bool>(false);
+
+    new Iter<T>(() => {
+      if started.value {
+        return source.next();
+      }
+
+      loop {
+        const value = source.next()?;
+
+        if !skip(value) {
+          started.value = true;
+          return Some(value);
+        }
+      }
+    })
+  }
+
+  /// What `f` gives for each value, until it gives `None`.
+  pub fn map_while<U>(self, f: fn(T) -> Option<U>) -> Iter<U> {
+    const source = self;
+    const done = new Cell<bool>(false);
+
+    new Iter<U>(() => {
+      if done.value {
+        return None;
+      }
+
+      const value = source.next()?;
+      const mapped = f(value);
+
+      if mapped.is_none() {
+        done.value = true;
+      }
+
+      mapped
+    })
+  }
+
+  /// The same values, calling `f` with each as it passes.
+  pub fn inspect(self, f: fn(T)) -> Iter<T> {
+    const source = self;
+
+    new Iter<T>(() => {
+      const value = source.next()?;
+
+      f(value);
+      Some(value)
+    })
+  }
+
+  /// The values over and over. Rust's clones the iterator; this one keeps the values it has
+  /// given, to give them again.
+  pub fn cycle(self) -> Iter<T> {
+    const source = self;
+    const seen = new List<T>();
+    const replay = new Cell<usize>(0);
+    const replaying = new Cell<bool>(false);
+
+    new Iter<T>(() => {
+      if !replaying.value {
+        match source.next() {
+          Some(value) => {
+            seen.push(value);
+            return Some(value);
+          }
+          None => {
+            replaying.value = true;
+          }
+        }
+      }
+
+      if seen.is_empty() {
+        return None;
+      }
+
+      const value = seen[replay.value % seen.len()];
+
+      replay.value += 1;
+      Some(value)
+    })
+  }
+
+  /// The first smallest value by `compare`.
+  pub fn min_by(self, compare: fn(T, T) -> Ordering) -> Option<T> {
+    var best = self.next()?;
+
+    for value in self {
+      if compare(value, best) == Ordering::Less {
+        best = value;
+      }
+    }
+
+    Some(best)
+  }
+
+  /// The last largest value by `compare`.
+  pub fn max_by(self, compare: fn(T, T) -> Ordering) -> Option<T> {
+    var best = self.next()?;
+
+    for value in self {
+      if compare(value, best) != Ordering::Less {
+        best = value;
+      }
+    }
+
+    Some(best)
+  }
+
+  /// The first value whose key is the smallest.
+  pub fn min_by_key<K: Ord>(self, key: fn(T) -> K) -> Option<T> {
+    self.min_by((a, b) => key(a).compare(key(b)))
+  }
+
+  /// The last value whose key is the largest.
+  pub fn max_by_key<K: Ord>(self, key: fn(T) -> K) -> Option<T> {
+    self.max_by((a, b) => key(a).compare(key(b)))
+  }
+
+  /// The position of the first value for which `test` returns `true`.
+  pub fn position(self, test: fn(T) -> bool) -> Option<usize> {
+    var index = 0usize;
+
+    for value in self {
+      if test(value) {
+        return Some(index);
+      }
+
+      index += 1;
+    }
+
+    None
+  }
+
+  /// The last value.
+  pub fn last(self) -> Option<T> {
+    var found: Option<T> = None;
+
+    for value in self {
+      found = Some(value);
+    }
+
+    found
+  }
+
+  /// The value at position `n`, consuming those before it.
+  pub fn nth(self, n: usize) -> Option<T> {
+    var index = 0usize;
+
+    while index < n {
+      self.next()?;
+      index += 1;
+    }
+
+    self.next()
+  }
+
+  /// The values for which `keep` returns `true`, and the others.
+  pub fn partition(self, keep: fn(T) -> bool) -> (List<T>, List<T>) {
+    const kept = new List<T>();
+    const others = new List<T>();
+
+    for value in self {
+      if keep(value) {
+        kept.push(value);
+      } else {
+        others.push(value);
+      }
+    }
+
+    (kept, others)
+  }
+}
+
+/// An iterator that can also give its last value: Rust's `DoubleEndedIterator`. `list.iter()`,
+/// the iterators of arrays, slices, ranges and strings give one (docs/adr/0093-everyday-methods.md,
+/// Q627).
+pub class DoubleEndedIter<T> extends Iter<T> {
+  prv const back: fn() -> Option<T>;
+
+  /// An iterator whose values come from `front` and, from the end, from `back`, which share what
+  /// is left between them.
+  pub fn new(self, front: fn() -> Option<T>, back: fn() -> Option<T>) {
+    zod.new(front);
+    self.back = back;
+  }
+
+  /// The last value left. When the back has nothing left, the value `peek` read ahead, if any, is
+  /// the last one, and `next` gives it.
+  pub fn next_back(self) -> Option<T> {
+    match self.back() {
+      Some(found) => Some(found),
+      None => self.next(),
+    }
+  }
+
+  /// The values from the last one.
+  pub fn rev(self) -> DoubleEndedIter<T> {
+    const source = self;
+
+    new DoubleEndedIter<T>(() => source.next_back(), () => source.next())
+  }
+}
+
+// ---- The methods of iterators that need more of their values, or keep both ends --------------
+//
+// The compiler calls these for a method of an `Iter<T>` whose values are of a kind, or of a
+// `DoubleEndedIter<T>` (docs/adr/0093-everyday-methods.md, Q626-Q628).
+
+fn double_map<T, U>(iter: DoubleEndedIter<T>, f: fn(T) -> U) -> DoubleEndedIter<U> {
+  new DoubleEndedIter<U>(() => iter.next().map(f), () => iter.next_back().map(f))
+}
+
+fn double_filter<T>(iter: DoubleEndedIter<T>, keep: fn(T) -> bool) -> DoubleEndedIter<T> {
+  const front: fn() -> Option<T> = () => {
+    for value in iter {
+      if keep(value) {
+        return Some(value);
+      }
+    }
+
+    None
+  };
+  const back: fn() -> Option<T> = () => {
+    loop {
+      const value = iter.next_back()?;
+
+      if keep(value) {
+        return Some(value);
+      }
+    }
+  };
+
+  new DoubleEndedIter<T>(front, back)
+}
+
+fn double_inspect<T>(iter: DoubleEndedIter<T>, f: fn(T)) -> DoubleEndedIter<T> {
+  const front: fn() -> Option<T> = () => {
+    const value = iter.next()?;
+
+    f(value);
+    Some(value)
+  };
+  const back: fn() -> Option<T> = () => {
+    const value = iter.next_back()?;
+
+    f(value);
+    Some(value)
+  };
+
+  new DoubleEndedIter<T>(front, back)
+}
+
+/// `a.chain(b)` of an iterator with two ends and one without: an `Iter<T>`.
+fn iter_chain<T>(first: Iter<T>, second: Iter<T>) -> Iter<T> {
+  first.chain(second)
+}
+
+fn double_chain<T>(first: DoubleEndedIter<T>, second: DoubleEndedIter<T>) -> DoubleEndedIter<T> {
+  const front: fn() -> Option<T> = () => {
+    match first.next() {
+      Some(found) => Some(found),
+      None => second.next(),
+    }
+  };
+  const back: fn() -> Option<T> = () => {
+    match second.next_back() {
+      Some(found) => Some(found),
+      None => first.next_back(),
+    }
+  };
+
+  new DoubleEndedIter<T>(front, back)
+}
+
+/// The first smallest value.
+fn iter_min<T: Ord>(iter: Iter<T>) -> Option<T> {
+  iter.min_by((a, b) => a.compare(b))
+}
+
+/// The last largest value.
+fn iter_max<T: Ord>(iter: Iter<T>) -> Option<T> {
+  iter.max_by((a, b) => a.compare(b))
+}
+
+fn iter_unzip<A, B>(iter: Iter<(A, B)>) -> (List<A>, List<B>) {
+  const firsts = new List<A>();
+  const seconds = new List<B>();
+
+  for (first, second) in iter {
+    firsts.push(first);
+    seconds.push(second);
+  }
+
+  (firsts, seconds)
+}
+
+fn iter_flatten<U>(iter: Iter<Iter<U>>) -> Iter<U> {
+  iter.flat_map((inner) => inner)
+}
+
+fn iter_flatten_lists<U>(iter: Iter<List<U>>) -> Iter<U> {
+  iter.flat_map((inner) => list_iter(inner))
+}
+
+fn iter_flatten_options<U>(iter: Iter<Option<U>>) -> Iter<U> {
+  iter.flat_map((inner) => option_iter(inner))
+}
+
+fn iter_collect_map<K: Hash, V>(iter: Iter<(K, V)>) -> Map<K, V> {
+  const map = new Map<K, V>();
+
+  map.extend(iter);
+  map
+}
+
+fn iter_collect_chars(iter: Iter<char>) -> String {
+  const text = new StringBuilder();
+
+  for c in iter {
+    text.append_char(c);
+  }
+
+  text.to_string()
+}
+
+fn iter_collect_strings(iter: Iter<String>) -> String {
+  const text = new StringBuilder();
+
+  for part in iter {
+    text.append(part);
+  }
+
+  text.to_string()
+}
+
+/// The values of the `Ok`s, or the first `Err`, after which no value is read.
+fn iter_collect_result<T, E>(iter: Iter<Result<T, E>>) -> Result<List<T>, E> {
+  const values = new List<T>();
+
+  for item in iter {
+    match item {
+      Ok(value) => values.push(value),
+      Err(error) => return Err(error),
+    }
+  }
+
+  Ok(values)
 }
 
 /// A hash map from keys to values that keeps the order in which keys were first inserted
@@ -563,19 +1022,33 @@ pub class Map<K: Hash, V> {
 
 /// `list.iter()`: the elements by position, reading the length at every step, so elements
 /// added while iterating are seen.
-fn list_iter<T>(list: List<T>) -> Iter<T> {
+fn list_iter<T>(list: List<T>) -> DoubleEndedIter<T> {
+  // The positions left are `next` up to `end`, which the back sets when it first reads: elements
+  // added while iterating are seen until then.
   const next = new Cell<usize>(0);
+  const end = new Cell<usize>(usize::MAX);
+  const front: fn() -> Option<T> = () => {
+    const position = next.value;
 
-  new Iter<T>(() => {
-    if next.value >= list.len() {
+    if position >= list.len() || position >= end.value {
       return None;
     }
 
-    const value = list[next.value];
+    next.value = position + 1;
+    Some(list[position])
+  };
+  const back: fn() -> Option<T> = () => {
+    const limit = smaller(end.value, list.len());
 
-    next.value += 1;
-    Some(value)
-  })
+    if limit <= next.value {
+      return None;
+    }
+
+    end.value = limit - 1;
+    Some(list[limit - 1])
+  };
+
+  new DoubleEndedIter<T>(front, back)
 }
 
 fn list_index_of<T: Eq>(list: List<T>, value: T) -> Option<usize> {
@@ -594,7 +1067,7 @@ fn list_contains<T: Eq>(list: List<T>, value: T) -> bool {
 
 /// `slice.iter()`: an iterator over a copy of the elements, which may outlive the call that lent
 /// the slice (docs/adr/0079-references-and-borrowing.md, Q494).
-fn slice_iter<T>(slice: &[T]) -> Iter<T> {
+fn slice_iter<T>(slice: &[T]) -> DoubleEndedIter<T> {
   const copy = new List<T>();
 
   for value in slice {
@@ -1400,7 +1873,7 @@ fn list_join(list: List<String>, separator: String) -> String {
 }
 
 /// `text.chars()` outside of `for`.
-fn string_chars(text: String) -> Iter<char> {
+fn string_chars(text: String) -> DoubleEndedIter<char> {
   const chars = new List<char>();
 
   for c in text.chars() {
@@ -1411,7 +1884,7 @@ fn string_chars(text: String) -> Iter<char> {
 }
 
 /// `text.bytes()` outside of `for`.
-fn string_bytes(text: String) -> Iter<u8> {
+fn string_bytes(text: String) -> DoubleEndedIter<u8> {
   const bytes = new List<u8>();
 
   for b in text.bytes() {

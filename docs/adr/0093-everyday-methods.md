@@ -131,3 +131,22 @@ fn main() {
   which removal leaves in place, and `Map::from` is a static function whose `K` and `V` come
   from the list of pairs. An array of pairs is not a list, so `Map::from([("a", 1)])`, Rust's
   form, is an error that asks for the types; `Map::from(List::from([("a", 1)]))` is the form.
+- Increment 5 is done, and with it the record. The adapters and consumers that need nothing of
+  the values are methods of `Iter`; those that need their kind (`sum`, `product`, `min`, `max`,
+  `unzip`, `flatten`) and `collect` into another type are prelude functions the checker chooses
+  (`types::collections::iter_method`), `sum` and `product` one per number type, written by the
+  loader as the ranges are. `peek` keeps the value read ahead in a field `next` tests first.
+  `DoubleEndedIter<T>` extends `Iter<T>` with the function of its back and does not override
+  `next`: when the back has nothing left, what `peek` read ahead is the last value, and `next`
+  gives it, so `next` stays a direct call. Lists, slices, ranges and strings give one; ranges
+  keep a low and a high bound, and `list.iter()` the end its back reached. The checker gives a
+  `DoubleEndedIter` its own `map`, `filter`, `inspect` and `chain` (`double_<name>` in the
+  prelude); `chain` keeps both ends only when its argument has them. Two changes were needed in
+  the checker: the inference of type parameters now unifies a class with an instance of one of
+  its subclasses (`Iter<T>` with a `DoubleEndedIter<i32>`), through the ancestors the checker of
+  subtypes already follows; and a lambda whose body gives an instance of a subclass of the
+  result its parameter expects has that result, as a `return` would, so
+  `flat_map((w) => w.chars())` fits `fn(String) -> Iter<U>` without making function types
+  variant. A chain of `filter`, `map` and `fold` over a list of 2,000,000 integers, ten times,
+  took about 10% more than before the increment (Windows, x86-64, release, the least of seven
+  runs, with noise): the check of `peek` and the bound of the back in `list.iter()`.

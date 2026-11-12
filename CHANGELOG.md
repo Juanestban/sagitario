@@ -15,6 +15,11 @@ The sources say 0.32.0.
 
 ### Added
 
+- Rust's adapters and consumers of iterators (`enumerate`, `zip`, `chain`, `flat_map`, `flatten`,
+  `take_while`, `sum`, `min`, `max`, `position`, `partition`, `unzip`...), `peek` on every
+  iterator, `DoubleEndedIter<T>` with `rev` and `next_back` for those of lists, slices, ranges
+  and strings, and `collect` into a `Map`, a `String` or a `Result` when the context expects one
+  ([ADR-0093](docs/adr/0093-everyday-methods.md), increment 5).
 - `Map::update`, `upsert` and `get_or_insert`, which do what Rust's `entry` is used for, with
   `retain`, `extend`, `iter` (pairs) and `Map::from` a list of pairs
   ([ADR-0093](docs/adr/0093-everyday-methods.md), increment 4).
@@ -75,6 +80,9 @@ The sources say 0.32.0.
 
 ### Changed
 
+- `rev()` works on any iterator with two ends, and is an error on the others, as in Rust;
+  `list.iter()` and the other iterators with two ends have the type `DoubleEndedIter<T>`, which
+  is an `Iter<T>` ([ADR-0093](docs/adr/0093-everyday-methods.md), Q627).
 - The standard library is written in Sagitario on the C API of each system, gathered in the
   private module `std::sys`, instead of C in the runtime (S1 of the
   [roadmap](docs/roadmap-v2.md)): `std::time`, `std::env`, `std::path`, `std::io`, `std::fs`,

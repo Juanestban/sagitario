@@ -268,27 +268,17 @@ fn text_strip_suffix(text: String, suffix: String) -> Option<String> {
   if text.ends_with(suffix) { Some(text.substring(0, text.len() - suffix.len())) } else { None }
 }
 
-/// A position that a closure advances.
-class Offset {
-  pub var value: usize;
-
-  pub fn new(self) {
-    self.value = 0;
-  }
-}
-
 /// Each character of `text` with the byte index where it starts.
-fn text_char_indices(text: String) -> Iter<(usize, char)> {
-  const chars = text.chars();
-  const offset = new Offset();
+fn text_char_indices(text: String) -> DoubleEndedIter<(usize, char)> {
+  const pairs = new List<(usize, char)>();
+  var at = 0usize;
 
-  new Iter<(usize, char)>(() => {
-    const c = chars.next()?;
-    const at = offset.value;
+  for c in text.chars() {
+    pairs.push((at, c));
+    at += char_len_utf8(c);
+  }
 
-    offset.value = at + char_len_utf8(c);
-    Some((at, c))
-  })
+  pairs.iter()
 }
 
 /// The matches of `pattern` in `text`, from the first, without overlapping.
