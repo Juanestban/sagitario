@@ -98,3 +98,17 @@ fn main() {
   Writing the test of `assert_eq` showed that `Option` and `Result` did not implement `Eq`, which
   Rust's do and which `assert_eq(found, Some(2))` needs: they now implement `Eq`, `Ord` and
   `Hash` as tuples do, in `sir/collections.sag`, by variant and then by the value held.
+- Increment 2 is done. The methods of `String`, `char` and `StringBuilder` are functions of the
+  root of `std` (`text_<name>`, `char_<name>`), not of the prelude, since they need the Unicode
+  data and the UTF-8 helpers the root already had; `types::collections::std_root_fn` finds them.
+  The data is a module `std::unicode`, hidden from programs as `std::sys` is, which the root
+  loads: `tools/unicode.rs`, run with `rustc`, prints it from Rust's `char` (Unicode 17.0.0)
+  after checking every code point against it, and appends the search written in
+  `tools/unicode_search.sag`, which a test of the harness keeps in step. Each table is a string
+  constant of numbers of six hexadecimal digits, searched without being decoded first, so a
+  program pays nothing before its first lookup and nothing at all if it makes none: ranges for
+  the properties, and for each case mapping runs `start, end, step, offset` (198 for uppercase,
+  185 for lowercase) plus the characters mapped to several (102 and 1). `to_lowercase` of a `String` gives `ς` for a `Σ` with a
+  cased character before it and none after it; Rust also skips the case-ignorable characters
+  around it, which the tables do not have. `insert`, `truncate`, `pop`, `capacity` and `reserve`
+  of `StringBuilder` are runtime functions, since they reach its buffer.

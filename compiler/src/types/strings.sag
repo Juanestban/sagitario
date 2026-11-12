@@ -83,8 +83,19 @@ fn builder_methods() -> List<RuntimeMethod> {
     runtime("is_empty", new List(), types::of(TypeKind::Bool), "sag_builder_is_empty"),
     runtime("clear", new List(), types::unit(), "sag_builder_clear"),
     runtime("to_string", new List(), types::string(), "sag_builder_to_string"),
+    located("insert", List::from([usize_type(), types::string()]), types::unit(), "sag_builder_insert_at"),
+    located("truncate", List::from([usize_type()]), types::unit(), "sag_builder_truncate_at"),
+    runtime("capacity", new List(), usize_type(), "sag_builder_capacity"),
+    runtime("reserve", List::from([usize_type()]), types::unit(), "sag_builder_reserve"),
   ])
 }
+
+/// The methods of `String` written in the root of `std`, as `text_<name>`
+/// (docs/adr/0093-everyday-methods.md, Q620).
+const STRING_STD_METHODS: String = "rfind split_whitespace splitn rsplit split_once rsplit_once strip_prefix strip_suffix char_indices matches replacen to_uppercase to_lowercase";
+
+/// The methods of `char` written in the root of `std`, as `char_<name>` (Q621).
+const CHAR_STD_METHODS: String = "is_alphabetic is_numeric is_alphanumeric is_whitespace is_uppercase is_lowercase is_control to_uppercase to_lowercase len_utf8 len_utf16";
 
 /// The type parsed by `parse_<name>`.
 fn parse_target(method: String) -> Option<Type> {
@@ -128,6 +139,9 @@ pub fn text_method(cx: Checker, value: Expr, receiver_ty: Type, method: Ident, a
     special = Some(BuiltinMethod::ToDigit);
     special_params = List::from([types::int(IntTy::U32)]);
     special_ret = types::option(types::int(IntTy::U32));
+  } else if !is_string && !is_char && name == "pop" {
+    special = Some(BuiltinMethod::BuilderPop);
+    special_ret = types::option(types::of(TypeKind::Char));
   } else if is_string {
     if let Some(target) = parse_target(name) {
       special = Some(BuiltinMethod::Parse(target));
@@ -140,6 +154,14 @@ pub fn text_method(cx: Checker, value: Expr, receiver_ty: Type, method: Ident, a
     cx.typed.builtin_methods.insert(value.id, builtin);
 
     return special_ret;
+  }
+
+  const std_methods = if is_string { STRING_STD_METHODS } else if is_char { CHAR_STD_METHODS } else { "" };
+
+  if std_methods.split(" ").contains(name) {
+    const function = (if is_string { "text_" } else { "char_" }) + name;
+
+    return collections::inferred_method_of(cx, value, collections::std_root_fn(cx, function), name, receiver_ty, args);
   }
 
   // Outside of `for`, implemented by prelude functions.
@@ -184,6 +206,10 @@ pub fn text_method(cx: Checker, value: Expr, receiver_ty: Type, method: Ident, a
         for extra in List::from(["find", "chars", "bytes", "split", "lines", "parse_i32"]) {
           names.push(extra);
         }
+      }
+
+      for extra in std_methods.split(" ") {
+        names.push(extra);
       }
 
       if let Some(similar) = diagnostics::closest_match(name, names) {

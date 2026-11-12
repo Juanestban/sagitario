@@ -48,7 +48,8 @@ compiler/           the compiler and Nova, written in Sagitario (compiler/Nova.t
                           library headers (header.sag) and targets (targets.sag)
   src/lsp/                `sag lsp`, the language server
   src/nova_main.sag       `nova`: the package manager (docs/nova.md), with src/nova/
-  std/                    the prelude and the standard library written in Sagitario
+  std/                    the prelude and the standard library written in Sagitario; unicode.sag
+                          holds the tables of `char` that tools/unicode.rs generates
 runtime/            minimal C runtime (ARC, panic, String, allocation, I/O and the OS calls of std)
 bootstrap/          the seed (the C of the compiler, with its runtime) and the scripts that build
                     the compiler from it with a C compiler alone (see testing.md)

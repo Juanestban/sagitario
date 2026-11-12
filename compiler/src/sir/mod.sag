@@ -2548,7 +2548,8 @@ pub class Lowering {
         BuiltinMethod::Prelude(function) => collections::prelude_method(self, value, function, ty, receiver, args),
         BuiltinMethod::TotalCompare => collections::total_compare(self, ty, receiver, args),
         BuiltinMethod::RangeRev => collections::range_iter(self, receiver, true, ty),
-        BuiltinMethod::Runtime { .. } | BuiltinMethod::Find | BuiltinMethod::ToDigit | BuiltinMethod::Parse(_) | BuiltinMethod::Checked(_) => {
+        BuiltinMethod::Runtime { .. } | BuiltinMethod::Find | BuiltinMethod::ToDigit | BuiltinMethod::Parse(_) | BuiltinMethod::Checked(_)
+          | BuiltinMethod::BuilderPop => {
           strings::text_method(self, builtin, ty, receiver, args)
         }
         _ => matching::builtin_method(self, builtin, ty, receiver, args),
@@ -3183,6 +3184,26 @@ pub class Lowering {
           self.emit(Stmt::If { cond: failed, then_body: List::from([Stmt::Panic(PanicMessage::Value(message))]), else_body: new List() });
 
           return Ok(unit_operand());
+        }
+
+        // Functions of the root of `std` (docs/adr/0093-everyday-methods.md, Q620 and Q621).
+        if name == "char::from_digit" || name.starts_with("String::from_") {
+          const function = match self.typed.builtin_methods.get(value.id) {
+            Some(BuiltinMethod::Prelude(found)) => found,
+            _ => return Err("`" + name + "` without its function"),
+          };
+          const subst = mono::call_subst(self, value.id, function, None);
+          const params = match self.typed.sig(function) {
+            Some(sig) => types::substitute_sig(sig, subst).params,
+            None => new List(),
+          };
+          const operands: List<Operand> = new List();
+
+          for index in 0..args.len() {
+            operands.push(self.operand_as(args[index], params.get(index).unwrap_or(types::error()))?);
+          }
+
+          return Ok(self.call(Callee::Fn(mono::instance(self, function, subst)), operands, ty));
         }
 
         if name == "char::from_u32" {

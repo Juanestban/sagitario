@@ -1430,8 +1430,10 @@ pub enum Start {
   Prelude(EnumKind),
   /// The prelude's `List`, with the static function `from`.
   List,
-  /// The primitive `char`, with the static function `from_u32`.
+  /// The primitive `char`, with the static functions `from_u32` and `from_digit`.
   Char,
+  /// `String`, with the static functions `from_utf8`, `from_utf8_lossy` and `from_utf16`.
+  Text,
   /// An integer type, by name, with the constants `MIN` and `MAX`
   /// (docs/adr/0088-bitwise-operators-and-integer-methods.md, Q580).
   Int(String),
@@ -2160,7 +2162,12 @@ pub class Resolver {
           return None;
         }
         Start::Char => {
-          self.error(last.span, "`char` has one static function, `char::from_u32`");
+          self.error(last.span, "`char` has the static functions `char::from_u32` and `char::from_digit`");
+
+          return None;
+        }
+        Start::Text => {
+          self.error(last.span, "`String` is a type, not a value");
 
           return None;
         }
@@ -2204,11 +2211,20 @@ pub class Resolver {
           return None;
         }
         Start::Char => {
-          if member.name == "from_u32" {
-            return Some(Res::Builtin("char::from_u32"));
+          if member.name == "from_u32" || member.name == "from_digit" {
+            return Some(Res::Builtin("char::" + member.name));
           }
 
-          self.error(last.span, "`char` has one static function, `char::from_u32`");
+          self.error(last.span, "`char` has the static functions `char::from_u32` and `char::from_digit`");
+
+          return None;
+        }
+        Start::Text => {
+          if member.name == "from_utf8" || member.name == "from_utf8_lossy" || member.name == "from_utf16" {
+            return Some(Res::Builtin("String::" + member.name));
+          }
+
+          self.error(member.span, "`String` has the static functions `String::from_utf8`, `String::from_utf8_lossy` and `String::from_utf16`");
 
           return None;
         }
@@ -2424,6 +2440,8 @@ pub class Resolver {
             start = Start::List;
           } else if name == "char" {
             start = Start::Char;
+          } else if name == "String" {
+            start = Start::Text;
           } else if INT_TYPE_NAMES.split(" ").contains(name) {
             start = Start::Int(name);
           } else if name == "std" {
@@ -2500,7 +2518,7 @@ pub class Resolver {
       }
 
       // `std::sys` is the standard library's own (docs/adr/0085-conditional-compilation-and-std-time.md, Q551).
-      var visible = name != "sys";
+      var visible = name != "sys" && name != "unicode";
 
       if let Some(current) = self.resolution.module(self.module) {
         visible = visible || current.in_std;

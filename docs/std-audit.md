@@ -59,9 +59,9 @@ The audit of the library found gaps of the language itself, which the library ne
 
 | Rust | Sagitario | State | Notes |
 |---|---|---|---|
-| `String`, `&str` | `String` (immutable, ARC; `trim` and `substring` share the buffer) | 🟡 | Has `len`, `is_empty`, `contains`, `starts_with`, `ends_with`, `find`, the `trim`s, ASCII case, `replace`, `repeat`, `substring`, `split`, `lines`, `chars`, `bytes`, `parse_*`. Missing: `rfind`, `split_whitespace`, `splitn`, `rsplit`, `split_once`, `strip_prefix`, `strip_suffix`, `char_indices`, `to_uppercase`/`to_lowercase` of Unicode, `matches`, `replacen`, `pad`, `char_count`, `from_utf8` (public; `std` has it privately), `from_utf8_lossy`, `from_utf16` |
-| `String` (growable) | `StringBuilder` | 🟡 | Missing: `insert`, `truncate`, `pop`, `capacity` |
-| `char` | `char` | 🟡 | Has ASCII classification, `to_digit`, `char::from_u32`. Missing: Unicode `is_alphabetic`, `is_numeric`, `is_whitespace`, `is_uppercase`, `to_uppercase`, `len_utf8`, `char::from_digit` |
+| `String`, `&str` | `String` (immutable, ARC; `trim` and `substring` share the buffer) | ✅ | Rust's methods, with Unicode's case mappings ([ADR-0093](adr/0093-everyday-methods.md), increment 2); `split`, `split_whitespace` and `matches` give lists. `char_count` is `chars().count()` and padding is a format specifier (➖) |
+| `String` (growable) | `StringBuilder` | ✅ | `insert`, `truncate`, `pop`, `capacity`, `reserve` (ADR-0093, increment 2) |
+| `char` | `char` | ✅ | Unicode 17's properties and case mappings, `len_utf8`, `len_utf16`, `char::from_digit` (ADR-0093, increment 2) |
 | `format!`, `fmt` | format strings `f"{expr}"` | 🟡 | `Display`, the specifiers (width, alignment, precision, radix) and the debug form `{:?}`, `{:#?}` are done (ADR-0089). Missing: widths and precisions given at run time (`{:>width$}`), and the debug form of an interface value (`dyn Name` for now) |
 
 ### Numbers (`num`, `f32`, `f64`, integer modules)

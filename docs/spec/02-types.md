@@ -202,6 +202,20 @@ arguments have the type of the receiver, unless written otherwise.
   | `to_ascii_uppercase()`, `to_ascii_lowercase()` | `String`; only ASCII letters change |
   | `replace(from, to)`, `repeat(n)`, `substring(start, end)` | `String` |
   | `parse_i32()` (every integer type), `parse_f32()`, `parse_f64()` | `Result<T, String>` with Rust's messages (`invalid digit found in string`) |
+  | `rfind(p)` | `Option<usize>`: byte index of the last occurrence |
+  | `split_once(p)`, `rsplit_once(p)` | `Option<(String, String)>`: the text before and after the first or last occurrence |
+  | `strip_prefix(p)`, `strip_suffix(p)` | `Option<String>`: the text without `p`, if it starts or ends with it |
+  | `split_whitespace()` | `List<String>`: the parts between runs of Unicode white space, none empty |
+  | `splitn(n, sep)`, `rsplit(sep)` | `List<String>`: at most `n` parts, the last holding the rest; the parts of `split` from the last |
+  | `matches(p)` | `List<String>`: the occurrences of `p`, without overlapping |
+  | `replacen(from, to, n)` | `String` with the first `n` occurrences replaced |
+  | `char_indices()` | `Iter<(usize, char)>`: each character with the byte index where it starts |
+  | `to_uppercase()`, `to_lowercase()` | `String` with Unicode's full case mappings, without a locale, as Rust's: `"Straße"` is `"STRASSE"`, and a final `Σ` becomes `ς` |
+
+  `String::from_utf8(bytes: List<u8>)` and `String::from_utf16(units: List<u16>)` give a
+  `Result<String, String>` with Rust's messages (`invalid utf-8 sequence of 1 bytes from index 0`),
+  and `String::from_utf8_lossy(bytes)` replaces each ill-formed sequence with U+FFFD
+  ([ADR-0093](../adr/0093-everyday-methods.md), Q620).
 
 - `for c in s.chars()` iterates the characters (`char`) and `for b in s.bytes()` the bytes
   (`u8`) of the string as it was before the loop. Elsewhere they are iterators (F2):
@@ -213,6 +227,12 @@ arguments have the type of the receiver, unless written otherwise.
   `is_ascii_alphanumeric()`, `is_ascii_whitespace()`, `is_ascii_uppercase()`,
   `is_ascii_lowercase()`, `to_ascii_uppercase()`, `to_ascii_lowercase()`, and
   `to_digit(radix) -> Option<u32>` (panics unless `radix` is 2 to 36).
+- `char` methods (Unicode 17, as Rust's `char`; [ADR-0093](../adr/0093-everyday-methods.md),
+  Q621): `is_alphabetic()`, `is_numeric()` (the categories `Nd`, `Nl` and `No`),
+  `is_alphanumeric()`, `is_whitespace()`, `is_uppercase()`, `is_lowercase()`, `is_control()`
+  (`Cc`), `to_uppercase()` and `to_lowercase()` (a `String` of one to three characters: `'ß'` is
+  `"SS"`), `len_utf8()` and `len_utf16()`. `char::from_digit(digit, radix)` gives the character
+  of a digit, lowercase past 9, or `None`; a radix past 36 panics.
 
 ## `StringBuilder` (F1)
 
@@ -227,7 +247,9 @@ const text = builder.to_string();
   builder, and it can be modified through a `const` binding. `new StringBuilder()` is the only
   `new` expression in F1.
 - Methods: `append(s: String)`, `append_char(c: char)`, `len()` (bytes), `is_empty()`,
-  `clear()`, `to_string()` (a new `String`; the builder stays usable).
+  `clear()`, `to_string()` (a new `String`; the builder stays usable), and Rust's
+  `insert(index, text)`, `truncate(len)`, `pop() -> Option<char>`, `capacity()` and
+  `reserve(additional)`. An index inside a character, or past the end for `insert`, panics.
 - It cannot be compared with `==` or interpolated.
 
 ## Equality (F1/F2)

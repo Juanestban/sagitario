@@ -919,6 +919,82 @@ sag_string sag_builder_to_string(sag_builder builder) {
   return sag_string_copy(builder->sb.data, builder->sb.len);
 }
 
+static bool sag_builder_boundary(sag_builder builder, size_t index) {
+  return index == 0 || index == builder->sb.len || (index < builder->sb.len && (builder->sb.data[index] & 0xC0) != 0x80);
+}
+
+static void sag_builder_check_index(sag_builder builder, size_t index, const char *file, int line) {
+  char message[128];
+  if (index > builder->sb.len) {
+    snprintf(message, sizeof message, "byte index %zu is out of bounds of a text of length %zu", index, builder->sb.len);
+    sag_panic_at(message, file, line);
+  }
+  if (!sag_builder_boundary(builder, index)) {
+    snprintf(message, sizeof message, "byte index %zu is not a char boundary", index);
+    sag_panic_at(message, file, line);
+  }
+}
+
+void sag_builder_insert_at(sag_builder builder, size_t index, sag_string text, const char *file, int line) {
+  sag_builder_check_index(builder, index, file, line);
+  if (text.len == 0) {
+    return;
+  }
+  size_t old_len = builder->sb.len;
+  /* Grows the buffer by the text's length, then moves the tail and copies the text in. */
+  sag_sb_push_bytes(&builder->sb, (const char *)text.ptr, text.len);
+  memmove(builder->sb.data + index + text.len, builder->sb.data + index, old_len - index);
+  memcpy(builder->sb.data + index, text.ptr, text.len);
+}
+
+void sag_builder_truncate_at(sag_builder builder, size_t len, const char *file, int line) {
+  if (len >= builder->sb.len) {
+    return;
+  }
+  sag_builder_check_index(builder, len, file, line);
+  builder->sb.len = len;
+}
+
+uint32_t sag_builder_pop(sag_builder builder) {
+  if (builder->sb.len == 0) {
+    return 0x110000u;
+  }
+  size_t start = builder->sb.len - 1;
+  while (start > 0 && (builder->sb.data[start] & 0xC0) == 0x80) {
+    start--;
+  }
+  uint32_t code = builder->sb.data[start];
+  size_t count = builder->sb.len - start;
+  if (count > 1) {
+    code &= count == 2 ? 0x1Fu : count == 3 ? 0x0Fu : 0x07u;
+    for (size_t k = start + 1; k < builder->sb.len; k++) {
+      code = (code << 6) | (builder->sb.data[k] & 0x3Fu);
+    }
+  }
+  builder->sb.len = start;
+  return code;
+}
+
+size_t sag_builder_capacity(sag_builder builder) {
+  return builder->sb.cap;
+}
+
+void sag_builder_reserve(sag_builder builder, size_t additional) {
+  if (additional > SIZE_MAX - builder->sb.len) {
+    sag_panic("capacity overflow");
+  }
+  size_t wanted = builder->sb.len + additional;
+  if (wanted <= builder->sb.cap) {
+    return;
+  }
+  uint8_t *data = realloc(builder->sb.data, wanted);
+  if (data == NULL) {
+    sag_panic("out of memory");
+  }
+  builder->sb.data = data;
+  builder->sb.cap = wanted;
+}
+
 /* ---- Class instances --------------------------------------------------------------------- */
 
 /* Objects whose count reached zero and wait to be destroyed, and whether destruction is under

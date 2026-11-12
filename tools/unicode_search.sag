@@ -1,0 +1,122 @@
+// ---- Searching the tables (written by hand in `tools/unicode_search.sag`) ---------------------
+
+/// The number at `index` of a table: six hexadecimal digits.
+fn number(table: String, index: usize) -> u32 {
+  const digits = table.as_ptr();
+  var value = 0u32;
+
+  for offset in 0..6usize {
+    const digit = (unsafe { *digits.add(index * 6 + offset) }) as u32;
+
+    value = value * 16 + (if digit <= 57 { digit - 48 } else { digit - 87 });
+  }
+
+  value
+}
+
+/// Whether `code` is in one of the `start, end` ranges of `table`.
+fn in_ranges(table: String, code: u32) -> bool {
+  var low = 0usize;
+  var high = table.len() / 12;
+
+  while low < high {
+    const middle = (low + high) / 2;
+
+    if code < number(table, middle * 2) {
+      high = middle;
+    } else if code > number(table, middle * 2 + 1) {
+      low = middle + 1;
+    } else {
+      return true;
+    }
+  }
+
+  false
+}
+
+/// Appends to `out` what a case mapping gives for `c`: the characters of its expansion, the
+/// character its run gives, or `c` itself.
+fn push_mapped(runs: String, expansions: String, c: char, out: StringBuilder) {
+  const code = c as u32;
+  var low = 0usize;
+  var high = expansions.len() / 30;
+
+  while low < high {
+    const middle = (low + high) / 2;
+    const from = number(expansions, middle * 5);
+
+    if code < from {
+      high = middle;
+    } else if code > from {
+      low = middle + 1;
+    } else {
+      const count = number(expansions, middle * 5 + 1) as usize;
+
+      for index in 0..count {
+        out.append_char(char::from_u32(number(expansions, middle * 5 + 2 + index)).unwrap_or(c));
+      }
+
+      return;
+    }
+  }
+
+  // The last run starting at `code` or before it.
+  low = 0;
+  high = runs.len() / 24;
+
+  while low < high {
+    const middle = (low + high) / 2;
+
+    if number(runs, middle * 4) <= code {
+      low = middle + 1;
+    } else {
+      high = middle;
+    }
+  }
+
+  if low > 0 {
+    const run = low - 1;
+    const start = number(runs, run * 4);
+    const step = number(runs, run * 4 + 2);
+
+    if code <= number(runs, run * 4 + 1) && (code - start) % step == 0 {
+      const mapped = code as u64 + number(runs, run * 4 + 3) as u64 - 0x800000;
+
+      out.append_char(char::from_u32(mapped as u32).unwrap_or(c));
+
+      return;
+    }
+  }
+
+  out.append_char(c);
+}
+
+pub fn is_alphabetic(c: char) -> bool {
+  in_ranges(ALPHABETIC, c as u32)
+}
+
+pub fn is_numeric(c: char) -> bool {
+  in_ranges(NUMERIC, c as u32)
+}
+
+pub fn is_uppercase(c: char) -> bool {
+  in_ranges(UPPERCASE, c as u32)
+}
+
+pub fn is_lowercase(c: char) -> bool {
+  in_ranges(LOWERCASE, c as u32)
+}
+
+pub fn is_whitespace(c: char) -> bool {
+  in_ranges(WHITE_SPACE, c as u32)
+}
+
+/// Appends the uppercase of `c`: one to three characters.
+pub fn push_uppercase(c: char, out: StringBuilder) {
+  push_mapped(TO_UPPER_RUNS, TO_UPPER_EXPANSIONS, c, out);
+}
+
+/// Appends the lowercase of `c`: one to three characters.
+pub fn push_lowercase(c: char, out: StringBuilder) {
+  push_mapped(TO_LOWER_RUNS, TO_LOWER_EXPANSIONS, c, out);
+}

@@ -50,6 +50,13 @@ pub fn text_method(lw: Lowering, method: BuiltinMethod, ty: Type, receiver: Expr
 
       Ok(sentinel_option(lw, ty, index, IntTy::Usize, 18446744073709551615))
     }
+    // The runtime gives 0x110000, past every character, when the text is empty.
+    BuiltinMethod::BuilderPop => {
+      const code = lw.new_value(types::int(IntTy::U32), Rvalue::Call { callee: runtime("sag_builder_pop"), args: operands });
+      const character = lw.new_value(types::of(TypeKind::Char), Rvalue::Cast { from: types::int(IntTy::U32), to: types::of(TypeKind::Char), operand: code });
+
+      Ok(sentinel_option(lw, ty, character, IntTy::U32, 0x110000))
+    }
     BuiltinMethod::ToDigit => {
       const callee = Callee::Runtime { function: "sag_char_to_digit_at", located: true };
       const digit = lw.new_value(types::int(IntTy::U32), Rvalue::Call { callee: callee, args: operands });

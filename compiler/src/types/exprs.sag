@@ -1631,6 +1631,11 @@ fn call(cx: Checker, value: Expr, callee: Expr, args: List<Expr>, expected: Opti
         sig = Some(FnSig { receiver: None, params: List::from([types::string()]), ret: ret });
       } else if name == "List::from" {
         return collections::list_from(cx, value, callee, args, expected);
+      } else if name == "char::from_digit" || name.starts_with("String::from_") {
+        // Written in the root of `std` (docs/adr/0093-everyday-methods.md, Q620 and Q621).
+        const function = if name == "char::from_digit" { "char_from_digit" } else { "text_" + name.substring(8, name.len()) };
+
+        return collections::inferred_call_of(cx, value, collections::std_root_fn(cx, function), name, args);
       } else if name == "assert_eq" || name == "assert_ne" {
         // The message comes from a generic function of the prelude, which also checks `Eq`.
         collections::inferred_prelude_call(cx, value, name + "_failure", args);

@@ -180,6 +180,13 @@ size_t sag_builder_len(sag_builder builder);
 bool sag_builder_is_empty(sag_builder builder);
 void sag_builder_clear(sag_builder builder);
 sag_string sag_builder_to_string(sag_builder builder);
+/* `insert`, `truncate`, `pop`, `capacity` and `reserve` (docs/adr/0093-everyday-methods.md, Q620):
+ * an index inside a character panics, as Rust's; `pop` gives 0x110000 when the text is empty. */
+void sag_builder_insert_at(sag_builder builder, size_t index, sag_string text, const char *file, int line);
+void sag_builder_truncate_at(sag_builder builder, size_t len, const char *file, int line);
+uint32_t sag_builder_pop(sag_builder builder);
+size_t sag_builder_capacity(sag_builder builder);
+void sag_builder_reserve(sag_builder builder, size_t additional);
 
 /* ---- Class instances (ARC, docs/spec/03-memory.md) ---------------------------------------- */
 

@@ -1,0 +1,42 @@
+// The methods of `String`, `char` and `StringBuilder` of ADR-0093, increment 2, with the Unicode
+// properties and case mappings of Rust's `char` (docs/adr/0093-everyday-methods.md, Q620, Q621).
+// expect-stdout: Some(9) None Some(1) Some(("key", "value=more")) Some(("key=value", "more"))
+// expect-stdout: ["a", "b", "c"] ["a", "b,c,d"] ["c", "b", "a"]
+// expect-stdout: Some("x") None ["X", "X"] bbaa
+// expect-stdout: [(0, 'a'), (1, 'ñ'), (3, 'b')]
+// expect-stdout: STRASSE Ǆ FI σας οδος 3 hello
+// expect-stdout: SS σ true true true true true
+// expect-stdout: true true true 2 2 true
+// expect-stdout: Some('7') Some('b') None
+// expect-stdout: Ok("hi") Err("invalid utf-8 sequence of 1 bytes from index 0") h�i
+// expect-stdout: Ok("H😀") Err("invalid utf-16: lone surrogate found")
+// expect-stdout: ¡hello! Some('!') Some('o')
+// expect-stdout: ¡h true
+// expect-stdout: None
+
+fn main() {
+  const text = "key=value=more";
+
+  println(f"{text.rfind("="):?} {text.rfind("x"):?} {"aaa".rfind("aa"):?} {text.split_once("="):?} {text.rsplit_once("="):?}");
+  println(f"{"  a\tb \u{3000}c\n ".split_whitespace():?} {"a,b,c,d".splitn(2, ","):?} {"a,b,c".rsplit(","):?}");
+  println(f"{"prefix-x".strip_prefix("prefix-"):?} {"x.sag".strip_suffix(".rs"):?} {"aXbXc".matches("X"):?} {"aaaa".replacen("a", "b", 2)}");
+  println(f"{"añb".char_indices().collect():?}");
+  println(f"{"Straße ǅ ﬁ".to_uppercase()} {"ΣΑΣ ΟΔΟΣ".to_lowercase()} {"İ".to_lowercase().len()} {"HeLLo".to_lowercase()}");
+  println(f"{'ß'.to_uppercase()} {'Σ'.to_lowercase()} {'a'.is_alphabetic()} {'中'.is_alphabetic()} {'٣'.is_numeric()} {'Ⅻ'.is_numeric()} {'\u{a0}'.is_whitespace()}");
+  println(f"{'Å'.is_uppercase()} {'ß'.is_lowercase()} {'\u{7f}'.is_control()} {'é'.len_utf8()} {'😀'.len_utf16()} {'x'.is_alphanumeric()}");
+  println(f"{char::from_digit(7, 10):?} {char::from_digit(11, 16):?} {char::from_digit(5, 4):?}");
+  println(f"{String::from_utf8(List::from([104u8, 105])):?} {String::from_utf8(List::from([0xffu8])):?} {String::from_utf8_lossy(List::from([104u8, 0xff, 105]))}");
+  println(f"{String::from_utf16(List::from([0x48u16, 0xD83D, 0xDE00])):?} {String::from_utf16(List::from([0xD800u16])):?}");
+
+  const builder = new StringBuilder();
+
+  builder.append("hello");
+  builder.insert(0, "¡");
+  builder.insert(builder.len(), "!");
+  println(f"{builder.to_string()} {builder.pop():?} {builder.pop():?}");
+  builder.truncate(3);
+  builder.reserve(100);
+  println(f"{builder.to_string()} {builder.capacity() >= 103}");
+  builder.clear();
+  println(f"{builder.pop():?}");
+}

@@ -7,7 +7,7 @@ use pkg::ast::{Expr, ExprKind, Ident, Path};
 use pkg::diagnostics;
 use pkg::diagnostics::Diagnostic;
 use pkg::diagnostics::codes;
-use pkg::resolve::{ParamOwner, TypeItem};
+use pkg::resolve::{ItemRef, ParamOwner, TypeItem};
 use pkg::types::{Checker, IntTy, Subst, Type, TypeKind};
 use pkg::types;
 use pkg::types::exprs;
@@ -326,7 +326,24 @@ pub fn prelude_method(cx: Checker, value: Expr, name: String, type_args: List<Ty
 /// the receiver: its type parameters come from the receiver's type, then from the arguments, as
 /// a generic call infers them (docs/adr/0093-everyday-methods.md, Q617).
 pub fn inferred_prelude_method(cx: Checker, value: Expr, name: String, receiver_ty: Type, args: List<Expr>) -> Type {
-  const function = match cx.resolution.prelude_fn(name) {
+  inferred_method_of(cx, value, cx.resolution.prelude_fn(name), name, receiver_ty, args)
+}
+
+/// A function of the root of `std`, which every program loads: those the compiler calls for the
+/// methods of `String`, `char` and `StringBuilder` (docs/adr/0093-everyday-methods.md, Q620).
+pub fn std_root_fn(cx: Checker, name: String) -> Option<u32> {
+  const root = cx.resolution.std_root?;
+  const info = cx.resolution.module(root)?;
+
+  match info.items.get(name)?.item {
+    ItemRef::Fn(id) => Some(id),
+    _ => None,
+  }
+}
+
+/// `inferred_prelude_method` for the function `found`, named `name` in messages.
+pub fn inferred_method_of(cx: Checker, value: Expr, found: Option<u32>, name: String, receiver_ty: Type, args: List<Expr>) -> Type {
+  const function = match found {
     Some(found) => found,
     None => {
       exprs::unchecked_args(cx, args);
@@ -369,7 +386,12 @@ pub fn inferred_prelude_method(cx: Checker, value: Expr, name: String, receiver_
 /// A call of the generic prelude function `name` for a builtin, its type parameters inferred
 /// from the arguments: its result.
 pub fn inferred_prelude_call(cx: Checker, value: Expr, name: String, args: List<Expr>) -> Type {
-  const function = match cx.resolution.prelude_fn(name) {
+  inferred_call_of(cx, value, cx.resolution.prelude_fn(name), name, args)
+}
+
+/// `inferred_prelude_call` for the function `found`, named `name` in messages.
+pub fn inferred_call_of(cx: Checker, value: Expr, found: Option<u32>, name: String, args: List<Expr>) -> Type {
+  const function = match found {
     Some(found) => found,
     None => {
       exprs::unchecked_args(cx, args);
@@ -390,7 +412,7 @@ pub fn inferred_prelude_call(cx: Checker, value: Expr, name: String, args: List<
   unknowns.add(ParamOwner::Fn(function), cx.generic_count(ParamOwner::Fn(function)), None);
   generic::generic_args(cx, value.span, "function", sig.params, args, Subst::empty(), unknowns);
 
-  const shown = name.substring(0, name.len() - "_failure".len());
+  const shown = if name.ends_with("_failure") { name.substring(0, name.len() - "_failure".len()) } else { name };
   const subst = generic::finish_inference(cx, value.span, "`" + shown + "`", unknowns);
 
   cx.typed.call_args.insert(value.id, subst.args_of(ParamOwner::Fn(function)).unwrap_or(new List()));

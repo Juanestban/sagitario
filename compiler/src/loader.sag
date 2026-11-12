@@ -39,6 +39,7 @@ const STD_TASK: String = include_str("../std/task.sag");
 const STD_THREAD: String = include_str("../std/thread.sag");
 const STD_TIME: String = include_str("../std/time.sag");
 const STD_SYS: String = include_str("../std/sys.sag");
+const STD_UNICODE: String = include_str("../std/unicode.sag");
 
 /// The modules of `std` whose functions the runtime's core calls, which every program compiles
 /// (docs/adr/0085-conditional-compilation-and-std-time.md, Q552).
@@ -75,6 +76,8 @@ fn std_source(name: String) -> Option<String> {
     Some(STD_TIME)
   } else if name == "sys" {
     Some(STD_SYS)
+  } else if name == "unicode" {
+    Some(STD_UNICODE)
   } else {
     None
   }
@@ -416,8 +419,8 @@ pub class Loader {
       }
 
       for name in modules::std_references(module) {
-        // `std::sys` is the standard library's own (Q551).
-        if attempted_std.contains_key(name) || (name == "sys" && !self.std.contains(index)) {
+        // `std::sys` and `std::unicode` are the standard library's own (Q551).
+        if attempted_std.contains_key(name) || ((name == "sys" || name == "unicode") && !self.std.contains(index)) {
           continue;
         }
 

@@ -15,6 +15,11 @@ The sources say 0.32.0.
 
 ### Added
 
+- Rust's methods of `String` (`rfind`, `split_once`, `strip_prefix`, `split_whitespace`,
+  `char_indices`, `to_uppercase` with Unicode's full mappings...), `String::from_utf8` and
+  `from_utf16`, the Unicode properties of `char` (`is_alphabetic`, `is_numeric`, `is_uppercase`...)
+  and `char::from_digit`, and `StringBuilder::insert`, `truncate` and `pop`
+  ([ADR-0093](docs/adr/0093-everyday-methods.md), increment 2).
 - `assert`, `assert_eq`, `assert_ne`, `unreachable` and `todo`, which panic at the line of their
   call, and Rust's other methods of `Option` and `Result` (`ok_or`, `or`, `and`, `xor`, `map_or`,
   `zip`, `flatten`, `ok`, `err`, `expect_err`...); `Option` and `Result` are compared, ordered and

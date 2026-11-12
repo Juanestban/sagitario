@@ -4,6 +4,7 @@
 use std::io;
 use std::io::ErrorKind;
 use std::sys;
+use std::unicode;
 
 extern "C" {
   fn sag_float_format(value: f64, precision: i32, scientific: bool, upper: bool, is_f32: bool) -> String;
@@ -153,6 +154,359 @@ fn utf8_lossy(bytes: &[u8]) -> String {
   }
 
   text.to_string()
+}
+
+// ---- The methods of `String`, `char` and `StringBuilder` written in Sagitario ------------------
+//
+// The compiler calls `text_<name>`, `char_<name>` and `builder_<name>` for a method of a value of
+// those types (docs/adr/0093-everyday-methods.md, Q620 and Q621); the Unicode data is that of
+// `std::unicode`.
+
+/// `text.rfind(pattern)`: the byte index of the last match.
+fn text_rfind(text: String, pattern: String) -> Option<usize> {
+  if pattern.is_empty() {
+    return Some(text.len());
+  }
+
+  // A match starts at a character: the next search starts after that character.
+  const step = char_len_utf8(pattern.chars().next().unwrap_or(' '));
+  var found: Option<usize> = None;
+  var from = 0usize;
+
+  while from <= text.len() {
+    match text.substring(from, text.len()).find(pattern) {
+      Some(at) => {
+        found = Some(from + at);
+        from = from + at + step;
+      }
+      None => break,
+    }
+  }
+
+  found
+}
+
+/// The pieces of `text` between runs of Unicode white space, without empty ones.
+fn text_split_whitespace(text: String) -> List<String> {
+  const pieces = new List<String>();
+  var start: Option<usize> = None;
+  var index = 0usize;
+
+  for c in text.chars() {
+    if unicode::is_whitespace(c) {
+      if let Some(from) = start {
+        pieces.push(text.substring(from, index));
+        start = None;
+      }
+    } else if start.is_none() {
+      start = Some(index);
+    }
+
+    index += char_len_utf8(c);
+  }
+
+  if let Some(from) = start {
+    pieces.push(text.substring(from, text.len()));
+  }
+
+  pieces
+}
+
+/// `text.splitn(count, separator)`: at most `count` pieces, the last holding the rest.
+fn text_splitn(text: String, count: usize, separator: String) -> List<String> {
+  const pieces = new List<String>();
+
+  if count == 0 {
+    return pieces;
+  }
+
+  var rest = text;
+
+  while pieces.len() + 1 < count {
+    match rest.find(separator) {
+      Some(at) => {
+        if separator.is_empty() && at == 0 && !pieces.is_empty() {
+          break;
+        }
+
+        pieces.push(rest.substring(0, at));
+        rest = rest.substring(at + separator.len(), rest.len());
+      }
+      None => break,
+    }
+  }
+
+  pieces.push(rest);
+  pieces
+}
+
+/// `text.rsplit(separator)`: the pieces of `split`, from the last one.
+fn text_rsplit(text: String, separator: String) -> List<String> {
+  const pieces = text.split(separator);
+
+  pieces.reverse();
+  pieces
+}
+
+fn text_split_once(text: String, separator: String) -> Option<(String, String)> {
+  const at = text.find(separator)?;
+
+  Some((text.substring(0, at), text.substring(at + separator.len(), text.len())))
+}
+
+fn text_rsplit_once(text: String, separator: String) -> Option<(String, String)> {
+  const at = text_rfind(text, separator)?;
+
+  Some((text.substring(0, at), text.substring(at + separator.len(), text.len())))
+}
+
+fn text_strip_prefix(text: String, prefix: String) -> Option<String> {
+  if text.starts_with(prefix) { Some(text.substring(prefix.len(), text.len())) } else { None }
+}
+
+fn text_strip_suffix(text: String, suffix: String) -> Option<String> {
+  if text.ends_with(suffix) { Some(text.substring(0, text.len() - suffix.len())) } else { None }
+}
+
+/// A position that a closure advances.
+class Offset {
+  pub var value: usize;
+
+  pub fn new(self) {
+    self.value = 0;
+  }
+}
+
+/// Each character of `text` with the byte index where it starts.
+fn text_char_indices(text: String) -> Iter<(usize, char)> {
+  const chars = text.chars();
+  const offset = new Offset();
+
+  new Iter<(usize, char)>(() => {
+    const c = chars.next()?;
+    const at = offset.value;
+
+    offset.value = at + char_len_utf8(c);
+    Some((at, c))
+  })
+}
+
+/// The matches of `pattern` in `text`, from the first, without overlapping.
+fn text_matches(text: String, pattern: String) -> List<String> {
+  const found = new List<String>();
+
+  if pattern.is_empty() {
+    for _ in 0..text.chars().count() + 1 {
+      found.push("");
+    }
+
+    return found;
+  }
+
+  var rest = text;
+
+  while let Some(at) = rest.find(pattern) {
+    found.push(pattern);
+    rest = rest.substring(at + pattern.len(), rest.len());
+  }
+
+  found
+}
+
+/// `text.replacen(from, to, count)`: the first `count` matches replaced.
+fn text_replacen(text: String, from: String, to: String, count: usize) -> String {
+  const out = new StringBuilder();
+  var rest = text;
+  var replaced = 0usize;
+
+  while replaced < count {
+    match rest.find(from) {
+      Some(at) => {
+        out.append(rest.substring(0, at));
+        out.append(to);
+
+        if from.is_empty() {
+          // An empty pattern matches before each character.
+          match rest.chars().next() {
+            Some(c) => {
+              out.append_char(c);
+              rest = rest.substring(char_len_utf8(c), rest.len());
+            }
+            None => {
+              rest = "";
+              replaced = count;
+            }
+          }
+        } else {
+          rest = rest.substring(at + from.len(), rest.len());
+        }
+
+        replaced += 1;
+      }
+      None => break,
+    }
+  }
+
+  out.append(rest);
+  out.to_string()
+}
+
+fn text_to_uppercase(text: String) -> String {
+  const out = new StringBuilder();
+
+  for c in text.chars() {
+    if (c as u32) < 0x80 {
+      out.append_char(c.to_ascii_uppercase());
+    } else {
+      unicode::push_uppercase(c, out);
+    }
+  }
+
+  out.to_string()
+}
+
+/// Whether `c` has a case: its uppercase or its lowercase differs from it, or it is one.
+fn is_cased(c: char) -> bool {
+  unicode::is_uppercase(c) || unicode::is_lowercase(c)
+}
+
+/// As Rust's, a capital sigma at the end of a word becomes the final `ς`: one with a cased
+/// character before it and none after it.
+fn text_to_lowercase(text: String) -> String {
+  const out = new StringBuilder();
+  const chars = text.chars().collect();
+
+  for index in 0..chars.len() {
+    const c = chars[index];
+
+    if (c as u32) < 0x80 {
+      out.append_char(c.to_ascii_lowercase());
+    } else if (c as u32) == 0x3A3 {
+      const after_cased = index > 0 && is_cased(chars[index - 1]);
+      const before_cased = index + 1 < chars.len() && is_cased(chars[index + 1]);
+
+      out.append_char(char::from_u32(if after_cased && !before_cased { 0x3C2 } else { 0x3C3 }).unwrap_or(c));
+    } else {
+      unicode::push_lowercase(c, out);
+    }
+  }
+
+  out.to_string()
+}
+
+/// `String::from_utf8(bytes)`: the text, or where the first ill-formed sequence starts.
+fn text_from_utf8(bytes: List<u8>) -> Result<String, String> {
+  var index = 0usize;
+
+  while index < bytes.len() {
+    const count = sequence(&bytes[0..bytes.len()], index);
+
+    if count < 0 {
+      return Err(`invalid utf-8 sequence of ${-count} bytes from index ${index}`);
+    }
+
+    index += count as usize;
+  }
+
+  Ok(utf8(&bytes[0..bytes.len()]).unwrap_or(""))
+}
+
+fn text_from_utf8_lossy(bytes: List<u8>) -> String {
+  utf8_lossy(&bytes[0..bytes.len()])
+}
+
+/// `String::from_utf16(units)`: the text, or an error for a surrogate without its pair.
+fn text_from_utf16(units: List<u16>) -> Result<String, String> {
+  const out = new StringBuilder();
+  var index = 0usize;
+
+  while index < units.len() {
+    const unit = units[index] as u32;
+
+    if unit >= 0xD800 && unit <= 0xDBFF && index + 1 < units.len() && units[index + 1] as u32 >= 0xDC00 && units[index + 1] as u32 <= 0xDFFF {
+      const low = units[index + 1] as u32;
+
+      out.append_char(char::from_u32(0x10000 + ((unit - 0xD800) << 10) + (low - 0xDC00)).unwrap_or('?'));
+      index += 2;
+    } else if unit >= 0xD800 && unit <= 0xDFFF {
+      return Err("invalid utf-16: lone surrogate found");
+    } else {
+      out.append_char(char::from_u32(unit).unwrap_or('?'));
+      index += 1;
+    }
+  }
+
+  Ok(out.to_string())
+}
+
+fn char_is_alphabetic(c: char) -> bool {
+  unicode::is_alphabetic(c)
+}
+
+fn char_is_numeric(c: char) -> bool {
+  unicode::is_numeric(c)
+}
+
+fn char_is_alphanumeric(c: char) -> bool {
+  unicode::is_alphabetic(c) || unicode::is_numeric(c)
+}
+
+fn char_is_whitespace(c: char) -> bool {
+  unicode::is_whitespace(c)
+}
+
+fn char_is_uppercase(c: char) -> bool {
+  unicode::is_uppercase(c)
+}
+
+fn char_is_lowercase(c: char) -> bool {
+  unicode::is_lowercase(c)
+}
+
+/// The general category `Cc`, as Rust's `char::is_control`.
+fn char_is_control(c: char) -> bool {
+  const code = c as u32;
+
+  code < 0x20 || (code >= 0x7F && code < 0xA0)
+}
+
+/// The uppercase of `c`: one to three characters, as Rust's iterator gives them.
+fn char_to_uppercase(c: char) -> String {
+  const out = new StringBuilder();
+
+  unicode::push_uppercase(c, out);
+  out.to_string()
+}
+
+fn char_to_lowercase(c: char) -> String {
+  const out = new StringBuilder();
+
+  unicode::push_lowercase(c, out);
+  out.to_string()
+}
+
+fn char_len_utf8(c: char) -> usize {
+  const code = c as u32;
+
+  if code < 0x80 { 1 } else if code < 0x800 { 2 } else if code < 0x10000 { 3 } else { 4 }
+}
+
+fn char_len_utf16(c: char) -> usize {
+  if (c as u32) < 0x10000 { 1 } else { 2 }
+}
+
+/// `char::from_digit(digit, radix)`: the character of a digit, in lowercase past 9; a radix
+/// outside 2 to 36 panics, as Rust's.
+fn char_from_digit(digit: u32, radix: u32) -> Option<char> {
+  if radix < 2 || radix > 36 {
+    panic("from_digit: radix is too high (maximum 36)");
+  }
+
+  if digit >= radix {
+    return None;
+  }
+
+  char::from_u32(if digit < 10 { 48 + digit } else { 87 + digit })
 }
 
 // ---- Format specifiers (docs/adr/0089-display-debug-and-format-specifiers.md) -----------------
