@@ -118,3 +118,7 @@ fn main() {
   costs that list but gives two ends at once, where Rust's walk the tree lazily. The compiler
   gives both types `Eq`, `Ord` and `Hash` as it gives `VecDeque` (`typed.compared_element`), and
   writes their debug forms by walking the tree with a stack.
+- Increment 5 is done, and with it the record. `BinaryHeap` keeps its comparison as a function,
+  `Ord`'s `compare` or the one `with_compare` gives, and its debug form is written from its list.
+  `into_list` and `into_sorted_list` give copies and leave the heap, since Sagitario does not move
+  values. It is not compared by value, as Rust's has no `PartialEq`.

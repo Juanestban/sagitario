@@ -1,0 +1,92 @@
+// `std::collections::BinaryHeap`: the largest first, checked against `sort` over thousands of
+// numbers, `with_compare` for the smallest first and for other orders, a type of the program, its
+// other methods, its debug form, `for` and `collect` (docs/adr/0095-collections.md, Q651 and Q652).
+// expect-stdout: true 2000
+// expect-stdout: [9, 6, 5, 4, 3, 2, 1, 1] Some(9) 8 [1, 1, 2, 3, 4, 5, 6, 9]
+// expect-stdout: Some(1) Some(3) Some(3) Some(5) None
+// expect-stdout: ["ccc", "bb", "a"] Some(Task { priority: 3, name: "write" })
+// expect-stdout: [1, 2] 3 [4, 2] 6 true 0
+// expect-stdout: [9, 2, 4]
+
+use std::collections::BinaryHeap;
+
+struct Task impl Ord {
+  pub priority: i32;
+  pub name: String;
+
+  pub fn equals(self, other: Task) -> bool { self.priority == other.priority }
+  pub fn compare(self, other: Task) -> Ordering { self.priority.compare(other.priority) }
+}
+
+fn total<T: Iterable<i32>>(values: T) -> i32 {
+  var sum = 0;
+
+  for value in values {
+    sum += value;
+  }
+
+  sum
+}
+
+fn main() {
+  // Popping gives the numbers from the largest, as sorting them and reversing does.
+  const numbers = new List<i64>();
+  var seed = 11i64;
+
+  for _ in 0..2000 {
+    seed = (seed * 1103515245 + 12345) % 2147483648;
+    numbers.push(seed % 1000);
+  }
+
+  const heap = BinaryHeap::from(numbers);
+  const popped = new List<i64>();
+
+  while let Some(value) = heap.pop() {
+    popped.push(value);
+  }
+
+  numbers.sort();
+  numbers.reverse();
+  println(f"{popped == numbers && heap.is_empty()} {popped.len()}");
+
+  const digits = BinaryHeap::from(List::from([3, 1, 4, 1, 5, 9, 2, 6]));
+  const order = new List<i32>();
+
+  for _ in 0..digits.len() {
+    order.push(digits.pop().unwrap());
+  }
+
+  const again = BinaryHeap::from(List::from([3, 1, 4, 1, 5, 9, 2, 6]));
+
+  println(f"{order:?} {again.peek():?} {again.len()} {again.into_sorted_list():?}");
+
+  const smallest = BinaryHeap::with_compare((a: i32, b: i32) => b.compare(a));
+
+  smallest.extend(List::from([5, 3, 1]).iter());
+
+  const first = smallest.pop();
+
+  smallest.push(3);
+  println(f"{first:?} {smallest.pop():?} {smallest.pop():?} {smallest.pop():?} {smallest.pop():?}");
+
+  const by_length = BinaryHeap::with_compare((a: String, b: String) => a.len().compare(b.len()));
+
+  by_length.extend(List::from(["bb", "ccc", "a"]).iter());
+
+  const tasks = BinaryHeap::from(List::from([Task { priority: 1, name: "read" }, Task { priority: 3, name: "write" }]));
+
+  println(f"{by_length.into_sorted_list().iter().rev().collect():?} {tasks.peek():?}");
+
+  const built: BinaryHeap<i32> = List::from([2, 1]).iter().collect();
+  const kept = BinaryHeap::from(List::from([1, 2, 3, 4]));
+
+  kept.retain((n) => n % 2 == 0);
+
+  const cleared: BinaryHeap<i32> = BinaryHeap::default();
+
+  cleared.push(1);
+  cleared.clear();
+  println(f"{built.into_sorted_list():?} {total(built)} {kept:?} {total(kept)} {BinaryHeap<i32>::with_capacity(8).is_empty()} {cleared.len()}");
+
+  println(f"{BinaryHeap::from(List::from([2, 9, 4])):?}");
+}

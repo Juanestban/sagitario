@@ -1,6 +1,5 @@
 //! `std::collections`: the collections of Rust's std beyond the prelude's `List`, `Map` and
 //! `HashSet` (docs/spec/11-standard-library.md#stdcollections, docs/adr/0095-collections.md).
-//! `BinaryHeap` comes in the last increment of the record.
 
 /// A position an iterator moves, which its closures share.
 class Position {
@@ -898,5 +897,193 @@ pub class BTreeSet<T: Ord> impl Iterable<T>, FromIterator<T>, Default {
 
   pub fn is_disjoint(self, other: BTreeSet<T>) -> bool {
     self.iter().all((value) => !other.contains(value))
+  }
+}
+
+/// A priority queue, as Rust's `BinaryHeap`: a binary heap in a list, the largest element first
+/// (docs/adr/0095-collections.md, Q651). `with_compare` orders it by another comparison, the
+/// largest by it first, which stands for Rust's `Reverse`.
+pub class BinaryHeap<T: Ord> impl Iterable<T>, FromIterator<T>, Default {
+  /// The elements, each one not smaller than its children at `2i + 1` and `2i + 2`.
+  prv var items: List<T>;
+  prv var compare: fn(T, T) -> Ordering;
+
+  pub fn new(self) {
+    self.items = new List<T>();
+    self.compare = (a: T, b: T) => a.compare(b);
+  }
+
+  /// An empty heap with room for `capacity` elements before it grows.
+  pub fn with_capacity(capacity: usize) -> BinaryHeap<T> {
+    const heap = new BinaryHeap<T>();
+
+    heap.items = List::with_capacity(capacity);
+    heap
+  }
+
+  /// An empty heap ordered by `compare`: `with_compare((a, b) => b.compare(a))` gives the
+  /// smallest first.
+  pub fn with_compare(compare: fn(T, T) -> Ordering) -> BinaryHeap<T> {
+    const heap = new BinaryHeap<T>();
+
+    heap.compare = compare;
+    heap
+  }
+
+  /// The heap of the elements of a list, built in linear time.
+  pub fn from(values: List<T>) -> BinaryHeap<T> {
+    const heap = new BinaryHeap<T>();
+
+    heap.items = values.iter().collect();
+    heap.rebuild();
+    heap
+  }
+
+  pub fn from_iter(iter: Iter<T>) -> BinaryHeap<T> {
+    const heap = new BinaryHeap<T>();
+
+    heap.extend(iter);
+    heap
+  }
+
+  pub fn default() -> BinaryHeap<T> {
+    new BinaryHeap<T>()
+  }
+
+  pub fn len(self) -> usize {
+    self.items.len()
+  }
+
+  pub fn is_empty(self) -> bool {
+    self.items.is_empty()
+  }
+
+  pub fn clear(self) {
+    self.items.clear();
+  }
+
+  /// Whether the element at `a` goes before the one at `b`.
+  prv fn above(self, a: usize, b: usize) -> bool {
+    (self.compare)(self.items[a], self.items[b]) == Ordering::Greater
+  }
+
+  /// Moves the element at `index` up while it goes before its parent.
+  prv fn sift_up(self, index: usize) {
+    var at = index;
+
+    while at > 0 {
+      const parent = (at - 1) / 2;
+
+      if !self.above(at, parent) {
+        return;
+      }
+
+      self.items.swap(at, parent);
+      at = parent;
+    }
+  }
+
+  /// Moves the element at `index` down while a child goes before it.
+  prv fn sift_down(self, index: usize) {
+    var at = index;
+    const count = self.items.len();
+
+    while true {
+      const left = 2 * at + 1;
+      const right = left + 1;
+      var largest = at;
+
+      if left < count && self.above(left, largest) {
+        largest = left;
+      }
+
+      if right < count && self.above(right, largest) {
+        largest = right;
+      }
+
+      if largest == at {
+        return;
+      }
+
+      self.items.swap(at, largest);
+      at = largest;
+    }
+  }
+
+  /// Makes the whole list a heap again, from its last parent up.
+  prv fn rebuild(self) {
+    var index = self.items.len() / 2;
+
+    while index > 0 {
+      index -= 1;
+      self.sift_down(index);
+    }
+  }
+
+  pub fn push(self, value: T) {
+    self.items.push(value);
+    self.sift_up(self.items.len() - 1);
+  }
+
+  /// Removes the largest element, and gives it.
+  pub fn pop(self) -> Option<T> {
+    if self.items.is_empty() {
+      return None;
+    }
+
+    const last = self.items.len() - 1;
+
+    self.items.swap(0, last);
+
+    const top = self.items.pop();
+
+    if !self.items.is_empty() {
+      self.sift_down(0);
+    }
+
+    top
+  }
+
+  /// The largest element.
+  pub fn peek(self) -> Option<T> {
+    self.items.first()
+  }
+
+  /// The elements in the order of the heap, which is no order.
+  pub fn iter(self) -> DoubleEndedIter<T> {
+    self.items.iter()
+  }
+
+  pub fn extend(self, values: Iter<T>) {
+    for value in values {
+      self.push(value);
+    }
+  }
+
+  /// Keeps the elements for which `keep` holds.
+  pub fn retain(self, keep: fn(T) -> bool) {
+    self.items.retain(keep);
+    self.rebuild();
+  }
+
+  /// A list of the elements in the order of the heap; the heap stays.
+  pub fn into_list(self) -> List<T> {
+    self.items.iter().collect()
+  }
+
+  /// A list of the elements from the smallest, as Rust's `into_sorted_vec`; the heap stays.
+  pub fn into_sorted_list(self) -> List<T> {
+    const copy = BinaryHeap::with_compare(self.compare);
+
+    copy.items = self.items.iter().collect();
+
+    const sorted = new List<T>();
+
+    while let Some(value) = copy.pop() {
+      sorted.push(value);
+    }
+
+    sorted.reverse();
+    sorted
   }
 }

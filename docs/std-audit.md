@@ -52,7 +52,7 @@ The audit of the library found gaps of the language itself, which the library ne
 | `HashSet<T>` | `HashSet<T: Hash>` | ✅ | In the prelude, on `Map`: keeps insertion order; the operations between sets give iterators of copies ([ADR-0095](adr/0095-collections.md), increment 2) |
 | `BTreeMap`, `BTreeSet` | `std::collections::BTreeMap`, `BTreeSet` | ✅ | B-trees ordered by `Ord`, with `range`, `range_from` and `range_to` ([ADR-0095](adr/0095-collections.md), increment 4); their iterators gather their entries when made |
 | `VecDeque<T>` | `std::collections::VecDeque<T>` | ✅ | A ring buffer ([ADR-0095](adr/0095-collections.md), increment 3); `contains` waits for bounds on methods (`iter().any(...)`); `Channel` keeps its two lists |
-| `BinaryHeap<T>` | — | ❌ | A priority queue on `Ord` |
+| `BinaryHeap<T>` | `std::collections::BinaryHeap<T: Ord>` | ✅ | The largest first, and `with_compare` for any other order, which stands for `Reverse` ([ADR-0095](adr/0095-collections.md), increment 5) |
 | `LinkedList<T>` | — | ⛔ | Rarely the right structure; Rust itself discourages it |
 
 ### Strings and characters (`string`, `str`, `char`, `ascii`)
@@ -225,8 +225,8 @@ From what most programs need to what fewer do. Each line is one record, or a few
    ([ADR-0093](adr/0093-everyday-methods.md))
 5. **Conversion and defaults:** `From`, `Into`, `TryFrom`, `Default`, generic `min`/`max`,
    `Index`. ✅ ([ADR-0094](adr/0094-conversions-and-defaults.md))
-6. **Collections:** `Set`, `Deque`, `SortedMap`, `SortedSet` and `PriorityQueue` (names to be
-   settled), and `collect` into them.
+6. **Collections:** `HashSet`, `VecDeque`, `BTreeMap`, `BTreeSet` and `BinaryHeap`, Rust's names,
+   and `collect` into them. ✅ ([ADR-0095](adr/0095-collections.md))
 7. **Streams and files:** `Read`, `Write`, buffered readers and writers, `File`, metadata,
    `remove_dir_all`, bytes on stdin and stdout; and with them the question of `Drop`.
 8. **Processes and environment:** `spawn` and `Child`, redirection, the rest of `env`.

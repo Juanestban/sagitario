@@ -46,8 +46,8 @@ fn main() -> Result<(), io::Error> {
 ## `std::collections`
 
 Rust's collections beyond the prelude's `List`, `Map` and `HashSet`
-([ADR-0095](../adr/0095-collections.md)), written in Sagitario. `BinaryHeap` comes in the last
-increment of the record.
+([ADR-0095](../adr/0095-collections.md)), written in Sagitario: `VecDeque`, `BTreeMap`,
+`BTreeSet` and `BinaryHeap`.
 
 ```sag
 use std::collections::VecDeque;
@@ -111,6 +111,20 @@ println(f"{scores.range_from("b").collect():?} {BTreeSet::from(List::from([3, 1,
 
 Both compare, order and hash as a list of their entries when these allow it, as the compiler
 gives `VecDeque`, and their debug forms are `{"a": 1}` and `{1, 2}`.
+
+**`BinaryHeap<T: Ord>`** (Q651), a priority queue in a binary heap, the largest first:
+
+| Method | Result |
+|---|---|
+| `new BinaryHeap<T>()`, `BinaryHeap::with_capacity(n)`, `BinaryHeap::from(list)` | A heap ordered by `Ord`; `from` builds it in linear time |
+| `BinaryHeap::with_compare(compare)` | A heap ordered by `compare: fn(T, T) -> Ordering`, the largest by it first: `(a, b) => b.compare(a)` gives the smallest first, which Rust's `Reverse` does |
+| `push(v)`, `pop() -> Option<T>`, `peek() -> Option<T>` | The largest is popped and peeked at |
+| `len()`, `is_empty()`, `clear()`, `extend(iter)`, `retain(keep)` | |
+| `iter()` | The elements in the order of the heap, which is no order |
+| `into_list()`, `into_sorted_list()` | A list of the elements in the order of the heap, or from the smallest, as Rust's `into_vec` and `into_sorted_vec`; the heap stays, since nothing moves |
+
+- It implements `Iterable`, `FromIterator` and `Default`, and is not compared by value: `==`
+  compares instances, as of any class. Its debug form is the list of its heap, `[9, 2, 4]`.
 
 ## `std::env`
 

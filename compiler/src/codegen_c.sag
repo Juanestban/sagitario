@@ -179,6 +179,13 @@ fn is_btree_set(program: Program, class_ref: NamedRef) -> bool {
   }
 }
 
+fn is_binary_heap(program: Program, class_ref: NamedRef) -> bool {
+  match program.binary_heap_class {
+    Some(id) => id == class_ref.id,
+    None => false,
+  }
+}
+
 /// `sag_sb_push_bytes` of a text without quotes or backslashes.
 fn push_text(text: String) -> String {
   "  sag_sb_push_bytes(sb, " + c_string_literal(text) + `, ${text.len()});`
@@ -1468,7 +1475,8 @@ class Generator {
         }
       }
       TypeKind::Class(class_ref) => {
-        if is_map(program, class_ref) || is_hash_set(program, class_ref) || is_vec_deque(program, class_ref) || is_btree_map(program, class_ref) || is_btree_set(program, class_ref) {
+        if is_map(program, class_ref) || is_hash_set(program, class_ref) || is_vec_deque(program, class_ref) || is_btree_map(program, class_ref) || is_btree_set(program, class_ref)
+          || is_binary_heap(program, class_ref) {
           for arg in class_ref.args {
             result.push(arg);
           }
@@ -1693,6 +1701,11 @@ class Generator {
 
         if is_btree_map(program, class_ref) {
           self.debug_btree(class_ref, "v", true, all, body);
+          return;
+        }
+
+        if is_binary_heap(program, class_ref) {
+          self.debug_heap(class_ref, all, body);
           return;
         }
 
@@ -2000,6 +2013,39 @@ class Generator {
     body.push("    }");
     body.push("  }");
     body.push("  sag_debug_end(sb, sag_any, indent, pretty, false, \"}\");");
+  }
+
+  /// `[9, 4, 2]`: the elements of a `BinaryHeap` in the order of its list, as Rust's derived
+  /// `Debug` writes it (docs/adr/0095-collections.md, Q652).
+  prv fn debug_heap(self, class_ref: NamedRef, all: List<Type>, body: List<String>) {
+    const index = self.class_index(class_ref);
+    const instance = match self.classes.get(index) {
+      Some(found) => found,
+      None => return,
+    };
+    var items_field = 0usize;
+
+    for field in 0..instance.field_names.len() {
+      if instance.field_names[field] == "items" {
+        items_field = field;
+      }
+    }
+
+    const elem_ty = class_ref.args.get(0).unwrap_or(types::unit());
+    const elem_type = self.c_type(elem_ty);
+
+    body.push(`  sag_object *sag_items = ((sag_c${index} *)v)->f${items_field};`);
+    body.push("  size_t sag_n = sag_list_len(sag_items);");
+    body.push("  sag_sb_push_bytes(sb, \"[\", 1);");
+    body.push("  for (size_t sag_k = 0; sag_k < sag_n; sag_k++) {");
+    body.push("    " + elem_type + " sag_e = *(" + elem_type + " *)sag_list_at(sag_items, sag_k, __FILE__, __LINE__);");
+    body.push("    sag_debug_next(sb, sag_k == 0, indent + 1, pretty, false);");
+    body.push(`    sag_debug_${debug_position(all, elem_ty).unwrap_or(0)}(sb, sag_e, indent + 1, pretty);`);
+    body.push("    if (pretty) {");
+    body.push("      sag_sb_push_bytes(sb, \",\", 1);");
+    body.push("    }");
+    body.push("  }");
+    body.push("  sag_debug_end(sb, sag_n > 0, indent, pretty, false, \"]\");");
   }
 
   /// The C `main`, which calls the program's `main`; a library has none.

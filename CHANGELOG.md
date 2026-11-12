@@ -15,6 +15,9 @@ The sources say 0.32.0.
 
 ### Added
 
+- `std::collections::BinaryHeap`, as Rust's: a priority queue, the largest first, with
+  `with_compare` for any other order, `into_sorted_list` and the debug form of its heap
+  ([ADR-0095](docs/adr/0095-collections.md), increment 5).
 - `std::collections::BTreeMap` and `BTreeSet`, as Rust's: B-trees ordered by their keys, with the
   methods of `Map` and `HashSet` in order, `first_key_value`, `pop_first`, `pop_last`, `range`,
   `range_from` and `range_to`, `for (key, value) in map`, comparison, order and hash by their
