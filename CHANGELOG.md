@@ -15,6 +15,9 @@ The sources say 0.32.0.
 
 ### Added
 
+- `HashSet` in the prelude, as Rust's, keeping insertion order, with `==` by value, the operations
+  between sets and the debug form `{1, 2}`; and `Map::get_key_value` and `Map::remove_entry`
+  ([ADR-0095](docs/adr/0095-collections.md), increment 2).
 - `Iterable` and `FromIterator`, as Rust's `IntoIterator` and `FromIterator`: `for` iterates over
   any type implementing `Iterable`, `collect()` makes any type implementing `FromIterator`, and
   lists, arrays, iterators, strings, maps and results implement them for bounds; and the module

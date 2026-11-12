@@ -151,6 +151,13 @@ fn is_map(program: Program, class_ref: NamedRef) -> bool {
   }
 }
 
+fn is_hash_set(program: Program, class_ref: NamedRef) -> bool {
+  match program.hash_set_class {
+    Some(id) => id == class_ref.id,
+    None => false,
+  }
+}
+
 /// `sag_sb_push_bytes` of a text without quotes or backslashes.
 fn push_text(text: String) -> String {
   "  sag_sb_push_bytes(sb, " + c_string_literal(text) + `, ${text.len()});`
@@ -1440,7 +1447,7 @@ class Generator {
         }
       }
       TypeKind::Class(class_ref) => {
-        if is_map(program, class_ref) {
+        if is_map(program, class_ref) || is_hash_set(program, class_ref) {
           for arg in class_ref.args {
             result.push(arg);
           }
@@ -1653,6 +1660,11 @@ class Generator {
           return;
         }
 
+        if is_hash_set(program, class_ref) {
+          self.debug_set(program, class_ref, all, body);
+          return;
+        }
+
         // A cycle writes the class again without its fields.
         body.push("  if (!sag_debug_enter(v)) {");
         body.push("  " + push_text(class_ref.name + " { .. }"));
@@ -1714,6 +1726,77 @@ class Generator {
     body.push(`    sag_debug_${debug_position(all, key_ty).unwrap_or(0)}(sb, sag_e.u.v1.f0.f0, indent + 1, pretty);`);
     body.push("    sag_sb_push_bytes(sb, \": \", 2);");
     body.push(`    sag_debug_${debug_position(all, value_ty).unwrap_or(0)}(sb, sag_e.u.v1.f0.f1, indent + 1, pretty);`);
+    body.push("    if (pretty) {");
+    body.push("      sag_sb_push_bytes(sb, \",\", 1);");
+    body.push("    }");
+    body.push("  }");
+    body.push("  sag_debug_end(sb, sag_any, indent, pretty, false, \"}\");");
+  }
+
+  /// `{1, 2}`: the keys of the map of a `HashSet`, in order, as Rust's derived `Debug` writes a set
+  /// (docs/adr/0095-collections.md, Q652).
+  prv fn debug_set(self, program: Program, class_ref: NamedRef, all: List<Type>, body: List<String>) {
+    const set_index = self.class_index(class_ref);
+    const set = match self.classes.get(set_index) {
+      Some(found) => found,
+      None => return,
+    };
+    var map_field = 0usize;
+
+    for field in 0..set.field_names.len() {
+      if set.field_names[field] == "map" {
+        map_field = field;
+      }
+    }
+
+    const map_ref = match set.fields.get(map_field) {
+      Some(found) => match found.kind {
+        TypeKind::Class(named) => named,
+        _ => return,
+      },
+      None => return,
+    };
+
+    if !is_map(program, map_ref) {
+      return;
+    }
+
+    const map_index = self.class_index(map_ref);
+    const map = match self.classes.get(map_index) {
+      Some(found) => found,
+      None => return,
+    };
+    var items_field = 0usize;
+
+    for field in 0..map.field_names.len() {
+      if map.field_names[field] == "items" {
+        items_field = field;
+      }
+    }
+
+    const entry_ty = match map.fields.get(items_field) {
+      Some(found) => match found.kind {
+        TypeKind::List(elem) => elem,
+        _ => return,
+      },
+      None => return,
+    };
+    const elem_ty = class_ref.args.get(0).unwrap_or(types::unit());
+    const entry_type = self.c_type(entry_ty);
+
+    body.push(`  sag_object *sag_map = ((sag_c${set_index} *)v)->f${map_field};`);
+    body.push(`  sag_object *sag_items = ((sag_c${map_index} *)sag_map)->f${items_field};`);
+    body.push("  size_t sag_n = sag_list_len(sag_items);");
+    body.push("  bool sag_any = false;");
+    body.push("  sag_sb_push_bytes(sb, \"{\", 1);");
+    body.push("  for (size_t sag_k = 0; sag_k < sag_n; sag_k++) {");
+    body.push("    " + entry_type + " sag_e = *(" + entry_type + " *)sag_list_at(sag_items, sag_k, __FILE__, __LINE__);");
+    body.push("    if (sag_e.tag != 1u) {");
+    body.push("      continue;");
+    body.push("    }");
+    body.push("    sag_debug_next(sb, !sag_any, indent + 1, pretty, false);");
+    body.push("    sag_any = true;");
+    body.push(`    sag_debug_${debug_position(all, elem_ty).unwrap_or(0)}(sb, sag_e.u.v1.f0.f0, indent + 1, pretty);`);
     body.push("    if (pretty) {");
     body.push("      sag_sb_push_bytes(sb, \",\", 1);");
     body.push("    }");

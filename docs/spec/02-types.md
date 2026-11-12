@@ -509,12 +509,40 @@ for entry in ages {
   `update(k, f) -> bool` changes the value of a key that is present to `f(value)`,
   `upsert(k, default, f)` inserts `default` or changes the value present with `f`
   (`entry(k).and_modify(f).or_insert(default)`), and `get_or_insert(k, v) -> V` gives the value
-  present or inserts `v`.
+  present or inserts `v`. `get_key_value(k)` and `remove_entry(k)` give the key the map holds
+  with its value, as `Option<(K, V)>` ([ADR-0095](../adr/0095-collections.md), Q647).
 - `for entry in map` iterates over `entries()`: values of the prelude struct
   `Entry<K, V> { key: K, value: V }`.
 - A map implements `Eq` when its values do: two maps are equal when they hold the same keys with
   equal values, in any order ([ADR-0093](../adr/0093-everyday-methods.md), Q623). Maps are not
   ordered and cannot be interpolated.
+
+### Sets (S2)
+
+Rationale: [ADR-0095](../adr/0095-collections.md), Q647.
+
+```sag
+const seen = new HashSet<String>();
+
+seen.insert("a");                                    // true
+seen.insert("a");                                    // false: already there
+const other = HashSet::from(List::from(["a", "b"]));
+
+println(f"{seen.is_subset(other)} {other.difference(seen).collect():?} {seen:?}");   // true ["b"] {"a"}
+```
+
+- `HashSet<T: Hash>` is a prelude class, Rust's `HashSet`, on a `Map` of its values: it keeps
+  the order in which values were first inserted, which Rust leaves unspecified.
+- `new HashSet<T>()`, `HashSet::with_capacity(n)`, `HashSet::from(list)`, `insert(v) -> bool`
+  (whether it was added; an equal value already there stays), `remove(v) -> bool`,
+  `contains(v)`, `get(v)` and `take(v)` (the equal value the set holds, as `Option<T>`), `len()`,
+  `is_empty()`, `clear()`, `iter()`, `retain(keep)` and `extend(iter)`.
+- `union`, `intersection`, `difference` and `symmetric_difference` of another set give an
+  `Iter<T>` of copies of the elements (Rust's lend both sets), those of this set first;
+  `is_subset`, `is_superset` and `is_disjoint` compare two sets.
+- A set implements `Eq`, `Iterable`, `FromIterator` and `Default`: `==` compares the elements in
+  any order, as for maps; `for x in set` and `collect()` work; it is not ordered. Its debug form is
+  `{1, 2}`, as Rust's.
 
 ## `Option<T>` and `Result<T, E>` (F1)
 

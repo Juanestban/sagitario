@@ -95,3 +95,8 @@ fn main() {
   `Iterable` calls its `iter()` unless the instance's type is iterated by itself, a list, an
   array or an iterator. `collect()` into another type implementing `FromIterator` calls its
   `from_iter`, as `T::from_iter` does.
+- Increment 2 is done. `HashSet` is written in the prelude on a `Map<T, ()>`, with `get_key_value`
+  and `remove_entry` added to `Map`, as Rust's, so that `get` and `take` give the value the set
+  holds. Its `Eq` is an implementation of the class; the checker lets `==` reach it, as it does
+  for a map, instead of comparing instances (`typed.compares_by_value`). Its debug form is
+  written by codegen from the entries of its map, as that of a map is.

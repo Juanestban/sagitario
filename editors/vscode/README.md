@@ -4,7 +4,7 @@ Support for the [Sagitario](https://github.com/Juanestban/sagitario) programming
 
 - The language server (`sag lsp`): the errors and warnings of `sag check` while typing, the type
   of what is under the cursor, go to definition (`F12` or `Ctrl+Click`, also on the modules of
-  `use` and of paths), completion of members after `.` (the methods of numbers, text, characters, lists, arrays, slices, maps, iterators, `Option` and
+  `use` and of paths), completion of members after `.` (the methods of numbers, text, characters, lists, arrays, slices, maps, sets, iterators, `Option` and
   `Result` too, `into` and `try_into` on every value, and the
   indices of a tuple's elements), of items after `::` (`MIN` and `MAX` after an integer type, the functions of `std::mem` and `std::hint`, the static functions of a type's interfaces and of a type parameter's bounds after `Type::` and `T::`, and `default`, `from` and `try_from` after the types of numbers, `char` and `String`), of attributes after
   `@` (`@cfg`, `@default`, `@export`, `@repr`, `@thread_local`), of their representations after `@repr(` and

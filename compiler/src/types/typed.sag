@@ -43,6 +43,8 @@ pub struct PreludeItems {
   /// `Iterable` and `FromIterator` (docs/adr/0095-collections.md).
   pub iterable: Option<u32>;
   pub from_iterator: Option<u32>;
+  /// `HashSet` (docs/adr/0095-collections.md, Q647).
+  pub hash_set: Option<u32>;
 }
 
 /// The methods of `List<T>` implemented by the compiler (docs/spec/02-types.md#arrays-and-lists).
@@ -302,6 +304,7 @@ pub class TypedModule {
       index_mut: None,
       iterable: None,
       from_iterator: None,
+      hash_set: None,
     };
     self.sync_classes = new List();
     self.const_types = new List();
@@ -877,6 +880,12 @@ pub class TypedModule {
     }
 
     found
+  }
+
+  /// Whether `==` compares instances of the class `id` by value, as Rust's: a `Map` and a
+  /// `HashSet` (docs/adr/0093-everyday-methods.md, Q623, and docs/adr/0095-collections.md, Q647).
+  pub fn compares_by_value(self, id: u32) -> bool {
+    is_id(self.prelude.map, id) || is_id(self.prelude.hash_set, id)
   }
 
   /// `Default`, without type arguments.

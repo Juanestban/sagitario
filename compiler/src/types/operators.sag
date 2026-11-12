@@ -290,11 +290,8 @@ pub fn comparison_call(cx: Checker, value: Expr, op: BinaryOp, ty: Type, span: S
   const by_interface = match ty.kind {
     TypeKind::Struct(_) | TypeKind::Enum(_) | TypeKind::Param(_) | TypeKind::Tuple(_) | TypeKind::Option(_) | TypeKind::Result { .. }
       | TypeKind::List(_) | TypeKind::Array { .. } => true,
-    // A map compares by value; other class instances by identity.
-    TypeKind::Class(named) => match cx.typed.prelude.map {
-      Some(map) => map == named.id,
-      None => false,
-    },
+    // A map and a set compare by value; other class instances by identity.
+    TypeKind::Class(named) => cx.typed.compares_by_value(named.id),
     _ => false,
   };
 

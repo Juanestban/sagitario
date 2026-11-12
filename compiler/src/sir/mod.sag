@@ -55,6 +55,8 @@ pub struct Program {
   pub debug_types: List<Type>;
   /// The prelude's `Map`, whose debug form is that of its entries.
   pub map_class: Option<u32>;
+  /// `HashSet`, whose debug form is that of its elements (docs/adr/0095-collections.md, Q652).
+  pub hash_set_class: Option<u32>;
 }
 
 /// A `static`: its storage, reached through `sag_static_N(file, line)`, which gives its address.
@@ -1012,6 +1014,7 @@ pub fn lower(package: Package, resolution: Resolution, typed: TypedModule, sourc
     statics: statics,
     debug_types: registry.debug_types,
     map_class: typed.prelude.map,
+    hash_set_class: typed.prelude.hash_set,
   })
 }
 
