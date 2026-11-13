@@ -28,6 +28,10 @@ The sources say 0.32.0.
 
 ### Added
 
+- The options of the sockets of `std::net`, as Rust's: read and write time outs,
+  `set_nonblocking`, `set_ttl`, `take_error` and `try_clone`; `TcpStream::connect_timeout`,
+  `set_nodelay` and `peek`; and `UdpSocket::set_broadcast`, `peek` and `peek_from`
+  ([ADR-0100](docs/adr/0100-networking.md), increment 4).
 - `std::net::UdpSocket` with `bind`, `send_to`, `recv_from`, `connect`, `send`, `recv`,
   `peer_addr` and `local_addr`, `Send` and closed by `Drop`
   ([ADR-0100](docs/adr/0100-networking.md), increment 3).

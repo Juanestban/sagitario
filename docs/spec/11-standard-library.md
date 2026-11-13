@@ -597,6 +597,27 @@ const received = socket.recv_from(&mut buffer).unwrap();   // (4, the socket's o
 - A `send_to` to an address without a listening socket may make a later `recv_from` fail, on the
   systems that report it (`ConnectionReset` on Windows), as Rust's.
 
+### Options of sockets
+
+Rationale: [ADR-0100](../adr/0100-networking.md), Q696, as Rust's.
+
+| Item | Of | Meaning |
+|---|---|---|
+| `set_read_timeout(Option<Duration>)`, `set_write_timeout`, `read_timeout()`, `write_timeout()` | `TcpStream`, `UdpSocket` | Waits at most that long in a read or a write, or forever with `None` |
+| `set_nonblocking(bool)` | all three | An operation that would wait is the error `WouldBlock` instead |
+| `set_ttl(u32)`, `ttl()` | all three | The time to live of its IP packets |
+| `take_error() -> Result<Option<io::Error>, io::Error>` | all three | The error the socket holds (`SO_ERROR`), which it forgets |
+| `try_clone() -> Result<Self, io::Error>` | all three | Another socket value of the same socket, sharing its options |
+| `TcpStream::connect_timeout(addr: SocketAddr, timeout)` | `TcpStream` | A connection waiting at most `timeout`: `TimedOut` if it does not come |
+| `set_nodelay(bool)`, `nodelay()`, `peek(buffer)` | `TcpStream` | Small writes sent at once (`TCP_NODELAY`); the bytes `read` would give, left to read |
+| `set_broadcast(bool)`, `broadcast()`, `peek_from(buffer)`, `peek(buffer)` | `UdpSocket` | Sending to broadcast addresses; the datagram `recv_from` or `recv` would give, left to receive |
+
+- A zero duration given to a time out, or to `connect_timeout`, is `InvalidInput`
+  (`cannot set a 0 duration timeout`). A time out is kept to the microsecond, and to the
+  millisecond on Windows, rounded so that it is never zero.
+- A read or a write whose time runs out is an error of kind `WouldBlock` on POSIX systems and
+  `TimedOut` on Windows, as the system gives it and as in Rust.
+
 ## `std::path`
 
 Functions on paths as text; they never touch the file system. `/` separates components on

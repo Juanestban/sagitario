@@ -124,4 +124,12 @@ fn main() {
   gives the bytes the buffer holds instead, as POSIX systems do, which is what Rust's says. As
   Rust's, `send_to` sends to the first address of what it is given, and `connect` tries each.
   `UdpSocket` joins the classes that are `Send` by name.
+- Increment 4 is done, and with it the record. Making a POSIX socket non-blocking and duplicating
+  one take `fcntl`, which is variadic, so the runtime's core does them in C
+  (`sag_socket_nonblocking`, `sag_socket_duplicate` with `F_DUPFD_CLOEXEC`), as declarations in
+  Sagitario cannot call variadic functions; Windows has `ioctlsocket` and `WSADuplicateSocketW`.
+  `connect_timeout` connects without blocking and waits with `poll`, or with `select` on Windows,
+  as Rust's, then reads the socket's error. The options that are an `int` (the time to live,
+  `TCP_NODELAY`, `SO_BROADCAST` and `SO_ERROR`) go through one call of `std::sys`, and a time out
+  is a `struct timeval` (a `DWORD` of milliseconds on Windows) never zero, as Rust's.
 

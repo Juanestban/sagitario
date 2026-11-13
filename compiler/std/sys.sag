@@ -3,7 +3,6 @@
 //! Q551). Only the modules of `std` can name it.
 
 use std::ffi::{c_char, c_int, c_void, string_from_c, CString};
-@cfg(windows)
 use std::mem;
 @cfg(unix)
 use std::ffi::c_long;
@@ -5340,4 +5339,417 @@ pub fn socket_recv_from(handle: usize, buffer: *mut u8, len: usize, flags: i32) 
     Some(sender) => Ok((received, sender)),
     None => Err(EINVAL),
   }
+}
+
+// ---- Options of sockets (docs/adr/0100-networking.md, Q696) -------------------------------------
+
+/// The options `socket_option` and `set_socket_option` read and write, each an `int`.
+pub const OPTION_TTL: i32 = 0;
+pub const OPTION_NODELAY: i32 = 1;
+pub const OPTION_BROADCAST: i32 = 2;
+pub const OPTION_ERROR: i32 = 3;
+
+const IPPROTO_IP: c_int = 0;
+const IPPROTO_TCP: c_int = 6;
+const TCP_NODELAY: c_int = 1;
+
+@cfg(any(target_os = "linux", target_os = "android"))
+const IP_TTL: c_int = 2;
+@cfg(any(target_os = "linux", target_os = "android"))
+const SO_ERROR: c_int = 4;
+@cfg(any(target_os = "linux", target_os = "android"))
+const SO_BROADCAST: c_int = 6;
+@cfg(any(target_os = "linux", target_os = "android"))
+const SO_RCVTIMEO: c_int = 20;
+@cfg(any(target_os = "linux", target_os = "android"))
+const SO_SNDTIMEO: c_int = 21;
+
+@cfg(any(target_os = "macos", target_os = "ios", windows))
+const IP_TTL: c_int = 4;
+@cfg(any(target_os = "macos", target_os = "ios", windows))
+const SO_ERROR: c_int = 0x1007;
+@cfg(any(target_os = "macos", target_os = "ios", windows))
+const SO_BROADCAST: c_int = 0x20;
+@cfg(any(target_os = "macos", target_os = "ios", windows))
+const SO_RCVTIMEO: c_int = 0x1006;
+@cfg(any(target_os = "macos", target_os = "ios", windows))
+const SO_SNDTIMEO: c_int = 0x1005;
+@cfg(windows)
+const SOL_SOCKET: c_int = 0xFFFF;
+
+/// The level and name of an option.
+fn option_place(option: i32) -> (c_int, c_int) {
+  if option == OPTION_TTL {
+    (IPPROTO_IP, IP_TTL)
+  } else if option == OPTION_NODELAY {
+    (IPPROTO_TCP, TCP_NODELAY)
+  } else if option == OPTION_BROADCAST {
+    (SOL_SOCKET, SO_BROADCAST)
+  } else {
+    (SOL_SOCKET, SO_ERROR)
+  }
+}
+
+/// A time out in nanoseconds as `struct timeval`: never 0, which is none, as Rust's.
+fn timeout_parts(nanos: u64) -> (u64, u64) {
+  const secs = nanos / 1_000_000_000;
+  var micros = (nanos % 1_000_000_000) / 1000;
+
+  if secs == 0 && micros == 0 {
+    micros = 1;
+  }
+
+  (secs, micros)
+}
+
+/// `struct timeval`, whose fields have 64 bits, except on 32-bit Android and for Apple's
+/// microseconds.
+@cfg(any(target_os = "linux", all(target_os = "android", target_pointer_width = "64")))
+@repr(C)
+struct Timeval {
+  pub tv_sec: i64;
+  pub tv_usec: i64;
+}
+
+@cfg(all(target_os = "android", target_pointer_width = "32"))
+@repr(C)
+struct Timeval {
+  pub tv_sec: i32;
+  pub tv_usec: i32;
+}
+
+@cfg(any(target_os = "macos", target_os = "ios"))
+@repr(C)
+struct Timeval {
+  pub tv_sec: i64;
+  pub tv_usec: i32;
+}
+
+@cfg(any(target_os = "linux", all(target_os = "android", target_pointer_width = "64")))
+fn timeval_of(nanos: u64) -> Timeval {
+  if nanos == 0 {
+    return Timeval { tv_sec: 0, tv_usec: 0 };
+  }
+
+  const parts = timeout_parts(nanos);
+  const secs = if parts.0 > 0x7FFF_FFFF_FFFF { 0x7FFF_FFFF_FFFFu64 } else { parts.0 };
+
+  Timeval { tv_sec: secs as i64, tv_usec: parts.1 as i64 }
+}
+
+@cfg(any(target_os = "macos", target_os = "ios"))
+fn timeval_of(nanos: u64) -> Timeval {
+  if nanos == 0 {
+    return Timeval { tv_sec: 0, tv_usec: 0 };
+  }
+
+  const parts = timeout_parts(nanos);
+  const secs = if parts.0 > 0x7FFF_FFFF_FFFF { 0x7FFF_FFFF_FFFFu64 } else { parts.0 };
+
+  Timeval { tv_sec: secs as i64, tv_usec: parts.1 as i32 }
+}
+
+@cfg(all(target_os = "android", target_pointer_width = "32"))
+fn timeval_of(nanos: u64) -> Timeval {
+  if nanos == 0 {
+    return Timeval { tv_sec: 0, tv_usec: 0 };
+  }
+
+  const parts = timeout_parts(nanos);
+  const secs = if parts.0 > 0x7FFF_FFFF { 0x7FFF_FFFFu64 } else { parts.0 };
+
+  Timeval { tv_sec: secs as i32, tv_usec: parts.1 as i32 }
+}
+
+/// The nanoseconds of a `struct timeval`, 0 for none.
+@cfg(unix)
+fn nanos_of(value: Timeval) -> u64 {
+  (value.tv_sec as u64) * 1_000_000_000 + (value.tv_usec as u64) * 1000
+}
+
+@cfg(unix)
+extern "C" {
+  fn getsockopt(socket: c_int, level: c_int, name: c_int, value: *mut c_void, len: *mut u32) -> c_int;
+  fn sag_socket_nonblocking(fd: c_int, on: c_int) -> c_int;
+  fn sag_socket_duplicate(fd: c_int) -> c_int;
+}
+
+// `PollFd`, `poll` and `POLLOUT` are those of the pipes of `std::process`, above.
+@cfg(unix)
+const POLLERR: i16 = 8;
+@cfg(unix)
+const POLLHUP: i16 = 0x10;
+
+/// Waits at most `nanos` nanoseconds in a read (`write` false) or a write; 0 is no limit.
+@cfg(unix)
+pub fn socket_set_timeout(handle: usize, write: bool, nanos: u64) -> Result<(), i32> {
+  const value = timeval_of(nanos);
+  const name = if write { SO_SNDTIMEO } else { SO_RCVTIMEO };
+
+  if unsafe { setsockopt(handle as c_int, SOL_SOCKET, name, &raw const value as *const c_void, mem::size_of<Timeval>() as u32) } == 0 { Ok(()) } else { Err(failure()) }
+}
+
+@cfg(unix)
+pub fn socket_timeout(handle: usize, write: bool) -> Result<u64, i32> {
+  var value = Timeval { tv_sec: 0, tv_usec: 0 };
+  var len = mem::size_of<Timeval>() as u32;
+  const name = if write { SO_SNDTIMEO } else { SO_RCVTIMEO };
+
+  if unsafe { getsockopt(handle as c_int, SOL_SOCKET, name, &raw mut value as *mut c_void, &raw mut len) } == 0 { Ok(nanos_of(value)) } else { Err(failure()) }
+}
+
+/// Sets an option that is an `int`.
+@cfg(unix)
+pub fn set_socket_option(handle: usize, option: i32, value: i32) -> Result<(), i32> {
+  const place = option_place(option);
+
+  set_int_option(handle as c_int, place.0, place.1, value)
+}
+
+@cfg(unix)
+pub fn socket_option(handle: usize, option: i32) -> Result<i32, i32> {
+  const place = option_place(option);
+  var value = 0 as c_int;
+  var len = 4u32;
+
+  if unsafe { getsockopt(handle as c_int, place.0, place.1, &raw mut value as *mut c_void, &raw mut len) } == 0 { Ok(value) } else { Err(failure()) }
+}
+
+@cfg(unix)
+pub fn socket_set_nonblocking(handle: usize, on: bool) -> Result<(), i32> {
+  if unsafe { sag_socket_nonblocking(handle as c_int, if on { 1 } else { 0 }) } == 0 { Ok(()) } else { Err(failure()) }
+}
+
+/// Another descriptor of the same socket, closed in the programs this one starts.
+@cfg(unix)
+pub fn socket_duplicate(handle: usize) -> Result<usize, i32> {
+  const fd = unsafe { sag_socket_duplicate(handle as c_int) };
+
+  if fd < 0 { Err(failure()) } else { Ok(fd as usize) }
+}
+
+/// Connects the socket, waiting at most `nanos` nanoseconds, as Rust's `connect_timeout`: a
+/// connection that does not come in time is `ETIMEDOUT`. The socket waits again afterwards.
+@cfg(unix)
+pub fn socket_connect_timeout(handle: usize, addr: RawAddr, nanos: u64) -> Result<(), i32> {
+  const buffer = encode(addr);
+
+  socket_set_nonblocking(handle, true)?;
+
+  const started = unsafe { connect(handle as c_int, &raw const buffer, sockaddr_len(addr.v6)) };
+
+  if started != 0 && errno() != EINPROGRESS {
+    const code = failure();
+
+    socket_set_nonblocking(handle, false)?;
+
+    return Err(code);
+  }
+
+  const start = monotonic_nanos();
+
+  while started != 0 {
+    const spent = monotonic_nanos() - start;
+
+    if spent >= nanos {
+      socket_set_nonblocking(handle, false)?;
+
+      return Err(ETIMEDOUT);
+    }
+
+    // In whole milliseconds, rounded up, which `poll` waits.
+    const left = nanos - spent;
+    const millis = left / 1_000_000 + if left % 1_000_000 != 0 { 1 } else { 0 };
+    var watched = PollFd { fd: handle as c_int, events: POLLOUT, revents: 0 };
+    const ready = unsafe { poll(&raw mut watched, 1, if millis > 0x7FFF_FFFF { 0x7FFF_FFFF } else { millis as c_int }) };
+
+    if ready < 0 {
+      if errno() == EINTR {
+        continue;
+      }
+
+      const code = failure();
+
+      socket_set_nonblocking(handle, false)?;
+
+      return Err(code);
+    }
+
+    if ready > 0 {
+      // The connection failed if the socket has an error: `poll` may also say so.
+      const pending = socket_option(handle, OPTION_ERROR)?;
+
+      if pending != 0 || watched.revents & (POLLERR | POLLHUP) != 0 {
+        socket_set_nonblocking(handle, false)?;
+
+        return Err(if pending != 0 { pending } else { ECONNREFUSED });
+      }
+
+      break;
+    }
+  }
+
+  socket_set_nonblocking(handle, false)
+}
+
+/// `FD_SET` of Winsock, for the one socket `select` watches.
+@cfg(windows)
+@repr(C)
+struct FdSet {
+  pub count: u32;
+  pub sockets: [usize; 64];
+}
+
+/// `struct timeval` of Winsock, whose `long` has 32 bits.
+@cfg(windows)
+@repr(C)
+struct WinTimeval {
+  pub tv_sec: i32;
+  pub tv_usec: i32;
+}
+
+/// `WSAPROTOCOL_INFOW`, which `WSADuplicateSocketW` fills.
+@cfg(windows)
+@repr(C)
+struct ProtocolInfo {
+  pub words: [u64; 96];
+}
+
+@cfg(windows)
+extern "C" {
+  fn setsockopt(socket: usize, level: c_int, name: c_int, value: *const c_void, len: c_int) -> c_int;
+  fn getsockopt(socket: usize, level: c_int, name: c_int, value: *mut c_void, len: *mut c_int) -> c_int;
+  fn ioctlsocket(socket: usize, command: i32, argument: *mut u32) -> c_int;
+  fn select(count: c_int, read: *mut FdSet, write: *mut FdSet, except: *mut FdSet, timeout: *const WinTimeval) -> c_int;
+  fn WSADuplicateSocketW(socket: usize, process: u32, info: *mut ProtocolInfo) -> c_int;
+}
+
+/// `FIONBIO`.
+@cfg(windows)
+const FIONBIO: u32 = 0x8004_667E;
+/// `FROM_PROTOCOL_INFO`: the socket is the one the protocol information describes.
+@cfg(windows)
+const FROM_PROTOCOL_INFO: c_int = -1;
+
+/// Windows takes a time out in whole milliseconds, as a `DWORD`: never 0, which is none.
+@cfg(windows)
+pub fn socket_set_timeout(handle: usize, write: bool, nanos: u64) -> Result<(), i32> {
+  var millis = nanos / 1_000_000;
+
+  if nanos != 0 && millis == 0 {
+    millis = 1;
+  }
+
+  const value = if millis > 0xFFFF_FFFE { 0xFFFF_FFFEu32 } else { millis as u32 };
+  const name = if write { SO_SNDTIMEO } else { SO_RCVTIMEO };
+
+  if unsafe { setsockopt(handle, SOL_SOCKET, name, &raw const value as *const c_void, 4) } != SOCKET_ERROR { Ok(()) } else { Err(wsa_failure()) }
+}
+
+@cfg(windows)
+pub fn socket_timeout(handle: usize, write: bool) -> Result<u64, i32> {
+  var value = 0u32;
+  var len = 4 as c_int;
+  const name = if write { SO_SNDTIMEO } else { SO_RCVTIMEO };
+
+  if unsafe { getsockopt(handle, SOL_SOCKET, name, &raw mut value as *mut c_void, &raw mut len) } != SOCKET_ERROR { Ok(value as u64 * 1_000_000) } else { Err(wsa_failure()) }
+}
+
+@cfg(windows)
+pub fn set_socket_option(handle: usize, option: i32, value: i32) -> Result<(), i32> {
+  const place = option_place(option);
+  const given = value;
+
+  if unsafe { setsockopt(handle, place.0, place.1, &raw const given as *const c_void, 4) } != SOCKET_ERROR { Ok(()) } else { Err(wsa_failure()) }
+}
+
+/// The value of an option; the pending error is a `WSA` code, which becomes an `errno` value.
+@cfg(windows)
+pub fn socket_option(handle: usize, option: i32) -> Result<i32, i32> {
+  const place = option_place(option);
+  var value = 0 as c_int;
+  var len = 4 as c_int;
+
+  if unsafe { getsockopt(handle, place.0, place.1, &raw mut value as *mut c_void, &raw mut len) } == SOCKET_ERROR {
+    return Err(wsa_failure());
+  }
+
+  if option == OPTION_ERROR && value != 0 { Ok(wsa_errno(value)) } else { Ok(value) }
+}
+
+@cfg(windows)
+pub fn socket_set_nonblocking(handle: usize, on: bool) -> Result<(), i32> {
+  var value = if on { 1u32 } else { 0u32 };
+
+  if unsafe { ioctlsocket(handle, FIONBIO as i32, &raw mut value) } != SOCKET_ERROR { Ok(()) } else { Err(wsa_failure()) }
+}
+
+/// Another `SOCKET` of the same socket, which child processes do not inherit, as Rust's.
+@cfg(windows)
+pub fn socket_duplicate(handle: usize) -> Result<usize, i32> {
+  var info = ProtocolInfo { words: [0u64; 96] };
+
+  if unsafe { WSADuplicateSocketW(handle, GetCurrentProcessId(), &raw mut info) } == SOCKET_ERROR {
+    return Err(wsa_failure());
+  }
+
+  const copy = unsafe { WSASocketW(FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, &raw mut info as *mut c_void, 0, SOCKET_FLAGS) };
+
+  if copy == INVALID_SOCKET { Err(wsa_failure()) } else { Ok(copy) }
+}
+
+/// `connect_timeout` with `select`, as Rust's on Windows: a failed connection is in the set of
+/// exceptions.
+@cfg(windows)
+pub fn socket_connect_timeout(handle: usize, addr: RawAddr, nanos: u64) -> Result<(), i32> {
+  const buffer = encode(addr);
+
+  socket_set_nonblocking(handle, true)?;
+
+  if unsafe { connect(handle, &raw const buffer, sockaddr_len(addr.v6) as c_int) } != SOCKET_ERROR {
+    return socket_set_nonblocking(handle, false);
+  }
+
+  const started = unsafe { WSAGetLastError() };
+
+  // WSAEWOULDBLOCK: the connection goes on.
+  if started != 10035 {
+    socket_set_nonblocking(handle, false)?;
+
+    return Err(wsa_errno(started));
+  }
+
+  const parts = timeout_parts(nanos);
+  const wait = WinTimeval { tv_sec: if parts.0 > 0x7FFF_FFFF { 0x7FFF_FFFF } else { parts.0 as i32 }, tv_usec: parts.1 as i32 };
+  var writable = FdSet { count: 1, sockets: [0usize; 64] };
+  var failed = FdSet { count: 1, sockets: [0usize; 64] };
+
+  writable.sockets[0] = handle;
+  failed.sockets[0] = handle;
+
+  const ready = unsafe { select(1, 0 as *mut FdSet, &raw mut writable, &raw mut failed, &raw const wait) };
+
+  if ready == SOCKET_ERROR {
+    const code = wsa_failure();
+
+    socket_set_nonblocking(handle, false)?;
+
+    return Err(code);
+  }
+
+  if ready == 0 {
+    socket_set_nonblocking(handle, false)?;
+
+    return Err(ETIMEDOUT);
+  }
+
+  if failed.count > 0 {
+    const pending = socket_option(handle, OPTION_ERROR)?;
+
+    socket_set_nonblocking(handle, false)?;
+
+    return Err(if pending != 0 { pending } else { ECONNREFUSED });
+  }
+
+  socket_set_nonblocking(handle, false)
 }

@@ -5,6 +5,7 @@
 use std::io;
 use std::io::{ErrorKind, Read, Write};
 use std::sys;
+use std::time::Duration;
 
 /// An IPv4 address: four octets, as Rust's `Ipv4Addr`.
 pub struct Ipv4Addr impl Hash, Ord, Display, TryFrom<String, AddrParseError> {
@@ -1057,6 +1058,26 @@ fn raw_of(addr: SocketAddr) -> sys::RawAddr {
   }
 }
 
+/// The nanoseconds of a time out, 0 for none; a zero duration is an error, as Rust's
+/// (docs/adr/0100-networking.md, Q696).
+fn timeout_nanos(timeout: Option<Duration>) -> Result<u64, io::Error> {
+  match timeout {
+    Some(found) => if found.as_nanos() == 0 { Err(new io::Error(ErrorKind::InvalidInput, "cannot set a 0 duration timeout")) } else { Ok(found.as_nanos()) },
+    None => Ok(0),
+  }
+}
+
+fn timeout_of(nanos: u64) -> Option<Duration> {
+  if nanos == 0 { None } else { Some(Duration::from_nanos(nanos)) }
+}
+
+/// The error a socket holds (`SO_ERROR`), which it forgets.
+fn pending_error(handle: usize) -> Result<Option<io::Error>, io::Error> {
+  const code = checked(sys::socket_option(handle, sys::OPTION_ERROR))?;
+
+  Ok(if code == 0 { None } else { Some(super::os_error(code, "")) })
+}
+
 /// The result of a call of `std::sys`, its failure an `io::Error` with the system's message.
 fn checked<T>(result: Result<T, i32>) -> Result<T, io::Error> {
   match result {
@@ -1124,6 +1145,30 @@ pub class TcpListener impl Drop {
     Ok(of_raw(checked(sys::socket_address(self.handle, false))?))
   }
 
+  /// The time to live of the IP packets it sends.
+  pub fn set_ttl(self, ttl: u32) -> Result<(), io::Error> {
+    checked(sys::set_socket_option(self.handle, sys::OPTION_TTL, ttl as i32))
+  }
+
+  pub fn ttl(self) -> Result<u32, io::Error> {
+    Ok(checked(sys::socket_option(self.handle, sys::OPTION_TTL))? as u32)
+  }
+
+  /// Whether an operation that would wait is the error `WouldBlock` instead.
+  pub fn set_nonblocking(self, nonblocking: bool) -> Result<(), io::Error> {
+    checked(sys::socket_set_nonblocking(self.handle, nonblocking))
+  }
+
+  /// The error the socket holds, which it forgets.
+  pub fn take_error(self) -> Result<Option<io::Error>, io::Error> {
+    pending_error(self.handle)
+  }
+
+  /// Another TcpListener of the same socket, which shares its options.
+  pub fn try_clone(self) -> Result<TcpListener, io::Error> {
+    Ok(new TcpListener(checked(sys::socket_duplicate(self.handle))?))
+  }
+
   /// The descriptor (POSIX) or `SOCKET` (Windows) of the system, which stays the listener's.
   pub fn as_raw_handle(self) -> usize {
     self.handle
@@ -1158,6 +1203,17 @@ pub class TcpStream impl Read, Write, Drop {
   /// A connection to the first address of `addr` that accepts one.
   pub fn connect<A: ToSocketAddrs>(addr: A) -> Result<TcpStream, io::Error> {
     each_addr(addr, (found) => TcpStream::connect_one(found))
+  }
+
+  /// A connection to `addr`, waiting at most `timeout` for it, as Rust's: a zero duration is
+  /// `InvalidInput`, and a connection that does not come in time `TimedOut`.
+  pub fn connect_timeout(addr: SocketAddr, timeout: Duration) -> Result<TcpStream, io::Error> {
+    const nanos = timeout_nanos(Some(timeout))?;
+    const raw = raw_of(addr);
+    const stream = new TcpStream(checked(sys::socket_open(raw.v6, false))?);
+
+    checked(sys::socket_connect_timeout(stream.handle, raw, nanos))?;
+    Ok(stream)
   }
 
   prv fn connect_one(addr: SocketAddr) -> Result<TcpStream, io::Error> {
@@ -1203,6 +1259,64 @@ pub class TcpStream impl Read, Write, Drop {
     };
 
     checked(sys::socket_shutdown(self.handle, code))
+  }
+
+  /// Waits at most `timeout` in a read, or forever with `None`; a zero duration is
+  /// `InvalidInput`. A read whose time runs out is an error of kind `WouldBlock` or `TimedOut`, as
+  /// the system gives it.
+  pub fn set_read_timeout(self, timeout: Option<Duration>) -> Result<(), io::Error> {
+    checked(sys::socket_set_timeout(self.handle, false, timeout_nanos(timeout)?))
+  }
+
+  /// The same for a write.
+  pub fn set_write_timeout(self, timeout: Option<Duration>) -> Result<(), io::Error> {
+    checked(sys::socket_set_timeout(self.handle, true, timeout_nanos(timeout)?))
+  }
+
+  pub fn read_timeout(self) -> Result<Option<Duration>, io::Error> {
+    Ok(timeout_of(checked(sys::socket_timeout(self.handle, false))?))
+  }
+
+  pub fn write_timeout(self) -> Result<Option<Duration>, io::Error> {
+    Ok(timeout_of(checked(sys::socket_timeout(self.handle, true))?))
+  }
+
+  /// The time to live of the IP packets it sends.
+  pub fn set_ttl(self, ttl: u32) -> Result<(), io::Error> {
+    checked(sys::set_socket_option(self.handle, sys::OPTION_TTL, ttl as i32))
+  }
+
+  pub fn ttl(self) -> Result<u32, io::Error> {
+    Ok(checked(sys::socket_option(self.handle, sys::OPTION_TTL))? as u32)
+  }
+
+  /// Whether an operation that would wait is the error `WouldBlock` instead.
+  pub fn set_nonblocking(self, nonblocking: bool) -> Result<(), io::Error> {
+    checked(sys::socket_set_nonblocking(self.handle, nonblocking))
+  }
+
+  /// The error the socket holds, which it forgets.
+  pub fn take_error(self) -> Result<Option<io::Error>, io::Error> {
+    pending_error(self.handle)
+  }
+
+  /// Another TcpStream of the same socket, which shares its options.
+  pub fn try_clone(self) -> Result<TcpStream, io::Error> {
+    Ok(new TcpStream(checked(sys::socket_duplicate(self.handle))?))
+  }
+
+  /// Whether small writes are sent at once (`TCP_NODELAY`), instead of waiting to be joined.
+  pub fn set_nodelay(self, nodelay: bool) -> Result<(), io::Error> {
+    checked(sys::set_socket_option(self.handle, sys::OPTION_NODELAY, if nodelay { 1 } else { 0 }))
+  }
+
+  pub fn nodelay(self) -> Result<bool, io::Error> {
+    Ok(checked(sys::socket_option(self.handle, sys::OPTION_NODELAY))? != 0)
+  }
+
+  /// The bytes `read` would give, which it leaves to read.
+  pub fn peek(self, buffer: &mut [u8]) -> Result<usize, io::Error> {
+    checked(sys::socket_recv(self.handle, buffer.as_mut_ptr(), buffer.len(), sys::MSG_PEEK))
   }
 
   /// The descriptor (POSIX) or `SOCKET` (Windows) of the system, which stays the stream's.
@@ -1294,6 +1408,71 @@ pub class UdpSocket impl Drop {
   /// The address it is bound to.
   pub fn local_addr(self) -> Result<SocketAddr, io::Error> {
     Ok(of_raw(checked(sys::socket_address(self.handle, false))?))
+  }
+
+  /// Waits at most `timeout` in a read, or forever with `None`; a zero duration is
+  /// `InvalidInput`. A read whose time runs out is an error of kind `WouldBlock` or `TimedOut`, as
+  /// the system gives it.
+  pub fn set_read_timeout(self, timeout: Option<Duration>) -> Result<(), io::Error> {
+    checked(sys::socket_set_timeout(self.handle, false, timeout_nanos(timeout)?))
+  }
+
+  /// The same for a write.
+  pub fn set_write_timeout(self, timeout: Option<Duration>) -> Result<(), io::Error> {
+    checked(sys::socket_set_timeout(self.handle, true, timeout_nanos(timeout)?))
+  }
+
+  pub fn read_timeout(self) -> Result<Option<Duration>, io::Error> {
+    Ok(timeout_of(checked(sys::socket_timeout(self.handle, false))?))
+  }
+
+  pub fn write_timeout(self) -> Result<Option<Duration>, io::Error> {
+    Ok(timeout_of(checked(sys::socket_timeout(self.handle, true))?))
+  }
+
+  /// The time to live of the IP packets it sends.
+  pub fn set_ttl(self, ttl: u32) -> Result<(), io::Error> {
+    checked(sys::set_socket_option(self.handle, sys::OPTION_TTL, ttl as i32))
+  }
+
+  pub fn ttl(self) -> Result<u32, io::Error> {
+    Ok(checked(sys::socket_option(self.handle, sys::OPTION_TTL))? as u32)
+  }
+
+  /// Whether an operation that would wait is the error `WouldBlock` instead.
+  pub fn set_nonblocking(self, nonblocking: bool) -> Result<(), io::Error> {
+    checked(sys::socket_set_nonblocking(self.handle, nonblocking))
+  }
+
+  /// The error the socket holds, which it forgets.
+  pub fn take_error(self) -> Result<Option<io::Error>, io::Error> {
+    pending_error(self.handle)
+  }
+
+  /// Another UdpSocket of the same socket, which shares its options.
+  pub fn try_clone(self) -> Result<UdpSocket, io::Error> {
+    Ok(new UdpSocket(checked(sys::socket_duplicate(self.handle))?))
+  }
+
+  /// Whether it may send to broadcast addresses.
+  pub fn set_broadcast(self, broadcast: bool) -> Result<(), io::Error> {
+    checked(sys::set_socket_option(self.handle, sys::OPTION_BROADCAST, if broadcast { 1 } else { 0 }))
+  }
+
+  pub fn broadcast(self) -> Result<bool, io::Error> {
+    Ok(checked(sys::socket_option(self.handle, sys::OPTION_BROADCAST))? != 0)
+  }
+
+  /// The datagram `recv_from` would give, which it leaves to receive.
+  pub fn peek_from(self, buffer: &mut [u8]) -> Result<(usize, SocketAddr), io::Error> {
+    const received = checked(sys::socket_recv_from(self.handle, buffer.as_mut_ptr(), buffer.len(), sys::MSG_PEEK))?;
+
+    Ok((received.0, of_raw(received.1)))
+  }
+
+  /// The datagram `recv` would give, which it leaves to receive.
+  pub fn peek(self, buffer: &mut [u8]) -> Result<usize, io::Error> {
+    checked(sys::socket_recv(self.handle, buffer.as_mut_ptr(), buffer.len(), sys::MSG_PEEK))
   }
 
   /// The descriptor (POSIX) or `SOCKET` (Windows) of the system, which stays the socket's.

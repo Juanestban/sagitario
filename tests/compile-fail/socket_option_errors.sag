@@ -1,0 +1,15 @@
+// The types the options of sockets take (docs/adr/0100-networking.md, Q696).
+use std::net::{TcpStream, UdpSocket};
+use std::time::Duration;
+
+fn main() {
+  const stream = TcpStream::connect("127.0.0.1:9").unwrap();
+  const socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+
+  stream.set_read_timeout(Duration::from_secs(1)).unwrap(); //~ ERROR E0300
+  stream.set_ttl(-1).unwrap(); //~ ERROR E0310
+  stream.set_nodelay(1).unwrap(); //~ ERROR E0300
+  socket.set_broadcast("yes").unwrap(); //~ ERROR E0300
+
+  const _a = TcpStream::connect_timeout("127.0.0.1:9", Duration::from_secs(1)); //~ ERROR E0300
+}

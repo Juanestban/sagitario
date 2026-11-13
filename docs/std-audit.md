@@ -154,8 +154,8 @@ The audit of the library found gaps of the language itself, which the library ne
 | Rust | Sagitario | State | Notes |
 |---|---|---|---|
 | `IpAddr`, `Ipv4Addr`, `Ipv6Addr`, `SocketAddr`, `SocketAddrV4`, `SocketAddrV6`, `AddrParseError` | `std::net` | ✅ | Rust's text, parsing (`TryFrom<String>`, Rust's `FromStr`), order and constants ([ADR-0100](adr/0100-networking.md), increment 1) |
-| `TcpListener`, `TcpStream`, `ToSocketAddrs`, `Shutdown` | `std::net` | 🟡 | Blocking sockets on `Read` and `Write`, `Send`, closed by `Drop`; the compiler implements `ToSocketAddrs` for `String` and the pairs with a port ([ADR-0100](adr/0100-networking.md), increment 2). Missing: the options of increment 4 (timeouts, `nonblocking`, `nodelay`, `ttl`, `peek`, `try_clone`, `take_error`, `connect_timeout`). TLS and HTTP are Nova packages, as in Rust |
-| `UdpSocket` | `std::net::UdpSocket` | 🟡 | `bind`, `send_to`, `recv_from`, `connect`, `send`, `recv`, `peer_addr`, `local_addr`; a datagram is cut to the buffer on every system ([ADR-0100](adr/0100-networking.md), increment 3). Missing: the options of increment 4 (timeouts, `nonblocking`, `ttl`, `broadcast`, `peek`, `peek_from`, `try_clone`, `take_error`); multicast is a record of its own |
+| `TcpListener`, `TcpStream`, `ToSocketAddrs`, `Shutdown` | `std::net` | ✅ | Blocking sockets on `Read` and `Write`, `Send`, closed by `Drop`; the compiler implements `ToSocketAddrs` for `String` and the pairs with a port; time outs, `nonblocking`, `nodelay`, `ttl`, `peek`, `try_clone`, `take_error` and `connect_timeout` ([ADR-0100](adr/0100-networking.md), increments 2 and 4). `set_linger` and `set_only_v6` are left out; TLS and HTTP are Nova packages, as in Rust |
+| `UdpSocket` | `std::net::UdpSocket` | ✅ | `bind`, `send_to`, `recv_from`, `connect`, `send`, `recv`, `peer_addr`, `local_addr`, a datagram cut to the buffer on every system, and time outs, `nonblocking`, `ttl`, `broadcast`, `peek`, `peek_from`, `try_clone`, `take_error` ([ADR-0100](adr/0100-networking.md), increments 3 and 4). Multicast is a record of its own |
 
 ### Processes and environment (`process`, `env`)
 
@@ -235,7 +235,8 @@ From what most programs need to what fewer do. Each line is one record, or a few
 8. **Processes and environment:** `spawn` and `Child`, redirection, the rest of `env`.
 9. **Concurrency:** `RwLock`, `Condvar`, `Barrier`, bounded channels, `try_lock`, thread names and
    ids, and atomic orderings. ✅ ([ADR-0098](adr/0098-locks-orderings-and-threads.md))
-10. **Networking:** TCP and UDP sockets on the streams of 7.
+10. **Networking:** TCP and UDP sockets on the streams of 7. ✅
+    ([ADR-0100](adr/0100-networking.md))
 
 **Acceptance of S2** ([roadmap](roadmap-v2.md#s2-a-complete-standard-library)): every row above is
 ✅, ➖ or ⛔ with its reason, and the benchmarks run, locally, with their results recorded

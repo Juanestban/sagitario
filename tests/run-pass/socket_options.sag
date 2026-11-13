@@ -1,0 +1,187 @@
+// The options of sockets: time outs, non-blocking sockets, `TCP_NODELAY`, the time to live,
+// broadcasting, `peek`, `try_clone`, `take_error` and `connect_timeout`
+// (docs/adr/0100-networking.md, Q696). The harness runs it with ThreadSanitizer where the C
+// compiler has it, and fails it on any leak.
+// sanitize: thread
+// expect-stdout: timeout: true true | zero: InvalidInput cannot set a 0 duration timeout | none: None
+// expect-stdout: nodelay: true false | ttl: 100 | error: None
+// expect-stdout: peek: 5 hello | read: hello | clone: from the clone
+// expect-stdout: nonblocking: WouldBlock | blocking again: data
+// expect-stdout: connect_timeout: true | zero: InvalidInput
+// expect-stdout: listener: WouldBlock 64 None | clone accepts: true
+// expect-stdout: udp: true false | ttl 77 | peek_from: ping true | recv_from: ping | peek: pong | clone: true
+// expect-stdout: udp timeout: true
+
+use std::io::{Error, ErrorKind};
+use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream, UdpSocket};
+use std::thread;
+use std::time::Duration;
+
+fn buffer(size: usize) -> List<u8> {
+  const bytes: List<u8> = new List();
+
+  bytes.resize(size, 0);
+  bytes
+}
+
+fn text(bytes: List<u8>, count: usize) -> String {
+  bytes.truncate(count);
+  String::from_utf8_lossy(bytes)
+}
+
+fn bytes_of(value: String) -> List<u8> {
+  value.bytes().collect()
+}
+
+/// Whether an error is what a read whose time ran out gives: `WouldBlock` on POSIX systems,
+/// `TimedOut` on Windows.
+fn ran_out(error: Error) -> bool {
+  error.kind() == ErrorKind::WouldBlock || error.kind() == ErrorKind::TimedOut
+}
+
+fn main() {
+  const listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+  const address = listener.local_addr().unwrap();
+  const client = TcpStream::connect(address).unwrap();
+  const served = listener.accept().unwrap().0;
+
+  // A read waits at most its time out.
+  client.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
+
+  const waited = match client.read(&mut buffer(8)) {
+    Ok(_) => false,
+    Err(error) => ran_out(error),
+  };
+  const set = match client.read_timeout().unwrap() {
+    Some(found) => found.as_millis() >= 50,
+    None => false,
+  };
+  const zero = match client.set_write_timeout(Some(Duration::from_secs(0))) {
+    Ok(_) => "set",
+    Err(error) => f"{error.kind():?} {error.message()}",
+  };
+
+  client.set_read_timeout(None).unwrap();
+  println(f"timeout: {waited} {set} | zero: {zero} | none: {client.read_timeout().unwrap():?}");
+
+  // Integer options.
+  client.set_nodelay(true).unwrap();
+
+  const on = client.nodelay().unwrap();
+
+  client.set_nodelay(false).unwrap();
+  client.set_ttl(100).unwrap();
+  const held = match client.take_error().unwrap() {
+    Some(error) => error.message(),
+    None => "None",
+  };
+
+  println(f"nodelay: {on} {client.nodelay().unwrap()} | ttl: {client.ttl().unwrap()} | error: {held}");
+
+  // `peek` leaves the bytes to read; a clone shares the socket.
+  served.write_str("hello").unwrap();
+
+  const peeked = buffer(5);
+  var count = 0usize;
+
+  // The bytes may come in pieces.
+  while count < 5 {
+    count = client.peek(&mut peeked).unwrap();
+  }
+
+  const read = buffer(5);
+
+  client.read_exact(&mut read).unwrap();
+
+  const copy = served.try_clone().unwrap();
+
+  copy.write_str("from the clone").unwrap();
+  copy.shutdown(Shutdown::Write).unwrap();
+  println(f"peek: {count} {text(peeked, 5)} | read: {text(read, 5)} | clone: {client.read_to_string().unwrap()}");
+
+  // A socket that does not wait.
+  const second = TcpStream::connect(address).unwrap();
+  const second_served = listener.accept().unwrap().0;
+
+  second.set_nonblocking(true).unwrap();
+
+  const would_block = match second.read(&mut buffer(8)) {
+    Ok(_) => "data",
+    Err(error) => f"{error.kind():?}",
+  };
+
+  second.set_nonblocking(false).unwrap();
+  second_served.write_str("data").unwrap();
+  second_served.shutdown(Shutdown::Write).unwrap();
+  println(f"nonblocking: {would_block} | blocking again: {second.read_to_string().unwrap()}");
+
+  // A connection within a time.
+  const timed = TcpStream::connect_timeout(address, Duration::from_secs(5)).unwrap();
+  const timed_served = listener.accept().unwrap().0;
+  const zero_connect = match TcpStream::connect_timeout(address, Duration::from_millis(0)) {
+    Ok(_) => "connected",
+    Err(error) => f"{error.kind():?}",
+  };
+
+  println(f"connect_timeout: {timed.peer_addr().unwrap() == timed_served.local_addr().unwrap()} | zero: {zero_connect}");
+
+  // A listener that does not wait, and a clone that accepts.
+  listener.set_nonblocking(true).unwrap();
+
+  const none_waiting = match listener.accept() {
+    Ok(_) => "accepted",
+    Err(error) => f"{error.kind():?}",
+  };
+
+  listener.set_nonblocking(false).unwrap();
+  listener.set_ttl(64).unwrap();
+
+  const pending = match listener.take_error().unwrap() {
+    Some(error) => error.message(),
+    None => "None",
+  };
+  const twin = listener.try_clone().unwrap();
+  const connector = thread::spawn(() => TcpStream::connect(address).is_ok());
+  const accepted = twin.accept().is_ok();
+
+  println(f"listener: {none_waiting} {listener.ttl().unwrap()} {pending} | clone accepts: {accepted && connector.join()}");
+
+  // UDP.
+  const a = UdpSocket::bind("127.0.0.1:0").unwrap();
+  const b = UdpSocket::bind("127.0.0.1:0").unwrap();
+  const b_addr: SocketAddr = b.local_addr().unwrap();
+
+  a.set_broadcast(true).unwrap();
+
+  const broadcasting = a.broadcast().unwrap();
+
+  a.set_broadcast(false).unwrap();
+  a.set_ttl(77).unwrap();
+  print(f"udp: {broadcasting} {a.broadcast().unwrap()} | ttl {a.ttl().unwrap()} | ");
+  a.send_to(&bytes_of("ping"), b_addr).unwrap();
+
+  const looked = buffer(16);
+  const peek = b.peek_from(&mut looked).unwrap();
+  const got = buffer(16);
+  const received = b.recv_from(&mut got).unwrap();
+
+  print(f"peek_from: {text(looked, peek.0)} {peek.1 == received.1} | recv_from: {text(got, received.0)} | ");
+  b.connect(a.local_addr().unwrap()).unwrap();
+  a.try_clone().unwrap().send_to(&bytes_of("pong"), b_addr).unwrap();
+
+  const peeked_datagram = buffer(16);
+  const peeked_count = b.peek(&mut peeked_datagram).unwrap();
+  const after = buffer(16);
+  const after_count = b.recv(&mut after).unwrap();
+
+  println(f"peek: {text(peeked_datagram, peeked_count)} | clone: {text(after, after_count) == "pong"}");
+
+  b.set_read_timeout(Some(Duration::from_millis(30))).unwrap();
+
+  const udp_waited = match b.recv(&mut buffer(16)) {
+    Ok(_) => false,
+    Err(error) => ran_out(error),
+  };
+
+  println(f"udp timeout: {udp_waited}");
+}

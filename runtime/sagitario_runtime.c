@@ -14,6 +14,7 @@
 #include <string.h>
 
 #ifndef _WIN32
+#include <fcntl.h>
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
@@ -2260,3 +2261,21 @@ int sag_rt_finish(void) {
   }
   return 0;
 }
+
+/* ---- Sockets (docs/adr/0100-networking.md, Q696) ----------------------------------------- */
+
+#ifndef _WIN32
+/* `fcntl` is variadic, which declarations in Sagitario cannot call (docs/spec/10-ffi.md). */
+int sag_socket_nonblocking(int fd, int on) {
+  int flags = fcntl(fd, F_GETFL);
+  if (flags < 0) {
+    return -1;
+  }
+  flags = on ? (flags | O_NONBLOCK) : (flags & ~O_NONBLOCK);
+  return fcntl(fd, F_SETFL, flags);
+}
+
+int sag_socket_duplicate(int fd) {
+  return fcntl(fd, F_DUPFD_CLOEXEC, 0);
+}
+#endif

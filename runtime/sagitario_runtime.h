@@ -1144,6 +1144,15 @@ _Noreturn void sag_process_abort(void);
 uint64_t sag_time_monotonic(void);
 void sag_time_sleep(uint64_t nanos);
 
+/* ---- Sockets (docs/adr/0100-networking.md, Q696) ----------------------------------------- */
+
+#ifndef _WIN32
+/* Make a socket non-blocking (`on`) or blocking, and duplicate one, closed in the programs this one
+ * starts: `fcntl` for `std::sys`, which cannot call variadic functions. -1 and `errno` on failure. */
+int sag_socket_nonblocking(int fd, int on);
+int sag_socket_duplicate(int fd);
+#endif
+
 /* ---- Threads (compiled with SAG_THREADS) ------------------------------------------------ */
 
 /* What the core does for each thread of `std::thread`, which `std::sys` starts and joins with the
