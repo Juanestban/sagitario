@@ -519,6 +519,41 @@ pub fn stream(index: i32) -> *mut c_void {
   unsafe { __acrt_iob_func(index as u32) }
 }
 
+/// The lock of a C stream, which each of its functions takes too, so that a series of writes
+/// holding it is not interleaved with other threads' (docs/adr/0096-streams-files-and-drop.md,
+/// Q660).
+@cfg(unix)
+extern "C" {
+  fn flockfile(stream: *mut c_void);
+  fn funlockfile(stream: *mut c_void);
+}
+
+@cfg(windows)
+extern "C" {
+  fn _lock_file(stream: *mut c_void);
+  fn _unlock_file(stream: *mut c_void);
+}
+
+@cfg(unix)
+pub fn lock_stream(index: i32) {
+  unsafe { flockfile(stream(index)); }
+}
+
+@cfg(unix)
+pub fn unlock_stream(index: i32) {
+  unsafe { funlockfile(stream(index)); }
+}
+
+@cfg(windows)
+pub fn lock_stream(index: i32) {
+  unsafe { _lock_file(stream(index)); }
+}
+
+@cfg(windows)
+pub fn unlock_stream(index: i32) {
+  unsafe { _unlock_file(stream(index)); }
+}
+
 @cfg(unix)
 extern "C" {
   fn isatty(fd: c_int) -> c_int;

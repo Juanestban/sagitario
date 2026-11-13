@@ -1,0 +1,18 @@
+// `BufRead`, `BufReader`, `BufWriter` and the standard streams (docs/adr/0096-streams-files-and-drop.md,
+// Q658 and Q660).
+use std::io;
+use std::io::{BufReader, BufWriter};
+
+struct Plain {
+  pub x: i32;
+}
+
+fn main() -> Result<(), io::Error> {
+  const _reader = new BufReader(Plain { x: 1 }); //~ ERROR E0330
+  const _writer = new BufWriter(io::stdin()); //~ ERROR E0330
+  const _bad = BufReader::new(io::stdin()); //~ ERROR E0314
+  const out = io::stdout();
+
+  out.read_line()?; //~ ERROR E0316
+  Ok(())
+}

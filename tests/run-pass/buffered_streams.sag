@@ -1,0 +1,106 @@
+// `BufRead`, `BufReader`, `BufWriter` and the standard streams: lines across the buffer's refills,
+// reads larger and smaller than the buffer, a writer flushed by `flush` and by its `drop` before
+// its inner file closes, stdin as a reader of lines, and stdout and stderr as writers, with stdout
+// held by its lock (docs/adr/0096-streams-files-and-drop.md, Q658 and Q660).
+// stdin: first
+// stdin: second line
+// expect-stdout: ["one", "two words", "", "three"] 3 eof
+// expect-stdout: abcdefghij | kl mnop
+// expect-stdout: 0 | 26 | dropped 6
+// expect-stdout: hello from a lock
+// expect-stdout: [first] [second line]
+// expect-stdout: 8192 4096
+
+use std::fs;
+use std::fs::File;
+use std::io;
+use std::io::{BufReader, BufWriter, Read, Write};
+
+fn lines_of<R: Read>(reader: BufReader<R>) -> List<String> {
+  const found = new List<String>();
+
+  for line in reader.lines() {
+    found.push(line.unwrap());
+  }
+
+  found
+}
+
+fn main() -> Result<(), io::Error> {
+  fs::write("lines.txt", "one\r\ntwo words\n\nthree")?;
+
+  // A buffer of 3 bytes makes every line cross refills.
+  const small = BufReader::with_capacity(3, File::open("lines.txt")?);
+  const lines = lines_of(small);
+  const counted = BufReader::with_capacity(4, File::open("lines.txt")?);
+
+  counted.read_line()?;
+  counted.read_line()?;
+  counted.read_line()?;
+
+  const last = counted.read_line()?.unwrap();
+  const after = match counted.read_line()? {
+    Some(_) => "more",
+    None => "eof",
+  };
+
+  println(f"{lines:?} {last.len() - 2} {after}");
+
+  fs::write("letters.txt", "abcdefghijklmnopqrstuvwxyz")?;
+
+  // A read as large as the buffer skips it; a smaller one is served from it.
+  const reader = BufReader::with_capacity(4, File::open("letters.txt")?);
+  const large = new List<u8>();
+  const pair = new List<u8>();
+  const four = new List<u8>();
+
+  large.resize(10, 0);
+  pair.resize(2, 0);
+  four.resize(4, 0);
+  reader.read_exact(&mut large)?;
+  reader.read_exact(&mut pair)?;
+  reader.read_exact(&mut four)?;
+  println(f"{String::from_utf8(large).unwrap()} | {String::from_utf8(pair).unwrap()} {String::from_utf8(four).unwrap()}");
+
+  // What a writer holds reaches the file on `flush`, and on its `drop`, before the file closes.
+  const writer = BufWriter::with_capacity(64, File::create("written.txt")?);
+
+  writer.write_str("not yet")?;
+
+  const before = fs::read_to_string("written.txt")?.len();
+
+  writer.write_str(" abcdefghijklmnopqr")?;
+  writer.flush()?;
+
+  const flushed = fs::read_to_string("written.txt")?.len();
+
+  {
+    const dropped = new BufWriter(File::create("dropped.txt")?);
+
+    dropped.write_str("byebye")?;
+  }
+
+  println(f"{before} | {flushed} | dropped {fs::read_to_string("dropped.txt")?.len()}");
+
+  {
+    const lock = io::stdout().lock();
+
+    lock.write_str("hello ")?;
+    lock.write_str("from a lock\n")?;
+    lock.flush()?;
+  }
+
+  const input = io::stdin();
+  const first = input.read_line()?.unwrap();
+  const rest = new BufReader(input).lines().map((line) => f"[{line.unwrap()}]").collect();
+
+  println(f"[{first}] {rest.join(" ")}");
+  io::stderr().write_str("to stderr\n")?;
+  println(f"{new BufReader(io::stdin()).capacity()} {BufWriter::with_capacity(4096, io::stdout()).capacity()}");
+
+  for name in List::from(["lines.txt", "letters.txt", "written.txt", "dropped.txt"]) {
+    fs::remove_file(name)?;
+  }
+
+  Ok(())
+}

@@ -141,8 +141,8 @@ The audit of the library found gaps of the language itself, which the library ne
 
 | Rust | Sagitario | State | Notes |
 |---|---|---|---|
-| `stdin`, `stdout`, `stderr`, `print!` | `std::io` | 🟡 | Lines, whole input, exact bytes, terminals. Missing: reading bytes (`List<u8>`) from stdin, writing bytes, locking for a series of writes |
-| `Read`, `Write`, `BufRead`, `BufReader`, `BufWriter` | `Read`, `Write` | 🟡 | On slices, as Rust's ([ADR-0096](adr/0096-streams-files-and-drop.md), increment 2); the buffers are increment 3 |
+| `stdin`, `stdout`, `stderr`, `print!` | `std::io` | ✅ | Lines, whole input, exact bytes, terminals, and `Stdin`, `Stdout`, `Stderr` as readers and writers of bytes, with `Stdout::lock` ([ADR-0096](adr/0096-streams-files-and-drop.md), increment 3) |
+| `Read`, `Write`, `BufRead`, `BufReader`, `BufWriter` | ✅ | ✅ | On slices, as Rust's; `BufRead` has `read_line` and `lines` for want of a lent buffer ([ADR-0096](adr/0096-streams-files-and-drop.md), increments 2 and 3) |
 | `fs::read`, `write`, `read_to_string`, `create_dir(_all)`, `remove_*`, `rename`, `copy`, `read_dir` | ✅ | ✅ | |
 | `File` (open, read in parts, seek, append) | `File`, `OpenOptions`, `SeekFrom` | ✅ | Closed by `Drop` or by `close` ([ADR-0096](adr/0096-streams-files-and-drop.md), increment 2) |
 | `fs::metadata` (size, times, permissions), `remove_dir_all`, `canonicalize`, `symlink` | — | ❌ | Spec 11 lists them as "not yet" |

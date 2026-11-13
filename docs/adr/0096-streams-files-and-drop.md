@@ -52,7 +52,7 @@ fn main() -> Result<(), io::Error> {
 
   log.write_str("started\n")?;
 
-  for line in BufReader::new(File::open("input.txt")?).lines() {
+  for line in new BufReader(File::open("input.txt")?).lines() {
     println(line?);
   }
 
@@ -108,3 +108,10 @@ fn main() -> Result<(), io::Error> {
   methods give copies, since a class cannot be made by `OpenOptions::new()`; and `OpenOptions`,
   another type, makes its `File` through `unsafe File::from_raw_handle`, as Rust's `from_raw_fd`,
   since the initializer of `File` is private to it.
+- Increment 3 is done. `BufReader` and `BufWriter` are made with `new BufReader(inner)` and
+  `new BufWriter(inner)`, not Rust's `BufReader::new`, since `new` of a class is its initializer
+  (spec 4); the example above writes it so. `Stdin`, `Stdout` and `Stderr` go through C's streams,
+  which `io::read_line` and `print` use, so their buffers are one; `Stdin::read` stops at the end
+  of a line, since `fread` would wait for a whole buffer from a terminal. `Stdout::lock` takes the
+  lock of C's stream, `flockfile` or Windows's `_lock_file`, which each function of the stream
+  takes too, so `print` from another thread waits for the lock's `drop`.

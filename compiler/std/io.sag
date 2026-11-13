@@ -327,3 +327,326 @@ pub enum SeekFrom {
   End(i64),
   Current(i64),
 }
+
+// ---- Buffers and the standard streams (docs/adr/0096-streams-files-and-drop.md, Q658, Q660) ----
+
+/// A reader whose input comes in lines, as Rust's `BufRead`. Rust's `fill_buf` lends its buffer,
+/// which Sagitario cannot; `read_line` stands for its uses.
+pub interface BufRead extends Read {
+  /// The next line without its `\n` or `\r\n`, or `None` at the end. Bytes that are not UTF-8 are
+  /// an error of kind `InvalidData`.
+  fn read_line(self) -> Result<Option<String>, Error>;
+
+  /// The lines left, each one or the error reading it.
+  fn lines(self) -> Iter<Result<String, Error>> {
+    const source = self;
+
+    new Iter<Result<String, Error>>(() => match source.read_line() {
+      Ok(Some(line)) => Some(Ok(line)),
+      Ok(None) => None,
+      Err(error) => Some(Err(error)),
+    })
+  }
+}
+
+/// The text of a line read, without its `\r`.
+fn line_text(line: List<u8>) -> Result<String, Error> {
+  if !line.is_empty() && line[line.len() - 1] == 13 {
+    line.resize(line.len() - 1, 0);
+  }
+
+  text_of(&line)
+}
+
+/// A reader of any `Read` through a buffer, as Rust's `BufReader`: few reads of the inner reader,
+/// and lines (Q658).
+pub class BufReader<R: Read> impl Read, BufRead {
+  prv var inner: R;
+  prv const buffer: List<u8>;
+  /// The next byte of `buffer` to give, and the end of those read.
+  prv var position: usize;
+  prv var filled: usize;
+
+  /// A reader with a buffer of 8 KiB, as Rust's.
+  pub fn new(self, inner: R) {
+    self.inner = inner;
+    self.buffer = new List<u8>();
+    self.buffer.resize(8192, 0);
+    self.position = 0;
+    self.filled = 0;
+  }
+
+  /// A reader with a buffer of `capacity` bytes, at least one.
+  pub fn with_capacity(capacity: usize, inner: R) -> BufReader<R> {
+    const reader = new BufReader<R>(inner);
+
+    reader.buffer.resize(max(capacity, 1), 0);
+    reader
+  }
+
+  /// The inner reader.
+  pub fn get_ref(self) -> R {
+    self.inner
+  }
+
+  pub fn capacity(self) -> usize {
+    self.buffer.len()
+  }
+
+  /// The bytes the buffer holds still, reading more when it holds none; `0` at the end.
+  prv fn fill(self) -> Result<usize, Error> {
+    if self.position >= self.filled {
+      const buffer = self.buffer;
+
+      self.filled = self.inner.read(&mut buffer)?;
+      self.position = 0;
+    }
+
+    Ok(self.filled - self.position)
+  }
+
+  pub fn read(self, out: &mut [u8]) -> Result<usize, Error> {
+    // A read as large as the buffer, with nothing in it, skips it.
+    if self.position >= self.filled && out.len() >= self.buffer.len() {
+      return self.inner.read(out);
+    }
+
+    const available = self.fill()?;
+    const count = min(available, out.len());
+
+    for index in 0..count {
+      out[index] = self.buffer[self.position + index];
+    }
+
+    self.position += count;
+    Ok(count)
+  }
+
+  pub fn read_line(self) -> Result<Option<String>, Error> {
+    const line = new List<u8>();
+    var any = false;
+
+    loop {
+      if self.fill()? == 0 {
+        break;
+      }
+
+      any = true;
+
+      var end = self.position;
+
+      while end < self.filled && self.buffer[end] != 10 {
+        end += 1;
+      }
+
+      for index in self.position..end {
+        line.push(self.buffer[index]);
+      }
+
+      if end < self.filled {
+        self.position = end + 1;
+        break;
+      }
+
+      self.position = end;
+    }
+
+    if !any {
+      return Ok(None);
+    }
+
+    Ok(Some(line_text(line)?))
+  }
+}
+
+/// A writer to any `Write` through a buffer, as Rust's `BufWriter`: its writes reach the inner
+/// writer when the buffer is full, on `flush`, and on its `drop`, which, as Rust's, loses an
+/// error there; `flush` reports it (Q658).
+pub class BufWriter<W: Write> impl Write, Drop {
+  prv var inner: W;
+  prv const buffer: List<u8>;
+  prv var limit: usize;
+
+  /// A writer with a buffer of 8 KiB, as Rust's.
+  pub fn new(self, inner: W) {
+    self.inner = inner;
+    self.buffer = new List<u8>();
+    self.limit = 8192;
+  }
+
+  /// A writer with a buffer of `capacity` bytes.
+  pub fn with_capacity(capacity: usize, inner: W) -> BufWriter<W> {
+    const writer = new BufWriter<W>(inner);
+
+    writer.limit = capacity;
+    writer
+  }
+
+  /// The inner writer.
+  pub fn get_ref(self) -> W {
+    self.inner
+  }
+
+  pub fn capacity(self) -> usize {
+    self.limit
+  }
+
+  /// Writes what the buffer holds to the inner writer.
+  prv fn flush_buffer(self) -> Result<(), Error> {
+    if self.buffer.is_empty() {
+      return Ok(());
+    }
+
+    const pending = self.buffer;
+
+    self.inner.write_all(&pending)?;
+    self.buffer.clear();
+    Ok(())
+  }
+
+  pub fn write(self, bytes: &[u8]) -> Result<usize, Error> {
+    if self.buffer.len() + bytes.len() > self.limit {
+      self.flush_buffer()?;
+    }
+
+    // Bytes as many as the buffer holds go straight to the inner writer.
+    if bytes.len() >= self.limit {
+      return self.inner.write(bytes);
+    }
+
+    for index in 0..bytes.len() {
+      self.buffer.push(bytes[index]);
+    }
+
+    Ok(bytes.len())
+  }
+
+  pub fn flush(self) -> Result<(), Error> {
+    self.flush_buffer()?;
+    self.inner.flush()
+  }
+
+  pub fn drop(self) {
+    if self.flush_buffer().is_err() {
+      return;
+    }
+  }
+}
+
+/// The program's standard input as a reader, as Rust's `Stdin`: the stream `read_line` reads, so
+/// the two can be mixed (Q660).
+pub class Stdin impl Read, BufRead {
+  pub fn new(self) {}
+
+  /// The bytes available, up to the end of a line, so that a terminal is not waited on for more.
+  pub fn read(self, buffer: &mut [u8]) -> Result<usize, Error> {
+    const stream = sys::stream(0);
+    var count = 0usize;
+
+    sys::clear_errno();
+
+    while count < buffer.len() {
+      const c = unsafe { sys::getc(stream) };
+
+      // `EOF`, a negative value.
+      if c < 0 {
+        if unsafe { sys::ferror(stream) } != 0 {
+          return Err(read_error(stream));
+        }
+
+        break;
+      }
+
+      buffer[count] = c as u8;
+      count += 1;
+
+      if c == 10 {
+        break;
+      }
+    }
+
+    Ok(count)
+  }
+
+  pub fn read_line(self) -> Result<Option<String>, Error> {
+    read_line()
+  }
+}
+
+/// Writes bytes to stdout or stderr, as `print` writes text.
+fn write_bytes(index: i32, bytes: &[u8]) -> Result<usize, Error> {
+  sys::clear_errno();
+
+  const written = unsafe { sys::fwrite(bytes.as_ptr(), 1, bytes.len(), sys::stream(index)) };
+
+  if written < bytes.len() { Err(error_from(super::last_error())) } else { Ok(written) }
+}
+
+fn flush_stream(index: i32) -> Result<(), Error> {
+  sys::clear_errno();
+
+  if unsafe { sys::fflush(sys::stream(index)) } == 0 { Ok(()) } else { Err(error_from(super::last_error())) }
+}
+
+/// The program's standard output as a writer, as Rust's `Stdout`.
+pub class Stdout impl Write {
+  pub fn new(self) {}
+
+  pub fn write(self, bytes: &[u8]) -> Result<usize, Error> {
+    write_bytes(1, bytes)
+  }
+
+  pub fn flush(self) -> Result<(), Error> {
+    flush_stream(1)
+  }
+
+  /// Holds stdout until the lock's `drop`, so that the writes made through it are not
+  /// interleaved with other threads' `print`.
+  pub fn lock(self) -> StdoutLock {
+    new StdoutLock()
+  }
+}
+
+/// Stdout held by one thread until its `drop`, as Rust's `StdoutLock`.
+pub class StdoutLock impl Write, Drop {
+  pub fn new(self) {
+    sys::lock_stream(1);
+  }
+
+  pub fn write(self, bytes: &[u8]) -> Result<usize, Error> {
+    write_bytes(1, bytes)
+  }
+
+  pub fn flush(self) -> Result<(), Error> {
+    flush_stream(1)
+  }
+
+  pub fn drop(self) {
+    sys::unlock_stream(1);
+  }
+}
+
+/// The program's standard error as a writer, as Rust's `Stderr`.
+pub class Stderr impl Write {
+  pub fn new(self) {}
+
+  pub fn write(self, bytes: &[u8]) -> Result<usize, Error> {
+    write_bytes(2, bytes)
+  }
+
+  pub fn flush(self) -> Result<(), Error> {
+    flush_stream(2)
+  }
+}
+
+pub fn stdin() -> Stdin {
+  new Stdin()
+}
+
+pub fn stdout() -> Stdout {
+  new Stdout()
+}
+
+pub fn stderr() -> Stderr {
+  new Stderr()
+}

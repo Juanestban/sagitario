@@ -221,6 +221,46 @@ fn copy<R: Read, W: Write>(from: R, to: W) -> Result<(), io::Error> {
 `SeekFrom`, an enum of `std::io`, says where [`seek`](#stdfs) moves: `Start(u64)`, `End(i64)` or
 `Current(i64)`.
 
+### Buffers and the standard streams
+
+Rationale: [ADR-0096](../adr/0096-streams-files-and-drop.md), Q658 and Q660.
+
+```sag
+use std::fs::File;
+use std::io;
+use std::io::{BufReader, BufWriter, Write};
+
+for line in new BufReader(File::open("input.txt")?).lines() {
+  println(line?);
+}
+
+const out = new BufWriter(File::create("output.txt")?);
+
+out.write_str("written when the buffer fills, on flush, or on its drop")?;
+
+const lock = io::stdout().lock();   // stdout is this thread's until `lock` goes
+```
+
+- `BufRead`, an interface extending `Read`, has `read_line() -> Result<Option<String>, Error>`
+  (the next line without its `\n` or `\r\n`, `None` at the end; bytes that are not UTF-8 are an
+  error of kind `InvalidData`) and `lines() -> Iter<Result<String, Error>>`. Rust's `fill_buf`
+  lends the buffer, which Sagitario cannot.
+- `new BufReader(inner)` reads any `Read` through a buffer of 8 KiB, and
+  `BufReader::with_capacity(n, inner)` through one of `n` bytes; it implements `Read` and
+  `BufRead`, and a read as large as its buffer, when it holds nothing, goes straight to `inner`.
+- `new BufWriter(inner)` and `BufWriter::with_capacity(n, inner)` write to any `Write` through a
+  buffer, which reaches `inner` when it is full, on `flush()`, and on the writer's `drop`, which,
+  as Rust's, loses an error there; bytes as many as the buffer holds go straight to `inner`. Its
+  `drop` runs before its fields are released, so a `File` inside it is closed after.
+- Both have `get_ref()`, the inner reader or writer, and `capacity()`.
+- `io::stdin()` gives a `Stdin`, a `Read` and `BufRead` on the stream `io::read_line` reads, so
+  the two can be mixed; its `read` gives what is available up to the end of a line, so a terminal
+  is not waited on for more. `io::stdout()` and `io::stderr()` give a `Stdout` and a `Stderr`,
+  `Write`s of bytes on the streams `print` writes.
+- `Stdout::lock()` gives a `StdoutLock`, a `Write` holding the lock of stdout until its `drop`:
+  every write of stdout takes that lock too, so other threads' `print` waits, and a series of
+  writes through it is not interleaved.
+
 ## `std::fs`
 
 Rationale: [ADR-0038](../adr/0038-file-system-and-paths.md). Paths are `String`s, relative to the

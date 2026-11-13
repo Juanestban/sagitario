@@ -15,6 +15,9 @@ The sources say 0.32.0.
 
 ### Added
 
+- `std::io::BufRead`, `BufReader` and `BufWriter`, which flushes on its `drop`, and `io::stdin()`,
+  `stdout()` and `stderr()` as readers and writers of bytes, with `Stdout::lock`
+  ([ADR-0096](docs/adr/0096-streams-files-and-drop.md), increment 3).
 - `std::io::Read` and `Write`, as Rust's, on slices, with `read_to_end`, `read_to_string`,
   `read_exact`, `write_all` and `write_str`; `std::fs::File`, which closes by `Drop` or `close`,
   with `seek`, `set_len` and `sync_all`; `OpenOptions` and `SeekFrom`
