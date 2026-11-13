@@ -190,6 +190,131 @@ fn try_from_template() -> String {
 ")
 }
 
+/// `to_le_bytes`, `to_be_bytes`, `to_ne_bytes` and the `from_` functions of an integer of type `TYPE`
+/// and `SIZE` bytes, as Rust's (docs/adr/0101-the-rest-of-s2.md, Q702), each after `CFG`, which
+/// chooses the size of `isize` and `usize`. The native order is little-endian on every supported
+/// system.
+fn bytes_template() -> String {
+  const lines = List::from([
+    "",
+    "CFG",
+    "fn int_to_le_bytes_TYPE(value: TYPE) -> [u8; SIZE] {",
+    "  const bits = value as u64;",
+    "  var bytes = [0u8; SIZE];",
+    "",
+    "  for index in 0..SIZEusize {",
+    "    bytes[index] = (bits >> ((8 * index) as u32)) as u8;",
+    "  }",
+    "",
+    "  bytes",
+    "}",
+    "",
+    "CFG",
+    "fn int_to_be_bytes_TYPE(value: TYPE) -> [u8; SIZE] {",
+    "  const bits = value as u64;",
+    "  var bytes = [0u8; SIZE];",
+    "",
+    "  for index in 0..SIZEusize {",
+    "    bytes[SIZEusize - 1 - index] = (bits >> ((8 * index) as u32)) as u8;",
+    "  }",
+    "",
+    "  bytes",
+    "}",
+    "",
+    "CFG",
+    "fn int_to_ne_bytes_TYPE(value: TYPE) -> [u8; SIZE] {",
+    "  int_to_le_bytes_TYPE(value)",
+    "}",
+    "",
+    "CFG",
+    "fn int_from_le_bytes_TYPE(bytes: [u8; SIZE]) -> TYPE {",
+    "  var bits = 0u64;",
+    "",
+    "  for index in 0..SIZEusize {",
+    "    bits = bits | (bytes[index] as u64) << ((8 * index) as u32);",
+    "  }",
+    "",
+    "  bits as TYPE",
+    "}",
+    "",
+    "CFG",
+    "fn int_from_be_bytes_TYPE(bytes: [u8; SIZE]) -> TYPE {",
+    "  var bits = 0u64;",
+    "",
+    "  for index in 0..SIZEusize {",
+    "    bits = bits | (bytes[SIZEusize - 1 - index] as u64) << ((8 * index) as u32);",
+    "  }",
+    "",
+    "  bits as TYPE",
+    "}",
+    "",
+    "CFG",
+    "fn int_from_ne_bytes_TYPE(bytes: [u8; SIZE]) -> TYPE {",
+    "  int_from_le_bytes_TYPE(bytes)",
+    "}",
+    "",
+  ]);
+
+  lines.join("\n")
+}
+
+/// `TYPE::from_str_radix(text, radix)`, with Rust's messages (Q703): a `+` or, when `SIGNED`, a `-`,
+/// then the digits of the radix.
+fn radix_template() -> String {
+  const lines = List::from([
+    "",
+    "fn int_from_str_radix_TYPE(text: String, radix: u32) -> Result<TYPE, String> {",
+    "  if radix < 2 || radix > 36 {",
+    "    panic(\"from_str_radix_int: must lie in the range `[2, 36]` - found \" + radix.to_string());",
+    "  }",
+    "",
+    "  if text.is_empty() {",
+    "    return Err(\"cannot parse integer from empty string\");",
+    "  }",
+    "",
+    "  var negative = false;",
+    "  var digits = text;",
+    "",
+    "  if text.starts_with(\"+\") {",
+    "    digits = text.substring(1, text.len());",
+    "  } else if SIGNED && text.starts_with(\"-\") {",
+    "    negative = true;",
+    "    digits = text.substring(1, text.len());",
+    "  }",
+    "",
+    "  if digits.is_empty() {",
+    "    return Err(\"invalid digit found in string\");",
+    "  }",
+    "",
+    "  const base = radix as TYPE;",
+    "  const overflow = if negative { \"number too small to fit in target type\" } else { \"number too large to fit in target type\" };",
+    "  var value: TYPE = 0;",
+    "",
+    "  for c in digits.chars() {",
+    "    const digit = match c.to_digit(radix) {",
+    "      Some(found) => found as TYPE,",
+    "      None => return Err(\"invalid digit found in string\"),",
+    "    };",
+    "    const scaled = match value.checked_mul(base) {",
+    "      Some(found) => found,",
+    "      None => return Err(overflow),",
+    "    };",
+    "    const next = if negative { scaled.checked_sub(digit) } else { scaled.checked_add(digit) };",
+    "",
+    "    value = match next {",
+    "      Some(found) => found,",
+    "      None => return Err(overflow),",
+    "    };",
+    "  }",
+    "",
+    "  Ok(value)",
+    "}",
+    "",
+  ]);
+
+  lines.join("\n")
+}
+
 /// The prelude's source: `prelude.sag` (or the text given in its place) followed by the range
 /// functions, `sum` and `product`, and the conversions between integers.
 fn prelude_source(prelude: String) -> String {
@@ -205,6 +330,24 @@ fn prelude_source(prelude: String) -> String {
 
   for ty in List::from(["f32", "f64"]) {
     source.append(sum_template().replace("TYPE", ty).replace("ZERO", "0.0").replace("ONE", "1.0"));
+  }
+
+  const bytes = bytes_template();
+  const radix = radix_template();
+
+  for ty in INT_TYPES.split(" ") {
+    const signed = ty.starts_with("i");
+
+    source.append(radix.replace("TYPE", ty).replace("SIGNED", if signed { "true" } else { "false" }));
+
+    if ty == "isize" || ty == "usize" {
+      source.append(bytes.replace("TYPE", ty).replace("SIZE", "8").replace("CFG", "@cfg(target_pointer_width = \"64\")"));
+      source.append(bytes.replace("TYPE", ty).replace("SIZE", "4").replace("CFG", "@cfg(target_pointer_width = \"32\")"));
+    } else {
+      const size = if ty == "i8" || ty == "u8" { "1" } else if ty == "i16" || ty == "u16" { "2" } else if ty == "i32" || ty == "u32" { "4" } else { "8" };
+
+      source.append(bytes.replace("TYPE", ty).replace("SIZE", size).replace("CFG", ""));
+    }
   }
 
   for to in INT_TYPES.split(" ") {

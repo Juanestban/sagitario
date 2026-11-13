@@ -2354,7 +2354,12 @@ pub class Resolver {
             return Some(Res::Builtin(int_name + "::" + member.name));
           }
 
-          self.error(member.span, "no constant or function `" + member.name + "` in `" + int_name + "`; integer types have `MIN`, `MAX`, `from` and `try_from`");
+          // Bytes and parsing in a radix (docs/adr/0101-the-rest-of-s2.md, Q702 and Q703).
+          if List::from(["from_le_bytes", "from_be_bytes", "from_ne_bytes", "from_str_radix"]).contains(member.name) {
+            return Some(Res::Builtin(int_name + "::" + member.name));
+          }
+
+          self.error(member.span, "no constant or function `" + member.name + "` in `" + int_name + "`; integer types have `MIN`, `MAX`, `from`, `try_from`, `from_le_bytes`, `from_be_bytes`, `from_ne_bytes` and `from_str_radix`");
 
           return None;
         }

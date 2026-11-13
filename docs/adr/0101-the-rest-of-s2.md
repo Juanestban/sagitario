@@ -1,6 +1,6 @@
 # 0101. The rest of S2: numbers, ranges, pointers, paths, hashing, operators and formats
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-13
 - Refines: [ADR-0084](0084-a-complete-language-and-the-engine-apart.md) (Q542: the acceptance of
   S2), [ADR-0081](0081-operator-overloading.md) (the bitwise operators were not overloadable),
@@ -67,3 +67,14 @@ precisions, with the debug form of an interface value's type; and `source()` now
 - With its five increments, every row of the audit of S2 is ✅, ➖ or ⛔, and S2 is accepted.
 - The prelude gains six operator interfaces and `Error::source`; existing programs keep working.
 - Format strings gain `name$` in their specifiers, and interface values their own debug form.
+
+## Notes
+
+- Increment 1 is done. The conversions to bytes and `from_str_radix` are functions of the prelude
+  for each integer type, made from templates by the loader as the range functions are
+  (`int_to_le_bytes_u32` and the rest), those of `usize` and `isize` twice, under
+  `@cfg(target_pointer_width)`, so that their arrays have the target's size. The compiler calls
+  them for the methods and the static functions (`u32::from_le_bytes`). `Duration`'s operators
+  check their arithmetic, so that they panic in release builds too, as Rust's; its `nanos` is a
+  `u64`, so the longest duration is about 584 years, where Rust's is far longer.
+

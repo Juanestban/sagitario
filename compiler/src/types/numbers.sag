@@ -8,6 +8,7 @@ use pkg::diagnostics::Diagnostic;
 use pkg::diagnostics::codes;
 use pkg::types::{Checker, FloatTy, IntTy, Type, TypeKind};
 use pkg::types;
+use pkg::types::collections;
 use pkg::types::exprs;
 use pkg::types::typed::BuiltinMethod;
 
@@ -43,6 +44,26 @@ fn checked(name: String, param_names: String, params: List<Type>, value: Type, f
 pub struct IntLimit {
   pub ty: IntTy;
   pub max: bool;
+}
+
+/// The methods of integers written in the prelude, whose result has the size of the type
+/// (docs/adr/0101-the-rest-of-s2.md, Q702): the prelude function of each is
+/// `int_<method>_<type>`.
+pub const BYTE_METHODS: String = "to_le_bytes to_be_bytes to_ne_bytes";
+
+/// The static functions of integer types written in the prelude (Q702, Q703).
+pub const INT_STATICS: String = "from_le_bytes from_be_bytes from_ne_bytes from_str_radix";
+
+/// The prelude function of a static function of an integer type, such as `u32::from_le_bytes`:
+/// `int_from_le_bytes_u32`.
+pub fn int_static(name: String) -> Option<String> {
+  const parts = name.split("::");
+
+  if parts.len() != 2 || !INT_STATICS.split(" ").contains(parts[1]) || types::int_from_name(parts[0]).is_none() {
+    return None;
+  }
+
+  Some("int_" + parts[1] + "_" + parts[0])
 }
 
 pub fn int_limit(name: String) -> Option<IntLimit> {
@@ -175,6 +196,13 @@ fn float_methods(float_ty: FloatTy) -> List<NumberMethod> {
 /// `total_compare`; `None` for other receivers.
 pub fn number_method(cx: Checker, value: Expr, receiver_ty: Type, method: Ident, args: List<Expr>) -> Option<Type> {
   const name = method.name;
+
+  if let TypeKind::Int(int_ty) = receiver_ty.kind {
+    if BYTE_METHODS.split(" ").contains(name) {
+      return Some(collections::prelude_method(cx, value, "int_" + name + "_" + types::int_name(int_ty), new List(), args));
+    }
+  }
+
   var unsigned = false;
   const methods = match receiver_ty.kind {
     TypeKind::Int(int_ty) => {

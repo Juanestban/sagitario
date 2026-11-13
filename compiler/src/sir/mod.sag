@@ -3658,8 +3658,9 @@ pub class Lowering {
           return Ok(unit_operand());
         }
 
-        // Functions of the root of `std` (docs/adr/0093-everyday-methods.md, Q620 and Q621).
-        if name == "char::from_digit" || name.starts_with("String::from_") || name == "List::with_capacity" {
+        // Functions of the root of `std` (docs/adr/0093-everyday-methods.md, Q620 and Q621), and
+        // of the prelude for integers (docs/adr/0101-the-rest-of-s2.md, Q702 and Q703).
+        if name == "char::from_digit" || name.starts_with("String::from_") || name == "List::with_capacity" || numbers::int_static(name).is_some() {
           const function = match self.typed.builtin_methods.get(value.id) {
             Some(BuiltinMethod::Prelude(found)) => found,
             _ => return Err("`" + name + "` without its function"),

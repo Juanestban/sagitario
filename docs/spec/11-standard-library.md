@@ -1036,15 +1036,23 @@ Rationale: [ADR-0039](../adr/0039-time-and-commands.md).
 | `d.as_secs()`, `as_millis()`, `as_micros()`, `as_nanos()` | The whole units, as `u64` |
 | `d.as_secs_f64()` | The seconds with their fraction |
 | `d.plus(e)`, `d.minus(e)`, `d.times(n: u64)` | Arithmetic; `minus` panics if `e` is longer, also in release builds |
+| `d + e`, `d - e`, `d * n`, `d / n` (`n: u32`) | The operators of Rust's `Duration`, which panic beyond the longest duration, below zero or dividing by zero, in every build |
+| `checked_add(e)`, `checked_sub(e)`, `checked_mul(n)`, `checked_div(n)` | `Option<Duration>`: `None` where the operator would panic |
+| `saturating_add(e)`, `saturating_sub(e)`, `saturating_mul(n)` | The longest duration, or zero, where the operator would panic |
+| `d.as_secs_f32()`, `Duration::from_secs_f64(s)`, `from_secs_f32(s)` | The seconds as a float; the duration of a number of seconds, truncated to the nanosecond, which panics if it is negative, too large or NaN |
+| `d.mul_f64(x)`, `div_f64(x)`, `mul_f32(x)`, `div_f32(x)` | The duration times or divided by a float, through its seconds |
 | `Instant::now()`, `i.elapsed()` | The current instant, and the time since `i` |
 | `i.duration_since(earlier)` | The time from `earlier` to `i`; zero if `earlier` is later |
 | `SystemTime::now()`, `t.since_unix_epoch()` | The current time, and the time since 1970-01-01 00:00:00 UTC (zero before it) |
 | `UNIX_EPOCH`, `t + d` | 1970-01-01 00:00:00 UTC, a `static`, and a `SystemTime` moved later by a `Duration`, as Rust's; `SystemTime::default()` is the epoch ([ADR-0096](../adr/0096-streams-files-and-drop.md), Q659) |
 
 - The three types implement `Ord` (and so `Eq`): `a.compare(b)`, and lists of them can be
-  sorted. Their arithmetic and comparisons are methods.
-- Creating or adding durations beyond the range of `u64` nanoseconds follows integer overflow
-  rules: a panic in debug builds.
+  sorted. `Duration` implements `Add`, `Sub`, `Mul<u32, Duration>` and `Div<u32, Duration>`
+  ([ADR-0101](../adr/0101-the-rest-of-s2.md), Q704).
+- Creating durations beyond the range of `u64` nanoseconds with `from_secs` and the like, or
+  with `plus` and `times`, follows integer overflow rules: a panic in debug builds. The
+  operators, `checked_` and `saturating_` check it in every build, as Rust's.
+- `Duration` has no `Display`, as in Rust; its debug form is that of a struct.
 - Calendar dates, time zones and formatting are not part of `std::time`.
 
 ## Implementation rules

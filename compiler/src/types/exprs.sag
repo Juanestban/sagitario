@@ -1676,6 +1676,9 @@ fn call(cx: Checker, value: Expr, callee: Expr, args: List<Expr>, expected: Opti
       } else if let Some(ty) = interfaces::primitive_conversion(cx, value, path, name, args, expected) {
         // Conversions of the prelude (docs/adr/0094-conversions-and-defaults.md, Q632 and Q634).
         return ty;
+      } else if let Some(function) = numbers::int_static(name) {
+        // Written in the prelude for each integer type (docs/adr/0101-the-rest-of-s2.md, Q702, Q703).
+        return collections::inferred_call_of(cx, value, cx.resolution.prelude_fn(function), name, args);
       } else if name == "char::from_digit" || name.starts_with("String::from_") {
         // Written in the root of `std` (docs/adr/0093-everyday-methods.md, Q620 and Q621).
         const function = if name == "char::from_digit" { "char_from_digit" } else { "text_" + name.substring(8, name.len()) };

@@ -28,6 +28,12 @@ The sources say 0.32.0.
 
 ### Added
 
+- `to_le_bytes`, `to_be_bytes` and `to_ne_bytes` of every integer type, and `from_le_bytes`,
+  `from_be_bytes`, `from_ne_bytes` and `from_str_radix`; the operators `+`, `-`, `*` and `/` of
+  `Duration`, and its `checked_` and `saturating_` arithmetic, `mul_f64`, `div_f64`,
+  `from_secs_f64` and the `f32` ones, as Rust's
+  ([ADR-0101](docs/adr/0101-the-rest-of-s2.md), increment 1).
+- `sag lsp` completes `net` after `std::`.
 - The options of the sockets of `std::net`, as Rust's: read and write time outs,
   `set_nonblocking`, `set_ttl`, `take_error` and `try_clone`; `TcpStream::connect_timeout`,
   `set_nodelay` and `peek`; and `UdpSocket::set_broadcast`, `peek` and `peek_from`

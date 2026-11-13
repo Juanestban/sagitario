@@ -1,0 +1,68 @@
+// Integers to and from bytes, parsing in a radix, and the arithmetic of `Duration`, as Rust's
+// (docs/adr/0101-the-rest-of-s2.md, Q702–Q704).
+// expect-stdout: le: [120, 86, 52, 18] be: [18, 52, 86, 120] ne: [120, 86, 52, 18] | [254, 255] [255, 254] | [7]
+// expect-stdout: from: 305419896 305419896 -2 -1234567890123 true | usize: 8 bytes
+// expect-stdout: radix: 255 -128 35 10 -42 7 1295 | 255 4294967295
+// expect-stdout: errors: number too large to fit in target type | number too small to fit in target type | cannot parse integer from empty string | invalid digit found in string | invalid digit found in string | invalid digit found in string | invalid digit found in string
+// expect-stdout: duration: 2500 500 3000 750 | Some(1500) None Some(4000) None None Some(250)
+// expect-stdout: saturating: true 0 true | float: 1500 750 2.5 2.5 | from_secs_f64: 1500000000 0
+// expect-stdout: ordered: true true
+
+use std::time::Duration;
+
+fn shown(result: Result<i8, String>) -> String {
+  match result {
+    Ok(value) => f"{value}",
+    Err(message) => message,
+  }
+}
+
+fn millis(duration: Option<Duration>) -> String {
+  match duration {
+    Some(found) => f"Some({found.as_millis()})",
+    None => "None",
+  }
+}
+
+fn main() {
+  const word = 0x12345678u32;
+
+  print(f"le: {word.to_le_bytes():?} be: {word.to_be_bytes():?} ne: {word.to_ne_bytes():?} | ");
+  println(f"{(-2i16).to_le_bytes():?} {(-2i16).to_be_bytes():?} | {7u8.to_be_bytes():?}");
+
+  const big = -1234567890123i64;
+
+  print(f"from: {u32::from_le_bytes([120, 86, 52, 18])} {u32::from_be_bytes(word.to_be_bytes())} {i16::from_le_bytes([254, 255])} ");
+  println(f"{i64::from_be_bytes(big.to_be_bytes())} {i64::from_ne_bytes(big.to_ne_bytes()) == big} | usize: {usize::MAX.to_le_bytes().len()} bytes");
+
+  print(f"radix: {u8::from_str_radix("ff", 16).unwrap()} {i8::from_str_radix("-80", 16).unwrap()} {u8::from_str_radix("z", 36).unwrap()} ");
+  print(f"{u8::from_str_radix("1010", 2).unwrap()} {i32::from_str_radix("-52", 8).unwrap()} {i32::from_str_radix("+7", 10).unwrap()} {u32::from_str_radix("ZZ", 36).unwrap()} | ");
+  println(f"{u8::from_str_radix("FF", 16).unwrap()} {u32::from_str_radix("ffffffff", 16).unwrap()}");
+
+  const errors = List::from([
+    shown(i8::from_str_radix("80", 16)),
+    shown(i8::from_str_radix("-81", 16)),
+    shown(i8::from_str_radix("", 10)),
+    shown(i8::from_str_radix("+", 10)),
+    shown(i8::from_str_radix("12a", 10)),
+    shown(i8::from_str_radix("-", 10)),
+    shown(i8::from_str_radix("9", 8)),
+  ]);
+
+  println("errors: " + errors.join(" | "));
+
+  // The operators of `Duration`, and the arithmetic that checks or saturates.
+  const second = Duration::from_millis(1000);
+  const half = Duration::from_millis(500);
+
+  print(f"duration: {(second + second + half).as_millis()} {(second - half).as_millis()} {(second * 3).as_millis()} {(second.times(3) / 4).as_millis()} | ");
+  print(f"{millis(second.checked_add(half))} {millis(Duration::from_nanos(u64::MAX).checked_add(half))} ");
+  println(f"{millis(second.checked_mul(4))} {millis(half.checked_sub(second))} {millis(second.checked_div(0))} {millis(second.checked_div(4))}");
+
+  const longest = Duration::from_nanos(u64::MAX);
+
+  print(f"saturating: {longest.saturating_add(second) == longest} {half.saturating_sub(second).as_nanos()} {longest.saturating_mul(2) == longest} | ");
+  print(f"float: {second.mul_f64(1.5).as_millis()} {second.div_f64(4.0 / 3.0).as_millis()} {Duration::from_millis(2500).as_secs_f64()} {Duration::from_millis(2500).as_secs_f32()} | ");
+  println(f"from_secs_f64: {Duration::from_secs_f64(1.5).as_nanos()} {Duration::from_secs_f32(0.0).as_nanos()}");
+  println(f"ordered: {half < second} {second + half > second}");
+}

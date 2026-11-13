@@ -72,8 +72,8 @@ The audit of the library found gaps of the language itself, which the library ne
 | `f64::consts`, float methods | `std::math`, methods of numbers | ✅ | G1 |
 | `checked_*`, `wrapping_*`, `saturating_*` | methods of integers | ✅ | ADR-0088; `overflowing_*` is missing |
 | `MIN`, `MAX` of integers | `i32::MAX`... | ✅ | ADR-0088 |
-| `count_ones`, `leading_zeros`, `rotate_left`, `swap_bytes`, `to_le_bytes` | methods of integers | 🟡 | ADR-0088; `to_le_bytes`, `from_le_bytes` and the other conversions to bytes are missing |
-| `from_str_radix`, formatting in hex | `{x:x}`, `{x:#b}` and the other radixes ([ADR-0089](adr/0089-display-debug-and-format-specifiers.md)) | 🟡 | Missing: parsing in a radix (`from_str_radix`) |
+| `count_ones`, `leading_zeros`, `rotate_left`, `swap_bytes`, `to_le_bytes` | methods of integers | ✅ | ADR-0088; `to_le_bytes`, `to_be_bytes`, `to_ne_bytes` and the `from_` functions ([ADR-0101](adr/0101-the-rest-of-s2.md), increment 1) |
+| `from_str_radix`, formatting in hex | `T::from_str_radix`, and `{x:x}`, `{x:#b}` and the other radixes ([ADR-0089](adr/0089-display-debug-and-format-specifiers.md)) | ✅ | Rust's messages; a radix outside 2 to 36 panics ([ADR-0101](adr/0101-the-rest-of-s2.md), increment 1) |
 | `NonZero*` | — | ⛔ | A layout optimization of `Option` that Sagitario's ARC model does not use |
 
 ### Iterators (`iter`)
@@ -172,7 +172,7 @@ The audit of the library found gaps of the language itself, which the library ne
 | Rust | Sagitario | State | Notes |
 |---|---|---|---|
 | `Duration`, `Instant`, `SystemTime`, `sleep` | ✅ | ✅ | Arithmetic is named methods (`plus`, `minus`, `times`) |
-| `checked_add`, `saturating_sub`, `Duration * f64`, `Display` | — | ❌ | With the numeric helpers and `fmt` |
+| `checked_add`, `saturating_sub`, `Duration * f64`, `Display` | `Duration`'s operators, `checked_`, `saturating_`, `mul_f64` and the floats of seconds | ✅ | `Duration` has no `Display` in Rust either ([ADR-0101](adr/0101-the-rest-of-s2.md), increment 1) |
 | Calendars, time zones | — | ⛔ | A Nova package, as `chrono` is for Rust |
 
 ### Other modules

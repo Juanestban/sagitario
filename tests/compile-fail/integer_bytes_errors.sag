@@ -1,0 +1,12 @@
+// The sizes and types of the conversions to bytes and of parsing in a radix
+// (docs/adr/0101-the-rest-of-s2.md, Q702–Q704).
+use std::time::Duration;
+
+fn main() {
+  const _a = u32::from_le_bytes([1u8, 2]); //~ ERROR E0300
+  const _b = 7u32.to_le_bytes(1); //~ ERROR E0301
+  const _c = i8::from_str_radix(5, 10); //~ ERROR E0300
+  const _d = u32::from_bytes([1u8, 2, 3, 4]); //~ ERROR E0200
+  const _e = Duration::from_secs(1) * 2.0; //~ ERROR E0300
+  const _f: [u8; 2] = 7u32.to_be_bytes(); //~ ERROR E0300
+}

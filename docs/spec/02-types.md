@@ -122,6 +122,16 @@ arguments have the type of the receiver, unless written otherwise.
 | `rotate_left(n: u32)`, `rotate_right(n: u32)` | yes | | the bits moved by `n % width`, those leaving one end entering at the other |
 | `swap_bytes()` | yes | | the bytes in the reverse order |
 | `is_power_of_two()` | unsigned | | whether `x` is `1`, `2`, `4`...; `false` for `0` |
+| `to_le_bytes()`, `to_be_bytes()`, `to_ne_bytes()` | yes | | `[u8; N]`, `N` the size of the type: the bytes from the lowest, from the highest, or in the order of the target |
+| `T::from_le_bytes(bytes)`, `from_be_bytes`, `from_ne_bytes` | yes | | the integer of `[u8; N]` in that order |
+| `T::from_str_radix(text, radix: u32)` | yes | | `Result<T, String>`: the integer `text` writes in `radix`, as `parse_i32` |
+
+- The conversions to bytes and parsing in a radix are Rust's
+  ([ADR-0101](../adr/0101-the-rest-of-s2.md), Q702 and Q703). `usize` and `isize` have the
+  target's size; the native order is little-endian on every supported target.
+  `from_str_radix` takes an optional `+`, or `-` for signed types, then digits of the radix in
+  either case, with Rust's messages (`invalid digit found in string`,
+  `number too large to fit in target type`...); a radix outside 2 to 36 panics.
 
 - `abs()` and `pow()` overflow as arithmetic does: a panic in debug builds, wrapping in release
   builds (the `abs()` of the smallest value of a type is itself). On unsigned integers `abs()`
