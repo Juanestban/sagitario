@@ -902,6 +902,20 @@ pub fn lower(package: Package, resolution: Resolution, typed: TypedModule, sourc
     }
   }
 
+  // The function computing the value of a `static` of the standard library, which the getter of
+  // the static calls; a value the checker computed needs none.
+  for index in 0..resolution.statics.len() {
+    const init = resolution.statics[index].init;
+    const computed = match typed.static_values.get(index) {
+      Some(Some(_)) => true,
+      _ => false,
+    };
+
+    if resolution.in_library(init) && !computed {
+      mono::require(registry, init);
+    }
+  }
+
   // Lowering an instance may need more instances.
   while let Some(index) = registry.pending.pop() {
     const instance = match registry.instances.get(index) {
@@ -997,7 +1011,16 @@ pub fn lower(package: Package, resolution: Resolution, typed: TypedModule, sourc
       value = Some(const_of(found, ty)?);
     }
 
-    statics.push(StaticDef { name: decl.name.name, ty: ty, init: resolution.statics[index].init, mutable: decl.mutable, thread_local: decl.thread_local, value: value, extern_c: decl.extern_c, in_std: resolution.is_std_source(resolution.statics[index].module) });
+    // The instance of the function of a static of the standard library (above).
+    var init = resolution.statics[index].init;
+
+    if let Some(position) = registry.instance_index.get(`${init}:` + subst_key(Subst::empty())) {
+      if resolution.in_library(init) {
+        init = registry.first_instance + position as u32;
+      }
+    }
+
+    statics.push(StaticDef { name: decl.name.name, ty: ty, init: init, mutable: decl.mutable, thread_local: decl.thread_local, value: value, extern_c: decl.extern_c, in_std: resolution.is_std_source(resolution.statics[index].module) });
   }
 
   // Fewer reference counts (docs/adr/0091-fewer-reference-counts.md); `SAG_NO_ARC_PASS` turns

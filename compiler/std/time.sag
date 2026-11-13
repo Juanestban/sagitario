@@ -135,6 +135,24 @@ pub struct SystemTime impl Ord {
   }
 }
 
+/// 1970-01-01 00:00:00 UTC, as Rust's: `UNIX_EPOCH + duration` is a `SystemTime`
+/// (docs/adr/0096-streams-files-and-drop.md, Q659).
+pub static UNIX_EPOCH: SystemTime = SystemTime::default();
+
+/// The epoch, which a block reaches the field of: the value of `UNIX_EPOCH`.
+impl Default for SystemTime {
+  fn default() -> SystemTime {
+    SystemTime { nanos: 0 }
+  }
+}
+
+/// A `SystemTime` moved later by a `Duration`, as Rust's.
+impl Add<Duration, SystemTime> for SystemTime {
+  fn add(self, other: Duration) -> SystemTime {
+    SystemTime { nanos: self.nanos + other.as_nanos() }
+  }
+}
+
 /// Pauses the program for at least `duration`.
 pub fn sleep(duration: Duration) {
   sys::sleep_nanos(duration.as_nanos());

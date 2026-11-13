@@ -4,6 +4,8 @@
 use std::io;
 use std::path;
 use std::sys;
+use std::time;
+use std::time::{Duration, SystemTime};
 
 /// The error with this code, described as `action: system message`.
 fn failure(code: i32, action: String) -> io::Error {
@@ -255,6 +257,18 @@ pub class File impl io::Read, io::Write, Drop {
     if code == 0 { Ok(()) } else { Err(self.error(code, "resize")) }
   }
 
+  /// What the file is: its size, kind and times.
+  pub fn metadata(self) -> Result<Metadata, io::Error> {
+    if !self.is_open {
+      return Err(self.error(sys::EBADF, "read the metadata of"));
+    }
+
+    match sys::file_metadata(self.handle) {
+      Ok(info) => Ok(Metadata::from_system(info)),
+      Err(code) => Err(self.error(code, "read the metadata of")),
+    }
+  }
+
   /// Waits until the system has stored what was written.
   pub fn sync_all(self) -> Result<(), io::Error> {
     if !self.is_open {
@@ -364,5 +378,131 @@ pub struct OpenOptions {
       Ok(handle) => Ok(unsafe { File::from_raw_handle(handle, path) }),
       Err(code) => Err(failure(file_code(path, code), `cannot open "${path}"`)),
     }
+  }
+}
+
+// ---- Metadata (docs/adr/0096-streams-files-and-drop.md, Q659) ------------------------------------
+
+/// What a path names, as Rust's `Metadata`: its size, its kind, whether it is read-only, and its
+/// times, where the system has them.
+pub struct Metadata {
+  prv kind: i32;
+  prv symlink: bool;
+  prv size: u64;
+  prv read_only: bool;
+  prv accessed_at: Option<u64>;
+  prv modified_at: Option<u64>;
+  prv created_at: Option<u64>;
+
+  /// The size in bytes.
+  pub fn len(self) -> u64 {
+    self.size
+  }
+
+  pub fn is_file(self) -> bool {
+    self.kind == sys::KIND_FILE
+  }
+
+  pub fn is_dir(self) -> bool {
+    self.kind == sys::KIND_DIR
+  }
+
+  /// Whether it is a symbolic link, which only `symlink_metadata` sees: `metadata` follows it.
+  pub fn is_symlink(self) -> bool {
+    self.symlink
+  }
+
+  /// Whether no one may write it: Rust's `permissions().readonly()`.
+  pub fn readonly(self) -> bool {
+    self.read_only
+  }
+
+  pub fn modified(self) -> Result<SystemTime, io::Error> {
+    time_of(self.modified_at, "modification")
+  }
+
+  pub fn accessed(self) -> Result<SystemTime, io::Error> {
+    time_of(self.accessed_at, "access")
+  }
+
+  /// The time of creation, which Linux and Android do not keep: an error of kind `Unsupported`.
+  pub fn created(self) -> Result<SystemTime, io::Error> {
+    time_of(self.created_at, "creation")
+  }
+
+  /// The metadata of what `std::sys` read, which only the standard library can name.
+  pub fn from_system(info: sys::FileInfo) -> Metadata {
+    Metadata {
+      kind: info.kind,
+      symlink: info.symlink,
+      size: info.size,
+      read_only: info.readonly,
+      accessed_at: info.accessed,
+      modified_at: info.modified,
+      created_at: info.created,
+    }
+  }
+}
+
+fn time_of(nanos: Option<u64>, what: String) -> Result<SystemTime, io::Error> {
+  match nanos {
+    Some(found) => Ok(time::UNIX_EPOCH + Duration::from_nanos(found)),
+    None => Err(new io::Error(io::ErrorKind::Unsupported, `${what} time is not available on this platform`)),
+  }
+}
+
+/// What `path` names, following a symbolic link.
+pub fn metadata(path: String) -> Result<Metadata, io::Error> {
+  match sys::metadata(path, true) {
+    Ok(info) => Ok(Metadata::from_system(info)),
+    Err(code) => Err(failure(code, `cannot read the metadata of "${path}"`)),
+  }
+}
+
+/// What `path` names, a symbolic link itself and not what it names.
+pub fn symlink_metadata(path: String) -> Result<Metadata, io::Error> {
+  match sys::metadata(path, false) {
+    Ok(info) => Ok(Metadata::from_system(info)),
+    Err(code) => Err(failure(code, `cannot read the metadata of "${path}"`)),
+  }
+}
+
+/// Removes a directory with everything in it, as Rust's. A symbolic link is removed itself, not
+/// what it names; a path that names a file is an error.
+pub fn remove_dir_all(path: String) -> Result<(), io::Error> {
+  const info = symlink_metadata(path)?;
+
+  if !info.is_dir() && !info.is_symlink() {
+    return Err(failure(sys::ENOTDIR, `cannot remove "${path}"`));
+  }
+
+  remove_tree(path, info)
+}
+
+fn remove_tree(path: String, info: Metadata) -> Result<(), io::Error> {
+  // A link to a directory is a directory to Windows, a file to the others.
+  if info.is_symlink() {
+    return if info.is_dir() { remove_dir(path) } else { remove_file(path) };
+  }
+
+  if !info.is_dir() {
+    return remove_file(path);
+  }
+
+  for name in read_dir(path)? {
+    const child = path::join(path, name);
+
+    remove_tree(child, symlink_metadata(child)?)?;
+  }
+
+  remove_dir(path)
+}
+
+/// The absolute path of `path`, with `.`, `..` and symbolic links resolved, as Rust's: on Windows
+/// it starts with `\\?\`.
+pub fn canonicalize(path: String) -> Result<String, io::Error> {
+  match sys::canonical(path) {
+    Ok(found) => Ok(found),
+    Err(code) => Err(failure(code, `cannot canonicalize "${path}"`)),
   }
 }

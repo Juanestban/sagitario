@@ -115,3 +115,14 @@ fn main() -> Result<(), io::Error> {
   of a line, since `fread` would wait for a whole buffer from a terminal. `Stdout::lock` takes the
   lock of C's stream, `flockfile` or Windows's `_lock_file`, which each function of the stream
   takes too, so `print` from another thread waits for the lock's `drop`.
+- Increment 4 is done, and with it the record. POSIX's `stat` is read, as `st_mode` already was,
+  at the offsets of its size and times on each system (with `lstat` for `symlink_metadata` and
+  `fstat` for a `File`); Windows's comes from `GetFileInformationByHandle`, through a handle that
+  follows links, or `GetFileAttributesExW`, which does not. `canonicalize` is `realpath` or
+  `GetFinalPathNameByHandleW`. Besides Q659: `fs::symlink_metadata`, Rust's, since `metadata`
+  follows links and `is_symlink` would never hold; `time::UNIX_EPOCH` and `SystemTime + Duration`,
+  Rust's, to make the times; and `SystemTime::default()`, the epoch, which Rust's has not, since
+  the value of a `static` outside the type cannot reach the private field a block of it can.
+  `UNIX_EPOCH` is the first `static` of the standard library whose value is not a constant, which
+  showed that lowering never made the function computing such a value: the function of every
+  static of the library is now an instance made with the others.

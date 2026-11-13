@@ -145,7 +145,7 @@ The audit of the library found gaps of the language itself, which the library ne
 | `Read`, `Write`, `BufRead`, `BufReader`, `BufWriter` | ✅ | ✅ | On slices, as Rust's; `BufRead` has `read_line` and `lines` for want of a lent buffer ([ADR-0096](adr/0096-streams-files-and-drop.md), increments 2 and 3) |
 | `fs::read`, `write`, `read_to_string`, `create_dir(_all)`, `remove_*`, `rename`, `copy`, `read_dir` | ✅ | ✅ | |
 | `File` (open, read in parts, seek, append) | `File`, `OpenOptions`, `SeekFrom` | ✅ | Closed by `Drop` or by `close` ([ADR-0096](adr/0096-streams-files-and-drop.md), increment 2) |
-| `fs::metadata` (size, times, permissions), `remove_dir_all`, `canonicalize`, `symlink` | — | ❌ | Spec 11 lists them as "not yet" |
+| `fs::metadata` (size, times, permissions), `remove_dir_all`, `canonicalize`, `symlink` | `metadata`, `symlink_metadata`, `remove_dir_all`, `canonicalize` | ✅ | Size, kind, read-only and times ([ADR-0096](adr/0096-streams-files-and-drop.md), increment 4); making links and setting permissions wait for a record of `std::os` |
 | `env::set_current_dir` | — | ❌ | Process-wide state |
 | `Path`, `PathBuf` | `std::path` over `String` | 🟡 | `join`, `file_name`, `parent`, `extension`, `stem`. Missing: `components`, `is_absolute`, `with_extension`, `strip_prefix`, normalization |
 
@@ -228,7 +228,8 @@ From what most programs need to what fewer do. Each line is one record, or a few
 6. **Collections:** `HashSet`, `VecDeque`, `BTreeMap`, `BTreeSet` and `BinaryHeap`, Rust's names,
    and `collect` into them. ✅ ([ADR-0095](adr/0095-collections.md))
 7. **Streams and files:** `Read`, `Write`, buffered readers and writers, `File`, metadata,
-   `remove_dir_all`, bytes on stdin and stdout; and with them the question of `Drop`.
+   `remove_dir_all`, bytes on stdin and stdout; and with them the question of `Drop`. ✅
+   ([ADR-0096](adr/0096-streams-files-and-drop.md))
 8. **Processes and environment:** `spawn` and `Child`, redirection, the rest of `env`.
 9. **Concurrency:** `RwLock`, `Condvar`, `Barrier`, bounded channels, `try_lock`, thread names and
    ids, and atomic orderings.

@@ -2909,3 +2909,310 @@ pub fn file_set_len(file: usize, len: u64) -> i32 {
 pub fn file_close(file: usize) -> i32 {
   if unsafe { CloseHandle(handle_of(file)) } != 0 { 0 } else { failure() }
 }
+
+// ---- Metadata (docs/adr/0096-streams-files-and-drop.md, Q659) ------------------------------------
+
+/// What `std::fs` reads of a file: its kind (`KIND_*`), whether it is a symbolic link, its size,
+/// whether it is read-only, and its times in nanoseconds since the Unix epoch, where the system
+/// has them.
+pub struct FileInfo {
+  pub kind: i32;
+  pub symlink: bool;
+  pub size: u64;
+  pub readonly: bool;
+  pub accessed: Option<u64>;
+  pub modified: Option<u64>;
+  pub created: Option<u64>;
+}
+
+@cfg(unix)
+extern "C" {
+  fn lstat(path: *const c_char, info: *mut StatBuffer) -> c_int;
+  fn fstat(fd: c_int, info: *mut StatBuffer) -> c_int;
+  fn realpath(path: *const c_char, resolved: *mut c_char) -> *mut c_char;
+}
+
+/// Where `st_size`, `st_atim`, `st_mtim` and the time of birth are in `struct stat`, and how many
+/// bytes each part of its `struct timespec` has. Linux and Android have no time of birth in it.
+@cfg(any(target_os = "linux", target_os = "android"))
+const SIZE_OFFSET: usize = 48;
+@cfg(any(target_os = "ios", all(target_os = "macos", target_arch = "aarch64")))
+const SIZE_OFFSET: usize = 96;
+@cfg(all(target_os = "macos", target_arch = "x86_64"))
+const SIZE_OFFSET: usize = 72;
+
+@cfg(all(any(target_os = "linux", target_os = "android"), not(all(target_os = "android", target_pointer_width = "32"))))
+const ACCESS_OFFSET: usize = 72;
+@cfg(all(any(target_os = "linux", target_os = "android"), not(all(target_os = "android", target_pointer_width = "32"))))
+const MODIFY_OFFSET: usize = 88;
+@cfg(all(target_os = "android", target_pointer_width = "32"))
+const ACCESS_OFFSET: usize = 72;
+@cfg(all(target_os = "android", target_pointer_width = "32"))
+const MODIFY_OFFSET: usize = 80;
+@cfg(any(target_os = "ios", all(target_os = "macos", target_arch = "aarch64")))
+const ACCESS_OFFSET: usize = 32;
+@cfg(any(target_os = "ios", all(target_os = "macos", target_arch = "aarch64")))
+const MODIFY_OFFSET: usize = 48;
+@cfg(all(target_os = "macos", target_arch = "x86_64"))
+const ACCESS_OFFSET: usize = 24;
+@cfg(all(target_os = "macos", target_arch = "x86_64"))
+const MODIFY_OFFSET: usize = 40;
+
+/// The time of birth, which only the 64-bit `struct stat` of Apple's systems has; 0 for none.
+@cfg(any(target_os = "ios", all(target_os = "macos", target_arch = "aarch64")))
+const BIRTH_OFFSET: usize = 80;
+@cfg(any(target_os = "linux", target_os = "android", all(target_os = "macos", target_arch = "x86_64")))
+const BIRTH_OFFSET: usize = 0;
+
+@cfg(all(target_os = "android", target_pointer_width = "32"))
+const TIME_BYTES: usize = 4;
+@cfg(all(unix, not(all(target_os = "android", target_pointer_width = "32"))))
+const TIME_BYTES: usize = 8;
+
+/// The signed number of `bytes` bytes at `offset` of `info`.
+@cfg(unix)
+fn number_at(info: StatBuffer, offset: usize, bytes: usize) -> i64 {
+  const copy = info;
+  const at = unsafe { (&raw const copy as *const u8).add(offset) };
+
+  if bytes == 8 { unsafe { *(at as *const i64) } } else { (unsafe { *(at as *const i32) }) as i64 }
+}
+
+/// The `struct timespec` at `offset`, in nanoseconds since the epoch; `None` before it.
+@cfg(unix)
+fn time_at(info: StatBuffer, offset: usize) -> Option<u64> {
+  const seconds = number_at(info, offset, TIME_BYTES);
+  const nanos = number_at(info, offset + TIME_BYTES, TIME_BYTES);
+
+  if seconds < 0 { None } else { Some(seconds as u64 * 1_000_000_000 + nanos as u64) }
+}
+
+@cfg(unix)
+fn info_of(info: StatBuffer) -> FileInfo {
+  const at = unsafe { (&raw const info as *const u8).add(MODE_OFFSET) };
+  const mode = if MODE_BYTES == 2 { (unsafe { *(at as *const u16) }) as u32 } else { unsafe { *(at as *const u32) } };
+  // `S_IFMT`: `S_IFDIR` 0o040000, `S_IFREG` 0o100000, `S_IFLNK` 0o120000.
+  const file_type = (mode >> 12) & 0xF;
+  const kind = if file_type == 4 { KIND_DIR } else if file_type == 8 { KIND_FILE } else { KIND_OTHER };
+
+  FileInfo {
+    kind: kind,
+    symlink: file_type == 10,
+    size: number_at(info, SIZE_OFFSET, 8) as u64,
+    // No one may write it: the bits 0o222 are clear.
+    readonly: mode & 0o222 == 0,
+    accessed: time_at(info, ACCESS_OFFSET),
+    modified: time_at(info, MODIFY_OFFSET),
+    created: if BIRTH_OFFSET == 0 { None } else { time_at(info, BIRTH_OFFSET) },
+  }
+}
+
+/// What `path` names, following a symbolic link or not.
+@cfg(unix)
+pub fn metadata(path: String, follow: bool) -> Result<FileInfo, i32> {
+  const name = match c_path(path) {
+    Some(found) => found,
+    None => return Err(EINVAL),
+  };
+  var info = StatBuffer { words: [0u64; 32] };
+
+  clear_errno();
+
+  const code = if follow { unsafe { stat(name.as_ptr(), &mut info) } } else { unsafe { lstat(name.as_ptr(), &mut info) } };
+
+  if code != 0 { Err(failure()) } else { Ok(info_of(info)) }
+}
+
+@cfg(unix)
+pub fn file_metadata(file: usize) -> Result<FileInfo, i32> {
+  var info = StatBuffer { words: [0u64; 32] };
+
+  clear_errno();
+
+  if unsafe { fstat(file as c_int, &mut info) } != 0 { Err(failure()) } else { Ok(info_of(info)) }
+}
+
+/// The absolute path of `path`, without `.`, `..` or symbolic links. 4096 bytes is Linux's
+/// `PATH_MAX`, and more than Apple's.
+@cfg(unix)
+pub fn canonical(path: String) -> Result<String, i32> {
+  const name = match c_path(path) {
+    Some(found) => found,
+    None => return Err(EINVAL),
+  };
+  const buffer = new List<u8>();
+
+  buffer.resize(4096, 0);
+  clear_errno();
+
+  const found = unsafe { realpath(name.as_ptr(), buffer.as_mut_ptr() as *mut c_char) };
+
+  if found.is_null() { Err(failure()) } else { Ok(unsafe { string_from_c(found as *const c_char) }) }
+}
+
+/// `BY_HANDLE_FILE_INFORMATION`.
+@cfg(windows)
+@repr(C)
+struct HandleInfo {
+  pub attributes: u32;
+  pub created: FileTime;
+  pub accessed: FileTime;
+  pub written: FileTime;
+  pub volume: u32;
+  pub size_high: u32;
+  pub size_low: u32;
+  pub links: u32;
+  pub index_high: u32;
+  pub index_low: u32;
+}
+
+/// `WIN32_FILE_ATTRIBUTE_DATA`.
+@cfg(windows)
+@repr(C)
+struct AttributeData {
+  pub attributes: u32;
+  pub created: FileTime;
+  pub accessed: FileTime;
+  pub written: FileTime;
+  pub size_high: u32;
+  pub size_low: u32;
+}
+
+@cfg(windows)
+extern "C" {
+  fn GetFileInformationByHandle(file: *mut c_void, info: *mut HandleInfo) -> c_int;
+  fn GetFileAttributesExW(name: *const u16, level: c_int, data: *mut AttributeData) -> c_int;
+  fn GetFinalPathNameByHandleW(file: *mut c_void, path: *mut u16, size: u32, flags: u32) -> u32;
+}
+
+/// A `FILETIME`, 100 ns since 1601, in nanoseconds since the Unix epoch; `None` before it.
+@cfg(windows)
+fn nanos_of(time: FileTime) -> Option<u64> {
+  const intervals = time.high as u64 * 0x1_0000_0000 + time.low as u64;
+  const epoch = 116_444_736_000_000_000u64;
+
+  if intervals < epoch { None } else { Some((intervals - epoch) * 100) }
+}
+
+/// The attributes `FILE_ATTRIBUTE_READONLY` (1), `DIRECTORY` (0x10) and `REPARSE_POINT` (0x400),
+/// which a symbolic link has.
+@cfg(windows)
+fn info_from(attributes: u32, created: FileTime, accessed: FileTime, written: FileTime, size_high: u32, size_low: u32) -> FileInfo {
+  FileInfo {
+    kind: if attributes & 0x10 != 0 { KIND_DIR } else { KIND_FILE },
+    symlink: attributes & 0x400 != 0,
+    size: size_high as u64 * 0x1_0000_0000 + size_low as u64,
+    readonly: attributes & 1 != 0,
+    accessed: nanos_of(accessed),
+    modified: nanos_of(written),
+    created: nanos_of(created),
+  }
+}
+
+@cfg(windows)
+fn handle_info(file: *mut c_void) -> Result<FileInfo, i32> {
+  var info = HandleInfo {
+    attributes: 0,
+    created: FileTime { low: 0, high: 0 },
+    accessed: FileTime { low: 0, high: 0 },
+    written: FileTime { low: 0, high: 0 },
+    volume: 0,
+    size_high: 0,
+    size_low: 0,
+    links: 0,
+    index_high: 0,
+    index_low: 0,
+  };
+
+  if unsafe { GetFileInformationByHandle(file, &mut info) } == 0 {
+    return Err(failure());
+  }
+
+  Ok(info_from(info.attributes, info.created, info.accessed, info.written, info.size_high, info.size_low))
+}
+
+/// A handle that reads only the attributes of what `path` names, a directory too
+/// (`FILE_FLAG_BACKUP_SEMANTICS`), following a symbolic link.
+@cfg(windows)
+fn attribute_handle(path: String) -> Result<*mut c_void, i32> {
+  const name = match wide_path(path) {
+    Some(found) => found,
+    None => return Err(EINVAL),
+  };
+  // FILE_READ_ATTRIBUTES, sharing everything, OPEN_EXISTING.
+  const file = unsafe { CreateFileW(name.as_ptr(), 0x80, 7, 0 as *mut c_void, 3, 0x0200_0000, 0 as *mut c_void) };
+
+  if invalid(file) { Err(failure()) } else { Ok(file) }
+}
+
+@cfg(windows)
+pub fn metadata(path: String, follow: bool) -> Result<FileInfo, i32> {
+  if follow {
+    const file = attribute_handle(path)?;
+    const found = handle_info(file);
+
+    unsafe { CloseHandle(file); }
+
+    return found;
+  }
+
+  // The link itself: `GetFileAttributesExW` does not follow it.
+  const name = match wide_path(path) {
+    Some(found) => found,
+    None => return Err(EINVAL),
+  };
+  var data = AttributeData {
+    attributes: 0,
+    created: FileTime { low: 0, high: 0 },
+    accessed: FileTime { low: 0, high: 0 },
+    written: FileTime { low: 0, high: 0 },
+    size_high: 0,
+    size_low: 0,
+  };
+
+  // GetFileExInfoStandard.
+  if unsafe { GetFileAttributesExW(name.as_ptr(), 0, &mut data) } == 0 {
+    return Err(failure());
+  }
+
+  Ok(info_from(data.attributes, data.created, data.accessed, data.written, data.size_high, data.size_low))
+}
+
+@cfg(windows)
+pub fn file_metadata(file: usize) -> Result<FileInfo, i32> {
+  handle_info(handle_of(file))
+}
+
+/// The final path of what `path` names, as Rust's `canonicalize`: `\\?\` and the path, links
+/// followed.
+@cfg(windows)
+pub fn canonical(path: String) -> Result<String, i32> {
+  const file = attribute_handle(path)?;
+  var size = 260u32;
+
+  loop {
+    const buffer = new List<u16>();
+
+    buffer.resize(size as usize, 0);
+
+    const len = unsafe { GetFinalPathNameByHandleW(file, buffer.as_mut_ptr(), size, 0) };
+
+    if len == 0 {
+      const code = failure();
+
+      unsafe { CloseHandle(file); }
+
+      return Err(code);
+    }
+
+    // Without room, the size it needs with its terminator.
+    if len >= size {
+      size = len + 1;
+      continue;
+    }
+
+    unsafe { CloseHandle(file); }
+
+    return Ok(from_utf16_lossy(&buffer[0..len as usize]));
+  }
+}

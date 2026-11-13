@@ -173,6 +173,7 @@ pub enum ErrorKind {
   InvalidInput,
   InvalidData,
   UnexpectedEof,
+  Unsupported,
   Other,
 }
 ```
@@ -295,8 +296,26 @@ current directory unless they have a root. The functions with a `Result` fail wi
 - Names that are not valid UTF-8 are listed by `read_dir` with each ill-formed sequence replaced
   by U+FFFD. On Windows, paths are passed to the system as UTF-16, so any Unicode name works.
 - A path containing a NUL character is an error of kind `InvalidInput`.
-- Not yet: file metadata (size, times, permissions), removing a
-  directory tree, and changing the current directory (F4, since it is process-wide state).
+- Not yet: changing the current directory (F4, since it is process-wide state), symbolic links
+  to make, and permissions to set.
+
+### Metadata
+
+Rationale: [ADR-0096](../adr/0096-streams-files-and-drop.md), Q659.
+
+| Function or method | Result |
+|---|---|
+| `metadata(path) -> Result<Metadata, io::Error>` | What `path` names, following a symbolic link |
+| `symlink_metadata(path) -> Result<Metadata, io::Error>` | The same, of a symbolic link itself |
+| `File::metadata()` | The same, of an open file |
+| `remove_dir_all(path)` | Removes a directory with everything in it; a symbolic link is removed itself, not what it names; a path naming a file is an error |
+| `canonicalize(path) -> Result<String, io::Error>` | The absolute path, with `.`, `..` and symbolic links resolved; on Windows it starts with `\\?\`, as Rust's |
+
+`Metadata` has `len() -> u64`, `is_file()`, `is_dir()`, `is_symlink()` (which only
+`symlink_metadata` can see), `readonly()` (no one may write it: Rust's
+`permissions().readonly()`), and `modified()`, `accessed()` and `created()`, each a
+`Result<SystemTime, io::Error>`: Linux and Android keep no creation time, and Intel Macs none in
+the `stat` they use, so `created()` there is an error of kind `Unsupported`.
 
 ### `File` and `OpenOptions`
 
@@ -599,6 +618,7 @@ Rationale: [ADR-0039](../adr/0039-time-and-commands.md).
 | `Instant::now()`, `i.elapsed()` | The current instant, and the time since `i` |
 | `i.duration_since(earlier)` | The time from `earlier` to `i`; zero if `earlier` is later |
 | `SystemTime::now()`, `t.since_unix_epoch()` | The current time, and the time since 1970-01-01 00:00:00 UTC (zero before it) |
+| `UNIX_EPOCH`, `t + d` | 1970-01-01 00:00:00 UTC, a `static`, and a `SystemTime` moved later by a `Duration`, as Rust's; `SystemTime::default()` is the epoch ([ADR-0096](../adr/0096-streams-files-and-drop.md), Q659) |
 
 - The three types implement `Ord` (and so `Eq`): `a.compare(b)`, and lists of them can be
   sorted. Their arithmetic and comparisons are methods.

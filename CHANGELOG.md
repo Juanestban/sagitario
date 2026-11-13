@@ -15,6 +15,10 @@ The sources say 0.32.0.
 
 ### Added
 
+- `fs::metadata`, `symlink_metadata` and `File::metadata`, with the size, kind, read-only flag and
+  times of a file as `SystemTime`s; `fs::remove_dir_all` and `fs::canonicalize`; `time::UNIX_EPOCH`
+  and `SystemTime + Duration`; and `io::ErrorKind::Unsupported`
+  ([ADR-0096](docs/adr/0096-streams-files-and-drop.md), increment 4).
 - `std::io::BufRead`, `BufReader` and `BufWriter`, which flushes on its `drop`, and `io::stdin()`,
   `stdout()` and `stderr()` as readers and writers of bytes, with `Stdout::lock`
   ([ADR-0096](docs/adr/0096-streams-files-and-drop.md), increment 3).
@@ -132,6 +136,8 @@ The sources say 0.32.0.
 
 ### Changed
 
+- `io::ErrorKind` has a variant more, `Unsupported`, so a `match` over it that names every kind
+  needs its arm ([ADR-0096](docs/adr/0096-streams-files-and-drop.md), increment 4).
 - `rev()` works on any iterator with two ends, and is an error on the others, as in Rust;
   `list.iter()` and the other iterators with two ends have the type `DoubleEndedIter<T>`, which
   is an `Iter<T>` ([ADR-0093](docs/adr/0093-everyday-methods.md), Q627).

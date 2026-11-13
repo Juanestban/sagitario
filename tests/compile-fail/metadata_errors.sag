@@ -1,0 +1,14 @@
+// `fs::Metadata` and `time::UNIX_EPOCH` (docs/adr/0096-streams-files-and-drop.md, Q659).
+use std::fs;
+use std::io;
+use std::time;
+use std::time::Duration;
+
+fn main() -> Result<(), io::Error> {
+  const info = fs::metadata("Nova.toml")?;
+  const _size = info.size; //~ ERROR E0205
+  const _wrong = fs::metadata(5); //~ ERROR E0300
+
+  time::UNIX_EPOCH = time::UNIX_EPOCH + Duration::from_secs(1); //~ ERROR E0307
+  Ok(())
+}
