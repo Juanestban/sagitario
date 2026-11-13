@@ -1,0 +1,20 @@
+// A `for` over an iterator that is a part of another value, such as what `unwrap()` gives: an
+// internal compiler error once (docs/adr/0100-networking.md, increment 2).
+// expect-stdout: 1 2 | 3
+
+fn main() {
+  const maybe: Option<Iter<i32>> = Some(List::from([1, 2]).iter());
+  const parts: List<String> = new List();
+
+  for x in maybe.unwrap() {
+    parts.push(f"{x}");
+  }
+
+  const result: Result<Iter<i32>, String> = Ok(List::from([3]).iter());
+
+  print(parts.join(" ") + " | ");
+
+  for y in result.unwrap() {
+    println(f"{y}");
+  }
+}

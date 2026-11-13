@@ -67,13 +67,86 @@ extern "C" {
 }
 
 /// The C library's description of the `errno` value `code`; invalid UTF-8 becomes U+FFFD.
+@cfg(unix)
 pub fn error_message(code: i32) -> String {
   unsafe { string_from_c(strerror(code)) }
+}
+
+/// The same; a code of Winsock without an `errno` value, from 10000, is described by Windows
+/// (docs/adr/0100-networking.md, Q697).
+@cfg(windows)
+pub fn error_message(code: i32) -> String {
+  if code >= 10000 { windows_message(code as u32) } else { unsafe { string_from_c(strerror(code)) } }
 }
 
 /// A call interrupted by a signal, on every Unix system.
 @cfg(unix)
 const EINTR: i32 = 4;
+
+// The `errno` values of the failures of sockets, which differ between C libraries; on Windows,
+// those of its C runtime, which the `WSA` codes become (docs/adr/0100-networking.md, Q697).
+@cfg(any(target_os = "linux", target_os = "android"))
+pub const ECONNREFUSED: i32 = 111;
+@cfg(any(target_os = "linux", target_os = "android"))
+pub const ECONNRESET: i32 = 104;
+@cfg(any(target_os = "linux", target_os = "android"))
+pub const ECONNABORTED: i32 = 103;
+@cfg(any(target_os = "linux", target_os = "android"))
+pub const ENOTCONN: i32 = 107;
+@cfg(any(target_os = "linux", target_os = "android"))
+pub const EADDRINUSE: i32 = 98;
+@cfg(any(target_os = "linux", target_os = "android"))
+pub const EADDRNOTAVAIL: i32 = 99;
+@cfg(any(target_os = "linux", target_os = "android"))
+pub const EAGAIN: i32 = 11;
+@cfg(any(target_os = "linux", target_os = "android"))
+pub const EWOULDBLOCK: i32 = 11;
+@cfg(any(target_os = "linux", target_os = "android"))
+pub const ETIMEDOUT: i32 = 110;
+@cfg(any(target_os = "linux", target_os = "android"))
+pub const EINPROGRESS: i32 = 115;
+
+@cfg(any(target_os = "macos", target_os = "ios"))
+pub const ECONNREFUSED: i32 = 61;
+@cfg(any(target_os = "macos", target_os = "ios"))
+pub const ECONNRESET: i32 = 54;
+@cfg(any(target_os = "macos", target_os = "ios"))
+pub const ECONNABORTED: i32 = 53;
+@cfg(any(target_os = "macos", target_os = "ios"))
+pub const ENOTCONN: i32 = 57;
+@cfg(any(target_os = "macos", target_os = "ios"))
+pub const EADDRINUSE: i32 = 48;
+@cfg(any(target_os = "macos", target_os = "ios"))
+pub const EADDRNOTAVAIL: i32 = 49;
+@cfg(any(target_os = "macos", target_os = "ios"))
+pub const EAGAIN: i32 = 35;
+@cfg(any(target_os = "macos", target_os = "ios"))
+pub const EWOULDBLOCK: i32 = 35;
+@cfg(any(target_os = "macos", target_os = "ios"))
+pub const ETIMEDOUT: i32 = 60;
+@cfg(any(target_os = "macos", target_os = "ios"))
+pub const EINPROGRESS: i32 = 36;
+
+@cfg(windows)
+pub const ECONNREFUSED: i32 = 107;
+@cfg(windows)
+pub const ECONNRESET: i32 = 108;
+@cfg(windows)
+pub const ECONNABORTED: i32 = 106;
+@cfg(windows)
+pub const ENOTCONN: i32 = 126;
+@cfg(windows)
+pub const EADDRINUSE: i32 = 100;
+@cfg(windows)
+pub const EADDRNOTAVAIL: i32 = 101;
+@cfg(windows)
+pub const EAGAIN: i32 = 11;
+@cfg(windows)
+pub const EWOULDBLOCK: i32 = 140;
+@cfg(windows)
+pub const ETIMEDOUT: i32 = 138;
+@cfg(windows)
+pub const EINPROGRESS: i32 = 112;
 
 // ---- Clocks and sleeping ----------------------------------------------------------------------
 
@@ -4426,4 +4499,745 @@ pub fn canonical(path: String) -> Result<String, i32> {
 
     return Ok(from_utf16_lossy(&buffer[0..len as usize]));
   }
+}
+
+// ---- Sockets (docs/adr/0100-networking.md, Q694 and Q698) --------------------------------------
+//
+// A socket is a number, as a file: a descriptor on POSIX, a `SOCKET` on Windows. The addresses
+// cross as `RawAddr`, which `std::net` turns into its types, and the system's `sockaddr_in` and
+// `sockaddr_in6` are written byte by byte, every supported processor being little-endian. A
+// failure is an `errno` value; on Windows, the `WSA` codes with one become it, and the others stay
+// as they are, which `error_message` describes.
+
+/// A socket address as `std::net` and the system exchange it: an IPv4 address in the first four
+/// octets, the port, and the flow label and scope of an IPv6 address.
+pub struct RawAddr {
+  pub v6: bool;
+  pub octets: [u8; 16];
+  pub port: u16;
+  pub flowinfo: u32;
+  pub scope_id: u32;
+}
+
+/// `struct sockaddr_storage`, large enough for every address.
+@repr(C)
+struct SockaddrBuffer {
+  pub bytes: [u8; 128];
+}
+
+const AF_INET: u8 = 2;
+@cfg(any(target_os = "linux", target_os = "android"))
+const AF_INET6: u8 = 10;
+@cfg(any(target_os = "macos", target_os = "ios"))
+const AF_INET6: u8 = 30;
+@cfg(windows)
+const AF_INET6: u8 = 23;
+
+const SOCK_STREAM: c_int = 1;
+const SOCK_DGRAM: c_int = 2;
+/// `MSG_PEEK`, the same everywhere.
+pub const MSG_PEEK: i32 = 2;
+
+/// The length of the `sockaddr` of an address.
+fn sockaddr_len(v6: bool) -> u32 {
+  if v6 { 28 } else { 16 }
+}
+
+/// Apple's `sockaddr` starts with its length, then its family in one byte.
+@cfg(any(target_os = "macos", target_os = "ios"))
+fn put_family(buffer: SockaddrBuffer, v6: bool) -> SockaddrBuffer {
+  var result = buffer;
+
+  result.bytes[0] = sockaddr_len(v6) as u8;
+  result.bytes[1] = if v6 { AF_INET6 } else { AF_INET };
+  result
+}
+
+@cfg(any(target_os = "macos", target_os = "ios"))
+fn family_of(buffer: SockaddrBuffer) -> u8 {
+  buffer.bytes[1]
+}
+
+/// The other systems' starts with its family in two bytes.
+@cfg(not(any(target_os = "macos", target_os = "ios")))
+fn put_family(buffer: SockaddrBuffer, v6: bool) -> SockaddrBuffer {
+  var result = buffer;
+
+  result.bytes[0] = if v6 { AF_INET6 } else { AF_INET };
+  result.bytes[1] = 0;
+  result
+}
+
+@cfg(not(any(target_os = "macos", target_os = "ios")))
+fn family_of(buffer: SockaddrBuffer) -> u8 {
+  buffer.bytes[0]
+}
+
+/// The `sockaddr_in` or `sockaddr_in6` of `addr`: the port and the flow label in network order,
+/// the scope in the machine's.
+fn encode(addr: RawAddr) -> SockaddrBuffer {
+  var buffer = put_family(SockaddrBuffer { bytes: [0u8; 128] }, addr.v6);
+
+  buffer.bytes[2] = (addr.port >> 8) as u8;
+  buffer.bytes[3] = addr.port as u8;
+
+  if !addr.v6 {
+    for index in 0..4usize {
+      buffer.bytes[4 + index] = addr.octets[index];
+    }
+
+    return buffer;
+  }
+
+  buffer.bytes[4] = (addr.flowinfo >> 24) as u8;
+  buffer.bytes[5] = (addr.flowinfo >> 16) as u8;
+  buffer.bytes[6] = (addr.flowinfo >> 8) as u8;
+  buffer.bytes[7] = addr.flowinfo as u8;
+
+  for index in 0..16usize {
+    buffer.bytes[8 + index] = addr.octets[index];
+  }
+
+  buffer.bytes[24] = addr.scope_id as u8;
+  buffer.bytes[25] = (addr.scope_id >> 8) as u8;
+  buffer.bytes[26] = (addr.scope_id >> 16) as u8;
+  buffer.bytes[27] = (addr.scope_id >> 24) as u8;
+  buffer
+}
+
+/// The address a `sockaddr_in` or `sockaddr_in6` holds; `None` for another family.
+fn decode(buffer: SockaddrBuffer) -> Option<RawAddr> {
+  const family = family_of(buffer);
+  const port = (buffer.bytes[2] as u16) << 8 | buffer.bytes[3] as u16;
+  var octets = [0u8; 16];
+
+  if family == AF_INET {
+    for index in 0..4usize {
+      octets[index] = buffer.bytes[4 + index];
+    }
+
+    return Some(RawAddr { v6: false, octets: octets, port: port, flowinfo: 0, scope_id: 0 });
+  }
+
+  if family != AF_INET6 {
+    return None;
+  }
+
+  for index in 0..16usize {
+    octets[index] = buffer.bytes[8 + index];
+  }
+
+  const flowinfo = (buffer.bytes[4] as u32) << 24 | (buffer.bytes[5] as u32) << 16 | (buffer.bytes[6] as u32) << 8 | buffer.bytes[7] as u32;
+  const scope_id = (buffer.bytes[27] as u32) << 24 | (buffer.bytes[26] as u32) << 16 | (buffer.bytes[25] as u32) << 8 | buffer.bytes[24] as u32;
+
+  Some(RawAddr { v6: true, octets: octets, port: port, flowinfo: flowinfo, scope_id: scope_id })
+}
+
+/// What `getaddrinfo` returns, whose fields each C library orders its own way.
+@cfg(any(target_os = "linux", target_os = "android"))
+@repr(C)
+struct AddrInfo {
+  pub flags: c_int;
+  pub family: c_int;
+  pub socktype: c_int;
+  pub protocol: c_int;
+  pub addrlen: u32;
+  pub addr: *const u8;
+  pub canonname: *const c_char;
+  pub next: *const AddrInfo;
+}
+
+@cfg(any(target_os = "macos", target_os = "ios"))
+@repr(C)
+struct AddrInfo {
+  pub flags: c_int;
+  pub family: c_int;
+  pub socktype: c_int;
+  pub protocol: c_int;
+  pub addrlen: u32;
+  pub canonname: *const c_char;
+  pub addr: *const u8;
+  pub next: *const AddrInfo;
+}
+
+@cfg(windows)
+@repr(C)
+struct AddrInfo {
+  pub flags: c_int;
+  pub family: c_int;
+  pub socktype: c_int;
+  pub protocol: c_int;
+  pub addrlen: usize;
+  pub canonname: *const c_char;
+  pub addr: *const u8;
+  pub next: *const AddrInfo;
+}
+
+/// The hints of a lookup: streams, of either family, as Rust's.
+fn lookup_hints() -> AddrInfo {
+  AddrInfo {
+    flags: 0,
+    family: 0,
+    socktype: SOCK_STREAM,
+    protocol: 0,
+    addrlen: 0,
+    canonname: 0 as *const c_char,
+    addr: 0 as *const u8,
+    next: 0 as *const AddrInfo,
+  }
+}
+
+/// The addresses of the list `getaddrinfo` returned, with `port`.
+fn lookup_results(first: *const AddrInfo, port: u16) -> List<RawAddr> {
+  const found: List<RawAddr> = new List();
+  var node = first;
+
+  while !node.is_null() {
+    const info = unsafe { *node };
+
+    if !info.addr.is_null() {
+      var buffer = SockaddrBuffer { bytes: [0u8; 128] };
+      const len = if (info.addrlen as usize) < 128 { info.addrlen as usize } else { 128usize };
+
+      for index in 0..len {
+        buffer.bytes[index] = unsafe { *info.addr.add(index) };
+      }
+
+      if let Some(raw) = decode(buffer) {
+        var with_port = raw;
+
+        with_port.port = port;
+        found.push(with_port);
+      }
+    }
+
+    node = info.next;
+  }
+
+  found
+}
+
+@cfg(unix)
+extern "C" {
+  fn socket(domain: c_int, kind: c_int, protocol: c_int) -> c_int;
+  fn bind(socket: c_int, addr: *const SockaddrBuffer, len: u32) -> c_int;
+  fn listen(socket: c_int, backlog: c_int) -> c_int;
+  fn connect(socket: c_int, addr: *const SockaddrBuffer, len: u32) -> c_int;
+  fn recv(socket: c_int, buffer: *mut c_void, len: usize, flags: c_int) -> isize;
+  fn send(socket: c_int, data: *const c_void, len: usize, flags: c_int) -> isize;
+  fn shutdown(socket: c_int, how: c_int) -> c_int;
+  fn getsockname(socket: c_int, addr: *mut SockaddrBuffer, len: *mut u32) -> c_int;
+  fn getpeername(socket: c_int, addr: *mut SockaddrBuffer, len: *mut u32) -> c_int;
+  fn setsockopt(socket: c_int, level: c_int, name: c_int, value: *const c_void, len: u32) -> c_int;
+  fn getaddrinfo(node: *const c_char, service: *const c_char, hints: *const AddrInfo, result: *mut *const AddrInfo) -> c_int;
+  fn freeaddrinfo(info: *const AddrInfo);
+  fn gai_strerror(code: c_int) -> *const c_char;
+}
+
+@cfg(any(target_os = "linux", target_os = "android"))
+extern "C" {
+  fn accept4(socket: c_int, addr: *mut SockaddrBuffer, len: *mut u32, flags: c_int) -> c_int;
+}
+
+@cfg(any(target_os = "macos", target_os = "ios"))
+extern "C" {
+  fn accept(socket: c_int, addr: *mut SockaddrBuffer, len: *mut u32) -> c_int;
+}
+
+/// `SOCK_CLOEXEC`: the socket is closed in the programs this one starts.
+@cfg(any(target_os = "linux", target_os = "android"))
+const SOCK_CLOEXEC: c_int = 0x80000;
+/// `MSG_NOSIGNAL`: a write to a socket whose other end closed fails instead of raising `SIGPIPE`.
+@cfg(any(target_os = "linux", target_os = "android"))
+const SEND_FLAGS: c_int = 0x4000;
+@cfg(any(target_os = "macos", target_os = "ios"))
+const SEND_FLAGS: c_int = 0;
+
+@cfg(any(target_os = "linux", target_os = "android"))
+const SOL_SOCKET: c_int = 1;
+@cfg(any(target_os = "linux", target_os = "android"))
+const SO_REUSEADDR: c_int = 2;
+@cfg(any(target_os = "macos", target_os = "ios"))
+const SOL_SOCKET: c_int = 0xFFFF;
+@cfg(any(target_os = "macos", target_os = "ios"))
+const SO_REUSEADDR: c_int = 4;
+/// Apple's sockets do not raise `SIGPIPE` with it, as there is no `MSG_NOSIGNAL`.
+@cfg(any(target_os = "macos", target_os = "ios"))
+const SO_NOSIGPIPE: c_int = 0x1022;
+
+/// Sets an option of the type `int` to `value`.
+@cfg(unix)
+fn set_int_option(fd: c_int, level: c_int, name: c_int, value: c_int) -> Result<(), i32> {
+  const given = value;
+
+  if unsafe { setsockopt(fd, level, name, &raw const given as *const c_void, 4) } == 0 { Ok(()) } else { Err(failure()) }
+}
+
+/// The kind of socket to open; the descriptor is closed in the programs this one starts.
+@cfg(any(target_os = "linux", target_os = "android"))
+fn open_socket(v6: bool, kind: c_int) -> c_int {
+  const family = if v6 { AF_INET6 } else { AF_INET };
+
+  unsafe { socket(family as c_int, kind | SOCK_CLOEXEC, 0) }
+}
+
+/// `std::process` closes in the children every descriptor it does not give them
+/// (`POSIX_SPAWN_CLOEXEC_DEFAULT`), so the socket needs no `FD_CLOEXEC`, which takes the
+/// variadic `fcntl`; it never raises `SIGPIPE`.
+@cfg(any(target_os = "macos", target_os = "ios"))
+fn open_socket(v6: bool, kind: c_int) -> c_int {
+  const family = if v6 { AF_INET6 } else { AF_INET };
+  const fd = unsafe { socket(family as c_int, kind, 0) };
+
+  if fd >= 0 {
+    if let Err(_) = set_int_option(fd, SOL_SOCKET, SO_NOSIGPIPE, 1) {
+      const code = errno();
+
+      unsafe { close(fd); }
+      unsafe { *errno_place() = code; }
+
+      return -1;
+    }
+  }
+
+  fd
+}
+
+/// A new socket of the family of `v6`, for streams or datagrams.
+@cfg(unix)
+pub fn socket_open(v6: bool, datagram: bool) -> Result<usize, i32> {
+  clear_errno();
+
+  const fd = open_socket(v6, if datagram { SOCK_DGRAM } else { SOCK_STREAM });
+
+  if fd < 0 { Err(failure()) } else { Ok(fd as usize) }
+}
+
+/// Lets a listener bind the address of one that closed while its connections wait to end, as
+/// Rust's `TcpListener::bind` does on Unix.
+@cfg(unix)
+pub fn socket_reuse_address(handle: usize) -> Result<(), i32> {
+  set_int_option(handle as c_int, SOL_SOCKET, SO_REUSEADDR, 1)
+}
+
+@cfg(unix)
+pub fn socket_bind(handle: usize, addr: RawAddr) -> Result<(), i32> {
+  const buffer = encode(addr);
+
+  if unsafe { bind(handle as c_int, &raw const buffer, sockaddr_len(addr.v6)) } == 0 { Ok(()) } else { Err(failure()) }
+}
+
+@cfg(unix)
+pub fn socket_listen(handle: usize, backlog: i32) -> Result<(), i32> {
+  if unsafe { listen(handle as c_int, backlog) } == 0 { Ok(()) } else { Err(failure()) }
+}
+
+/// Waits for a connection: its socket and the address of its other end. A signal does not
+/// interrupt it.
+@cfg(any(target_os = "linux", target_os = "android"))
+pub fn socket_accept(handle: usize) -> Result<(usize, RawAddr), i32> {
+  loop {
+    var buffer = SockaddrBuffer { bytes: [0u8; 128] };
+    var len = 128u32;
+    const fd = unsafe { accept4(handle as c_int, &raw mut buffer, &raw mut len, SOCK_CLOEXEC) };
+
+    if fd >= 0 {
+      return accepted(fd, buffer);
+    }
+
+    if errno() != EINTR {
+      return Err(failure());
+    }
+  }
+}
+
+@cfg(any(target_os = "macos", target_os = "ios"))
+pub fn socket_accept(handle: usize) -> Result<(usize, RawAddr), i32> {
+  loop {
+    var buffer = SockaddrBuffer { bytes: [0u8; 128] };
+    var len = 128u32;
+    const fd = unsafe { accept(handle as c_int, &raw mut buffer, &raw mut len) };
+
+    if fd >= 0 {
+      if let Err(code) = set_int_option(fd, SOL_SOCKET, SO_NOSIGPIPE, 1) {
+        unsafe { close(fd); }
+
+        return Err(code);
+      }
+
+      return accepted(fd, buffer);
+    }
+
+    if errno() != EINTR {
+      return Err(failure());
+    }
+  }
+}
+
+/// The accepted descriptor `fd` and the address of its other end.
+@cfg(unix)
+fn accepted(fd: c_int, buffer: SockaddrBuffer) -> Result<(usize, RawAddr), i32> {
+  match decode(buffer) {
+    Some(found) => Ok((fd as usize, found)),
+    None => {
+      unsafe { close(fd); }
+
+      Err(EINVAL)
+    }
+  }
+}
+
+/// Connects the socket, waiting until the other end accepts or refuses. A signal does not
+/// interrupt it.
+@cfg(unix)
+pub fn socket_connect(handle: usize, addr: RawAddr) -> Result<(), i32> {
+  const buffer = encode(addr);
+
+  loop {
+    if unsafe { connect(handle as c_int, &raw const buffer, sockaddr_len(addr.v6)) } == 0 {
+      return Ok(());
+    }
+
+    if errno() != EINTR {
+      return Err(failure());
+    }
+  }
+}
+
+/// Reads at most `len` bytes into `buffer`, or looks at them with `MSG_PEEK`: 0 once the other
+/// end closed. A signal does not interrupt it.
+@cfg(unix)
+pub fn socket_recv(handle: usize, buffer: *mut u8, len: usize, flags: i32) -> Result<usize, i32> {
+  loop {
+    const count = unsafe { recv(handle as c_int, buffer as *mut c_void, len, flags) };
+
+    if count >= 0 {
+      return Ok(count as usize);
+    }
+
+    if errno() != EINTR {
+      return Err(failure());
+    }
+  }
+}
+
+/// Writes at most `len` bytes of `data`: how many it took. A signal does not interrupt it.
+@cfg(unix)
+pub fn socket_send(handle: usize, data: *const u8, len: usize) -> Result<usize, i32> {
+  loop {
+    const count = unsafe { send(handle as c_int, data as *const c_void, len, SEND_FLAGS) };
+
+    if count >= 0 {
+      return Ok(count as usize);
+    }
+
+    if errno() != EINTR {
+      return Err(failure());
+    }
+  }
+}
+
+/// Closes the reading half (0), the writing half (1) or both (2).
+@cfg(unix)
+pub fn socket_shutdown(handle: usize, how: i32) -> Result<(), i32> {
+  if unsafe { shutdown(handle as c_int, how) } == 0 { Ok(()) } else { Err(failure()) }
+}
+
+@cfg(unix)
+pub fn socket_close(handle: usize) -> i32 {
+  if unsafe { close(handle as c_int) } == 0 { 0 } else { failure() }
+}
+
+/// The address of this end (`peer` false) or of the other.
+@cfg(unix)
+pub fn socket_address(handle: usize, peer: bool) -> Result<RawAddr, i32> {
+  var buffer = SockaddrBuffer { bytes: [0u8; 128] };
+  var len = 128u32;
+  const code = if peer { unsafe { getpeername(handle as c_int, &raw mut buffer, &raw mut len) } } else { unsafe { getsockname(handle as c_int, &raw mut buffer, &raw mut len) } };
+
+  if code != 0 {
+    return Err(failure());
+  }
+
+  match decode(buffer) {
+    Some(found) => Ok(found),
+    None => Err(EINVAL),
+  }
+}
+
+/// The addresses of `host` with `port`, from the system's resolver; the resolver's message if it
+/// cannot give them.
+@cfg(unix)
+pub fn resolve(host: String, port: u16) -> Result<List<RawAddr>, String> {
+  const name = match CString::new(host) {
+    Ok(found) => found,
+    Err(_) => return Err("the name holds a NUL"),
+  };
+  const hints = lookup_hints();
+  var first = 0 as *const AddrInfo;
+
+  clear_errno();
+
+  const code = unsafe { getaddrinfo(name.as_ptr(), 0 as *const c_char, &raw const hints, &raw mut first) };
+
+  if code != 0 {
+    // `EAI_SYSTEM`: the reason is in `errno`.
+    const reason = errno();
+
+    if reason != 0 && code == EAI_SYSTEM {
+      return Err(error_message(reason));
+    }
+
+    return Err(unsafe { string_from_c(gai_strerror(code)) });
+  }
+
+  const found = lookup_results(first, port);
+
+  unsafe { freeaddrinfo(first); }
+  Ok(found)
+}
+
+@cfg(any(target_os = "linux", target_os = "android"))
+const EAI_SYSTEM: c_int = -11;
+@cfg(any(target_os = "macos", target_os = "ios"))
+const EAI_SYSTEM: c_int = 11;
+
+/// `WSADATA`, which `WSAStartup` fills.
+@cfg(windows)
+@repr(C)
+struct WsaData {
+  pub words: [u64; 64];
+}
+
+@cfg(windows)
+extern "C" {
+  fn WSAStartup(version: u16, data: *mut WsaData) -> c_int;
+  fn WSAGetLastError() -> c_int;
+  fn WSASocketW(family: c_int, kind: c_int, protocol: c_int, info: *mut c_void, group: u32, flags: u32) -> usize;
+  fn bind(socket: usize, addr: *const SockaddrBuffer, len: c_int) -> c_int;
+  fn listen(socket: usize, backlog: c_int) -> c_int;
+  fn accept(socket: usize, addr: *mut SockaddrBuffer, len: *mut c_int) -> usize;
+  fn connect(socket: usize, addr: *const SockaddrBuffer, len: c_int) -> c_int;
+  fn recv(socket: usize, buffer: *mut u8, len: c_int, flags: c_int) -> c_int;
+  fn send(socket: usize, data: *const u8, len: c_int, flags: c_int) -> c_int;
+  fn shutdown(socket: usize, how: c_int) -> c_int;
+  fn closesocket(socket: usize) -> c_int;
+  fn getsockname(socket: usize, addr: *mut SockaddrBuffer, len: *mut c_int) -> c_int;
+  fn getpeername(socket: usize, addr: *mut SockaddrBuffer, len: *mut c_int) -> c_int;
+  fn getaddrinfo(node: *const c_char, service: *const c_char, hints: *const AddrInfo, result: *mut *const AddrInfo) -> c_int;
+  fn freeaddrinfo(info: *const AddrInfo);
+  fn SetHandleInformation(handle: *mut c_void, mask: u32, flags: u32) -> c_int;
+  fn FormatMessageW(flags: u32, source: *const c_void, id: u32, language: u32, buffer: *mut u16, size: u32, arguments: *mut c_void) -> u32;
+}
+
+/// `INVALID_SOCKET` and `SOCKET_ERROR`.
+@cfg(windows)
+const INVALID_SOCKET: usize = 0xFFFF_FFFF_FFFF_FFFF;
+@cfg(windows)
+const SOCKET_ERROR: c_int = -1;
+/// `WSA_FLAG_OVERLAPPED` and `WSA_FLAG_NO_HANDLE_INHERIT`, as Rust's.
+@cfg(windows)
+const SOCKET_FLAGS: u32 = 0x01 | 0x80;
+
+/// The `errno` value of a `WSA` code, so that kinds and messages match other systems; one without
+/// stays as it is, which `error_message` describes.
+@cfg(windows)
+fn wsa_errno(code: c_int) -> i32 {
+  if code == 10061 {
+    ECONNREFUSED
+  } else if code == 10054 {
+    ECONNRESET
+  } else if code == 10053 {
+    ECONNABORTED
+  } else if code == 10057 {
+    ENOTCONN
+  } else if code == 10048 {
+    EADDRINUSE
+  } else if code == 10049 {
+    EADDRNOTAVAIL
+  } else if code == 10035 {
+    EWOULDBLOCK
+  } else if code == 10060 {
+    ETIMEDOUT
+  } else if code == 10004 {
+    // WSAEINTR
+    4
+  } else if code == 10013 {
+    // WSAEACCES
+    13
+  } else if code == 10022 {
+    EINVAL
+  } else if code == 10036 {
+    EINPROGRESS
+  } else {
+    code
+  }
+}
+
+/// The `errno` value of the last failure of Winsock.
+@cfg(windows)
+fn wsa_failure() -> i32 {
+  wsa_errno(unsafe { WSAGetLastError() })
+}
+
+/// Winsock, started before each socket: `WSAStartup` counts its calls, and it is never stopped,
+/// as Rust's.
+@cfg(windows)
+fn start_winsock() -> Result<(), i32> {
+  var data = WsaData { words: [0u64; 64] };
+  const code = unsafe { WSAStartup(0x0202, &raw mut data) };
+
+  if code == 0 { Ok(()) } else { Err(wsa_errno(code)) }
+}
+
+@cfg(windows)
+pub fn socket_open(v6: bool, datagram: bool) -> Result<usize, i32> {
+  start_winsock()?;
+
+  const family = if v6 { AF_INET6 } else { AF_INET };
+  const handle = unsafe { WSASocketW(family as c_int, if datagram { SOCK_DGRAM } else { SOCK_STREAM }, 0, 0 as *mut c_void, 0, SOCKET_FLAGS) };
+
+  if handle == INVALID_SOCKET { Err(wsa_failure()) } else { Ok(handle) }
+}
+
+/// Windows lets another socket take a bound address with `SO_REUSEADDR`, so Rust does not set it.
+@cfg(windows)
+pub fn socket_reuse_address(_handle: usize) -> Result<(), i32> {
+  Ok(())
+}
+
+@cfg(windows)
+pub fn socket_bind(handle: usize, addr: RawAddr) -> Result<(), i32> {
+  const buffer = encode(addr);
+
+  if unsafe { bind(handle, &raw const buffer, sockaddr_len(addr.v6) as c_int) } != SOCKET_ERROR { Ok(()) } else { Err(wsa_failure()) }
+}
+
+@cfg(windows)
+pub fn socket_listen(handle: usize, backlog: i32) -> Result<(), i32> {
+  if unsafe { listen(handle, backlog) } != SOCKET_ERROR { Ok(()) } else { Err(wsa_failure()) }
+}
+
+@cfg(windows)
+pub fn socket_accept(handle: usize) -> Result<(usize, RawAddr), i32> {
+  var buffer = SockaddrBuffer { bytes: [0u8; 128] };
+  var len = 128 as c_int;
+  const accepted = unsafe { accept(handle, &raw mut buffer, &raw mut len) };
+
+  if accepted == INVALID_SOCKET {
+    return Err(wsa_failure());
+  }
+
+  // HANDLE_FLAG_INHERIT: child processes do not inherit it, as Rust's.
+  unsafe { SetHandleInformation(accepted as *mut c_void, 1, 0); }
+
+  match decode(buffer) {
+    Some(found) => Ok((accepted, found)),
+    None => {
+      unsafe { closesocket(accepted); }
+
+      Err(EINVAL)
+    }
+  }
+}
+
+@cfg(windows)
+pub fn socket_connect(handle: usize, addr: RawAddr) -> Result<(), i32> {
+  const buffer = encode(addr);
+
+  if unsafe { connect(handle, &raw const buffer, sockaddr_len(addr.v6) as c_int) } != SOCKET_ERROR { Ok(()) } else { Err(wsa_failure()) }
+}
+
+/// At most 2 GiB in one call, which `recv` and `send` count in an `int`.
+@cfg(windows)
+fn socket_chunk(len: usize) -> c_int {
+  if len > 0x7FFF_FFFF { 0x7FFF_FFFF } else { len as c_int }
+}
+
+@cfg(windows)
+pub fn socket_recv(handle: usize, buffer: *mut u8, len: usize, flags: i32) -> Result<usize, i32> {
+  const count = unsafe { recv(handle, buffer, socket_chunk(len), flags) };
+
+  if count != SOCKET_ERROR {
+    return Ok(count as usize);
+  }
+
+  // WSAESHUTDOWN: this end closed its reading half, which is the end, as on the other systems.
+  const code = unsafe { WSAGetLastError() };
+
+  if code == 10058 { Ok(0) } else { Err(wsa_errno(code)) }
+}
+
+@cfg(windows)
+pub fn socket_send(handle: usize, data: *const u8, len: usize) -> Result<usize, i32> {
+  const count = unsafe { send(handle, data, socket_chunk(len), 0) };
+
+  if count != SOCKET_ERROR { Ok(count as usize) } else { Err(wsa_failure()) }
+}
+
+@cfg(windows)
+pub fn socket_shutdown(handle: usize, how: i32) -> Result<(), i32> {
+  if unsafe { shutdown(handle, how) } != SOCKET_ERROR { Ok(()) } else { Err(wsa_failure()) }
+}
+
+@cfg(windows)
+pub fn socket_close(handle: usize) -> i32 {
+  if unsafe { closesocket(handle) } != SOCKET_ERROR { 0 } else { wsa_failure() }
+}
+
+@cfg(windows)
+pub fn socket_address(handle: usize, peer: bool) -> Result<RawAddr, i32> {
+  var buffer = SockaddrBuffer { bytes: [0u8; 128] };
+  var len = 128 as c_int;
+  const code = if peer { unsafe { getpeername(handle, &raw mut buffer, &raw mut len) } } else { unsafe { getsockname(handle, &raw mut buffer, &raw mut len) } };
+
+  if code == SOCKET_ERROR {
+    return Err(wsa_failure());
+  }
+
+  match decode(buffer) {
+    Some(found) => Ok(found),
+    None => Err(EINVAL),
+  }
+}
+
+@cfg(windows)
+pub fn resolve(host: String, port: u16) -> Result<List<RawAddr>, String> {
+  if let Err(code) = start_winsock() {
+    return Err(error_message(code));
+  }
+
+  const name = match CString::new(host) {
+    Ok(found) => found,
+    Err(_) => return Err("the name holds a NUL"),
+  };
+  const hints = lookup_hints();
+  var first = 0 as *const AddrInfo;
+  const code = unsafe { getaddrinfo(name.as_ptr(), 0 as *const c_char, &raw const hints, &raw mut first) };
+
+  if code != 0 {
+    return Err(windows_message(code as u32));
+  }
+
+  const found = lookup_results(first, port);
+
+  unsafe { freeaddrinfo(first); }
+  Ok(found)
+}
+
+/// Windows' description of an error code, without its line break.
+@cfg(windows)
+fn windows_message(code: u32) -> String {
+  const buffer = new List<u16>();
+
+  buffer.resize(512, 0);
+
+  // FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS
+  const len = unsafe { FormatMessageW(0x1000 | 0x200, 0 as *const c_void, code, 0, buffer.as_mut_ptr(), 512, 0 as *mut c_void) };
+
+  if len == 0 {
+    return `Windows error ${code}`;
+  }
+
+  from_utf16_lossy(&buffer[0..len as usize]).trim_end()
 }

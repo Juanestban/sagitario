@@ -520,15 +520,18 @@ class Toolchain {
   pub const sanitize: List<String>;
   /// Whether the program uses threads (`GeneratedC::threads`).
   pub const threads: bool;
+  /// Whether the program uses sockets (`GeneratedC::sockets`).
+  pub const sockets: bool;
   /// Position-independent code, for dynamic libraries outside Windows.
   pub const pic: bool;
 
-  pub fn new(self, compiler: CCompiler, dir: String, mode: List<String>, sanitize: List<String>, threads: bool, pic: bool) {
+  pub fn new(self, compiler: CCompiler, dir: String, mode: List<String>, sanitize: List<String>, generated: GeneratedC, pic: bool) {
     self.compiler = compiler;
     self.dir = dir;
     self.mode = mode;
     self.sanitize = sanitize;
-    self.threads = threads;
+    self.threads = generated.threads;
+    self.sockets = generated.sockets;
     self.pic = pic;
   }
 
@@ -609,10 +612,12 @@ class Toolchain {
     Ok(objects)
   }
 
-  /// The libraries to link: the package's, then libm outside Windows (`fmod` and friends). For
-  /// `cl` they are options of the linker, after `/link`.
+  /// The libraries to link: the package's, then libm outside Windows (`fmod` and friends), and
+  /// Winsock on Windows for a program using sockets (docs/adr/0100-networking.md, Q698). For `cl`
+  /// they are options of the linker, after `/link`.
   pub fn link_args(self, link: Link) -> List<String> {
     const args: List<String> = new List();
+    const winsock = self.sockets && self.compiler.windows();
 
     if self.compiler.cl {
       for found in link.search_paths {
@@ -623,7 +628,15 @@ class Toolchain {
         args.push(library + ".lib");
       }
 
+      if winsock {
+        args.push("ws2_32.lib");
+      }
+
       return args;
+    }
+
+    if winsock {
+      args.push("-lws2_32");
     }
 
     for found in link.search_paths {
@@ -919,7 +932,7 @@ fn build_in(compiler: CCompiler, generated: GeneratedC, dir: String, options: Co
 }
 
 fn build_with(compiler: CCompiler, generated: GeneratedC, dir: String, mode: List<String>, sanitize: List<String>, files: List<String>, link: Link, executable: String) -> Result<(), Failure> {
-  const toolchain = new Toolchain(compiler, dir, mode, sanitize, generated.threads, false);
+  const toolchain = new Toolchain(compiler, dir, mode, sanitize, generated, false);
   const objects = toolchain.objects(files, link.sources)?;
 
   toolchain.executable(objects, link, executable)
@@ -1153,7 +1166,7 @@ fn build_library_in(options: CompileOptions, compiler: CCompiler, generated: Gen
 
   if let Some(found) = files.static_lib {
     const archiver = find_archiver(compiler)?;
-    const toolchain = new Toolchain(compiler, dir, mode, new List(), generated.threads, false);
+    const toolchain = new Toolchain(compiler, dir, mode, new List(), generated, false);
     const objects = match toolchain.objects(sources, options.link.sources) {
       Ok(list) => list,
       Err(failure) => return Err(report_failure(failure, compiler, options.link)),
@@ -1183,7 +1196,7 @@ fn build_library_in(options: CompileOptions, compiler: CCompiler, generated: Gen
   }
 
   if let Some(found) = files.dynamic_lib {
-    const toolchain = new Toolchain(compiler, dir, mode, new List(), generated.threads, !windows_target);
+    const toolchain = new Toolchain(compiler, dir, mode, new List(), generated, !windows_target);
     const objects = match toolchain.objects(sources, options.link.sources) {
       Ok(list) => list,
       Err(failure) => return Err(report_failure(failure, compiler, options.link)),

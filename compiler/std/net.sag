@@ -1,6 +1,8 @@
-//! `std::net`: IP and socket addresses (docs/spec/11-standard-library.md#stdnet), as Rust's
-//! (docs/adr/0100-networking.md, Q690–Q692).
+//! `std::net`: IP and socket addresses, and TCP sockets (docs/spec/11-standard-library.md#stdnet),
+//! as Rust's (docs/adr/0100-networking.md), on the sockets of each system in `std::sys`.
 
+use std::io;
+use std::io::{ErrorKind, Read, Write};
 use std::sys;
 
 /// An IPv4 address: four octets, as Rust's `Ipv4Addr`.
@@ -373,7 +375,7 @@ impl From<Ipv6Addr> for IpAddr {
 }
 
 /// An IPv4 address and a port, as Rust's `SocketAddrV4`.
-pub struct SocketAddrV4 impl Hash, Ord, Display, TryFrom<String, AddrParseError> {
+pub struct SocketAddrV4 impl Hash, Ord, Display, TryFrom<String, AddrParseError>, ToSocketAddrs {
   prv address: Ipv4Addr;
   prv number: u16;
 
@@ -417,6 +419,10 @@ pub struct SocketAddrV4 impl Hash, Ord, Display, TryFrom<String, AddrParseError>
     `${self.address}:${self.number}`
   }
 
+  pub fn to_socket_addrs(self) -> Result<Iter<SocketAddr>, io::Error> {
+    Ok(List::from([SocketAddr::V4(self)]).iter())
+  }
+
   pub fn try_from(text: String) -> Result<SocketAddrV4, AddrParseError> {
     const parser = new Parser(text);
 
@@ -429,7 +435,7 @@ pub struct SocketAddrV4 impl Hash, Ord, Display, TryFrom<String, AddrParseError>
 
 /// An IPv6 address, a port, a flow label and the scope of a link-local address, as Rust's
 /// `SocketAddrV6`.
-pub struct SocketAddrV6 impl Hash, Ord, Display, TryFrom<String, AddrParseError> {
+pub struct SocketAddrV6 impl Hash, Ord, Display, TryFrom<String, AddrParseError>, ToSocketAddrs {
   prv address: Ipv6Addr;
   prv number: u16;
   prv flow: u32;
@@ -504,6 +510,10 @@ pub struct SocketAddrV6 impl Hash, Ord, Display, TryFrom<String, AddrParseError>
   }
 
   /// `[address]:port`, or `[address%scope]:port` with a decimal scope.
+  pub fn to_socket_addrs(self) -> Result<Iter<SocketAddr>, io::Error> {
+    Ok(List::from([SocketAddr::V6(self)]).iter())
+  }
+
   pub fn try_from(text: String) -> Result<SocketAddrV6, AddrParseError> {
     const parser = new Parser(text);
 
@@ -515,7 +525,7 @@ pub struct SocketAddrV6 impl Hash, Ord, Display, TryFrom<String, AddrParseError>
 }
 
 /// An IPv4 or IPv6 socket address, as Rust's `SocketAddr`.
-pub enum SocketAddr impl Hash, Ord, Display, From<SocketAddrV4>, TryFrom<String, AddrParseError> {
+pub enum SocketAddr impl Hash, Ord, Display, From<SocketAddrV4>, TryFrom<String, AddrParseError>, ToSocketAddrs {
   V4(SocketAddrV4),
   V6(SocketAddrV6),
 
@@ -608,6 +618,10 @@ pub enum SocketAddr impl Hash, Ord, Display, From<SocketAddrV4>, TryFrom<String,
   }
 
   /// An IPv4 socket address, or else an IPv6 one.
+  pub fn to_socket_addrs(self) -> Result<Iter<SocketAddr>, io::Error> {
+    Ok(List::from([self]).iter())
+  }
+
   pub fn try_from(text: String) -> Result<SocketAddr, AddrParseError> {
     const parser = new Parser(text);
 
@@ -912,4 +926,299 @@ class Parser {
 /// The address of eight segments read.
 fn of_segments(segments: List<u16>) -> Ipv6Addr {
   Ipv6Addr::new(segments[0], segments[1], segments[2], segments[3], segments[4], segments[5], segments[6], segments[7])
+}
+
+// ---- Resolving addresses (docs/adr/0100-networking.md, Q693) ------------------------------------
+
+/// What can be the address of a socket: its addresses, tried in order by `bind` and `connect`, as
+/// Rust's `ToSocketAddrs`. `std::net` implements it for the socket addresses, and the compiler for
+/// `String` (`"host:port"`), `(String, u16)` and the IP addresses with a port.
+pub interface ToSocketAddrs {
+  fn to_socket_addrs(self) -> Result<Iter<SocketAddr>, io::Error>;
+}
+
+/// `to_socket_addrs` of a `String`, which the compiler implements: an address as it is, or else a
+/// name and a port, the name looked up.
+fn text_socket_addrs(text: String) -> Result<Iter<SocketAddr>, io::Error> {
+  if let Ok(found) = SocketAddr::try_from(text) {
+    return Ok(List::from([found]).iter());
+  }
+
+  match text.rsplit_once(":") {
+    Some(parts) => match parts.1.parse_u16() {
+      Ok(port) => lookup(parts.0, port),
+      Err(_) => Err(new io::Error(ErrorKind::InvalidInput, "invalid port value")),
+    },
+    None => Err(new io::Error(ErrorKind::InvalidInput, "invalid socket address")),
+  }
+}
+
+/// `to_socket_addrs` of `(String, u16)`: an IP address as it is, or else a name looked up.
+fn host_socket_addrs(pair: (String, u16)) -> Result<Iter<SocketAddr>, io::Error> {
+  match IpAddr::try_from(pair.0) {
+    Ok(ip) => Ok(List::from([SocketAddr::new(ip, pair.1)]).iter()),
+    Err(_) => lookup(pair.0, pair.1),
+  }
+}
+
+/// `to_socket_addrs` of `(IpAddr, u16)`.
+fn ip_socket_addrs(pair: (IpAddr, u16)) -> Result<Iter<SocketAddr>, io::Error> {
+  Ok(List::from([SocketAddr::new(pair.0, pair.1)]).iter())
+}
+
+/// `to_socket_addrs` of `(Ipv4Addr, u16)`.
+fn ipv4_socket_addrs(pair: (Ipv4Addr, u16)) -> Result<Iter<SocketAddr>, io::Error> {
+  Ok(List::from([SocketAddr::V4(SocketAddrV4::new(pair.0, pair.1))]).iter())
+}
+
+/// `to_socket_addrs` of `(Ipv6Addr, u16)`.
+fn ipv6_socket_addrs(pair: (Ipv6Addr, u16)) -> Result<Iter<SocketAddr>, io::Error> {
+  Ok(List::from([SocketAddr::V6(SocketAddrV6::new(pair.0, pair.1, 0, 0))]).iter())
+}
+
+/// The addresses of `host`, from the system's resolver, with `port`.
+fn lookup(host: String, port: u16) -> Result<Iter<SocketAddr>, io::Error> {
+  if host.contains("\0") {
+    return Err(new io::Error(ErrorKind::InvalidInput, "data provided contains a nul byte"));
+  }
+
+  match sys::resolve(host, port) {
+    Ok(found) => {
+      const addrs: List<SocketAddr> = new List();
+
+      for raw in found {
+        addrs.push(of_raw(raw));
+      }
+
+      Ok(addrs.iter())
+    }
+    Err(message) => Err(new io::Error(ErrorKind::Other, "failed to lookup address information: " + message)),
+  }
+}
+
+/// The first of the addresses of `addr` for which `attempt` works, else the last error, as Rust's.
+fn each_addr<A: ToSocketAddrs, T>(addr: A, attempt: fn(SocketAddr) -> Result<T, io::Error>) -> Result<T, io::Error> {
+  const addrs = addr.to_socket_addrs()?;
+  var last: Option<io::Error> = None;
+
+  for found in addrs {
+    match attempt(found) {
+      Ok(value) => return Ok(value),
+      Err(error) => {
+        last = Some(error);
+      }
+    }
+  }
+
+  match last {
+    Some(error) => Err(error),
+    None => Err(new io::Error(ErrorKind::InvalidInput, "could not resolve to any addresses")),
+  }
+}
+
+/// A socket address of the system's.
+fn of_raw(raw: sys::RawAddr) -> SocketAddr {
+  const o = raw.octets;
+
+  if !raw.v6 {
+    return SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(o[0], o[1], o[2], o[3]), raw.port));
+  }
+
+  const ip = Ipv6Addr::new(
+    (o[0] as u16) << 8 | o[1] as u16,
+    (o[2] as u16) << 8 | o[3] as u16,
+    (o[4] as u16) << 8 | o[5] as u16,
+    (o[6] as u16) << 8 | o[7] as u16,
+    (o[8] as u16) << 8 | o[9] as u16,
+    (o[10] as u16) << 8 | o[11] as u16,
+    (o[12] as u16) << 8 | o[13] as u16,
+    (o[14] as u16) << 8 | o[15] as u16,
+  );
+
+  SocketAddr::V6(SocketAddrV6::new(ip, raw.port, raw.flowinfo, raw.scope_id))
+}
+
+/// The system's form of a socket address.
+fn raw_of(addr: SocketAddr) -> sys::RawAddr {
+  var octets = [0u8; 16];
+
+  match addr {
+    SocketAddr::V4(found) => {
+      const bytes = found.ip().octets();
+
+      for index in 0..4usize {
+        octets[index] = bytes[index];
+      }
+
+      sys::RawAddr { v6: false, octets: octets, port: found.port(), flowinfo: 0, scope_id: 0 }
+    }
+    SocketAddr::V6(found) => sys::RawAddr { v6: true, octets: found.ip().octets(), port: found.port(), flowinfo: found.flowinfo(), scope_id: found.scope_id() },
+  }
+}
+
+/// The result of a call of `std::sys`, its failure an `io::Error` with the system's message.
+fn checked<T>(result: Result<T, i32>) -> Result<T, io::Error> {
+  match result {
+    Ok(value) => Ok(value),
+    Err(code) => Err(super::os_error(code, "")),
+  }
+}
+
+// ---- TCP (docs/adr/0100-networking.md, Q694) ---------------------------------------------------
+
+/// Which halves of a connection `TcpStream::shutdown` closes, as Rust's `Shutdown`.
+pub enum Shutdown {
+  /// Reads return the end.
+  Read,
+  /// The other end reads the end; writes fail.
+  Write,
+  Both,
+}
+
+/// A socket that waits for TCP connections, as Rust's `TcpListener`. It closes when its last
+/// reference goes; threads share it.
+pub class TcpListener impl Drop {
+  /// The descriptor or `SOCKET` of the system.
+  prv var handle: usize;
+  prv var is_open: bool;
+
+  prv fn new(self, handle: usize) {
+    self.handle = handle;
+    self.is_open = true;
+  }
+
+  /// A listener on the first address of `addr` that can be bound; port 0 asks the system for a
+  /// free one, which `local_addr` gives.
+  pub fn bind<A: ToSocketAddrs>(addr: A) -> Result<TcpListener, io::Error> {
+    each_addr(addr, (found) => TcpListener::bind_one(found))
+  }
+
+  prv fn bind_one(addr: SocketAddr) -> Result<TcpListener, io::Error> {
+    const raw = raw_of(addr);
+    const listener = new TcpListener(checked(sys::socket_open(raw.v6, false))?);
+
+    checked(sys::socket_reuse_address(listener.handle))?;
+    checked(sys::socket_bind(listener.handle, raw))?;
+    checked(sys::socket_listen(listener.handle, 128))?;
+    Ok(listener)
+  }
+
+  /// Waits for a connection: its stream and the address of its other end.
+  pub fn accept(self) -> Result<(TcpStream, SocketAddr), io::Error> {
+    const accepted = checked(sys::socket_accept(self.handle))?;
+
+    Ok((unsafe { TcpStream::from_raw_handle(accepted.0) }, of_raw(accepted.1)))
+  }
+
+  /// The connections, one `accept` each; it never ends.
+  pub fn incoming(self) -> Iter<Result<TcpStream, io::Error>> {
+    new Iter<Result<TcpStream, io::Error>>(() => Some(match self.accept() {
+      Ok(pair) => Ok(pair.0),
+      Err(error) => Err(error),
+    }))
+  }
+
+  /// The address it listens on.
+  pub fn local_addr(self) -> Result<SocketAddr, io::Error> {
+    Ok(of_raw(checked(sys::socket_address(self.handle, false))?))
+  }
+
+  /// The descriptor (POSIX) or `SOCKET` (Windows) of the system, which stays the listener's.
+  pub fn as_raw_handle(self) -> usize {
+    self.handle
+  }
+
+  /// The listener of a socket of the system, which it closes. It is `unsafe`: nothing else may
+  /// close or use the socket.
+  pub unsafe fn from_raw_handle(handle: usize) -> TcpListener {
+    new TcpListener(handle)
+  }
+
+  pub fn drop(self) {
+    if self.is_open {
+      self.is_open = false;
+      sys::socket_close(self.handle);
+    }
+  }
+}
+
+/// A TCP connection, as Rust's `TcpStream`: it reads and writes bytes, and closes when its last
+/// reference goes. Threads share it.
+pub class TcpStream impl Read, Write, Drop {
+  /// The descriptor or `SOCKET` of the system.
+  prv var handle: usize;
+  prv var is_open: bool;
+
+  prv fn new(self, handle: usize) {
+    self.handle = handle;
+    self.is_open = true;
+  }
+
+  /// A connection to the first address of `addr` that accepts one.
+  pub fn connect<A: ToSocketAddrs>(addr: A) -> Result<TcpStream, io::Error> {
+    each_addr(addr, (found) => TcpStream::connect_one(found))
+  }
+
+  prv fn connect_one(addr: SocketAddr) -> Result<TcpStream, io::Error> {
+    const raw = raw_of(addr);
+    const stream = new TcpStream(checked(sys::socket_open(raw.v6, false))?);
+
+    checked(sys::socket_connect(stream.handle, raw))?;
+    Ok(stream)
+  }
+
+  /// At most `buffer.len()` bytes: how many, 0 once the other end closed its writing half.
+  pub fn read(self, buffer: &mut [u8]) -> Result<usize, io::Error> {
+    checked(sys::socket_recv(self.handle, buffer.as_mut_ptr(), buffer.len(), 0))
+  }
+
+  /// The start of `bytes`: how many the system took. Writing to an end that closed is an error of
+  /// kind `BrokenPipe` or `ConnectionReset`, never a signal.
+  pub fn write(self, bytes: &[u8]) -> Result<usize, io::Error> {
+    checked(sys::socket_send(self.handle, bytes.as_ptr(), bytes.len()))
+  }
+
+  /// Nothing: the system sends what it is given.
+  pub fn flush(self) -> Result<(), io::Error> {
+    Ok(())
+  }
+
+  /// The address of the other end.
+  pub fn peer_addr(self) -> Result<SocketAddr, io::Error> {
+    Ok(of_raw(checked(sys::socket_address(self.handle, true))?))
+  }
+
+  /// The address of this end.
+  pub fn local_addr(self) -> Result<SocketAddr, io::Error> {
+    Ok(of_raw(checked(sys::socket_address(self.handle, false))?))
+  }
+
+  /// Closes a half, or both, of the connection; the socket stays open until it goes.
+  pub fn shutdown(self, how: Shutdown) -> Result<(), io::Error> {
+    const code = match how {
+      Shutdown::Read => 0,
+      Shutdown::Write => 1,
+      Shutdown::Both => 2,
+    };
+
+    checked(sys::socket_shutdown(self.handle, code))
+  }
+
+  /// The descriptor (POSIX) or `SOCKET` (Windows) of the system, which stays the stream's.
+  pub fn as_raw_handle(self) -> usize {
+    self.handle
+  }
+
+  /// The stream of a connected socket of the system, which it closes. It is `unsafe`: nothing
+  /// else may close or use the socket.
+  pub unsafe fn from_raw_handle(handle: usize) -> TcpStream {
+    new TcpStream(handle)
+  }
+
+  pub fn drop(self) {
+    if self.is_open {
+      self.is_open = false;
+      sys::socket_close(self.handle);
+    }
+  }
 }

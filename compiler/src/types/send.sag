@@ -33,10 +33,57 @@ pub fn sync_classes(cx: Checker) {
     classes.push(class_id);
   }
 
+  // The sockets of `std::net`, which a server gives a thread each
+  // (docs/adr/0100-networking.md, Q694).
+  for name in List::from(["TcpListener", "TcpStream"]) {
+    if let Some(class_id) = std_class(cx, "net", name) {
+      classes.push(class_id);
+    }
+  }
+
   classes.sort();
   guards.sort();
   cx.typed.sync_classes = classes;
   cx.typed.guard_classes = guards;
+}
+
+/// The items of `std::net` the compiler knows, if the program uses it
+/// (docs/adr/0100-networking.md, Q693).
+pub fn net_items(cx: Checker) {
+  const module = match std_module(cx, "net") {
+    Some(found) => found,
+    None => return,
+  };
+  const addrs = match module.items.get("ToSocketAddrs") {
+    Some(declared) => match declared.item {
+      ItemRef::Type(TypeItem::Interface(id)) => id,
+      _ => return,
+    },
+    None => return,
+  };
+  const ip = match module.items.get("IpAddr") {
+    Some(declared) => match declared.item {
+      ItemRef::Type(TypeItem::Enum(id)) => id,
+      _ => return,
+    },
+    None => return,
+  };
+  const ipv4 = match module.items.get("Ipv4Addr") {
+    Some(declared) => match declared.item {
+      ItemRef::Type(TypeItem::Struct(id)) => id,
+      _ => return,
+    },
+    None => return,
+  };
+  const ipv6 = match module.items.get("Ipv6Addr") {
+    Some(declared) => match declared.item {
+      ItemRef::Type(TypeItem::Struct(id)) => id,
+      _ => return,
+    },
+    None => return,
+  };
+
+  cx.typed.net = Some(pkg::types::typed::NetItems { to_socket_addrs: addrs, ip: ip, ipv4: ipv4, ipv6: ipv6 });
 }
 
 /// The class `name` of `std::module`, if the program uses it.

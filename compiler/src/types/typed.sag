@@ -241,6 +241,8 @@ pub class TypedModule {
   /// The guards of `std::sync`, never `Send`: the thread that took a lock releases it
   /// (docs/adr/0098-locks-orderings-and-threads.md, Q671).
   pub var guard_classes: List<u32>;
+  /// The items of `std::net` the compiler knows, if the program uses it.
+  pub var net: Option<NetItems>;
   /// The type of each module-level constant.
   pub var const_types: List<Type>;
   /// The value of each module-level constant, or `None` if it has an error.
@@ -330,6 +332,7 @@ pub class TypedModule {
     };
     self.sync_classes = new List();
     self.guard_classes = new List();
+    self.net = None;
     self.const_types = new List();
     self.static_values = new List();
     self.const_values = new List();
@@ -1208,6 +1211,12 @@ pub class TypedModule {
       return self.converts(ty, args[0]);
     }
 
+    if let Some(net) = self.net {
+      if net.to_socket_addrs == interface_ref.id {
+        return self.socket_addrs_of(ty).is_some();
+      }
+    }
+
     if is_id(self.prelude.try_into, interface_ref.id) && args.len() == 2 {
       return match self.prelude.try_from {
         Some(id) => self.implements(args[0], NamedRef { id: id, name: "TryFrom", args: List::from([ty, args[1]]) }),
@@ -1216,6 +1225,34 @@ pub class TypedModule {
     }
 
     false
+  }
+
+  /// The function of `std::net` that is `to_socket_addrs` of `ty`, for the types the compiler
+  /// implements `ToSocketAddrs` for: `String`, and `String` or an IP address with a `u16` port
+  /// (docs/adr/0100-networking.md, Q693).
+  pub fn socket_addrs_of(self, ty: Type) -> Option<String> {
+    const net = self.net?;
+
+    if types::is_string(ty) {
+      return Some("text_socket_addrs");
+    }
+
+    const elems = match ty.kind {
+      TypeKind::Tuple(found) => found,
+      _ => return None,
+    };
+
+    if elems.len() != 2 || !types::same_type(elems[1], types::int(IntTy::U16)) {
+      return None;
+    }
+
+    match elems[0].kind {
+      TypeKind::String => Some("host_socket_addrs"),
+      TypeKind::Enum(named) if named.id == net.ip => Some("ip_socket_addrs"),
+      TypeKind::Struct(named) if named.id == net.ipv4 => Some("ipv4_socket_addrs"),
+      TypeKind::Struct(named) if named.id == net.ipv6 => Some("ipv6_socket_addrs"),
+      _ => None,
+    }
   }
 
   /// Whether `to` is a list made from an array of its elements (`List::from`), or a map from a
@@ -1517,6 +1554,15 @@ pub class TypedModule {
 
     None
   }
+}
+
+/// The interface `ToSocketAddrs` of `std::net`, and the types of IP addresses, which the compiler
+/// implements it for with a port (docs/adr/0100-networking.md, Q693).
+pub struct NetItems {
+  pub to_socket_addrs: u32;
+  pub ip: u32;
+  pub ipv4: u32;
+  pub ipv6: u32;
 }
 
 fn is_id(found: Option<u32>, id: u32) -> bool {

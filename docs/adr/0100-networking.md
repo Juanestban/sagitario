@@ -103,4 +103,20 @@ fn main() {
   which programs cannot make, as the results of `std::sync` take a `std::sys::Flag`. A text is
   converted with a typed result, `const a: Result<SocketAddr, AddrParseError> = text.try_into();`:
   `try_into()?` alone does not tell the compiler the type to convert to.
+- Increment 2 is done. `std::sys` writes the `sockaddr_in` and `sockaddr_in6` of each system byte
+  by byte (Apple's start with their length), and reads `getaddrinfo`'s list, whose fields each C
+  library orders its own way. The compiler knows `ToSocketAddrs`, `IpAddr`, `Ipv4Addr` and
+  `Ipv6Addr` of `std::net` by their ids: `implements` gives the interface to `String` and the five
+  pairs, a call of `to_socket_addrs` on them lowers to a private function of `std::net` for each
+  (`text_socket_addrs` and the rest), and a pair written for a type parameter bounded by
+  `ToSocketAddrs` takes `u16` for its port, so that `bind((ip, 0))` is Rust's. `TcpListener` and
+  `TcpStream` join the classes that are `Send` by name. The `errno` values of the network differ
+  between C libraries, so `std::sys` has them for each; Windows' C runtime describes them, and
+  `std::sys` maps the `WSA` codes to them, keeping the others, which `FormatMessageW` describes.
+  Where Rust gives `Interrupted` from a read or a write, the call is tried again, since the
+  defaults of `Read` and `Write` do not try again as Rust's do. On Apple's systems a socket gets
+  no `FD_CLOEXEC`, which takes the variadic `fcntl`: `std::process` closes in its children every
+  descriptor it does not give them. The driver links `ws2_32` on Windows when the program calls
+  `WSAStartup`. `for` over an iterator that is a place, such as `option.unwrap()`, was an internal
+  compiler error, found by the tests, and fixed.
 

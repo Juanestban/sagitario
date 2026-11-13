@@ -8,7 +8,7 @@ use pkg::diagnostics::Diagnostic;
 use pkg::diagnostics::codes;
 use pkg::resolve::{ParamOwner, TypeItem};
 use pkg::span::Span;
-use pkg::types::{Checker, GenericDef, NamedRef, ParamRef, SpanType, Subst, SubstEntry, Type, TypeKind};
+use pkg::types::{Checker, GenericDef, IntTy, NamedRef, ParamRef, SpanType, Subst, SubstEntry, Type, TypeKind};
 use pkg::types;
 use pkg::types::exprs;
 use pkg::types::ffi;
@@ -437,6 +437,24 @@ pub fn generic_args(cx: Checker, span: Span, what: String, params: List<Type>, a
 }
 
 /// Checks one value against a type that may mention parameters being inferred.
+/// Whether `ty` is a type parameter bounded by `ToSocketAddrs` of `std::net`.
+fn socket_addrs_param(cx: Checker, ty: Type) -> bool {
+  const net = match cx.typed.net {
+    Some(found) => found,
+    None => return false,
+  };
+
+  if let TypeKind::Param(param) = ty.kind {
+    for bound in cx.typed.param_bounds(param) {
+      if bound.id == net.to_socket_addrs {
+        return true;
+      }
+    }
+  }
+
+  false
+}
+
 pub fn generic_arg(cx: Checker, arg: Expr, param: Type, fixed: Subst, unknowns: Unknowns) {
   const pattern = types::substitute(param, fixed);
   const known = types::substitute(pattern, unknowns.subst());
@@ -461,6 +479,14 @@ pub fn generic_arg(cx: Checker, arg: Expr, param: Type, fixed: Subst, unknowns: 
   // `&values` lends a slice where one is expected, whatever its elements.
   if let TypeKind::Slice { .. } = known.kind {
     hint = Some(known);
+  }
+
+  // A pair given for a type parameter bounded by `ToSocketAddrs` has a `u16` port, as Rust's
+  // `(ip, 80)` (docs/adr/0100-networking.md, Q693).
+  if let ExprKind::Tuple(elems) = arg.kind {
+    if elems.len() == 2 && socket_addrs_param(cx, known) {
+      hint = Some(types::of(TypeKind::Tuple(List::from([types::error(), types::int(IntTy::U16)]))));
+    }
   }
 
   const actual = exprs::expr(cx, arg, hint);

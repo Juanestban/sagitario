@@ -15,6 +15,12 @@ The sources say 0.32.0.
 
 ### Changed
 
+- **Breaking:** `io::ErrorKind` gains Rust's `ConnectionRefused`, `ConnectionReset`,
+  `ConnectionAborted`, `NotConnected`, `AddrInUse`, `AddrNotAvailable`, `BrokenPipe`,
+  `WouldBlock`, `TimedOut` and `Interrupted`, in Rust's order; a `match` on it without `_` must
+  add them. A write to a pipe whose other end closed is now `BrokenPipe` rather than `Other`
+  ([ADR-0100](docs/adr/0100-networking.md), Q697).
+
 - Every operation of an atomic takes its ordering, as Rust's: `load(Ordering::SeqCst)`,
   `fetch_add(1, Ordering::Relaxed)`, `compare_exchange(current, desired, success, failure)`, with
   `std::sync::Ordering`; add `Ordering::SeqCst` to keep what a program did
@@ -22,6 +28,11 @@ The sources say 0.32.0.
 
 ### Added
 
+- `std::net::TcpListener` and `TcpStream`, blocking sockets on `Read` and `Write` that are `Send`
+  and close by `Drop`, `Shutdown`, and `ToSocketAddrs`, which the compiler implements for `String`
+  (`"localhost:8080"`, looked up with the system's resolver) and the pairs of a name or an IP
+  address and a `u16` port. A program using them links Winsock on Windows
+  ([ADR-0100](docs/adr/0100-networking.md), increment 2).
 - `std::net` with `Ipv4Addr`, `Ipv6Addr`, `IpAddr`, `SocketAddrV4`, `SocketAddrV6`,
   `SocketAddr` and `AddrParseError`: Rust's texts (IPv6 as RFC 5952 writes it), parsing with
   `try_from`, order, hashing and constants such as `Ipv4Addr::LOCALHOST`
@@ -222,6 +233,11 @@ The sources say 0.32.0.
 - A statement starting with a block-like expression (`if`, `match`, `unsafe { }`, a block) ends at
   its `}`: `unsafe { f() } * p` no longer parses as a multiplication. Another operator there is
   an error (`E0100`) that asks for parentheses.
+
+### Fixed
+
+- A `for` over an iterator that is a part of another value, such as `option.unwrap()`, was an
+  internal compiler error.
 
 ## [0.20.0] - 2026-11-10
 

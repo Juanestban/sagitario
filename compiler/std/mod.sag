@@ -42,6 +42,28 @@ fn os_error(code: i32, context: String) -> io::Error {
   } else if code == 22 {
     // EINVAL
     ErrorKind::InvalidInput
+  } else if code == 4 {
+    // EINTR
+    ErrorKind::Interrupted
+  } else if code == 32 {
+    // EPIPE
+    ErrorKind::BrokenPipe
+  } else if code == sys::ECONNREFUSED {
+    ErrorKind::ConnectionRefused
+  } else if code == sys::ECONNRESET {
+    ErrorKind::ConnectionReset
+  } else if code == sys::ECONNABORTED {
+    ErrorKind::ConnectionAborted
+  } else if code == sys::ENOTCONN {
+    ErrorKind::NotConnected
+  } else if code == sys::EADDRINUSE {
+    ErrorKind::AddrInUse
+  } else if code == sys::EADDRNOTAVAIL {
+    ErrorKind::AddrNotAvailable
+  } else if code == sys::EAGAIN || code == sys::EWOULDBLOCK {
+    ErrorKind::WouldBlock
+  } else if code == sys::ETIMEDOUT {
+    ErrorKind::TimedOut
   } else {
     ErrorKind::Other
   };

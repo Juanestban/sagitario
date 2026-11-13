@@ -1,0 +1,163 @@
+// TCP listeners and streams on the loopback addresses, the addresses `ToSocketAddrs` takes, and
+// the errors of the network (docs/adr/0100-networking.md, Q693, Q694 and Q697). The harness runs
+// it with ThreadSanitizer where the C compiler has it, and fails it on any leak.
+// sanitize: thread
+// expect-stdout: text: HELLO true | tuple: TUPLE true | address: ADDRESS | host: HOST
+// expect-stdout: served 4 | local 127.0.0.1 | localhost: true | direct: [127.0.0.1:7] [10.0.0.1:8]
+// expect-stdout: in use: AddrInUse | refused: ConnectionRefused | bad port: InvalidInput invalid port value | no port: InvalidInput invalid socket address
+// expect-stdout: ipv6: ok
+// expect-stdout: threads: 8 connections, 8 answers
+
+use std::io::ErrorKind;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::thread;
+use std::thread::JoinHandle;
+
+/// Sends `text`, closes the writing half, and reads the answer to the end.
+fn ask(stream: TcpStream, text: String) -> String {
+  stream.write_str(text).unwrap();
+  stream.shutdown(Shutdown::Write).unwrap();
+  stream.read_to_string().unwrap()
+}
+
+fn kind(result: Result<TcpStream, std::io::Error>) -> String {
+  match result {
+    Ok(_) => "connected",
+    Err(error) => f"{error.kind():?}",
+  }
+}
+
+fn main() {
+  // A server answering each connection in uppercase, four times.
+  const listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+  const address = listener.local_addr().unwrap();
+  const port = address.port();
+  const server = thread::spawn(() => {
+    var served = 0;
+
+    for incoming in listener.incoming() {
+      const stream = incoming.unwrap();
+      const text = stream.read_to_string().unwrap();
+
+      stream.write_str(text.to_uppercase()).unwrap();
+      served += 1;
+
+      if served == 4 {
+        break;
+      }
+    }
+
+    served
+  });
+
+  const by_text = TcpStream::connect(f"127.0.0.1:{port}").unwrap();
+
+  print(f"text: {ask(by_text, "hello")} {by_text.peer_addr().unwrap() == address} | ");
+
+  const by_tuple = TcpStream::connect((IpAddr::V4(Ipv4Addr::LOCALHOST), port)).unwrap();
+
+  print(f"tuple: {ask(by_tuple, "tuple")} {by_tuple.local_addr().unwrap().ip().is_loopback()} | ");
+  print(f"address: {ask(TcpStream::connect(address).unwrap(), "address")} | ");
+  println(f"host: {ask(TcpStream::connect(("localhost", port)).unwrap(), "host")}");
+  print(f"served {server.join()} | local {address.ip()} | ");
+
+  // Names are looked up; addresses are taken as they are.
+  var loopback = false;
+
+  for found in "localhost:80".to_socket_addrs().unwrap() {
+    loopback = loopback || (found.ip().is_loopback() && found.port() == 80);
+  }
+
+  const direct: List<String> = new List();
+
+  for found in (Ipv4Addr::LOCALHOST, 7u16).to_socket_addrs().unwrap() {
+    direct.push(f"[{found}]");
+  }
+
+  for found in ("10.0.0.1", 8u16).to_socket_addrs().unwrap() {
+    direct.push(f"[{found}]");
+  }
+
+  println(f"localhost: {loopback} | direct: {direct.join(" ")}");
+
+  // The errors of the network have their kinds.
+  const taken = match TcpListener::bind(address) {
+    Ok(_) => "bound twice",
+    Err(error) => f"{error.kind():?}",
+  };
+  var closed_port = 0u16;
+
+  {
+    const closed = TcpListener::bind("127.0.0.1:0").unwrap();
+
+    closed_port = closed.local_addr().unwrap().port();
+  }
+
+  const bad_port = match TcpStream::connect("127.0.0.1:x") {
+    Ok(_) => "connected",
+    Err(error) => f"{error.kind():?} {error.message()}",
+  };
+  const no_port = match TcpListener::bind("127.0.0.1") {
+    Ok(_) => "bound",
+    Err(error) => f"{error.kind():?} {error.message()}",
+  };
+
+  print(f"in use: {taken} | refused: {kind(TcpStream::connect((Ipv4Addr::LOCALHOST, closed_port)))} | ");
+  println(f"bad port: {bad_port} | no port: {no_port}");
+
+  // IPv6, where the system has it.
+  const ipv6 = match TcpListener::bind((Ipv6Addr::LOCALHOST, 0)) {
+    Ok(v6) => {
+      const v6_address = v6.local_addr().unwrap();
+      const v6_server = thread::spawn(() => {
+        const accepted = v6.accept().unwrap();
+
+        accepted.0.write_str("six").unwrap();
+        accepted.1.is_ipv6()
+      });
+      const answer = TcpStream::connect(v6_address).unwrap().read_to_string().unwrap();
+
+      if v6_server.join() && answer == "six" && v6_address.is_ipv6() { "ok" } else { "wrong" }
+    }
+    Err(error) => if error.kind() == ErrorKind::AddrNotAvailable { "ok" } else { f"{error.message()}" },
+  };
+
+  println(f"ipv6: {ipv6}");
+
+  // Many clients at once, each in a thread of its own, answered by threads of the server.
+  const shared = TcpListener::bind("127.0.0.1:0").unwrap();
+  const target: SocketAddr = shared.local_addr().unwrap();
+  const acceptor = thread::spawn(() => {
+    const handlers: List<JoinHandle<()>> = new List();
+
+    for _ in 0..8 {
+      const stream = shared.accept().unwrap().0;
+
+      handlers.push(thread::spawn(() => {
+        const text = stream.read_to_string().unwrap();
+
+        stream.write_str(text + "!").unwrap();
+      }));
+    }
+
+    for handler in handlers {
+      handler.join();
+    }
+  });
+  const clients: List<JoinHandle<bool>> = new List();
+
+  for index in 0..8 {
+    clients.push(thread::spawn(() => ask(TcpStream::connect(target).unwrap(), f"client {index}") == f"client {index}!"));
+  }
+
+  var answers = 0;
+
+  for client in clients {
+    if client.join() {
+      answers += 1;
+    }
+  }
+
+  acceptor.join();
+  println(f"threads: 8 connections, {answers} answers");
+}

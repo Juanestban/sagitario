@@ -154,7 +154,8 @@ The audit of the library found gaps of the language itself, which the library ne
 | Rust | Sagitario | State | Notes |
 |---|---|---|---|
 | `IpAddr`, `Ipv4Addr`, `Ipv6Addr`, `SocketAddr`, `SocketAddrV4`, `SocketAddrV6`, `AddrParseError` | `std::net` | ✅ | Rust's text, parsing (`TryFrom<String>`, Rust's `FromStr`), order and constants ([ADR-0100](adr/0100-networking.md), increment 1) |
-| `TcpListener`, `TcpStream`, `UdpSocket`, `ToSocketAddrs` | — | ❌ | [ADR-0100](adr/0100-networking.md), increments 2–4: sockets of each system in `std::sys`, on the `Read` and `Write` interfaces. TLS and HTTP are Nova packages, as in Rust |
+| `TcpListener`, `TcpStream`, `ToSocketAddrs`, `Shutdown` | `std::net` | 🟡 | Blocking sockets on `Read` and `Write`, `Send`, closed by `Drop`; the compiler implements `ToSocketAddrs` for `String` and the pairs with a port ([ADR-0100](adr/0100-networking.md), increment 2). Missing: the options of increment 4 (timeouts, `nonblocking`, `nodelay`, `ttl`, `peek`, `try_clone`, `take_error`, `connect_timeout`). TLS and HTTP are Nova packages, as in Rust |
+| `UdpSocket` | — | ❌ | [ADR-0100](adr/0100-networking.md), increment 3 |
 
 ### Processes and environment (`process`, `env`)
 

@@ -434,7 +434,24 @@ fn same_option(id: u32, found: Option<u32>) -> bool {
 
 /// Whether `function` is a method of the prelude's `Eq`, `Ord` or `Hash`, called on an integer,
 /// `bool`, `char` or `String`.
+/// Whether `function` is `to_socket_addrs` of `ToSocketAddrs` of `std::net`.
+fn is_socket_addrs(lw: Lowering, function: u32) -> bool {
+  match lw.typed.net {
+    Some(net) => match lw.resolution.owner(function) {
+      Some(TypeItem::Interface(id)) => id == net.to_socket_addrs,
+      _ => false,
+    },
+    None => false,
+  }
+}
+
 pub fn is_primitive_method(lw: Lowering, function: u32, receiver_ty: Type) -> bool {
+  // `to_socket_addrs` of the types the compiler implements `ToSocketAddrs` for
+  // (docs/adr/0100-networking.md, Q693).
+  if is_socket_addrs(lw, function) {
+    return lw.typed.socket_addrs_of(receiver_ty).is_some();
+  }
+
   // `iter` of `Iterable` on a list or an array, called in generic code
   // (docs/adr/0095-collections.md, Q645).
   if is_iterable_iter(lw, function) {
@@ -536,6 +553,21 @@ pub fn primitive_operator(lw: Lowering, function: u32, receiver_ty: Type, lhs: O
 /// number or a `String`.
 pub fn primitive_method(lw: Lowering, function: u32, ty: Type, receiver: Expr, args: List<Expr>) -> Result<Operand, String> {
   const receiver_ty = lw.type_of(receiver)?;
+
+  // A function of `std::net` for each type the compiler implements `ToSocketAddrs` for.
+  if is_socket_addrs(lw, function) {
+    const name = match lw.typed.socket_addrs_of(receiver_ty) {
+      Some(found) => found,
+      None => return Err("`to_socket_addrs` of a type without it"),
+    };
+    const target = match lw.resolution.std_fn("net", name) {
+      Some(found) => found,
+      None => return Err("`std::net` has no `" + name + "`"),
+    };
+    const value = lw.expr(receiver)?;
+
+    return Ok(lw.call(Callee::Fn(mono::instance(lw, target, Subst::empty())), List::from([value]), ty));
+  }
 
   if is_iterable_iter(lw, function) {
     const elem = match receiver_ty.kind {
@@ -1128,11 +1160,12 @@ fn for_list(lw: Lowering, variable: u32, iter: Expr, list_ty: Type, elem: Type, 
 
 /// The loop over an iterator: `next` is called until it returns `None`.
 fn for_iter(lw: Lowering, variable: u32, source: Operand, body: Block) -> Result<(), String> {
-  const source_local = match source {
-    Operand::Local(local) => local,
+  // A local, or a place such as the payload of `option.unwrap()`, which `store` retains.
+  const iter_ty = match source {
+    Operand::Local(local) => lw.local_type(local),
+    Operand::Place(place) => place.ty,
     _ => return Err("iterator without a local"),
   };
-  const iter_ty = lw.local_type(source_local);
   const class_ref = match iter_ty.kind {
     TypeKind::Class(found) => found,
     _ => return Err("iterator that is not a class"),

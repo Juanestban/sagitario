@@ -1871,6 +1871,20 @@ fn method_call(cx: Checker, value: Expr, receiver: Expr, method: Ident, args: Li
     }
   }
 
+  // `to_socket_addrs` of `String` and the tuples the compiler implements `ToSocketAddrs` for
+  // (docs/adr/0100-networking.md, Q693).
+  if name == "to_socket_addrs" && args.is_empty() && cx.typed.socket_addrs_of(receiver_ty).is_some() {
+    if let Some(net) = cx.typed.net {
+      if let Some(function) = cx.resolution.type_function(cx.package, TypeItem::Interface(net.to_socket_addrs), name) {
+        if let Some(sig) = cx.typed.sig(function) {
+          cx.typed.method_calls.insert(value.id, function);
+
+          return sig.ret;
+        }
+      }
+    }
+  }
+
   // `into` and `try_into`, unless the type declares a method of that name
   // (docs/adr/0094-conversions-and-defaults.md, Q633 and Q634).
   if (name == "into" || name == "try_into") && args.is_empty() && !declares_method(cx, receiver_ty, name) {

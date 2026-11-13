@@ -202,11 +202,21 @@ compares them (`println(f"{env::OS} on {env::ARCH}")`).
 pub enum ErrorKind {
   NotFound,
   PermissionDenied,
+  ConnectionRefused,
+  ConnectionReset,
+  ConnectionAborted,
+  NotConnected,
+  AddrInUse,
+  AddrNotAvailable,
+  BrokenPipe,
   AlreadyExists,
+  WouldBlock,
   InvalidInput,
   InvalidData,
-  UnexpectedEof,
+  TimedOut,
+  Interrupted,
   Unsupported,
+  UnexpectedEof,
   Other,
 }
 ```
@@ -216,8 +226,11 @@ pub enum ErrorKind {
 - `new io::Error(kind, message)` creates one, for code that reports its own I/O failures.
 - Like any type implementing `Error`, it converts to `Error` with `?`
   ([errors](07-errors.md#the--operator)), and `main` may return `Result<(), io::Error>`.
-- The kinds are the same on every operating system. Failures without a more precise kind are
-  `Other`.
+- The kinds are the same on every operating system, in the order of Rust's, which has more.
+  Failures without a more precise kind are `Other`. The kinds of the network
+  ([ADR-0100](../adr/0100-networking.md), Q697) come from the `errno` value of each C library, and
+  from the `WSA` codes of Windows; a pipe or a socket whose other end closed is `BrokenPipe`. A
+  `match` on `ErrorKind` needs a `_` arm to keep compiling when kinds are added.
 
 ### Streams
 
@@ -498,6 +511,59 @@ println(f"{local} {parsed.unwrap().port()} {Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0
   their parts in order (address, port, flow label and scope).
 - An address is a value: `set_port` and the others change a `var`.
 - The fields of the addresses are private, and `AddrParseError` is made only by `std::net`.
+
+### TCP
+
+Rationale: [ADR-0100](../adr/0100-networking.md), Q693, Q694 and Q698. Blocking sockets, as Rust's;
+a server gives each connection a thread.
+
+```sag
+use std::net::{Ipv4Addr, TcpListener, TcpStream};
+use std::thread;
+
+const listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();   // port 0: a free one
+const port = listener.local_addr().unwrap().port();
+const server = thread::spawn(() => {
+  for stream in listener.incoming() {
+    const connection = stream.unwrap();
+
+    thread::spawn(() => connection.write_str("hello").unwrap());
+  }
+});
+
+println(TcpStream::connect(f"localhost:{port}").unwrap().read_to_string().unwrap());   // hello
+```
+
+| Item | Meaning |
+|---|---|
+| `ToSocketAddrs`, `to_socket_addrs() -> Result<Iter<SocketAddr>, io::Error>` | What can be the address of a socket: `SocketAddr`, `SocketAddrV4` and `SocketAddrV6`, and, as the compiler implements it, `String` (`"host:port"`), `(String, u16)`, `(IpAddr, u16)`, `(Ipv4Addr, u16)` and `(Ipv6Addr, u16)` |
+| `TcpListener::bind(addr) -> Result<TcpListener, io::Error>` | A socket listening on the first address of `addr` it can bind |
+| `listener.accept() -> Result<(TcpStream, SocketAddr), io::Error>` | Waits for a connection: its stream and the address of its other end |
+| `listener.incoming() -> Iter<Result<TcpStream, io::Error>>` | One `accept` per value; it never ends |
+| `TcpStream::connect(addr) -> Result<TcpStream, io::Error>` | A connection to the first address of `addr` that accepts one |
+| `read`, `write` and the methods of `Read` and `Write` | The bytes of the connection; `read` gives 0 once the other end closed its writing half, and `flush` does nothing |
+| `peer_addr()`, `local_addr()` | The address of the other end, of this one (`TcpListener` has `local_addr`) |
+| `stream.shutdown(how: Shutdown)` | Closes `Shutdown::Read`, `Write` or `Both` halves of the connection |
+| `as_raw_handle()`, `unsafe from_raw_handle(handle)` | The descriptor or `SOCKET` of the system, as `File`'s |
+
+- A text is an address as it is (`"127.0.0.1:80"`, `"[::1]:80"`), or a name and a port, whose name
+  the system's resolver looks up (`getaddrinfo`): `"localhost:8080"`. A text without a port is
+  `InvalidInput` (`invalid socket address`), a port that is not a `u16` too
+  (`invalid port value`), and a name the resolver does not know `Other`
+  (`failed to lookup address information: ...`). `(String, u16)` takes the name or address and
+  the port apart. A pair written for `addr` has a `u16` port: `bind((ip, 80))`.
+- `bind` and `connect` try each address in order and give the first that works, else the error
+  of the last, or `InvalidInput` (`could not resolve to any addresses`) when there is none, as
+  Rust's.
+- `TcpListener` and `TcpStream` are `Send`, as Rust's: threads share them, and the system orders
+  what they do on one socket. Each closes its socket when its last reference goes (`Drop`); a
+  listener bound on Unix lets another bind its address while its connections end
+  (`SO_REUSEADDR`), as Rust's.
+- Writing to a connection whose other end closed is an error, `BrokenPipe` or `ConnectionReset`,
+  never the `SIGPIPE` signal that would end the program. A signal interrupting `accept`,
+  `connect`, a read or a write is not an error: it is tried again.
+- Sockets are not inherited by the programs `std::process` starts. On Windows, a program using
+  sockets is linked with Winsock (`ws2_32`), which `std::net` starts before its first socket.
 
 ## `std::path`
 

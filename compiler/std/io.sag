@@ -5,18 +5,38 @@
 use std::ffi::c_void;
 use std::sys;
 
-/// What kind of failure an I/O error is.
+/// What kind of failure an I/O error is, in the order of Rust's `ErrorKind`.
 pub enum ErrorKind {
   NotFound,
   PermissionDenied,
+  /// The other end refused the connection (docs/adr/0100-networking.md, Q697).
+  ConnectionRefused,
+  /// The other end reset the connection.
+  ConnectionReset,
+  /// The connection was aborted, by this end.
+  ConnectionAborted,
+  /// The socket is not connected.
+  NotConnected,
+  /// The address is taken by another socket.
+  AddrInUse,
+  /// The address is not one of this machine, or does not exist.
+  AddrNotAvailable,
+  /// The other end of a pipe or socket closed while this one wrote.
+  BrokenPipe,
   AlreadyExists,
+  /// The operation would have to wait, on a socket that does not.
+  WouldBlock,
   InvalidInput,
   /// The data is not valid, such as input that is not UTF-8.
   InvalidData,
-  UnexpectedEof,
+  /// The time given to the operation ran out.
+  TimedOut,
+  /// A signal interrupted the operation.
+  Interrupted,
   /// The system cannot do it, such as giving the creation time of a file on Linux
   /// (docs/adr/0096-streams-files-and-drop.md, Q659).
   Unsupported,
+  UnexpectedEof,
   Other,
 }
 

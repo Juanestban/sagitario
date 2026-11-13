@@ -25,6 +25,9 @@ pub struct GeneratedC {
   pub std_ffi: Option<String>;
   /// Whether the program uses `std::thread` or `std::sync`.
   pub threads: bool;
+  /// Whether the program uses the sockets of `std::net`, which Windows has in Winsock
+  /// (docs/adr/0100-networking.md, Q698).
+  pub sockets: bool;
 }
 
 /// The longest string literal every C11 compiler accepts (5.2.4.1).
@@ -34,9 +37,14 @@ pub fn generate(program: Program) -> GeneratedC {
   const generator = new Generator(program);
   const order = generator.aggregate_order(program);
   var threads = false;
+  var sockets = false;
 
   for index in 0..program.externs.len() {
     const decl = program.externs[index];
+
+    if decl.in_std && decl.symbol == "WSAStartup" && calls_extern(program, index as u32) {
+      sockets = true;
+    }
 
     if decl.runtime && decl.symbol == "sag_thread_prepare" {
       threads = true;
@@ -119,7 +127,7 @@ pub fn generate(program: Program) -> GeneratedC {
 
   const text = head + generator.long_string_definitions() + generator.fn_pointer_conversions() + generator.zeroed_definitions() + generator.out.to_string();
 
-  GeneratedC { program: text, ffi: generator.ffi_unit(program, false), std_ffi: generator.ffi_unit(program, true), threads: threads }
+  GeneratedC { program: text, ffi: generator.ffi_unit(program, false), std_ffi: generator.ffi_unit(program, true), threads: threads, sockets: sockets }
 }
 
 /// A field of a class, with how the C reads it from `v`.
