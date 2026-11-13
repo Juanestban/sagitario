@@ -73,7 +73,7 @@ The audit of the library found gaps of the language itself, which the library ne
 | `checked_*`, `wrapping_*`, `saturating_*` | methods of integers | ✅ | ADR-0088; `overflowing_*` is missing |
 | `MIN`, `MAX` of integers | `i32::MAX`... | ✅ | ADR-0088 |
 | `count_ones`, `leading_zeros`, `rotate_left`, `swap_bytes`, `to_le_bytes` | methods of integers | 🟡 | ADR-0088; `to_le_bytes`, `from_le_bytes` and the other conversions to bytes are missing |
-| `from_str_radix`, formatting in hex | — | ❌ | With `fmt` |
+| `from_str_radix`, formatting in hex | `{x:x}`, `{x:#b}` and the other radixes ([ADR-0089](adr/0089-display-debug-and-format-specifiers.md)) | 🟡 | Missing: parsing in a radix (`from_str_radix`) |
 | `NonZero*` | — | ⛔ | A layout optimization of `Option` that Sagitario's ARC model does not use |
 
 ### Iterators (`iter`)
@@ -81,7 +81,7 @@ The audit of the library found gaps of the language itself, which the library ne
 | Rust | Sagitario | State | Notes |
 |---|---|---|---|
 | `Iterator`, `DoubleEndedIterator`, `Peekable` | `Iter<T>`, a class over `fn() -> Option<T>`, and `DoubleEndedIter<T>` | ✅ | Rust's adapters and consumers, `peek` on every iterator, `rev` and `next_back` on those with two ends, `collect` into a list, a map, a string or a `Result` ([ADR-0093](adr/0093-everyday-methods.md), increment 5). `scan` waits for closures that assign their captures; `enumerate`, `zip`, `take` and `skip` keep one end only until a record on lengths (`ExactSizeIterator`) |
-| `IntoIterator` for user types | — | ❌ | `for` over a user collection needs `.iter()` |
+| `IntoIterator` for user types | `Iterable<T>` | ✅ | `for` runs over the `iter()` of any type implementing it ([ADR-0095](adr/0095-collections.md), Q645) |
 
 ### Options, results and errors (`option`, `result`, `error`)
 
@@ -112,7 +112,7 @@ The audit of the library found gaps of the language itself, which the library ne
 | Rust | Sagitario | State | Notes |
 |---|---|---|---|
 | `mem::size_of`, `align_of`, `zeroed` | `std::mem` | ✅ | G1 |
-| `mem::swap`, `replace`, `take` | — | ❌ | Useful with `var` fields |
+| `mem::swap`, `replace`, `take` | `std::mem` | ✅ | On the place a `&mut` lends ([ADR-0094](adr/0094-conversions-and-defaults.md), Q637); `Option::take` and `replace` on a place too ([ADR-0097](adr/0097-processes-and-environment.md)) |
 | `ptr::null`, `read`, `write`, `copy`, `copy_nonoverlapping` | `0 as *const T`, `*p`, `memcpy` through the FFI | 🟡 | Named functions for raw memory are missing |
 | `Box`, `Rc`, `Arc`, `Weak` | classes, `weak` | ➖ | See above |
 | `Cell`, `RefCell` | `var` fields of classes | ➖ | |
@@ -146,7 +146,7 @@ The audit of the library found gaps of the language itself, which the library ne
 | `fs::read`, `write`, `read_to_string`, `create_dir(_all)`, `remove_*`, `rename`, `copy`, `read_dir` | ✅ | ✅ | |
 | `File` (open, read in parts, seek, append) | `File`, `OpenOptions`, `SeekFrom` | ✅ | Closed by `Drop` or by `close` ([ADR-0096](adr/0096-streams-files-and-drop.md), increment 2) |
 | `fs::metadata` (size, times, permissions), `remove_dir_all`, `canonicalize`, `symlink` | `metadata`, `symlink_metadata`, `remove_dir_all`, `canonicalize` | ✅ | Size, kind, read-only and times ([ADR-0096](adr/0096-streams-files-and-drop.md), increment 4); making links and setting permissions wait for a record of `std::os` |
-| `env::set_current_dir` | — | ❌ | Process-wide state |
+| `env::set_current_dir` | `env::set_current_dir` | ✅ | [ADR-0097](adr/0097-processes-and-environment.md), increment 3 |
 | `Path`, `PathBuf` | `std::path` over `String` | 🟡 | `join`, `file_name`, `parent`, `extension`, `stem`. Missing: `components`, `is_absolute`, `with_extension`, `strip_prefix`, normalization |
 
 ### Networking (`net`)
@@ -180,7 +180,7 @@ The audit of the library found gaps of the language itself, which the library ne
 | Rust | Sagitario | State | Notes |
 |---|---|---|---|
 | `ffi` (`CString`, `CStr`, C types, `c_void`) | `std::ffi`, `Library` | ✅ | ADR-0078; `OsString` is ⛔: paths and arguments are UTF-8 `String`s, UTF-16 on Windows inside `std::sys` |
-| `os` (`unix::fs::PermissionsExt`, `windows::io::AsRawHandle`...) | — | 🟡 | Programs reach the system through `extern "C"`; raw descriptors of `std` types, once they exist (`File`, sockets), would be a record |
+| `os` (`unix::fs::PermissionsExt`, `windows::io::AsRawHandle`...) | `as_raw_handle` and `unsafe from_raw_handle` of `File` and the sockets | 🟡 | The descriptor or `HANDLE` of each is a `usize` on every system ([ADR-0096](adr/0096-streams-files-and-drop.md), [ADR-0100](adr/0100-networking.md)); the permissions of Unix and the rest of `os` are missing; programs reach the system through `extern "C"` |
 | `hint::black_box` | `std::hint::black_box` | ✅ | ADR-0090 |
 | `any`, `TypeId` | — | ⛔ | Reflection; interfaces cover the cases of a general-purpose program |
 | `backtrace` | — | ❌ | With error chains |
@@ -232,7 +232,8 @@ From what most programs need to what fewer do. Each line is one record, or a few
 7. **Streams and files:** `Read`, `Write`, buffered readers and writers, `File`, metadata,
    `remove_dir_all`, bytes on stdin and stdout; and with them the question of `Drop`. ✅
    ([ADR-0096](adr/0096-streams-files-and-drop.md))
-8. **Processes and environment:** `spawn` and `Child`, redirection, the rest of `env`.
+8. **Processes and environment:** `spawn` and `Child`, redirection, the rest of `env`. ✅
+   ([ADR-0097](adr/0097-processes-and-environment.md))
 9. **Concurrency:** `RwLock`, `Condvar`, `Barrier`, bounded channels, `try_lock`, thread names and
    ids, and atomic orderings. ✅ ([ADR-0098](adr/0098-locks-orderings-and-threads.md))
 10. **Networking:** TCP and UDP sockets on the streams of 7. ✅

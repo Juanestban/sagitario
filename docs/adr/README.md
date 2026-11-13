@@ -109,6 +109,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0098](0098-locks-orderings-and-threads.md) | Lock guards, condition variables, atomic orderings and threads (S2) | Accepted |
 | [0099](0099-associated-and-composite-constants.md) | Associated constants and composite constants (S2) | Accepted |
 | [0100](0100-networking.md) | Networking: addresses, TCP and UDP sockets (S2) | Accepted |
+| [0101](0101-the-rest-of-s2.md) | The rest of S2: numbers, ranges, pointers, paths, hashing, operators and formats | Proposed |
 
 ## Template
 
