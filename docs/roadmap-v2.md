@@ -135,6 +135,20 @@ program.
 **Acceptance:** the runtime is Sagitario code. What stays C is the generated code and the system's C
 library; anything else is listed in S3's record with its reason.
 
+### Deferred details
+
+Small gaps found while filling S2, to take up once the core is in Sagitario:
+
+- Constants of interfaces, read as `T::NAME` in a generic function bounded by the interface, as
+  Rust's associated constants of traits; constants used as patterns; constants of generic types;
+  and calls in constants, as Rust's `const fn`
+  ([ADR-0099](adr/0099-associated-and-composite-constants.md), Q688).
+- An argument of the wrong type in a call of a generic method can report a second mismatch whose
+  type holds `{error}` (`found MutexGuard<{error}>`): the check that ignores `{error}` looks at
+  the top of a type only.
+- A pattern naming a variant that does not exist (`E0200`) counts as `_`, so the arms after it are
+  reported as unreachable (`W0004`).
+
 ## S4: Binding generation
 
 A Nova tool that writes Sagitario declarations from C headers, as Rust's `bindgen` does (Q544):
