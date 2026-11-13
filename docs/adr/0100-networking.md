@@ -93,3 +93,14 @@ fn main() {
 - The compiler implements `ToSocketAddrs` for `String` and four tuples, and knows the sockets as
   `Send` by name.
 - The audit's row of `net` is done, and with it the records of S2.
+
+## Notes
+
+- Increment 1 is done, in `std::net`, which the loader and `sag lsp` know as any module of
+  `std`. The parser follows Rust's (`std::net::parser`): each form is tried at a position, which
+  goes back if it is not there, an IPv4 octet takes no zero before a digit, and an IPv4 address
+  may end an IPv6 one where two segments are left. `AddrParseError` takes a `std::sys::Message`,
+  which programs cannot make, as the results of `std::sync` take a `std::sys::Flag`. A text is
+  converted with a typed result, `const a: Result<SocketAddr, AddrParseError> = text.try_into();`:
+  `try_into()?` alone does not tell the compiler the type to convert to.
+

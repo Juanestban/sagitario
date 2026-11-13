@@ -22,6 +22,10 @@ The sources say 0.32.0.
 
 ### Added
 
+- `std::net` with `Ipv4Addr`, `Ipv6Addr`, `IpAddr`, `SocketAddrV4`, `SocketAddrV6`,
+  `SocketAddr` and `AddrParseError`: Rust's texts (IPv6 as RFC 5952 writes it), parsing with
+  `try_from`, order, hashing and constants such as `Ipv4Addr::LOCALHOST`
+  ([ADR-0100](docs/adr/0100-networking.md), increment 1).
 - Constants of structs, enums and classes, `pub const NAME: Type = value;`, named `Type::NAME`
   and `Self::NAME`, as Rust's associated constants; `sag lsp` completes them after `Type::` and
   `Self::`, lists them in the outline and colors them in paths, and the snippet `typeconst`

@@ -153,7 +153,8 @@ The audit of the library found gaps of the language itself, which the library ne
 
 | Rust | Sagitario | State | Notes |
 |---|---|---|---|
-| `TcpListener`, `TcpStream`, `UdpSocket`, `IpAddr`, `SocketAddr`, `ToSocketAddrs` | — | ❌ | A record of its own: sockets of each system in `std::sys`, on the `Read` and `Write` interfaces. TLS and HTTP are Nova packages, as in Rust |
+| `IpAddr`, `Ipv4Addr`, `Ipv6Addr`, `SocketAddr`, `SocketAddrV4`, `SocketAddrV6`, `AddrParseError` | `std::net` | ✅ | Rust's text, parsing (`TryFrom<String>`, Rust's `FromStr`), order and constants ([ADR-0100](adr/0100-networking.md), increment 1) |
+| `TcpListener`, `TcpStream`, `UdpSocket`, `ToSocketAddrs` | — | ❌ | [ADR-0100](adr/0100-networking.md), increments 2–4: sockets of each system in `std::sys`, on the `Read` and `Write` interfaces. TLS and HTTP are Nova packages, as in Rust |
 
 ### Processes and environment (`process`, `env`)
 

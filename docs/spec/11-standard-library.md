@@ -453,6 +453,52 @@ var properties: PhysicalDeviceProperties = unsafe { mem::zeroed() };
   a variant of value `0`, and `@repr(C)` structs, unions and arrays of them. Other types, such as
   a C function pointer (never null) or a struct without `@repr(C)`, are errors.
 
+## `std::net`
+
+Rationale: [ADR-0100](../adr/0100-networking.md), Q690–Q692. IP and socket addresses, as Rust's
+`std::net`.
+
+```sag
+use std::net::{AddrParseError, IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+
+const local = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080);
+const parsed: Result<SocketAddr, AddrParseError> = "[::1]:443".try_into();
+
+println(f"{local} {parsed.unwrap().port()} {Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)}");
+// 127.0.0.1:8080 443 2001:db8::1
+```
+
+| Item | Meaning |
+|---|---|
+| `Ipv4Addr::new(a, b, c, d)`, `octets() -> [u8; 4]`, `to_bits() -> u32`, `Ipv4Addr::from_bits(bits)` | An IPv4 address: its octets, and as a number with the first octet highest |
+| `Ipv4Addr::LOCALHOST`, `UNSPECIFIED`, `BROADCAST` | `127.0.0.1`, `0.0.0.0`, `255.255.255.255` |
+| `is_loopback`, `is_unspecified`, `is_private`, `is_link_local`, `is_multicast`, `is_broadcast`, `is_documentation` | Rust's ranges: `127.0.0.0/8`; `0.0.0.0`; `10/8`, `172.16/12`, `192.168/16`; `169.254/16`; `224/4`; `255.255.255.255`; `192.0.2/24`, `198.51.100/24`, `203.0.113/24` |
+| `to_ipv6_compatible()`, `to_ipv6_mapped()` | `::a.b.c.d`, `::ffff:a.b.c.d` |
+| `Ipv6Addr::new(a, b, c, d, e, f, g, h)`, `segments() -> [u16; 8]`, `octets() -> [u8; 16]` | An IPv6 address of eight segments |
+| `Ipv6Addr::LOCALHOST`, `UNSPECIFIED` | `::1`, `::` |
+| `is_loopback`, `is_unspecified`, `is_multicast`, `is_unique_local`, `is_unicast_link_local` | `::1`; `::`; `ff00::/8`; `fc00::/7`; `fe80::/10` |
+| `to_ipv4_mapped() -> Option<Ipv4Addr>`, `to_ipv4()` | The IPv4 address of `::ffff:a.b.c.d`; of that or of `::a.b.c.d` |
+| `IpAddr::V4(ip)`, `IpAddr::V6(ip)`, `IpAddr::from(ip)` | Either; `is_ipv4`, `is_ipv6`, `is_loopback`, `is_unspecified`, `is_multicast` |
+| `SocketAddrV4::new(ip, port)`, `SocketAddrV6::new(ip, port, flowinfo, scope_id)` | An address and a port; `ip()`, `port()`, `flowinfo()`, `scope_id()`, and `set_` each |
+| `SocketAddr::V4(a)`, `SocketAddr::V6(a)`, `SocketAddr::new(ip: IpAddr, port)`, `SocketAddr::from(a)` | Either; `ip()`, `port()`, `set_ip`, `set_port`, `is_ipv4`, `is_ipv6` |
+| `Type::try_from(text) -> Result<Type, AddrParseError>`, `text.try_into()` | The address a text writes, for every type above |
+| `AddrParseError` | Why a text is not an address: `message()` and its text, as Rust's (`invalid IPv4 address syntax`) |
+
+- The text of an address (`Display`) is Rust's: `127.0.0.1`, IPv6 as RFC 5952 writes it (lowercase
+  segments without zeros before a digit, the longest run of two or more zero segments as `::`,
+  the first of equal ones, and `::ffff:192.0.2.1` for a mapped address), `127.0.0.1:80`,
+  `[::1]:80` and `[fe80::1%2]:80` with a scope. The debug form is that of the structs and enums
+  (`Ipv4Addr { bytes: [127, 0, 0, 1] }`).
+- Parsing accepts Rust's forms: four decimal octets without a zero before a digit (`01.2.3.4`
+  is not an address); one to four hexadecimal digits per segment, one `::`, and an IPv4
+  address in the last two segments (`::ffff:10.0.0.1`); a port after `:`, and an IPv6 socket
+  address in brackets with an optional decimal scope after `%`. `IpAddr` and `SocketAddr` try
+  IPv4 first.
+- Every address implements `Eq`, `Ord` and `Hash`: an IPv4 address before any IPv6 one, then by
+  their parts in order (address, port, flow label and scope).
+- An address is a value: `set_port` and the others change a `var`.
+- The fields of the addresses are private, and `AddrParseError` is made only by `std::net`.
+
 ## `std::path`
 
 Functions on paths as text; they never touch the file system. `/` separates components on
