@@ -1,0 +1,28 @@
+// Only a constant of a type has a value in its declaration, and generic types and interfaces
+// have none yet (docs/adr/0099-associated-and-composite-constants.md, Q683 and Q688).
+struct Point {
+  pub x: i32;
+  pub LOOSE: i32 = 3; //~ ERROR E0100
+}
+
+struct Wrap<T> {
+  pub value: T;
+
+  pub const ZERO: i32 = 0; //~ ERROR E0900
+}
+
+interface Bounded {
+  const MAX: i32 = 1; //~ ERROR E0900
+}
+
+class Counter {
+  pub var count: i32 = 1; //~ ERROR E0100
+  pub weak var next: Option<Counter> = None; //~ ERROR E0100
+
+  pub fn new(self) {
+    self.count = 0;
+    self.next = None;
+  }
+}
+
+fn main() {}

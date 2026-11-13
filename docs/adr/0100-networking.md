@@ -28,7 +28,7 @@ The record follows Rust, with these differences of the language:
 - Rust's `parse::<SocketAddr>()` is `FromStr`; Sagitario's conversion from text is
   `TryFrom<String, E>` (ADR-0094, Q634).
 - The debug form of a struct is the compiler's (spec 02): `{ip:?}` is
-  `Ipv4Addr { octets: [127, 0, 0, 1] }`, and `{ip}`, its `Display`, is Rust's `127.0.0.1`.
+  `Ipv4Addr { bytes: [127, 0, 0, 1] }`, and `{ip}`, its `Display`, is Rust's `127.0.0.1`.
 
 ## Decision
 

@@ -2150,6 +2150,16 @@ fn method_call(cx: Checker, value: Expr, receiver: Expr, method: Ident, args: Li
   ty
 }
 
+/// The help of `value.NAME` when `NAME` is a constant of the value's type, which is named
+/// through the type (docs/adr/0099-associated-and-composite-constants.md, Q683).
+pub fn const_help(cx: Checker, item: TypeItem, name: String) -> Option<String> {
+  cx.resolution.type_const(cx.package, item, name)?;
+
+  const shown = cx.resolution.type_name(cx.package, item);
+
+  Some("`" + name + "` is a constant of `" + shown + "`; name it through the type: `" + shown + "::" + name + "`")
+}
+
 fn resolve_same(a: TypeItem, b: TypeItem) -> bool {
   pkg::resolve::same_type_item(a, b)
 }
@@ -2211,7 +2221,15 @@ fn field(cx: Checker, base: Expr, name: Ident) -> Type {
     TypeKind::Struct(named) => named,
     TypeKind::Error | TypeKind::Never => return types::error(),
     _ => {
-      cx.error(codes::UNKNOWN_MEMBER, name.span, "no field `" + field_name + "` on type `" + types::text(base_ty) + "`");
+      var diagnostic = Diagnostic::error(codes::UNKNOWN_MEMBER, name.span, "no field `" + field_name + "` on type `" + types::text(base_ty) + "`");
+
+      if let TypeKind::Enum(named) = base_ty.kind {
+        if let Some(help) = const_help(cx, TypeItem::Enum(named.id), field_name) {
+          diagnostic = diagnostic.with_help(help);
+        }
+      }
+
+      cx.diagnostics.push(diagnostic);
 
       return types::error();
     }
@@ -2246,6 +2264,8 @@ fn field(cx: Checker, base: Expr, name: Ident) -> Type {
 
       if cx.resolution.type_function(cx.package, TypeItem::Struct(owner.id), field_name).is_some() {
         diagnostic = diagnostic.with_help("`" + field_name + "` is a method; call it with `" + field_name + "(...)`, or wrap it in a lambda to use it as a value");
+      } else if let Some(help) = const_help(cx, TypeItem::Struct(owner.id), field_name) {
+        diagnostic = diagnostic.with_help(help);
       } else {
         const names: List<String> = new List();
 

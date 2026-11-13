@@ -271,6 +271,10 @@ pub struct BlockInfo {
 pub struct ConstInfo {
   pub module: usize;
   pub item: usize;
+  /// A constant of a type: its position among the type's constants, and the type
+  /// (docs/adr/0099-associated-and-composite-constants.md, Q683).
+  pub member: Option<usize>;
+  pub owner: Option<TypeItem>;
 }
 
 /// A `static` and the function computing its value.
@@ -290,6 +294,8 @@ pub struct TypeInfo {
   pub module: usize;
   pub item: usize;
   pub functions: List<u32>;
+  /// Its constants (Q683).
+  pub consts: List<u32>;
 }
 
 /// The item at `item` of the module at `module`.
@@ -408,11 +414,40 @@ pub class Resolution {
 
   pub fn const_decl(self, package: Package, id: u32) -> Option<ConstDecl> {
     const info = self.consts.get(id as usize)?;
+    const item = item_at(package, info.module, info.item)?;
 
-    match item_at(package, info.module, info.item)? {
-      Item::Const(decl) => Some(decl),
-      _ => None,
+    match info.member {
+      None => match item {
+        Item::Const(decl) => Some(decl),
+        _ => None,
+      },
+      Some(member) => match item {
+        Item::Struct(decl) => decl.consts.get(member),
+        Item::Enum(decl) => decl.consts.get(member),
+        Item::Class(decl) => decl.consts.get(member),
+        _ => None,
+      },
     }
+  }
+
+  /// A type's constant by name (Q683); a subclass does not inherit its class's.
+  pub fn type_const(self, package: Package, item: TypeItem, name: String) -> Option<u32> {
+    const info = match item {
+      TypeItem::Struct(id) => self.structs.get(id as usize),
+      TypeItem::Enum(id) => self.enums.get(id as usize),
+      TypeItem::Class(id) => self.classes.get(id as usize),
+      TypeItem::Interface(id) => self.interfaces.get(id as usize),
+    }?;
+
+    for id in info.consts {
+      if let Some(decl) = self.const_decl(package, id) {
+        if decl.name.name == name {
+          return Some(id);
+        }
+      }
+    }
+
+    None
   }
 
   pub fn static_decl(self, package: Package, id: u32) -> Option<StaticDecl> {
@@ -547,6 +582,21 @@ pub class Resolution {
     };
 
     functions.unwrap_or(new List())
+  }
+
+  /// The constants of a type (Q683).
+  pub fn type_consts(self, item: TypeItem) -> List<u32> {
+    const info = match item {
+      TypeItem::Struct(id) => self.structs.get(id as usize),
+      TypeItem::Enum(id) => self.enums.get(id as usize),
+      TypeItem::Class(id) => self.classes.get(id as usize),
+      TypeItem::Interface(id) => self.interfaces.get(id as usize),
+    };
+
+    match info {
+      Some(found) => found.consts,
+      None => new List(),
+    }
   }
 
   /// A type's function (method or static) by name.
@@ -991,7 +1041,8 @@ pub fn resolve(package: Package, diagnostics: Diagnostics) -> Resolution {
       Some(decl) => decl,
       None => continue,
     };
-    const resolver = new Resolver(package, resolution, module_of(module_ids, resolution.consts[index].module), None, diagnostics);
+    // A constant of a type is resolved inside it, where `Self` and its private members are seen.
+    const resolver = new Resolver(package, resolution, module_of(module_ids, resolution.consts[index].module), resolution.consts[index].owner, diagnostics);
 
     resolver.type_expr(decl.ty);
     resolver.expr(decl.value);
@@ -1173,13 +1224,18 @@ fn declare_items(resolution: Resolution, source: usize, node: u32, module: Modul
       Item::Struct(decl) => {
         const owner = TypeItem::Struct(resolution.structs.len() as u32);
         const functions = register_functions(resolution, source, index, decl.functions.len(), owner);
+        const consts = register_consts(resolution, source, index, decl.consts.len(), owner);
 
-        resolution.structs.push(TypeInfo { module: source, item: index, functions: functions });
+        resolution.structs.push(TypeInfo { module: source, item: index, functions: functions, consts: consts });
 
         const members: List<Ident> = new List();
 
         for field in decl.fields {
           members.push(field.name);
+        }
+
+        for found in decl.consts {
+          members.push(found.name);
         }
 
         for function in decl.functions {
@@ -1192,13 +1248,18 @@ fn declare_items(resolution: Resolution, source: usize, node: u32, module: Modul
       Item::Class(decl) => {
         const owner = TypeItem::Class(resolution.classes.len() as u32);
         const functions = register_functions(resolution, source, index, decl.functions.len(), owner);
+        const consts = register_consts(resolution, source, index, decl.consts.len(), owner);
 
-        resolution.classes.push(TypeInfo { module: source, item: index, functions: functions });
+        resolution.classes.push(TypeInfo { module: source, item: index, functions: functions, consts: consts });
 
         const members: List<Ident> = new List();
 
         for field in decl.fields {
           members.push(field.name);
+        }
+
+        for found in decl.consts {
+          members.push(found.name);
         }
 
         for function in decl.functions {
@@ -1212,7 +1273,7 @@ fn declare_items(resolution: Resolution, source: usize, node: u32, module: Modul
         const owner = TypeItem::Interface(resolution.interfaces.len() as u32);
         const functions = register_functions(resolution, source, index, decl.functions.len(), owner);
 
-        resolution.interfaces.push(TypeInfo { module: source, item: index, functions: functions });
+        resolution.interfaces.push(TypeInfo { module: source, item: index, functions: functions, consts: new List() });
 
         const members: List<Ident> = new List();
 
@@ -1230,13 +1291,18 @@ fn declare_items(resolution: Resolution, source: usize, node: u32, module: Modul
       Item::Enum(decl) => {
         const owner = TypeItem::Enum(resolution.enums.len() as u32);
         const functions = register_functions(resolution, source, index, decl.functions.len(), owner);
+        const consts = register_consts(resolution, source, index, decl.consts.len(), owner);
 
-        resolution.enums.push(TypeInfo { module: source, item: index, functions: functions });
+        resolution.enums.push(TypeInfo { module: source, item: index, functions: functions, consts: consts });
 
         const members: List<Ident> = new List();
 
         for variant in decl.variants {
           members.push(variant.name);
+        }
+
+        for found in decl.consts {
+          members.push(found.name);
         }
 
         for function in decl.functions {
@@ -1262,7 +1328,7 @@ fn declare_items(resolution: Resolution, source: usize, node: u32, module: Modul
       Item::Const(decl) => {
         const id = resolution.consts.len() as u32;
 
-        resolution.consts.push(ConstInfo { module: source, item: index });
+        resolution.consts.push(ConstInfo { module: source, item: index, member: None, owner: None });
         names.push(Named { name: decl.name, item: ItemRef::Const(id), visibility: decl.visibility });
       }
       Item::Static(decl) => {
@@ -1393,6 +1459,18 @@ fn declare_item(resolution: Resolution, node: u32, name: Ident, item: ItemRef, v
   } else {
     info.items.insert(name.name, Declared { item: item, span: name.span, visibility: visibility });
   }
+}
+
+/// The constants of a type, numbered with those of the modules (Q683).
+fn register_consts(resolution: Resolution, source: usize, item: usize, count: usize, owner: TypeItem) -> List<u32> {
+  const consts: List<u32> = new List();
+
+  for member in 0..count {
+    consts.push(resolution.consts.len() as u32);
+    resolution.consts.push(ConstInfo { module: source, item: item, member: Some(member), owner: Some(owner) });
+  }
+
+  consts
 }
 
 fn register_functions(resolution: Resolution, source: usize, item: usize, count: usize, owner: TypeItem) -> List<u32> {
@@ -2297,6 +2375,11 @@ pub class Resolver {
             }
           }
 
+          // A constant of the type (Q683).
+          if let Some(id) = self.resolution.type_const(self.package, item, member.name) {
+            return self.type_const(item, id, member.span);
+          }
+
           // `Self::name` inside an interface: a static function of the type implementing it.
           if let TypeItem::Interface(_) = item {
             if last.name == "Self" {
@@ -2810,6 +2893,56 @@ pub class Resolver {
   }
 
   /// `Type::function`: a static function of a struct, enum or class.
+  /// The nearest class above the class `item` that declares the constant `name`.
+  prv fn const_ancestor(self, item: TypeItem, name: String) -> Option<u32> {
+    var current = item;
+
+    // A cycle of `extends` is reported elsewhere; the depth bounds the walk.
+    for _ in 0..64 {
+      const id = match current {
+        TypeItem::Class(found) => found,
+        _ => return None,
+      };
+      const parent = self.resolution.class_decl(self.package, id)?.parent?;
+      const parent_id = match parent.kind {
+        TypeExprKind::Path(path) => match self.resolution.type_paths.get(path.id) {
+          Some(TypeRes::Item(TypeItem::Class(found))) => found,
+          _ => return None,
+        },
+        _ => return None,
+      };
+
+      if self.resolution.type_const(self.package, TypeItem::Class(parent_id), name).is_some() {
+        return Some(parent_id);
+      }
+
+      current = TypeItem::Class(parent_id);
+    }
+
+    None
+  }
+
+  /// `Type::NAME`: a `prv` constant is reached only inside its type.
+  prv fn type_const(self, item: TypeItem, id: u32, span: Span) -> Option<Res> {
+    const decl = self.resolution.const_decl(self.package, id)?;
+    const own = match self.owner {
+      Some(owner) => same_type_item(owner, item),
+      None => false,
+    };
+
+    if let Visibility::Private = decl.visibility {
+      if !own {
+        const type_name = self.resolution.type_name(self.package, item);
+
+        self.diagnostics.push(
+          Diagnostic::error(codes::PRIVATE_MEMBER, span, "the constant `" + decl.name.name + "` of `" + type_name + "` is private").with_label(decl.name.span, "declared `prv` here"),
+        );
+      }
+    }
+
+    Some(Res::Const(id))
+  }
+
   prv fn type_function(self, item: TypeItem, name: String, span: Span) -> Option<Res> {
     const type_name = self.resolution.type_name(self.package, item);
 
@@ -2844,7 +2977,14 @@ pub class Resolver {
           candidates.push(function.name.name);
         }
 
-        var what = "function";
+        for id in self.resolution.type_consts(item) {
+          if let Some(decl) = self.resolution.const_decl(self.package, id) {
+            candidates.push(decl.name.name);
+          }
+        }
+
+        const has_consts = !self.resolution.type_consts(item).is_empty();
+        var what = if has_consts { "function or constant" } else { "function" };
 
         if let TypeItem::Enum(id) = item {
           if let Some(decl) = self.resolution.enum_decl(self.package, id) {
@@ -2853,13 +2993,23 @@ pub class Resolver {
             }
           }
 
-          what = "variant or function";
+          what = if has_consts { "variant, function or constant" } else { "variant or function" };
         }
 
         var diagnostic = Diagnostic::error(codes::UNRESOLVED_NAME, span, "no " + what + " `" + name + "` in `" + type_name + "`");
 
         if let Some(similar) = diagnostics::closest_match(name, candidates) {
           diagnostic = diagnostic.with_help("a " + what + " with a similar name exists: `" + similar + "`");
+        }
+
+        // A subclass does not inherit the constants of its classes
+        // (docs/adr/0099-associated-and-composite-constants.md, Q683).
+        if let Some(ancestor) = self.const_ancestor(item, name) {
+          const ancestor_name = self.resolution.type_name(self.package, TypeItem::Class(ancestor));
+
+          diagnostic = diagnostic
+            .with_note("constants are not inherited: `" + name + "` is a constant of `" + ancestor_name + "`")
+            .with_help("name it through that class: `" + ancestor_name + "::" + name + "`");
         }
 
         self.diagnostics.push(diagnostic);

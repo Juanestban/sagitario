@@ -22,6 +22,10 @@ The sources say 0.32.0.
 
 ### Added
 
+- Constants of structs, enums and classes, `pub const NAME: Type = value;`, named `Type::NAME`
+  and `Self::NAME`, as Rust's associated constants; `sag lsp` completes them after `Type::` and
+  `Self::`, lists them in the outline and colors them in paths, and the snippet `typeconst`
+  declares one ([ADR-0099](docs/adr/0099-associated-and-composite-constants.md), increment 2).
 - Constants that are structs, enums, `Option`, `Result`, arrays and tuples of constants, written
   as literals, and the parts of a constant (`ORIGIN.x`, `PAIR.0`, `PRIMES[3]`) in other
   constants ([ADR-0099](docs/adr/0099-associated-and-composite-constants.md), increment 1).

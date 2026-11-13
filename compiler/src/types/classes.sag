@@ -291,7 +291,9 @@ pub fn class_field(cx: Checker, id: u32, base_ty: Type, name: Ident) -> Type {
         }
       }
 
-      if inheritance::class_method(cx, id, field_name).is_some() {
+      if let Some(help) = exprs::const_help(cx, TypeItem::Class(id), field_name) {
+        diagnostic = diagnostic.with_help(help);
+      } else if inheritance::class_method(cx, id, field_name).is_some() {
         diagnostic = diagnostic.with_help("`" + field_name + "` is a method; call it with `" + field_name + "(...)`, or wrap it in a lambda to use it as a value");
       } else if let Some(similar) = diagnostics::closest_match(field_name, fields) {
         diagnostic = diagnostic.with_help("a field with a similar name exists: `" + similar + "`");

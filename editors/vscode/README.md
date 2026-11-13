@@ -6,11 +6,11 @@ Support for the [Sagitario](https://github.com/Juanestban/sagitario) programming
   of what is under the cursor, go to definition (`F12` or `Ctrl+Click`, also on the modules of
   `use` and of paths), completion of members after `.` (the methods of numbers, text, characters, lists, arrays, slices, maps, sets, iterators, `Option` and
   `Result` too, `into` and `try_into` on every value, and the
-  indices of a tuple's elements), of items after `::` (`MIN` and `MAX` after an integer type, the functions of `std::mem` and `std::hint`, `exit` and `abort` after `std::process::`, the static functions of a type's interfaces and of a type parameter's bounds after `Type::` and `T::`, and `default`, `from` and `try_from` after the types of numbers, `char` and `String`), of attributes after
+  indices of a tuple's elements), of items after `::` (`MIN` and `MAX` after an integer type, the functions of `std::mem` and `std::hint`, `exit` and `abort` after `std::process::`, the constants of a type and the static functions of its interfaces after `Type::` and `Self::`, those of a type parameter's bounds after `T::`, and `default`, `from` and `try_from` after the types of numbers, `char` and `String`), of attributes after
   `@` (`@cfg`, `@default`, `@export`, `@repr`, `@thread_local`), of their representations after `@repr(` and
   of the conditions of `@cfg(`, of names
-  (module-level constants and statics with their types, and the builtins, `assert` and `assert_eq` among them) and of types, the outline of a document (`Ctrl+Shift+O`), and the colors of modules, functions and
-  types in paths (semantic tokens). Inside the braces of format strings, as rust-analyzer does
+  (module-level constants and statics with their types, and the builtins, `assert` and `assert_eq` among them) and of types, the outline of a document (`Ctrl+Shift+O`), the constants of types included, and the colors of modules, functions,
+  types and constants in paths (semantic tokens). Inside the braces of format strings, as rust-analyzer does
   in Rust's, it also colors the variables, parameters, fields, methods and functions.
 - Syntax highlighting of `.sag` files: keywords, types, operators (the bitwise ones and shifts
   too), numbers with their suffixes, the indices of tuples' elements (`pair.0`) and the names a tuple pattern declares
@@ -20,7 +20,7 @@ Support for the [Sagitario](https://github.com/Juanestban/sagitario) programming
   comments, documentation comments and attributes.
 - An icon for `.sag` files in the explorer and the tabs.
 - Commenting with `Ctrl+/`, matching and auto-closing brackets and quotes, and folding.
-- Snippets: `main`, `mainr`, `asyncmain`, `asyncfn`, `fn`, `pfn`, `static`, `staticvar`,
+- Snippets: `main`, `mainr`, `asyncmain`, `asyncfn`, `fn`, `pfn`, `static`, `staticvar`, `typeconst`,
   `threadlocal`, `cfg`, `struct`, `class`, `enum`, `interface`, `implfor`, `match`, `iflet`, `whilelet`, `for`,
   `forin`, `fortuple`, `consttuple`, `assert`, `asserteq`, `if`, `ifelse`, `println`, `fstr` (a format string) and `use`; for operators and text, `impleq`, `implord`, `impldisplay`, `implop` (`+`, `-`, `*`,
   `/`, `%`) and `implneg`; for conversions, defaults, indexing and iteration, `implfrom`, `impltryfrom`, `impldefault`, `default` (a struct with `@default`), `implindex`, `impliterable`, `implfromiter` and `impldrop`; for streams, `implread` and `implwrite`; and for the FFI, `extern` (a block of C functions), `externstatic` (a global variable of C), `externfn`,

@@ -113,6 +113,44 @@ const LAST: u32 = PRIMES[3] * 2;              // 14
   `include_str`. Operators apply to the primitive parts only: `ORIGIN == ORIGIN` is an error.
 - Each use of a composite constant is a copy of its value, as any value of a struct.
 
+### Constants of types
+
+Rationale: [ADR-0099](../adr/0099-associated-and-composite-constants.md), Q683 and Q684, as Rust's
+associated constants.
+
+```sag
+pub struct Ipv4Addr {
+  prv bytes: [u8; 4];
+
+  pub const LOCALHOST: Ipv4Addr = Ipv4Addr { bytes: [127, 0, 0, 1] };
+  pub const UNSPECIFIED: Self = Self { bytes: [0; 4] };
+}
+
+class Server {
+  pub const name: String;                 // a field: no value
+  pub const DEFAULT_PORT: u16 = 8080;     // a constant of the class
+
+  pub fn new(self, name: String) {
+    self.name = name;
+  }
+}
+
+const ip = Ipv4Addr::LOCALHOST;
+```
+
+- `pub const NAME: Type = value;` or `prv const NAME: Type = value;` in the body of a struct, an
+  enum or a class declares a constant of the type, with the rules of the constants above. Its
+  value is what tells it from a field of a class, which never has one; any other member with a
+  value (`pub var count: i32 = 0;`, a field of a struct) is an error (`E0100`).
+- It is named through its type, `Ipv4Addr::LOCALHOST`, or `Self::LOCALHOST` inside it, and
+  from another module as any item of the type (`net::Ipv4Addr::LOCALHOST`). Through a value
+  (`ip.LOCALHOST`) it is an error (`E0316`). A `prv` one is reached only inside the type
+  (`E0205`), and its value, checked inside the type, may build the type's private fields.
+- It shares the namespace of the type's fields, functions and variants (`E0201`). A subclass
+  does not inherit the constants of its classes: `Derived::SIZE` is an error that names the class
+  declaring it.
+- A generic type and an interface cannot declare constants yet (`E0900`).
+
 ## Global state (G1)
 
 Rationale: [ADR-0083](../adr/0083-global-state.md).

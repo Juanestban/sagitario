@@ -4,7 +4,7 @@
 //! format string or a template, as rust-analyzer does in Rust's format strings, also the
 //! variables, parameters, fields and methods, which would otherwise take the color of the string.
 
-use pkg::ast::{Block, Expr, ExprKind, FnDecl, Ident, Item, Module, Path, Pattern, PatternKind, Stmt, TypeExpr, TypeExprKind, UseTree, UseTreeKind};
+use pkg::ast::{Block, ConstDecl, Expr, ExprKind, FnDecl, Ident, Item, Module, Path, Pattern, PatternKind, Stmt, TypeExpr, TypeExprKind, UseTree, UseTreeKind};
 use pkg::ast;
 use pkg::lsp::analysis::Analysis;
 use pkg::lsp::json;
@@ -168,11 +168,21 @@ class Collector {
       Some(Res::Extern(_)) => Some(FUNCTION),
       Some(Res::Variant(_)) => Some(ENUM_MEMBER),
       Some(Res::Struct(_)) => Some(STRUCT),
+      // A constant, of a module or of a type (`Point::ORIGIN`): the legend has no kind of its own.
+      Some(Res::Const(_)) => Some(VARIABLE),
       _ => None,
     };
 
     if let Some(last) = path.segments.last() {
       self.add(last, kind);
+    }
+  }
+
+  /// The types and values of the constants of a type.
+  prv fn consts(self, consts: List<ConstDecl>) {
+    for decl in consts {
+      self.type_expr(decl.ty);
+      self.expr(decl.value);
     }
   }
 
@@ -286,6 +296,8 @@ class Collector {
             self.type_expr(field.ty);
           }
 
+          self.consts(decl.consts);
+
           for function in decl.functions {
             self.function(function);
           }
@@ -294,6 +306,8 @@ class Collector {
           for ty in decl.impls {
             self.type_expr(ty);
           }
+
+          self.consts(decl.consts);
 
           for function in decl.functions {
             self.function(function);
@@ -311,6 +325,8 @@ class Collector {
           for field in decl.fields {
             self.type_expr(field.ty);
           }
+
+          self.consts(decl.consts);
 
           for function in decl.functions {
             self.function(function);

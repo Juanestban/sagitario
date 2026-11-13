@@ -149,13 +149,13 @@ pub fn const_defs(cx: Checker) {
   cx.const_states = states;
 
   // Every constant's type first: a value checked as an expression reads the types of the
-  // constants it names.
+  // constants it names. A constant of a type is checked inside it, where `Self` and the type's
+  // private members are seen (docs/adr/0099-associated-and-composite-constants.md, Q683).
   const owner = cx.owner;
-
-  cx.owner = None;
 
   for index in 0..count {
     if let Some(decl) = cx.resolution.const_decl(cx.package, index as u32) {
+      cx.owner = const_owner(cx, index);
       cx.typed.const_types[index] = cx.type_expr(decl.ty);
     }
   }
@@ -164,6 +164,14 @@ pub fn const_defs(cx: Checker) {
 
   for index in 0..count {
     const_value(cx, index as u32, None);
+  }
+}
+
+/// The type declaring the constant at `index`, or `None` for a module's.
+fn const_owner(cx: Checker, index: usize) -> Option<pkg::resolve::TypeItem> {
+  match cx.resolution.consts.get(index) {
+    Some(info) => info.owner,
+    None => None,
   }
 }
 
@@ -357,8 +365,10 @@ fn const_value(cx: Checker, id: u32, use_span: Option<Span>) -> Option<Typed> {
   const valid = types::is_error(ty) || constant_type(cx, ty, 0);
 
   if !valid {
+    const what = if const_owner(cx, index).is_some() { "a constant" } else { "a module-level constant" };
+
     cx.diagnostics.push(
-      Diagnostic::error(codes::NOT_CONSTANT, decl.ty.span, "a module-level constant cannot have the type `" + types::text(ty) + "`")
+      Diagnostic::error(codes::NOT_CONSTANT, decl.ty.span, what + " cannot have the type `" + types::text(ty) + "`")
         .with_note("constants are integers, floats, `bool`, `char`, `String`, and structs, enums, arrays and tuples of them"),
     );
   }
@@ -369,11 +379,11 @@ fn const_value(cx: Checker, id: u32, use_span: Option<Span>) -> Option<Typed> {
     if is_primitive(ty) && !has_parts(cx, decl.value) {
       value = const_expr(cx, decl.value, ty, module);
     } else if constant_shape(cx, decl.value) {
-      // Its types first, as any expression's, outside any type (Q685).
+      // Its types first, as any expression's, in the type that declares it, if any (Q685).
       const owner = cx.owner;
       const reported = cx.diagnostics.len();
 
-      cx.owner = None;
+      cx.owner = const_owner(cx, index);
       exprs::expect(cx, decl.value, ty);
       cx.owner = owner;
 

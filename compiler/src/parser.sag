@@ -243,6 +243,9 @@ pub fn describe(kind: TokenKind) -> String {
 
 enum Member {
   Field(FieldDecl),
+  /// `pub const NAME: Type = value;`, a constant of the type
+  /// (docs/adr/0099-associated-and-composite-constants.md, Q683).
+  Const(ConstDecl),
   Fn(FnDecl),
 }
 
@@ -1348,12 +1351,14 @@ class Parser {
     self.expect("{")?;
 
     const fields: List<FieldDecl> = new List();
+    const consts: List<ConstDecl> = new List();
     const functions: List<FnDecl> = new List();
 
     while !self.at("}") && !self.at_eof() {
       const before = self.pos;
 
       match self.member() {
+        Ok(Member::Const(decl)) => consts.push(decl),
         Ok(Member::Field(field)) => {
           if field.mutable.is_some() {
             self.diagnostics.push(
@@ -1378,6 +1383,8 @@ class Parser {
 
     const end = self.expect("}")?.span;
 
+    self.generic_consts(generics, consts);
+
     if is_union {
       if !generics.is_empty() || !impls.is_empty() {
         self.not_implemented(name.span, "generic unions and unions implementing interfaces");
@@ -1397,9 +1404,19 @@ class Parser {
       generics: generics,
       impls: impls,
       fields: fields,
+      consts: consts,
       functions: functions,
       span: start.to(end),
     })
+  }
+
+  /// A generic type cannot declare constants yet: `Type::NAME` would need its arguments (Q683).
+  prv fn generic_consts(self, generics: List<GenericParam>, consts: List<ConstDecl>) {
+    if !generics.is_empty() {
+      if let Some(decl) = consts.first() {
+        self.not_implemented(decl.name.span, "constants of generic types");
+      }
+    }
   }
 
   /// `impl A, B<T>` after a type's name (and its `extends`).
@@ -1457,6 +1474,8 @@ class Parser {
 
           fields.push(field);
         }
+        // Constants of interfaces, read as `T::NAME`, are deferred (Q688).
+        Ok(Member::Const(decl)) => self.not_implemented(decl.name.span, "constants of interfaces"),
         Ok(Member::Fn(function)) => functions.push(function),
         Err(_) => self.skip_member(),
       }
@@ -1506,12 +1525,14 @@ class Parser {
     self.expect("{")?;
 
     const fields: List<FieldDecl> = new List();
+    const consts: List<ConstDecl> = new List();
     const functions: List<FnDecl> = new List();
 
     while !self.at("}") && !self.at_eof() {
       const before = self.pos;
 
       match self.member() {
+        Ok(Member::Const(decl)) => consts.push(decl),
         Ok(Member::Field(field)) => {
           if field.mutable.is_none() {
             const field_name = field.name.name;
@@ -1535,6 +1556,8 @@ class Parser {
 
     const end = self.expect("}")?.span;
 
+    self.generic_consts(generics, consts);
+
     Ok(ClassDecl {
       is_abstract: is_abstract,
       visibility: visibility,
@@ -1543,6 +1566,7 @@ class Parser {
       parent: parent,
       impls: impls,
       fields: fields,
+      consts: consts,
       functions: functions,
       span: start.to(end),
     })
@@ -1587,6 +1611,7 @@ class Parser {
       );
     }
 
+    const consts: List<ConstDecl> = new List();
     const functions: List<FnDecl> = new List();
 
     while !self.at("}") && !self.at_eof() {
@@ -1597,6 +1622,7 @@ class Parser {
           self.class_only_modifiers(function);
           functions.push(function);
         }
+        Ok(Member::Const(decl)) => consts.push(decl),
         Ok(Member::Field(field)) => {
           self.diagnostics.push(
             Diagnostic::error(codes::UNEXPECTED_TOKEN, field.span, "enums cannot have fields")
@@ -1613,7 +1639,9 @@ class Parser {
 
     const end = self.expect("}")?.span;
 
-    Ok(EnumDecl { repr: None, default: None, visibility: visibility, name: name, generics: generics, impls: impls, variants: variants, functions: functions, span: start.to(end) })
+    self.generic_consts(generics, consts);
+
+    Ok(EnumDecl { repr: None, default: None, visibility: visibility, name: name, generics: generics, impls: impls, variants: variants, consts: consts, functions: functions, span: start.to(end) })
   }
 
   /// Whether attributes before a name start the next variant: `@default Normal`, not the
@@ -1803,7 +1831,8 @@ class Parser {
     self.field_member(visibility, start)
   }
 
-  /// A field `weak var name: Type;` after its visibility.
+  /// A field `weak var name: Type;` after its visibility, or a constant of the type,
+  /// `const NAME: Type = value;`, which its value tells apart (Q683).
   prv fn field_member(self, visibility: Visibility, start: Span) -> Result<Member, ()> {
     // The type checker decides where `weak` is allowed.
     const is_weak = self.eat_keyword("weak");
@@ -1824,6 +1853,27 @@ class Parser {
     self.expect(":")?;
 
     const ty = self.type_expr()?;
+
+    if self.at("=") {
+      const equals = self.advance().span;
+      const value = self.expr()?;
+      const end = self.expect(";")?.span;
+
+      const is_const = match mutable {
+        Some(found) => !found,
+        None => false,
+      };
+
+      if !is_const || is_weak {
+        self.diagnostics.push(
+          Diagnostic::error(codes::UNEXPECTED_TOKEN, equals, "only a constant of a type has a value in its declaration")
+            .with_help("declare it `const " + name.name + ": ... = ...;`, or give the field its value in `new`"),
+        );
+      }
+
+      return Ok(Member::Const(ConstDecl { visibility: visibility, name: name, ty: ty, value: value, span: start.to(end) }));
+    }
+
     const end = self.expect(";")?.span;
 
     Ok(Member::Field(FieldDecl { visibility: visibility, mutable: mutable, is_weak: is_weak, name: name, ty: ty, span: start.to(end) }))

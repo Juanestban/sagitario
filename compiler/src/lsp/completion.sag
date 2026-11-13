@@ -507,6 +507,20 @@ fn path_members(items: Items, analysis: Analysis, module: Option<Module>, module
     return;
   }
 
+  // `Self::`: what `Type::` names, for the type whose function holds the cursor
+  // (docs/adr/0099-associated-and-composite-constants.md, Q687).
+  if chain.len() == 1 && first == "Self" {
+    if let Some(found_module) = module {
+      if let Some(function) = query::enclosing_function(analysis, found_module, offset) {
+        if let Some(item) = resolution.owner(function) {
+          type_functions(items, analysis, item);
+        }
+      }
+    }
+
+    return;
+  }
+
   // `T::`: the static functions of the interfaces bounding a type parameter in scope
   // (docs/adr/0094-conversions-and-defaults.md, Q631).
   if chain.len() == 1 {
@@ -592,7 +606,8 @@ fn path_members(items: Items, analysis: Analysis, module: Option<Module>, module
   }
 }
 
-/// The functions of a type without `self`, and an enum's variants: what `Type::` names.
+/// The functions of a type without `self`, its constants, and an enum's variants: what `Type::`
+/// names.
 fn type_functions(items: Items, analysis: Analysis, item: TypeItem) {
   const package = match analysis.package {
     Some(found) => found,
@@ -608,6 +623,21 @@ fn type_functions(items: Items, analysis: Analysis, item: TypeItem) {
       for variant in decl.variants {
         items.add(variant.name.name, ENUM_MEMBER, "");
       }
+    }
+  }
+
+  // Its constants (docs/adr/0099-associated-and-composite-constants.md, Q687).
+  for id in resolution.type_consts(item) {
+    if let Some(decl) = resolution.const_decl(package, id) {
+      const detail = match analysis.typed {
+        Some(typed) => match typed.const_types.get(id as usize) {
+          Some(ty) => "const " + decl.name.name + ": " + types::text(ty),
+          None => "",
+        },
+        None => "",
+      };
+
+      items.add(decl.name.name, CONSTANT, detail);
     }
   }
 

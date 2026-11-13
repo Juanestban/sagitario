@@ -57,7 +57,12 @@ pub fn dump(resolution: Resolution) -> String {
   for index in 0..resolution.consts.len() {
     const info = resolution.consts[index];
 
-    out.append(`const ${index} module=${info.module} item=${info.item}\n`);
+    const member = match info.member {
+      Some(found) => ` member=${found}`,
+      None => "",
+    };
+
+    out.append(`const ${index} module=${info.module} item=${info.item}` + member + "\n");
   }
 
   for index in 0..resolution.externs.len() {

@@ -3,7 +3,7 @@
 //! `sagitario_resolve::modules`.
 
 use pkg::ast::{
-  Block, Expr, ExprKind, FnDecl, Ident, Item, Module, Package, Path, Pattern, PatternKind, Stmt, TypeExpr, TypeExprKind, UseTree,
+  Block, ConstDecl, Expr, ExprKind, FnDecl, Ident, Item, Module, Package, Path, Pattern, PatternKind, Stmt, TypeExpr, TypeExprKind, UseTree,
   UseTreeKind, VariantFields, Visibility,
 };
 use pkg::diagnostics::{Diagnostic, Diagnostics};
@@ -760,6 +760,8 @@ fn item_paths(module: Module) -> List<Path> {
           type_paths(field.ty, paths);
         }
 
+        const_paths(decl.consts, paths);
+
         for function in decl.functions {
           fn_paths(function, paths);
         }
@@ -776,6 +778,8 @@ fn item_paths(module: Module) -> List<Path> {
         for field in decl.fields {
           type_paths(field.ty, paths);
         }
+
+        const_paths(decl.consts, paths);
 
         for function in decl.functions {
           fn_paths(function, paths);
@@ -814,6 +818,8 @@ fn item_paths(module: Module) -> List<Path> {
             }
           }
         }
+
+        const_paths(decl.consts, paths);
 
         for function in decl.functions {
           fn_paths(function, paths);
@@ -914,6 +920,15 @@ fn expr_path(path: Path, out: List<Path>) {
     for arg in args.args {
       type_paths(arg, out);
     }
+  }
+}
+
+/// The paths of the constants of a type
+/// (docs/adr/0099-associated-and-composite-constants.md, Q683).
+fn const_paths(consts: List<ConstDecl>, out: List<Path>) {
+  for decl in consts {
+    type_paths(decl.ty, out);
+    expr_paths(decl.value, out);
   }
 }
 

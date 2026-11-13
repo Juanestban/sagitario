@@ -36,7 +36,8 @@ const dog = new Dog("Rex");
 
 ## Visibility of members
 
-- Every class member (field or method) **must** declare `pub` or `prv`.
+- Every class member (field, [constant](03-memory.md#constants-of-types) or method) **must**
+  declare `pub` or `prv`.
 - `pub`: visible wherever the class is visible.
 - `prv`: visible only inside the declaring class. Subclasses cannot access it.
 - There is no `protected` level in the MVP (open for reconsideration later).
@@ -50,7 +51,9 @@ const dog = new Dog("Rex");
 - Objects are created with `new ClassName(args)`, which allocates and calls `new`. A `prv`
   initializer can only be used inside the class.
 - A class without fields may omit `new`; it then has an implicit `new(self)` without parameters. A
-  class with fields must declare it. Fields have no initializers in their declaration.
+  class with fields must declare it. Fields have no initializers in their declaration: a
+  `const` with a value is a [constant of the class](03-memory.md#constants-of-types), not a
+  field.
 - Every field, `const` and `var`, must be assigned before `new` returns: at the end of its body
   and at every `return`. A `const` field is assigned exactly once. No field is read before it is
   assigned, and `self` cannot be used otherwise (calling its methods, passing it along) until
