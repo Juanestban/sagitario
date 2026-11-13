@@ -6,6 +6,7 @@ use pkg::diagnostics::Diagnostic;
 use pkg::diagnostics::codes;
 use pkg::resolve::{ParamOwner, Resolution, TypeItem};
 use pkg::sir::{ClassInstance, Instance, Lowering, Registry, subst_key, type_key};
+use pkg::sir::interfaces;
 use pkg::types::{NamedRef, Subst, Type, TypeKind};
 use pkg::types;
 use pkg::types::typed::{TypedModule, owner_key};
@@ -215,12 +216,28 @@ pub fn class_instance(lw: Lowering, class_ref: NamedRef) -> usize {
 
   created.parent = parent;
   created.vtable = vtable;
+  created.user_drop = user_drop(lw, class_ref);
 
   for field in fields {
     register_types(lw, field);
   }
 
   index
+}
+
+/// The function implementing `drop` of `Drop` for the class, its own or inherited, when the class
+/// implements it (docs/adr/0096-streams-files-and-drop.md, Q655).
+fn user_drop(lw: Lowering, class_ref: NamedRef) -> Option<u32> {
+  const drop = lw.typed.prelude.drop?;
+  const class_ty = types::of(TypeKind::Class(class_ref));
+
+  if !lw.typed.implements(class_ty, NamedRef { id: drop, name: "Drop", args: new List() }) {
+    return None;
+  }
+
+  const method = lw.typed.interface_def(drop)?.methods.first()?;
+
+  Some(interfaces::method_for(lw, method, class_ty, Subst::empty().with_self(class_ty), new List<Type>()).function)
 }
 
 /// Registers the class instances a type needs, inside structs, enums, arrays and the like.

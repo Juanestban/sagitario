@@ -214,6 +214,12 @@ void sag_object_init(sag_object *object, void (*drop)(sag_object *object), const
  * last reference goes away while another is being destroyed are destroyed after it, in a loop,
  * so long chains of objects do not exhaust the stack. */
 void sag_object_destroy(sag_object *object);
+/* Around the `drop` of a class implementing `Drop`, while its object is destroyed
+ * (docs/adr/0096-streams-files-and-drop.md, Q655): the object has one strong reference while it
+ * runs, so a copy of `self` taken and released there does not destroy it again; when it returns,
+ * a reference left besides that one is `self` kept alive, and panics. */
+bool sag_object_drop_begin(sag_object *object);
+void sag_object_drop_end(sag_object *object, bool dropping);
 
 static inline void sag_object_retain(void *object) {
   if (object != NULL) {

@@ -15,6 +15,10 @@ The sources say 0.32.0.
 
 ### Added
 
+- `Drop`, for classes: `drop` runs when the last strong reference to an instance goes, before its
+  fields are released, and keeping `self` alive there panics; instances whose last references go
+  together are now freed in the order those references went, so a list's elements go first to
+  last ([ADR-0096](docs/adr/0096-streams-files-and-drop.md), increment 1).
 - `std::collections::BinaryHeap`, as Rust's: a priority queue, the largest first, with
   `with_compare` for any other order, `into_sorted_list` and the debug form of its heap
   ([ADR-0095](docs/adr/0095-collections.md), increment 5).

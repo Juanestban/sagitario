@@ -1085,10 +1085,27 @@ class Generator {
     const vtable = self.vtable(index);
 
     self.out.append("}\n");
+
+    // The `drop` of `Drop` runs first, with the object held by one reference while it does
+    // (docs/adr/0096-streams-files-and-drop.md, Q655).
+    var destroy = `sag_drop_c${index}`;
+
+    if let Some(instance) = self.classes.get(index) {
+      if let Some(function) = instance.user_drop {
+        destroy = `sag_destroy_c${index}`;
+        self.out.append(`static void sag_destroy_c${index}(sag_object *object) {\n`);
+        self.out.append("  bool dropping = sag_object_drop_begin(object);\n");
+        self.out.append("  " + fn_name(function) + "(object);\n");
+        self.out.append("  sag_object_drop_end(object, dropping);\n");
+        self.out.append(`  sag_drop_c${index}(object);\n`);
+        self.out.append("}\n");
+      }
+    }
+
     self.out.append(`static sag_object *sag_new_c${index}(void) {\n`);
     self.out.append("  " + name + " *value = sag_object_alloc(sizeof(" + name + "));\n");
     self.out.append("  *value = (" + name + "){0};\n");
-    self.out.append(`  sag_object_init((sag_object *)value, sag_drop_c${index}, ` + vtable + ");\n");
+    self.out.append("  sag_object_init((sag_object *)value, " + destroy + ", " + vtable + ");\n");
     self.out.append("  return (sag_object *)value;\n}\n");
   }
 

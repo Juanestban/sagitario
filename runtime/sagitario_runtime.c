@@ -1002,6 +1002,9 @@ void sag_builder_reserve(sag_builder builder, size_t additional) {
 /* Each thread destroys the objects it releases, with its own stack. */
 static SAG_THREAD_LOCAL sag_object **sag_drop_stack = NULL;
 static SAG_THREAD_LOCAL size_t sag_drop_len = 0;
+/* The next object to destroy: objects are destroyed in the order their last reference went, so
+ * the elements of a list go first to last, as Rust drops them. */
+static SAG_THREAD_LOCAL size_t sag_drop_head = 0;
 static SAG_THREAD_LOCAL size_t sag_drop_cap = 0;
 static SAG_THREAD_LOCAL bool sag_dropping = false;
 
@@ -1042,14 +1045,37 @@ static void sag_drop_push(sag_object *object) {
   sag_drop_stack[sag_drop_len++] = object;
 }
 
+/* While a `drop` of the program runs, objects it releases are destroyed at once, by a loop of
+ * their own, so that what held `self` (a list, a closure) lets it go before `drop` returns. */
+bool sag_object_drop_begin(sag_object *object) {
+  bool dropping = sag_dropping;
+
+  sag_count_init(&object->strong, 1);
+  sag_dropping = false;
+  return dropping;
+}
+
+void sag_object_drop_end(sag_object *object, bool dropping) {
+  sag_dropping = dropping;
+  if (sag_count_get(&object->strong) != 1) {
+    sag_panic("drop kept a reference to its instance");
+  }
+  sag_count_init(&object->strong, 0);
+}
+
 void sag_object_destroy(sag_object *object) {
   sag_drop_push(object);
   if (sag_dropping) {
     return;
   }
   sag_dropping = true;
-  while (sag_drop_len > 0) {
-    sag_object *next = sag_drop_stack[--sag_drop_len];
+  while (sag_drop_head < sag_drop_len) {
+    sag_object *next = sag_drop_stack[sag_drop_head++];
+    /* An empty queue starts again at its beginning, so a long chain reuses one slot. */
+    if (sag_drop_head == sag_drop_len) {
+      sag_drop_head = 0;
+      sag_drop_len = 0;
+    }
     next->drop(next);
     /* The weak reference of the strong ones, kept while the fields were released. */
     sag_object_weak_release(next);

@@ -1837,6 +1837,22 @@ fn method_call(cx: Checker, value: Expr, receiver: Expr, method: Ident, args: Li
   const receiver_ty = borrow::deref_base(cx, receiver);
   const name = method.name;
 
+  // The last reference going calls `drop` of `Drop` (docs/adr/0096-streams-files-and-drop.md, Q655);
+  // `zod.drop()` in a `drop` calls the parent's, above.
+  if name == "drop" && args.is_empty() {
+    if let Some(drop) = cx.typed.prelude.drop {
+      if cx.typed.implements(receiver_ty, NamedRef { id: drop, name: "Drop", args: new List() }) {
+        cx.diagnostics.push(
+          Diagnostic::error(codes::WRONG_CALL_FORM, method.span, "`drop` of `Drop` is not called directly")
+            .with_note("it runs when the last reference to the instance goes")
+            .with_help("let the value go, or call a method that frees the resource now, such as `close`"),
+        );
+
+        return types::unit();
+      }
+    }
+  }
+
   // `into` and `try_into`, unless the type declares a method of that name
   // (docs/adr/0094-conversions-and-defaults.md, Q633 and Q634).
   if (name == "into" || name == "try_into") && args.is_empty() && !declares_method(cx, receiver_ty, name) {

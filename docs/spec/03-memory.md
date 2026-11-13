@@ -21,9 +21,9 @@ and arrays are value types too ([types](02-types.md#tuples-s2)).
   tracing garbage collector and no pauses.
 - Reference cycles are not collected. `weak` references break cycles; a `weak` reference
   does not keep its target alive (see [classes](04-classes.md#weak-references)).
-- When the last reference to an instance goes away, its fields are released; there are no
-  destructors in the MVP. Chains of instances (a long linked list) are destroyed iteratively,
-  without exhausting the stack.
+- When the last reference to an instance goes away, its fields are released, after its
+  [`drop`](04-classes.md#drop) when the class implements `Drop`. Chains of instances (a long
+  linked list) are destroyed iteratively, without exhausting the stack.
 - Class instances are compared with `==`/`!=` by identity (the same instance).
 - Reference counting is **non-atomic**, except in programs using `std::thread` (F4), where
   every count is atomic ([ADR-0045](../adr/0045-threads-and-send.md)).

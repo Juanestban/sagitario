@@ -1,0 +1,37 @@
+// `Drop` (docs/adr/0096-streams-files-and-drop.md, Q655).
+
+struct Copied impl Drop { //~ ERROR E0329
+  pub x: i32;
+
+  pub fn drop(self) {}
+}
+
+enum State {
+  On,
+  Off,
+}
+
+impl Drop for State { //~ ERROR E0329
+  fn drop(self) {}
+}
+
+class Missing impl Drop { //~ ERROR E0329
+  pub fn new(self) {}
+}
+
+class Resource impl Drop {
+  pub fn new(self) {}
+  pub fn drop(self) {}
+}
+
+fn release<T: Drop>(value: T) {
+  value.drop(); //~ ERROR E0314
+}
+
+fn main() {
+  const resource = new Resource();
+
+  resource.drop(); //~ ERROR E0314
+
+  const _held: Drop = resource;
+}

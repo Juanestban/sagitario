@@ -35,7 +35,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0024](0024-modules-imports-and-visibility.md) | Modules, imports, visibility and the entry point | Accepted (amended by 0025; refined by 0037; files of modules superseded by 0065) |
 | [0025](0025-single-pub-visibility.md) | A single `pub` visibility, without `pub(pkg)` | Accepted |
 | [0026](0026-ffi-details.md) | FFI details: pointers, `unsafe`, `std::ffi` and exports | Accepted (refined by 0043) |
-| [0027](0027-classes-and-arc.md) | Classes, construction, ARC objects and `weak` references | Accepted (refined by 0030, 0035) |
+| [0027](0027-classes-and-arc.md) | Classes, construction, ARC objects and `weak` references | Accepted (refined by 0030, 0035, 0096) |
 | [0028](0028-inferred-self-mutation.md) | `self` without `var`: methods that modify `self` are inferred | Accepted |
 | [0029](0029-inheritance.md) | Inheritance: construction, overriding, subtyping and dispatch | Accepted |
 | [0030](0030-weak-references.md) | Weak references: initialization, scope and runtime | Accepted |
@@ -104,6 +104,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0093](0093-everyday-methods.md) | The everyday methods of the standard library (S2) | Accepted |
 | [0094](0094-conversions-and-defaults.md) | Conversions, defaults, generic `min` and `max`, and indexing (S2) | Accepted |
 | [0095](0095-collections.md) | The collections of Rust's std, `Iterable` and `FromIterator` (S2) | Accepted |
+| [0096](0096-streams-files-and-drop.md) | Streams, files and `Drop` (S2) | Accepted |
 
 ## Template
 

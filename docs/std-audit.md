@@ -105,7 +105,7 @@ The audit of the library found gaps of the language itself, which the library ne
 | `Default` | `Default`, `@default` | ✅ | ADR-0094: Rust's defaults of the prelude's types, `@default` for `#[derive(Default)]`, `unwrap_or_default`, `mem::take` and struct update |
 | `Clone`, `Copy` | ➖ | ➖ | Structs copy, classes share |
 | `Send`, `Sync` | `Send` | ➖ | Inferred; sharing is capturing a `Send` value |
-| `Drop` | — | ⛔ for now | No destructors; the runtime frees with ARC. A `Drop` for resources (files, sockets) would be a record of its own |
+| `Drop` | `Drop` | ✅ | For classes, run when the last strong reference goes ([ADR-0096](adr/0096-streams-files-and-drop.md), increment 1) |
 
 ### Memory and pointers (`mem`, `ptr`, `boxed`, `rc`, `cell`, `borrow`, `alloc`, `pin`)
 

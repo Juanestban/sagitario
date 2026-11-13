@@ -545,6 +545,19 @@ fn check_new_impl(cx: Checker, item: TypeItem, implemented: List<NamedRef>, bloc
 
   // The compiler gives `Into` and `TryInto` from `From` and `TryFrom`, so the two cannot disagree
   // (docs/adr/0094-conversions-and-defaults.md, Q633).
+  // Structs and enums are copied: no copy is the last (docs/adr/0096-streams-files-and-drop.md, Q655).
+  if is_prelude(cx.typed.prelude.drop, interface_ref.id) {
+    if let TypeItem::Class(_) = item {
+    } else {
+      cx.diagnostics.push(
+        Diagnostic::error(codes::INVALID_IMPL, span, "only classes implement `Drop`: `" + type_name + "` is copied, and no copy is the last")
+          .with_help("hold the resource in a class, whose instances are shared and freed when the last reference goes"),
+      );
+
+      return;
+    }
+  }
+
   if is_mirrored(cx, interface_ref) {
     const mirrored = if is_prelude(cx.typed.prelude.into, interface_ref.id) { "From" } else { "TryFrom" };
 

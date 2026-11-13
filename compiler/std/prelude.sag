@@ -190,6 +190,13 @@ pub interface TryInto<U, E> {
   fn try_into(self) -> Result<U, E>;
 }
 
+/// What a class does when its last strong reference goes, before its fields are released, as
+/// Swift's `deinit` (docs/adr/0096-streams-files-and-drop.md, Q655): closing a file, a socket or a
+/// lock. Only classes implement it; it is never called directly, and `drop` must not keep `self`.
+pub interface Drop {
+  fn drop(self);
+}
+
 /// What `for` iterates over, as Rust's `IntoIterator` (docs/adr/0095-collections.md, Q645):
 /// `for x in value` runs over `value.iter()`. Lists, arrays and iterators implement it.
 pub interface Iterable<T> {
