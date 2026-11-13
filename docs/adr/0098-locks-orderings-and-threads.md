@@ -137,3 +137,16 @@ fn main() {
   A send waiting for room panics if the channel is closed meanwhile, since its value was never
   sent; one whose value is queued returns. `receive_timeout` measures its time by `Instant`, as
   `Condvar::wait_timeout_while`.
+- Increment 4 is done, and with it the record. A `ThreadId` is a struct with a private field;
+  the language has no tuple structs and gives every struct the debug form of its fields, so
+  `ThreadId(1)` is its `Display` text, and `{id:?}` is `ThreadId { value: 1 }`, which the user
+  chose over an enum of one variant, which programs could build. What a `Thread` holds is a
+  `std::sys::ThreadData` (its number, its name, and the lock and token of `park`), which a
+  `@thread_local` static of `std::thread` keeps for the calling thread; `current()` wraps it, so
+  that no method of `Thread` gives programs a type of `std::sys`. The main thread is the one that
+  called `sag_env_init`: `std::sys` keeps its number in a plain `static var`, since an atomic
+  static would make every program use threads. The compiler checks `Builder::spawn` where a
+  method call is checked, and adds `Thread` to the classes that are `Send` by name.
+  `std::sys::start_thread` takes the stack size and returns the `errno` value of a failure, and
+  the core's `sag_thread_abandon` frees a thread the system did not start. On Windows the size
+  only reserves the stack (`STACK_SIZE_PARAM_IS_A_RESERVATION`), as Rust's.

@@ -22,6 +22,11 @@ The sources say 0.32.0.
 
 ### Added
 
+- `std::thread::Builder` with `name` and `stack_size`, whose `spawn` returns an `io::Error` when
+  the system cannot start the thread and is checked as `thread::spawn`; `thread::current`,
+  `Thread` with `id`, `name` and `unpark`, `ThreadId`, `JoinHandle::thread`, `park`,
+  `park_timeout` and `yield_now`. The system gets the name of each thread
+  ([ADR-0098](docs/adr/0098-locks-orderings-and-threads.md), increment 4).
 - `Channel::bounded(capacity)`, whose `send` waits for room, or with 0 for a receiver, as Rust's
   `sync_channel`; and `Channel::try_send`, `try_receive` and `receive_timeout`, with
   `TrySendError`, `TryReceiveError` and `ReceiveTimeoutError`

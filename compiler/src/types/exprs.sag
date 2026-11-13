@@ -2140,7 +2140,14 @@ fn method_call(cx: Checker, value: Expr, receiver: Expr, method: Ident, args: Li
     }
   }
 
-  generic::generic_method_call(cx, value, receiver_ty, function, args)
+  const ty = generic::generic_method_call(cx, value, receiver_ty, function, args);
+
+  // `Builder::spawn` (docs/adr/0098-locks-orderings-and-threads.md, Q678).
+  if let Some(spawn) = send::spawn_name(cx, function) {
+    send::check_spawn_argument(cx, spawn, args);
+  }
+
+  ty
 }
 
 fn resolve_same(a: TypeItem, b: TypeItem) -> bool {

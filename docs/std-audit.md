@@ -132,7 +132,7 @@ The audit of the library found gaps of the language itself, which the library ne
 | `Barrier` | `Barrier` | ✅ | ([ADR-0098](adr/0098-locks-orderings-and-threads.md), increment 2) |
 | `mpsc::channel`, `sync_channel` | `Channel<T: Send>` | ✅ | `new Channel()` without a limit, `Channel::bounded(capacity)` with one (0 hands each value over), `try_send`, `try_receive` and `receive_timeout` with Rust's errors; closed by `close` rather than by dropping the last sender ([ADR-0098](adr/0098-locks-orderings-and-threads.md), increment 3) |
 | `thread::spawn`, `join`, `sleep`, `available_parallelism` | ✅ | ✅ | |
-| `thread::Builder` (name, stack size), `current`, `ThreadId`, `park`, `yield_now` | — | ❌ | |
+| `thread::Builder` (name, stack size), `current`, `ThreadId`, `park`, `yield_now` | `Builder`, `Thread`, `ThreadId` | ✅ | `Builder::spawn` returns `io::Error` and is checked as `spawn`; `park_timeout`, `Thread::unpark`, `JoinHandle::thread`; the system gets the name ([ADR-0098](adr/0098-locks-orderings-and-threads.md), increment 4) |
 | `thread::scope` | — | ⛔ for now | Scoped threads borrow the stack, which needs references held by closures |
 | `thread_local!` | `@thread_local static var` | ✅ | ADR-0083 |
 | `Future`, `task` | `async fn`, `std::task` | ✅ | F8; a different model from Rust's (a single-threaded executor, `spawn_blocking`) |
@@ -232,7 +232,7 @@ From what most programs need to what fewer do. Each line is one record, or a few
    ([ADR-0096](adr/0096-streams-files-and-drop.md))
 8. **Processes and environment:** `spawn` and `Child`, redirection, the rest of `env`.
 9. **Concurrency:** `RwLock`, `Condvar`, `Barrier`, bounded channels, `try_lock`, thread names and
-   ids, and atomic orderings.
+   ids, and atomic orderings. ✅ ([ADR-0098](adr/0098-locks-orderings-and-threads.md))
 10. **Networking:** TCP and UDP sockets on the streams of 7.
 
 **Acceptance of S2** ([roadmap](roadmap-v2.md#s2-a-complete-standard-library)): every row above is

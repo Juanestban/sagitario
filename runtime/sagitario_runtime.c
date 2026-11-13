@@ -1783,6 +1783,13 @@ void sag_thread_finish(void *pointer) {
   free(thread);
 }
 
+void sag_thread_abandon(void *pointer) {
+  sag_thread *thread = pointer;
+  sag_fnval_release(thread->body);
+  sag_count_dec(&sag_threads_running);
+  sag_thread_finish(thread);
+}
+
 #ifdef _WIN32
 extern void *SAG_WINAPI CreateThread(void *attributes, size_t stack_size, unsigned long(SAG_WINAPI *start)(void *), void *parameter, unsigned long flags,
                                      unsigned long *thread_id);

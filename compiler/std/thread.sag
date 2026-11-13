@@ -2,6 +2,8 @@
 //! (docs/spec/11-standard-library.md#stdthread).
 
 use std::ffi::c_void;
+use std::io;
+use std::sync;
 use std::sys;
 use std::time;
 use std::time::Duration;
@@ -11,41 +13,102 @@ use std::time::Duration;
 extern "C" {
   fn sag_thread_prepare(body: fn()) -> *mut c_void;
   fn sag_thread_finish(thread: *mut c_void);
+  fn sag_thread_abandon(thread: *mut c_void);
+}
+
+/// The number of the next thread: the main thread's is 1, and none is used twice
+/// (docs/adr/0098-locks-orderings-and-threads.md, Q679).
+static NEXT_ID: sync::AtomicU64 = new sync::AtomicU64(2);
+
+/// What the calling thread's `Thread` holds, once it has asked or `std::thread` started it.
+@thread_local
+static var CURRENT: Option<sys::ThreadData> = None;
+
+fn next_id() -> u64 {
+  NEXT_ID.fetch_add(1, sync::Ordering::Relaxed)
+}
+
+/// The calling thread's data: the main thread is 1 and named `main`, and a thread that C started
+/// gets a number, without a name, when it first asks.
+fn current_data() -> sys::ThreadData {
+  match CURRENT {
+    Some(data) => data,
+    None => {
+      const data = if sys::is_main_thread() { new sys::ThreadData(1, Some("main")) } else { new sys::ThreadData(next_id(), None) };
+
+      CURRENT = Some(data);
+      data
+    }
+  }
 }
 
 /// A thread started by `spawn`, whose result `join` waits for. A thread nobody joins keeps
 /// running; when `main` returns, the program ends without waiting for it.
 pub class JoinHandle<T> {
   /// The core's thread, until it is joined.
-  prv var thread: *mut c_void;
+  prv var core: *mut c_void;
   /// The system's thread (`pthread_t`, or a `HANDLE`).
   prv var system: usize;
   /// What the thread's function returned, once it has.
   prv var result: Option<T>;
+  /// What its `Thread` holds.
+  prv var data: Option<sys::ThreadData>;
 
   /// A handle without a thread: only `spawn` starts threads.
   pub fn new(self) {
-    self.thread = 0 as *mut c_void;
+    self.core = 0 as *mut c_void;
     self.system = 0;
     self.result = None;
+    self.data = None;
   }
 
   /// `thread::spawn`, which calls it; the compiler checks its argument the same way.
   pub fn spawn(body: fn() -> T) -> JoinHandle<T> {
+    match JoinHandle::start(body, new sys::ThreadData(next_id(), None), 0) {
+      Ok(handle) => handle,
+      Err(_) => panic("failed to spawn a thread"),
+    }
+  }
+
+  /// Starts a thread with `data`, and a stack of `stack_size` bytes or the system's default with
+  /// 0; the `errno` value of why the system could not start it. Only `spawn` and
+  /// `Builder::spawn`, which check `body`, have the data to give.
+  pub fn start(body: fn() -> T, data: sys::ThreadData, stack_size: usize) -> Result<JoinHandle<T>, i32> {
     const handle = new JoinHandle<T>();
 
-    handle.thread = unsafe { sag_thread_prepare(() => { handle.result = Some(body()); }) };
-    handle.system = sys::start_thread(handle.thread);
-    handle
+    handle.data = Some(data);
+    handle.core = unsafe {
+      sag_thread_prepare(() => {
+        CURRENT = Some(data);
+
+        if let Some(name) = data.name {
+          sys::set_thread_name(name);
+        }
+
+        handle.result = Some(body());
+      })
+    };
+
+    match sys::start_thread(handle.core, stack_size) {
+      Ok(system) => {
+        handle.system = system;
+        Ok(handle)
+      }
+      Err(code) => {
+        unsafe { sag_thread_abandon(handle.core) };
+        handle.core = 0 as *mut c_void;
+        Err(code)
+      }
+    }
   }
 
   /// Waits until the thread finishes and returns its result. Calling it again returns the same
   /// result.
   pub fn join(self) -> T {
-    if !self.thread.is_null() {
+    if !self.core.is_null() {
       sys::join_thread(self.system);
-      unsafe { sag_thread_finish(self.thread) };
-      self.thread = 0 as *mut c_void;
+      unsafe { sag_thread_finish(self.core) };
+      self.core = 0 as *mut c_void;
     }
 
     match self.result {
@@ -53,6 +116,123 @@ pub class JoinHandle<T> {
       None => panic("this `JoinHandle` has no thread: only `thread::spawn` starts threads"),
     }
   }
+
+  /// The thread it started.
+  pub fn thread(self) -> Thread {
+    match self.data {
+      Some(data) => new Thread(data),
+      None => panic("this `JoinHandle` has no thread: only `thread::spawn` starts threads"),
+    }
+  }
+}
+
+/// A thread of the program, as Rust's `Thread`: its number, its name, and `unpark`. Threads
+/// share it.
+pub class Thread {
+  prv const data: sys::ThreadData;
+
+  /// Only `std::thread` makes one: `current()` or `JoinHandle::thread()`.
+  pub fn new(self, data: sys::ThreadData) {
+    self.data = data;
+  }
+
+  /// Its number, unique among the threads of the program.
+  pub fn id(self) -> ThreadId {
+    ThreadId::of(self.data)
+  }
+
+  /// `Some("main")` for the main thread, the name given to `Builder::name`, or `None`.
+  pub fn name(self) -> Option<String> {
+    self.data.name
+  }
+
+  /// Wakes the thread if it is in `park`, or makes its next `park` return at once.
+  pub fn unpark(self) {
+    self.data.unpark();
+  }
+}
+
+/// The number of a thread, unique among the threads of the program and never used again, as
+/// Rust's `ThreadId`; the main thread's is 1. Its text is `ThreadId(1)`.
+pub struct ThreadId impl Hash, Display {
+  prv value: u64;
+
+  /// Only `Thread` makes one.
+  pub fn of(data: sys::ThreadData) -> ThreadId {
+    ThreadId { value: data.id }
+  }
+
+  pub fn equals(self, other: ThreadId) -> bool {
+    self.value == other.value
+  }
+
+  pub fn hash(self) -> u64 {
+    self.value.hash()
+  }
+
+  pub fn to_string(self) -> String {
+    `ThreadId(${self.value})`
+  }
+}
+
+/// How to start a thread, as Rust's `thread::Builder`: with a name, or a stack of a given size.
+pub class Builder {
+  prv var label: Option<String>;
+  prv var stack: usize;
+
+  pub fn new(self) {
+    self.label = None;
+    self.stack = 0;
+  }
+
+  /// The thread's name: `Thread::name()` gives it whole, and the system gets as much as it keeps.
+  /// A name holding a NUL panics when the thread is spawned.
+  pub fn name(self, name: String) -> Builder {
+    self.label = Some(name);
+    self
+  }
+
+  /// A stack of at least `bytes` bytes, rounded up as the system needs; 0 keeps its default.
+  pub fn stack_size(self, bytes: usize) -> Builder {
+    self.stack = bytes;
+    self
+  }
+
+  /// Runs `body` in a new thread, checked as `thread::spawn`'s: the error of the system if it
+  /// cannot start one.
+  pub fn spawn<T>(self, body: fn() -> T) -> Result<JoinHandle<T>, io::Error> {
+    if let Some(name) = self.label {
+      if name.contains("\0") {
+        panic("thread name may not contain interior null bytes");
+      }
+    }
+
+    match JoinHandle::start(body, new sys::ThreadData(next_id(), self.label), self.stack) {
+      Ok(handle) => Ok(handle),
+      Err(code) => Err(super::os_error(code, "")),
+    }
+  }
+}
+
+/// The calling thread.
+pub fn current() -> Thread {
+  new Thread(current_data())
+}
+
+/// Waits until another thread calls `unpark` on this one, or returns at once if one did since
+/// the last `park`, as Rust's; it may also return without an `unpark`.
+pub fn park() {
+  current_data().park();
+}
+
+/// `park` for at most `duration`.
+pub fn park_timeout(duration: Duration) {
+  current_data().park_timeout(duration.as_nanos());
+}
+
+/// Lets the system run another thread.
+pub fn yield_now() {
+  sys::yield_thread();
 }
 
 /// Pauses the running thread for at least `duration`; the same as `time::sleep`.

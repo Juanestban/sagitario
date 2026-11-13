@@ -1,0 +1,8 @@
+// A thread's name cannot hold a NUL, as in Rust (docs/adr/0098-locks-orderings-and-threads.md,
+// Q678).
+// expect-panic: thread name may not contain interior null bytes
+use std::thread::Builder;
+
+fn main() {
+  const _handle = new Builder().name("bad\0name").spawn(() => 1);
+}

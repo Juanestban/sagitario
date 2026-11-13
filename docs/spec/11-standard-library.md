@@ -808,6 +808,12 @@ println(handle.join());
 | `handle.join() -> T` | Waits for the thread to finish and returns what `body` returned; again, the same value |
 | `sleep(duration: Duration)` | Pauses the running thread for at least `duration`; the same as `time::sleep` |
 | `available_parallelism() -> usize` | The number of logical processors, at least 1 |
+| `new Builder()`, `b.name(name) -> Builder`, `b.stack_size(bytes) -> Builder` | How to start a thread: with a name, or a stack of at least `bytes` bytes (0 keeps the system's default) |
+| `b.spawn(body: fn() -> T) -> Result<JoinHandle<T>, io::Error>` | Runs `body` in a new thread, or the error of the system if it cannot start one |
+| `current() -> Thread`, `handle.thread() -> Thread` | The calling thread; the thread a handle started |
+| `t.id() -> ThreadId`, `t.name() -> Option<String>` | Its number; `Some("main")` for the main thread, the name given to the builder, or `None` |
+| `park()`, `park_timeout(duration)`, `t.unpark()` | Waits until another thread unparks this one, for at most `duration`; wakes `t` |
+| `yield_now()` | Lets the system run another thread |
 
 - The argument of `spawn` is a lambda or the name of a function, not another function value.
   Every binding the lambda captures must be `Send`
@@ -820,7 +826,33 @@ println(handle.join());
   waiting for the threads still running; the leak check of the test harness only runs when none
   is.
 - `JoinHandle::spawn(body)` is the same as `thread::spawn(body)`, which calls it.
-  `new JoinHandle<T>()` makes a handle without a thread, whose `join` panics.
+  `new JoinHandle<T>()` makes a handle without a thread, whose `join` and `thread` panic.
+
+Rationale for the rest: [ADR-0098](../adr/0098-locks-orderings-and-threads.md), Q678–Q680, as
+Rust's `std::thread`.
+
+```sag
+use std::thread;
+use std::thread::Builder;
+
+const worker = new Builder().name("worker").spawn(() => thread::current().name()).unwrap();
+
+println(f"{worker.join():?} {thread::current().id()}");   // Some("worker") ThreadId(1)
+```
+
+- The `body` of `Builder::spawn` is checked as `spawn`'s (`E0332`, `E0333`). A name holding a NUL
+  panics when the thread is spawned (`thread name may not contain interior null bytes`). The
+  system gets the name too, for debuggers, cut at a character to what it keeps (15 bytes on Linux
+  and Android, 63 on Apple's systems); `name()` gives it whole. A stack size is rounded up to
+  whole pages; a size below the system's minimum keeps its default.
+- A `ThreadId` is unique among the threads of the program and never used again; the main thread's
+  is 1. It is compared with `==` and hashed, and its text is `ThreadId(1)`; its debug form is that
+  of a struct, `ThreadId { value: 1 }`. A thread that C started gets one, without a name, when it
+  first calls `current()`.
+- A `Thread` is `Send`, so another thread can `unpark` it. `park` has Rust's token: an `unpark`
+  before it makes it return at once, and it may also return without one, so it is called in a
+  loop that checks a condition. `Thread` and `ThreadId` are made only by `std::thread`: their
+  initializers take types of `std::sys`.
 
 ## `std::time`
 

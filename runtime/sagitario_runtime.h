@@ -1153,6 +1153,8 @@ void sag_time_sleep(uint64_t nanos);
 void *sag_thread_prepare(sag_fnval body);
 void sag_thread_run(void *thread);
 void sag_thread_finish(void *thread);
+/* Frees a thread the system could not start, which never ran `body`. */
+void sag_thread_abandon(void *thread);
 
 /* ---- Tasks (docs/spec/12-async.md) ----------------------------------------------------- */
 

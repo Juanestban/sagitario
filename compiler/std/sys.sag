@@ -263,6 +263,7 @@ pub fn set_args(argc: c_int, argv: *const *const c_char) {
   unsafe {
     ARGC = argc;
     ARGV = argv as usize;
+    MAIN_THREAD = thread_id();
   }
 }
 
@@ -270,6 +271,7 @@ pub fn set_args(argc: c_int, argv: *const *const c_char) {
 @cfg(windows)
 pub fn set_args(_argc: c_int, _argv: *const *const c_char) {
   // C's `argv` is in the ANSI code page, not UTF-16.
+  unsafe { MAIN_THREAD = thread_id(); }
 }
 
 /// The arguments C's `main` received; invalid UTF-8 becomes U+FFFD.
@@ -3547,12 +3549,58 @@ extern "C" {
   fn sag_thread_run(thread: *mut c_void);
 }
 
+/// The system's number of the main thread (`thread_id()`), which `set_args` keeps when the
+/// program starts, before any other thread (docs/adr/0098-locks-orderings-and-threads.md, Q679).
+/// A plain number, not an `Atomic`: an atomic static would make every program use threads.
+static var MAIN_THREAD: usize = 0;
+
+/// Whether the calling thread is the one that started the program.
+pub fn is_main_thread() -> bool {
+  thread_id() == unsafe { MAIN_THREAD }
+}
+
+/// `pthread_attr_t`, of at most 64 bytes on the supported systems.
+@cfg(unix)
+@repr(C)
+struct ThreadAttributes {
+  pub words: [u64; 16];
+}
+
 @cfg(unix)
 extern "C" {
-  fn pthread_create(thread: *mut usize, attributes: *const c_void, start: extern "C" fn(*mut c_void) -> *mut c_void, argument: *mut c_void) -> c_int;
+  fn pthread_create(thread: *mut usize, attributes: *const ThreadAttributes, start: extern "C" fn(*mut c_void) -> *mut c_void, argument: *mut c_void) -> c_int;
   fn pthread_join(thread: usize, result: *mut *mut c_void) -> c_int;
+  fn pthread_attr_init(attributes: *mut ThreadAttributes) -> c_int;
+  fn pthread_attr_setstacksize(attributes: *mut ThreadAttributes, size: usize) -> c_int;
+  fn pthread_attr_destroy(attributes: *mut ThreadAttributes) -> c_int;
+  fn sched_yield() -> c_int;
   fn sysconf(name: c_int) -> c_long;
 }
+
+@cfg(any(target_os = "linux", target_os = "android"))
+extern "C" {
+  fn pthread_setname_np(thread: usize, name: *const c_char) -> c_int;
+}
+
+/// Apple's names only the calling thread.
+@cfg(any(target_os = "macos", target_os = "ios"))
+extern "C" {
+  fn pthread_setname_np(name: *const c_char) -> c_int;
+}
+
+/// The bytes of a thread's name each system keeps, without its NUL.
+@cfg(any(target_os = "linux", target_os = "android"))
+const THREAD_NAME_BYTES: usize = 15;
+@cfg(any(target_os = "macos", target_os = "ios"))
+const THREAD_NAME_BYTES: usize = 63;
+
+/// `_SC_PAGESIZE` of each C library.
+@cfg(target_os = "linux")
+const PAGESIZE: c_int = 30;
+@cfg(target_os = "android")
+const PAGESIZE: c_int = 0x27;
+@cfg(any(target_os = "macos", target_os = "ios"))
+const PAGESIZE: c_int = 29;
 
 /// `_SC_NPROCESSORS_ONLN` of each C library.
 @cfg(target_os = "linux")
@@ -3569,17 +3617,77 @@ extern "C" fn sag_thread_entry(thread: *mut c_void) -> *mut c_void {
   0 as *mut c_void
 }
 
-/// Starts the core's `thread`: the system's thread, which `join_thread` waits for. Panics if the
-/// system cannot start one.
+/// Starts the core's `thread`, with a stack of at least `stack_size` bytes, or the system's
+/// default with 0: the system's thread, which `join_thread` waits for, or the `errno` value of why
+/// the system could not start one.
 @cfg(unix)
-pub fn start_thread(thread: *mut c_void) -> usize {
+pub fn start_thread(thread: *mut c_void, stack_size: usize) -> Result<usize, i32> {
   var id = 0usize;
 
-  if (unsafe { pthread_create(&raw mut id, 0 as *const c_void, sag_thread_entry, thread) }) != 0 {
-    panic("failed to spawn a thread");
+  if stack_size == 0 {
+    const code = unsafe { pthread_create(&raw mut id, 0 as *const ThreadAttributes, sag_thread_entry, thread) };
+
+    return if code == 0 { Ok(id) } else { Err(code) };
   }
 
-  id
+  var attributes = ThreadAttributes { words: [0u64; 16] };
+
+  unsafe { pthread_attr_init(&raw mut attributes); }
+
+  // A whole number of pages, which Apple's systems need; a size below the system's minimum
+  // keeps its default, which is larger.
+  const page = (unsafe { sysconf(PAGESIZE) }) as usize;
+  const size = if page == 0 || stack_size > usize::MAX - page { stack_size } else { (stack_size + page - 1) / page * page };
+
+  unsafe { pthread_attr_setstacksize(&raw mut attributes, size); }
+
+  const code = unsafe { pthread_create(&raw mut id, &raw const attributes, sag_thread_entry, thread) };
+
+  unsafe { pthread_attr_destroy(&raw mut attributes); }
+
+  if code == 0 { Ok(id) } else { Err(code) }
+}
+
+/// Gives the calling thread's name to the system, cut at a character to what it keeps. A system
+/// that refuses it leaves the thread without one.
+@cfg(any(target_os = "linux", target_os = "android"))
+pub fn set_thread_name(name: String) {
+  if let Ok(text) = CString::new(cut_name(name)) {
+    unsafe { pthread_setname_np(thread_id(), text.as_ptr()); }
+  }
+}
+
+@cfg(any(target_os = "macos", target_os = "ios"))
+pub fn set_thread_name(name: String) {
+  if let Ok(text) = CString::new(cut_name(name)) {
+    unsafe { pthread_setname_np(text.as_ptr()); }
+  }
+}
+
+/// The longest start of `name` that fits `THREAD_NAME_BYTES`, ending at a character.
+@cfg(unix)
+fn cut_name(name: String) -> String {
+  if name.len() <= THREAD_NAME_BYTES {
+    return name;
+  }
+
+  var end = 0usize;
+
+  for pair in name.char_indices() {
+    if pair.0 > THREAD_NAME_BYTES {
+      break;
+    }
+
+    end = pair.0;
+  }
+
+  name.substring(0, end)
+}
+
+/// Lets the system run another thread.
+@cfg(unix)
+pub fn yield_thread() {
+  unsafe { sched_yield(); }
 }
 
 @cfg(unix)
@@ -3599,7 +3707,15 @@ pub fn processors() -> usize {
 extern "C" {
   fn CreateThread(security: *mut c_void, stack_size: usize, start: extern "C" fn(*mut c_void) -> u32, parameter: *mut c_void, flags: u32, thread_id: *mut u32) -> *mut c_void;
   fn GetActiveProcessorCount(group: u16) -> u32;
+  fn GetCurrentThread() -> *mut c_void;
+  fn SetThreadDescription(thread: *mut c_void, description: *const u16) -> i32;
+  fn SwitchToThread() -> c_int;
 }
+
+/// `STACK_SIZE_PARAM_IS_A_RESERVATION`: the size reserves the stack instead of committing it, as
+/// Rust's `std` asks.
+@cfg(windows)
+const STACK_RESERVATION: u32 = 0x10000;
 
 @cfg(windows)
 extern "C" fn sag_thread_entry(thread: *mut c_void) -> u32 {
@@ -3608,14 +3724,26 @@ extern "C" fn sag_thread_entry(thread: *mut c_void) -> u32 {
 }
 
 @cfg(windows)
-pub fn start_thread(thread: *mut c_void) -> usize {
-  const handle = unsafe { CreateThread(0 as *mut c_void, 0, sag_thread_entry, thread, 0, 0 as *mut u32) };
+pub fn start_thread(thread: *mut c_void, stack_size: usize) -> Result<usize, i32> {
+  const flags = if stack_size == 0 { 0u32 } else { STACK_RESERVATION };
+  const handle = unsafe { CreateThread(0 as *mut c_void, stack_size, sag_thread_entry, thread, flags, 0 as *mut u32) };
 
-  if handle.is_null() {
-    panic("failed to spawn a thread");
-  }
+  if handle.is_null() { Err(failure()) } else { Ok(handle as usize) }
+}
 
-  handle as usize
+/// Gives the calling thread's name to the system, whole, as UTF-16. A system that refuses it
+/// leaves the thread without one.
+@cfg(windows)
+pub fn set_thread_name(name: String) {
+  const wide = to_utf16(name);
+
+  unsafe { SetThreadDescription(GetCurrentThread(), wide.as_ptr()); }
+}
+
+/// Lets the system run another thread.
+@cfg(windows)
+pub fn yield_thread() {
+  unsafe { SwitchToThread(); }
 }
 
 @cfg(windows)
@@ -3635,6 +3763,55 @@ pub fn processors() -> usize {
   const count = unsafe { GetActiveProcessorCount(0xFFFF) };
 
   if count > 0 { count as usize } else { 1 }
+}
+
+/// What a `std::thread::Thread` holds: its number, its name, and the token of `park`, as Rust's
+/// (docs/adr/0098-locks-orderings-and-threads.md, Q679 and Q680). Threads share it.
+pub class ThreadData {
+  pub const id: u64;
+  pub const name: Option<String>;
+  prv const lock: Lock;
+  /// Whether an `unpark` came that no `park` has taken yet.
+  prv var token: bool;
+
+  pub fn new(self, id: u64, name: Option<String>) {
+    self.id = id;
+    self.name = name;
+    self.lock = new Lock();
+    self.token = false;
+  }
+
+  /// Waits until the token is there, then takes it; it may also return without one.
+  pub fn park(self) {
+    self.lock.lock();
+
+    if !self.token {
+      self.lock.wait();
+    }
+
+    self.token = false;
+    self.lock.unlock();
+  }
+
+  /// `park` for at most `nanos` nanoseconds.
+  pub fn park_timeout(self, nanos: u64) {
+    self.lock.lock();
+
+    if !self.token {
+      self.lock.wait_timeout(nanos);
+    }
+
+    self.token = false;
+    self.lock.unlock();
+  }
+
+  /// Leaves the token, waking the thread if it is parked.
+  pub fn unpark(self) {
+    self.lock.lock();
+    self.token = true;
+    self.lock.notify_one();
+    self.lock.unlock();
+  }
 }
 
 // ---- Open files (docs/adr/0096-streams-files-and-drop.md, Q657) --------------------------------

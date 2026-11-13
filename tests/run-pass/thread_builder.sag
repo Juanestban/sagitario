@@ -1,0 +1,104 @@
+// `thread::Builder`, `current`, `Thread` and `ThreadId`, `park`, `park_timeout`, `unpark` and
+// `yield_now` (docs/adr/0098-locks-orderings-and-threads.md, Q678–Q680). The harness runs it with
+// ThreadSanitizer where the C compiler has it, and fails it on any leak.
+// sanitize: thread
+// expect-stdout: main: Some("main") ThreadId(1) ThreadId { value: 1 } true
+// expect-stdout: builder: Some("worker") Some("worker") true false | unnamed: None
+// expect-stdout: long name: Some("a name longer than fifteen bytes, ñandú")
+// expect-stdout: huge stack: handled true
+// expect-stdout: ids: 8 distinct, none is 1: true
+// expect-stdout: parked: woken true | token: at once | timeout: returned
+// expect-stdout: shared: unparked the main thread
+
+use std::sync::{AtomicBool, Ordering};
+use std::thread;
+use std::thread::{Builder, JoinHandle, ThreadId};
+use std::time::Duration;
+
+fn main() {
+  // The main thread is 1 and named `main`.
+  const main_thread = thread::current();
+  const main_id = main_thread.id();
+
+  println(f"main: {main_thread.name():?} {main_id} {main_id:?} {thread::current().id() == main_id}");
+
+  // A named thread with a stack of its own size; `JoinHandle::thread` is the same thread.
+  const worker = new Builder().name("worker").stack_size(1 << 20).spawn(() => {
+    const me = thread::current();
+
+    (me.name(), me.id())
+  }).unwrap();
+  const seen = worker.join();
+
+  print(f"builder: {seen.0:?} {worker.thread().name():?} {seen.1 == worker.thread().id()} {seen.1 == main_id} | ");
+
+  const unnamed = thread::spawn(() => thread::current().name());
+
+  println(f"unnamed: {unnamed.join():?}");
+
+  // The system keeps the start of a long name; `name()` gives it whole.
+  const long = new Builder().name("a name longer than fifteen bytes, ñandú").spawn(() => thread::current().name()).unwrap();
+
+  println(f"long name: {long.join():?}");
+
+  // A stack the system cannot give: its error, or a thread with the default stack on a system
+  // that keeps it for a size it refuses.
+  const huge = match new Builder().stack_size(usize::MAX / 2).spawn(() => 3) {
+    Ok(handle) => handle.join() == 3,
+    Err(error) => !error.message().is_empty(),
+  };
+
+  println(f"huge stack: handled {huge}");
+
+  // Every thread has a number of its own.
+  const handles: List<JoinHandle<ThreadId>> = new List();
+
+  for _ in 0..8 {
+    handles.push(thread::spawn(() => thread::current().id()));
+  }
+
+  const ids: HashSet<ThreadId> = new HashSet();
+
+  for handle in handles {
+    ids.insert(handle.join());
+  }
+
+  println(f"ids: {ids.len()} distinct, none is 1: {!ids.contains(main_id)}");
+
+  // A parked thread waits for `unpark`; it may wake without one, so it checks a flag.
+  const flag = new AtomicBool(false);
+  const sleeper = thread::spawn(() => {
+    while !flag.load(Ordering::Acquire) {
+      thread::park();
+    }
+
+    true
+  });
+
+  thread::sleep(Duration::from_millis(10));
+  flag.store(true, Ordering::Release);
+  sleeper.thread().unpark();
+  print(f"parked: woken {sleeper.join()} | ");
+
+  // An `unpark` before `park` makes it return at once.
+  thread::current().unpark();
+  thread::park();
+  print("token: at once | ");
+  thread::park_timeout(Duration::from_millis(10));
+  thread::yield_now();
+  println("timeout: returned");
+
+  // A `Thread` is `Send`: another thread wakes this one.
+  const done = new AtomicBool(false);
+  const waker = thread::spawn(() => {
+    done.store(true, Ordering::Release);
+    main_thread.unpark();
+  });
+
+  while !done.load(Ordering::Acquire) {
+    thread::park();
+  }
+
+  waker.join();
+  println("shared: unparked the main thread");
+}
