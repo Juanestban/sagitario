@@ -1700,6 +1700,44 @@ pub class Lowering {
     Ok(())
   }
 
+  /// `place.take()` or `place.replace(value)`: the value of the place, now this expression's, and
+  /// `None` or `Some(value)` stored in it, as an assignment stores (docs/adr/0097-processes-and-environment.md,
+  /// Q663). The argument runs first, then the place, once.
+  prv fn option_take(self, receiver: Expr, args: List<Expr>, ty: Type, replace: bool) -> Result<Operand, String> {
+    const inner = match ty.kind {
+      TypeKind::Option(found) => found,
+      _ => return Err("`take` of a value that is not an `Option`"),
+    };
+    var stored = unit_operand();
+
+    if replace {
+      if args.len() != 1 {
+        return Err("`replace` without one argument");
+      }
+
+      const replacement = self.operand_as(args[0], inner)?;
+
+      stored = matching::variant(self, ty, 1, List::from([replacement]));
+    } else {
+      stored = matching::variant(self, ty, 0, new List());
+    }
+
+    const place = self.place(receiver)?;
+    // Read now, before the place changes: a copy this expression owns.
+    const old = self.new_value(ty, Rvalue::Use(Operand::Place(place)));
+
+    if self.managed(ty) {
+      // Retain first: the new value may share with the old one.
+      self.emit(Stmt::Retain(old));
+      self.emit(Stmt::Retain(stored));
+      self.emit(Stmt::ReleasePlace(place));
+    }
+
+    self.emit(Stmt::AssignPlace { dest: place, value: Rvalue::Use(stored) });
+
+    Ok(old)
+  }
+
   /// An assignment through `base[index]` of a type implementing `IndexMut`: the index nearest the
   /// root of the place is read with `index` into a copy, the rest of the assignment changes the
   /// copy, and `index_set` writes it back; `base[index] = value` only calls `index_set`. The base
@@ -2841,6 +2879,12 @@ pub class Lowering {
     if let Some(builtin) = self.typed.builtin_methods.get(value.id) {
       if let BuiltinMethod::Atomic(name) = builtin {
         return self.atomic_method(name, ty, receiver, args);
+      }
+
+      match builtin {
+        BuiltinMethod::Take => return self.option_take(receiver, args, ty, false),
+        BuiltinMethod::Replace => return self.option_take(receiver, args, ty, true),
+        _ => {}
       }
 
       return match builtin {

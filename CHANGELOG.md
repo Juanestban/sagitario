@@ -15,6 +15,9 @@ The sources say 0.32.0.
 
 ### Added
 
+- `take` and `replace` of an `Option` place, as Rust's: `child.stdin.take()` takes the value out of
+  a `var` field and leaves `None` ([ADR-0097](docs/adr/0097-processes-and-environment.md),
+  increment 1).
 - `fs::metadata`, `symlink_metadata` and `File::metadata`, with the size, kind, read-only flag and
   times of a file as `SystemTime`s; `fs::remove_dir_all` and `fs::canonicalize`; `time::UNIX_EPOCH`
   and `SystemTime + Duration`; and `io::ErrorKind::Unsupported`

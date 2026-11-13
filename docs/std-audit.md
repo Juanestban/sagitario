@@ -87,7 +87,7 @@ The audit of the library found gaps of the language itself, which the library ne
 
 | Rust | Sagitario | State | Notes |
 |---|---|---|---|
-| `Option`, `Result` | ✅ | ✅ | Rust's methods, `Eq`, `Ord` and `Hash` ([ADR-0093](adr/0093-everyday-methods.md), increment 1). `take` and `replace` are `mem::replace` (➖); `unwrap_or_default` waits for `Default` (record 5) |
+| `Option`, `Result` | ✅ | ✅ | Rust's methods, `Eq`, `Ord` and `Hash` ([ADR-0093](adr/0093-everyday-methods.md), increment 1). `take` and `replace` on a place ([ADR-0097](adr/0097-processes-and-environment.md), increment 1); `unwrap_or_default` ([ADR-0094](adr/0094-conversions-and-defaults.md)) |
 | `std::error::Error` | the prelude's `Error` interface | 🟡 | Missing: `source()` chains and backtraces (spec 7, post-MVP) |
 | `panic!`, `assert!`, `unreachable!`, `todo!` | `panic`, `assert`, `assert_eq`, `assert_ne`, `unreachable`, `todo` | ✅ | Functions that panic at the line of their call, without a message argument (ADR-0093, increment 1) |
 

@@ -101,10 +101,11 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0090](0090-benchmarks.md) | A suite of benchmarks against other languages, and `std::hint::black_box` (S2) | Accepted |
 | [0091](0091-fewer-reference-counts.md) | Fewer reference counts: an optimization pass over SIR (S2) | Accepted |
 | [0092](0092-tuples.md) | Tuples: types, values, patterns and their interfaces (S2) | Accepted |
-| [0093](0093-everyday-methods.md) | The everyday methods of the standard library (S2) | Accepted |
+| [0093](0093-everyday-methods.md) | The everyday methods of the standard library (S2) | Accepted (refined by 0097) |
 | [0094](0094-conversions-and-defaults.md) | Conversions, defaults, generic `min` and `max`, and indexing (S2) | Accepted |
 | [0095](0095-collections.md) | The collections of Rust's std, `Iterable` and `FromIterator` (S2) | Accepted |
 | [0096](0096-streams-files-and-drop.md) | Streams, files and `Drop` (S2) | Accepted |
+| [0097](0097-processes-and-environment.md) | Processes and the environment (S2) | Accepted |
 
 ## Template
 

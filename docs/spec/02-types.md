@@ -565,8 +565,13 @@ println(f"{seen.is_subset(other)} {other.difference(seen).collect():?} {seen:?}"
   `ok_or`, `ok_or_else`, `or`, `or_else`, `and`, `xor`, `map_or`, `map_or_else`, `is_some_and`,
   `is_none_or`, `zip` (an `Option` of a tuple), `flatten` (of an `Option<Option<T>>`) and `iter`;
   on `Result`, `ok`, `err`, `and`, `or`, `or_else`, `map_or`, `map_or_else`, `is_ok_and`,
-  `is_err_and`, `iter` and `expect_err(message)`, which panics on `Ok`. `take` and `replace`
-  change the place that holds the value, which `mem::replace` does.
+  `is_err_and`, `iter` and `expect_err(message)`, which panics on `Ok`.
+- `place.take()` gives the value of an `Option` place and leaves `None` there, and
+  `place.replace(value)` gives it and leaves `Some(value)`, as Rust's
+  ([ADR-0097](../adr/0097-processes-and-environment.md), Q663): the receiver is assigned, so it
+  must be a place an assignment could change, a `var` binding, a `var` field or an element of
+  one (`E0312` for a `const` one, `E0307` for a value that is not a place), and is evaluated
+  once: `child.stdin.take()` takes a pipe out of a `var` field of a class instance.
 - `Option<T>` and `Result<T, E>` implement `Eq`, `Ord` and `Hash` when the types they hold do:
   equal when they are the same variant holding equal values, and ordered by variant as declared
   (`None` before `Some`, `Ok` before `Err`), then by those values: `Some(1) == Some(1)`,

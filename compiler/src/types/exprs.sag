@@ -1931,6 +1931,7 @@ fn method_call(cx: Checker, value: Expr, receiver: Expr, method: Ident, args: Li
     TypeKind::Interface(named) => {
       owner = TypeItem::Interface(named.id);
     }
+    TypeKind::Option(inner) if name == "take" || name == "replace" => return option_take(cx, value, receiver, receiver_ty, inner, method, args),
     TypeKind::Option(_) | TypeKind::Result { .. } => return builtin_method(cx, value, receiver_ty, method, args),
     TypeKind::List(_) => return collections::list_method(cx, value, receiver, receiver_ty, method, args),
     TypeKind::Error | TypeKind::Never => {
@@ -2784,6 +2785,19 @@ const OPTION_PRELUDE_METHODS: String = "ok_or ok_or_else or or_else and xor map_
 /// The methods of `Result` written in the prelude, as `result_<name>`.
 const RESULT_PRELUDE_METHODS: String = "ok err and or or_else map_or map_or_else is_ok_and is_err_and iter unwrap_or_default";
 
+/// `place.take()`, which gives the value of an `Option` place and leaves `None`, and
+/// `place.replace(value)`, which leaves `Some(value)`: the place is assigned, under the rules of
+/// an assignment (docs/adr/0097-processes-and-environment.md, Q663).
+fn option_take(cx: Checker, value: Expr, receiver: Expr, option_ty: Type, inner: Type, method: Ident, args: List<Expr>) -> Type {
+  const replace = method.name == "replace";
+
+  check_args(cx, value.span, "method", if replace { List::from([inner]) } else { new List() }, args);
+  classes::check_mutable_place(cx, receiver, PlaceUse::Assign);
+  cx.typed.builtin_methods.insert(value.id, if replace { BuiltinMethod::Replace } else { BuiltinMethod::Take });
+
+  option_ty
+}
+
 /// A method of `Option` or `Result` (docs/spec/07-errors.md).
 fn builtin_method(cx: Checker, value: Expr, receiver_ty: Type, method: Ident, args: List<Expr>) -> Type {
   if let Some(ty) = closures::closure_method(cx, value, receiver_ty, method, args) {
@@ -2876,7 +2890,7 @@ fn builtin_method(cx: Checker, value: Expr, receiver_ty: Type, method: Ident, ar
     Some(chosen) => chosen,
     None => {
       const flattening = name == "flatten" && option_value.is_some();
-      const note = if flattening { "only an `Option<Option<T>>` is flattened" } else { "the methods of `Option` and `Result` are those of Rust's, except `take` and `replace`, which `mem::replace` does" };
+      const note = if flattening { "only an `Option<Option<T>>` is flattened" } else { "the methods of `Option` and `Result` are those of Rust's" };
 
       cx.diagnostics.push(Diagnostic::error(codes::UNKNOWN_MEMBER, method.span, "no method `" + name + "` on type `" + types::text(receiver_ty) + "`").with_note(note));
       unchecked_args(cx, args);

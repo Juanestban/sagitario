@@ -617,7 +617,14 @@ class Flow {
           }
         }
 
-        if as_mut_ptr || by_var {
+        // `take` and `replace` of an `Option` assign their receiver
+        // (docs/adr/0097-processes-and-environment.md, Q663).
+        const takes = match self.typed.builtin_methods.get(value.id) {
+          Some(BuiltinMethod::Take) | Some(BuiltinMethod::Replace) => true,
+          _ => false,
+        };
+
+        if as_mut_ptr || by_var || takes {
           self.mutate(receiver);
         }
       }

@@ -1,0 +1,22 @@
+// `take` and `replace` of an `Option` assign their receiver (docs/adr/0097-processes-and-environment.md,
+// Q663).
+
+class Holder {
+  pub const fixed: Option<i32>;
+
+  pub fn new(self) {
+    self.fixed = Some(1);
+  }
+}
+
+fn main() {
+  const number = Some(1);
+  const _a = number.take(); //~ ERROR E0312
+  const holder = new Holder();
+  const _b = holder.fixed.take(); //~ ERROR E0312
+  const _c = Some(5).take(); //~ ERROR E0307
+  var text = Some("a");
+  const _d = text.replace(1); //~ ERROR E0300
+  const result: Result<i32, String> = Ok(1);
+  const _e = result.take(); //~ ERROR E0316
+}
