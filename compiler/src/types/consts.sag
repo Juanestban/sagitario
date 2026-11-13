@@ -2,6 +2,10 @@
 //! computes each value from literals, other constants, arithmetic, comparisons, casts and
 //! `include_str`, and reports anything it cannot compute. The port of `sagitario_types::consts`.
 //!
+//! A constant may also be a struct, an enum, an array or a tuple of constants
+//! (docs/adr/0099-associated-and-composite-constants.md, Q685): such a value, and one that reads a
+//! part of one, is first checked as any expression, for its types, then computed from those types.
+//!
 //! Rust computes integers in `i128`. Every value that fits an integer type lies between
 //! `i64::MIN` and `u64::MAX`, so `sag` keeps a sign and a `u64` magnitude (`Wide`), and treats a
 //! result beyond that as one that fits no type, as Rust's range check does.
@@ -15,6 +19,7 @@ use pkg::resolve::Res;
 use pkg::span::Span;
 use pkg::types::{Checker, FloatTy, IntTy, Type, TypeKind};
 use pkg::types;
+use pkg::types::exprs;
 use pkg::types::numbers;
 use std::fs;
 use std::io::ErrorKind;
@@ -109,6 +114,12 @@ pub enum ConstValue {
   Int(Wide),
   Float(f64),
   Str(String),
+  /// A struct, an array or a tuple: its parts in order, a struct's in the order of its fields.
+  Aggregate(List<Typed>),
+  /// `[part; count]`, its part alone in a list: an enum cannot hold its own type directly.
+  Repeat { part: List<Typed>, count: u64 },
+  /// A variant of an enum, `Option` or `Result`, by its position, with its fields in order.
+  Variant { index: u32, fields: List<Typed> },
 }
 
 /// Where the computation of each constant stands, to find constants that need themselves.
@@ -137,8 +148,178 @@ pub fn const_defs(cx: Checker) {
 
   cx.const_states = states;
 
+  // Every constant's type first: a value checked as an expression reads the types of the
+  // constants it names.
+  const owner = cx.owner;
+
+  cx.owner = None;
+
+  for index in 0..count {
+    if let Some(decl) = cx.resolution.const_decl(cx.package, index as u32) {
+      cx.typed.const_types[index] = cx.type_expr(decl.ty);
+    }
+  }
+
+  cx.owner = owner;
+
   for index in 0..count {
     const_value(cx, index as u32, None);
+  }
+}
+
+/// Whether a constant of type `ty` is a number, `bool`, `char` or `String`.
+fn is_primitive(ty: Type) -> bool {
+  match ty.kind {
+    TypeKind::Int(_) | TypeKind::Float(_) | TypeKind::Bool | TypeKind::Char | TypeKind::String => true,
+    _ => false,
+  }
+}
+
+/// Whether a constant can have the type `ty`: a primitive one, or a struct, an enum, an array or
+/// a tuple of such types (Q685). `depth` stops at types nested deeper than any program writes.
+fn constant_type(cx: Checker, ty: Type, depth: u32) -> bool {
+  if is_primitive(ty) {
+    return true;
+  }
+
+  if depth > 64 {
+    return false;
+  }
+
+  match ty.kind {
+    TypeKind::Array { elem, .. } => constant_type(cx, elem, depth + 1),
+    TypeKind::Tuple(elems) => {
+      for elem in elems {
+        if !constant_type(cx, elem, depth + 1) {
+          return false;
+        }
+      }
+
+      true
+    }
+    TypeKind::Struct(named) => {
+      match cx.typed.struct_def(named.id) {
+        Some(def) => {
+          if def.is_union {
+            return false;
+          }
+        }
+        None => return false,
+      }
+
+      for field in cx.typed.struct_field_types(named) {
+        if !constant_type(cx, field, depth + 1) {
+          return false;
+        }
+      }
+
+      true
+    }
+    TypeKind::Enum(_) | TypeKind::Option(_) | TypeKind::Result { .. } => match cx.typed.variants(ty) {
+      Some(variants) => {
+        for variant in variants {
+          for field in variant.field_types() {
+            if !constant_type(cx, field, depth + 1) {
+              return false;
+            }
+          }
+        }
+
+        true
+      }
+      None => false,
+    },
+    _ => false,
+  }
+}
+
+/// Whether `value` builds a struct, an enum, an array or a tuple, or reads a part of one: what is
+/// checked as an expression before it is computed.
+fn has_parts(cx: Checker, value: Expr) -> bool {
+  match value.kind {
+    ExprKind::StructLit { .. } | ExprKind::ArrayLit(_) | ExprKind::ArrayRepeat { .. } | ExprKind::Tuple(_) | ExprKind::Field { .. } | ExprKind::Index { .. } => true,
+    ExprKind::Path(_) => match cx.resolution.paths.get(value.id) {
+      Some(Res::Variant(_)) => true,
+      _ => false,
+    },
+    ExprKind::Call { callee, .. } => match cx.resolution.paths.get(callee.id) {
+      Some(Res::Variant(_)) => true,
+      _ => false,
+    },
+    ExprKind::Unary { operand, .. } => has_parts(cx, operand),
+    ExprKind::Binary { lhs, rhs, .. } => has_parts(cx, lhs) || has_parts(cx, rhs),
+    ExprKind::Cast { expr, .. } => has_parts(cx, expr),
+    _ => false,
+  }
+}
+
+/// Whether `value` has only the forms of a constant, reporting the first that is not: what can be
+/// checked as an expression outside a function.
+fn constant_shape(cx: Checker, value: Expr) -> bool {
+  match value.kind {
+    ExprKind::Int { .. } | ExprKind::Float { .. } | ExprKind::Bool(_) | ExprKind::Char(_) | ExprKind::Str(_) | ExprKind::Path(_) => true,
+    ExprKind::Unary { op, operand } => {
+      if op == UnaryOp::Deref {
+        not_constant(cx, value.span);
+
+        return false;
+      }
+
+      constant_shape(cx, operand)
+    }
+    ExprKind::Binary { lhs, rhs, .. } => constant_shape(cx, lhs) && constant_shape(cx, rhs),
+    ExprKind::Cast { expr, .. } => constant_shape(cx, expr),
+    ExprKind::Field { base, .. } => constant_shape(cx, base),
+    ExprKind::Index { base, index } => constant_shape(cx, base) && constant_shape(cx, index),
+    ExprKind::Tuple(elems) | ExprKind::ArrayLit(elems) => {
+      for elem in elems {
+        if !constant_shape(cx, elem) {
+          return false;
+        }
+      }
+
+      true
+    }
+    ExprKind::ArrayRepeat { value: repeated, .. } => constant_shape(cx, repeated),
+    ExprKind::StructLit { fields, base, .. } => {
+      if let Some(found) = base {
+        not_constant(cx, found.span);
+
+        return false;
+      }
+
+      for init in fields {
+        if !constant_shape(cx, init.value) {
+          return false;
+        }
+      }
+
+      true
+    }
+    ExprKind::Call { callee, args } => {
+      match cx.resolution.paths.get(callee.id) {
+        Some(Res::Variant(_)) => {}
+        Some(Res::Builtin(name)) if name == "include_str" => return true,
+        _ => {
+          not_constant(cx, value.span);
+
+          return false;
+        }
+      }
+
+      for arg in args {
+        if !constant_shape(cx, arg) {
+          return false;
+        }
+      }
+
+      true
+    }
+    _ => {
+      not_constant(cx, value.span);
+
+      false
+    }
   }
 }
 
@@ -172,27 +353,35 @@ fn const_value(cx: Checker, id: u32, use_span: Option<Span>) -> Option<Typed> {
     Some(info) => info.module,
     None => 0,
   };
-  const owner = cx.owner;
-
-  cx.owner = None;
-
-  const ty = cx.type_expr(decl.ty);
-
-  cx.owner = owner;
-
-  const valid = match ty.kind {
-    TypeKind::Int(_) | TypeKind::Float(_) | TypeKind::Bool | TypeKind::Char | TypeKind::String | TypeKind::Error => true,
-    _ => false,
-  };
+  const ty = cx.typed.const_types.get(index)?;
+  const valid = types::is_error(ty) || constant_type(cx, ty, 0);
 
   if !valid {
     cx.diagnostics.push(
       Diagnostic::error(codes::NOT_CONSTANT, decl.ty.span, "a module-level constant cannot have the type `" + types::text(ty) + "`")
-        .with_note("constants are integers, floats, `bool`, `char` or `String`"),
+        .with_note("constants are integers, floats, `bool`, `char`, `String`, and structs, enums, arrays and tuples of them"),
     );
   }
 
-  const value = if valid && !types::is_error(ty) { const_expr(cx, decl.value, ty, module) } else { None };
+  var value: Option<ConstValue> = None;
+
+  if valid && !types::is_error(ty) {
+    if is_primitive(ty) && !has_parts(cx, decl.value) {
+      value = const_expr(cx, decl.value, ty, module);
+    } else if constant_shape(cx, decl.value) {
+      // Its types first, as any expression's, outside any type (Q685).
+      const owner = cx.owner;
+      const reported = cx.diagnostics.len();
+
+      cx.owner = None;
+      exprs::expect(cx, decl.value, ty);
+      cx.owner = owner;
+
+      if cx.diagnostics.len() == reported {
+        value = const_expr(cx, decl.value, ty, module);
+      }
+    }
+  }
 
   cx.typed.const_types[index] = ty;
   cx.typed.const_values[index] = value;
@@ -280,6 +469,7 @@ fn const_eval(cx: Checker, expr: Expr, hint: Option<Type>, module: usize) -> Opt
     }
     ExprKind::Path(_) => match cx.resolution.paths.get(expr.id) {
       Some(Res::Const(other)) => const_value(cx, other, Some(expr.span)),
+      Some(Res::Variant(variant)) => const_variant(cx, expr, variant, new List(), module),
       Some(Res::Builtin(name)) if numbers::int_limit(name).is_some() => match numbers::int_limit(name) {
         Some(limit) => {
           const max = types::int_max(limit.ty, cx.target.pointer_width);
@@ -373,16 +563,166 @@ fn const_eval(cx: Checker, expr: Expr, hint: Option<Type>, module: usize) -> Opt
       const_cast(cx, found.ty, found.value, to, expr.span)
     }
     ExprKind::Call { callee, args } => {
-      if let Some(Res::Builtin(name)) = cx.resolution.paths.get(callee.id) {
-        if name == "include_str" {
-          return include_str(cx, expr.span, args, module);
-        }
+      match cx.resolution.paths.get(callee.id) {
+        Some(Res::Builtin(name)) if name == "include_str" => return include_str(cx, expr.span, args, module),
+        Some(Res::Variant(variant)) => return const_variant(cx, expr, variant, args, module),
+        _ => {}
       }
 
       not_constant(cx, expr.span)
     }
+    ExprKind::StructLit { fields, .. } => const_struct(cx, expr, fields, module),
+    ExprKind::Tuple(elems) => const_parts(cx, expr, elems, module),
+    ExprKind::ArrayLit(elems) => const_parts(cx, expr, elems, module),
+    ExprKind::ArrayRepeat { value, .. } => {
+      const ty = checked_type(cx, expr)?;
+
+      match ty.kind {
+        TypeKind::Array { elem, len } => {
+          const part = const_eval(cx, value, Some(elem), module)?;
+
+          Some(Typed { ty: ty, value: ConstValue::Repeat { part: List::from([part]), count: len } })
+        }
+        _ => None,
+      }
+    }
+    ExprKind::Field { base, name } => {
+      const found = const_eval(cx, base, None, module)?;
+      const parts = match found.value {
+        ConstValue::Aggregate(parts) => parts,
+        _ => return None,
+      };
+      const position = match found.ty.kind {
+        TypeKind::Tuple(elems) => types::tuple_index(name.name, elems.len()),
+        TypeKind::Struct(named) => cx.typed.field_index(named.id, name.name),
+        _ => None,
+      };
+
+      parts.get(position?)
+    }
+    ExprKind::Index { base, index } => {
+      const found = const_eval(cx, base, None, module)?;
+      const position = const_eval(cx, index, Some(types::int(IntTy::Usize)), module)?;
+      const at = match position.value {
+        ConstValue::Int(found_index) => found_index,
+        _ => return None,
+      };
+      const len = match found.value {
+        ConstValue::Aggregate(parts) => parts.len() as u64,
+        ConstValue::Repeat { count, .. } => count,
+        _ => return None,
+      };
+
+      if at.negative || at.magnitude >= len {
+        cx.error(codes::NOT_CONSTANT, expr.span, `index out of bounds: the len is ${len} but the index is ${at.text()}`);
+
+        return None;
+      }
+
+      match found.value {
+        ConstValue::Aggregate(parts) => parts.get(at.magnitude as usize),
+        ConstValue::Repeat { part, .. } => part.first(),
+        _ => None,
+      }
+    }
     _ => not_constant(cx, expr.span),
   }
+}
+
+/// The type the expression check gave `value`, which every value with parts has (Q685).
+fn checked_type(cx: Checker, value: Expr) -> Option<Type> {
+  match cx.typed.expr_types.get(value.id) {
+    Some(ty) => if types::is_error(ty) { None } else { Some(ty) },
+    None => {
+      not_constant(cx, value.span);
+
+      None
+    }
+  }
+}
+
+/// A tuple or an array of constants.
+fn const_parts(cx: Checker, value: Expr, elems: List<Expr>, module: usize) -> Option<Typed> {
+  const ty = checked_type(cx, value)?;
+  const parts: List<Typed> = new List();
+
+  for index in 0..elems.len() {
+    const part_ty = match ty.kind {
+      TypeKind::Tuple(part_types) => part_types.get(index)?,
+      TypeKind::Array { elem, .. } => elem,
+      _ => return None,
+    };
+
+    parts.push(Typed { ty: part_ty, value: const_expr(cx, elems[index], part_ty, module)? });
+  }
+
+  Some(Typed { ty: ty, value: ConstValue::Aggregate(parts) })
+}
+
+/// The value given to the field `name` in a literal.
+fn field_value(fields: List<ast::FieldInit>, name: String) -> Option<Expr> {
+  for init in fields {
+    if init.name.name == name {
+      return Some(init.value);
+    }
+  }
+
+  None
+}
+
+/// `Point { x: 1, y: 2 }` or `Shape::Rect { w: 1, h: 2 }`, of constants.
+fn const_struct(cx: Checker, value: Expr, fields: List<ast::FieldInit>, module: usize) -> Option<Typed> {
+  const ty = checked_type(cx, value)?;
+
+  match cx.resolution.paths.get(value.id) {
+    Some(Res::Variant(variant)) => {
+      const def = cx.typed.variants(ty)?.get(variant.index as usize)?;
+      const parts: List<Typed> = new List();
+
+      for field in def.fields {
+        const given = field_value(fields, field.name?)?;
+
+        parts.push(Typed { ty: field.ty, value: const_expr(cx, given, field.ty, module)? });
+      }
+
+      Some(Typed { ty: ty, value: ConstValue::Variant { index: variant.index, fields: parts } })
+    }
+    Some(Res::Struct(id)) => {
+      const named = match ty.kind {
+        TypeKind::Struct(found) => found,
+        _ => return None,
+      };
+      const def = cx.typed.struct_def(id)?;
+      const field_types = cx.typed.struct_field_types(named);
+      const parts: List<Typed> = new List();
+
+      for index in 0..def.fields.len() {
+        const part_ty = field_types.get(index)?;
+        const given = field_value(fields, def.fields[index].name)?;
+
+        parts.push(Typed { ty: part_ty, value: const_expr(cx, given, part_ty, module)? });
+      }
+
+      Some(Typed { ty: ty, value: ConstValue::Aggregate(parts) })
+    }
+    _ => None,
+  }
+}
+
+/// A variant without fields (`Color::Red`, `None`), or with them in order (`Some(3)`).
+fn const_variant(cx: Checker, value: Expr, variant: pkg::resolve::VariantRef, args: List<Expr>, module: usize) -> Option<Typed> {
+  const ty = checked_type(cx, value)?;
+  const def = cx.typed.variants(ty)?.get(variant.index as usize)?;
+  const field_types = def.field_types();
+  const parts: List<Typed> = new List();
+
+  for index in 0..args.len() {
+    const part_ty = field_types.get(index)?;
+
+    parts.push(Typed { ty: part_ty, value: const_expr(cx, args[index], part_ty, module)? });
+  }
+
+  Some(Typed { ty: ty, value: ConstValue::Variant { index: variant.index, fields: parts } })
 }
 
 fn not_constant(cx: Checker, span: Span) -> Option<Typed> {
@@ -454,6 +794,7 @@ fn const_float(value: f64, float_ty: FloatTy) -> Option<Typed> {
 
 fn compare_values(lhs: ConstValue, rhs: ConstValue) -> Option<Ordering> {
   match lhs {
+    ConstValue::Aggregate(_) | ConstValue::Repeat { .. } | ConstValue::Variant { .. } => None,
     ConstValue::Int(a) => match rhs {
       ConstValue::Int(b) => Some(a.compare(b)),
       _ => None,
@@ -478,6 +819,11 @@ fn compare_values(lhs: ConstValue, rhs: ConstValue) -> Option<Ordering> {
 }
 
 fn const_binary(cx: Checker, op: BinaryOp, ty: Type, lhs: ConstValue, rhs: ConstValue, span: Span) -> Option<Typed> {
+  // Only the primitive types have operators in a constant (Q685).
+  if !is_primitive(ty) {
+    return const_operand_error(cx, span, "`" + ast::binary_symbol(op) + "`", ty);
+  }
+
   if is_comparison(op) {
     // NaN is unordered: only `!=` holds.
     if is_nan(lhs) || is_nan(rhs) {

@@ -1,0 +1,36 @@
+// What a composite constant cannot hold or do (docs/adr/0099-associated-and-composite-constants.md,
+// Q685).
+struct Point {
+  pub x: i32;
+  pub y: i32;
+}
+
+struct Secret {
+  prv code: i32;
+}
+
+struct Holder {
+  pub items: List<i32>;
+}
+
+fn one() -> i32 {
+  1
+}
+
+const ORIGIN: Point = Point { x: 0, y: 0 };
+const LIST: List<i32> = new List(); //~ ERROR E0334
+const HOLDER: Holder = Holder { items: new List() }; //~ ERROR E0334
+const HIDDEN: Secret = Secret { code: 1 }; //~ ERROR E0205
+const CALLED: Point = Point { x: one(), y: 0 }; //~ ERROR E0334
+const BASED: Point = Point { x: 1, ..ORIGIN }; //~ ERROR E0334
+const PRIMES: [u32; 2] = [2, 3];
+const OUTSIDE: u32 = PRIMES[2]; //~ ERROR E0334
+const SAME: bool = ORIGIN == ORIGIN; //~ ERROR E0310
+const MISSING: Point = Point { x: 1 }; //~ ERROR E0315
+const WRONG: Point = Point { x: "a", y: 0 }; //~ ERROR E0300
+const A: (i32, i32) = (B, 1);
+const B: i32 = A.0; //~ ERROR E0334
+const LAMBDA: (i32, i32) = (1, (() => 2)()); //~ ERROR E0334
+const UNKNOWN: i32 = ORIGIN.z; //~ ERROR E0316
+
+fn main() {}

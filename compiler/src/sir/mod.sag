@@ -105,6 +105,7 @@ pub fn const_of(value: ConstValue, ty: Type) -> Result<Const, String> {
       TypeKind::Float(float_ty) => Ok(Const::Float { text: `${found}`, ty: float_ty }),
       _ => Err("float constant typed as " + types::text(ty)),
     },
+    ConstValue::Aggregate(_) | ConstValue::Repeat { .. } | ConstValue::Variant { .. } => Err("composite constant typed as " + types::text(ty)),
   }
 }
 
@@ -1925,6 +1926,12 @@ pub class Lowering {
             _ => Err("the address of a static is not a local"),
           }
         }
+        // A composite constant, built in a temporary whose parts are read (Q686).
+        Some(Res::Const(id)) => {
+          const built = self.const_operand(id, ty)?;
+
+          self.operand_place(built, ty)
+        }
         _ => Err("place of unsupported path"),
       },
       ExprKind::Field { base, name } => {
@@ -2308,7 +2315,44 @@ pub class Lowering {
       _ => return Err(`constant ${id} without a value`),
     };
 
-    Ok(Operand::Const(const_of(value, ty)?))
+    self.const_value(value, ty)
+  }
+
+  /// A constant's value: a struct, an enum, an array or a tuple is built from its parts at each
+  /// use, as a literal of them (docs/adr/0099-associated-and-composite-constants.md, Q686).
+  prv fn const_value(self, value: ConstValue, ty: Type) -> Result<Operand, String> {
+    match value {
+      ConstValue::Aggregate(parts) => {
+        const operands: List<Operand> = new List();
+        const part_types: List<Type> = new List();
+
+        for part in parts {
+          operands.push(self.const_value(part.value, part.ty)?);
+          part_types.push(part.ty);
+        }
+
+        Ok(self.aggregate(ty, operands, part_types))
+      }
+      ConstValue::Repeat { part, .. } => {
+        const repeated = match part.first() {
+          Some(found) => found,
+          None => return Err("repeated constant without its part"),
+        };
+        const element = self.const_value(repeated.value, repeated.ty)?;
+
+        Ok(self.new_value(ty, Rvalue::Repeat(element)))
+      }
+      ConstValue::Variant { index, fields } => {
+        const operands: List<Operand> = new List();
+
+        for field in fields {
+          operands.push(self.const_value(field.value, field.ty)?);
+        }
+
+        Ok(matching::variant(self, ty, index, operands))
+      }
+      _ => Ok(Operand::Const(const_of(value, ty)?)),
+    }
   }
 
   /// Lowers an expression to an operand. Values of managed types that are newly created are

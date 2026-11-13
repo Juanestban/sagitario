@@ -241,7 +241,20 @@ fn const_value(value: ConstValue) -> String {
     ConstValue::Int(found) => "int " + found.text(),
     ConstValue::Float(found) => `float ${found}`,
     ConstValue::Str(found) => "str " + lexer::quote(found),
+    ConstValue::Aggregate(parts) => "parts [" + const_parts(parts) + "]",
+    ConstValue::Repeat { part, count } => `repeat ${count} [` + const_parts(part) + "]",
+    ConstValue::Variant { index, fields } => `variant ${index} [` + const_parts(fields) + "]",
   }
+}
+
+fn const_parts(parts: List<pkg::types::consts::Typed>) -> String {
+  const shown: List<String> = new List();
+
+  for part in parts {
+    shown.push(const_value(part.value));
+  }
+
+  shown.join(", ")
 }
 
 fn optional(value: Option<u32>) -> String {

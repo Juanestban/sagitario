@@ -1,0 +1,82 @@
+// Constants that are structs, enums, arrays and tuples of constants, and their parts
+// (docs/adr/0099-associated-and-composite-constants.md, Q685 and Q686). Each use is a copy.
+// expect-stdout: 0 5 [2, 3, 5, 7] [0, 0, 0] (4, "four") 2 None
+// expect-stdout: Some(Point { x: 0, y: 5 }) Ok(1) [Empty, Circle(2.5), Rect { w: 1, h: 2 }] Named { name: "ada", tags: ["a", "b"] } 14 5 5
+// expect-stdout: copied: 9 0 | 3 b | area 6 | match 20 | static 2 | lambda 7 | 6 1
+
+struct Point {
+  pub x: i32;
+  pub y: i32;
+}
+
+struct Pair<T> {
+  pub first: T;
+  pub second: T;
+}
+
+enum Shape {
+  Empty,
+  Circle(f64),
+  Rect { w: i32, h: i32 },
+}
+
+struct Named {
+  pub name: String;
+  pub tags: [String; 2];
+}
+
+struct Size {
+  pub w: i32;
+  pub h: i32;
+
+  pub fn area(self) -> i32 {
+    self.w * self.h
+  }
+}
+
+const ORIGIN: Point = Point { x: 0, y: -1 + 2 * 3 };
+const PRIMES: [u32; 4] = [2, 3, 5, 7];
+const ZEROS: [u8; 3] = [0; 3];
+const PAIR: (i32, String) = (4, "four");
+const GENERIC: Pair<i64> = Pair { first: 1, second: 2 };
+const NONE: Option<i32> = None;
+const SOME: Option<Point> = Some(ORIGIN);
+const OK: Result<i32, String> = Ok(1);
+const SHAPES: [Shape; 3] = [Shape::Empty, Shape::Circle(2.5), Shape::Rect { w: 1, h: 2 }];
+const NAMED: Named = Named { name: "ada", tags: ["a", "b"] };
+const SEVENTH: u32 = PRIMES[3] * 2;
+const Y: i32 = ORIGIN.y;
+const FIRST: i32 = PAIR.0 + 1;
+
+const UNIT: Size = Size { w: 1, h: 1 };
+const SIZES: [Size; 2] = [Size { w: 2, h: 3 }, UNIT];
+const MAYBE: Option<Size> = Some(Size { w: 4, h: 5 });
+
+static BIG: Size = SIZES[0];
+
+fn main() {
+  println(f"{ORIGIN.x} {ORIGIN.y} {PRIMES:?} {ZEROS:?} {PAIR:?} {GENERIC.second} {NONE:?}");
+  println(f"{SOME:?} {OK:?} {SHAPES:?} {NAMED:?} {SEVENTH} {Y} {FIRST}");
+
+  // A copy: changing it leaves the constant as it is.
+  var p = ORIGIN;
+
+  p.x = 9;
+  print(f"copied: {p.x} {ORIGIN.x} | {PRIMES[1]} {NAMED.tags[1]} | area {SIZES[0].area()} | ");
+
+  const described = match MAYBE {
+    Some(size) => size.area(),
+    None => 0,
+  };
+  const area = () => UNIT.area() + SIZES[0].area();
+
+  print(f"match {described} | static {BIG.w} | lambda {area()} | ");
+
+  const areas: List<String> = new List();
+
+  for size in SIZES {
+    areas.push(f"{size.area()}");
+  }
+
+  println(areas.join(" "));
+}

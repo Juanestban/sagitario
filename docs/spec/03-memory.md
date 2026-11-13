@@ -68,7 +68,8 @@ const RUNTIME: String = include_str("../runtime/runtime.c");
 ```
 
 - A constant is an item: `pub` exports it, `use` imports it, and `limits::MAX_USERS` names it
-  in full. Its type is always written, and is an integer, a float, `bool`, `char` or `String`.
+  in full. Its type is always written, and is an integer, a float, `bool`, `char` or `String`,
+  or a struct, an enum, an array or a tuple of such types ([below](#composite-constants)).
 - The compiler computes its value from literals, other constants, unary `-` and `!`, the
   arithmetic operators (`+` also joins strings), the bitwise operators and shifts, comparisons,
   `&&`, `||`, `as` between primitive types and `include_str`. A constant cannot need its own
@@ -81,6 +82,36 @@ const RUNTIME: String = include_str("../runtime/runtime.c");
 - `include_str("path")` is the text of a file, as a `String`. It is only valid in the value of
   a module-level constant; the path is a string literal relative to the directory of the
   source file, and the file must be UTF-8. The file is read when the program is compiled.
+
+### Composite constants
+
+Rationale: [ADR-0099](../adr/0099-associated-and-composite-constants.md), Q685 and Q686, as Rust's
+`const` items without `const fn`.
+
+```sag
+struct Point {
+  pub x: i32;
+  pub y: i32;
+}
+
+const ORIGIN: Point = Point { x: 0, y: 0 };
+const PRIMES: [u32; 4] = [2, 3, 5, 7];
+const FALLBACK: (Option<i32>, String) = (None, "none");
+const LAST: u32 = PRIMES[3] * 2;              // 14
+```
+
+- A constant may be a struct, an enum, `Option`, `Result`, an array or a tuple whose parts are
+  constants, written as literals: a struct literal naming every field (without `..base`), a
+  variant with or without fields (`Shape::Circle(2.5)`, `Some(3)`, `Shape::Rect { w: 1, h: 2 }`),
+  `[a, b]` and `[value; count]`, and `(a, b)`. Its value is checked as any expression of its type
+  (the fields, their privacy, the type arguments of a generic struct), outside any type: a
+  literal of a struct with a private field is an error (`E0205`).
+- A part of a constant is a constant: `ORIGIN.x`, `FALLBACK.0`, and `PRIMES[3]` with a constant
+  index; an index outside the array is an error (`index out of bounds`).
+- Classes, `List`, `Map`, slices, references, raw pointers and function values cannot be parts of
+  a constant (`E0334`): `new` creates them, or they point to memory. There are no calls but
+  `include_str`. Operators apply to the primitive parts only: `ORIGIN == ORIGIN` is an error.
+- Each use of a composite constant is a copy of its value, as any value of a struct.
 
 ## Global state (G1)
 

@@ -1,6 +1,6 @@
 # 0099. Associated constants and composite constants (S2)
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-13
 - Refines: [ADR-0049](0049-self-hosting-plan-and-language-prerequisites.md) (module-level
   constants of primitive types and `String`), docs/spec/03-memory.md (module-level constants),
@@ -81,3 +81,17 @@ fn main() {
 - ADR-0100 declares the constants of `Ipv4Addr` and `Ipv6Addr` with them.
 - The deferred details of the roadmap list constants of interfaces, constants in patterns,
   constants of generic types and `const fn`.
+
+## Notes
+
+- Increment 1 is done. A constant whose type is not primitive, or whose value builds or reads a
+  part of a struct, an enum, an array or a tuple, is first checked as an expression of its type,
+  outside any type, which gives its literals the checks of any other (missing fields, privacy,
+  the type arguments of a generic struct); the types of every constant are known before any value
+  is, for that. Its value is then computed from those types, as a tree of parts. An expression
+  with a form no constant has (a call, a lambda, `..base`) is reported before it is checked, so
+  the check never sees code outside a function. Q686 changes in how the C holds a composite
+  constant: each use builds the value from its parts, as a literal of them, instead of copying a
+  `static const` object written once. The result is the same value, which the C compiler folds,
+  and the `String` parts of a constant need no object of their own outside the core's literals.
+

@@ -1,5 +1,5 @@
-// Constants at the limits of every integer type, float constants, casts and the errors of
-// computing them.
+// Constants at the limits of every integer type, float constants, casts, composite constants and
+// the errors of computing them.
 
 const I8_MIN: i8 = -128;
 const I8_MAX: i8 = 127;
@@ -64,6 +64,18 @@ const WRONG_OPERAND: f64 = !1.5;
 const MISMATCH: i32 = 1 + 2.0;
 const BAD_CAST: bool = 1 as bool;
 const CHAR_CAST: char = 300 as char;
+
+// Structs, enums, arrays and tuples of constants, and their parts
+// (docs/adr/0099-associated-and-composite-constants.md, Q685).
+struct Point {
+  pub x: i32;
+  pub y: i32;
+}
+
+const ORIGIN: Point = Point { x: 0, y: -1 };
+const PARTS: (Option<i32>, [u8; 2], [bool; 3]) = (Some(I8_MAX as i32), [1, 2], [true; 3]);
+const RESULT: Result<String, i32> = Err(4);
+const Y: i32 = ORIGIN.y + PARTS.1[1] as i32;
 
 fn main() {
   println(`${I8_MIN} ${U64_MAX} ${THIRD} ${TEXT}`);

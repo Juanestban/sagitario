@@ -22,6 +22,9 @@ The sources say 0.32.0.
 
 ### Added
 
+- Constants that are structs, enums, `Option`, `Result`, arrays and tuples of constants, written
+  as literals, and the parts of a constant (`ORIGIN.x`, `PAIR.0`, `PRIMES[3]`) in other
+  constants ([ADR-0099](docs/adr/0099-associated-and-composite-constants.md), increment 1).
 - `std::thread::Builder` with `name` and `stack_size`, whose `spawn` returns an `io::Error` when
   the system cannot start the thread and is checked as `thread::spawn`; `thread::current`,
   `Thread` with `id`, `name` and `unpark`, `ThreadId`, `JoinHandle::thread`, `park`,

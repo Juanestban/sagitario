@@ -1,6 +1,6 @@
 # 0100. Networking: addresses, TCP and UDP sockets (S2)
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-13
 - Refines: [ADR-0084](0084-a-complete-language-and-the-engine-apart.md) (Q542: record 10 of the
   audit of S2), [ADR-0096](0096-streams-files-and-drop.md) (`Read`, `Write` and `Drop`, which
