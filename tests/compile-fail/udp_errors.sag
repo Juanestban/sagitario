@@ -1,0 +1,13 @@
+// What a UDP socket sends to and sends (docs/adr/0100-networking.md, Q695).
+use std::net::UdpSocket;
+
+fn main() {
+  const socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+  const bytes: List<u8> = List::from([1u8, 2]);
+
+  socket.send_to(&bytes, 9000).unwrap(); //~ ERROR E0330
+  socket.send("text").unwrap(); //~ ERROR E0300
+  socket.connect(("localhost", -1)).unwrap(); //~ ERROR E0310
+
+  const _other = new UdpSocket(3); //~ ERROR E0205
+}

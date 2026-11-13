@@ -565,6 +565,38 @@ println(TcpStream::connect(f"localhost:{port}").unwrap().read_to_string().unwrap
 - Sockets are not inherited by the programs `std::process` starts. On Windows, a program using
   sockets is linked with Winsock (`ws2_32`), which `std::net` starts before its first socket.
 
+### UDP
+
+Rationale: [ADR-0100](../adr/0100-networking.md), Q695.
+
+```sag
+use std::net::UdpSocket;
+
+const socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+const bytes: List<u8> = "ping".bytes().collect();
+const buffer: List<u8> = new List();
+
+buffer.resize(1500, 0);
+socket.send_to(&bytes, socket.local_addr().unwrap()).unwrap();
+
+const received = socket.recv_from(&mut buffer).unwrap();   // (4, the socket's own address)
+```
+
+| Item | Meaning |
+|---|---|
+| `UdpSocket::bind(addr) -> Result<UdpSocket, io::Error>` | A socket bound to the first address of `addr` it can bind |
+| `socket.send_to(bytes: &[u8], addr) -> Result<usize, io::Error>` | Sends one datagram to the first address of `addr` |
+| `socket.recv_from(buffer: &mut [u8]) -> Result<(usize, SocketAddr), io::Error>` | Waits for a datagram: how many of its bytes `buffer` holds, and who sent it |
+| `socket.connect(addr)`, `send(bytes)`, `recv(buffer)` | Sends and receives with one address only; datagrams from others are dropped |
+| `peer_addr()`, `local_addr()` | The address it is connected to (`NotConnected` if none), the one it is bound to |
+| `as_raw_handle()`, `unsafe from_raw_handle(handle)` | The descriptor or `SOCKET` of the system |
+
+- A datagram longer than the buffer is cut to it, and the rest of it is lost, as in Rust, on
+  every system.
+- `UdpSocket` is `Send`, and closes its socket when its last reference goes, as `TcpStream`.
+- A `send_to` to an address without a listening socket may make a later `recv_from` fail, on the
+  systems that report it (`ConnectionReset` on Windows), as Rust's.
+
 ## `std::path`
 
 Functions on paths as text; they never touch the file system. `/` separates components on

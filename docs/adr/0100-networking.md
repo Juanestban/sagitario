@@ -119,4 +119,9 @@ fn main() {
   descriptor it does not give them. The driver links `ws2_32` on Windows when the program calls
   `WSAStartup`. `for` over an iterator that is a place, such as `option.unwrap()`, was an internal
   compiler error, found by the tests, and fixed.
+- Increment 3 is done. `std::sys` gains `sendto` and `recvfrom` for each system. Windows reports
+  a datagram longer than the buffer as the error `WSAEMSGSIZE`, with the buffer filled; `std::sys`
+  gives the bytes the buffer holds instead, as POSIX systems do, which is what Rust's says. As
+  Rust's, `send_to` sends to the first address of what it is given, and `connect` tries each.
+  `UdpSocket` joins the classes that are `Send` by name.
 

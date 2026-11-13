@@ -1,5 +1,6 @@
-//! `std::net`: IP and socket addresses, and TCP sockets (docs/spec/11-standard-library.md#stdnet),
-//! as Rust's (docs/adr/0100-networking.md), on the sockets of each system in `std::sys`.
+//! `std::net`: IP and socket addresses, and TCP and UDP sockets
+//! (docs/spec/11-standard-library.md#stdnet), as Rust's (docs/adr/0100-networking.md), on the
+//! sockets of each system in `std::sys`.
 
 use std::io;
 use std::io::{ErrorKind, Read, Write};
@@ -1213,6 +1214,97 @@ pub class TcpStream impl Read, Write, Drop {
   /// else may close or use the socket.
   pub unsafe fn from_raw_handle(handle: usize) -> TcpStream {
     new TcpStream(handle)
+  }
+
+  pub fn drop(self) {
+    if self.is_open {
+      self.is_open = false;
+      sys::socket_close(self.handle);
+    }
+  }
+}
+
+// ---- UDP (docs/adr/0100-networking.md, Q695) ---------------------------------------------------
+
+/// A UDP socket, as Rust's `UdpSocket`: it sends and receives datagrams, to and from any address,
+/// or the one it is connected to. It closes when its last reference goes; threads share it.
+pub class UdpSocket impl Drop {
+  /// The descriptor or `SOCKET` of the system.
+  prv var handle: usize;
+  prv var is_open: bool;
+
+  prv fn new(self, handle: usize) {
+    self.handle = handle;
+    self.is_open = true;
+  }
+
+  /// A socket bound to the first address of `addr` it can bind; port 0 asks the system for a free
+  /// one, which `local_addr` gives.
+  pub fn bind<A: ToSocketAddrs>(addr: A) -> Result<UdpSocket, io::Error> {
+    each_addr(addr, (found) => UdpSocket::bind_one(found))
+  }
+
+  prv fn bind_one(addr: SocketAddr) -> Result<UdpSocket, io::Error> {
+    const raw = raw_of(addr);
+    const socket = new UdpSocket(checked(sys::socket_open(raw.v6, true))?);
+
+    checked(sys::socket_bind(socket.handle, raw))?;
+    Ok(socket)
+  }
+
+  /// Sends `bytes` as one datagram to the first address of `addr`, as Rust's: how many bytes
+  /// went.
+  pub fn send_to<A: ToSocketAddrs>(self, bytes: &[u8], addr: A) -> Result<usize, io::Error> {
+    const target = match addr.to_socket_addrs()?.next() {
+      Some(found) => found,
+      None => return Err(new io::Error(ErrorKind::InvalidInput, "no addresses to send data to")),
+    };
+
+    checked(sys::socket_send_to(self.handle, bytes.as_ptr(), bytes.len(), raw_of(target)))
+  }
+
+  /// Waits for a datagram: how many of its bytes `buffer` holds, cut to it, and who sent it.
+  pub fn recv_from(self, buffer: &mut [u8]) -> Result<(usize, SocketAddr), io::Error> {
+    const received = checked(sys::socket_recv_from(self.handle, buffer.as_mut_ptr(), buffer.len(), 0))?;
+
+    Ok((received.0, of_raw(received.1)))
+  }
+
+  /// Sends and receives with the first address of `addr` that works only: `send` and `recv` use
+  /// it, and datagrams from other addresses are dropped.
+  pub fn connect<A: ToSocketAddrs>(self, addr: A) -> Result<(), io::Error> {
+    each_addr(addr, (found) => checked(sys::socket_connect(self.handle, raw_of(found))))
+  }
+
+  /// Sends `bytes` as one datagram to the address it is connected to.
+  pub fn send(self, bytes: &[u8]) -> Result<usize, io::Error> {
+    checked(sys::socket_send(self.handle, bytes.as_ptr(), bytes.len()))
+  }
+
+  /// Waits for a datagram from the address it is connected to, cut to `buffer`.
+  pub fn recv(self, buffer: &mut [u8]) -> Result<usize, io::Error> {
+    checked(sys::socket_recv(self.handle, buffer.as_mut_ptr(), buffer.len(), 0))
+  }
+
+  /// The address it is connected to.
+  pub fn peer_addr(self) -> Result<SocketAddr, io::Error> {
+    Ok(of_raw(checked(sys::socket_address(self.handle, true))?))
+  }
+
+  /// The address it is bound to.
+  pub fn local_addr(self) -> Result<SocketAddr, io::Error> {
+    Ok(of_raw(checked(sys::socket_address(self.handle, false))?))
+  }
+
+  /// The descriptor (POSIX) or `SOCKET` (Windows) of the system, which stays the socket's.
+  pub fn as_raw_handle(self) -> usize {
+    self.handle
+  }
+
+  /// The UDP socket of a socket of the system, which it closes. It is `unsafe`: nothing else may
+  /// close or use the socket.
+  pub unsafe fn from_raw_handle(handle: usize) -> UdpSocket {
+    new UdpSocket(handle)
   }
 
   pub fn drop(self) {

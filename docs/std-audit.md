@@ -155,7 +155,7 @@ The audit of the library found gaps of the language itself, which the library ne
 |---|---|---|---|
 | `IpAddr`, `Ipv4Addr`, `Ipv6Addr`, `SocketAddr`, `SocketAddrV4`, `SocketAddrV6`, `AddrParseError` | `std::net` | ✅ | Rust's text, parsing (`TryFrom<String>`, Rust's `FromStr`), order and constants ([ADR-0100](adr/0100-networking.md), increment 1) |
 | `TcpListener`, `TcpStream`, `ToSocketAddrs`, `Shutdown` | `std::net` | 🟡 | Blocking sockets on `Read` and `Write`, `Send`, closed by `Drop`; the compiler implements `ToSocketAddrs` for `String` and the pairs with a port ([ADR-0100](adr/0100-networking.md), increment 2). Missing: the options of increment 4 (timeouts, `nonblocking`, `nodelay`, `ttl`, `peek`, `try_clone`, `take_error`, `connect_timeout`). TLS and HTTP are Nova packages, as in Rust |
-| `UdpSocket` | — | ❌ | [ADR-0100](adr/0100-networking.md), increment 3 |
+| `UdpSocket` | `std::net::UdpSocket` | 🟡 | `bind`, `send_to`, `recv_from`, `connect`, `send`, `recv`, `peer_addr`, `local_addr`; a datagram is cut to the buffer on every system ([ADR-0100](adr/0100-networking.md), increment 3). Missing: the options of increment 4 (timeouts, `nonblocking`, `ttl`, `broadcast`, `peek`, `peek_from`, `try_clone`, `take_error`); multicast is a record of its own |
 
 ### Processes and environment (`process`, `env`)
 

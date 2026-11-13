@@ -28,6 +28,9 @@ The sources say 0.32.0.
 
 ### Added
 
+- `std::net::UdpSocket` with `bind`, `send_to`, `recv_from`, `connect`, `send`, `recv`,
+  `peer_addr` and `local_addr`, `Send` and closed by `Drop`
+  ([ADR-0100](docs/adr/0100-networking.md), increment 3).
 - `std::net::TcpListener` and `TcpStream`, blocking sockets on `Read` and `Write` that are `Send`
   and close by `Drop`, `Shutdown`, and `ToSocketAddrs`, which the compiler implements for `String`
   (`"localhost:8080"`, looked up with the system's resolver) and the pairs of a name or an IP
