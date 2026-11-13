@@ -1,0 +1,14 @@
+// `std::env` changes are `unsafe`, its constants are constants, and `process::abort` takes
+// nothing (docs/adr/0097-processes-and-environment.md, Q667 and Q668).
+
+use std::env;
+use std::process;
+
+fn main() {
+  env::set_var("NAME", "value"); //~ ERROR E0323
+  env::remove_var("NAME"); //~ ERROR E0323
+  env::OS = "linux"; //~ ERROR E0307
+  const _count: i32 = env::ARCH; //~ ERROR E0300
+  const _f: i32 = process::abort; //~ ERROR E0314
+  process::abort(1); //~ ERROR E0301
+}

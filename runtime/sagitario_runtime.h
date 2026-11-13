@@ -1111,6 +1111,8 @@ void sag_black_box(const void *value);
 void sag_env_init(int argc, const char *const *argv);
 /* Flushes output and ends the program without running pending releases. */
 _Noreturn void sag_process_exit(int32_t code);
+/* Ends the program at once, as C's `abort`. */
+_Noreturn void sag_process_abort(void);
 
 /* Nanoseconds of a monotonic clock, and sleeping at least `nanos` nanoseconds: written in
  * Sagitario in `std::time`, which every program compiles, for the timers of the core

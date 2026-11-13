@@ -53,6 +53,10 @@ pub fn builtin_sig(name: String, target: TargetInfo) -> FnSig {
     return FnSig { receiver: None, params: List::from([types::int(IntTy::I32)]), ret: types::of(TypeKind::Never) };
   }
 
+  if name == "abort" {
+    return FnSig { receiver: None, params: new List(), ret: types::of(TypeKind::Never) };
+  }
+
   if name == "CString::new" {
     return FnSig { receiver: None, params: List::from([string]), ret: types::of(TypeKind::Result { value: types::of(TypeKind::CString), error: string }) };
   }

@@ -1,0 +1,9 @@
+// A name no system could have makes `env::set_var` panic, as Rust's
+// (docs/adr/0097-processes-and-environment.md, Q668).
+// expect-panic: failed to set environment variable "A=B": Invalid argument
+
+use std::env;
+
+fn main() {
+  unsafe { env::set_var("A=B", "value"); }
+}

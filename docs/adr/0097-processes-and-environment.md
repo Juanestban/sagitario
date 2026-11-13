@@ -99,3 +99,15 @@ fn main() -> Result<(), io::Error> {
   initializers of `Child` and of its pipes, and `Stdio::system`, which gives `Command` the stream,
   are public, as `Metadata::from_system` is, since a class cannot reach another's private
   members, but they take or give types of `std::sys`, which programs cannot name.
+- Increment 3 is done, and with it the ADR. `abort` is a function the compiler provides, as
+  `exit` (`StdItem::Abort`), lowered to the runtime's `sag_process_abort`, which is C's `abort`:
+  with Microsoft's C runtime it ends the program with `0xC0000409`, as Rust's `__fastfail` does,
+  and with MinGW's with 3. `std::sys` reads the environment as `Command` already did (`environ`,
+  `GetEnvironmentStringsW`), and changes it with `setenv` and `unsetenv`, or
+  `SetEnvironmentVariableW`, which is what `Command` and `variable` read, so a variable set is
+  seen by both. `home_dir` follows Rust on POSIX systems, `HOME` and then `getpwuid_r`, whose
+  `pw_dir` is read at its offset on each system; on Windows it reads `USERPROFILE` only, since
+  Rust's fallback, `GetUserProfileDirectoryW`, is in `userenv.dll`, which programs do not link.
+  `temp_dir` on Windows is `GetTempPathW`, not the `GetTempPath2W` Rust prefers where it exists,
+  which only differs for programs running as `SYSTEM`. `sag lsp` now completes `exit` and `abort`
+  after `std::process::`, which it did not offer for `exit` before.

@@ -160,10 +160,10 @@ The audit of the library found gaps of the language itself, which the library ne
 | Rust | Sagitario | State | Notes |
 |---|---|---|---|
 | `Command` with `output`, `status` | `Command` | ✅ | Arguments, variables, directory, input; `Stdio`, `spawn` and `Child` with its pipes, `wait`, `try_wait`, `kill` and `wait_with_output` ([ADR-0097](adr/0097-processes-and-environment.md), increment 2). `env_remove` and `env_clear` wait (spec 11, "not yet") |
-| `process::exit`, `abort`, `id` | `exit` | 🟡 | `abort` and `id` are missing |
+| `process::exit`, `abort`, `id` | `exit`, `abort`, `id` | ✅ | `abort` is provided by the compiler, as `exit` is ([ADR-0097](adr/0097-processes-and-environment.md), increment 3) |
 | `env::args`, `var` | `args`, `variable` | ✅ | |
-| `env::vars`, `set_var`, `remove_var`, `current_exe`, `temp_dir`, `home_dir` | — | ❌ | `set_var` is process-wide state, as in Rust (`unsafe` there since 2024) |
-| `env::consts::OS`, `ARCH` | `@cfg` | 🟡 | Known at compile time; constants for code that prints them are missing |
+| `env::vars`, `set_var`, `remove_var`, `current_exe`, `temp_dir`, `home_dir` | the same, and `set_current_dir` | ✅ | `set_var` and `remove_var` are `unsafe`, as in Rust 2024 ([ADR-0097](adr/0097-processes-and-environment.md), increment 3). `current_dir` is `fs::current_dir` |
+| `env::consts::OS`, `ARCH` | `env::OS`, `ARCH`, `FAMILY` | ✅ | In `std::env` itself, since a module of `std` is one file ([ADR-0097](adr/0097-processes-and-environment.md), increment 3) |
 
 ### Time (`time`)
 

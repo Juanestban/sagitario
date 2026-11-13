@@ -6,7 +6,7 @@ Support for the [Sagitario](https://github.com/Juanestban/sagitario) programming
   of what is under the cursor, go to definition (`F12` or `Ctrl+Click`, also on the modules of
   `use` and of paths), completion of members after `.` (the methods of numbers, text, characters, lists, arrays, slices, maps, sets, iterators, `Option` and
   `Result` too, `into` and `try_into` on every value, and the
-  indices of a tuple's elements), of items after `::` (`MIN` and `MAX` after an integer type, the functions of `std::mem` and `std::hint`, the static functions of a type's interfaces and of a type parameter's bounds after `Type::` and `T::`, and `default`, `from` and `try_from` after the types of numbers, `char` and `String`), of attributes after
+  indices of a tuple's elements), of items after `::` (`MIN` and `MAX` after an integer type, the functions of `std::mem` and `std::hint`, `exit` and `abort` after `std::process::`, the static functions of a type's interfaces and of a type parameter's bounds after `Type::` and `T::`, and `default`, `from` and `try_from` after the types of numbers, `char` and `String`), of attributes after
   `@` (`@cfg`, `@default`, `@export`, `@repr`, `@thread_local`), of their representations after `@repr(` and
   of the conditions of `@cfg(`, of names
   (module-level constants and statics with their types, and the builtins, `assert` and `assert_eq` among them) and of types, the outline of a document (`Ctrl+Shift+O`), and the colors of modules, functions and

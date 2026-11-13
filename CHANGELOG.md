@@ -15,6 +15,10 @@ The sources say 0.32.0.
 
 ### Added
 
+- `std::process::abort` and `id`; `std::env::vars`, `set_var` and `remove_var` (`unsafe`, as in
+  Rust 2024), `set_current_dir`, `current_exe`, `temp_dir` and `home_dir`, and the constants
+  `env::OS`, `ARCH` and `FAMILY`; `sag lsp` completes `exit` and `abort` after `std::process::`
+  ([ADR-0097](docs/adr/0097-processes-and-environment.md), increment 3).
 - `std::process::Stdio` (`inherit`, `piped`, `null`, and `from` a `File`) and `Command::stdin`,
   `stdout` and `stderr`; `Command::spawn` and `Child`, with its pipes as the fields `stdin`,
   `stdout` and `stderr` (`ChildStdin` is a `Write`, the others `Read`), `id`, `wait`, `try_wait`,

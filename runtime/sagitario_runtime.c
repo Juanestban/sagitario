@@ -1521,6 +1521,13 @@ _Noreturn void sag_process_exit(int32_t code) {
   _Exit((int)code);
 }
 
+/* `std::process::abort`: C's `abort`, which raises `SIGABRT` on POSIX systems and ends with the exit
+ * code 3 on Windows, without writing out buffers or running anything else
+ * (docs/adr/0097-processes-and-environment.md, Q667). */
+_Noreturn void sag_process_abort(void) {
+  abort();
+}
+
 /* ---- Tasks (docs/spec/12-async.md) ----------------------------------------------------- */
 
 typedef struct sag_task_timer_entry {

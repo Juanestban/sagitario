@@ -240,6 +240,22 @@ static var ARGV: usize = 0;
 @cfg(unix)
 extern "C" {
   fn getenv(name: *const c_char) -> *const c_char;
+  fn setenv(name: *const c_char, value: *const c_char, overwrite: c_int) -> c_int;
+  fn unsetenv(name: *const c_char) -> c_int;
+  fn chdir(path: *const c_char) -> c_int;
+  fn getpid() -> c_int;
+  fn getuid() -> u32;
+  fn getpwuid_r(uid: u32, info: *mut c_void, buffer: *mut c_char, size: usize, result: *mut *mut c_void) -> c_int;
+}
+
+@cfg(any(target_os = "linux", target_os = "android"))
+extern "C" {
+  fn readlink(path: *const c_char, buffer: *mut c_char, size: usize) -> isize;
+}
+
+@cfg(any(target_os = "macos", target_os = "ios"))
+extern "C" {
+  fn _NSGetExecutablePath(buffer: *mut c_char, size: *mut u32) -> c_int;
 }
 
 @cfg(unix)
@@ -292,11 +308,185 @@ pub fn variable(name: String) -> Option<String> {
   if value.is_null() { None } else { Some(unsafe { string_from_c(value) }) }
 }
 
+/// The name and the value of a `NAME=value` entry of the environment. As Rust's, a name may start
+/// with `=`, which Windows gives its hidden variables; an entry without `=` after that is skipped.
+fn entry_of(text: String) -> Option<(String, String)> {
+  const from = if text.starts_with("=") { 1usize } else { 0usize };
+  const at = text.substring(from, text.len()).find("=")? + from;
+
+  Some((text.substring(0, at), text.substring(at + 1, text.len())))
+}
+
+/// The identifier of this program.
+@cfg(unix)
+pub fn process_id() -> u32 {
+  (unsafe { getpid() }) as u32
+}
+
+/// Every variable of the environment, in its order; invalid UTF-8 becomes U+FFFD.
+@cfg(unix)
+pub fn variables() -> List<(String, String)> {
+  const found = new List<(String, String)>();
+  const entries = environment();
+
+  if entries.is_null() {
+    return found;
+  }
+
+  var index = 0usize;
+
+  loop {
+    const entry = unsafe { *entries.add(index) };
+
+    if entry.is_null() {
+      return found;
+    }
+
+    if let Some(pair) = entry_of(unsafe { string_from_c(entry as *const c_char) }) {
+      found.push(pair);
+    }
+
+    index += 1;
+  }
+}
+
+/// Sets the variable `name` to `value`; `std::env` gives a name that is not empty and has no `=`.
+@cfg(unix)
+pub fn set_variable(name: String, value: String) -> Result<(), i32> {
+  const c_name = match c_path(name) {
+    Some(found) => found,
+    None => return Err(EINVAL),
+  };
+  const c_value = match c_path(value) {
+    Some(found) => found,
+    None => return Err(EINVAL),
+  };
+
+  if unsafe { setenv(c_name.as_ptr(), c_value.as_ptr(), 1) } != 0 { Err(failure()) } else { Ok(()) }
+}
+
+@cfg(unix)
+pub fn remove_variable(name: String) -> Result<(), i32> {
+  const c_name = match c_path(name) {
+    Some(found) => found,
+    None => return Err(EINVAL),
+  };
+
+  if unsafe { unsetenv(c_name.as_ptr()) } != 0 { Err(failure()) } else { Ok(()) }
+}
+
+@cfg(unix)
+pub fn set_current_dir(path: String) -> Result<(), i32> {
+  const name = match c_path(path) {
+    Some(found) => found,
+    None => return Err(EINVAL),
+  };
+
+  if unsafe { chdir(name.as_ptr()) } != 0 { Err(failure()) } else { Ok(()) }
+}
+
+/// The file of this program, as Linux's `/proc/self/exe` names it.
+@cfg(any(target_os = "linux", target_os = "android"))
+pub fn current_exe() -> Result<String, i32> {
+  const link = match c_path("/proc/self/exe") {
+    Some(found) => found,
+    None => return Err(EINVAL),
+  };
+  var size = 256usize;
+
+  loop {
+    const buffer = new List<u8>();
+
+    buffer.resize(size, 0);
+
+    const len = unsafe { readlink(link.as_ptr(), buffer.as_mut_ptr() as *mut c_char, size) };
+
+    if len < 0 {
+      return Err(failure());
+    }
+
+    // A path that fills the buffer may have been cut.
+    if (len as usize) < size {
+      buffer.truncate(len as usize);
+
+      return Ok(String::from_utf8_lossy(buffer));
+    }
+
+    size *= 2;
+  }
+}
+
+/// The file of this program, which `_NSGetExecutablePath` gives as it was started, made absolute
+/// without links, as Rust's.
+@cfg(any(target_os = "macos", target_os = "ios"))
+pub fn current_exe() -> Result<String, i32> {
+  var size = 0u32;
+
+  // Without room, it gives the size it needs, with the terminator.
+  unsafe { _NSGetExecutablePath(0 as *mut c_char, &mut size); }
+
+  const buffer = new List<u8>();
+
+  buffer.resize(size as usize + 1, 0);
+
+  if unsafe { _NSGetExecutablePath(buffer.as_mut_ptr() as *mut c_char, &mut size) } != 0 {
+    return Err(super::UNKNOWN);
+  }
+
+  canonical(unsafe { string_from_c(buffer.as_ptr() as *const c_char) })
+}
+
+/// Where `pw_dir` is in `struct passwd`.
+@cfg(all(any(target_os = "linux", target_os = "android"), not(all(target_os = "android", target_pointer_width = "32"))))
+const HOME_OFFSET: usize = 32;
+@cfg(all(target_os = "android", target_pointer_width = "32"))
+const HOME_OFFSET: usize = 16;
+@cfg(any(target_os = "macos", target_os = "ios"))
+const HOME_OFFSET: usize = 48;
+
+/// The home directory of the user running this program, from the system's database of users.
+@cfg(unix)
+pub fn user_home() -> Option<String> {
+  // Room for C's `struct passwd` on every system.
+  var info = [0u64; 16];
+  var result = 0 as *mut c_void;
+  var size = 1024usize;
+
+  loop {
+    const buffer = new List<u8>();
+
+    buffer.resize(size, 0);
+
+    const code = unsafe { getpwuid_r(getuid(), &raw mut info as *mut c_void, buffer.as_mut_ptr() as *mut c_char, size, &mut result) };
+
+    if code == ERANGE {
+      size *= 2;
+      continue;
+    }
+
+    if code != 0 || result.is_null() {
+      return None;
+    }
+
+    const dir = unsafe { *((&raw const info as *const u8).add(HOME_OFFSET) as *const *const c_char) };
+
+    return if dir.is_null() { None } else { Some(unsafe { string_from_c(dir) }) };
+  }
+}
+
 @cfg(windows)
 extern "C" {
   fn GetCommandLineW() -> *const u16;
   fn GetEnvironmentVariableW(name: *const u16, buffer: *mut u16, size: u32) -> u32;
+  fn SetEnvironmentVariableW(name: *const u16, value: *const u16) -> c_int;
+  fn SetCurrentDirectoryW(path: *const u16) -> c_int;
+  fn GetModuleFileNameW(module: *mut c_void, buffer: *mut u16, size: u32) -> u32;
+  fn GetTempPathW(size: u32, buffer: *mut u16) -> u32;
 }
+
+/// `ERROR_ENVVAR_NOT_FOUND`.
+@cfg(windows)
+const ERROR_ENVVAR_NOT_FOUND: u32 = 203;
 
 @cfg(windows)
 const QUOTE: u16 = 0x22;
@@ -424,6 +614,129 @@ pub fn variable(name: String) -> Option<String> {
   }
 
   Some(from_utf16_lossy(&value[0..written as usize]))
+}
+
+/// The identifier of this program.
+@cfg(windows)
+pub fn process_id() -> u32 {
+  unsafe { GetCurrentProcessId() }
+}
+
+/// Every variable of the environment, in its order, read as UTF-16.
+@cfg(windows)
+pub fn variables() -> List<(String, String)> {
+  const found = new List<(String, String)>();
+  const block = unsafe { GetEnvironmentStringsW() };
+
+  if block.is_null() {
+    return found;
+  }
+
+  const units = block as *const u16;
+  var at = 0usize;
+
+  while unit(units, at) != 0 {
+    var end = at;
+
+    while unit(units, end) != 0 {
+      end += 1;
+    }
+
+    const entry = new List<u16>();
+
+    for index in at..end {
+      entry.push(unit(units, index));
+    }
+
+    if let Some(pair) = entry_of(from_utf16_lossy(&entry)) {
+      found.push(pair);
+    }
+
+    at = end + 1;
+  }
+
+  unsafe { FreeEnvironmentStringsW(block); }
+  found
+}
+
+@cfg(windows)
+pub fn set_variable(name: String, value: String) -> Result<(), i32> {
+  const wide_name = to_utf16(name);
+  const wide_value = to_utf16(value);
+
+  if unsafe { SetEnvironmentVariableW(wide_name.as_ptr(), wide_value.as_ptr()) } == 0 { Err(failure()) } else { Ok(()) }
+}
+
+/// A variable that is not set is no error, as on POSIX systems.
+@cfg(windows)
+pub fn remove_variable(name: String) -> Result<(), i32> {
+  const wide = to_utf16(name);
+
+  if unsafe { SetEnvironmentVariableW(wide.as_ptr(), 0 as *const u16) } == 0 && unsafe { GetLastError() } != ERROR_ENVVAR_NOT_FOUND {
+    return Err(failure());
+  }
+
+  Ok(())
+}
+
+@cfg(windows)
+pub fn set_current_dir(path: String) -> Result<(), i32> {
+  const wide = to_utf16(path);
+
+  if unsafe { SetCurrentDirectoryW(wide.as_ptr()) } == 0 { Err(failure()) } else { Ok(()) }
+}
+
+/// The file of this program, as Windows loaded it.
+@cfg(windows)
+pub fn current_exe() -> Result<String, i32> {
+  var size = 260u32;
+
+  loop {
+    const buffer = new List<u16>();
+
+    buffer.resize(size as usize, 0);
+
+    const len = unsafe { GetModuleFileNameW(0 as *mut c_void, buffer.as_mut_ptr(), size) };
+
+    if len == 0 {
+      return Err(failure());
+    }
+
+    // A path that fills the buffer was cut.
+    if len < size {
+      return Ok(from_utf16_lossy(&buffer[0..len as usize]));
+    }
+
+    size *= 2;
+  }
+}
+
+/// The directory of temporary files Windows gives, ending in `\`: `TMP`, `TEMP` or
+/// `USERPROFILE`, else the directory of Windows.
+@cfg(windows)
+pub fn temp_dir() -> Result<String, i32> {
+  // Without room, the size it needs with its terminator.
+  const size = unsafe { GetTempPathW(0, 0 as *mut u16) };
+
+  if size == 0 {
+    return Err(failure());
+  }
+
+  const buffer = new List<u16>();
+
+  buffer.resize(size as usize, 0);
+
+  const len = unsafe { GetTempPathW(size, buffer.as_mut_ptr()) };
+
+  if len == 0 {
+    return Err(failure());
+  }
+
+  if len >= size {
+    return Err(super::UNKNOWN);
+  }
+
+  Ok(from_utf16_lossy(&buffer[0..len as usize]))
 }
 
 /// UTF-16 code units as a string; an unpaired surrogate becomes U+FFFD.
@@ -1376,7 +1689,6 @@ extern "C" {
   fn pipe2(fds: *mut c_int, flags: c_int) -> c_int;
   fn fork() -> c_int;
   fn dup2(from: c_int, to: c_int) -> c_int;
-  fn chdir(path: *const c_char) -> c_int;
   fn execve(path: *const c_char, argv: *const *mut c_char, envp: *const *mut c_char) -> c_int;
   fn _exit(code: c_int);
   static environ: *const *mut c_char;

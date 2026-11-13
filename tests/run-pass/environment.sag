@@ -1,0 +1,102 @@
+// `std::env` changes and the target's constants, and `process::abort` and `id`
+// (docs/adr/0097-processes-and-environment.md, Q667 and Q668): the program runs itself as the
+// child, with a role in its first argument, to see what a started program receives.
+// env: SAG_TEST_LISTED=listed
+// expect-stdout: constants: true true
+// expect-stdout: listed: true
+// expect-stdout: set: Some("uno") true | replaced: Some("dos")
+// expect-stdout: child sees: dos
+// expect-stdout: removed: None false | again: None
+// expect-stdout: child sees: none
+// expect-stdout: same id: true
+// expect-stdout: aborted: false true
+// expect-stdout: exe: true true
+// expect-stdout: directory: true true | missing: NotFound
+// expect-stdout: temp: true | home: true
+
+use std::env;
+use std::fs;
+use std::io;
+use std::io::ErrorKind;
+use std::process;
+use std::process::{Command, Stdio};
+
+/// The child: does what `role` says, then exits.
+fn child(role: String) {
+  if role == "variable" {
+    println(`child sees: ${env::variable("SAG_TEST_SET").unwrap_or("none")}`);
+  } else if role == "id" {
+    println(`${process::id()}`);
+  } else if role == "abort" {
+    process::abort();
+  }
+
+  process::exit(0);
+}
+
+fn main() -> Result<(), io::Error> {
+  const args = env::args();
+
+  if args.len() > 1 {
+    child(args[1]);
+  }
+
+  const me = args[0];
+  const family = if env::OS == "windows" { "windows" } else { "unix" };
+
+  println(`constants: ${env::FAMILY == family} ${List::from(["x86_64", "aarch64", "arm"]).contains(env::ARCH)}`);
+
+  // `vars` holds what the environment holds.
+  const listed = env::vars().iter().filter((pair) => pair.0 == "SAG_TEST_LISTED").collect();
+
+  println(`listed: ${listed.len() == 1 && listed[0].1 == "listed"}`);
+
+  // Set for this program and the programs it starts, then removed; removing it again is no error.
+  unsafe { env::set_var("SAG_TEST_SET", "uno"); }
+  print(f"set: {env::variable("SAG_TEST_SET"):?} {env::vars().iter().any((pair) => pair.0 == "SAG_TEST_SET" && pair.1 == "uno")} | ");
+  unsafe { env::set_var("SAG_TEST_SET", "dos"); }
+  println(f"replaced: {env::variable("SAG_TEST_SET"):?}");
+  new Command(me).arg("variable").status()?;
+  unsafe { env::remove_var("SAG_TEST_SET"); }
+  print(f"removed: {env::variable("SAG_TEST_SET"):?} {env::vars().iter().any((pair) => pair.0 == "SAG_TEST_SET")} | ");
+  unsafe { env::remove_var("SAG_TEST_SET"); }
+  println(f"again: {env::variable("SAG_TEST_SET"):?}");
+  new Command(me).arg("variable").status()?;
+
+  // The child's own identifier is the one its `Child` has.
+  const spawned = new Command(me).arg("id").stdout(Stdio::piped()).spawn()?;
+  const id = spawned.id();
+  const printed = spawned.wait_with_output()?.stdout.trim();
+
+  println(`same id: ${printed == `${id}` && id != process::id()}`);
+
+  // Ended at once: no exit code on POSIX systems, where `SIGABRT` ends it.
+  const aborted = new Command(me).arg("abort").status()?;
+
+  println(`aborted: ${aborted.success()} ${if env::FAMILY == "unix" { aborted.code.is_none() } else { aborted.code.is_some() }}`);
+
+  const exe = env::current_exe()?;
+
+  println(`exe: ${fs::is_file(exe)} ${fs::canonicalize(exe)? == fs::canonicalize(me)?}`);
+
+  // The current directory changes, and goes back.
+  const before = fs::current_dir()?;
+  const temp = env::temp_dir();
+
+  env::set_current_dir(temp)?;
+
+  const moved = fs::canonicalize(fs::current_dir()?)? == fs::canonicalize(temp)?;
+
+  env::set_current_dir(before)?;
+
+  const missing = match env::set_current_dir("no-such-directory-sag") {
+    Ok(_) => "no error",
+    Err(error) => if error.kind() == ErrorKind::NotFound { "NotFound" } else { "another kind" },
+  };
+
+  println(`directory: ${moved} ${fs::current_dir()? == before} | missing: ${missing}`);
+
+  // Where the system says; a home directory may be missing, but never empty.
+  println(`temp: ${fs::is_dir(temp)} | home: ${env::home_dir().map((dir) => !dir.is_empty()).unwrap_or(true)}`);
+  Ok(())
+}

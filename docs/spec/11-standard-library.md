@@ -132,12 +132,45 @@ gives `VecDeque`, and their debug forms are `{"a": 1}` and `{1, 2}`.
 |---|---|
 | `args() -> List<String>` | The command-line arguments, starting with the program as the operating system started it (usually its path) |
 | `variable(name: String) -> Option<String>` | The value of an environment variable, or `None` if it is not set |
+| `vars() -> List<(String, String)>` | Every environment variable, as its name and its value, in the order of the environment |
+| `unsafe set_var(name: String, value: String)` | Sets a variable, for this program and the programs it starts |
+| `unsafe remove_var(name: String)` | Removes a variable; one that is not set is no error |
+| `set_current_dir(path: String) -> Result<(), io::Error>` | Changes the current working directory, which [`fs::current_dir`](#stdfs) gives |
+| `current_exe() -> Result<String, io::Error>` | The full path of this program's file |
+| `temp_dir() -> String` | The directory for temporary files |
+| `home_dir() -> Option<String>` | The home directory of the user, or `None` if the system has none |
 
 - Arguments and values that are not valid UTF-8 have each ill-formed sequence replaced by
   U+FFFD. On Windows they are read as UTF-16, so any Unicode text arrives intact.
 - A variable name that is empty or contains `=` or a NUL character is never set: `variable`
   returns `None`.
 - Arguments are not part of `main`'s signature ([errors](07-errors.md#program-entry-point-and-exit-codes)).
+- `set_var` and `remove_var` are `unsafe`, as in Rust 2024: another thread, or C code, may read
+  the environment at the same time, which systems other than Windows do not make safe. A name
+  that is empty or contains `=` or a NUL, a value that contains a NUL, or a change the system
+  refuses panics, as Rust's (`failed to set environment variable "A=B": Invalid argument`)
+  ([ADR-0097](../adr/0097-processes-and-environment.md), Q668).
+- `vars` gives a name that starts with `=` as it is, as Rust's: Windows keeps hidden variables of
+  the shell such as `=C:`.
+- `current_exe` reads `/proc/self/exe` on Linux and Android, asks `_NSGetExecutablePath` on Apple's
+  systems and makes it absolute without links, and asks `GetModuleFileNameW` on Windows.
+- `temp_dir` is `TMPDIR`, else `/tmp` (`/data/local/tmp` on Android); on Windows, what
+  `GetTempPathW` gives, ending in `\` (`TMP`, `TEMP` or `USERPROFILE`, else the directory of
+  Windows). It does not check that the directory exists.
+- `home_dir` is `HOME` unless it is empty, else the one of the system's database of users
+  (`getpwuid_r`), as Rust's; on Windows, `USERPROFILE` unless it is empty, else `None`.
+
+The constants of the target the program was compiled for, as Rust's `std::env::consts`, are
+written `env::OS`, since a module of `std` is one file:
+
+| Constant | Values |
+|---|---|
+| `OS: String` | `"linux"`, `"macos"`, `"windows"`, `"android"`, `"ios"` |
+| `ARCH: String` | `"x86_64"`, `"aarch64"`, `"arm"` |
+| `FAMILY: String` | `"unix"`, `"windows"` |
+
+They hold what [`@cfg`](09-modules.md#conditional-compilation-s1) tests, for code that prints or
+compares them (`println(f"{env::OS} on {env::ARCH}")`).
 
 ## `std::io`
 
@@ -455,6 +488,15 @@ it can stand where any value is expected (`const n = if ok { 1 } else { process:
 - It writes out the buffered output, then ends the program without running pending releases:
   the leak check of the test harness does not report the objects still alive.
 - Exit codes outside 0–255 depend on the operating system; POSIX systems keep the low 8 bits.
+
+`abort()` ends the program at once, as Rust's: it never returns either, and writes out nothing,
+so output still in a buffer may be lost ([ADR-0097](../adr/0097-processes-and-environment.md),
+Q667). It is C's `abort`: on POSIX systems the signal `SIGABRT` ends the program, so its
+`ExitStatus` has no code; on Windows, Microsoft's C runtime ends it with the status `0xC0000409`,
+as Rust's does, and MinGW's with the exit code 3.
+
+`id() -> u32` is the identifier the system gave this program, the one a `Child` started from it
+has as its `id()`.
 
 ### Running programs
 

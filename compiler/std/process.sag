@@ -1,13 +1,19 @@
 //! `std::process`: the running program and the programs it runs
 //! (docs/spec/11-standard-library.md#stdprocess).
 //!
-//! `exit(code: i32)` ends the program with an exit code. It never returns, which no function
-//! written in Sagitario can declare, so the compiler provides it like `panic`.
+//! `exit(code: i32)` ends the program with an exit code, and `abort()` ends it at once
+//! (docs/adr/0097-processes-and-environment.md, Q667). They never return, which no function
+//! written in Sagitario can declare, so the compiler provides them like `panic`.
 
 use std::fs::File;
 use std::io;
 use std::io::ErrorKind;
 use std::sys;
+
+/// The identifier the system gave this program.
+pub fn id() -> u32 {
+  sys::process_id()
+}
 
 /// How a program ended.
 pub struct ExitStatus {
