@@ -129,3 +129,11 @@ fn main() {
   compiler keeps the classes of `std::sync` whose names end in `Guard` out of those that are
   `Send` by name, with their own reason. A guard that is a temporary lives until the end of its
   statement, as in Rust, which the spec says.
+- Increment 3 is done. A `Channel` keeps its capacity (`None` without a limit), a second
+  `std::sys::Condition` that senders wait on, for room or for a receiver, and how many values were
+  received: a send on a channel of capacity 0 queues its value, as one of capacity 1, and waits
+  until that count reaches it, so `try_receive` takes the value of a sender that waits, as in
+  Rust. `try_send` on such a channel succeeds while more receivers wait than values are queued.
+  A send waiting for room panics if the channel is closed meanwhile, since its value was never
+  sent; one whose value is queued returns. `receive_timeout` measures its time by `Instant`, as
+  `Condvar::wait_timeout_while`.

@@ -647,9 +647,13 @@ reaches without passing it: `static HITS: AtomicI64 = new AtomicI64(0);`.
 | `Condvar`, `RwLock<T: Send>`, `Barrier` | A condition to wait on, a lock for many readers or one writer, a meeting point of threads |
 | `AtomicBool`, `AtomicI8`, `AtomicI16`, `AtomicI32`, `AtomicI64`, `AtomicIsize`, `AtomicU8`, `AtomicU16`, `AtomicU32`, `AtomicU64`, `AtomicUsize` | A value of that type that threads read and change at once ([atomics](#atomics)) |
 | `AtomicPtr<T>` | A `*mut T` that threads read and change at once |
-| `Channel<T: Send>` | A queue of values that threads send to each other, without a limit |
+| `Channel<T: Send>` | A queue of values that threads send to each other, without a limit or with one |
 | `new Channel<T>()`, `c.send(value)` | Creates it; adds `value` at the end. Sending on a closed channel panics |
+| `Channel::bounded(capacity) -> Channel<T>` | A channel whose `send` waits while it holds `capacity` values; with 0, `send` waits until a receiver takes the value, as Rust's `sync_channel` |
+| `c.try_send(value) -> Result<(), TrySendError<T>>` | Sends without waiting, or gives the value back: `Full(value)` when the channel holds as many as it can (with capacity 0, when no receiver waits), `Closed(value)` when it is closed |
 | `c.receive() -> Option<T>` | The value at the front, waiting until there is one; `None` once the channel is closed and empty |
+| `c.try_receive() -> Result<T, TryReceiveError>` | The value at the front if there is one; else `Err(Empty)`, or `Err(Closed)` once it is closed and empty |
+| `c.receive_timeout(duration) -> Result<T, ReceiveTimeoutError>` | `receive` for at most `duration`; else `Err(Timeout)`, or `Err(Closed)` once it is closed and empty |
 | `c.close()` | No more values can be sent; those sent are still received. Closing again does nothing |
 | `c.iter() -> Iter<T>` | The values received one by one, until the channel is closed and empty |
 
@@ -660,6 +664,12 @@ reaches without passing it: `static HITS: AtomicI64 = new AtomicI64(0);`.
   forever.
 - Any thread holding a channel may send, receive or close it. Several receivers share the
   values: each value goes to one of them.
+- A `send` waiting for room panics if the channel is closed meanwhile, since its value was never
+  sent; one on a channel of capacity 0 whose value is waiting for a receiver returns when the
+  channel is closed, and the value is still received. The errors are Rust's `TrySendError`,
+  `TryRecvError` and `RecvTimeoutError`, with `Closed` for `Disconnected`, since a channel is
+  closed rather than left by its last sender
+  ([ADR-0098](../adr/0098-locks-orderings-and-threads.md), Q675).
 
 ### Lock guards and conditions
 

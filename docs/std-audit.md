@@ -130,7 +130,7 @@ The audit of the library found gaps of the language itself, which the library ne
 | `atomic::*` | `Ordering`, `fence` and twelve atomics | ✅ | Rust's orderings, `AtomicI8`/`U8`/`I16`/`U16`/`Isize`/`Ptr`, `fetch_and`/`or`/`xor`/`nand`/`max`/`min`/`update`, `compare_exchange_weak` ([ADR-0098](adr/0098-locks-orderings-and-threads.md), increment 1). `Ordering` is `sync::Ordering`, since a module of `std` is one file |
 | `Once`, `OnceLock`, `LazyLock` | `static` | ➖ | A `static` is computed once, on its first use, by one thread (ADR-0083) |
 | `Barrier` | `Barrier` | ✅ | ([ADR-0098](adr/0098-locks-orderings-and-threads.md), increment 2) |
-| `mpsc::channel`, `sync_channel` | `Channel<T: Send>` | 🟡 | Missing: a bounded channel, `try_receive`, `receive_timeout` |
+| `mpsc::channel`, `sync_channel` | `Channel<T: Send>` | ✅ | `new Channel()` without a limit, `Channel::bounded(capacity)` with one (0 hands each value over), `try_send`, `try_receive` and `receive_timeout` with Rust's errors; closed by `close` rather than by dropping the last sender ([ADR-0098](adr/0098-locks-orderings-and-threads.md), increment 3) |
 | `thread::spawn`, `join`, `sleep`, `available_parallelism` | ✅ | ✅ | |
 | `thread::Builder` (name, stack size), `current`, `ThreadId`, `park`, `yield_now` | — | ❌ | |
 | `thread::scope` | — | ⛔ for now | Scoped threads borrow the stack, which needs references held by closures |

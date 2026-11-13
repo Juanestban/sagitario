@@ -336,8 +336,8 @@ pub class Barrier {
   }
 }
 
-/// A queue of values that threads send to each other, without a limit. `receive` waits for a
-/// value; once the channel is closed and empty it returns `None`.
+/// A queue of values that threads send to each other, without a limit, or with one if made by
+/// `bounded`. `receive` waits for a value; once the channel is closed and empty it returns `None`.
 pub class Channel<T: Send> {
   prv const lock: sys::Lock;
   /// Values sent, the newest last.
@@ -348,6 +348,16 @@ pub class Channel<T: Send> {
   /// The receivers waiting for a value: a send wakes them only when there are some, since a wake
   /// is a call to the system (docs/adr/0090-benchmarks.md).
   prv var waiting: usize;
+  /// How many values it holds at most, or `None` without a limit
+  /// (docs/adr/0098-locks-orderings-and-threads.md, Q675).
+  prv var capacity: Option<usize>;
+  /// What senders wait on, for room or, with capacity 0, for a receiver to take their value.
+  prv const room: sys::Condition;
+  /// The senders waiting on `room`, which a receive wakes only when there are some.
+  prv var senders: usize;
+  /// How many values were received, so that a sender on a channel of capacity 0 knows when its
+  /// value was.
+  prv var received: u64;
 
   pub fn new(self) {
     self.lock = new sys::Lock();
@@ -355,24 +365,80 @@ pub class Channel<T: Send> {
     self.outbox = new List();
     self.closed = false;
     self.waiting = 0;
+    self.capacity = None;
+    self.room = new sys::Condition();
+    self.senders = 0;
+    self.received = 0;
   }
 
-  /// Adds `value` at the end of the queue. Sending on a closed channel panics.
+  /// A channel whose `send` waits while it holds `capacity` values; with 0, `send` waits until a
+  /// receiver takes the value, as Rust's `sync_channel`.
+  pub fn bounded(capacity: usize) -> Channel<T> {
+    const channel = new Channel<T>();
+
+    channel.capacity = Some(capacity);
+    channel
+  }
+
+  /// Adds `value` at the end of the queue, waiting while the channel is full; with capacity 0, it
+  /// returns once a receiver took the value or the channel was closed. Sending on a closed
+  /// channel panics, also when it is closed while the send waits for room.
   pub fn send(self, value: T) {
     self.lock.lock();
+
+    if let Some(capacity) = self.capacity {
+      // A channel of capacity 0 holds the value of one sender until a receiver takes it.
+      const limit = max(capacity, 1);
+
+      while !self.closed && self.len() >= limit {
+        self.wait_for_room();
+      }
+    }
 
     if self.closed {
       self.lock.unlock();
       panic("send on a closed channel");
     }
 
-    self.inbox.push(value);
+    self.push(value);
 
-    if self.waiting > 0 {
-      self.lock.notify_all();
+    if let Some(0) = self.capacity {
+      // The values are received in order: this one is taken once `received` reaches it.
+      const ticket = self.received + self.len() as u64;
+
+      while !self.closed && self.received < ticket {
+        self.wait_for_room();
+      }
     }
 
     self.lock.unlock();
+  }
+
+  /// Sends `value` if it can without waiting: `TrySendError::Full(value)` if the channel holds
+  /// as many values as it can (with capacity 0, if no receiver waits for one), and
+  /// `TrySendError::Closed(value)` if it is closed.
+  pub fn try_send(self, value: T) -> Result<(), TrySendError<T>> {
+    self.lock.lock();
+
+    if self.closed {
+      self.lock.unlock();
+      return Err(TrySendError::Closed(value));
+    }
+
+    const full = match self.capacity {
+      Some(0) => self.len() >= self.waiting,
+      Some(capacity) => self.len() >= capacity,
+      None => false,
+    };
+
+    if full {
+      self.lock.unlock();
+      return Err(TrySendError::Full(value));
+    }
+
+    self.push(value);
+    self.lock.unlock();
+    Ok(())
   }
 
   /// The value at the front of the queue, waiting until there is one; `None` once the channel
@@ -380,24 +446,69 @@ pub class Channel<T: Send> {
   pub fn receive(self) -> Option<T> {
     self.lock.lock();
 
-    while self.outbox.is_empty() {
-      if !self.inbox.is_empty() {
-        // The oldest value of the inbox ends up last in the outbox.
-        while move_newest(self.inbox, self.outbox) {}
-      } else if self.closed {
+    loop {
+      if let Some(value) = self.take() {
+        self.lock.unlock();
+        return Some(value);
+      }
+
+      if self.closed {
         self.lock.unlock();
         return None;
-      } else {
-        self.waiting += 1;
-        self.lock.wait();
-        self.waiting -= 1;
       }
-    }
 
-    const value = self.outbox.pop();
+      self.waiting += 1;
+      self.lock.wait();
+      self.waiting -= 1;
+    }
+  }
+
+  /// The value at the front of the queue if there is one: `TryReceiveError::Empty` if not, and
+  /// `TryReceiveError::Closed` once the channel is closed and empty.
+  pub fn try_receive(self) -> Result<T, TryReceiveError> {
+    self.lock.lock();
+
+    const value = self.take();
+    const closed = self.closed;
 
     self.lock.unlock();
-    value
+
+    match value {
+      Some(value) => Ok(value),
+      None => Err(if closed { TryReceiveError::Closed } else { TryReceiveError::Empty }),
+    }
+  }
+
+  /// `receive`, waiting at most `duration`: `ReceiveTimeoutError::Timeout` if no value came in
+  /// time, and `ReceiveTimeoutError::Closed` once the channel is closed and empty.
+  pub fn receive_timeout(self, duration: Duration) -> Result<T, ReceiveTimeoutError> {
+    const start = Instant::now();
+    const total = duration.as_nanos();
+
+    self.lock.lock();
+
+    loop {
+      if let Some(value) = self.take() {
+        self.lock.unlock();
+        return Ok(value);
+      }
+
+      if self.closed {
+        self.lock.unlock();
+        return Err(ReceiveTimeoutError::Closed);
+      }
+
+      const spent = start.elapsed().as_nanos();
+
+      if spent >= total {
+        self.lock.unlock();
+        return Err(ReceiveTimeoutError::Timeout);
+      }
+
+      self.waiting += 1;
+      self.lock.wait_timeout(total - spent);
+      self.waiting -= 1;
+    }
   }
 
   /// No more values can be sent; those already sent are still received. Closing it again does
@@ -406,6 +517,7 @@ pub class Channel<T: Send> {
     self.lock.lock();
     self.closed = true;
     self.lock.notify_all();
+    self.room.notify_all();
     self.lock.unlock();
   }
 
@@ -414,6 +526,71 @@ pub class Channel<T: Send> {
   pub fn iter(self) -> Iter<T> {
     new Iter<T>(() => self.receive())
   }
+
+  /// The values it holds, with the lock held.
+  prv fn len(self) -> usize {
+    self.inbox.len() + self.outbox.len()
+  }
+
+  /// Adds a value, with the lock held, and wakes the receivers waiting.
+  prv fn push(self, value: T) {
+    self.inbox.push(value);
+
+    if self.waiting > 0 {
+      self.lock.notify_all();
+    }
+  }
+
+  /// The next value, with the lock held, and wakes the senders waiting; `None` if there is none.
+  prv fn take(self) -> Option<T> {
+    if self.outbox.is_empty() {
+      // The oldest value of the inbox ends up last in the outbox.
+      while move_newest(self.inbox, self.outbox) {}
+    }
+
+    const value = self.outbox.pop();
+
+    if value.is_some() {
+      self.received += 1;
+
+      if self.senders > 0 {
+        self.room.notify_all();
+      }
+    }
+
+    value
+  }
+
+  /// Waits on `room`, with the lock held.
+  prv fn wait_for_room(self) {
+    self.senders += 1;
+    self.lock.wait_on(self.room);
+    self.senders -= 1;
+  }
+}
+
+/// Why `try_send` did not send a value, which it gives back, as Rust's `TrySendError`.
+pub enum TrySendError<T> {
+  /// The channel holds as many values as it can; with capacity 0, no receiver waits for one.
+  Full(T),
+  /// The channel is closed.
+  Closed(T),
+}
+
+/// Why `try_receive` returned no value, as Rust's `TryRecvError`.
+pub enum TryReceiveError {
+  /// The channel holds no value now.
+  Empty,
+  /// The channel is closed and empty.
+  Closed,
+}
+
+/// Why `receive_timeout` returned no value, as Rust's `RecvTimeoutError`.
+pub enum ReceiveTimeoutError {
+  /// No value came in time.
+  Timeout,
+  /// The channel is closed and empty.
+  Closed,
 }
 
 /// Moves the newest value of `from` to the end of `to`; false when `from` is empty.

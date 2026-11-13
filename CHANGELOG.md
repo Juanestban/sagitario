@@ -22,6 +22,10 @@ The sources say 0.32.0.
 
 ### Added
 
+- `Channel::bounded(capacity)`, whose `send` waits for room, or with 0 for a receiver, as Rust's
+  `sync_channel`; and `Channel::try_send`, `try_receive` and `receive_timeout`, with
+  `TrySendError`, `TryReceiveError` and `ReceiveTimeoutError`
+  ([ADR-0098](docs/adr/0098-locks-orderings-and-threads.md), increment 3).
 - `Mutex::lock` and `try_lock`, with a `MutexGuard` that releases the lock when it goes, as
   Rust's; `std::sync::Condvar`, `RwLock` with its read and write guards, and `Barrier`; and
   `TryLockError`, `WaitTimeoutResult` and `BarrierWaitResult`

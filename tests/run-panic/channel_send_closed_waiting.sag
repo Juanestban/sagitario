@@ -1,0 +1,19 @@
+// A send waiting for room on a full channel panics if the channel is closed meanwhile: its value
+// was never sent (docs/adr/0098-locks-orderings-and-threads.md, Q675).
+// expect-panic: send on a closed channel
+use std::sync::Channel;
+use std::thread;
+use std::time::Duration;
+
+fn main() {
+  const channel: Channel<i32> = Channel::bounded(1);
+
+  channel.send(1);
+
+  const _closer = thread::spawn(() => {
+    thread::sleep(Duration::from_millis(10));
+    channel.close();
+  });
+
+  channel.send(2);
+}
