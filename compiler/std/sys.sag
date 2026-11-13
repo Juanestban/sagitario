@@ -3047,18 +3047,35 @@ pub fn library_symbol(library: *mut c_void, name: String) -> Option<unsafe exter
 /// (docs/adr/0087-atomic-storage-and-std-sync.md, Q570).
 @cfg(unix)
 @repr(C)
-struct PthreadBuffer {
+pub struct PthreadBuffer {
   pub words: [u64; 8];
+}
+
+/// Room for `pthread_rwlock_t`: 56 bytes in glibc and 64-bit bionic, 40 in 32-bit bionic, 200 in
+/// Apple's C library (docs/adr/0098-locks-orderings-and-threads.md, Q673).
+@cfg(unix)
+@repr(C)
+pub struct RwLockBuffer {
+  pub words: [u64; 32];
 }
 
 @cfg(unix)
 extern "C" {
   fn pthread_mutex_init(mutex: *mut PthreadBuffer, attributes: *const c_void) -> c_int;
   fn pthread_mutex_lock(mutex: *mut PthreadBuffer) -> c_int;
+  fn pthread_mutex_trylock(mutex: *mut PthreadBuffer) -> c_int;
   fn pthread_mutex_unlock(mutex: *mut PthreadBuffer) -> c_int;
   fn pthread_cond_init(condition: *mut PthreadBuffer, attributes: *const c_void) -> c_int;
   fn pthread_cond_wait(condition: *mut PthreadBuffer, mutex: *mut PthreadBuffer) -> c_int;
+  fn pthread_cond_timedwait(condition: *mut PthreadBuffer, mutex: *mut PthreadBuffer, deadline: *const Timespec) -> c_int;
+  fn pthread_cond_signal(condition: *mut PthreadBuffer) -> c_int;
   fn pthread_cond_broadcast(condition: *mut PthreadBuffer) -> c_int;
+  fn pthread_rwlock_init(lock: *mut RwLockBuffer, attributes: *const c_void) -> c_int;
+  fn pthread_rwlock_rdlock(lock: *mut RwLockBuffer) -> c_int;
+  fn pthread_rwlock_tryrdlock(lock: *mut RwLockBuffer) -> c_int;
+  fn pthread_rwlock_wrlock(lock: *mut RwLockBuffer) -> c_int;
+  fn pthread_rwlock_trywrlock(lock: *mut RwLockBuffer) -> c_int;
+  fn pthread_rwlock_unlock(lock: *mut RwLockBuffer) -> c_int;
   /// `pthread_t` is an integer or a pointer, of the size of a pointer, on every supported system.
   fn pthread_self() -> usize;
 }
@@ -3073,25 +3090,63 @@ fn thread_id() -> usize {
 /// (docs/adr/0098-locks-orderings-and-threads.md, Q676).
 const SEQ_CST: i32 = 4;
 
-/// A lock with a condition, for `Mutex` and `Channel`. C changes the memory of its fields, which
-/// the generated C never declares `const`. They are never destroyed: Sagitario has no destructors,
-/// and the default mutexes and conditions of these C libraries hold nothing to free.
+/// A condition variable, which a thread holding a `Lock` waits on. It waits with one lock only,
+/// the first it waits with (docs/adr/0098-locks-orderings-and-threads.md, Q672).
+@cfg(unix)
+pub class Condition {
+  prv const condition: PthreadBuffer;
+  /// The `id()` of the lock it waits with, or 0 before its first wait.
+  prv const bound: Atomic<usize>;
+
+  pub fn new(self) {
+    self.condition = PthreadBuffer { words: [0u64; 8] };
+    self.bound = Atomic::new(0);
+
+    if (unsafe { pthread_cond_init(self.place(), 0 as *const c_void) }) != 0 {
+      panic("failed to create a condition variable");
+    }
+  }
+
+  pub fn place(self) -> *mut PthreadBuffer {
+    &raw const self.condition as *mut PthreadBuffer
+  }
+
+  /// Wakes one thread waiting on it.
+  pub fn notify_one(self) {
+    unsafe { pthread_cond_signal(self.place()); }
+  }
+
+  /// Wakes every thread waiting on it.
+  pub fn notify_all(self) {
+    unsafe { pthread_cond_broadcast(self.place()); }
+  }
+
+  /// Panics if it waited with another lock, as Rust's `Condvar` may.
+  pub fn bind(self, lock: usize) {
+    if let Err(found) = self.bound.compare_exchange(0, lock, SEQ_CST, SEQ_CST) {
+      if found != lock {
+        panic("attempted to use a condition variable with two mutexes");
+      }
+    }
+  }
+}
+
+/// A lock with a condition, for `Mutex`, `Channel` and `Barrier`. C changes the memory of its
+/// fields, which the generated C never declares `const`. They are never destroyed: the default
+/// mutexes and conditions of these C libraries hold nothing to free.
 @cfg(unix)
 pub class Lock {
   prv const mutex: PthreadBuffer;
-  prv const condition: PthreadBuffer;
+  prv const condition: Condition;
   /// The thread holding the lock, or 0.
   prv const owner: Atomic<usize>;
 
   pub fn new(self) {
     self.mutex = PthreadBuffer { words: [0u64; 8] };
-    self.condition = PthreadBuffer { words: [0u64; 8] };
+    self.condition = new Condition();
     self.owner = Atomic::new(0);
 
-    const failed = (unsafe { pthread_mutex_init(self.mutex_place(), 0 as *const c_void) }) != 0
-      || (unsafe { pthread_cond_init(self.condition_place(), 0 as *const c_void) }) != 0;
-
-    if failed {
+    if (unsafe { pthread_mutex_init(self.mutex_place(), 0 as *const c_void) }) != 0 {
       panic("failed to create a mutex");
     }
   }
@@ -3100,8 +3155,10 @@ pub class Lock {
     &raw const self.mutex as *mut PthreadBuffer
   }
 
-  prv fn condition_place(self) -> *mut PthreadBuffer {
-    &raw const self.condition as *mut PthreadBuffer
+  /// Its address, which names it for `Condition::bind` while it lives, as Rust's `Condvar`
+  /// checks it.
+  pub fn id(self) -> usize {
+    self.mutex_place() as usize
   }
 
   /// Takes the lock, waiting for it; panics if this thread holds it already.
@@ -3109,11 +3166,23 @@ pub class Lock {
     const me = thread_id();
 
     if self.owner.load(SEQ_CST) == me {
-      panic("a thread locked a `Mutex` it already holds: the function given to `update` must not use the same mutex");
+      panic("a thread locked a `Mutex` it already holds, through a guard or the function given to `update`");
     }
 
     unsafe { pthread_mutex_lock(self.mutex_place()); }
     self.owner.store(me, SEQ_CST);
+  }
+
+  /// Takes the lock if no thread holds it, this one included.
+  pub fn try_lock(self) -> bool {
+    const me = thread_id();
+
+    if self.owner.load(SEQ_CST) == me || (unsafe { pthread_mutex_trylock(self.mutex_place()) }) != 0 {
+      return false;
+    }
+
+    self.owner.store(me, SEQ_CST);
+    true
   }
 
   pub fn unlock(self) {
@@ -3121,32 +3190,129 @@ pub class Lock {
     unsafe { pthread_mutex_unlock(self.mutex_place()); }
   }
 
-  /// Releases the lock, which this thread holds, until another thread calls `notify_all`, then
-  /// takes it again. It may also return without one.
+  /// Releases the lock, which this thread holds, until another thread notifies its condition,
+  /// then takes it again. It may also return without a notification.
   pub fn wait(self) {
+    self.wait_on(self.condition);
+  }
+
+  /// `wait` for at most `nanos` nanoseconds: whether they ran out.
+  pub fn wait_timeout(self, nanos: u64) -> bool {
+    self.wait_on_timeout(self.condition, nanos)
+  }
+
+  /// `wait`, on another condition.
+  pub fn wait_on(self, condition: Condition) {
+    condition.bind(self.id());
     self.owner.store(0, SEQ_CST);
-    unsafe { pthread_cond_wait(self.condition_place(), self.mutex_place()); }
+    unsafe { pthread_cond_wait(condition.place(), self.mutex_place()); }
     self.owner.store(thread_id(), SEQ_CST);
+  }
+
+  /// `wait_timeout`, on another condition. The condition waits until a time of the system clock,
+  /// which may change, so whether the time ran out is measured on the monotonic one.
+  pub fn wait_on_timeout(self, condition: Condition, nanos: u64) -> bool {
+    condition.bind(self.id());
+
+    const start = monotonic_nanos();
+    const now = system_nanos();
+    const deadline = if nanos > u64::MAX - now { u64::MAX } else { now + nanos };
+    const until = Timespec::of(deadline / 1_000_000_000, deadline % 1_000_000_000);
+
+    self.owner.store(0, SEQ_CST);
+    unsafe { pthread_cond_timedwait(condition.place(), self.mutex_place(), &until); }
+    self.owner.store(thread_id(), SEQ_CST);
+    monotonic_nanos() - start >= nanos
+  }
+
+  /// Wakes one thread waiting on the lock.
+  pub fn notify_one(self) {
+    self.condition.notify_one();
   }
 
   /// Wakes every thread waiting on the lock.
   pub fn notify_all(self) {
-    unsafe { pthread_cond_broadcast(self.condition_place()); }
+    self.condition.notify_all();
+  }
+}
+
+/// A lock that many threads hold to read, or one to write. The thread writing is kept, to panic
+/// when it takes the lock again.
+@cfg(unix)
+pub class RwLock {
+  prv const lock: RwLockBuffer;
+  prv const writer: Atomic<usize>;
+
+  pub fn new(self) {
+    self.lock = RwLockBuffer { words: [0u64; 32] };
+    self.writer = Atomic::new(0);
+
+    if (unsafe { pthread_rwlock_init(self.place(), 0 as *const c_void) }) != 0 {
+      panic("failed to create a read-write lock");
+    }
+  }
+
+  prv fn place(self) -> *mut RwLockBuffer {
+    &raw const self.lock as *mut RwLockBuffer
+  }
+
+  prv fn check(self) {
+    if self.writer.load(SEQ_CST) == thread_id() {
+      panic("a thread locked a `RwLock` it already holds for writing");
+    }
+  }
+
+  pub fn read(self) {
+    self.check();
+    unsafe { pthread_rwlock_rdlock(self.place()); }
+  }
+
+  pub fn try_read(self) -> bool {
+    self.writer.load(SEQ_CST) != thread_id() && (unsafe { pthread_rwlock_tryrdlock(self.place()) }) == 0
+  }
+
+  pub fn write(self) {
+    self.check();
+    unsafe { pthread_rwlock_wrlock(self.place()); }
+    self.writer.store(thread_id(), SEQ_CST);
+  }
+
+  pub fn try_write(self) -> bool {
+    if self.writer.load(SEQ_CST) == thread_id() || (unsafe { pthread_rwlock_trywrlock(self.place()) }) != 0 {
+      return false;
+    }
+
+    self.writer.store(thread_id(), SEQ_CST);
+    true
+  }
+
+  pub fn unlock_read(self) {
+    unsafe { pthread_rwlock_unlock(self.place()); }
+  }
+
+  pub fn unlock_write(self) {
+    self.writer.store(0, SEQ_CST);
+    unsafe { pthread_rwlock_unlock(self.place()); }
   }
 }
 
 /// `SRWLOCK` and `CONDITION_VARIABLE`: one pointer each, which starts as zero.
 @cfg(windows)
 @repr(C)
-struct WinLockCell {
+pub struct WinLockCell {
   pub value: usize;
 }
 
 @cfg(windows)
 extern "C" {
   fn AcquireSRWLockExclusive(lock: *mut WinLockCell);
+  fn TryAcquireSRWLockExclusive(lock: *mut WinLockCell) -> u8;
   fn ReleaseSRWLockExclusive(lock: *mut WinLockCell);
+  fn AcquireSRWLockShared(lock: *mut WinLockCell);
+  fn TryAcquireSRWLockShared(lock: *mut WinLockCell) -> u8;
+  fn ReleaseSRWLockShared(lock: *mut WinLockCell);
   fn SleepConditionVariableSRW(condition: *mut WinLockCell, lock: *mut WinLockCell, milliseconds: u32, flags: u32) -> c_int;
+  fn WakeConditionVariable(condition: *mut WinLockCell);
   fn WakeAllConditionVariable(condition: *mut WinLockCell);
 }
 
@@ -3156,19 +3322,54 @@ fn thread_id() -> usize {
   (unsafe { GetCurrentThreadId() }) as usize
 }
 
-/// A lock with a condition, for `Mutex` and `Channel`. C changes the memory of its fields, which
-/// the generated C never declares `const`; `SRWLOCK_INIT` and `CONDITION_VARIABLE_INIT` are zero,
-/// and neither is destroyed.
+/// A condition variable, which a thread holding a `Lock` waits on, with one lock only.
+/// `CONDITION_VARIABLE_INIT` is zero, and it is not destroyed.
+@cfg(windows)
+pub class Condition {
+  prv const condition: WinLockCell;
+  /// The `id()` of the lock it waits with, or 0 before its first wait.
+  prv const bound: Atomic<usize>;
+
+  pub fn new(self) {
+    self.condition = WinLockCell { value: 0 };
+    self.bound = Atomic::new(0);
+  }
+
+  pub fn place(self) -> *mut WinLockCell {
+    &raw const self.condition as *mut WinLockCell
+  }
+
+  pub fn notify_one(self) {
+    unsafe { WakeConditionVariable(self.place()); }
+  }
+
+  pub fn notify_all(self) {
+    unsafe { WakeAllConditionVariable(self.place()); }
+  }
+
+  /// Panics if it waited with another lock, as Rust's `Condvar` may.
+  pub fn bind(self, lock: usize) {
+    if let Err(found) = self.bound.compare_exchange(0, lock, SEQ_CST, SEQ_CST) {
+      if found != lock {
+        panic("attempted to use a condition variable with two mutexes");
+      }
+    }
+  }
+}
+
+/// A lock with a condition, for `Mutex`, `Channel` and `Barrier`. C changes the memory of its
+/// fields, which the generated C never declares `const`; `SRWLOCK_INIT` is zero, and it is not
+/// destroyed.
 @cfg(windows)
 pub class Lock {
   prv const srw: WinLockCell;
-  prv const condition: WinLockCell;
+  prv const condition: Condition;
   /// The thread holding the lock, or 0.
   prv const owner: Atomic<usize>;
 
   pub fn new(self) {
     self.srw = WinLockCell { value: 0 };
-    self.condition = WinLockCell { value: 0 };
+    self.condition = new Condition();
     self.owner = Atomic::new(0);
   }
 
@@ -3176,8 +3377,9 @@ pub class Lock {
     &raw const self.srw as *mut WinLockCell
   }
 
-  prv fn condition_place(self) -> *mut WinLockCell {
-    &raw const self.condition as *mut WinLockCell
+  /// Its address, which names it for `Condition::bind` while it lives.
+  pub fn id(self) -> usize {
+    self.srw_place() as usize
   }
 
   /// Takes the lock, waiting for it; panics if this thread holds it already.
@@ -3185,11 +3387,23 @@ pub class Lock {
     const me = thread_id();
 
     if self.owner.load(SEQ_CST) == me {
-      panic("a thread locked a `Mutex` it already holds: the function given to `update` must not use the same mutex");
+      panic("a thread locked a `Mutex` it already holds, through a guard or the function given to `update`");
     }
 
     unsafe { AcquireSRWLockExclusive(self.srw_place()); }
     self.owner.store(me, SEQ_CST);
+  }
+
+  /// Takes the lock if no thread holds it, this one included.
+  pub fn try_lock(self) -> bool {
+    const me = thread_id();
+
+    if self.owner.load(SEQ_CST) == me || (unsafe { TryAcquireSRWLockExclusive(self.srw_place()) }) == 0 {
+      return false;
+    }
+
+    self.owner.store(me, SEQ_CST);
+    true
   }
 
   pub fn unlock(self) {
@@ -3197,18 +3411,132 @@ pub class Lock {
     unsafe { ReleaseSRWLockExclusive(self.srw_place()); }
   }
 
-  /// Releases the lock, which this thread holds, until another thread calls `notify_all`, then
-  /// takes it again. It may also return without one.
+  /// Releases the lock, which this thread holds, until another thread notifies its condition,
+  /// then takes it again. It may also return without a notification.
   pub fn wait(self) {
+    self.wait_on(self.condition);
+  }
+
+  /// `wait` for at most `nanos` nanoseconds: whether they ran out.
+  pub fn wait_timeout(self, nanos: u64) -> bool {
+    self.wait_on_timeout(self.condition, nanos)
+  }
+
+  /// `wait`, on another condition.
+  pub fn wait_on(self, condition: Condition) {
+    condition.bind(self.id());
     self.owner.store(0, SEQ_CST);
-    unsafe { SleepConditionVariableSRW(self.condition_place(), self.srw_place(), INFINITE, 0); }
+    unsafe { SleepConditionVariableSRW(condition.place(), self.srw_place(), INFINITE, 0); }
     self.owner.store(thread_id(), SEQ_CST);
+  }
+
+  /// `wait_timeout`, on another condition, in whole milliseconds rounded up; a longer wait than
+  /// Windows takes returns early, which a wait may.
+  pub fn wait_on_timeout(self, condition: Condition, nanos: u64) -> bool {
+    condition.bind(self.id());
+
+    const start = monotonic_nanos();
+    const millis = nanos / 1_000_000 + if nanos % 1_000_000 != 0 { 1 } else { 0 };
+    const bounded = if millis >= INFINITE as u64 { INFINITE - 1 } else { millis as u32 };
+
+    self.owner.store(0, SEQ_CST);
+    unsafe { SleepConditionVariableSRW(condition.place(), self.srw_place(), bounded, 0); }
+    self.owner.store(thread_id(), SEQ_CST);
+    monotonic_nanos() - start >= nanos
+  }
+
+  /// Wakes one thread waiting on the lock.
+  pub fn notify_one(self) {
+    self.condition.notify_one();
   }
 
   /// Wakes every thread waiting on the lock.
   pub fn notify_all(self) {
-    unsafe { WakeAllConditionVariable(self.condition_place()); }
+    self.condition.notify_all();
   }
+}
+
+/// A lock that many threads hold to read, or one to write: an `SRWLOCK`, taken shared or
+/// exclusive. The thread writing is kept, to panic when it takes the lock again.
+@cfg(windows)
+pub class RwLock {
+  prv const srw: WinLockCell;
+  prv const writer: Atomic<usize>;
+
+  pub fn new(self) {
+    self.srw = WinLockCell { value: 0 };
+    self.writer = Atomic::new(0);
+  }
+
+  prv fn place(self) -> *mut WinLockCell {
+    &raw const self.srw as *mut WinLockCell
+  }
+
+  prv fn check(self) {
+    if self.writer.load(SEQ_CST) == thread_id() {
+      panic("a thread locked a `RwLock` it already holds for writing");
+    }
+  }
+
+  pub fn read(self) {
+    self.check();
+    unsafe { AcquireSRWLockShared(self.place()); }
+  }
+
+  pub fn try_read(self) -> bool {
+    self.writer.load(SEQ_CST) != thread_id() && (unsafe { TryAcquireSRWLockShared(self.place()) }) != 0
+  }
+
+  pub fn write(self) {
+    self.check();
+    unsafe { AcquireSRWLockExclusive(self.place()); }
+    self.writer.store(thread_id(), SEQ_CST);
+  }
+
+  pub fn try_write(self) -> bool {
+    if self.writer.load(SEQ_CST) == thread_id() || (unsafe { TryAcquireSRWLockExclusive(self.place()) }) == 0 {
+      return false;
+    }
+
+    self.writer.store(thread_id(), SEQ_CST);
+    true
+  }
+
+  pub fn unlock_read(self) {
+    unsafe { ReleaseSRWLockShared(self.place()); }
+  }
+
+  pub fn unlock_write(self) {
+    self.writer.store(0, SEQ_CST);
+    unsafe { ReleaseSRWLockExclusive(self.place()); }
+  }
+}
+
+/// The lock and the value of a `Mutex`, which it shares with its guards.
+pub class Locked<T> {
+  pub const lock: Lock;
+  pub var value: T;
+
+  pub fn new(self, value: T) {
+    self.lock = new Lock();
+    self.value = value;
+  }
+}
+
+/// The lock and the value of an `RwLock`, which it shares with its guards.
+pub class ReadWriteLocked<T> {
+  pub const lock: RwLock;
+  pub var value: T;
+
+  pub fn new(self, value: T) {
+    self.lock = new RwLock();
+    self.value = value;
+  }
+}
+
+/// A `bool` that `std::sync` gives the results it makes, whose initializers programs cannot call.
+pub struct Flag {
+  pub value: bool;
 }
 
 // ---- Threads ----------------------------------------------------------------------------------

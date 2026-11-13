@@ -7,41 +7,332 @@
 
 use std::sys;
 use std::sys::Atomic;
+use std::time::{Duration, Instant};
 
 /// A value that threads share, changed by one thread at a time. `T` must be `Send`, so that what
 /// `get` returns can go on living in any thread.
 pub class Mutex<T: Send> {
-  prv const lock: sys::Lock;
-  prv var value: T;
+  prv const locked: sys::Locked<T>;
 
   pub fn new(self, value: T) {
-    self.lock = new sys::Lock();
-    self.value = value;
+    self.locked = new sys::Locked(value);
+  }
+
+  /// Waits for the lock and holds it until the guard goes
+  /// (docs/adr/0098-locks-orderings-and-threads.md, Q671). A thread locking a mutex it holds
+  /// panics.
+  pub fn lock(self) -> MutexGuard<T> {
+    self.locked.lock.lock();
+    new MutexGuard(self.locked)
+  }
+
+  /// The guard if no thread holds the lock, this one included; `TryLockError::WouldBlock` if not.
+  pub fn try_lock(self) -> Result<MutexGuard<T>, TryLockError> {
+    if self.locked.lock.try_lock() { Ok(new MutexGuard(self.locked)) } else { Err(TryLockError::WouldBlock) }
   }
 
   /// A copy of the value.
   pub fn get(self) -> T {
-    self.lock.lock();
-    const value = self.value;
-    self.lock.unlock();
+    self.locked.lock.lock();
+    const value = self.locked.value;
+    self.locked.lock.unlock();
     value
   }
 
   /// Replaces the value.
   pub fn set(self, value: T) {
-    self.lock.lock();
-    self.value = value;
-    self.lock.unlock();
+    self.locked.lock.lock();
+    self.locked.value = value;
+    self.locked.lock.unlock();
   }
 
   /// Replaces the value with what `f` returns for it, while no other thread can use the mutex,
   /// and returns the new value. `f` must not use this mutex: that panics.
   pub fn update(self, f: fn(T) -> T) -> T {
-    self.lock.lock();
-    const next = f(self.value);
-    self.value = next;
-    self.lock.unlock();
+    self.locked.lock.lock();
+    const next = f(self.locked.value);
+    self.locked.value = next;
+    self.locked.lock.unlock();
     next
+  }
+}
+
+/// Why `try_lock`, `try_read` or `try_write` did not take a lock, as Rust's `TryLockError`
+/// without poisoning, since a panic ends the program.
+pub enum TryLockError {
+  /// Another thread, or this one, holds it.
+  WouldBlock,
+}
+
+/// The lock of a `Mutex`, held until the guard's last reference goes: for a guard in a local, the
+/// end of its scope. It is not `Send`: the thread that took the lock releases it.
+pub class MutexGuard<T: Send> impl Drop {
+  prv const locked: sys::Locked<T>;
+
+  /// The guard of a lock already taken; only `Mutex` has one to give.
+  pub fn new(self, locked: sys::Locked<T>) {
+    self.locked = locked;
+  }
+
+  /// A copy of the value.
+  pub fn get(self) -> T {
+    self.locked.value
+  }
+
+  /// Replaces the value.
+  pub fn set(self, value: T) {
+    self.locked.value = value;
+  }
+
+  /// `Condvar::wait`, which calls it with its condition, which only `Condvar` has.
+  pub fn wait_on(self, condition: sys::Condition) {
+    self.locked.lock.wait_on(condition);
+  }
+
+  /// `Condvar::wait_timeout`: whether the time ran out.
+  pub fn wait_on_timeout(self, condition: sys::Condition, nanos: u64) -> bool {
+    self.locked.lock.wait_on_timeout(condition, nanos)
+  }
+
+  pub fn drop(self) {
+    self.locked.lock.unlock();
+  }
+}
+
+/// Whether `Condvar::wait_timeout` returned because its time ran out.
+pub class WaitTimeoutResult {
+  prv const ran_out: bool;
+
+  /// Only `Condvar` makes one.
+  pub fn new(self, ran_out: sys::Flag) {
+    self.ran_out = ran_out.value;
+  }
+
+  pub fn timed_out(self) -> bool {
+    self.ran_out
+  }
+}
+
+/// A condition variable, as Rust's `Condvar`: threads holding a `MutexGuard` wait on it until
+/// another thread notifies it (docs/adr/0098-locks-orderings-and-threads.md, Q672). It waits with
+/// one mutex: waiting with another panics.
+pub class Condvar {
+  prv const condition: sys::Condition;
+
+  pub fn new(self) {
+    self.condition = new sys::Condition();
+  }
+
+  /// Releases the guard's lock until the condition is notified, then takes it again and gives the
+  /// guard back. It may also return without a notification, as Rust's.
+  pub fn wait<T: Send>(self, guard: MutexGuard<T>) -> MutexGuard<T> {
+    guard.wait_on(self.condition);
+    guard
+  }
+
+  /// Waits while `condition` holds for the value: the guard once it does not.
+  pub fn wait_while<T: Send>(self, guard: MutexGuard<T>, condition: fn(T) -> bool) -> MutexGuard<T> {
+    while condition(guard.get()) {
+      guard.wait_on(self.condition);
+    }
+
+    guard
+  }
+
+  /// `wait` for at most `duration`.
+  pub fn wait_timeout<T: Send>(self, guard: MutexGuard<T>, duration: Duration) -> (MutexGuard<T>, WaitTimeoutResult) {
+    const ran_out = guard.wait_on_timeout(self.condition, duration.as_nanos());
+
+    (guard, new WaitTimeoutResult(sys::Flag { value: ran_out }))
+  }
+
+  /// `wait_while` for at most `duration`: it timed out if the time ran out while `condition`
+  /// still held.
+  pub fn wait_timeout_while<T: Send>(self, guard: MutexGuard<T>, duration: Duration, condition: fn(T) -> bool) -> (MutexGuard<T>, WaitTimeoutResult) {
+    const start = Instant::now();
+    const total = duration.as_nanos();
+
+    while condition(guard.get()) {
+      const spent = start.elapsed().as_nanos();
+
+      if spent >= total {
+        return (guard, new WaitTimeoutResult(sys::Flag { value: true }));
+      }
+
+      guard.wait_on_timeout(self.condition, total - spent);
+    }
+
+    (guard, new WaitTimeoutResult(sys::Flag { value: false }))
+  }
+
+  /// Wakes one thread waiting on it.
+  pub fn notify_one(self) {
+    self.condition.notify_one();
+  }
+
+  /// Wakes every thread waiting on it.
+  pub fn notify_all(self) {
+    self.condition.notify_all();
+  }
+}
+
+/// A value that many threads read at once, or one writes, as Rust's `RwLock`
+/// (docs/adr/0098-locks-orderings-and-threads.md, Q673).
+pub class RwLock<T: Send> {
+  prv const locked: sys::ReadWriteLocked<T>;
+
+  pub fn new(self, value: T) {
+    self.locked = new sys::ReadWriteLocked(value);
+  }
+
+  /// Waits until no thread writes, and reads until the guard goes. A thread writing it panics;
+  /// one reading it already may wait forever if a writer waits, as Rust's says.
+  pub fn read(self) -> RwLockReadGuard<T> {
+    self.locked.lock.read();
+    new RwLockReadGuard(self.locked)
+  }
+
+  /// Waits until no thread reads or writes, and writes until the guard goes. A thread writing it
+  /// already panics.
+  pub fn write(self) -> RwLockWriteGuard<T> {
+    self.locked.lock.write();
+    new RwLockWriteGuard(self.locked)
+  }
+
+  /// The guard if no thread writes; `TryLockError::WouldBlock` if one does.
+  pub fn try_read(self) -> Result<RwLockReadGuard<T>, TryLockError> {
+    if self.locked.lock.try_read() { Ok(new RwLockReadGuard(self.locked)) } else { Err(TryLockError::WouldBlock) }
+  }
+
+  /// The guard if no thread reads or writes; `TryLockError::WouldBlock` if one does.
+  pub fn try_write(self) -> Result<RwLockWriteGuard<T>, TryLockError> {
+    if self.locked.lock.try_write() { Ok(new RwLockWriteGuard(self.locked)) } else { Err(TryLockError::WouldBlock) }
+  }
+
+  /// A copy of the value, read while others may read it too.
+  pub fn get(self) -> T {
+    self.locked.lock.read();
+    const value = self.locked.value;
+    self.locked.lock.unlock_read();
+    value
+  }
+
+  /// Replaces the value.
+  pub fn set(self, value: T) {
+    self.locked.lock.write();
+    self.locked.value = value;
+    self.locked.lock.unlock_write();
+  }
+
+  /// Replaces the value with what `f` returns for it, while no other thread can use the lock,
+  /// and returns the new value.
+  pub fn update(self, f: fn(T) -> T) -> T {
+    self.locked.lock.write();
+    const next = f(self.locked.value);
+    self.locked.value = next;
+    self.locked.lock.unlock_write();
+    next
+  }
+}
+
+/// The reading lock of an `RwLock`, held until the guard goes; not `Send`.
+pub class RwLockReadGuard<T: Send> impl Drop {
+  prv const locked: sys::ReadWriteLocked<T>;
+
+  /// The guard of a lock already taken; only `RwLock` has one to give.
+  pub fn new(self, locked: sys::ReadWriteLocked<T>) {
+    self.locked = locked;
+  }
+
+  /// A copy of the value.
+  pub fn get(self) -> T {
+    self.locked.value
+  }
+
+  pub fn drop(self) {
+    self.locked.lock.unlock_read();
+  }
+}
+
+/// The writing lock of an `RwLock`, held until the guard goes; not `Send`.
+pub class RwLockWriteGuard<T: Send> impl Drop {
+  prv const locked: sys::ReadWriteLocked<T>;
+
+  /// The guard of a lock already taken; only `RwLock` has one to give.
+  pub fn new(self, locked: sys::ReadWriteLocked<T>) {
+    self.locked = locked;
+  }
+
+  /// A copy of the value.
+  pub fn get(self) -> T {
+    self.locked.value
+  }
+
+  /// Replaces the value.
+  pub fn set(self, value: T) {
+    self.locked.value = value;
+  }
+
+  pub fn drop(self) {
+    self.locked.lock.unlock_write();
+  }
+}
+
+/// Whether a thread is the one `Barrier::wait` chose among those it let go together.
+pub class BarrierWaitResult {
+  prv const leader: bool;
+
+  /// Only `Barrier` makes one.
+  pub fn new(self, leader: sys::Flag) {
+    self.leader = leader.value;
+  }
+
+  pub fn is_leader(self) -> bool {
+    self.leader
+  }
+}
+
+/// A point where a number of threads wait for each other, as Rust's `Barrier`
+/// (docs/adr/0098-locks-orderings-and-threads.md, Q674); it can be used again.
+pub class Barrier {
+  prv const lock: sys::Lock;
+  prv const count: usize;
+  prv var waiting: usize;
+  /// How many times it let the threads go, so that a waiting thread knows when it did.
+  prv var generation: usize;
+
+  /// A barrier for `count` threads; 0 is as 1.
+  pub fn new(self, count: usize) {
+    self.lock = new sys::Lock();
+    self.count = if count == 0 { 1 } else { count };
+    self.waiting = 0;
+    self.generation = 0;
+  }
+
+  /// Waits until `count` threads have called it, then lets them all go; one of them is the
+  /// leader.
+  pub fn wait(self) -> BarrierWaitResult {
+    self.lock.lock();
+
+    const generation = self.generation;
+
+    self.waiting += 1;
+
+    if self.waiting < self.count {
+      while generation == self.generation {
+        self.lock.wait();
+      }
+
+      self.lock.unlock();
+
+      return new BarrierWaitResult(sys::Flag { value: false });
+    }
+
+    self.waiting = 0;
+    self.generation = self.generation.wrapping_add(1);
+    self.lock.notify_all();
+    self.lock.unlock();
+    new BarrierWaitResult(sys::Flag { value: true })
   }
 }
 

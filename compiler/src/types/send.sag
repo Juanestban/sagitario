@@ -12,20 +12,26 @@ use pkg::types::Checker;
 use pkg::types;
 use pkg::types::exprs;
 
-/// Finds the classes of `std::sync`, if the program uses it, in declaration order.
+/// Finds the classes of `std::sync`, if the program uses it, in declaration order, and apart
+/// its guards, whose names end in `Guard`.
 pub fn sync_classes(cx: Checker) {
   for module in cx.resolution.modules {
     if module.in_std && module.path.len() == 2 && module.path[0] == "std" && module.path[1] == "sync" {
       const classes: List<u32> = new List();
+      const guards: List<u32> = new List();
 
-      for declared in module.items.values() {
-        if let ItemRef::Type(TypeItem::Class(id)) = declared.item {
-          classes.push(id);
+      for name in module.items.keys() {
+        if let Some(declared) = module.items.get(name) {
+          if let ItemRef::Type(TypeItem::Class(id)) = declared.item {
+            if name.ends_with("Guard") { guards.push(id); } else { classes.push(id); }
+          }
         }
       }
 
       classes.sort();
+      guards.sort();
       cx.typed.sync_classes = classes;
+      cx.typed.guard_classes = guards;
 
       return;
     }

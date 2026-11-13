@@ -22,6 +22,10 @@ The sources say 0.32.0.
 
 ### Added
 
+- `Mutex::lock` and `try_lock`, with a `MutexGuard` that releases the lock when it goes, as
+  Rust's; `std::sync::Condvar`, `RwLock` with its read and write guards, and `Barrier`; and
+  `TryLockError`, `WaitTimeoutResult` and `BarrierWaitResult`
+  ([ADR-0098](docs/adr/0098-locks-orderings-and-threads.md), increment 2).
 - `std::sync::Ordering` and `fence`; `AtomicI8`, `AtomicU8`, `AtomicI16`, `AtomicU16`,
   `AtomicIsize` and `AtomicPtr<T>`; `fetch_and`, `fetch_or`, `fetch_xor`, `fetch_nand`,
   `fetch_max`, `fetch_min`, `fetch_update` and `compare_exchange_weak` on the atomics, and

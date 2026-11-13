@@ -235,8 +235,11 @@ pub class TypedModule {
   /// The vtable slot of each method dispatched dynamically.
   pub var slots: Map<u32, usize>;
   pub var prelude: PreludeItems;
-  /// The classes of `std::sync`.
+  /// The classes of `std::sync`, `Send` by name, other than its guards.
   pub var sync_classes: List<u32>;
+  /// The guards of `std::sync`, never `Send`: the thread that took a lock releases it
+  /// (docs/adr/0098-locks-orderings-and-threads.md, Q671).
+  pub var guard_classes: List<u32>;
   /// The type of each module-level constant.
   pub var const_types: List<Type>;
   /// The value of each module-level constant, or `None` if it has an error.
@@ -325,6 +328,7 @@ pub class TypedModule {
       drop: None,
     };
     self.sync_classes = new List();
+    self.guard_classes = new List();
     self.const_types = new List();
     self.static_values = new List();
     self.const_values = new List();
@@ -1436,6 +1440,10 @@ pub class TypedModule {
         reason
       }
       TypeKind::Class(named) => {
+        if self.guard_classes.contains(named.id) {
+          return Some("`" + named.name + "` holds a lock, which the thread that took it releases");
+        }
+
         if self.sync_classes.contains(named.id) {
           for arg in named.args {
             if let Some(reason) = self.not_send(arg, visiting) {

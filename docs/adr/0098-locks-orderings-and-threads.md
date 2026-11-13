@@ -115,3 +115,17 @@ fn main() {
   `fetch_and` on `atomic_bool`). `Atomic<*mut T>` in a generic class needed the type
   substitution to enter `Atomic`, which it never had to. The existing tests and the spec use
   `Ordering::SeqCst`, or `Relaxed` where only counting matters.
+- Increment 2 is done. `std::sys` gains `Condition`, a condition variable that remembers the
+  first `Lock` it waits with, by its address, as Rust's `Condvar` checks it (a static count would
+  have been an atomic in every program, which `SAG_THREADS` would then have compiled), `RwLock`
+  (`pthread_rwlock_t` in 256 bytes, or an `SRWLOCK` taken shared or exclusive), `try_lock`,
+  `notify_one` and timed waits on `Lock`, and `Locked<T>` and `ReadWriteLocked<T>`, the lock and
+  value a `Mutex` or an `RwLock` shares with its guards: `prv` is private to its type, so
+  classes of one module cannot reach each other's members, and a `pub` method naming a private
+  type is warned about. For the same reason the initializers of the guards and of the two
+  results are public and take types of `std::sys`, which programs cannot name, as
+  `Metadata::from_system` does. A timed wait on POSIX systems waits until a time of the system
+  clock, `pthread_cond_timedwait`'s, and says whether the time ran out by the monotonic one. The
+  compiler keeps the classes of `std::sync` whose names end in `Guard` out of those that are
+  `Send` by name, with their own reason. A guard that is a temporary lives until the end of its
+  statement, as in Rust, which the spec says.

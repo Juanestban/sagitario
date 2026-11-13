@@ -643,6 +643,8 @@ reaches without passing it: `static HITS: AtomicI64 = new AtomicI64(0);`.
 | `Mutex<T: Send>` | A value that threads share, changed by one thread at a time |
 | `new Mutex(value)`, `m.get() -> T`, `m.set(value)` | Creates it, copies the value out, replaces it |
 | `m.update(f: fn(T) -> T) -> T` | Replaces the value with `f(value)` while no other thread can use the mutex, and returns the new value |
+| `m.lock() -> MutexGuard<T>`, `m.try_lock()` | Holds the lock until the guard goes ([locks](#lock-guards-and-conditions)) |
+| `Condvar`, `RwLock<T: Send>`, `Barrier` | A condition to wait on, a lock for many readers or one writer, a meeting point of threads |
 | `AtomicBool`, `AtomicI8`, `AtomicI16`, `AtomicI32`, `AtomicI64`, `AtomicIsize`, `AtomicU8`, `AtomicU16`, `AtomicU32`, `AtomicU64`, `AtomicUsize` | A value of that type that threads read and change at once ([atomics](#atomics)) |
 | `AtomicPtr<T>` | A `*mut T` that threads read and change at once |
 | `Channel<T: Send>` | A queue of values that threads send to each other, without a limit |
@@ -653,11 +655,60 @@ reaches without passing it: `static HITS: AtomicI64 = new AtomicI64(0);`.
 
 - `Mutex<T>` and the atomics are `Send` (a `Mutex<T>` when `T` is), so threads can capture
   them. Since `T` must be `Send`, a mutex cannot hold a `List` or a class with `var` fields.
-- There are no lock guards: every method takes and releases the lock itself. A thread using a
-  mutex inside the function it gave to `update` of the same mutex panics instead of waiting
+- `get`, `set` and `update` take and release the lock themselves. A thread locking a mutex it
+  holds, through a guard or inside the function it gave to `update`, panics instead of waiting
   forever.
 - Any thread holding a channel may send, receive or close it. Several receivers share the
   values: each value goes to one of them.
+
+### Lock guards and conditions
+
+Rationale: [ADR-0098](../adr/0098-locks-orderings-and-threads.md), Q671–Q674. As Rust's, without
+poisoning: a panic ends the whole program, so no lock is left held by a thread that failed.
+
+```sag
+use std::sync::{Condvar, Mutex};
+
+const queue = new Mutex(0);
+const changed = new Condvar();
+const worker = thread::spawn(() => {
+  const guard = queue.lock();            // held until the end of this scope
+
+  guard.set(guard.get() + 1);
+  changed.notify_one();
+});
+const guard = changed.wait_while(queue.lock(), (count) => count == 0);
+```
+
+| Item | Meaning |
+|---|---|
+| `m.lock() -> MutexGuard<T>` | Waits for the lock of the `Mutex` and holds it until the guard goes |
+| `m.try_lock() -> Result<MutexGuard<T>, TryLockError>` | The guard if no thread holds the lock, this one included; else `Err(TryLockError::WouldBlock)` |
+| `guard.get() -> T`, `guard.set(value)` | A copy of the value; replaces it |
+| `new Condvar()` | A condition that threads holding a `MutexGuard` wait on |
+| `c.wait(guard) -> MutexGuard<T>` | Releases the lock until the condition is notified, then takes it again; it may also return without a notification |
+| `c.wait_while(guard, condition: fn(T) -> bool) -> MutexGuard<T>` | Waits while `condition` holds for the value |
+| `c.wait_timeout(guard, duration)`, `c.wait_timeout_while(guard, duration, condition)` | The same for at most `duration`: `(MutexGuard<T>, WaitTimeoutResult)`, whose `timed_out()` says whether the time ran out (while `condition` still held) |
+| `c.notify_one()`, `c.notify_all()` | Wakes one, or every, thread waiting on it |
+| `new RwLock(value)` | A value that many threads read at once, or one writes |
+| `r.read() -> RwLockReadGuard<T>`, `r.write() -> RwLockWriteGuard<T>` | Holds the lock to read (`get`) or to write (`get`, `set`) until the guard goes |
+| `r.try_read()`, `r.try_write()` | The guard, or `Err(TryLockError::WouldBlock)` if another thread writes, or reads or writes |
+| `r.get()`, `r.set(value)`, `r.update(f)` | As `Mutex`'s; `get` reads while others read too |
+| `new Barrier(count)`, `b.wait() -> BarrierWaitResult` | Waits until `count` threads have called it (0 is as 1), then lets them go together; `is_leader()` is true for one of them. It can be used again |
+
+- A guard is released when its last reference goes: a guard in a local at the end of its scope, a
+  temporary at the end of its statement, as in Rust. So `m.lock().get() + m.get()` locks the
+  mutex twice in one statement, and panics. A guard kept in a field or a list holds the lock until
+  it goes.
+- The guards are not `Send` (`E0330`, `E0332`): the thread that took a lock releases it. The
+  mutex, the condition, the `RwLock` and the barrier are, and threads share them.
+- A `Condvar` waits with one mutex: waiting with another panics
+  (`attempted to use a condition variable with two mutexes`), as Rust's may.
+- A thread writing an `RwLock` that takes it again panics; one reading it that reads again may
+  wait forever if a writer waits in between, as Rust's says.
+- `MutexGuard::new`, `RwLockReadGuard::new`, `RwLockWriteGuard::new`, `WaitTimeoutResult::new` and
+  `BarrierWaitResult::new` take types of `std::sys`, which programs cannot name: only the lock or
+  the condition makes them.
 
 ### Atomics
 

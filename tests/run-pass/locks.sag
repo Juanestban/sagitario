@@ -1,0 +1,190 @@
+// Lock guards, `try_lock`, `Condvar`, `RwLock` and `Barrier`
+// (docs/adr/0098-locks-orderings-and-threads.md, Q671–Q674).
+// expect-stdout: guarded: 8000
+// expect-stdout: held: WouldBlock WouldBlock | released: Ok 3
+// expect-stdout: temporary: 5 Ok
+// expect-stdout: condvar: 10 | timed out: true 0 | while: false 3
+// expect-stdout: notified: 4
+// expect-stdout: rwlock: 2 readers WouldBlock 7 | after: Ok | updated: 8 9
+// expect-stdout: barrier: 1 1 | 8 arrived
+
+use std::sync::{AtomicUsize, Barrier, Condvar, Mutex, MutexGuard, Ordering, RwLock, TryLockError};
+use std::thread;
+use std::thread::JoinHandle;
+use std::time::Duration;
+
+fn shown<T: Send>(result: Result<MutexGuard<T>, TryLockError>) -> String {
+  match result {
+    Ok(_) => "Ok",
+    Err(TryLockError::WouldBlock) => "WouldBlock",
+  }
+}
+
+fn main() {
+  // A section of several statements under one lock.
+  const total = new Mutex(0);
+  const workers: List<JoinHandle<()>> = new List();
+
+  for _ in 0..8 {
+    workers.push(thread::spawn(() => {
+      for _ in 0..1000 {
+        const guard = total.lock();
+        const value = guard.get();
+
+        guard.set(value + 1);
+      }
+    }));
+  }
+
+  for worker in workers {
+    worker.join();
+  }
+
+  println(f"guarded: {total.get()}");
+
+  // The lock is held while the guard lives, and released at the end of its scope.
+  const cell = new Mutex(3);
+
+  {
+    const guard = cell.lock();
+    const other = thread::spawn(() => shown(cell.try_lock()));
+
+    print(f"held: {shown(cell.try_lock())} {other.join()} | ");
+    guard.set(3);
+  }
+
+  // A guard that is a temporary is released at the end of its statement.
+  const released = shown(cell.try_lock());
+
+  println(f"released: {released} {cell.get()}");
+  cell.lock().set(5);
+  println(f"temporary: {cell.get()} {shown(cell.try_lock())}");
+
+  // A producer notifies the condition; the consumer waits while the value is below 10.
+  const level = new Mutex(0);
+  const changed = new Condvar();
+  const producer = thread::spawn(() => {
+    for _ in 0..10 {
+      const guard = level.lock();
+
+      guard.set(guard.get() + 1);
+      changed.notify_all();
+    }
+  });
+  const reached = changed.wait_while(level.lock(), (value) => value < 10).get();
+
+  producer.join();
+  print(f"condvar: {reached} | ");
+
+  // Nobody notifies: the time runs out.
+  {
+    const quiet = new Mutex(0);
+    const silent = new Condvar();
+    const waited = silent.wait_timeout(quiet.lock(), Duration::from_millis(20));
+
+    print(f"timed out: {waited.1.timed_out()} {waited.0.get()} | ");
+  }
+
+  const flag = new Mutex(0);
+  const ready = new Condvar();
+  const setter = thread::spawn(() => {
+    thread::sleep(Duration::from_millis(5));
+    flag.set(3);
+    ready.notify_one();
+  });
+  const done = ready.wait_timeout_while(flag.lock(), Duration::from_secs(10), (value) => value == 0);
+
+  println(f"while: {done.1.timed_out()} {done.0.get()}");
+  setter.join();
+
+  // `notify_one` wakes the waiting threads one at a time.
+  const arrived = new Mutex(0);
+  const gate = new Condvar();
+  const opened = new Mutex(false);
+  const waiters: List<JoinHandle<()>> = new List();
+
+  for _ in 0..4 {
+    waiters.push(thread::spawn(() => {
+      const guard = gate.wait_while(opened.lock(), (open) => !open);
+
+      guard.set(true);
+      arrived.update((count) => count + 1);
+    }));
+  }
+
+  thread::sleep(Duration::from_millis(10));
+  opened.set(true);
+
+  for _ in 0..4 {
+    gate.notify_one();
+  }
+
+  // Each waiter that wakes finds the gate open, whether notified or not.
+  gate.notify_all();
+
+  for waiter in waiters {
+    waiter.join();
+  }
+
+  println(f"notified: {arrived.get()}");
+
+  // Many readers at once; a writer waits for them.
+  const shared = new RwLock(7);
+
+  {
+    const first = shared.read();
+    const second = shared.read();
+    const writing = match shared.try_write() {
+      Ok(_) => "Ok",
+      Err(TryLockError::WouldBlock) => "WouldBlock",
+    };
+    const reader = thread::spawn(() => shared.get());
+
+    print(f"rwlock: {(first.get() + second.get()) / 7} readers {writing} {reader.join()} | ");
+  }
+
+  const after = match shared.try_write() {
+    Ok(_) => "Ok",
+    Err(TryLockError::WouldBlock) => "WouldBlock",
+  };
+
+  shared.update((value) => value + 1);
+
+  const writer = shared.write();
+
+  print(f"after: {after} | updated: {writer.get()} ");
+  writer.set(9);
+  println(f"{writer.get()}");
+
+  // Eight threads meet twice; one of them leads each time.
+  const barrier = new Barrier(8);
+  const leaders = new AtomicUsize(0);
+  const meetings = new AtomicUsize(0);
+  const met: List<JoinHandle<bool>> = new List();
+
+  for _ in 0..8 {
+    met.push(thread::spawn(() => {
+      const first_time = barrier.wait().is_leader();
+
+      meetings.fetch_add(1, Ordering::SeqCst);
+
+      const second_time = barrier.wait().is_leader();
+
+      if first_time {
+        leaders.fetch_add(1, Ordering::SeqCst);
+      }
+
+      second_time
+    }));
+  }
+
+  var second_leaders = 0;
+
+  for handle in met {
+    if handle.join() {
+      second_leaders += 1;
+    }
+  }
+
+  println(f"barrier: {leaders.load(Ordering::SeqCst)} {second_leaders} | {meetings.load(Ordering::SeqCst)} arrived");
+}

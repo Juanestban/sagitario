@@ -124,12 +124,12 @@ The audit of the library found gaps of the language itself, which the library ne
 
 | Rust | Sagitario | State | Notes |
 |---|---|---|---|
-| `Mutex` | `Mutex<T: Send>` | 🟡 | `get`, `set`, `update(f)`, no guards; `try_lock` is missing |
-| `RwLock` | — | ❌ | `read(f)` and `update(f)` in the style of `Mutex` |
-| `Condvar` | — | ❌ | `std::sys::Lock` has one; a public API waits for a design without guards |
+| `Mutex` | `Mutex<T: Send>` | ✅ | `lock` and `try_lock` with a `MutexGuard` released by `Drop`, and `get`, `set`, `update(f)`; no poisoning, since a panic ends the program ([ADR-0098](adr/0098-locks-orderings-and-threads.md), increment 2) |
+| `RwLock` | `RwLock<T: Send>` | ✅ | `read`, `write`, `try_read`, `try_write` with their guards, and `get`, `set`, `update(f)` ([ADR-0098](adr/0098-locks-orderings-and-threads.md), increment 2) |
+| `Condvar` | `Condvar` | ✅ | `wait`, `wait_while`, `wait_timeout`, `wait_timeout_while`, `notify_one`, `notify_all` ([ADR-0098](adr/0098-locks-orderings-and-threads.md), increment 2) |
 | `atomic::*` | `Ordering`, `fence` and twelve atomics | ✅ | Rust's orderings, `AtomicI8`/`U8`/`I16`/`U16`/`Isize`/`Ptr`, `fetch_and`/`or`/`xor`/`nand`/`max`/`min`/`update`, `compare_exchange_weak` ([ADR-0098](adr/0098-locks-orderings-and-threads.md), increment 1). `Ordering` is `sync::Ordering`, since a module of `std` is one file |
 | `Once`, `OnceLock`, `LazyLock` | `static` | ➖ | A `static` is computed once, on its first use, by one thread (ADR-0083) |
-| `Barrier` | — | ❌ | |
+| `Barrier` | `Barrier` | ✅ | ([ADR-0098](adr/0098-locks-orderings-and-threads.md), increment 2) |
 | `mpsc::channel`, `sync_channel` | `Channel<T: Send>` | 🟡 | Missing: a bounded channel, `try_receive`, `receive_timeout` |
 | `thread::spawn`, `join`, `sleep`, `available_parallelism` | ✅ | ✅ | |
 | `thread::Builder` (name, stack size), `current`, `ThreadId`, `park`, `yield_now` | — | ❌ | |
