@@ -1,0 +1,15 @@
+// The streams of a started program: `Stdio` is made by its functions, a file is the only value it
+// converts, and each pipe goes one way (docs/adr/0097-processes-and-environment.md, Q664, Q665).
+
+use std::io;
+use std::process::{Command, Stdio};
+
+fn main() -> Result<(), io::Error> {
+  const _made = new Stdio(0, None); //~ ERROR E0205
+  const _number = Stdio::from(1); //~ ERROR E0330
+  const child = new Command("tool").stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()?;
+
+  child.stdin.take().unwrap().read_to_string()?; //~ ERROR E0316
+  child.stdout.take().unwrap().write_str("text")?; //~ ERROR E0316
+  Ok(())
+}

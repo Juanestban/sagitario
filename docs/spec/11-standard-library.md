@@ -345,6 +345,8 @@ const log = OpenOptions::new().append(true).create(true).open("log.txt")?;
 | `sync_all()` | Waits until the system has stored what was written |
 | `close()` | Closes the file now, reporting what the system says; closing it again does nothing |
 | `unsafe File::from_raw_handle(handle: usize, path)` | The file of a descriptor (POSIX) or `HANDLE` (Windows) that nothing else will close, as Rust's `from_raw_fd` |
+| `as_raw_handle() -> usize` | Its descriptor or `HANDLE`, which stays the file's, as Rust's `as_raw_fd`; after `close` it names nothing |
+| `try_clone()` | `Result<File, io::Error>`: another `File` of the same open file, sharing its position, as Rust's ([ADR-0097](../adr/0097-processes-and-environment.md), Q664) |
 
 - A `File` implements `Read`, `Write` and [`Drop`](04-classes.md#drop): it closes when its last
   reference goes, and an error there is lost, which `close()` reports. Reading, writing or seeking
@@ -473,12 +475,18 @@ if output.status.success() {
 | `arg(text)`, `args(list)` | Adds arguments, passed exactly as given |
 | `env(name, value)` | Sets an environment variable for the program; the others are inherited |
 | `current_dir(path)` | The program's working directory |
-| `input(text)` | Text written to the program's stdin, which is then closed; without it the program reads this program's stdin |
+| `input(text)` | Text that `output` and `status` write to the program's stdin, which they then close; it replaces `stdin(...)` |
+| `stdin(stdio)`, `stdout(stdio)`, `stderr(stdio)` | What a stream of the program is (a [`Stdio`](#streams-of-a-program)); `stdin` replaces `input(...)` |
 
 | Method | Result |
 |---|---|
 | `output() -> Result<Output, io::Error>` | Runs the program to its end, capturing its stdout and stderr |
 | `status() -> Result<ExitStatus, io::Error>` | Runs the program to its end, printing to this program's stdout and stderr |
+| `spawn() -> Result<Child, io::Error>` | Starts the program, which [runs while this one goes on](#started-programs) |
+
+Unless `stdin`, `stdout` or `stderr` set them, `output()` pipes stdout and stderr to capture them,
+and `status()` and `spawn()` give the program this program's three streams; the stdin of
+`output()` and `status()` is a pipe with `input(text)`, else this program's.
 
 ```sag
 pub struct ExitStatus {
@@ -501,8 +509,68 @@ pub struct Output {
 - Captured output that is not valid UTF-8 has each ill-formed sequence replaced by U+FFFD.
 - This program's buffered output is written out before the child starts, so what both print
   appears in order.
-- Not yet: running a program in the background (`spawn`, `wait`, `kill`), redirecting to
-  files, removing or clearing inherited variables, and connecting programs with pipes.
+- Not yet: removing or clearing inherited variables, and connecting one program's stdout to
+  another's stdin.
+
+### Streams of a program
+
+Rationale: [ADR-0097](../adr/0097-processes-and-environment.md), Q664. A `Stdio`, a class, is what
+a stream of a program to run is, as Rust's:
+
+| Function | The stream |
+|---|---|
+| `Stdio::inherit()` | This program's |
+| `Stdio::piped()` | A pipe to this program: for `spawn`, the `stdin`, `stdout` or `stderr` of the `Child` |
+| `Stdio::null()` | Nothing: reading it gives the end at once, and what is written to it goes nowhere |
+| `Stdio::from(file)`, `file.into()` | The `File` `file`, through a copy of its handle (`try_clone`), so that `file` stays this program's; it implements `From<File>` |
+
+- A `Stdio::from(file)` of a closed file makes `spawn`, `output` and `status` fail with that
+  error.
+
+### Started programs
+
+Rationale: [ADR-0097](../adr/0097-processes-and-environment.md), Q665 and Q666.
+
+```sag
+use std::io::BufReader;
+use std::process::{Command, Stdio};
+
+const child = new Command("sort").stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()?;
+
+{
+  const input = child.stdin.take().unwrap();
+
+  input.write_str("pear\napple\n")?;
+}                                    // closed: `sort` sees the end of its input
+
+for line in new BufReader(child.stdout.take().unwrap()).lines() {
+  println(line?);                    // apple, then pear
+}
+
+println(child.wait()?.success());
+```
+
+A `Child` has the fields `pub var stdin: Option<ChildStdin>`, `stdout: Option<ChildStdout>` and
+`stderr: Option<ChildStderr>`, `Some` for a stream set to `Stdio::piped()`, which
+[`take()`](02-types.md#optiont-and-resultt-e-f1) takes out. `ChildStdin` implements `io::Write`,
+the other two `io::Read`, and the three `Drop`, which closes the pipe.
+
+| Method | Result |
+|---|---|
+| `id() -> u32` | The identifier the system gave the program |
+| `wait() -> Result<ExitStatus, io::Error>` | Closes `stdin`, unless it was taken, then waits for the program to end |
+| `try_wait() -> Result<Option<ExitStatus>, io::Error>` | How the program ended, or `None` while it runs |
+| `kill() -> Result<(), io::Error>` | Ends the program at once: `SIGKILL`, or `TerminateProcess` with the exit code 1 on Windows; one that ended already is not an error |
+| `wait_with_output() -> Result<Output, io::Error>` | Closes `stdin`, reads the piped `stdout` and `stderr` still in the `Child` to their end, both at once, and waits |
+
+- A status found is kept: waiting again gives it, and `kill` after it does nothing.
+- `spawn` with `input(text)` set is an error of kind `InvalidInput`: the stdin of a started
+  program is written through its pipe.
+- A write to a `ChildStdin` whose program closed its stdin is an error (`Broken pipe`, of kind
+  `Other`), not a signal that ends this program.
+- The `drop` of a `Child` closes its handle and the pipes still in it, and neither waits for the
+  program nor kills it, as Rust's: the program goes on, and on POSIX systems it stays a zombie
+  until this program ends unless it was waited for.
 
 ## `std::sync`
 

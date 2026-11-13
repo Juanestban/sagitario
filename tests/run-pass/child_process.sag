@@ -1,0 +1,141 @@
+// `Command::spawn`, `Child` and its pipes, and `Stdio` (docs/adr/0097-processes-and-environment.md,
+// Q664–Q666): the program runs itself as the child, with a role in its first argument, so the
+// test works the same on every system.
+// expect-stdout: piped: HOLA|MUNDO| true true
+// expect-stdout: with output: 300 300 | true
+// expect-stdout: closed by wait: count 0
+// expect-stdout: null: count 0 | 0 bytes
+// expect-stdout: replaced: count 0 | count 2
+// expect-stdout: to a file: inherited | from a file: ABC | the file stays: true
+// expect-stdout: running: true | killed: false true | again: true true
+// expect-stdout: same status: true
+// expect-stdout: spawn with input: InvalidInput
+// expect-stdout: missing: NotFound
+
+use std::env;
+use std::fs;
+use std::fs::File;
+use std::io;
+use std::io::{BufReader, ErrorKind};
+use std::process;
+use std::process::{Child, Command, Stdio};
+
+/// The child: does what `role` says, then exits.
+fn child(role: String) -> Result<(), io::Error> {
+  if role == "upper" {
+    io::print(io::read_to_string()?.to_ascii_uppercase())?;
+  } else if role == "count" {
+    io::println(`count ${io::read_to_string()?.len()}`)?;
+  } else if role == "big" {
+    // More than a pipe holds, on both streams at once.
+    const line = "x".repeat(1000);
+
+    for _i in 0..300 {
+      io::println(line)?;
+      io::eprintln(line)?;
+    }
+  } else if role == "inherited" {
+    io::println("inherited")?;
+  } else if role == "block" {
+    // Until its stdin ends, which the test does not do.
+    io::read_to_string()?;
+  }
+
+  process::exit(0);
+}
+
+/// Lines written with `\n`, or with `\r\n` by the C runtime of Windows.
+fn lines(text: String) -> String {
+  text.replace("\r", "").replace("\n", "|")
+}
+
+fn kind_name(result: Result<Child, io::Error>) -> String {
+  match result {
+    Ok(_) => "no error",
+    Err(error) => match error.kind() {
+      ErrorKind::NotFound => "NotFound",
+      ErrorKind::InvalidInput => "InvalidInput",
+      _ => "another kind",
+    },
+  }
+}
+
+fn main() -> Result<(), io::Error> {
+  const args = env::args();
+
+  if args.len() > 1 {
+    child(args[1])?;
+  }
+
+  const me = args[0];
+
+  // Written through one pipe, closed by the `drop` of `ChildStdin`, and read through the other.
+  const upper = new Command(me).arg("upper").stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()?;
+
+  {
+    const input = upper.stdin.take().unwrap();
+
+    input.write_str("hola\nmundo\n")?;
+  }
+
+  const read = new BufReader(upper.stdout.take().unwrap()).lines().map((line) => line.unwrap()).collect();
+
+  println(`piped: ${read.join("|")}| ${upper.wait()?.success()} ${upper.id() > 0}`);
+
+  // Both streams read at once, while the child writes more than a pipe holds.
+  const big = new Command(me).arg("big").stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+  const output = big.wait_with_output()?;
+
+  println(`with output: ${output.stdout.lines().len()} ${output.stderr.lines().len()} | ${output.status.success()}`);
+
+  // `wait` closes a stdin still in the `Child`, so the child sees its end.
+  const counted = new Command(me).arg("count").stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()?.wait_with_output()?;
+
+  println(`closed by wait: ${lines(counted.stdout).replace("|", "")}`);
+
+  // Nothing to read, and nowhere to write.
+  const from_null = new Command(me).arg("count").stdin(Stdio::null()).output()?;
+  const to_null = new Command(me).arg("big").stdout(Stdio::null()).stderr(Stdio::null()).output()?;
+
+  println(`null: ${lines(from_null.stdout).replace("|", "")} | ${to_null.stdout.len() + to_null.stderr.len()} bytes`);
+
+  // `input` and `stdin` replace each other.
+  const first = new Command(me).arg("count").input("abc").stdin(Stdio::null()).output()?;
+  const second = new Command(me).arg("count").stdin(Stdio::null()).input("ab").output()?;
+
+  println(`replaced: ${lines(first.stdout).replace("|", "")} | ${lines(second.stdout).replace("|", "")}`);
+
+  // A file as stdout and as stdin; the `File` stays this program's.
+  const written = File::create("child_out.txt")?;
+
+  new Command(me).arg("inherited").stdout(Stdio::from(written)).status()?;
+  written.write_str("more")?;
+  written.close()?;
+  fs::write("child_in.txt", "abc")?;
+
+  const from_file = new Command(me).arg("upper").stdin(File::open("child_in.txt")?.into()).output()?;
+  const kept = fs::read_to_string("child_out.txt")?;
+
+  println(`to a file: ${lines(kept).replace("|", "").replace("more", "")} | from a file: ${from_file.stdout} | the file stays: ${kept.ends_with("more")}`);
+  fs::remove_file("child_out.txt")?;
+  fs::remove_file("child_in.txt")?;
+
+  // A child waiting for input that never ends, killed.
+  const blocked = new Command(me).arg("block").stdin(Stdio::piped()).spawn()?;
+
+  print(`running: ${blocked.try_wait()?.is_none()} | `);
+  blocked.kill()?;
+
+  const killed = blocked.wait()?;
+
+  println(`killed: ${killed.success()} ${blocked.try_wait()?.is_some()} | again: ${blocked.kill().is_ok()} ${blocked.wait()?.code == killed.code}`);
+
+  // A status found is kept.
+  const done = new Command(me).arg("inherited").stdout(Stdio::null()).spawn()?;
+  const status = done.wait()?;
+
+  println(`same status: ${done.wait()?.code == status.code && done.try_wait()?.unwrap().code == status.code}`);
+  println(`spawn with input: ${kind_name(new Command(me).input("text").spawn())}`);
+  println(`missing: ${kind_name(new Command("no-such-program-sag").spawn())}`);
+  Ok(())
+}

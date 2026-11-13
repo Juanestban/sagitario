@@ -967,6 +967,9 @@ fn failure() -> i32 {
   } else if error == 39 || error == 112 {
     // ERROR_HANDLE_DISK_FULL, ERROR_DISK_FULL: ENOSPC.
     28
+  } else if error == 109 || error == 232 {
+    // ERROR_BROKEN_PIPE, ERROR_NO_DATA: the other end of a pipe closed.
+    EPIPE
   } else {
     super::UNKNOWN
   }
@@ -1218,12 +1221,90 @@ pub fn current_dir() -> Result<String, i32> {
 
 // ---- Running programs -------------------------------------------------------------------------
 
-/// How a program ended, and what it printed when it was captured.
-pub struct Finished {
-  /// Its exit code, or `None` if a signal ended it.
-  pub code: Option<i32>;
-  pub stdout: List<u8>;
-  pub stderr: List<u8>;
+// A started program has three streams, each this program's (`STREAM_INHERIT`), a pipe to this
+// program (`STREAM_PIPE`), nothing (`STREAM_NULL`), or a file (`STREAM_FILE`)
+// (docs/adr/0097-processes-and-environment.md, Q664).
+
+pub const STREAM_INHERIT: i32 = 0;
+pub const STREAM_PIPE: i32 = 1;
+pub const STREAM_NULL: i32 = 2;
+pub const STREAM_FILE: i32 = 3;
+
+/// A stream of a program to start: a `STREAM_*` mode, and the file of `STREAM_FILE`, which stays
+/// the caller's.
+pub struct Stream {
+  pub mode: i32;
+  pub handle: usize;
+}
+
+/// This program's end of a pipe to a started program, a file of `file_*` closed once: by `close`,
+/// by `exchange`, which takes it, or when the last reference goes.
+pub class Pipe impl Drop {
+  pub var handle: usize;
+  pub var is_open: bool;
+
+  pub fn new(self, handle: usize) {
+    self.handle = handle;
+    self.is_open = true;
+  }
+
+  pub fn read(self, buffer: *mut u8, len: usize) -> Result<usize, i32> {
+    if !self.is_open {
+      return Err(EBADF);
+    }
+
+    pipe_read(self.handle, buffer, len)
+  }
+
+  pub fn write(self, data: *const u8, len: usize) -> Result<usize, i32> {
+    if !self.is_open {
+      return Err(EBADF);
+    }
+
+    pipe_write(self.handle, data, len)
+  }
+
+  /// Closes the pipe: 0, or the code of the failure. Closing it again does nothing.
+  pub fn close(self) -> i32 {
+    if !self.is_open {
+      return 0;
+    }
+
+    self.is_open = false;
+    file_close(self.handle)
+  }
+
+  /// The handle, now the caller's to close, or `None` once closed.
+  pub fn release(self) -> Option<usize> {
+    if !self.is_open {
+      return None;
+    }
+
+    self.is_open = false;
+    Some(self.handle)
+  }
+
+  pub fn drop(self) {
+    self.close();
+  }
+}
+
+/// A started program: its process (the process ID on POSIX systems, a `HANDLE` on Windows), the
+/// identifier of the system, and this program's ends of its piped streams.
+pub struct Started {
+  pub process: usize;
+  pub id: u32;
+  pub stdin: Option<Pipe>;
+  pub stdout: Option<Pipe>;
+  pub stderr: Option<Pipe>;
+}
+
+/// The handle of `pipe`, now the caller's, or `None`.
+fn released(pipe: Option<Pipe>) -> Option<usize> {
+  match pipe {
+    Some(found) => found.release(),
+    None => None,
+  }
 }
 
 /// `struct pollfd`, the same on every Unix system.
@@ -1243,6 +1324,14 @@ const POLLOUT: i16 = 4;
 const SIGPIPE: c_int = 13;
 @cfg(unix)
 const X_OK: c_int = 1;
+/// `waitpid` returns at once for a program still running, on every Unix system.
+@cfg(unix)
+const WNOHANG: c_int = 1;
+@cfg(unix)
+const SIGKILL: c_int = 9;
+/// No such process.
+@cfg(unix)
+const ESRCH: i32 = 3;
 
 /// What one write to a pipe that `poll` found ready never blocks on: POSIX's least `PIPE_BUF`.
 @cfg(unix)
@@ -1255,6 +1344,7 @@ extern "C" {
   fn write(fd: c_int, buffer: *const c_void, size: usize) -> isize;
   fn access(path: *const c_char, mode: c_int) -> c_int;
   fn waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_int;
+  fn kill(pid: c_int, signal: c_int) -> c_int;
   fn signal(number: c_int, handler: Option<extern "C" fn(c_int)>) -> Option<extern "C" fn(c_int)>;
 }
 
@@ -1407,6 +1497,19 @@ fn child(program: *const c_char, argv: *const *mut c_char, envp: *const *mut c_c
 
     if fd >= 0 && (unsafe { dup2(fd, target) }) < 0 {
       exit_child(report);
+    }
+
+    target += 1;
+  }
+
+  // Pipes close on `execve`; a file or the null device given as a stream is closed here.
+  target = 0;
+
+  while target < 3 {
+    const fd = unsafe { *fds.add(target as usize) };
+
+    if fd > 2 {
+      unsafe { close(fd); }
     }
 
     target += 1;
@@ -1591,11 +1694,11 @@ fn pointers(strings: List<CString>) -> List<usize> {
   addresses
 }
 
-/// Runs `argv[0]` with the arguments `argv`, the `NAME=value` entries of `vars` added to its
-/// environment, in `dir`, with `input` as its stdin, capturing its stdout and stderr when
-/// `capture`: how it ended, or the code of the failure to start it.
+/// Starts `argv[0]` with the arguments `argv`, the `NAME=value` entries of `vars` added to its
+/// environment, in `dir`, with `streams` as its stdin, stdout and stderr: the program, or the code
+/// of the failure to start it.
 @cfg(unix)
-pub fn run_process(argv: List<String>, vars: List<String>, dir: Option<String>, input: Option<String>, capture: bool) -> Result<Finished, i32> {
+pub fn start_process(argv: List<String>, vars: List<String>, dir: Option<String>, streams: List<Stream>) -> Result<Started, i32> {
   const program = match find_program(argv[0]) {
     Some(found) => found,
     None => return Err(ENOENT),
@@ -1642,44 +1745,86 @@ pub fn run_process(argv: List<String>, vars: List<String>, dir: Option<String>, 
     Some(path) => path.as_ptr(),
     None => 0 as *const c_char,
   };
-  var stdin_pipe = [-1; 2];
-  var stdout_pipe = [-1; 2];
-  var stderr_pipe = [-1; 2];
+  // This program's ends of the pipes, and the child's descriptors, which this function closes
+  // after the start when it opened them.
+  var ours = [-1; 3];
+  var theirs = [-1; 3];
+  var opened = [false; 3];
   var code = 0;
 
-  if (input.is_some() && !open_pipe(stdin_pipe.as_mut_ptr())) || (capture && (!open_pipe(stdout_pipe.as_mut_ptr()) || !open_pipe(stderr_pipe.as_mut_ptr()))) {
-    code = failure();
+  for stream in 0..3usize {
+    const mode = streams[stream].mode;
+
+    if mode == STREAM_PIPE {
+      var ends = [-1; 2];
+
+      if !open_pipe(ends.as_mut_ptr()) {
+        code = failure();
+        break;
+      }
+
+      // The child reads its stdin from the first end, and writes the others to the second.
+      ours[stream] = if stream == 0 { ends[1] } else { ends[0] };
+      theirs[stream] = if stream == 0 { ends[0] } else { ends[1] };
+      opened[stream] = true;
+    } else if mode == STREAM_NULL {
+      match file_open("/dev/null", stream == 0, stream != 0, false, false, false, false) {
+        Ok(fd) => {
+          theirs[stream] = fd as c_int;
+          opened[stream] = true;
+        }
+        Err(failed) => {
+          code = failed;
+          break;
+        }
+      }
+    } else if mode == STREAM_FILE {
+      theirs[stream] = streams[stream].handle as c_int;
+    }
   }
 
   // The child shares stdout and stderr: what this program printed must come first.
   unsafe { fflush(0 as *mut c_void); }
 
-  const fds = [stdin_pipe[0], stdout_pipe[1], stderr_pipe[1]];
   const started = if code == 0 {
-    spawn(program.as_ptr(), arg_pointers.as_ptr() as *const *mut c_char, envp, dir_pointer, fds.as_ptr())
+    spawn(program.as_ptr(), arg_pointers.as_ptr() as *const *mut c_char, envp, dir_pointer, theirs.as_ptr())
   } else {
     Err(code)
   };
 
-  close_fd(stdin_pipe[0]);
-  close_fd(stdout_pipe[1]);
-  close_fd(stderr_pipe[1]);
+  for stream in 0..3usize {
+    if opened[stream] {
+      close_fd(theirs[stream]);
+    }
+  }
 
   const pid = match started {
     Ok(found) => found,
     Err(failed) => {
-      close_fd(stdin_pipe[1]);
-      close_fd(stdout_pipe[0]);
-      close_fd(stderr_pipe[0]);
+      for stream in 0..3usize {
+        close_fd(ours[stream]);
+      }
+
       return Err(failed);
     }
   };
-  const stdout = new List<u8>();
-  const stderr = new List<u8>();
-  const text = input.unwrap_or("");
-  var in_fd = stdin_pipe[1];
-  var out_fd = stdout_pipe[0];
-  var err_fd = stderr_pipe[0];
+
+  Ok(Started { process: pid as usize, id: pid as u32, stdin: pipe_of(ours[0]), stdout: pipe_of(ours[1]), stderr: pipe_of(ours[2]) })
+}
+
+/// The pipe of the descriptor `fd`, or `None` for -1.
+@cfg(unix)
+fn pipe_of(fd: c_int) -> Option<Pipe> {
+  if fd < 0 { None } else { Some(new Pipe(fd as usize)) }
+}
+
+/// Writes `text` to the pipe `stdin` and reads the pipes `stdout` and `stderr` into `out` and
+/// `err`, all at once, until each one is closed, which it does; `None` is not a pipe.
+@cfg(unix)
+pub fn exchange(stdin: Option<Pipe>, text: String, stdout: Option<Pipe>, stderr: Option<Pipe>, out: List<u8>, err: List<u8>) {
+  var in_fd = descriptor(released(stdin));
+  var out_fd = descriptor(released(stdout));
+  var err_fd = descriptor(released(stderr));
   var done = 0usize;
 
   if in_fd >= 0 && text.is_empty() {
@@ -1728,11 +1873,11 @@ pub fn run_process(argv: List<String>, vars: List<String>, dir: Option<String>, 
     }
 
     if out_fd >= 0 && ready[1].revents != 0 {
-      out_fd = drain(out_fd, stdout);
+      out_fd = drain(out_fd, out);
     }
 
     if err_fd >= 0 && ready[2].revents != 0 {
-      err_fd = drain(err_fd, stderr);
+      err_fd = drain(err_fd, err);
     }
   }
 
@@ -1743,8 +1888,89 @@ pub fn run_process(argv: List<String>, vars: List<String>, dir: Option<String>, 
   close_fd(in_fd);
   close_fd(out_fd);
   close_fd(err_fd);
+}
 
-  Ok(Finished { code: wait_child(pid), stdout: stdout, stderr: stderr })
+/// The descriptor of a released pipe, or -1.
+@cfg(unix)
+fn descriptor(handle: Option<usize>) -> c_int {
+  match handle {
+    Some(found) => found as c_int,
+    None => -1,
+  }
+}
+
+/// What `waitpid` with `options` found of `process`: its exit code, or `None` if a signal ended
+/// it; nothing yet, with `WNOHANG`, while it runs.
+@cfg(unix)
+fn reap(process: usize, options: c_int) -> Result<Option<Option<i32>>, i32> {
+  var status = [0; 1];
+
+  loop {
+    clear_errno();
+
+    const found = unsafe { waitpid(process as c_int, status.as_mut_ptr(), options) };
+
+    if found > 0 {
+      // `WIFEXITED`: no signal in the low 7 bits; `WEXITSTATUS`: the next 8 bits.
+      return Ok(Some(if status[0] & 0x7F == 0 { Some((status[0] >> 8) & 0xFF) } else { None }));
+    }
+
+    if found == 0 {
+      return Ok(None);
+    }
+
+    if errno() != EINTR {
+      return Err(failure());
+    }
+  }
+}
+
+/// Waits for `process` to end: its exit code, or `None` if a signal ended it.
+@cfg(unix)
+pub fn wait_process(process: usize) -> Result<Option<i32>, i32> {
+  Ok(reap(process, 0)?.flatten())
+}
+
+/// How `process` ended, or `None` while it runs.
+@cfg(unix)
+pub fn poll_process(process: usize) -> Result<Option<Option<i32>>, i32> {
+  reap(process, WNOHANG)
+}
+
+/// Ends `process` with `SIGKILL`: 0, or the code of the failure. One that ended and was waited for
+/// is not a failure.
+@cfg(unix)
+pub fn kill_process(process: usize) -> i32 {
+  clear_errno();
+
+  if (unsafe { kill(process as c_int, SIGKILL) }) == 0 {
+    return 0;
+  }
+
+  const code = failure();
+
+  if code == ESRCH { 0 } else { code }
+}
+
+/// A process ID holds nothing to release.
+@cfg(unix)
+pub fn release_process(_process: usize) {}
+
+@cfg(unix)
+fn pipe_read(pipe: usize, buffer: *mut u8, len: usize) -> Result<usize, i32> {
+  file_read(pipe, buffer, len)
+}
+
+/// A program that closed its stdin would end this one with `SIGPIPE`, which is ignored for the
+/// write, so that it fails with `EPIPE` instead; `SIG_IGN` is 1.
+@cfg(unix)
+fn pipe_write(pipe: usize, data: *const u8, len: usize) -> Result<usize, i32> {
+  const ignore = Some(unsafe { 1usize as extern "C" fn(c_int) });
+  const previous = unsafe { signal(SIGPIPE, ignore) };
+  const written = file_write(pipe, data, len);
+
+  unsafe { signal(SIGPIPE, previous); }
+  written
 }
 
 /// `SECURITY_ATTRIBUTES`.
@@ -1826,12 +2052,17 @@ extern "C" {
   fn GetCurrentProcessId() -> u32;
   fn GetCurrentThreadId() -> u32;
   fn DuplicateHandle(source_process: *mut c_void, source: *mut c_void, target_process: *mut c_void, target: *mut *mut c_void, access: u32, inherit: c_int, options: u32) -> c_int;
+  fn TerminateProcess(process: *mut c_void, code: u32) -> c_int;
 }
 
 @cfg(windows)
 const INFINITE: u32 = 0xFFFF_FFFF;
 @cfg(windows)
 const ERROR_IO_PENDING: u32 = 997;
+@cfg(windows)
+const WAIT_TIMEOUT: u32 = 258;
+@cfg(windows)
+const WAIT_FAILED: u32 = 0xFFFF_FFFF;
 @cfg(windows)
 const EQUALS: u16 = 0x3D;
 
@@ -1876,22 +2107,41 @@ fn child_pipe(inbound: bool) -> Result<PipeEnds, i32> {
   Ok(PipeEnds { ours: ours, theirs: theirs })
 }
 
+/// A copy of `handle` that a child inherits when `inherit`.
+@cfg(windows)
+fn duplicate(handle: *mut c_void, inherit: bool) -> Result<*mut c_void, i32> {
+  var copy = 0 as *mut c_void;
+
+  // DUPLICATE_SAME_ACCESS
+  if (unsafe { DuplicateHandle(GetCurrentProcess(), handle, GetCurrentProcess(), &raw mut copy, 0, if inherit { 1 } else { 0 }, 2) }) == 0 {
+    return Err(failure());
+  }
+
+  Ok(copy)
+}
+
 /// An inheritable copy of this program's standard stream `index`, or null if it has none.
 @cfg(windows)
 fn inherited(index: i32) -> *mut c_void {
   const handle = unsafe { GetStdHandle((-10 - index) as u32) };
-  var copy = 0 as *mut c_void;
 
   if handle.is_null() || invalid(handle) {
-    return copy;
-  }
-
-  // DUPLICATE_SAME_ACCESS
-  if (unsafe { DuplicateHandle(GetCurrentProcess(), handle, GetCurrentProcess(), &raw mut copy, 0, 1, 2) }) == 0 {
     return 0 as *mut c_void;
   }
 
-  copy
+  duplicate(handle, true).unwrap_or(0 as *mut c_void)
+}
+
+/// The null device, inheritable, to read when `reading`, else to write.
+@cfg(windows)
+fn null_device(reading: bool) -> Result<*mut c_void, i32> {
+  const name = to_utf16("NUL");
+  var inheritable = SecurityAttributes { length: mem::size_of<SecurityAttributes>() as u32, descriptor: 0 as *mut c_void, inherit: 1 };
+  // GENERIC_READ or GENERIC_WRITE, sharing reads and writes, OPEN_EXISTING.
+  const access = if reading { 0x8000_0000u32 } else { 0x4000_0000u32 };
+  const device = unsafe { CreateFileW(name.as_ptr(), access, 3, &raw mut inheritable as *mut c_void, 3, 0, 0 as *mut c_void) };
+
+  if invalid(device) { Err(failure()) } else { Ok(device) }
 }
 
 /// Appends `arg` quoted so that the rules of Microsoft's C runtime (`args`) read it back.
@@ -2166,7 +2416,7 @@ fn application_name(program: String) -> Option<List<u16>> {
 }
 
 @cfg(windows)
-pub fn run_process(argv: List<String>, vars: List<String>, dir: Option<String>, input: Option<String>, capture: bool) -> Result<Finished, i32> {
+pub fn start_process(argv: List<String>, vars: List<String>, dir: Option<String>, streams: List<Stream>) -> Result<Started, i32> {
   const line = to_utf16(command_line(argv));
   const application = application_name(argv[0]);
   const environment: Option<List<u16>> = if vars.is_empty() { None } else { Some(environment_block(vars)) };
@@ -2179,19 +2429,30 @@ pub fn run_process(argv: List<String>, vars: List<String>, dir: Option<String>, 
   var code = 0;
 
   for stream in 0..3usize {
-    const piped = if stream == 0 { input.is_some() } else { capture };
-
-    if !piped {
-      theirs[stream] = inherited(stream as i32);
-    } else if code == 0 {
+    const mode = streams[stream].mode;
+    const given: Result<*mut c_void, i32> = if mode == STREAM_PIPE {
       match child_pipe(stream != 0) {
         Ok(ends) => {
           ours[stream] = ends.ours;
-          theirs[stream] = ends.theirs;
+          Ok(ends.theirs)
         }
-        Err(failed) => {
-          code = failed;
-        }
+        Err(failed) => Err(failed),
+      }
+    } else if mode == STREAM_NULL {
+      null_device(stream == 0)
+    } else if mode == STREAM_FILE {
+      duplicate(handle_of(streams[stream].handle), true)
+    } else {
+      Ok(inherited(stream as i32))
+    };
+
+    match given {
+      Ok(handle) => {
+        theirs[stream] = handle;
+      }
+      Err(failed) => {
+        code = failed;
+        break;
       }
     }
   }
@@ -2261,20 +2522,127 @@ pub fn run_process(argv: List<String>, vars: List<String>, dir: Option<String>, 
     return Err(code);
   }
 
-  const stdout = new List<u8>();
-  const stderr = new List<u8>();
+  unsafe { CloseHandle(process.thread); }
+  Ok(Started { process: process.process as usize, id: process.process_id, stdin: windows_pipe(ours[0]), stdout: windows_pipe(ours[1]), stderr: windows_pipe(ours[2]) })
+}
+
+/// The pipe of `handle`, or `None` for null.
+@cfg(windows)
+fn windows_pipe(handle: *mut c_void) -> Option<Pipe> {
+  if handle.is_null() { None } else { Some(new Pipe(handle as usize)) }
+}
+
+/// The handle of a released pipe, or null.
+@cfg(windows)
+fn handle_or_null(handle: Option<usize>) -> *mut c_void {
+  match handle {
+    Some(found) => handle_of(found),
+    None => 0 as *mut c_void,
+  }
+}
+
+@cfg(windows)
+pub fn exchange(stdin: Option<Pipe>, input: String, stdout: Option<Pipe>, stderr: Option<Pipe>, out: List<u8>, err: List<u8>) {
+  communicate(handle_or_null(released(stdin)), handle_or_null(released(stdout)), handle_or_null(released(stderr)), input, out, err);
+}
+
+@cfg(windows)
+fn exit_code_of(process: usize) -> Result<Option<i32>, i32> {
   var exit = 0u32;
 
-  communicate(ours[0], ours[1], ours[2], input.unwrap_or(""), stdout, stderr);
-
-  unsafe {
-    WaitForSingleObject(process.process, INFINITE);
-    GetExitCodeProcess(process.process, &raw mut exit);
-    CloseHandle(process.process);
-    CloseHandle(process.thread);
+  if (unsafe { GetExitCodeProcess(handle_of(process), &raw mut exit) }) == 0 {
+    return Err(failure());
   }
 
-  Ok(Finished { code: Some(exit as i32), stdout: stdout, stderr: stderr })
+  Ok(Some(exit as i32))
+}
+
+@cfg(windows)
+pub fn wait_process(process: usize) -> Result<Option<i32>, i32> {
+  if (unsafe { WaitForSingleObject(handle_of(process), INFINITE) }) == WAIT_FAILED {
+    return Err(failure());
+  }
+
+  exit_code_of(process)
+}
+
+@cfg(windows)
+pub fn poll_process(process: usize) -> Result<Option<Option<i32>>, i32> {
+  const found = unsafe { WaitForSingleObject(handle_of(process), 0) };
+
+  if found == WAIT_TIMEOUT {
+    return Ok(None);
+  }
+
+  if found == WAIT_FAILED {
+    return Err(failure());
+  }
+
+  Ok(Some(exit_code_of(process)?))
+}
+
+/// Ends `process` with `TerminateProcess` and the exit code 1, as Rust's; one that ended already is
+/// not a failure.
+@cfg(windows)
+pub fn kill_process(process: usize) -> i32 {
+  if (unsafe { TerminateProcess(handle_of(process), 1) }) != 0 {
+    return 0;
+  }
+
+  const code = failure();
+
+  if (unsafe { WaitForSingleObject(handle_of(process), 0) }) == 0 { 0 } else { code }
+}
+
+@cfg(windows)
+pub fn release_process(process: usize) {
+  unsafe { CloseHandle(handle_of(process)); }
+}
+
+/// One read or write of a pipe opened for overlapped I/O, waited for: the bytes it moved.
+@cfg(windows)
+fn overlapped_io(pipe: usize, buffer: *mut u8, len: usize, writing: bool) -> Result<usize, i32> {
+  const size = if len > 0x4000_0000 { 0x4000_0000u32 } else { len as u32 };
+  const event = unsafe { CreateEventW(0 as *mut c_void, 1, 0, 0 as *const u16) };
+
+  if event.is_null() {
+    return Err(failure());
+  }
+
+  var overlapped = Overlapped { internal: 0, internal_high: 0, offset: 0, offset_high: 0, event: event };
+  const place = &raw mut overlapped as *mut c_void;
+  const started = if writing {
+    unsafe { WriteFile(handle_of(pipe), buffer as *const u8, size, 0 as *mut u32, place) }
+  } else {
+    unsafe { ReadFile(handle_of(pipe), buffer, size, 0 as *mut u32, place) }
+  };
+  var transferred = 0u32;
+  var code = 0;
+
+  if started == 0 && (unsafe { GetLastError() }) != ERROR_IO_PENDING {
+    code = failure();
+  } else if (unsafe { GetOverlappedResult(handle_of(pipe), &raw mut overlapped, &raw mut transferred, 1) }) == 0 {
+    code = failure();
+  }
+
+  unsafe { CloseHandle(event); }
+
+  // A read from a pipe whose other end closed is the end.
+  if code == EPIPE && !writing {
+    return Ok(0);
+  }
+
+  if code != 0 { Err(code) } else { Ok(transferred as usize) }
+}
+
+@cfg(windows)
+fn pipe_read(pipe: usize, buffer: *mut u8, len: usize) -> Result<usize, i32> {
+  overlapped_io(pipe, buffer, len, false)
+}
+
+@cfg(windows)
+fn pipe_write(pipe: usize, data: *const u8, len: usize) -> Result<usize, i32> {
+  overlapped_io(pipe, data as *mut u8, len, true)
 }
 
 // ---- Dynamic libraries ------------------------------------------------------------------------
@@ -2633,6 +3001,8 @@ pub fn processors() -> usize {
 
 /// `EBADF`, the code of a file used after `close`.
 pub const EBADF: i32 = 9;
+/// `EPIPE`, the code of a write to a pipe whose other end closed.
+const EPIPE: i32 = 32;
 
 @cfg(unix)
 extern "C" {
@@ -2794,6 +3164,15 @@ pub fn file_set_len(file: usize, len: u64) -> i32 {
 }
 
 @cfg(unix)
+pub fn file_duplicate(file: usize) -> Result<usize, i32> {
+  clear_errno();
+
+  const fd = unsafe { dup(file as c_int) };
+
+  if fd < 0 { Err(failure()) } else { Ok(fd as usize) }
+}
+
+@cfg(unix)
 pub fn file_close(file: usize) -> i32 {
   clear_errno();
 
@@ -2903,6 +3282,11 @@ pub fn file_set_len(file: usize, len: u64) -> i32 {
     Ok(_) => code,
     Err(again) => if code == 0 { again } else { code },
   }
+}
+
+@cfg(windows)
+pub fn file_duplicate(file: usize) -> Result<usize, i32> {
+  Ok(duplicate(handle_of(file), false)? as usize)
 }
 
 @cfg(windows)

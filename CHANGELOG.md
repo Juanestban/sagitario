@@ -15,6 +15,11 @@ The sources say 0.32.0.
 
 ### Added
 
+- `std::process::Stdio` (`inherit`, `piped`, `null`, and `from` a `File`) and `Command::stdin`,
+  `stdout` and `stderr`; `Command::spawn` and `Child`, with its pipes as the fields `stdin`,
+  `stdout` and `stderr` (`ChildStdin` is a `Write`, the others `Read`), `id`, `wait`, `try_wait`,
+  `kill` and `wait_with_output`; and `File::try_clone` and `as_raw_handle`
+  ([ADR-0097](docs/adr/0097-processes-and-environment.md), increment 2).
 - `take` and `replace` of an `Option` place, as Rust's: `child.stdin.take()` takes the value out of
   a `var` field and leaves `None` ([ADR-0097](docs/adr/0097-processes-and-environment.md),
   increment 1).

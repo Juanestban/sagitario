@@ -186,6 +186,24 @@ pub class File impl io::Read, io::Write, Drop {
     new File(handle, path)
   }
 
+  /// The descriptor (POSIX) or `HANDLE` (Windows) of the system, which stays the file's, as Rust's
+  /// `as_raw_fd`; after `close` it names nothing.
+  pub fn as_raw_handle(self) -> usize {
+    self.handle
+  }
+
+  /// Another `File` of the same open file, sharing its position, as Rust's `try_clone`.
+  pub fn try_clone(self) -> Result<File, io::Error> {
+    if !self.is_open {
+      return Err(self.error(sys::EBADF, "clone"));
+    }
+
+    match sys::file_duplicate(self.handle) {
+      Ok(handle) => Ok(new File(handle, self.path)),
+      Err(code) => Err(self.error(code, "clone")),
+    }
+  }
+
   /// Opens the file at `path` to read it.
   pub fn open(path: String) -> Result<File, io::Error> {
     OpenOptions::new().read(true).open(path)

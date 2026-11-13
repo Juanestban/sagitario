@@ -159,7 +159,7 @@ The audit of the library found gaps of the language itself, which the library ne
 
 | Rust | Sagitario | State | Notes |
 |---|---|---|---|
-| `Command` with `output`, `status` | `Command` | 🟡 | Arguments, variables, directory, input. Missing: `spawn` and a `Child` to `wait`, `kill` or stream from; redirecting to files; `env_remove`, `env_clear` (spec 11, "not yet") |
+| `Command` with `output`, `status` | `Command` | ✅ | Arguments, variables, directory, input; `Stdio`, `spawn` and `Child` with its pipes, `wait`, `try_wait`, `kill` and `wait_with_output` ([ADR-0097](adr/0097-processes-and-environment.md), increment 2). `env_remove` and `env_clear` wait (spec 11, "not yet") |
 | `process::exit`, `abort`, `id` | `exit` | 🟡 | `abort` and `id` are missing |
 | `env::args`, `var` | `args`, `variable` | ✅ | |
 | `env::vars`, `set_var`, `remove_var`, `current_exe`, `temp_dir`, `home_dir` | — | ❌ | `set_var` is process-wide state, as in Rust (`unsafe` there since 2024) |

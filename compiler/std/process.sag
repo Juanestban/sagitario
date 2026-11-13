@@ -4,6 +4,7 @@
 //! `exit(code: i32)` ends the program with an exit code. It never returns, which no function
 //! written in Sagitario can declare, so the compiler provides it like `panic`.
 
+use std::fs::File;
 use std::io;
 use std::io::ErrorKind;
 use std::sys;
@@ -31,7 +32,258 @@ pub struct Output {
   pub stderr: String;
 }
 
-/// A program to run, with its arguments, environment, directory and input. Each method returns
+/// What a stream of a started program is, as Rust's `Stdio`
+/// (docs/adr/0097-processes-and-environment.md, Q664).
+pub class Stdio {
+  /// A `STREAM_*` mode of `std::sys`.
+  prv const mode: i32;
+  /// The copy of the file of `from`, or the failure to make it.
+  prv const file: Option<Result<File, io::Error>>;
+
+  prv fn new(self, mode: i32, file: Option<Result<File, io::Error>>) {
+    self.mode = mode;
+    self.file = file;
+  }
+
+  /// This program's stream.
+  pub fn inherit() -> Stdio {
+    new Stdio(sys::STREAM_INHERIT, None)
+  }
+
+  /// A pipe to this program: the `stdin`, `stdout` or `stderr` of the `Child`.
+  pub fn piped() -> Stdio {
+    new Stdio(sys::STREAM_PIPE, None)
+  }
+
+  /// Nothing: reading it gives the end at once, and what is written to it goes nowhere.
+  pub fn null() -> Stdio {
+    new Stdio(sys::STREAM_NULL, None)
+  }
+
+  /// The stream of `std::sys` this stands for, for `Command`.
+  pub fn system(self) -> Result<sys::Stream, io::Error> {
+    match self.file {
+      Some(Ok(file)) => Ok(sys::Stream { mode: self.mode, handle: file.as_raw_handle() }),
+      Some(Err(error)) => Err(error),
+      None => Ok(sys::Stream { mode: self.mode, handle: 0 }),
+    }
+  }
+}
+
+/// A file as the stream of a program: a copy of its handle, so that `file` stays this program's.
+impl From<File> for Stdio {
+  fn from(file: File) -> Stdio {
+    new Stdio(sys::STREAM_FILE, Some(file.try_clone()))
+  }
+}
+
+/// The stdin of a started program, a pipe this program writes, as Rust's `ChildStdin`. Its `drop`
+/// closes it, so that the program sees the end of its input.
+pub class ChildStdin impl io::Write, Drop {
+  prv const pipe: sys::Pipe;
+
+  /// Made by `Command::spawn`.
+  pub fn new(self, pipe: sys::Pipe) {
+    self.pipe = pipe;
+  }
+
+  pub fn write(self, bytes: &[u8]) -> Result<usize, io::Error> {
+    match self.pipe.write(bytes.as_ptr(), bytes.len()) {
+      Ok(count) => Ok(count),
+      Err(code) => Err(super::os_error(code, "cannot write to the stdin of a program")),
+    }
+  }
+
+  /// A pipe has no buffer in this program.
+  pub fn flush(self) -> Result<(), io::Error> {
+    Ok(())
+  }
+
+  pub fn drop(self) {
+    self.pipe.close();
+  }
+}
+
+/// The stdout of a started program, a pipe this program reads, as Rust's `ChildStdout`, closed by
+/// its `drop`.
+pub class ChildStdout impl io::Read, Drop {
+  prv const pipe: sys::Pipe;
+
+  /// Made by `Command::spawn`.
+  pub fn new(self, pipe: sys::Pipe) {
+    self.pipe = pipe;
+  }
+
+  pub fn read(self, buffer: &mut [u8]) -> Result<usize, io::Error> {
+    match self.pipe.read(buffer.as_mut_ptr(), buffer.len()) {
+      Ok(count) => Ok(count),
+      Err(code) => Err(super::os_error(code, "cannot read the stdout of a program")),
+    }
+  }
+
+  pub fn drop(self) {
+    self.pipe.close();
+  }
+}
+
+/// The stderr of a started program, as `ChildStdout` is its stdout.
+pub class ChildStderr impl io::Read, Drop {
+  prv const pipe: sys::Pipe;
+
+  /// Made by `Command::spawn`.
+  pub fn new(self, pipe: sys::Pipe) {
+    self.pipe = pipe;
+  }
+
+  pub fn read(self, buffer: &mut [u8]) -> Result<usize, io::Error> {
+    match self.pipe.read(buffer.as_mut_ptr(), buffer.len()) {
+      Ok(count) => Ok(count),
+      Err(code) => Err(super::os_error(code, "cannot read the stderr of a program")),
+    }
+  }
+
+  pub fn drop(self) {
+    self.pipe.close();
+  }
+}
+
+/// A program started by `Command::spawn`, which runs while this one goes on, as Rust's `Child`
+/// (Q665). Its piped streams are `Some` until taken: `child.stdin.take()`.
+pub class Child impl Drop {
+  pub var stdin: Option<ChildStdin>;
+  pub var stdout: Option<ChildStdout>;
+  pub var stderr: Option<ChildStderr>;
+  /// The process of `std::sys` and its identifier.
+  prv const process: usize;
+  prv const pid: u32;
+  prv const program: String;
+  /// The pipes of the three streams, which `wait` and `wait_with_output` reach without the
+  /// objects holding them.
+  prv const pipes: List<Option<sys::Pipe>>;
+  /// How it ended, once found.
+  prv var status: Option<ExitStatus>;
+
+  /// Made by `Command::spawn`.
+  pub fn new(self, started: sys::Started, program: String) {
+    self.process = started.process;
+    self.pid = started.id;
+    self.program = program;
+    self.pipes = List::from([started.stdin, started.stdout, started.stderr]);
+    self.stdin = started.stdin.map((pipe) => new ChildStdin(pipe));
+    self.stdout = started.stdout.map((pipe) => new ChildStdout(pipe));
+    self.stderr = started.stderr.map((pipe) => new ChildStderr(pipe));
+    self.status = None;
+  }
+
+  /// The identifier the system gave the program.
+  pub fn id(self) -> u32 {
+    self.pid
+  }
+
+  prv fn error(self, code: i32, action: String) -> io::Error {
+    super::os_error(code, `cannot ${action} "${self.program}"`)
+  }
+
+  /// Closes stdin unless it was taken, as Rust's, so that the program sees the end of its input.
+  prv fn close_stdin(self) {
+    if self.stdin.take().is_some() {
+      if let Some(pipe) = self.pipes[0] {
+        pipe.close();
+      }
+    }
+  }
+
+  /// The pipe of stream `index` when its object is still here, `here`, taken from that object,
+  /// whose `drop` then closes nothing.
+  prv fn release_pipe(self, index: usize, here: bool) -> Option<sys::Pipe> {
+    if !here {
+      return None;
+    }
+
+    match self.pipes[index] {
+      Some(pipe) => match pipe.release() {
+        Some(handle) => Some(new sys::Pipe(handle)),
+        None => None,
+      },
+      None => None,
+    }
+  }
+
+  prv fn ended(self, code: Option<i32>) -> ExitStatus {
+    const status = ExitStatus { code: code };
+
+    self.status = Some(status);
+    status
+  }
+
+  /// Closes stdin, then waits for the program to end. Waiting again gives the same status.
+  pub fn wait(self) -> Result<ExitStatus, io::Error> {
+    self.close_stdin();
+
+    if let Some(found) = self.status {
+      return Ok(found);
+    }
+
+    match sys::wait_process(self.process) {
+      Ok(code) => Ok(self.ended(code)),
+      Err(code) => Err(self.error(code, "wait for")),
+    }
+  }
+
+  /// How the program ended, or `None` while it runs.
+  pub fn try_wait(self) -> Result<Option<ExitStatus>, io::Error> {
+    if let Some(found) = self.status {
+      return Ok(Some(found));
+    }
+
+    match sys::poll_process(self.process) {
+      Ok(Some(code)) => Ok(Some(self.ended(code))),
+      Ok(None) => Ok(None),
+      Err(code) => Err(self.error(code, "wait for")),
+    }
+  }
+
+  /// Ends the program at once: `SIGKILL`, or `TerminateProcess` on Windows. One that ended already
+  /// is not an error.
+  pub fn kill(self) -> Result<(), io::Error> {
+    // The identifier of one waited for may be another program's now.
+    if self.status.is_some() {
+      return Ok(());
+    }
+
+    const code = sys::kill_process(self.process);
+
+    if code == 0 { Ok(()) } else { Err(self.error(code, "kill")) }
+  }
+
+  /// Closes stdin, reads the piped stdout and stderr still here to their end, all at once, and
+  /// waits.
+  pub fn wait_with_output(self) -> Result<Output, io::Error> {
+    self.close_stdin();
+
+    const stdout_pipe = self.release_pipe(1, self.stdout.is_some());
+    const stderr_pipe = self.release_pipe(2, self.stderr.is_some());
+
+    self.stdout = None;
+    self.stderr = None;
+    const out = new List<u8>();
+    const err = new List<u8>();
+
+    sys::exchange(None, "", stdout_pipe, stderr_pipe, out, err);
+
+    const status = self.wait()?;
+
+    Ok(Output { status: status, stdout: super::utf8_lossy(&out), stderr: super::utf8_lossy(&err) })
+  }
+
+  /// Closes the handle of the program, which goes on, and is not waited for (Q666). The pipes
+  /// still here close as their objects go.
+  pub fn drop(self) {
+    sys::release_process(self.process);
+  }
+}
+
+/// A program to run, with its arguments, environment, directory and streams. Each method returns
 /// the command itself, so calls chain: `new Command("git").arg("status").output()`.
 pub class Command {
   prv const program: String;
@@ -40,6 +292,8 @@ pub class Command {
   prv const variables: List<String>;
   prv var directory: Option<String>;
   prv var stdin_text: Option<String>;
+  /// The streams set by `stdin`, `stdout` and `stderr`.
+  prv const streams: List<Option<Stdio>>;
   /// Whether `env` received a name that is empty or contains `=`.
   prv var invalid_name: bool;
 
@@ -50,7 +304,12 @@ pub class Command {
     self.variables = new List<String>();
     self.directory = None;
     self.stdin_text = None;
+    self.streams = new List<Option<Stdio>>();
     self.invalid_name = false;
+
+    for _ in 0..3 {
+      self.streams.push(None);
+    }
   }
 
   pub fn arg(self, arg: String) -> Command {
@@ -82,10 +341,30 @@ pub class Command {
     self
   }
 
-  /// Text written to the program's stdin, which is then closed. Without it, the program reads
-  /// this program's stdin.
+  /// Text written to the program's stdin by `output` and `status`, which then close it; it replaces
+  /// `stdin(...)`. Without either, the program reads this program's stdin.
   pub fn input(self, text: String) -> Command {
     self.stdin_text = Some(text);
+    self.streams[0] = None;
+    self
+  }
+
+  /// The program's stdin; it replaces `input(...)`.
+  pub fn stdin(self, stdio: Stdio) -> Command {
+    self.stdin_text = None;
+    self.streams[0] = Some(stdio);
+    self
+  }
+
+  /// The program's stdout, instead of a pipe for `output` and this program's for the others.
+  pub fn stdout(self, stdio: Stdio) -> Command {
+    self.streams[1] = Some(stdio);
+    self
+  }
+
+  /// The program's stderr, as `stdout`.
+  pub fn stderr(self, stdio: Stdio) -> Command {
+    self.streams[2] = Some(stdio);
     self
   }
 
@@ -99,7 +378,40 @@ pub class Command {
     Ok(self.run(false)?.status)
   }
 
+  /// Starts the program, which runs while this one goes on, with this program's streams unless
+  /// `stdin`, `stdout` or `stderr` set others (Q665).
+  pub fn spawn(self) -> Result<Child, io::Error> {
+    if self.stdin_text.is_some() {
+      return Err(new io::Error(ErrorKind::InvalidInput, `cannot run "${self.program}": the input text is for output() and status(); the stdin of a started program is written through its pipe`));
+    }
+
+    const inherit = sys::STREAM_INHERIT;
+    const started = self.start(List::from([inherit, inherit, inherit]))?;
+
+    Ok(new Child(started, self.program))
+  }
+
   prv fn run(self, capture: bool) -> Result<Output, io::Error> {
+    const output_mode = if capture { sys::STREAM_PIPE } else { sys::STREAM_INHERIT };
+    const input_mode = if self.stdin_text.is_some() { sys::STREAM_PIPE } else { sys::STREAM_INHERIT };
+    const started = self.start(List::from([input_mode, output_mode, output_mode]))?;
+    const out = new List<u8>();
+    const err = new List<u8>();
+
+    sys::exchange(started.stdin, self.stdin_text.unwrap_or(""), started.stdout, started.stderr, out, err);
+
+    const waited = sys::wait_process(started.process);
+
+    sys::release_process(started.process);
+
+    match waited {
+      Ok(code) => Ok(Output { status: ExitStatus { code: code }, stdout: super::utf8_lossy(&out), stderr: super::utf8_lossy(&err) }),
+      Err(code) => Err(super::os_error(code, `cannot wait for "${self.program}"`)),
+    }
+  }
+
+  /// Starts the program with the streams set, and the modes `defaults` for the others.
+  prv fn start(self, defaults: List<i32>) -> Result<sys::Started, io::Error> {
     const action = `cannot run "${self.program}"`;
     const nul = "\0";
     const texts = List::from([self.program]);
@@ -125,18 +437,23 @@ pub class Command {
       return Err(new io::Error(ErrorKind::InvalidInput, `${action}: an argument, variable or directory contains a NUL character`));
     }
 
+    const streams = new List<sys::Stream>();
+
+    for index in 0..3usize {
+      match self.streams[index] {
+        Some(stdio) => streams.push(stdio.system()?),
+        None => streams.push(sys::Stream { mode: defaults[index], handle: 0 }),
+      }
+    }
+
     const argv = List::from([self.program]);
 
     for arg in self.arguments {
       argv.push(arg);
     }
 
-    match sys::run_process(argv, self.variables, self.directory, self.stdin_text, capture) {
-      Ok(finished) => Ok(Output {
-        status: ExitStatus { code: finished.code },
-        stdout: super::utf8_lossy(&finished.stdout),
-        stderr: super::utf8_lossy(&finished.stderr),
-      }),
+    match sys::start_process(argv, self.variables, self.directory, streams) {
+      Ok(started) => Ok(started),
       Err(code) => Err(super::os_error(code, action)),
     }
   }

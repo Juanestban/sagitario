@@ -86,3 +86,16 @@ fn main() -> Result<(), io::Error> {
   assignment, the flow analysis counts it as one for the warning of an unneeded `var`, and
   lowering reads the place into a value of its own before storing `None` or `Some(value)`, the
   argument first.
+- Increment 2 is done. `std::sys` starts a program with each stream inherited, a pipe, the null
+  device or a file (`start_process`), and waits for it, polls it, kills it and releases it; the
+  pipes are `sys::Pipe`s closed once. `output` and `status` are now built on that start, and
+  `exchange`, which writes the input and reads both outputs at once, serves them and
+  `wait_with_output`. On Windows this program's ends of the pipes stay overlapped, so a read or a
+  write through `ChildStdout` or `ChildStdin` waits for its own operation; on POSIX systems a write
+  ignores `SIGPIPE`, and a Linux child closes a file or null device it was given once it has
+  them as its streams. Besides Q664 and Q665: `File::try_clone`, Rust's, which makes the copy of
+  `Stdio::from`, and `File::as_raw_handle`, Rust's `as_raw_fd`, the counterpart of
+  `from_raw_handle`; `Stdio::from` is Rust's `From<File>`, so `file.into()` works too. The
+  initializers of `Child` and of its pipes, and `Stdio::system`, which gives `Command` the stream,
+  are public, as `Metadata::from_system` is, since a class cannot reach another's private
+  members, but they take or give types of `std::sys`, which programs cannot name.
