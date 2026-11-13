@@ -2218,6 +2218,10 @@ pub class Resolver {
             return Some(Res::Builtin("Atomic::new"));
           }
 
+          if member.name == "fence" {
+            return Some(Res::Builtin("Atomic::fence"));
+          }
+
           self.error(member.span, "no function `" + member.name + "` in `Atomic`");
 
           return None;

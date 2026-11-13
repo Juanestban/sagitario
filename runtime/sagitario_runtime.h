@@ -30,6 +30,30 @@ typedef atomic_size_t sag_count;
  * ordering lets the thread that drops it see the writes of every other one. */
 #define SAG_COUNT_INC(count) ((void)atomic_fetch_add_explicit((count), 1, memory_order_relaxed))
 #define SAG_COUNT_DEC(count) (atomic_fetch_sub_explicit((count), 1, memory_order_acq_rel) - 1)
+/* The operations of `std::sys::Atomic`, with an ordering of `std::sync::Ordering` as a number:
+ * 0 `Relaxed`, 1 `Release`, 2 `Acquire`, 3 `AcqRel`, 4 `SeqCst`; `std::sync` rejects those an
+ * operation does not allow (docs/adr/0098-locks-orderings-and-threads.md, Q676). */
+#define SAG_MEMORY_ORDER(order)                                                                \
+  ((order) == 0   ? memory_order_relaxed                                                       \
+   : (order) == 1 ? memory_order_release                                                       \
+   : (order) == 2 ? memory_order_acquire                                                       \
+   : (order) == 3 ? memory_order_acq_rel                                                       \
+                  : memory_order_seq_cst)
+#define sag_atomic_load(object, order) atomic_load_explicit((object), SAG_MEMORY_ORDER(order))
+#define sag_atomic_store(object, value, order) atomic_store_explicit((object), (value), SAG_MEMORY_ORDER(order))
+#define sag_atomic_exchange(object, value, order) atomic_exchange_explicit((object), (value), SAG_MEMORY_ORDER(order))
+#define sag_atomic_fetch_add(object, value, order) atomic_fetch_add_explicit((object), (value), SAG_MEMORY_ORDER(order))
+#define sag_atomic_fetch_sub(object, value, order) atomic_fetch_sub_explicit((object), (value), SAG_MEMORY_ORDER(order))
+#define sag_atomic_fetch_and(object, value, order) atomic_fetch_and_explicit((object), (value), SAG_MEMORY_ORDER(order))
+#define sag_atomic_fetch_or(object, value, order) atomic_fetch_or_explicit((object), (value), SAG_MEMORY_ORDER(order))
+#define sag_atomic_fetch_xor(object, value, order) atomic_fetch_xor_explicit((object), (value), SAG_MEMORY_ORDER(order))
+#define sag_atomic_compare_exchange_strong(object, expected, desired, success, failure)             \
+  atomic_compare_exchange_strong_explicit((object), (expected), (desired), SAG_MEMORY_ORDER(success), \
+                                          SAG_MEMORY_ORDER(failure))
+#define sag_atomic_compare_exchange_weak(object, expected, desired, success, failure)               \
+  atomic_compare_exchange_weak_explicit((object), (expected), (desired), SAG_MEMORY_ORDER(success),   \
+                                        SAG_MEMORY_ORDER(failure))
+#define sag_atomic_thread_fence(order) atomic_thread_fence(SAG_MEMORY_ORDER(order))
 #else
 typedef size_t sag_count;
 #define SAG_COUNT_INC(count) ((void)++*(count))

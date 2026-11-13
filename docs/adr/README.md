@@ -106,6 +106,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0095](0095-collections.md) | The collections of Rust's std, `Iterable` and `FromIterator` (S2) | Accepted |
 | [0096](0096-streams-files-and-drop.md) | Streams, files and `Drop` (S2) | Accepted |
 | [0097](0097-processes-and-environment.md) | Processes and the environment (S2) | Accepted |
+| [0098](0098-locks-orderings-and-threads.md) | Lock guards, condition variables, atomic orderings and threads (S2) | Accepted |
 
 ## Template
 

@@ -699,6 +699,8 @@ pub fn substitute(ty: Type, subst: Subst) -> Type {
     TypeKind::Slice { mutable, elem } => of(TypeKind::Slice { mutable: mutable, elem: substitute(elem, subst) }),
     TypeKind::Function { params, ret } => of(TypeKind::Function { params: substitute_all(params, subst), ret: substitute(ret, subst) }),
     TypeKind::CFn { is_unsafe, params, ret } => of(TypeKind::CFn { is_unsafe: is_unsafe, params: substitute_all(params, subst), ret: substitute(ret, subst) }),
+    // A pointer to a parameter (docs/adr/0098-locks-orderings-and-threads.md, Q677).
+    TypeKind::Atomic(value) => of(TypeKind::Atomic(substitute(value, subst))),
     _ => ty,
   }
 }
@@ -718,7 +720,7 @@ pub fn depth(ty: Type) -> usize {
     TypeKind::Tuple(elems) => 1 + max_depth(elems),
     TypeKind::List(elem) => 1 + depth(elem),
     TypeKind::Option(elem) => 1 + depth(elem),
-    TypeKind::Ptr { pointee, .. } | TypeKind::Ref { pointee, .. } | TypeKind::Slice { elem: pointee, .. } => 1 + depth(pointee),
+    TypeKind::Ptr { pointee, .. } | TypeKind::Ref { pointee, .. } | TypeKind::Slice { elem: pointee, .. } | TypeKind::Atomic(pointee) => 1 + depth(pointee),
     TypeKind::Result { value, error } => {
       const a = depth(value);
       const b = depth(error);
@@ -1656,8 +1658,9 @@ pub class Checker {
     self.type_expr_at(ty, false)
   }
 
-  /// `Atomic<T>`, of a `bool` or an integer, in the one place it may be
-  /// (docs/adr/0087-atomic-storage-and-std-sync.md, Q565 and Q566).
+  /// `Atomic<T>`, of a `bool`, an integer or a raw pointer, in the one place it may be
+  /// (docs/adr/0087-atomic-storage-and-std-sync.md, Q565 and Q566;
+  /// docs/adr/0098-locks-orderings-and-threads.md, Q677).
   prv fn atomic_type(self, span: Span, args: List<TypeExpr>, allowed: bool) -> Type {
     if args.len() != 1 {
       self.error(codes::WRONG_TYPE_ARGUMENTS, span, `\`Atomic\` takes 1 type argument but ${args.len()} were supplied`);
@@ -1667,13 +1670,13 @@ pub class Checker {
 
     const value = self.type_expr(args[0]);
     const atomic_value = match value.kind {
-      TypeKind::Bool | TypeKind::Int(_) => true,
+      TypeKind::Bool | TypeKind::Int(_) | TypeKind::Ptr { .. } => true,
       TypeKind::Error => return error(),
       _ => false,
     };
 
     if !atomic_value {
-      self.error(codes::WRONG_TYPE_ARGUMENTS, span, "`Atomic` holds a `bool` or an integer, not `" + text(value) + "`");
+      self.error(codes::WRONG_TYPE_ARGUMENTS, span, "`Atomic` holds a `bool`, an integer or a raw pointer, not `" + text(value) + "`");
 
       return error();
     }

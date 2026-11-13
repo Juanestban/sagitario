@@ -500,7 +500,7 @@ pub fn mentions_params(ty: Type) -> bool {
     TypeKind::Struct(named) | TypeKind::Enum(named) | TypeKind::Class(named) | TypeKind::Interface(named) => named.args.iter().any((arg) => mentions_params(arg)),
     TypeKind::Array { elem, .. } | TypeKind::List(elem) | TypeKind::Option(elem) => mentions_params(elem),
     TypeKind::Tuple(elems) => elems.iter().any((elem) => mentions_params(elem)),
-    TypeKind::Ptr { pointee, .. } | TypeKind::Ref { pointee, .. } | TypeKind::Slice { elem: pointee, .. } => mentions_params(pointee),
+    TypeKind::Ptr { pointee, .. } | TypeKind::Ref { pointee, .. } | TypeKind::Slice { elem: pointee, .. } | TypeKind::Atomic(pointee) => mentions_params(pointee),
     TypeKind::Result { value, error } => mentions_params(value) || mentions_params(error),
     TypeKind::Function { params, ret } | TypeKind::CFn { params, ret, .. } => params.iter().any((param) => mentions_params(param)) || mentions_params(ret),
     _ => false,

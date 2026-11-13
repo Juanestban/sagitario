@@ -87,14 +87,14 @@ const RUNTIME: String = include_str("../runtime/runtime.c");
 Rationale: [ADR-0083](../adr/0083-global-state.md).
 
 ```sag
-use std::sync::{AtomicI64, Mutex};
+use std::sync::{AtomicI64, Mutex, Ordering};
 
 pub static WIDTH: i32 = 640;
 static FRAMES: AtomicI64 = new AtomicI64(0);
 static NAMES: Mutex<String> = new Mutex(load_names());
 
 fn frame() {
-  FRAMES.fetch_add(1);
+  FRAMES.fetch_add(1, Ordering::Relaxed);
   NAMES.update((names) => names + ",");
 }
 ```
@@ -108,7 +108,7 @@ fn frame() {
   A `List`, a `Map` or a class with `var` fields is an error (`E0332`).
 - A static cannot be assigned (`E0307`), nor its fields, nor can a method that modifies `self`
   be called on it (`E0312`, `E0313`). Its value changes only through its own methods, such as
-  those of an atomic or a `Mutex`: `FRAMES.fetch_add(1)`.
+  those of an atomic or a `Mutex`: `FRAMES.fetch_add(1, Ordering::Relaxed)`.
 - The value is any expression, computed **on the first use** of the static, exactly once even
   when several threads reach it at once: the others wait for it. A static that needs its own value
   while it is being computed, directly or through other statics or functions, panics naming it. A

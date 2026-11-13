@@ -13,7 +13,7 @@
 // expect-stdout: sorted 1 2 3 5 8 9, compared true
 // expect-stdout: main scratch untouched: 0
 use std::ffi::{c_int, c_void};
-use std::sync::{AtomicI64, Mutex};
+use std::sync::{AtomicI64, Mutex, Ordering};
 use std::thread;
 
 extern "C" {
@@ -46,7 +46,7 @@ fn load_config() -> Config {
 }
 
 fn new_scratch() -> List<i32> {
-  SCRATCH_LISTS.fetch_add(1);
+  SCRATCH_LISTS.fetch_add(1, Ordering::SeqCst);
   new List()
 }
 
@@ -58,7 +58,7 @@ fn frame(worker: i32) {
     SCRATCH.push(call);
   }
 
-  FRAMES.fetch_add(1);
+  FRAMES.fetch_add(1, Ordering::SeqCst);
 }
 
 fn worker(index: i32) -> String {
@@ -95,7 +95,7 @@ fn main() {
   // The main thread creates its own list on first use.
   const main_scratch = SCRATCH.len();
 
-  println(f"{FRAMES.load()} frames in total, {SCRATCH_LISTS.load()} scratch lists, log \"{LOG.get()}\"");
+  println(f"{FRAMES.load(Ordering::SeqCst)} frames in total, {SCRATCH_LISTS.load(Ordering::SeqCst)} scratch lists, log \"{LOG.get()}\"");
 
   const depths = List::from([5, 3, 9, 1, 8, 2]);
 

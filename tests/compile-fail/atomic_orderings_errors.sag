@@ -1,0 +1,20 @@
+// Every atomic operation takes its ordering, of `std::sync`, not the prelude's `Ordering` of
+// comparisons (docs/adr/0098-locks-orderings-and-threads.md, Q676 and Q677).
+
+use std::sync;
+use std::sync::{AtomicI32, AtomicPtr};
+
+fn main() {
+  const value = new AtomicI32(1);
+
+  value.load(); //~ ERROR E0301
+  value.store(2, Ordering::Less); //~ ERROR E0300
+  value.fetch_max(2, sync::Ordering::SeqCst, sync::Ordering::SeqCst); //~ ERROR E0301
+  sync::fence(); //~ ERROR E0301
+
+  var number = 1;
+  const pointer = new AtomicPtr(&raw mut number);
+
+  pointer.store(5, sync::Ordering::SeqCst); //~ ERROR E0300
+  pointer.fetch_add(1, sync::Ordering::SeqCst); //~ ERROR E0316
+}

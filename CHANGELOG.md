@@ -13,7 +13,20 @@ followed them.
 
 The sources say 0.32.0.
 
+### Changed
+
+- Every operation of an atomic takes its ordering, as Rust's: `load(Ordering::SeqCst)`,
+  `fetch_add(1, Ordering::Relaxed)`, `compare_exchange(current, desired, success, failure)`, with
+  `std::sync::Ordering`; add `Ordering::SeqCst` to keep what a program did
+  ([ADR-0098](docs/adr/0098-locks-orderings-and-threads.md), increment 1).
+
 ### Added
+
+- `std::sync::Ordering` and `fence`; `AtomicI8`, `AtomicU8`, `AtomicI16`, `AtomicU16`,
+  `AtomicIsize` and `AtomicPtr<T>`; `fetch_and`, `fetch_or`, `fetch_xor`, `fetch_nand`,
+  `fetch_max`, `fetch_min`, `fetch_update` and `compare_exchange_weak` on the atomics, and
+  `fetch_not` on `AtomicBool`. A mismatch between two types of the same name notes that they
+  differ ([ADR-0098](docs/adr/0098-locks-orderings-and-threads.md), increment 1).
 
 - `std::process::abort` and `id`; `std::env::vars`, `set_var` and `remove_var` (`unsafe`, as in
   Rust 2024), `set_current_dir`, `current_exe`, `temp_dir` and `home_dir`, and the constants

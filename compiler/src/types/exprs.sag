@@ -57,6 +57,12 @@ pub fn builtin_sig(name: String, target: TargetInfo) -> FnSig {
     return FnSig { receiver: None, params: new List(), ret: types::of(TypeKind::Never) };
   }
 
+  // C11's `atomic_thread_fence`, with an ordering of `std::sync`
+  // (docs/adr/0098-locks-orderings-and-threads.md, Q676).
+  if name == "Atomic::fence" {
+    return FnSig { receiver: None, params: List::from([types::int(IntTy::I32)]), ret: types::unit() };
+  }
+
   if name == "CString::new" {
     return FnSig { receiver: None, params: List::from([string]), ret: types::of(TypeKind::Result { value: types::of(TypeKind::CString), error: string }) };
   }
@@ -615,6 +621,11 @@ pub fn expect_because(cx: Checker, value: Expr, expected: Type, because: Option<
 
   var diagnostic = Diagnostic::error(codes::MISMATCHED_TYPES, value.span, "expected `" + types::text(expected) + "`, found `" + types::text(actual) + "`");
 
+  // Such as `std::sync::Ordering` and the prelude's `Ordering` of comparisons.
+  if types::text(expected) == types::text(actual) {
+    diagnostic = diagnostic.with_note("they are two different types with the same name");
+  }
+
   if let Some(reason) = because {
     diagnostic = diagnostic.with_label(reason.span, reason.message);
   }
@@ -710,27 +721,30 @@ fn atomic_misuses(cx: Checker) {
   cx.atomic_uses = new List();
 }
 
-/// A method of `Atomic<T>` (docs/adr/0087-atomic-storage-and-std-sync.md, Q568).
+/// A method of `Atomic<T>` (docs/adr/0087-atomic-storage-and-std-sync.md, Q568). Each one takes
+/// its orderings last, as numbers that `std::sync` gives from its `Ordering`
+/// (docs/adr/0098-locks-orderings-and-threads.md, Q676).
 fn atomic_method(cx: Checker, value: Expr, receiver: Expr, inner: Type, method: Ident, args: List<Expr>) -> Type {
   const name = method.name;
   const is_int = match inner.kind {
     TypeKind::Int(_) => true,
     _ => false,
   };
+  const order = types::int(IntTy::I32);
   var params: List<Type> = new List();
   var ret = inner;
 
   atomic_used(cx, receiver);
 
   if name == "load" {
-    ret = inner;
+    params = List::from([order]);
   } else if name == "store" {
-    params = List::from([inner]);
+    params = List::from([inner, order]);
     ret = types::unit();
-  } else if name == "swap" || (is_int && (name == "fetch_add" || name == "fetch_sub")) {
-    params = List::from([inner]);
-  } else if name == "compare_exchange" {
-    params = List::from([inner, inner]);
+  } else if name == "swap" || (is_int && (name == "fetch_add" || name == "fetch_sub" || name == "fetch_and" || name == "fetch_or" || name == "fetch_xor")) {
+    params = List::from([inner, order]);
+  } else if name == "compare_exchange" || name == "compare_exchange_weak" {
+    params = List::from([inner, inner, order, order]);
     ret = types::of(TypeKind::Result { value: inner, error: inner });
   } else {
     cx.error(codes::UNKNOWN_MEMBER, method.span, "no method `" + name + "` on type `Atomic<" + types::text(inner) + ">`");

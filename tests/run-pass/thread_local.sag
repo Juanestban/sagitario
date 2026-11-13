@@ -7,7 +7,7 @@
 // expect-stdout: threads: 4 sums 10 20 30 40, created 5
 // expect-stdout: main again: 3 items, calls 4, label main!
 // expect-stdout: label replaced, holder 7
-use std::sync::AtomicI64;
+use std::sync::{AtomicI64, Ordering};
 use std::thread;
 
 static CREATED: AtomicI64 = new AtomicI64(0);
@@ -41,7 +41,7 @@ class Holder {
 static var HOLDER: Holder = new Holder(7);
 
 fn new_scratch() -> List<i32> {
-  CREATED.fetch_add(1);
+  CREATED.fetch_add(1, Ordering::SeqCst);
   new List()
 }
 
@@ -64,7 +64,7 @@ fn main() {
   record(1);
   record(2);
   record(3);
-  println(f"main: {CREATED.load()} created, {SCRATCH.len()} items, total {total()}, calls {CALLS}");
+  println(f"main: {CREATED.load(Ordering::SeqCst)} created, {SCRATCH.len()} items, total {total()}, calls {CALLS}");
 
   const handles = new List<thread::JoinHandle<i32>>();
 
@@ -85,7 +85,7 @@ fn main() {
     sums = sums + f" {handle.join()}";
   }
 
-  println(f"threads: {CREATED.load() - 1} sums{sums}, created {CREATED.load()}");
+  println(f"threads: {CREATED.load(Ordering::SeqCst) - 1} sums{sums}, created {CREATED.load(Ordering::SeqCst)}");
 
   CALLS += 1;
   LABEL = LABEL + "!";

@@ -2,7 +2,8 @@
 //!
 //! `Mutex` and `Channel` hold a `std::sys::Lock`, the lock and condition of each system, and an
 //! atomic holds its value in a field of type `std::sys::Atomic`, which the compiler provides
-//! (docs/adr/0087-atomic-storage-and-std-sync.md).
+//! (docs/adr/0087-atomic-storage-and-std-sync.md), with the orderings of Rust
+//! (docs/adr/0098-locks-orderings-and-threads.md).
 
 use std::sys;
 use std::sys::Atomic;
@@ -135,6 +136,86 @@ fn move_newest<T>(from: List<T>, to: List<T>) -> bool {
   }
 }
 
+// ---- Atomics (docs/adr/0098-locks-orderings-and-threads.md, Q676 and Q677) ----------------------
+
+/// How an atomic operation orders the memory operations around it, as Rust's
+/// `std::sync::atomic::Ordering`. Written `sync::Ordering`, or imported, which hides the prelude's
+/// `Ordering` of comparisons.
+pub enum Ordering {
+  /// Only the operation itself is atomic.
+  Relaxed,
+  /// The writes before it are seen by a thread that reads its value with `Acquire`.
+  Release,
+  /// It sees the writes made before a `Release` whose value it reads.
+  Acquire,
+  /// Both `Acquire` and `Release`, for an operation that reads and writes.
+  AcqRel,
+  /// `AcqRel`, and every thread sees all `SeqCst` operations in one order.
+  SeqCst,
+}
+
+/// The number of an ordering for `std::sys::Atomic`.
+fn code(order: Ordering) -> i32 {
+  match order {
+    Ordering::Relaxed => 0,
+    Ordering::Release => 1,
+    Ordering::Acquire => 2,
+    Ordering::AcqRel => 3,
+    Ordering::SeqCst => 4,
+  }
+}
+
+/// A load may not release, as Rust's says.
+fn load_code(order: Ordering) -> i32 {
+  match order {
+    Ordering::Release => panic("there is no such thing as a release load"),
+    Ordering::AcqRel => panic("there is no such thing as an acquire-release load"),
+    _ => code(order),
+  }
+}
+
+/// A store may not acquire.
+fn store_code(order: Ordering) -> i32 {
+  match order {
+    Ordering::Acquire => panic("there is no such thing as an acquire store"),
+    Ordering::AcqRel => panic("there is no such thing as an acquire-release store"),
+    _ => code(order),
+  }
+}
+
+/// What a failed compare-exchange does is a load.
+fn failure_code(order: Ordering) -> i32 {
+  match order {
+    Ordering::Release => panic("there is no such thing as a release failure ordering"),
+    Ordering::AcqRel => panic("there is no such thing as an acquire-release failure ordering"),
+    _ => code(order),
+  }
+}
+
+/// The ordering of a compare-exchange that succeeds. C11 wants it no weaker than the one of a
+/// failure, which Rust does not: a stronger one keeps what both ask for.
+fn success_code(success: Ordering, failure: Ordering) -> i32 {
+  match failure {
+    Ordering::SeqCst => 4,
+    Ordering::Acquire => match success {
+      Ordering::Relaxed => 2,
+      Ordering::Release => 3,
+      _ => code(success),
+    },
+    _ => code(success),
+  }
+}
+
+/// A fence orders the memory operations around it without an atomic of its own, as Rust's
+/// `std::sync::atomic::fence`. Panics with `Relaxed`, which would order nothing.
+pub fn fence(order: Ordering) {
+  if order == Ordering::Relaxed {
+    panic("there is no such thing as a relaxed fence");
+  }
+
+  Atomic::fence(code(order));
+}
+
 /// A `bool` that threads read and change at once.
 pub class AtomicBool {
   prv const value: Atomic<bool>;
@@ -143,22 +224,358 @@ pub class AtomicBool {
     self.value = Atomic::new(value);
   }
 
-  pub fn load(self) -> bool {
-    self.value.load()
+  pub fn load(self, order: Ordering) -> bool {
+    self.value.load(load_code(order))
   }
 
-  pub fn store(self, value: bool) {
-    self.value.store(value);
+  pub fn store(self, value: bool, order: Ordering) {
+    self.value.store(value, store_code(order));
   }
 
   /// Stores `value` and returns the previous value.
-  pub fn swap(self, value: bool) -> bool {
-    self.value.swap(value)
+  pub fn swap(self, value: bool, order: Ordering) -> bool {
+    self.value.swap(value, code(order))
   }
 
-  /// Stores `desired` if the value is `expected`: `Ok(expected)` if it did, `Err(actual)` if not.
-  pub fn compare_exchange(self, expected: bool, desired: bool) -> Result<bool, bool> {
-    self.value.compare_exchange(expected, desired)
+  /// Stores `desired` if the value is `current`: `Ok(current)` if it did, `Err(actual)` if not.
+  /// `success` orders the exchange, `failure` the load of a value that differs.
+  pub fn compare_exchange(self, current: bool, desired: bool, success: Ordering, failure: Ordering) -> Result<bool, bool> {
+    const failed = failure_code(failure);
+
+    self.value.compare_exchange(current, desired, success_code(success, failure), failed)
+  }
+
+  /// As `compare_exchange`, but it may fail although the value is `current`, which is faster in a
+  /// loop on some processors.
+  pub fn compare_exchange_weak(self, current: bool, desired: bool, success: Ordering, failure: Ordering) -> Result<bool, bool> {
+    const failed = failure_code(failure);
+
+    self.value.compare_exchange_weak(current, desired, success_code(success, failure), failed)
+  }
+
+  /// Stores what `f` returns for the value while it returns `Some`, trying again if another
+  /// thread changed the value in between: `Ok(previous)`, or `Err(previous)` once `f` gives
+  /// `None`. `set_order` orders the store, `fetch_order` the loads.
+  pub fn fetch_update(self, set_order: Ordering, fetch_order: Ordering, f: fn(bool) -> Option<bool>) -> Result<bool, bool> {
+    var previous = self.load(fetch_order);
+
+    while let Some(next) = f(previous) {
+      match self.compare_exchange_weak(previous, next, set_order, fetch_order) {
+        Ok(found) => return Ok(found),
+        Err(found) => {
+          previous = found;
+        }
+      }
+    }
+
+    Err(previous)
+  }
+
+  /// Stores the value `&&` `value` and returns the previous value.
+  pub fn fetch_and(self, value: bool, order: Ordering) -> bool {
+    var previous = self.value.load(0);
+
+    loop {
+      match self.value.compare_exchange_weak(previous, previous && value, code(order), 0) {
+        Ok(found) => return found,
+        Err(found) => {
+          previous = found;
+        }
+      }
+    }
+  }
+
+  /// Stores the value `||` `value` and returns the previous value.
+  pub fn fetch_or(self, value: bool, order: Ordering) -> bool {
+    var previous = self.value.load(0);
+
+    loop {
+      match self.value.compare_exchange_weak(previous, previous || value, code(order), 0) {
+        Ok(found) => return found,
+        Err(found) => {
+          previous = found;
+        }
+      }
+    }
+  }
+
+  /// Stores the value `!=` `value` and returns the previous value.
+  pub fn fetch_xor(self, value: bool, order: Ordering) -> bool {
+    var previous = self.value.load(0);
+
+    loop {
+      match self.value.compare_exchange_weak(previous, previous != value, code(order), 0) {
+        Ok(found) => return found,
+        Err(found) => {
+          previous = found;
+        }
+      }
+    }
+  }
+
+  /// Stores `!(previous && value)` and returns the previous value.
+  pub fn fetch_nand(self, value: bool, order: Ordering) -> bool {
+    var previous = self.value.load(0);
+
+    loop {
+      match self.value.compare_exchange_weak(previous, !(previous && value), code(order), 0) {
+        Ok(found) => return found,
+        Err(found) => {
+          previous = found;
+        }
+      }
+    }
+  }
+
+  /// Stores the opposite of the value and returns the previous value.
+  pub fn fetch_not(self, order: Ordering) -> bool {
+    self.fetch_xor(true, order)
+  }
+}
+
+/// An `i8` that threads read and change at once.
+pub class AtomicI8 {
+  prv const value: Atomic<i8>;
+
+  pub fn new(self, value: i8) {
+    self.value = Atomic::new(value);
+  }
+
+  pub fn load(self, order: Ordering) -> i8 {
+    self.value.load(load_code(order))
+  }
+
+  pub fn store(self, value: i8, order: Ordering) {
+    self.value.store(value, store_code(order));
+  }
+
+  /// Stores `value` and returns the previous value.
+  pub fn swap(self, value: i8, order: Ordering) -> i8 {
+    self.value.swap(value, code(order))
+  }
+
+  /// Adds `value` and returns the previous value; the sum wraps around at the limits of `i8`.
+  pub fn fetch_add(self, value: i8, order: Ordering) -> i8 {
+    self.value.fetch_add(value, code(order))
+  }
+
+  /// Subtracts `value` and returns the previous value; the difference wraps around at the limits of `i8`.
+  pub fn fetch_sub(self, value: i8, order: Ordering) -> i8 {
+    self.value.fetch_sub(value, code(order))
+  }
+
+  /// Stores the value `&` `value` and returns the previous value.
+  pub fn fetch_and(self, value: i8, order: Ordering) -> i8 {
+    self.value.fetch_and(value, code(order))
+  }
+
+  /// Stores the value `|` `value` and returns the previous value.
+  pub fn fetch_or(self, value: i8, order: Ordering) -> i8 {
+    self.value.fetch_or(value, code(order))
+  }
+
+  /// Stores the value `^` `value` and returns the previous value.
+  pub fn fetch_xor(self, value: i8, order: Ordering) -> i8 {
+    self.value.fetch_xor(value, code(order))
+  }
+
+  /// Stores `!(previous & value)` and returns the previous value.
+  pub fn fetch_nand(self, value: i8, order: Ordering) -> i8 {
+    var previous = self.value.load(0);
+
+    loop {
+      match self.value.compare_exchange_weak(previous, !(previous & value), code(order), 0) {
+        Ok(found) => return found,
+        Err(found) => {
+          previous = found;
+        }
+      }
+    }
+  }
+
+  /// Stores the larger of the value and `value`, and returns the previous value.
+  pub fn fetch_max(self, value: i8, order: Ordering) -> i8 {
+    var previous = self.value.load(0);
+
+    loop {
+      match self.value.compare_exchange_weak(previous, previous.max(value), code(order), 0) {
+        Ok(found) => return found,
+        Err(found) => {
+          previous = found;
+        }
+      }
+    }
+  }
+
+  /// Stores the smaller of the value and `value`, and returns the previous value.
+  pub fn fetch_min(self, value: i8, order: Ordering) -> i8 {
+    var previous = self.value.load(0);
+
+    loop {
+      match self.value.compare_exchange_weak(previous, previous.min(value), code(order), 0) {
+        Ok(found) => return found,
+        Err(found) => {
+          previous = found;
+        }
+      }
+    }
+  }
+
+  /// Stores `desired` if the value is `current`: `Ok(current)` if it did, `Err(actual)` if not.
+  /// `success` orders the exchange, `failure` the load of a value that differs.
+  pub fn compare_exchange(self, current: i8, desired: i8, success: Ordering, failure: Ordering) -> Result<i8, i8> {
+    const failed = failure_code(failure);
+
+    self.value.compare_exchange(current, desired, success_code(success, failure), failed)
+  }
+
+  /// As `compare_exchange`, but it may fail although the value is `current`, which is faster in a
+  /// loop on some processors.
+  pub fn compare_exchange_weak(self, current: i8, desired: i8, success: Ordering, failure: Ordering) -> Result<i8, i8> {
+    const failed = failure_code(failure);
+
+    self.value.compare_exchange_weak(current, desired, success_code(success, failure), failed)
+  }
+
+  /// Stores what `f` returns for the value while it returns `Some`, trying again if another
+  /// thread changed the value in between: `Ok(previous)`, or `Err(previous)` once `f` gives
+  /// `None`. `set_order` orders the store, `fetch_order` the loads.
+  pub fn fetch_update(self, set_order: Ordering, fetch_order: Ordering, f: fn(i8) -> Option<i8>) -> Result<i8, i8> {
+    var previous = self.load(fetch_order);
+
+    while let Some(next) = f(previous) {
+      match self.compare_exchange_weak(previous, next, set_order, fetch_order) {
+        Ok(found) => return Ok(found),
+        Err(found) => {
+          previous = found;
+        }
+      }
+    }
+
+    Err(previous)
+  }
+}
+
+/// An `i16` that threads read and change at once.
+pub class AtomicI16 {
+  prv const value: Atomic<i16>;
+
+  pub fn new(self, value: i16) {
+    self.value = Atomic::new(value);
+  }
+
+  pub fn load(self, order: Ordering) -> i16 {
+    self.value.load(load_code(order))
+  }
+
+  pub fn store(self, value: i16, order: Ordering) {
+    self.value.store(value, store_code(order));
+  }
+
+  /// Stores `value` and returns the previous value.
+  pub fn swap(self, value: i16, order: Ordering) -> i16 {
+    self.value.swap(value, code(order))
+  }
+
+  /// Adds `value` and returns the previous value; the sum wraps around at the limits of `i16`.
+  pub fn fetch_add(self, value: i16, order: Ordering) -> i16 {
+    self.value.fetch_add(value, code(order))
+  }
+
+  /// Subtracts `value` and returns the previous value; the difference wraps around at the limits of `i16`.
+  pub fn fetch_sub(self, value: i16, order: Ordering) -> i16 {
+    self.value.fetch_sub(value, code(order))
+  }
+
+  /// Stores the value `&` `value` and returns the previous value.
+  pub fn fetch_and(self, value: i16, order: Ordering) -> i16 {
+    self.value.fetch_and(value, code(order))
+  }
+
+  /// Stores the value `|` `value` and returns the previous value.
+  pub fn fetch_or(self, value: i16, order: Ordering) -> i16 {
+    self.value.fetch_or(value, code(order))
+  }
+
+  /// Stores the value `^` `value` and returns the previous value.
+  pub fn fetch_xor(self, value: i16, order: Ordering) -> i16 {
+    self.value.fetch_xor(value, code(order))
+  }
+
+  /// Stores `!(previous & value)` and returns the previous value.
+  pub fn fetch_nand(self, value: i16, order: Ordering) -> i16 {
+    var previous = self.value.load(0);
+
+    loop {
+      match self.value.compare_exchange_weak(previous, !(previous & value), code(order), 0) {
+        Ok(found) => return found,
+        Err(found) => {
+          previous = found;
+        }
+      }
+    }
+  }
+
+  /// Stores the larger of the value and `value`, and returns the previous value.
+  pub fn fetch_max(self, value: i16, order: Ordering) -> i16 {
+    var previous = self.value.load(0);
+
+    loop {
+      match self.value.compare_exchange_weak(previous, previous.max(value), code(order), 0) {
+        Ok(found) => return found,
+        Err(found) => {
+          previous = found;
+        }
+      }
+    }
+  }
+
+  /// Stores the smaller of the value and `value`, and returns the previous value.
+  pub fn fetch_min(self, value: i16, order: Ordering) -> i16 {
+    var previous = self.value.load(0);
+
+    loop {
+      match self.value.compare_exchange_weak(previous, previous.min(value), code(order), 0) {
+        Ok(found) => return found,
+        Err(found) => {
+          previous = found;
+        }
+      }
+    }
+  }
+
+  /// Stores `desired` if the value is `current`: `Ok(current)` if it did, `Err(actual)` if not.
+  /// `success` orders the exchange, `failure` the load of a value that differs.
+  pub fn compare_exchange(self, current: i16, desired: i16, success: Ordering, failure: Ordering) -> Result<i16, i16> {
+    const failed = failure_code(failure);
+
+    self.value.compare_exchange(current, desired, success_code(success, failure), failed)
+  }
+
+  /// As `compare_exchange`, but it may fail although the value is `current`, which is faster in a
+  /// loop on some processors.
+  pub fn compare_exchange_weak(self, current: i16, desired: i16, success: Ordering, failure: Ordering) -> Result<i16, i16> {
+    const failed = failure_code(failure);
+
+    self.value.compare_exchange_weak(current, desired, success_code(success, failure), failed)
+  }
+
+  /// Stores what `f` returns for the value while it returns `Some`, trying again if another
+  /// thread changed the value in between: `Ok(previous)`, or `Err(previous)` once `f` gives
+  /// `None`. `set_order` orders the store, `fetch_order` the loads.
+  pub fn fetch_update(self, set_order: Ordering, fetch_order: Ordering, f: fn(i16) -> Option<i16>) -> Result<i16, i16> {
+    var previous = self.load(fetch_order);
+
+    while let Some(next) = f(previous) {
+      match self.compare_exchange_weak(previous, next, set_order, fetch_order) {
+        Ok(found) => return Ok(found),
+        Err(found) => {
+          previous = found;
+        }
+      }
+    }
+
+    Err(previous)
   }
 }
 
@@ -170,33 +587,118 @@ pub class AtomicI32 {
     self.value = Atomic::new(value);
   }
 
-  pub fn load(self) -> i32 {
-    self.value.load()
+  pub fn load(self, order: Ordering) -> i32 {
+    self.value.load(load_code(order))
   }
 
-  pub fn store(self, value: i32) {
-    self.value.store(value);
+  pub fn store(self, value: i32, order: Ordering) {
+    self.value.store(value, store_code(order));
   }
 
   /// Stores `value` and returns the previous value.
-  pub fn swap(self, value: i32) -> i32 {
-    self.value.swap(value)
+  pub fn swap(self, value: i32, order: Ordering) -> i32 {
+    self.value.swap(value, code(order))
   }
 
-  /// Adds `n` and returns the previous value; the sum wraps around at the limits of `i32`.
-  pub fn fetch_add(self, n: i32) -> i32 {
-    self.value.fetch_add(n)
+  /// Adds `value` and returns the previous value; the sum wraps around at the limits of `i32`.
+  pub fn fetch_add(self, value: i32, order: Ordering) -> i32 {
+    self.value.fetch_add(value, code(order))
   }
 
-  /// Subtracts `n` and returns the previous value; the difference wraps around at the limits of
-  /// `i32`.
-  pub fn fetch_sub(self, n: i32) -> i32 {
-    self.value.fetch_sub(n)
+  /// Subtracts `value` and returns the previous value; the difference wraps around at the limits of `i32`.
+  pub fn fetch_sub(self, value: i32, order: Ordering) -> i32 {
+    self.value.fetch_sub(value, code(order))
   }
 
-  /// Stores `desired` if the value is `expected`: `Ok(expected)` if it did, `Err(actual)` if not.
-  pub fn compare_exchange(self, expected: i32, desired: i32) -> Result<i32, i32> {
-    self.value.compare_exchange(expected, desired)
+  /// Stores the value `&` `value` and returns the previous value.
+  pub fn fetch_and(self, value: i32, order: Ordering) -> i32 {
+    self.value.fetch_and(value, code(order))
+  }
+
+  /// Stores the value `|` `value` and returns the previous value.
+  pub fn fetch_or(self, value: i32, order: Ordering) -> i32 {
+    self.value.fetch_or(value, code(order))
+  }
+
+  /// Stores the value `^` `value` and returns the previous value.
+  pub fn fetch_xor(self, value: i32, order: Ordering) -> i32 {
+    self.value.fetch_xor(value, code(order))
+  }
+
+  /// Stores `!(previous & value)` and returns the previous value.
+  pub fn fetch_nand(self, value: i32, order: Ordering) -> i32 {
+    var previous = self.value.load(0);
+
+    loop {
+      match self.value.compare_exchange_weak(previous, !(previous & value), code(order), 0) {
+        Ok(found) => return found,
+        Err(found) => {
+          previous = found;
+        }
+      }
+    }
+  }
+
+  /// Stores the larger of the value and `value`, and returns the previous value.
+  pub fn fetch_max(self, value: i32, order: Ordering) -> i32 {
+    var previous = self.value.load(0);
+
+    loop {
+      match self.value.compare_exchange_weak(previous, previous.max(value), code(order), 0) {
+        Ok(found) => return found,
+        Err(found) => {
+          previous = found;
+        }
+      }
+    }
+  }
+
+  /// Stores the smaller of the value and `value`, and returns the previous value.
+  pub fn fetch_min(self, value: i32, order: Ordering) -> i32 {
+    var previous = self.value.load(0);
+
+    loop {
+      match self.value.compare_exchange_weak(previous, previous.min(value), code(order), 0) {
+        Ok(found) => return found,
+        Err(found) => {
+          previous = found;
+        }
+      }
+    }
+  }
+
+  /// Stores `desired` if the value is `current`: `Ok(current)` if it did, `Err(actual)` if not.
+  /// `success` orders the exchange, `failure` the load of a value that differs.
+  pub fn compare_exchange(self, current: i32, desired: i32, success: Ordering, failure: Ordering) -> Result<i32, i32> {
+    const failed = failure_code(failure);
+
+    self.value.compare_exchange(current, desired, success_code(success, failure), failed)
+  }
+
+  /// As `compare_exchange`, but it may fail although the value is `current`, which is faster in a
+  /// loop on some processors.
+  pub fn compare_exchange_weak(self, current: i32, desired: i32, success: Ordering, failure: Ordering) -> Result<i32, i32> {
+    const failed = failure_code(failure);
+
+    self.value.compare_exchange_weak(current, desired, success_code(success, failure), failed)
+  }
+
+  /// Stores what `f` returns for the value while it returns `Some`, trying again if another
+  /// thread changed the value in between: `Ok(previous)`, or `Err(previous)` once `f` gives
+  /// `None`. `set_order` orders the store, `fetch_order` the loads.
+  pub fn fetch_update(self, set_order: Ordering, fetch_order: Ordering, f: fn(i32) -> Option<i32>) -> Result<i32, i32> {
+    var previous = self.load(fetch_order);
+
+    while let Some(next) = f(previous) {
+      match self.compare_exchange_weak(previous, next, set_order, fetch_order) {
+        Ok(found) => return Ok(found),
+        Err(found) => {
+          previous = found;
+        }
+      }
+    }
+
+    Err(previous)
   }
 }
 
@@ -208,33 +710,487 @@ pub class AtomicI64 {
     self.value = Atomic::new(value);
   }
 
-  pub fn load(self) -> i64 {
-    self.value.load()
+  pub fn load(self, order: Ordering) -> i64 {
+    self.value.load(load_code(order))
   }
 
-  pub fn store(self, value: i64) {
-    self.value.store(value);
+  pub fn store(self, value: i64, order: Ordering) {
+    self.value.store(value, store_code(order));
   }
 
   /// Stores `value` and returns the previous value.
-  pub fn swap(self, value: i64) -> i64 {
-    self.value.swap(value)
+  pub fn swap(self, value: i64, order: Ordering) -> i64 {
+    self.value.swap(value, code(order))
   }
 
-  /// Adds `n` and returns the previous value; the sum wraps around at the limits of `i64`.
-  pub fn fetch_add(self, n: i64) -> i64 {
-    self.value.fetch_add(n)
+  /// Adds `value` and returns the previous value; the sum wraps around at the limits of `i64`.
+  pub fn fetch_add(self, value: i64, order: Ordering) -> i64 {
+    self.value.fetch_add(value, code(order))
   }
 
-  /// Subtracts `n` and returns the previous value; the difference wraps around at the limits of
-  /// `i64`.
-  pub fn fetch_sub(self, n: i64) -> i64 {
-    self.value.fetch_sub(n)
+  /// Subtracts `value` and returns the previous value; the difference wraps around at the limits of `i64`.
+  pub fn fetch_sub(self, value: i64, order: Ordering) -> i64 {
+    self.value.fetch_sub(value, code(order))
   }
 
-  /// Stores `desired` if the value is `expected`: `Ok(expected)` if it did, `Err(actual)` if not.
-  pub fn compare_exchange(self, expected: i64, desired: i64) -> Result<i64, i64> {
-    self.value.compare_exchange(expected, desired)
+  /// Stores the value `&` `value` and returns the previous value.
+  pub fn fetch_and(self, value: i64, order: Ordering) -> i64 {
+    self.value.fetch_and(value, code(order))
+  }
+
+  /// Stores the value `|` `value` and returns the previous value.
+  pub fn fetch_or(self, value: i64, order: Ordering) -> i64 {
+    self.value.fetch_or(value, code(order))
+  }
+
+  /// Stores the value `^` `value` and returns the previous value.
+  pub fn fetch_xor(self, value: i64, order: Ordering) -> i64 {
+    self.value.fetch_xor(value, code(order))
+  }
+
+  /// Stores `!(previous & value)` and returns the previous value.
+  pub fn fetch_nand(self, value: i64, order: Ordering) -> i64 {
+    var previous = self.value.load(0);
+
+    loop {
+      match self.value.compare_exchange_weak(previous, !(previous & value), code(order), 0) {
+        Ok(found) => return found,
+        Err(found) => {
+          previous = found;
+        }
+      }
+    }
+  }
+
+  /// Stores the larger of the value and `value`, and returns the previous value.
+  pub fn fetch_max(self, value: i64, order: Ordering) -> i64 {
+    var previous = self.value.load(0);
+
+    loop {
+      match self.value.compare_exchange_weak(previous, previous.max(value), code(order), 0) {
+        Ok(found) => return found,
+        Err(found) => {
+          previous = found;
+        }
+      }
+    }
+  }
+
+  /// Stores the smaller of the value and `value`, and returns the previous value.
+  pub fn fetch_min(self, value: i64, order: Ordering) -> i64 {
+    var previous = self.value.load(0);
+
+    loop {
+      match self.value.compare_exchange_weak(previous, previous.min(value), code(order), 0) {
+        Ok(found) => return found,
+        Err(found) => {
+          previous = found;
+        }
+      }
+    }
+  }
+
+  /// Stores `desired` if the value is `current`: `Ok(current)` if it did, `Err(actual)` if not.
+  /// `success` orders the exchange, `failure` the load of a value that differs.
+  pub fn compare_exchange(self, current: i64, desired: i64, success: Ordering, failure: Ordering) -> Result<i64, i64> {
+    const failed = failure_code(failure);
+
+    self.value.compare_exchange(current, desired, success_code(success, failure), failed)
+  }
+
+  /// As `compare_exchange`, but it may fail although the value is `current`, which is faster in a
+  /// loop on some processors.
+  pub fn compare_exchange_weak(self, current: i64, desired: i64, success: Ordering, failure: Ordering) -> Result<i64, i64> {
+    const failed = failure_code(failure);
+
+    self.value.compare_exchange_weak(current, desired, success_code(success, failure), failed)
+  }
+
+  /// Stores what `f` returns for the value while it returns `Some`, trying again if another
+  /// thread changed the value in between: `Ok(previous)`, or `Err(previous)` once `f` gives
+  /// `None`. `set_order` orders the store, `fetch_order` the loads.
+  pub fn fetch_update(self, set_order: Ordering, fetch_order: Ordering, f: fn(i64) -> Option<i64>) -> Result<i64, i64> {
+    var previous = self.load(fetch_order);
+
+    while let Some(next) = f(previous) {
+      match self.compare_exchange_weak(previous, next, set_order, fetch_order) {
+        Ok(found) => return Ok(found),
+        Err(found) => {
+          previous = found;
+        }
+      }
+    }
+
+    Err(previous)
+  }
+}
+
+/// An `isize` that threads read and change at once.
+pub class AtomicIsize {
+  prv const value: Atomic<isize>;
+
+  pub fn new(self, value: isize) {
+    self.value = Atomic::new(value);
+  }
+
+  pub fn load(self, order: Ordering) -> isize {
+    self.value.load(load_code(order))
+  }
+
+  pub fn store(self, value: isize, order: Ordering) {
+    self.value.store(value, store_code(order));
+  }
+
+  /// Stores `value` and returns the previous value.
+  pub fn swap(self, value: isize, order: Ordering) -> isize {
+    self.value.swap(value, code(order))
+  }
+
+  /// Adds `value` and returns the previous value; the sum wraps around at the limits of `isize`.
+  pub fn fetch_add(self, value: isize, order: Ordering) -> isize {
+    self.value.fetch_add(value, code(order))
+  }
+
+  /// Subtracts `value` and returns the previous value; the difference wraps around at the limits of `isize`.
+  pub fn fetch_sub(self, value: isize, order: Ordering) -> isize {
+    self.value.fetch_sub(value, code(order))
+  }
+
+  /// Stores the value `&` `value` and returns the previous value.
+  pub fn fetch_and(self, value: isize, order: Ordering) -> isize {
+    self.value.fetch_and(value, code(order))
+  }
+
+  /// Stores the value `|` `value` and returns the previous value.
+  pub fn fetch_or(self, value: isize, order: Ordering) -> isize {
+    self.value.fetch_or(value, code(order))
+  }
+
+  /// Stores the value `^` `value` and returns the previous value.
+  pub fn fetch_xor(self, value: isize, order: Ordering) -> isize {
+    self.value.fetch_xor(value, code(order))
+  }
+
+  /// Stores `!(previous & value)` and returns the previous value.
+  pub fn fetch_nand(self, value: isize, order: Ordering) -> isize {
+    var previous = self.value.load(0);
+
+    loop {
+      match self.value.compare_exchange_weak(previous, !(previous & value), code(order), 0) {
+        Ok(found) => return found,
+        Err(found) => {
+          previous = found;
+        }
+      }
+    }
+  }
+
+  /// Stores the larger of the value and `value`, and returns the previous value.
+  pub fn fetch_max(self, value: isize, order: Ordering) -> isize {
+    var previous = self.value.load(0);
+
+    loop {
+      match self.value.compare_exchange_weak(previous, previous.max(value), code(order), 0) {
+        Ok(found) => return found,
+        Err(found) => {
+          previous = found;
+        }
+      }
+    }
+  }
+
+  /// Stores the smaller of the value and `value`, and returns the previous value.
+  pub fn fetch_min(self, value: isize, order: Ordering) -> isize {
+    var previous = self.value.load(0);
+
+    loop {
+      match self.value.compare_exchange_weak(previous, previous.min(value), code(order), 0) {
+        Ok(found) => return found,
+        Err(found) => {
+          previous = found;
+        }
+      }
+    }
+  }
+
+  /// Stores `desired` if the value is `current`: `Ok(current)` if it did, `Err(actual)` if not.
+  /// `success` orders the exchange, `failure` the load of a value that differs.
+  pub fn compare_exchange(self, current: isize, desired: isize, success: Ordering, failure: Ordering) -> Result<isize, isize> {
+    const failed = failure_code(failure);
+
+    self.value.compare_exchange(current, desired, success_code(success, failure), failed)
+  }
+
+  /// As `compare_exchange`, but it may fail although the value is `current`, which is faster in a
+  /// loop on some processors.
+  pub fn compare_exchange_weak(self, current: isize, desired: isize, success: Ordering, failure: Ordering) -> Result<isize, isize> {
+    const failed = failure_code(failure);
+
+    self.value.compare_exchange_weak(current, desired, success_code(success, failure), failed)
+  }
+
+  /// Stores what `f` returns for the value while it returns `Some`, trying again if another
+  /// thread changed the value in between: `Ok(previous)`, or `Err(previous)` once `f` gives
+  /// `None`. `set_order` orders the store, `fetch_order` the loads.
+  pub fn fetch_update(self, set_order: Ordering, fetch_order: Ordering, f: fn(isize) -> Option<isize>) -> Result<isize, isize> {
+    var previous = self.load(fetch_order);
+
+    while let Some(next) = f(previous) {
+      match self.compare_exchange_weak(previous, next, set_order, fetch_order) {
+        Ok(found) => return Ok(found),
+        Err(found) => {
+          previous = found;
+        }
+      }
+    }
+
+    Err(previous)
+  }
+}
+
+/// An `u8` that threads read and change at once.
+pub class AtomicU8 {
+  prv const value: Atomic<u8>;
+
+  pub fn new(self, value: u8) {
+    self.value = Atomic::new(value);
+  }
+
+  pub fn load(self, order: Ordering) -> u8 {
+    self.value.load(load_code(order))
+  }
+
+  pub fn store(self, value: u8, order: Ordering) {
+    self.value.store(value, store_code(order));
+  }
+
+  /// Stores `value` and returns the previous value.
+  pub fn swap(self, value: u8, order: Ordering) -> u8 {
+    self.value.swap(value, code(order))
+  }
+
+  /// Adds `value` and returns the previous value; the sum wraps around at the limits of `u8`.
+  pub fn fetch_add(self, value: u8, order: Ordering) -> u8 {
+    self.value.fetch_add(value, code(order))
+  }
+
+  /// Subtracts `value` and returns the previous value; the difference wraps around at the limits of `u8`.
+  pub fn fetch_sub(self, value: u8, order: Ordering) -> u8 {
+    self.value.fetch_sub(value, code(order))
+  }
+
+  /// Stores the value `&` `value` and returns the previous value.
+  pub fn fetch_and(self, value: u8, order: Ordering) -> u8 {
+    self.value.fetch_and(value, code(order))
+  }
+
+  /// Stores the value `|` `value` and returns the previous value.
+  pub fn fetch_or(self, value: u8, order: Ordering) -> u8 {
+    self.value.fetch_or(value, code(order))
+  }
+
+  /// Stores the value `^` `value` and returns the previous value.
+  pub fn fetch_xor(self, value: u8, order: Ordering) -> u8 {
+    self.value.fetch_xor(value, code(order))
+  }
+
+  /// Stores `!(previous & value)` and returns the previous value.
+  pub fn fetch_nand(self, value: u8, order: Ordering) -> u8 {
+    var previous = self.value.load(0);
+
+    loop {
+      match self.value.compare_exchange_weak(previous, !(previous & value), code(order), 0) {
+        Ok(found) => return found,
+        Err(found) => {
+          previous = found;
+        }
+      }
+    }
+  }
+
+  /// Stores the larger of the value and `value`, and returns the previous value.
+  pub fn fetch_max(self, value: u8, order: Ordering) -> u8 {
+    var previous = self.value.load(0);
+
+    loop {
+      match self.value.compare_exchange_weak(previous, previous.max(value), code(order), 0) {
+        Ok(found) => return found,
+        Err(found) => {
+          previous = found;
+        }
+      }
+    }
+  }
+
+  /// Stores the smaller of the value and `value`, and returns the previous value.
+  pub fn fetch_min(self, value: u8, order: Ordering) -> u8 {
+    var previous = self.value.load(0);
+
+    loop {
+      match self.value.compare_exchange_weak(previous, previous.min(value), code(order), 0) {
+        Ok(found) => return found,
+        Err(found) => {
+          previous = found;
+        }
+      }
+    }
+  }
+
+  /// Stores `desired` if the value is `current`: `Ok(current)` if it did, `Err(actual)` if not.
+  /// `success` orders the exchange, `failure` the load of a value that differs.
+  pub fn compare_exchange(self, current: u8, desired: u8, success: Ordering, failure: Ordering) -> Result<u8, u8> {
+    const failed = failure_code(failure);
+
+    self.value.compare_exchange(current, desired, success_code(success, failure), failed)
+  }
+
+  /// As `compare_exchange`, but it may fail although the value is `current`, which is faster in a
+  /// loop on some processors.
+  pub fn compare_exchange_weak(self, current: u8, desired: u8, success: Ordering, failure: Ordering) -> Result<u8, u8> {
+    const failed = failure_code(failure);
+
+    self.value.compare_exchange_weak(current, desired, success_code(success, failure), failed)
+  }
+
+  /// Stores what `f` returns for the value while it returns `Some`, trying again if another
+  /// thread changed the value in between: `Ok(previous)`, or `Err(previous)` once `f` gives
+  /// `None`. `set_order` orders the store, `fetch_order` the loads.
+  pub fn fetch_update(self, set_order: Ordering, fetch_order: Ordering, f: fn(u8) -> Option<u8>) -> Result<u8, u8> {
+    var previous = self.load(fetch_order);
+
+    while let Some(next) = f(previous) {
+      match self.compare_exchange_weak(previous, next, set_order, fetch_order) {
+        Ok(found) => return Ok(found),
+        Err(found) => {
+          previous = found;
+        }
+      }
+    }
+
+    Err(previous)
+  }
+}
+
+/// An `u16` that threads read and change at once.
+pub class AtomicU16 {
+  prv const value: Atomic<u16>;
+
+  pub fn new(self, value: u16) {
+    self.value = Atomic::new(value);
+  }
+
+  pub fn load(self, order: Ordering) -> u16 {
+    self.value.load(load_code(order))
+  }
+
+  pub fn store(self, value: u16, order: Ordering) {
+    self.value.store(value, store_code(order));
+  }
+
+  /// Stores `value` and returns the previous value.
+  pub fn swap(self, value: u16, order: Ordering) -> u16 {
+    self.value.swap(value, code(order))
+  }
+
+  /// Adds `value` and returns the previous value; the sum wraps around at the limits of `u16`.
+  pub fn fetch_add(self, value: u16, order: Ordering) -> u16 {
+    self.value.fetch_add(value, code(order))
+  }
+
+  /// Subtracts `value` and returns the previous value; the difference wraps around at the limits of `u16`.
+  pub fn fetch_sub(self, value: u16, order: Ordering) -> u16 {
+    self.value.fetch_sub(value, code(order))
+  }
+
+  /// Stores the value `&` `value` and returns the previous value.
+  pub fn fetch_and(self, value: u16, order: Ordering) -> u16 {
+    self.value.fetch_and(value, code(order))
+  }
+
+  /// Stores the value `|` `value` and returns the previous value.
+  pub fn fetch_or(self, value: u16, order: Ordering) -> u16 {
+    self.value.fetch_or(value, code(order))
+  }
+
+  /// Stores the value `^` `value` and returns the previous value.
+  pub fn fetch_xor(self, value: u16, order: Ordering) -> u16 {
+    self.value.fetch_xor(value, code(order))
+  }
+
+  /// Stores `!(previous & value)` and returns the previous value.
+  pub fn fetch_nand(self, value: u16, order: Ordering) -> u16 {
+    var previous = self.value.load(0);
+
+    loop {
+      match self.value.compare_exchange_weak(previous, !(previous & value), code(order), 0) {
+        Ok(found) => return found,
+        Err(found) => {
+          previous = found;
+        }
+      }
+    }
+  }
+
+  /// Stores the larger of the value and `value`, and returns the previous value.
+  pub fn fetch_max(self, value: u16, order: Ordering) -> u16 {
+    var previous = self.value.load(0);
+
+    loop {
+      match self.value.compare_exchange_weak(previous, previous.max(value), code(order), 0) {
+        Ok(found) => return found,
+        Err(found) => {
+          previous = found;
+        }
+      }
+    }
+  }
+
+  /// Stores the smaller of the value and `value`, and returns the previous value.
+  pub fn fetch_min(self, value: u16, order: Ordering) -> u16 {
+    var previous = self.value.load(0);
+
+    loop {
+      match self.value.compare_exchange_weak(previous, previous.min(value), code(order), 0) {
+        Ok(found) => return found,
+        Err(found) => {
+          previous = found;
+        }
+      }
+    }
+  }
+
+  /// Stores `desired` if the value is `current`: `Ok(current)` if it did, `Err(actual)` if not.
+  /// `success` orders the exchange, `failure` the load of a value that differs.
+  pub fn compare_exchange(self, current: u16, desired: u16, success: Ordering, failure: Ordering) -> Result<u16, u16> {
+    const failed = failure_code(failure);
+
+    self.value.compare_exchange(current, desired, success_code(success, failure), failed)
+  }
+
+  /// As `compare_exchange`, but it may fail although the value is `current`, which is faster in a
+  /// loop on some processors.
+  pub fn compare_exchange_weak(self, current: u16, desired: u16, success: Ordering, failure: Ordering) -> Result<u16, u16> {
+    const failed = failure_code(failure);
+
+    self.value.compare_exchange_weak(current, desired, success_code(success, failure), failed)
+  }
+
+  /// Stores what `f` returns for the value while it returns `Some`, trying again if another
+  /// thread changed the value in between: `Ok(previous)`, or `Err(previous)` once `f` gives
+  /// `None`. `set_order` orders the store, `fetch_order` the loads.
+  pub fn fetch_update(self, set_order: Ordering, fetch_order: Ordering, f: fn(u16) -> Option<u16>) -> Result<u16, u16> {
+    var previous = self.load(fetch_order);
+
+    while let Some(next) = f(previous) {
+      match self.compare_exchange_weak(previous, next, set_order, fetch_order) {
+        Ok(found) => return Ok(found),
+        Err(found) => {
+          previous = found;
+        }
+      }
+    }
+
+    Err(previous)
   }
 }
 
@@ -246,33 +1202,118 @@ pub class AtomicU32 {
     self.value = Atomic::new(value);
   }
 
-  pub fn load(self) -> u32 {
-    self.value.load()
+  pub fn load(self, order: Ordering) -> u32 {
+    self.value.load(load_code(order))
   }
 
-  pub fn store(self, value: u32) {
-    self.value.store(value);
+  pub fn store(self, value: u32, order: Ordering) {
+    self.value.store(value, store_code(order));
   }
 
   /// Stores `value` and returns the previous value.
-  pub fn swap(self, value: u32) -> u32 {
-    self.value.swap(value)
+  pub fn swap(self, value: u32, order: Ordering) -> u32 {
+    self.value.swap(value, code(order))
   }
 
-  /// Adds `n` and returns the previous value; the sum wraps around at the limits of `u32`.
-  pub fn fetch_add(self, n: u32) -> u32 {
-    self.value.fetch_add(n)
+  /// Adds `value` and returns the previous value; the sum wraps around at the limits of `u32`.
+  pub fn fetch_add(self, value: u32, order: Ordering) -> u32 {
+    self.value.fetch_add(value, code(order))
   }
 
-  /// Subtracts `n` and returns the previous value; the difference wraps around at the limits of
-  /// `u32`.
-  pub fn fetch_sub(self, n: u32) -> u32 {
-    self.value.fetch_sub(n)
+  /// Subtracts `value` and returns the previous value; the difference wraps around at the limits of `u32`.
+  pub fn fetch_sub(self, value: u32, order: Ordering) -> u32 {
+    self.value.fetch_sub(value, code(order))
   }
 
-  /// Stores `desired` if the value is `expected`: `Ok(expected)` if it did, `Err(actual)` if not.
-  pub fn compare_exchange(self, expected: u32, desired: u32) -> Result<u32, u32> {
-    self.value.compare_exchange(expected, desired)
+  /// Stores the value `&` `value` and returns the previous value.
+  pub fn fetch_and(self, value: u32, order: Ordering) -> u32 {
+    self.value.fetch_and(value, code(order))
+  }
+
+  /// Stores the value `|` `value` and returns the previous value.
+  pub fn fetch_or(self, value: u32, order: Ordering) -> u32 {
+    self.value.fetch_or(value, code(order))
+  }
+
+  /// Stores the value `^` `value` and returns the previous value.
+  pub fn fetch_xor(self, value: u32, order: Ordering) -> u32 {
+    self.value.fetch_xor(value, code(order))
+  }
+
+  /// Stores `!(previous & value)` and returns the previous value.
+  pub fn fetch_nand(self, value: u32, order: Ordering) -> u32 {
+    var previous = self.value.load(0);
+
+    loop {
+      match self.value.compare_exchange_weak(previous, !(previous & value), code(order), 0) {
+        Ok(found) => return found,
+        Err(found) => {
+          previous = found;
+        }
+      }
+    }
+  }
+
+  /// Stores the larger of the value and `value`, and returns the previous value.
+  pub fn fetch_max(self, value: u32, order: Ordering) -> u32 {
+    var previous = self.value.load(0);
+
+    loop {
+      match self.value.compare_exchange_weak(previous, previous.max(value), code(order), 0) {
+        Ok(found) => return found,
+        Err(found) => {
+          previous = found;
+        }
+      }
+    }
+  }
+
+  /// Stores the smaller of the value and `value`, and returns the previous value.
+  pub fn fetch_min(self, value: u32, order: Ordering) -> u32 {
+    var previous = self.value.load(0);
+
+    loop {
+      match self.value.compare_exchange_weak(previous, previous.min(value), code(order), 0) {
+        Ok(found) => return found,
+        Err(found) => {
+          previous = found;
+        }
+      }
+    }
+  }
+
+  /// Stores `desired` if the value is `current`: `Ok(current)` if it did, `Err(actual)` if not.
+  /// `success` orders the exchange, `failure` the load of a value that differs.
+  pub fn compare_exchange(self, current: u32, desired: u32, success: Ordering, failure: Ordering) -> Result<u32, u32> {
+    const failed = failure_code(failure);
+
+    self.value.compare_exchange(current, desired, success_code(success, failure), failed)
+  }
+
+  /// As `compare_exchange`, but it may fail although the value is `current`, which is faster in a
+  /// loop on some processors.
+  pub fn compare_exchange_weak(self, current: u32, desired: u32, success: Ordering, failure: Ordering) -> Result<u32, u32> {
+    const failed = failure_code(failure);
+
+    self.value.compare_exchange_weak(current, desired, success_code(success, failure), failed)
+  }
+
+  /// Stores what `f` returns for the value while it returns `Some`, trying again if another
+  /// thread changed the value in between: `Ok(previous)`, or `Err(previous)` once `f` gives
+  /// `None`. `set_order` orders the store, `fetch_order` the loads.
+  pub fn fetch_update(self, set_order: Ordering, fetch_order: Ordering, f: fn(u32) -> Option<u32>) -> Result<u32, u32> {
+    var previous = self.load(fetch_order);
+
+    while let Some(next) = f(previous) {
+      match self.compare_exchange_weak(previous, next, set_order, fetch_order) {
+        Ok(found) => return Ok(found),
+        Err(found) => {
+          previous = found;
+        }
+      }
+    }
+
+    Err(previous)
   }
 }
 
@@ -284,33 +1325,118 @@ pub class AtomicU64 {
     self.value = Atomic::new(value);
   }
 
-  pub fn load(self) -> u64 {
-    self.value.load()
+  pub fn load(self, order: Ordering) -> u64 {
+    self.value.load(load_code(order))
   }
 
-  pub fn store(self, value: u64) {
-    self.value.store(value);
+  pub fn store(self, value: u64, order: Ordering) {
+    self.value.store(value, store_code(order));
   }
 
   /// Stores `value` and returns the previous value.
-  pub fn swap(self, value: u64) -> u64 {
-    self.value.swap(value)
+  pub fn swap(self, value: u64, order: Ordering) -> u64 {
+    self.value.swap(value, code(order))
   }
 
-  /// Adds `n` and returns the previous value; the sum wraps around at the limits of `u64`.
-  pub fn fetch_add(self, n: u64) -> u64 {
-    self.value.fetch_add(n)
+  /// Adds `value` and returns the previous value; the sum wraps around at the limits of `u64`.
+  pub fn fetch_add(self, value: u64, order: Ordering) -> u64 {
+    self.value.fetch_add(value, code(order))
   }
 
-  /// Subtracts `n` and returns the previous value; the difference wraps around at the limits of
-  /// `u64`.
-  pub fn fetch_sub(self, n: u64) -> u64 {
-    self.value.fetch_sub(n)
+  /// Subtracts `value` and returns the previous value; the difference wraps around at the limits of `u64`.
+  pub fn fetch_sub(self, value: u64, order: Ordering) -> u64 {
+    self.value.fetch_sub(value, code(order))
   }
 
-  /// Stores `desired` if the value is `expected`: `Ok(expected)` if it did, `Err(actual)` if not.
-  pub fn compare_exchange(self, expected: u64, desired: u64) -> Result<u64, u64> {
-    self.value.compare_exchange(expected, desired)
+  /// Stores the value `&` `value` and returns the previous value.
+  pub fn fetch_and(self, value: u64, order: Ordering) -> u64 {
+    self.value.fetch_and(value, code(order))
+  }
+
+  /// Stores the value `|` `value` and returns the previous value.
+  pub fn fetch_or(self, value: u64, order: Ordering) -> u64 {
+    self.value.fetch_or(value, code(order))
+  }
+
+  /// Stores the value `^` `value` and returns the previous value.
+  pub fn fetch_xor(self, value: u64, order: Ordering) -> u64 {
+    self.value.fetch_xor(value, code(order))
+  }
+
+  /// Stores `!(previous & value)` and returns the previous value.
+  pub fn fetch_nand(self, value: u64, order: Ordering) -> u64 {
+    var previous = self.value.load(0);
+
+    loop {
+      match self.value.compare_exchange_weak(previous, !(previous & value), code(order), 0) {
+        Ok(found) => return found,
+        Err(found) => {
+          previous = found;
+        }
+      }
+    }
+  }
+
+  /// Stores the larger of the value and `value`, and returns the previous value.
+  pub fn fetch_max(self, value: u64, order: Ordering) -> u64 {
+    var previous = self.value.load(0);
+
+    loop {
+      match self.value.compare_exchange_weak(previous, previous.max(value), code(order), 0) {
+        Ok(found) => return found,
+        Err(found) => {
+          previous = found;
+        }
+      }
+    }
+  }
+
+  /// Stores the smaller of the value and `value`, and returns the previous value.
+  pub fn fetch_min(self, value: u64, order: Ordering) -> u64 {
+    var previous = self.value.load(0);
+
+    loop {
+      match self.value.compare_exchange_weak(previous, previous.min(value), code(order), 0) {
+        Ok(found) => return found,
+        Err(found) => {
+          previous = found;
+        }
+      }
+    }
+  }
+
+  /// Stores `desired` if the value is `current`: `Ok(current)` if it did, `Err(actual)` if not.
+  /// `success` orders the exchange, `failure` the load of a value that differs.
+  pub fn compare_exchange(self, current: u64, desired: u64, success: Ordering, failure: Ordering) -> Result<u64, u64> {
+    const failed = failure_code(failure);
+
+    self.value.compare_exchange(current, desired, success_code(success, failure), failed)
+  }
+
+  /// As `compare_exchange`, but it may fail although the value is `current`, which is faster in a
+  /// loop on some processors.
+  pub fn compare_exchange_weak(self, current: u64, desired: u64, success: Ordering, failure: Ordering) -> Result<u64, u64> {
+    const failed = failure_code(failure);
+
+    self.value.compare_exchange_weak(current, desired, success_code(success, failure), failed)
+  }
+
+  /// Stores what `f` returns for the value while it returns `Some`, trying again if another
+  /// thread changed the value in between: `Ok(previous)`, or `Err(previous)` once `f` gives
+  /// `None`. `set_order` orders the store, `fetch_order` the loads.
+  pub fn fetch_update(self, set_order: Ordering, fetch_order: Ordering, f: fn(u64) -> Option<u64>) -> Result<u64, u64> {
+    var previous = self.load(fetch_order);
+
+    while let Some(next) = f(previous) {
+      match self.compare_exchange_weak(previous, next, set_order, fetch_order) {
+        Ok(found) => return Ok(found),
+        Err(found) => {
+          previous = found;
+        }
+      }
+    }
+
+    Err(previous)
   }
 }
 
@@ -322,32 +1448,174 @@ pub class AtomicUsize {
     self.value = Atomic::new(value);
   }
 
-  pub fn load(self) -> usize {
-    self.value.load()
+  pub fn load(self, order: Ordering) -> usize {
+    self.value.load(load_code(order))
   }
 
-  pub fn store(self, value: usize) {
-    self.value.store(value);
+  pub fn store(self, value: usize, order: Ordering) {
+    self.value.store(value, store_code(order));
   }
 
   /// Stores `value` and returns the previous value.
-  pub fn swap(self, value: usize) -> usize {
-    self.value.swap(value)
+  pub fn swap(self, value: usize, order: Ordering) -> usize {
+    self.value.swap(value, code(order))
   }
 
-  /// Adds `n` and returns the previous value; the sum wraps around at the limits of `usize`.
-  pub fn fetch_add(self, n: usize) -> usize {
-    self.value.fetch_add(n)
+  /// Adds `value` and returns the previous value; the sum wraps around at the limits of `usize`.
+  pub fn fetch_add(self, value: usize, order: Ordering) -> usize {
+    self.value.fetch_add(value, code(order))
   }
 
-  /// Subtracts `n` and returns the previous value; the difference wraps around at the limits of
-  /// `usize`.
-  pub fn fetch_sub(self, n: usize) -> usize {
-    self.value.fetch_sub(n)
+  /// Subtracts `value` and returns the previous value; the difference wraps around at the limits of `usize`.
+  pub fn fetch_sub(self, value: usize, order: Ordering) -> usize {
+    self.value.fetch_sub(value, code(order))
   }
 
-  /// Stores `desired` if the value is `expected`: `Ok(expected)` if it did, `Err(actual)` if not.
-  pub fn compare_exchange(self, expected: usize, desired: usize) -> Result<usize, usize> {
-    self.value.compare_exchange(expected, desired)
+  /// Stores the value `&` `value` and returns the previous value.
+  pub fn fetch_and(self, value: usize, order: Ordering) -> usize {
+    self.value.fetch_and(value, code(order))
+  }
+
+  /// Stores the value `|` `value` and returns the previous value.
+  pub fn fetch_or(self, value: usize, order: Ordering) -> usize {
+    self.value.fetch_or(value, code(order))
+  }
+
+  /// Stores the value `^` `value` and returns the previous value.
+  pub fn fetch_xor(self, value: usize, order: Ordering) -> usize {
+    self.value.fetch_xor(value, code(order))
+  }
+
+  /// Stores `!(previous & value)` and returns the previous value.
+  pub fn fetch_nand(self, value: usize, order: Ordering) -> usize {
+    var previous = self.value.load(0);
+
+    loop {
+      match self.value.compare_exchange_weak(previous, !(previous & value), code(order), 0) {
+        Ok(found) => return found,
+        Err(found) => {
+          previous = found;
+        }
+      }
+    }
+  }
+
+  /// Stores the larger of the value and `value`, and returns the previous value.
+  pub fn fetch_max(self, value: usize, order: Ordering) -> usize {
+    var previous = self.value.load(0);
+
+    loop {
+      match self.value.compare_exchange_weak(previous, previous.max(value), code(order), 0) {
+        Ok(found) => return found,
+        Err(found) => {
+          previous = found;
+        }
+      }
+    }
+  }
+
+  /// Stores the smaller of the value and `value`, and returns the previous value.
+  pub fn fetch_min(self, value: usize, order: Ordering) -> usize {
+    var previous = self.value.load(0);
+
+    loop {
+      match self.value.compare_exchange_weak(previous, previous.min(value), code(order), 0) {
+        Ok(found) => return found,
+        Err(found) => {
+          previous = found;
+        }
+      }
+    }
+  }
+
+  /// Stores `desired` if the value is `current`: `Ok(current)` if it did, `Err(actual)` if not.
+  /// `success` orders the exchange, `failure` the load of a value that differs.
+  pub fn compare_exchange(self, current: usize, desired: usize, success: Ordering, failure: Ordering) -> Result<usize, usize> {
+    const failed = failure_code(failure);
+
+    self.value.compare_exchange(current, desired, success_code(success, failure), failed)
+  }
+
+  /// As `compare_exchange`, but it may fail although the value is `current`, which is faster in a
+  /// loop on some processors.
+  pub fn compare_exchange_weak(self, current: usize, desired: usize, success: Ordering, failure: Ordering) -> Result<usize, usize> {
+    const failed = failure_code(failure);
+
+    self.value.compare_exchange_weak(current, desired, success_code(success, failure), failed)
+  }
+
+  /// Stores what `f` returns for the value while it returns `Some`, trying again if another
+  /// thread changed the value in between: `Ok(previous)`, or `Err(previous)` once `f` gives
+  /// `None`. `set_order` orders the store, `fetch_order` the loads.
+  pub fn fetch_update(self, set_order: Ordering, fetch_order: Ordering, f: fn(usize) -> Option<usize>) -> Result<usize, usize> {
+    var previous = self.load(fetch_order);
+
+    while let Some(next) = f(previous) {
+      match self.compare_exchange_weak(previous, next, set_order, fetch_order) {
+        Ok(found) => return Ok(found),
+        Err(found) => {
+          previous = found;
+        }
+      }
+    }
+
+    Err(previous)
+  }
+}
+
+/// A raw pointer that threads read and change at once, as Rust's `AtomicPtr`: what it points to
+/// is read and written through `unsafe`, as any raw pointer's.
+pub class AtomicPtr<T> {
+  prv const value: Atomic<*mut T>;
+
+  pub fn new(self, value: *mut T) {
+    self.value = Atomic::new(value);
+  }
+
+  pub fn load(self, order: Ordering) -> *mut T {
+    self.value.load(load_code(order))
+  }
+
+  pub fn store(self, value: *mut T, order: Ordering) {
+    self.value.store(value, store_code(order));
+  }
+
+  /// Stores `value` and returns the previous value.
+  pub fn swap(self, value: *mut T, order: Ordering) -> *mut T {
+    self.value.swap(value, code(order))
+  }
+
+  /// Stores `desired` if the value is `current`: `Ok(current)` if it did, `Err(actual)` if not.
+  /// `success` orders the exchange, `failure` the load of a value that differs.
+  pub fn compare_exchange(self, current: *mut T, desired: *mut T, success: Ordering, failure: Ordering) -> Result<*mut T, *mut T> {
+    const failed = failure_code(failure);
+
+    self.value.compare_exchange(current, desired, success_code(success, failure), failed)
+  }
+
+  /// As `compare_exchange`, but it may fail although the value is `current`, which is faster in a
+  /// loop on some processors.
+  pub fn compare_exchange_weak(self, current: *mut T, desired: *mut T, success: Ordering, failure: Ordering) -> Result<*mut T, *mut T> {
+    const failed = failure_code(failure);
+
+    self.value.compare_exchange_weak(current, desired, success_code(success, failure), failed)
+  }
+
+  /// Stores what `f` returns for the value while it returns `Some`, trying again if another
+  /// thread changed the value in between: `Ok(previous)`, or `Err(previous)` once `f` gives
+  /// `None`. `set_order` orders the store, `fetch_order` the loads.
+  pub fn fetch_update(self, set_order: Ordering, fetch_order: Ordering, f: fn(*mut T) -> Option<*mut T>) -> Result<*mut T, *mut T> {
+    var previous = self.load(fetch_order);
+
+    while let Some(next) = f(previous) {
+      match self.compare_exchange_weak(previous, next, set_order, fetch_order) {
+        Ok(found) => return Ok(found),
+        Err(found) => {
+          previous = found;
+        }
+      }
+    }
+
+    Err(previous)
   }
 }

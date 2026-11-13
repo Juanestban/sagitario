@@ -3069,6 +3069,10 @@ fn thread_id() -> usize {
   unsafe { pthread_self() }
 }
 
+/// The ordering of `std::sync::Ordering::SeqCst` for an `Atomic`
+/// (docs/adr/0098-locks-orderings-and-threads.md, Q676).
+const SEQ_CST: i32 = 4;
+
 /// A lock with a condition, for `Mutex` and `Channel`. C changes the memory of its fields, which
 /// the generated C never declares `const`. They are never destroyed: Sagitario has no destructors,
 /// and the default mutexes and conditions of these C libraries hold nothing to free.
@@ -3104,25 +3108,25 @@ pub class Lock {
   pub fn lock(self) {
     const me = thread_id();
 
-    if self.owner.load() == me {
+    if self.owner.load(SEQ_CST) == me {
       panic("a thread locked a `Mutex` it already holds: the function given to `update` must not use the same mutex");
     }
 
     unsafe { pthread_mutex_lock(self.mutex_place()); }
-    self.owner.store(me);
+    self.owner.store(me, SEQ_CST);
   }
 
   pub fn unlock(self) {
-    self.owner.store(0);
+    self.owner.store(0, SEQ_CST);
     unsafe { pthread_mutex_unlock(self.mutex_place()); }
   }
 
   /// Releases the lock, which this thread holds, until another thread calls `notify_all`, then
   /// takes it again. It may also return without one.
   pub fn wait(self) {
-    self.owner.store(0);
+    self.owner.store(0, SEQ_CST);
     unsafe { pthread_cond_wait(self.condition_place(), self.mutex_place()); }
-    self.owner.store(thread_id());
+    self.owner.store(thread_id(), SEQ_CST);
   }
 
   /// Wakes every thread waiting on the lock.
@@ -3180,25 +3184,25 @@ pub class Lock {
   pub fn lock(self) {
     const me = thread_id();
 
-    if self.owner.load() == me {
+    if self.owner.load(SEQ_CST) == me {
       panic("a thread locked a `Mutex` it already holds: the function given to `update` must not use the same mutex");
     }
 
     unsafe { AcquireSRWLockExclusive(self.srw_place()); }
-    self.owner.store(me);
+    self.owner.store(me, SEQ_CST);
   }
 
   pub fn unlock(self) {
-    self.owner.store(0);
+    self.owner.store(0, SEQ_CST);
     unsafe { ReleaseSRWLockExclusive(self.srw_place()); }
   }
 
   /// Releases the lock, which this thread holds, until another thread calls `notify_all`, then
   /// takes it again. It may also return without one.
   pub fn wait(self) {
-    self.owner.store(0);
+    self.owner.store(0, SEQ_CST);
     unsafe { SleepConditionVariableSRW(self.condition_place(), self.srw_place(), INFINITE, 0); }
-    self.owner.store(thread_id());
+    self.owner.store(thread_id(), SEQ_CST);
   }
 
   /// Wakes every thread waiting on the lock.

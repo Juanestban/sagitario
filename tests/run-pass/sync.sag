@@ -10,7 +10,7 @@
 // expect-stdout: flag true false, Ok(true) Err(false)
 // expect-stdout: config v2 3
 
-use std::sync::{AtomicBool, AtomicI32, AtomicI64, AtomicU32, AtomicUsize, Mutex};
+use std::sync::{AtomicBool, AtomicI32, AtomicI64, AtomicU32, AtomicUsize, Mutex, Ordering};
 use std::thread;
 use std::thread::JoinHandle;
 
@@ -34,9 +34,9 @@ pub fn main() {
   for id in 0..8 {
     workers.push(thread::spawn(() => {
       for _ in 0..1000 {
-        counter.fetch_add(1);
+        counter.fetch_add(1, Ordering::SeqCst);
         total.update((value) => value + 1);
-        updates.fetch_add(1);
+        updates.fetch_add(1, Ordering::SeqCst);
       }
 
       log.update((text) => `${text}[${id}]`);
@@ -47,32 +47,32 @@ pub fn main() {
     worker.join();
   }
 
-  println(`atomic ${counter.load()} mutex ${total.get()} updates ${updates.load()}`);
+  println(`atomic ${counter.load(Ordering::SeqCst)} mutex ${total.get()} updates ${updates.load(Ordering::SeqCst)}`);
   println(`log has ${log.get().split("[").len() - 1} entries`);
 
   const cell = new AtomicI32(5);
-  const before = cell.swap(9);
-  const first = cell.compare_exchange(9, 10);
-  const second = cell.compare_exchange(9, 11);
+  const before = cell.swap(9, Ordering::SeqCst);
+  const first = cell.compare_exchange(9, 10, Ordering::SeqCst, Ordering::SeqCst);
+  const second = cell.compare_exchange(9, 11, Ordering::SeqCst, Ordering::SeqCst);
 
   println(`swap ${before} -> 9, exchange ${show(first)} then ${show(second)}`);
 
   const small = new AtomicI32(2147483647);
   const unsigned = new AtomicU32(0);
 
-  small.fetch_add(1);
-  unsigned.fetch_sub(1);
-  unsigned.fetch_add(1);
+  small.fetch_add(1, Ordering::SeqCst);
+  unsigned.fetch_sub(1, Ordering::SeqCst);
+  unsigned.fetch_add(1, Ordering::SeqCst);
 
   const wrapped = new AtomicU32(4294967295);
 
-  wrapped.fetch_add(1);
-  println(`wrap ${small.load()} ${unsigned.swap(4294967295)} ${wrapped.load()}`);
+  wrapped.fetch_add(1, Ordering::SeqCst);
+  println(`wrap ${small.load(Ordering::SeqCst)} ${unsigned.swap(4294967295, Ordering::SeqCst)} ${wrapped.load(Ordering::SeqCst)}`);
 
   const flag = new AtomicBool(false);
-  const was = flag.swap(true);
+  const was = flag.swap(true, Ordering::SeqCst);
 
-  println(`flag ${flag.load()} ${was}, ${showb(flag.compare_exchange(true, false))} ${showb(flag.compare_exchange(true, false))}`);
+  println(`flag ${flag.load(Ordering::SeqCst)} ${was}, ${showb(flag.compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst))} ${showb(flag.compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst))}`);
 
   const config = new Mutex(new Config("v1", 1));
   const reader = thread::spawn(() => config.get().version);

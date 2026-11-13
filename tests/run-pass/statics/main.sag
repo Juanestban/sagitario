@@ -13,7 +13,7 @@
 
 use pkg::config;
 use pkg::config::{TITLE, WIDTH};
-use std::sync::{AtomicI64, Mutex};
+use std::sync::{AtomicI64, Mutex, Ordering};
 use std::thread;
 
 const BASE: i32 = 40;
@@ -57,7 +57,7 @@ static INITS: AtomicI64 = new AtomicI64(0);
 static LOG: Mutex<String> = new Mutex(first_entry());
 
 fn first_entry() -> String {
-  INITS.fetch_add(1);
+  INITS.fetch_add(1, Ordering::SeqCst);
   ""
 }
 
@@ -86,7 +86,7 @@ fn main() {
   for _ in 0..8 {
     handles.push(thread::spawn(() => {
       for _ in 0..100 {
-        HITS.fetch_add(1);
+        HITS.fetch_add(1, Ordering::SeqCst);
       }
 
       LOG.update((text) => text + ".");
@@ -97,6 +97,6 @@ fn main() {
     handle.join();
   }
 
-  println(f"{HITS.load()} hits, {LOG.get().len()} dots, computed once: {INITS.load() == 1}");
+  println(f"{HITS.load(Ordering::SeqCst)} hits, {LOG.get().len()} dots, computed once: {INITS.load(Ordering::SeqCst) == 1}");
   println(f"answer {ANSWER}, borrowed {read(&ANSWER)}");
 }

@@ -127,7 +127,7 @@ The audit of the library found gaps of the language itself, which the library ne
 | `Mutex` | `Mutex<T: Send>` | 🟡 | `get`, `set`, `update(f)`, no guards; `try_lock` is missing |
 | `RwLock` | — | ❌ | `read(f)` and `update(f)` in the style of `Mutex` |
 | `Condvar` | — | ❌ | `std::sys::Lock` has one; a public API waits for a design without guards |
-| `atomic::*` | six atomics | 🟡 | Sequentially consistent only (ADR-0087); missing: orderings, `AtomicI8`/`U8`/`I16`/`U16`/`Isize`/`Ptr`, `fetch_max`/`min`/`and`/`or` |
+| `atomic::*` | `Ordering`, `fence` and twelve atomics | ✅ | Rust's orderings, `AtomicI8`/`U8`/`I16`/`U16`/`Isize`/`Ptr`, `fetch_and`/`or`/`xor`/`nand`/`max`/`min`/`update`, `compare_exchange_weak` ([ADR-0098](adr/0098-locks-orderings-and-threads.md), increment 1). `Ordering` is `sync::Ordering`, since a module of `std` is one file |
 | `Once`, `OnceLock`, `LazyLock` | `static` | ➖ | A `static` is computed once, on its first use, by one thread (ADR-0083) |
 | `Barrier` | — | ❌ | |
 | `mpsc::channel`, `sync_channel` | `Channel<T: Send>` | 🟡 | Missing: a bounded channel, `try_receive`, `receive_timeout` |

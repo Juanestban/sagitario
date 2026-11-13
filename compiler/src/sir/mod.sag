@@ -2798,29 +2798,39 @@ pub class Lowering {
     Ok(self.new_value(ty, Rvalue::Template(pieces)))
   }
 
-  /// A method of `Atomic<T>`, one of C11's sequentially consistent operations on the field
-  /// (docs/adr/0087-atomic-storage-and-std-sync.md, Q568).
+  /// A method of `Atomic<T>`, one of C11's operations on the field with the orderings its last
+  /// arguments give (docs/adr/0087-atomic-storage-and-std-sync.md, Q568;
+  /// docs/adr/0098-locks-orderings-and-threads.md, Q676), through the runtime's macros.
   prv fn atomic_method(self, name: String, ty: Type, receiver: Expr, args: List<Expr>) -> Result<Operand, String> {
     const place = self.place(receiver)?;
     const inner = match place.ty.kind {
       TypeKind::Atomic(found) => found,
       _ => return Err("an atomic method on a value that is not atomic"),
     };
+    const exchange = name == "compare_exchange" || name == "compare_exchange_weak";
+    const orders = if exchange { 2usize } else { 1usize };
+
+    if args.len() < orders {
+      return Err("an atomic method without its orderings");
+    }
+
     const values: List<Operand> = List::from([Operand::Ref(place)]);
 
-    for arg in args {
-      values.push(self.operand_as(arg, inner)?);
+    for index in 0..args.len() {
+      const expected = if index < args.len() - orders { inner } else { types::int(IntTy::I32) };
+
+      values.push(self.operand_as(args[index], expected)?);
     }
 
     if name == "store" {
-      self.emit(Stmt::Eval(Rvalue::Call { callee: c_operation("atomic_store"), args: values }));
+      self.emit(Stmt::Eval(Rvalue::Call { callee: c_operation("sag_atomic_store"), args: values }));
 
       return Ok(unit_operand());
     }
 
-    if name == "compare_exchange" {
-      if values.len() != 3 {
-        return Err("`compare_exchange` without two arguments");
+    if exchange {
+      if values.len() != 5 {
+        return Err("`compare_exchange` without four arguments");
       }
 
       // C writes the value it found into `expected` when it differs.
@@ -2829,8 +2839,9 @@ pub class Lowering {
 
       self.emit(Stmt::Assign { dest: found, value: Rvalue::Use(expected) });
 
-      const call_args = List::from([values[0], Operand::Ref(local_place(found, inner)), values[2]]);
-      const exchanged = self.new_value(types::of(TypeKind::Bool), Rvalue::Call { callee: c_operation("atomic_compare_exchange_strong"), args: call_args });
+      const call_args = List::from([values[0], Operand::Ref(local_place(found, inner)), values[2], values[3], values[4]]);
+      const function = if name == "compare_exchange" { "sag_atomic_compare_exchange_strong" } else { "sag_atomic_compare_exchange_weak" };
+      const exchanged = self.new_value(types::of(TypeKind::Bool), Rvalue::Call { callee: c_operation(function), args: call_args });
       const dest = self.temp(ty);
       const then_body = List::from([Stmt::Assign { dest: dest, value: Rvalue::Variant { index: 0, fields: List::from([expected]) } }]);
       const else_body = List::from([Stmt::Assign { dest: dest, value: Rvalue::Variant { index: 1, fields: List::from([Operand::Local(found)]) } }]);
@@ -2841,13 +2852,11 @@ pub class Lowering {
     }
 
     const function = if name == "load" {
-      "atomic_load"
+      "sag_atomic_load"
     } else if name == "swap" {
-      "atomic_exchange"
-    } else if name == "fetch_add" {
-      "atomic_fetch_add"
-    } else if name == "fetch_sub" {
-      "atomic_fetch_sub"
+      "sag_atomic_exchange"
+    } else if name == "fetch_add" || name == "fetch_sub" || name == "fetch_and" || name == "fetch_or" || name == "fetch_xor" {
+      "sag_atomic_" + name
     } else {
       return Err("an unknown atomic method `" + name + "`");
     };

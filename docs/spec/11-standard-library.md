@@ -617,21 +617,22 @@ the other two `io::Read`, and the three `Drop`, which closes the pipe.
 ## `std::sync`
 
 Rationale: [ADR-0046](../adr/0046-mutex-and-atomics.md),
-[ADR-0047](../adr/0047-channels-and-thread-utilities.md).
+[ADR-0047](../adr/0047-channels-and-thread-utilities.md),
+[ADR-0098](../adr/0098-locks-orderings-and-threads.md).
 
 ```sag
-use std::sync::{AtomicI64, Mutex};
+use std::sync::{AtomicI64, Mutex, Ordering};
 use std::thread;
 
 const hits = new AtomicI64(0);
 const names = new Mutex("");
 const worker = thread::spawn(() => {
-  hits.fetch_add(1);
+  hits.fetch_add(1, Ordering::Relaxed);
   names.update((text) => `${text}a`);
 });
 
 worker.join();
-println(`${hits.load()} ${names.get()}`);
+println(`${hits.load(Ordering::Relaxed)} ${names.get()}`);
 ```
 
 A [static](03-memory.md#global-state-g1) holds a `Mutex` or an atomic that every thread
@@ -642,11 +643,8 @@ reaches without passing it: `static HITS: AtomicI64 = new AtomicI64(0);`.
 | `Mutex<T: Send>` | A value that threads share, changed by one thread at a time |
 | `new Mutex(value)`, `m.get() -> T`, `m.set(value)` | Creates it, copies the value out, replaces it |
 | `m.update(f: fn(T) -> T) -> T` | Replaces the value with `f(value)` while no other thread can use the mutex, and returns the new value |
-| `AtomicBool`, `AtomicI32`, `AtomicI64`, `AtomicU32`, `AtomicU64`, `AtomicUsize` | A value of that type that threads read and change at once |
-| `new AtomicI64(value)`, `a.load()`, `a.store(value)` | Creates it, reads it, writes it |
-| `a.swap(value)` | Writes `value` and returns the previous value |
-| `a.compare_exchange(expected, desired) -> Result<T, T>` | Writes `desired` if the value is `expected`: `Ok(expected)` if it did, `Err(actual)` if not |
-| `a.fetch_add(n)`, `a.fetch_sub(n)` | Integers only: adds or subtracts `n` and returns the previous value; the result wraps around at the type's limits, also in debug builds |
+| `AtomicBool`, `AtomicI8`, `AtomicI16`, `AtomicI32`, `AtomicI64`, `AtomicIsize`, `AtomicU8`, `AtomicU16`, `AtomicU32`, `AtomicU64`, `AtomicUsize` | A value of that type that threads read and change at once ([atomics](#atomics)) |
+| `AtomicPtr<T>` | A `*mut T` that threads read and change at once |
 | `Channel<T: Send>` | A queue of values that threads send to each other, without a limit |
 | `new Channel<T>()`, `c.send(value)` | Creates it; adds `value` at the end. Sending on a closed channel panics |
 | `c.receive() -> Option<T>` | The value at the front, waiting until there is one; `None` once the channel is closed and empty |
@@ -658,9 +656,64 @@ reaches without passing it: `static HITS: AtomicI64 = new AtomicI64(0);`.
 - There are no lock guards: every method takes and releases the lock itself. A thread using a
   mutex inside the function it gave to `update` of the same mutex panics instead of waiting
   forever.
-- Atomic operations are sequentially consistent: every thread sees them in one order.
 - Any thread holding a channel may send, receive or close it. Several receivers share the
   values: each value goes to one of them.
+
+### Atomics
+
+Rationale: [ADR-0087](../adr/0087-atomic-storage-and-std-sync.md),
+[ADR-0098](../adr/0098-locks-orderings-and-threads.md), Q676 and Q677. Every operation of an
+atomic takes how it orders the memory operations around it, an `Ordering`, as Rust's
+`std::sync::atomic`:
+
+| `Ordering` | Meaning |
+|---|---|
+| `Relaxed` | Only the operation itself is atomic |
+| `Release` | The writes before it are seen by a thread that reads its value with `Acquire` |
+| `Acquire` | It sees the writes made before a `Release` whose value it reads |
+| `AcqRel` | Both, for an operation that reads and writes |
+| `SeqCst` | `AcqRel`, and every thread sees all `SeqCst` operations in one order |
+
+| Method | Result |
+|---|---|
+| `new AtomicI64(value)` | The atomic |
+| `load(order) -> T`, `store(value, order)` | Reads the value, writes it |
+| `swap(value, order) -> T` | Writes `value` and returns the previous value |
+| `compare_exchange(current, desired, success, failure) -> Result<T, T>` | Writes `desired` if the value is `current`: `Ok(current)` if it did, `Err(actual)` if not; `success` orders the exchange, `failure` the read of a value that differs |
+| `compare_exchange_weak(current, desired, success, failure)` | The same, but it may fail although the value is `current`; faster in a loop on some processors |
+| `fetch_update(set_order, fetch_order, f: fn(T) -> Option<T>) -> Result<T, T>` | Writes what `f` returns for the value while it returns `Some`, trying again if another thread changed it: `Ok(previous)`, or `Err(previous)` once `f` gives `None` |
+| `fetch_add`, `fetch_sub`, `fetch_and`, `fetch_or`, `fetch_xor`, `fetch_nand`, `fetch_max`, `fetch_min` `(value, order) -> T` | Integers: writes the sum, difference, `&`, `\|`, `^`, `!(a & b)`, larger or smaller of the value and `value`, and returns the previous value; the sum and difference wrap around at the type's limits, also in debug builds |
+| `fetch_and`, `fetch_or`, `fetch_xor`, `fetch_nand` `(value, order)`, `fetch_not(order)` | `AtomicBool`: the same with `&&`, `\|\|`, `!=` and `!(a && b)`, and the opposite |
+
+`AtomicPtr<T>` has `load`, `store`, `swap`, `compare_exchange`, `compare_exchange_weak` and
+`fetch_update`; what its pointer points to is read and written through `unsafe`, as any raw
+pointer's ([FFI](10-ffi.md)). `sync::fence(order)` orders the memory operations around it
+without an atomic of its own, as Rust's `atomic::fence`.
+
+```sag
+use std::sync::{AtomicBool, AtomicI64, Ordering};
+use std::thread;
+
+const data = new AtomicI64(0);
+const ready = new AtomicBool(false);
+const reader = thread::spawn(() => {
+  while !ready.load(Ordering::Acquire) {}
+
+  data.load(Ordering::Relaxed)               // 42: `Acquire` sees what came before `Release`
+});
+
+data.store(42, Ordering::Relaxed);
+ready.store(true, Ordering::Release);
+```
+
+- The orderings Rust rejects panic, as Rust's: `load` with `Release` or `AcqRel`
+  (`there is no such thing as a release load`), `store` with `Acquire` or `AcqRel`, a `failure`
+  ordering of `Release` or `AcqRel`, and a `Relaxed` fence. A `failure` ordering stronger than
+  `success` is allowed, as in Rust.
+- `Ordering` is written `sync::Ordering`, or imported with `use std::sync::Ordering`, which hides
+  the prelude's `Ordering` of comparisons in that file; a mismatch between the two notes that
+  they are different types with the same name.
+- The atomics are `Send`, and a [static](03-memory.md#global-state-g1) can hold one.
 
 ```sag
 const jobs: Channel<i64> = new Channel();
