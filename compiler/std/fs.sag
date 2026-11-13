@@ -160,3 +160,209 @@ pub fn current_dir() -> Result<String, io::Error> {
     Err(code) => Err(failure(code, "cannot get the current directory")),
   }
 }
+
+// ---- Open files (docs/adr/0096-streams-files-and-drop.md, Q657) --------------------------------
+
+/// An open file, as Rust's `File`: it reads and writes where its position is, and closes when
+/// its last reference goes, or earlier with `close`, which reports what the system says.
+pub class File impl io::Read, io::Write, Drop {
+  /// The descriptor or handle of the system.
+  prv var handle: usize;
+  prv var is_open: bool;
+  prv const path: String;
+
+  prv fn new(self, handle: usize, path: String) {
+    self.handle = handle;
+    self.is_open = true;
+    self.path = path;
+  }
+
+  /// The file of a descriptor (POSIX) or `HANDLE` (Windows) of the system, opened for `path`,
+  /// which the `File` closes, as Rust's `from_raw_fd`. It is `unsafe`: nothing else may close
+  /// or use the handle.
+  pub unsafe fn from_raw_handle(handle: usize, path: String) -> File {
+    new File(handle, path)
+  }
+
+  /// Opens the file at `path` to read it.
+  pub fn open(path: String) -> Result<File, io::Error> {
+    OpenOptions::new().read(true).open(path)
+  }
+
+  /// Opens the file at `path` to write it, creating it or emptying it.
+  pub fn create(path: String) -> Result<File, io::Error> {
+    OpenOptions::new().write(true).create(true).truncate(true).open(path)
+  }
+
+  /// The error of a failed operation on this file, or of one after `close`.
+  prv fn error(self, code: i32, action: String) -> io::Error {
+    failure(code, `cannot ${action} "${self.path}"`)
+  }
+
+  pub fn read(self, buffer: &mut [u8]) -> Result<usize, io::Error> {
+    if !self.is_open {
+      return Err(self.error(sys::EBADF, "read"));
+    }
+
+    match sys::file_read(self.handle, buffer.as_mut_ptr(), buffer.len()) {
+      Ok(count) => Ok(count),
+      Err(code) => Err(self.error(code, "read")),
+    }
+  }
+
+  pub fn write(self, bytes: &[u8]) -> Result<usize, io::Error> {
+    if !self.is_open {
+      return Err(self.error(sys::EBADF, "write"));
+    }
+
+    match sys::file_write(self.handle, bytes.as_ptr(), bytes.len()) {
+      Ok(count) => Ok(count),
+      Err(code) => Err(self.error(code, "write")),
+    }
+  }
+
+  /// A file has no buffer of its own: its writes are the system's.
+  pub fn flush(self) -> Result<(), io::Error> {
+    Ok(())
+  }
+
+  /// Moves the position, and gives it, from the start of the file.
+  pub fn seek(self, position: io::SeekFrom) -> Result<u64, io::Error> {
+    if !self.is_open {
+      return Err(self.error(sys::EBADF, "seek in"));
+    }
+
+    const found = match position {
+      io::SeekFrom::Start(offset) => sys::file_seek(self.handle, offset as i64, 0),
+      io::SeekFrom::Current(offset) => sys::file_seek(self.handle, offset, 1),
+      io::SeekFrom::End(offset) => sys::file_seek(self.handle, offset, 2),
+    };
+
+    match found {
+      Ok(at) => Ok(at),
+      Err(code) => Err(self.error(code, "seek in")),
+    }
+  }
+
+  /// Makes the file `size` bytes long, cutting it or adding zeros; the position stays.
+  pub fn set_len(self, size: u64) -> Result<(), io::Error> {
+    if !self.is_open {
+      return Err(self.error(sys::EBADF, "resize"));
+    }
+
+    const code = sys::file_set_len(self.handle, size);
+
+    if code == 0 { Ok(()) } else { Err(self.error(code, "resize")) }
+  }
+
+  /// Waits until the system has stored what was written.
+  pub fn sync_all(self) -> Result<(), io::Error> {
+    if !self.is_open {
+      return Err(self.error(sys::EBADF, "sync"));
+    }
+
+    const code = sys::file_sync(self.handle);
+
+    if code == 0 { Ok(()) } else { Err(self.error(code, "sync")) }
+  }
+
+  /// Closes the file now; reading or writing it after is an error. Closing it again does nothing.
+  pub fn close(self) -> Result<(), io::Error> {
+    if !self.is_open {
+      return Ok(());
+    }
+
+    self.is_open = false;
+
+    const code = sys::file_close(self.handle);
+
+    if code == 0 { Ok(()) } else { Err(self.error(code, "close")) }
+  }
+
+  /// Closes the file, unless `close` did; an error there has no one to go to.
+  pub fn drop(self) {
+    if self.is_open {
+      self.is_open = false;
+      sys::file_close(self.handle);
+    }
+  }
+}
+
+/// How `open` opens a file, as Rust's `OpenOptions`: each method gives the options with one set.
+pub struct OpenOptions {
+  prv reading: bool;
+  prv writing: bool;
+  prv appending: bool;
+  prv truncating: bool;
+  prv creating: bool;
+  prv creating_new: bool;
+
+  /// No option set.
+  pub fn new() -> OpenOptions {
+    OpenOptions { reading: false, writing: false, appending: false, truncating: false, creating: false, creating_new: false }
+  }
+
+  pub fn read(self, value: bool) -> OpenOptions {
+    var options = self;
+
+    options.reading = value;
+    options
+  }
+
+  pub fn write(self, value: bool) -> OpenOptions {
+    var options = self;
+
+    options.writing = value;
+    options
+  }
+
+  /// Every write goes at the end; it writes, as `write` does.
+  pub fn append(self, value: bool) -> OpenOptions {
+    var options = self;
+
+    options.appending = value;
+    options
+  }
+
+  /// Empties a file that exists; it needs `write`.
+  pub fn truncate(self, value: bool) -> OpenOptions {
+    var options = self;
+
+    options.truncating = value;
+    options
+  }
+
+  /// Creates the file if it does not exist; it needs `write` or `append`.
+  pub fn create(self, value: bool) -> OpenOptions {
+    var options = self;
+
+    options.creating = value;
+    options
+  }
+
+  /// Creates the file, which must not exist; it needs `write` or `append`.
+  pub fn create_new(self, value: bool) -> OpenOptions {
+    var options = self;
+
+    options.creating_new = value;
+    options
+  }
+
+  /// Opens the file at `path` with these options. Options that do not go together are an error of
+  /// kind `InvalidInput`, as Rust's: none to read or write, `truncate` without `write`, `truncate`
+  /// with `append`, and `create` or `create_new` without writing.
+  pub fn open(self, path: String) -> Result<File, io::Error> {
+    const writes = self.writing || self.appending;
+    const valid = (self.reading || writes) && !(self.truncating && !self.writing) && !(self.truncating && self.appending)
+      && !((self.creating || self.creating_new) && !writes);
+
+    if !valid {
+      return Err(failure(sys::EINVAL, `cannot open "${path}"`));
+    }
+
+    match sys::file_open(path, self.reading, self.writing, self.appending, self.truncating, self.creating, self.creating_new) {
+      Ok(handle) => Ok(unsafe { File::from_raw_handle(handle, path) }),
+      Err(code) => Err(failure(file_code(path, code), `cannot open "${path}"`)),
+    }
+  }
+}

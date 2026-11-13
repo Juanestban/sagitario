@@ -185,6 +185,42 @@ pub enum ErrorKind {
 - The kinds are the same on every operating system. Failures without a more precise kind are
   `Other`.
 
+### Streams
+
+Rationale: [ADR-0096](../adr/0096-streams-files-and-drop.md), Q656. Two interfaces, as Rust's,
+let code read and write any source and destination of bytes, a [file](#stdfs) among them:
+
+```sag
+interface Read {
+  fn read(self, buffer: &mut [u8]) -> Result<usize, Error>;
+  // read_to_end, read_to_string and read_exact, with defaults
+}
+
+interface Write {
+  fn write(self, bytes: &[u8]) -> Result<usize, Error>;
+  fn flush(self) -> Result<(), Error>;
+  // write_all and write_str, with defaults
+}
+
+fn copy<R: Read, W: Write>(from: R, to: W) -> Result<(), io::Error> {
+  to.write_all(&from.read_to_end()?)
+}
+```
+
+| Method | Result |
+|---|---|
+| `read(buffer: &mut [u8])` | `Result<usize, Error>`: the bytes put at the start of `buffer`; `0` at the end |
+| `read_to_end()` | `Result<List<u8>, Error>`: every byte left |
+| `read_to_string()` | `Result<String, Error>`: every byte left, as text; invalid UTF-8 is an error of kind `InvalidData` |
+| `read_exact(buffer: &mut [u8])` | Exactly as many bytes as `buffer` holds; an end before is an error of kind `UnexpectedEof` |
+| `write(bytes: &[u8])` | `Result<usize, Error>`: the bytes taken from the start of `bytes` |
+| `flush()` | Writes out what a buffer holds |
+| `write_all(bytes: &[u8])` | Every byte, in as many writes as it takes |
+| `write_str(text: String)` | The bytes of `text`, which Rust writes with `write!` |
+
+`SeekFrom`, an enum of `std::io`, says where [`seek`](#stdfs) moves: `Start(u64)`, `End(i64)` or
+`Current(i64)`.
+
 ## `std::fs`
 
 Rationale: [ADR-0038](../adr/0038-file-system-and-paths.md). Paths are `String`s, relative to the
@@ -221,6 +257,47 @@ current directory unless they have a root. The functions with a `Result` fail wi
 - A path containing a NUL character is an error of kind `InvalidInput`.
 - Not yet: file metadata (size, times, permissions), removing a
   directory tree, and changing the current directory (F4, since it is process-wide state).
+
+### `File` and `OpenOptions`
+
+Rationale: [ADR-0096](../adr/0096-streams-files-and-drop.md), Q657. A `File` is an open file,
+which reads and writes where its position is:
+
+```sag
+use std::fs::{File, OpenOptions};
+use std::io::{Read, SeekFrom, Write};
+
+const file = File::create("notes.txt")?;
+
+file.write_str("hello world")?;
+file.seek(SeekFrom::Start(6))?;
+
+const log = OpenOptions::new().append(true).create(true).open("log.txt")?;
+```
+
+| Function or method | Result |
+|---|---|
+| `File::open(path)` | `Result<File, io::Error>`: the file, to read it |
+| `File::create(path)` | The file, to write it, created or emptied |
+| `OpenOptions::new()` | No option set; `read(b)`, `write(b)`, `append(b)`, `truncate(b)`, `create(b)` and `create_new(b)` each give the options with one set, and `open(path)` opens with them |
+| `read`, `read_to_end`, `read_to_string`, `read_exact`, `write`, `write_all`, `write_str`, `flush` | Those of [`Read` and `Write`](#streams); `flush` does nothing, since a file has no buffer of its own |
+| `seek(position: SeekFrom)` | `Result<u64, io::Error>`: the new position, from the start |
+| `set_len(size: u64)` | Cuts the file to `size` bytes or adds zeros; the position stays |
+| `sync_all()` | Waits until the system has stored what was written |
+| `close()` | Closes the file now, reporting what the system says; closing it again does nothing |
+| `unsafe File::from_raw_handle(handle: usize, path)` | The file of a descriptor (POSIX) or `HANDLE` (Windows) that nothing else will close, as Rust's `from_raw_fd` |
+
+- A `File` implements `Read`, `Write` and [`Drop`](04-classes.md#drop): it closes when its last
+  reference goes, and an error there is lost, which `close()` reports. Reading, writing or seeking
+  after `close` is an error (`Bad file descriptor`, of kind `Other`).
+- As Rust's, `OpenOptions` asks for options that go together, or `open` is an error of kind
+  `InvalidInput`: reading or writing, `truncate` with `write` and without `append`, and `create`
+  or `create_new` with `write` or `append`. `append` writes every write at the end; `create_new`
+  fails, of kind `AlreadyExists`, when the file exists; a file that does not exist without
+  `create` is of kind `NotFound`.
+- `OpenOptions` is a struct: each method gives a copy with one option set, so the calls chain as
+  Rust's do.
+
 
 ## `std::hint`
 

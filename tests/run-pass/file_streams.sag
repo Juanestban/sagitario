@@ -1,0 +1,106 @@
+// `Read`, `Write`, `File`, `OpenOptions` and `SeekFrom`: writing, reading, seeking, appending,
+// resizing, reading and writing one file, closing by `drop` and by `close`, code generic over
+// streams, a file as a value of `Read`, and the errors of each way to fail
+// (docs/adr/0096-streams-files-and-drop.md, Q656 and Q657).
+// expect-stdout: hello world | world | 11
+// expect-stdout: hello world! | hello
+// expect-stdout: HELLO | 5 | copied 5
+// expect-stdout: NotFound AlreadyExists InvalidInput InvalidInput NotFound Other
+// expect-stdout: removed true
+
+use std::fs;
+use std::fs::{File, OpenOptions};
+use std::io;
+use std::io::{ErrorKind, Read, SeekFrom, Write};
+
+/// Copies every byte of `from` to `to`, and gives how many.
+fn copy<R: Read, W: Write>(from: R, to: W) -> Result<usize, io::Error> {
+  const data = from.read_to_end()?;
+
+  to.write_all(&data)?;
+  to.flush()?;
+  Ok(data.len())
+}
+
+fn kind(result: Result<File, io::Error>) -> String {
+  match result {
+    Ok(_) => "opened",
+    Err(error) => match error.kind() {
+      ErrorKind::NotFound => "NotFound",
+      ErrorKind::AlreadyExists => "AlreadyExists",
+      ErrorKind::InvalidInput => "InvalidInput",
+      _ => "Other",
+    },
+  }
+}
+
+fn main() -> Result<(), io::Error> {
+  const path = "streams.txt";
+  const file = File::create(path)?;
+
+  file.write_str("hello world")?;
+  file.close()?;
+
+  const reader = File::open(path)?;
+  const text = reader.read_to_string()?;
+  const end = reader.seek(SeekFrom::End(0))?;
+
+  reader.seek(SeekFrom::Start(6))?;
+
+  const word = new List<u8>();
+
+  word.resize(5, 0);
+  reader.read_exact(&mut word)?;
+  println(f"{text} | {String::from_utf8(word).unwrap()} | {end}");
+
+  {
+    // Closed by its `drop` at the end of this block.
+    const log = OpenOptions::new().append(true).open(path)?;
+
+    log.write_str("!")?;
+  }
+
+  const appended = fs::read_to_string(path)?;
+  const both = OpenOptions::new().read(true).write(true).open(path)?;
+
+  both.set_len(5)?;
+  both.seek(SeekFrom::Start(0))?;
+
+  const cut = both.read_to_string()?;
+
+  println(f"{appended} | {cut}");
+
+  // Overwriting from the start, then reading back through a `Read` value.
+  both.seek(SeekFrom::Start(0))?;
+  both.write_str("HELLO")?;
+  both.seek(SeekFrom::Current(-5))?;
+
+  const source: Read = both;
+  const again = source.read_to_string()?;
+  const target = File::create("copy.txt")?;
+  const copied = copy(File::open(path)?, target)?;
+
+  println(f"{again} | {fs::read_to_string("copy.txt")?.len()} | copied {copied}");
+
+  const closed = File::open(path)?;
+
+  closed.close()?;
+  closed.close()?;
+
+  const after_close = match closed.read_to_string() {
+    Ok(_) => "read",
+    Err(error) => match error.kind() {
+      ErrorKind::Other => "Other",
+      _ => "another kind",
+    },
+  };
+
+  println(f"{kind(File::open("missing.txt"))} {kind(OpenOptions::new().write(true).create_new(true).open(path))} {kind(OpenOptions::new().open(path))} {kind(OpenOptions::new().append(true).truncate(true).open(path))} {kind(OpenOptions::new().append(true).open("absent.txt"))} {after_close}");
+
+  // Every handle is closed, so the files can go.
+  both.close()?;
+  fs::remove_file(path)?;
+  fs::remove_file("copy.txt")?;
+  println(f"removed {!fs::exists(path)}");
+  Ok(())
+}

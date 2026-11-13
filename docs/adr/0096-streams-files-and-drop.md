@@ -97,3 +97,14 @@ fn main() -> Result<(), io::Error> {
   it go before the check of `drop_end`. The runtime's queue of objects to destroy, which was a
   stack, became first in, first out, for the order of Q655's spec: the elements of a list are
   dropped first to last, as Rust's.
+- Increment 2 is done. A `File` holds a descriptor of the system as a `usize` (a `HANDLE` on
+  Windows), so its fields are the same everywhere; `std::sys` opens, reads, writes, seeks, syncs,
+  resizes and closes it. POSIX's `open` is variadic, which the FFI cannot declare, so files are
+  opened with `fopen`, whose C11 modes (`x` for `create_new`) cover Rust's options but one: writing
+  without truncating a file that may be new tries `r+`, then a new file; the stream's descriptor
+  is duplicated with `dup` and the stream closed, and the `File` reads and writes the descriptor
+  without stdio's buffer. Windows opens with `CreateFileW`, whose dispositions cover every option.
+  Two departures from Q657, for want of module-private members: `OpenOptions` is a struct whose
+  methods give copies, since a class cannot be made by `OpenOptions::new()`; and `OpenOptions`,
+  another type, makes its `File` through `unsafe File::from_raw_handle`, as Rust's `from_raw_fd`,
+  since the initializer of `File` is private to it.

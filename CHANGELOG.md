@@ -15,6 +15,10 @@ The sources say 0.32.0.
 
 ### Added
 
+- `std::io::Read` and `Write`, as Rust's, on slices, with `read_to_end`, `read_to_string`,
+  `read_exact`, `write_all` and `write_str`; `std::fs::File`, which closes by `Drop` or `close`,
+  with `seek`, `set_len` and `sync_all`; `OpenOptions` and `SeekFrom`
+  ([ADR-0096](docs/adr/0096-streams-files-and-drop.md), increment 2).
 - `Drop`, for classes: `drop` runs when the last strong reference to an instance goes, before its
   fields are released, and keeping `self` alive there panics; instances whose last references go
   together are now freed in the order those references went, so a list's elements go first to

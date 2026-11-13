@@ -225,3 +225,105 @@ fn text_of(bytes: &[u8]) -> Result<String, Error> {
     None => Err(error_from(super::INVALID_DATA)),
   }
 }
+
+// ---- Streams (docs/adr/0096-streams-files-and-drop.md, Q656) ------------------------------------
+
+/// A source of bytes, as Rust's `Read`: files, buffers and, with record 10, sockets. `read` fills
+/// the start of `buffer` and gives how many bytes it put there, `0` at the end.
+pub interface Read {
+  fn read(self, buffer: &mut [u8]) -> Result<usize, Error>;
+
+  /// Every byte left.
+  fn read_to_end(self) -> Result<List<u8>, Error> {
+    const data = new List<u8>();
+    const chunk = new List<u8>();
+
+    chunk.resize(4096, 0);
+
+    loop {
+      const count = self.read(&mut chunk)?;
+
+      if count == 0 {
+        break;
+      }
+
+      for index in 0..count {
+        data.push(chunk[index]);
+      }
+    }
+
+    Ok(data)
+  }
+
+  /// Every byte left, as text; bytes that are not UTF-8 are an error of kind `InvalidData`.
+  fn read_to_string(self) -> Result<String, Error> {
+    const data = self.read_to_end()?;
+
+    match super::utf8(&data) {
+      Some(text) => Ok(text),
+      None => Err(super::os_error(super::INVALID_DATA, "")),
+    }
+  }
+
+  /// Exactly as many bytes as `buffer` holds; an end before is an error of kind `UnexpectedEof`.
+  fn read_exact(self, buffer: &mut [u8]) -> Result<(), Error> {
+    var done = 0usize;
+    const chunk = new List<u8>();
+
+    while done < buffer.len() {
+      chunk.resize(buffer.len() - done, 0);
+
+      const count = self.read(&mut chunk)?;
+
+      if count == 0 {
+        return Err(super::os_error(super::UNEXPECTED_EOF, ""));
+      }
+
+      for index in 0..count {
+        buffer[done + index] = chunk[index];
+      }
+
+      done += count;
+    }
+
+    Ok(())
+  }
+}
+
+/// A destination of bytes, as Rust's `Write`. `write` takes the start of `bytes` and gives how
+/// many it took; `flush` writes out what a buffer holds.
+pub interface Write {
+  fn write(self, bytes: &[u8]) -> Result<usize, Error>;
+  fn flush(self) -> Result<(), Error>;
+
+  /// Every byte, in as many writes as it takes; a write that takes none is an error.
+  fn write_all(self, bytes: &[u8]) -> Result<(), Error> {
+    var done = 0usize;
+
+    while done < bytes.len() {
+      const count = self.write(&bytes[done..bytes.len()])?;
+
+      if count == 0 {
+        return Err(new Error(ErrorKind::Other, "failed to write whole buffer"));
+      }
+
+      done += count;
+    }
+
+    Ok(())
+  }
+
+  /// The bytes of `text`, which Rust writes with `write!`.
+  fn write_str(self, text: String) -> Result<(), Error> {
+    const bytes: List<u8> = text.bytes().collect();
+
+    self.write_all(&bytes)
+  }
+}
+
+/// Where `seek` moves to, as Rust's: from the start, the end or the current position.
+pub enum SeekFrom {
+  Start(u64),
+  End(i64),
+  Current(i64),
+}

@@ -142,9 +142,9 @@ The audit of the library found gaps of the language itself, which the library ne
 | Rust | Sagitario | State | Notes |
 |---|---|---|---|
 | `stdin`, `stdout`, `stderr`, `print!` | `std::io` | 🟡 | Lines, whole input, exact bytes, terminals. Missing: reading bytes (`List<u8>`) from stdin, writing bytes, locking for a series of writes |
-| `Read`, `Write`, `BufRead`, `BufReader`, `BufWriter` | — | ❌ | Interfaces for streams, so files, sockets and processes share code |
+| `Read`, `Write`, `BufRead`, `BufReader`, `BufWriter` | `Read`, `Write` | 🟡 | On slices, as Rust's ([ADR-0096](adr/0096-streams-files-and-drop.md), increment 2); the buffers are increment 3 |
 | `fs::read`, `write`, `read_to_string`, `create_dir(_all)`, `remove_*`, `rename`, `copy`, `read_dir` | ✅ | ✅ | |
-| `File` (open, read in parts, seek, append) | — | ❌ | Whole files only; large files need a handle. Needs `Drop` or an explicit `close` |
+| `File` (open, read in parts, seek, append) | `File`, `OpenOptions`, `SeekFrom` | ✅ | Closed by `Drop` or by `close` ([ADR-0096](adr/0096-streams-files-and-drop.md), increment 2) |
 | `fs::metadata` (size, times, permissions), `remove_dir_all`, `canonicalize`, `symlink` | — | ❌ | Spec 11 lists them as "not yet" |
 | `env::set_current_dir` | — | ❌ | Process-wide state |
 | `Path`, `PathBuf` | `std::path` over `String` | 🟡 | `join`, `file_name`, `parent`, `extension`, `stem`. Missing: `components`, `is_absolute`, `with_extension`, `strip_prefix`, normalization |

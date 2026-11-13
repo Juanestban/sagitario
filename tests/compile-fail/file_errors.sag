@@ -1,0 +1,21 @@
+// `Read`, `Write` and `File` (docs/adr/0096-streams-files-and-drop.md, Q656 and Q657).
+use std::fs::File;
+use std::io;
+use std::io::{Read, Write};
+
+struct Silent impl Write { //~ ERROR E0329
+  pub x: i32;
+
+  pub fn write(self, bytes: &[u8]) -> Result<usize, io::Error> { Ok(bytes.len()) }
+}
+
+fn main() -> Result<(), io::Error> {
+  const _forged = new File(3, "x"); //~ ERROR E0205
+  const _raw = File::from_raw_handle(3, "x"); //~ ERROR E0323
+  const file = File::create("x.txt")?;
+
+  file.write("text")?; //~ ERROR E0300
+
+  const _reader: Read = 5; //~ ERROR E0300
+  Ok(())
+}

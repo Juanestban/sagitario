@@ -159,6 +159,32 @@
       "}"
     ]
   },
+  "implread": {
+    "prefix": "implread",
+    "description": "A source of bytes: `read` fills the start of the buffer and gives how many it put",
+    "body": [
+      "impl Read for ${1:Type} {",
+      "  fn read(self, buffer: &mut [u8]) -> Result<usize, io::Error> {",
+      "    $0",
+      "  }",
+      "}"
+    ]
+  },
+  "implwrite": {
+    "prefix": "implwrite",
+    "description": "A destination of bytes: `write` takes the start of the bytes and gives how many it took",
+    "body": [
+      "impl Write for ${1:Type} {",
+      "  fn write(self, bytes: &[u8]) -> Result<usize, io::Error> {",
+      "    $0",
+      "  }",
+      "",
+      "  fn flush(self) -> Result<(), io::Error> {",
+      "    Ok(())",
+      "  }",
+      "}"
+    ]
+  },
   "impldrop": {
     "prefix": "impldrop",
     "description": "What a class does when its last reference goes, such as closing a resource",

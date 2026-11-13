@@ -2589,3 +2589,288 @@ pub fn processors() -> usize {
 
   if count > 0 { count as usize } else { 1 }
 }
+
+// ---- Open files (docs/adr/0096-streams-files-and-drop.md, Q657) --------------------------------
+//
+// A file is a number: a descriptor on POSIX, a `HANDLE` as an integer on Windows, so that the
+// `File` of `std::fs` has the same fields everywhere. `whence` of `file_seek` is 0 for the start,
+// 1 for the current position and 2 for the end.
+
+/// `EBADF`, the code of a file used after `close`.
+pub const EBADF: i32 = 9;
+
+@cfg(unix)
+extern "C" {
+  fn fileno(file: *mut c_void) -> c_int;
+  fn dup(fd: c_int) -> c_int;
+  fn fsync(fd: c_int) -> c_int;
+}
+
+@cfg(all(unix, not(all(target_os = "android", target_pointer_width = "32"))))
+extern "C" {
+  fn lseek(fd: c_int, offset: i64, whence: c_int) -> i64;
+  fn ftruncate(fd: c_int, length: i64) -> c_int;
+}
+
+/// 32-bit Android has a 32-bit `off_t`; its `*64` functions take 64 bits.
+@cfg(all(target_os = "android", target_pointer_width = "32"))
+extern "C" {
+  fn lseek64(fd: c_int, offset: i64, whence: c_int) -> i64;
+  fn ftruncate64(fd: c_int, length: i64) -> c_int;
+}
+
+@cfg(all(unix, not(all(target_os = "android", target_pointer_width = "32"))))
+fn seek_fd(fd: c_int, offset: i64, whence: c_int) -> i64 {
+  unsafe { lseek(fd, offset, whence) }
+}
+
+@cfg(all(target_os = "android", target_pointer_width = "32"))
+fn seek_fd(fd: c_int, offset: i64, whence: c_int) -> i64 {
+  unsafe { lseek64(fd, offset, whence) }
+}
+
+@cfg(all(unix, not(all(target_os = "android", target_pointer_width = "32"))))
+fn truncate_fd(fd: c_int, length: i64) -> c_int {
+  unsafe { ftruncate(fd, length) }
+}
+
+@cfg(all(target_os = "android", target_pointer_width = "32"))
+fn truncate_fd(fd: c_int, length: i64) -> c_int {
+  unsafe { ftruncate64(fd, length) }
+}
+
+/// The `fopen` mode of a combination of options that `std::fs` checked: C has no `open` the FFI
+/// can declare, since it is variadic, and C11's modes, with `x` for a file that must be new, cover
+/// Rust's options but one, writing without truncating a file that may be new, which tries `r+`
+/// and then a new file.
+@cfg(unix)
+fn open_mode(read: bool, write: bool, append: bool, truncate: bool, create_new: bool) -> String {
+  if create_new {
+    return if read { "w+bx" } else { "wbx" };
+  }
+
+  if append {
+    return if read { "a+b" } else { "ab" };
+  }
+
+  if truncate {
+    return if read { "w+b" } else { "wb" };
+  }
+
+  if write { "r+b" } else { "rb" }
+}
+
+/// Opens `path` and gives a descriptor of its own, which `fclose` of the stream leaves open.
+@cfg(unix)
+fn open_stream(name: CString, mode: String) -> Result<usize, i32> {
+  const c_mode = CString::new(mode).unwrap();
+
+  clear_errno();
+
+  const stream = unsafe { fopen(name.as_ptr(), c_mode.as_ptr()) };
+
+  if stream.is_null() {
+    return Err(failure());
+  }
+
+  const fd = unsafe { dup(fileno(stream)) };
+  const code = if fd < 0 { failure() } else { 0 };
+
+  unsafe { fclose(stream); }
+
+  if fd < 0 { Err(code) } else { Ok(fd as usize) }
+}
+
+@cfg(unix)
+pub fn file_open(path: String, read: bool, write: bool, append: bool, truncate: bool, create: bool, create_new: bool) -> Result<usize, i32> {
+  const name = match c_path(path) {
+    Some(found) => found,
+    None => return Err(EINVAL),
+  };
+
+  // `a` and `w` create the file, which `create` must ask for.
+  if !create && !create_new && (append || truncate) && path_kind(path) == KIND_MISSING {
+    return Err(ENOENT);
+  }
+
+  const mode = open_mode(read, write, append, truncate, create_new);
+
+  match open_stream(name, mode) {
+    Ok(fd) => Ok(fd),
+    // Writing without truncating a file that may be new: a new one, unless another came first.
+    Err(code) => {
+      if code == ENOENT && create && mode == "r+b" {
+        match open_stream(c_path(path).unwrap(), "w+bx") {
+          Ok(fd) => return Ok(fd),
+          Err(again) => {
+            if again == EEXIST {
+              return open_stream(c_path(path).unwrap(), "r+b");
+            }
+
+            return Err(again);
+          }
+        }
+      }
+
+      Err(code)
+    }
+  }
+}
+
+@cfg(unix)
+pub fn file_read(file: usize, buffer: *mut u8, len: usize) -> Result<usize, i32> {
+  clear_errno();
+
+  const count = unsafe { read(file as c_int, buffer as *mut c_void, len) };
+
+  if count < 0 { Err(failure()) } else { Ok(count as usize) }
+}
+
+@cfg(unix)
+pub fn file_write(file: usize, data: *const u8, len: usize) -> Result<usize, i32> {
+  clear_errno();
+
+  const written = unsafe { write(file as c_int, data as *const c_void, len) };
+
+  if written < 0 { Err(failure()) } else { Ok(written as usize) }
+}
+
+@cfg(unix)
+pub fn file_seek(file: usize, offset: i64, whence: i32) -> Result<u64, i32> {
+  clear_errno();
+
+  const position = seek_fd(file as c_int, offset, whence as c_int);
+
+  if position < 0 { Err(failure()) } else { Ok(position as u64) }
+}
+
+@cfg(unix)
+pub fn file_sync(file: usize) -> i32 {
+  clear_errno();
+
+  if unsafe { fsync(file as c_int) } == 0 { 0 } else { failure() }
+}
+
+@cfg(unix)
+pub fn file_set_len(file: usize, len: u64) -> i32 {
+  clear_errno();
+
+  if truncate_fd(file as c_int, len as i64) == 0 { 0 } else { failure() }
+}
+
+@cfg(unix)
+pub fn file_close(file: usize) -> i32 {
+  clear_errno();
+
+  if unsafe { close(file as c_int) } == 0 { 0 } else { failure() }
+}
+
+@cfg(windows)
+extern "C" {
+  fn SetFilePointerEx(file: *mut c_void, distance: i64, position: *mut i64, method: u32) -> c_int;
+  fn FlushFileBuffers(file: *mut c_void) -> c_int;
+  fn SetEndOfFile(file: *mut c_void) -> c_int;
+}
+
+@cfg(windows)
+fn handle_of(file: usize) -> *mut c_void {
+  file as *mut c_void
+}
+
+@cfg(windows)
+pub fn file_open(path: String, read: bool, write: bool, append: bool, truncate: bool, create: bool, create_new: bool) -> Result<usize, i32> {
+  const name = match wide_path(path) {
+    Some(found) => found,
+    None => return Err(EINVAL),
+  };
+  // GENERIC_READ, GENERIC_WRITE, or FILE_APPEND_DATA, whose writes go at the end.
+  var access = 0u32;
+
+  if read {
+    access = access | 0x8000_0000;
+  }
+
+  if append {
+    access = access | 0x4;
+  } else if write {
+    access = access | 0x4000_0000;
+  }
+
+  // CREATE_NEW, CREATE_ALWAYS, OPEN_ALWAYS, TRUNCATE_EXISTING or OPEN_EXISTING.
+  const disposition = if create_new { 1u32 } else if create && truncate { 2u32 } else if create { 4u32 } else if truncate { 5u32 } else { 3u32 };
+  // Sharing everything, FILE_ATTRIBUTE_NORMAL.
+  const file = unsafe { CreateFileW(name.as_ptr(), access, 7, 0 as *mut c_void, disposition, 0x80, 0 as *mut c_void) };
+
+  if invalid(file) { Err(failure()) } else { Ok(file as usize) }
+}
+
+@cfg(windows)
+pub fn file_read(file: usize, buffer: *mut u8, len: usize) -> Result<usize, i32> {
+  const size = if len > 0x4000_0000 { 0x4000_0000u32 } else { len as u32 };
+  var read = 0u32;
+
+  if unsafe { ReadFile(handle_of(file), buffer, size, &mut read, 0 as *mut c_void) } == 0 {
+    // ERROR_BROKEN_PIPE: the other end closed, which is the end.
+    if unsafe { GetLastError() } == 109 {
+      return Ok(0);
+    }
+
+    return Err(failure());
+  }
+
+  Ok(read as usize)
+}
+
+@cfg(windows)
+pub fn file_write(file: usize, data: *const u8, len: usize) -> Result<usize, i32> {
+  const size = if len > 0x4000_0000 { 0x4000_0000u32 } else { len as u32 };
+  var written = 0u32;
+
+  if unsafe { WriteFile(handle_of(file), data, size, &mut written, 0 as *mut c_void) } == 0 {
+    return Err(failure());
+  }
+
+  Ok(written as usize)
+}
+
+@cfg(windows)
+pub fn file_seek(file: usize, offset: i64, whence: i32) -> Result<u64, i32> {
+  var position = 0i64;
+
+  // FILE_BEGIN, FILE_CURRENT and FILE_END are 0, 1 and 2, as `whence`.
+  if unsafe { SetFilePointerEx(handle_of(file), offset, &mut position, whence as u32) } == 0 {
+    return Err(failure());
+  }
+
+  Ok(position as u64)
+}
+
+@cfg(windows)
+pub fn file_sync(file: usize) -> i32 {
+  if unsafe { FlushFileBuffers(handle_of(file)) } != 0 { 0 } else { failure() }
+}
+
+/// Moves the end of the file to `len`, leaving the position where it was.
+@cfg(windows)
+pub fn file_set_len(file: usize, len: u64) -> i32 {
+  const position = match file_seek(file, 0, 1) {
+    Ok(found) => found,
+    Err(code) => return code,
+  };
+
+  if let Err(code) = file_seek(file, len as i64, 0) {
+    return code;
+  }
+
+  const code = if unsafe { SetEndOfFile(handle_of(file)) } != 0 { 0 } else { failure() };
+
+  match file_seek(file, position as i64, 0) {
+    Ok(_) => code,
+    Err(again) => if code == 0 { again } else { code },
+  }
+}
+
+@cfg(windows)
+pub fn file_close(file: usize) -> i32 {
+  if unsafe { CloseHandle(handle_of(file)) } != 0 { 0 } else { failure() }
+}
