@@ -1,0 +1,49 @@
+//! `std::ptr`: null pointers and the reading, writing and copying of raw memory, as Rust's
+//! (docs/spec/11-standard-library.md#stdptr, docs/adr/0101-the-rest-of-s2.md, Q706), on the C
+//! library's `memmove`, `memcpy` and `memset`.
+
+use std::ffi::{c_int, c_void};
+use std::mem;
+
+extern "C" {
+  fn memmove(dst: *mut c_void, src: *const c_void, count: usize) -> *mut c_void;
+  fn memcpy(dst: *mut c_void, src: *const c_void, count: usize) -> *mut c_void;
+  fn memset(dst: *mut c_void, byte: c_int, count: usize) -> *mut c_void;
+}
+
+/// The null pointer of a `*const T`, whose `T` comes from the type expected.
+pub fn null<T>() -> *const T {
+  0 as *const T
+}
+
+/// The null pointer of a `*mut T`.
+pub fn null_mut<T>() -> *mut T {
+  0 as *mut T
+}
+
+/// The value `src` points to, as `*src`.
+pub unsafe fn read<T>(src: *const T) -> T {
+  unsafe { *src }
+}
+
+/// Writes `value` where `dst` points, as `*dst = value`.
+pub unsafe fn write<T>(dst: *mut T, value: T) {
+  unsafe { *dst = value; }
+}
+
+/// Copies `count` values of `T` from `src` to `dst`; the two regions may overlap, as C's
+/// `memmove`.
+pub unsafe fn copy<T>(src: *const T, dst: *mut T, count: usize) {
+  unsafe { memmove(dst as *mut c_void, src as *const c_void, count * mem::size_of<T>()); }
+}
+
+/// The same for regions that do not overlap, as C's `memcpy`; overlapping ones are undefined
+/// behavior.
+pub unsafe fn copy_nonoverlapping<T>(src: *const T, dst: *mut T, count: usize) {
+  unsafe { memcpy(dst as *mut c_void, src as *const c_void, count * mem::size_of<T>()); }
+}
+
+/// Sets every byte of `count` values of `T` at `dst` to `byte`, as C's `memset`.
+pub unsafe fn write_bytes<T>(dst: *mut T, byte: u8, count: usize) {
+  unsafe { memset(dst as *mut c_void, byte as c_int, count * mem::size_of<T>()); }
+}

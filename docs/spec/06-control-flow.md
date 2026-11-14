@@ -97,6 +97,10 @@ for i in 1..=10 { ... }   // 1 to 10
   range. `step_by(n)` keeps the first value and every `n`-th after it; a step of 0 panics. In a
   `for`, both compile to a counting loop without an iterator, and never step past the type's
   limits: `for b in (0u8..=255u8).rev()` visits 256 values.
+- `(a..b).contains(x)` and `(a..b).is_empty()`, written directly on a range as `rev()` is, test
+  its ends without an iterator, as Rust's: `a <= x && x < b` (`x <= b` for `a..=b`), and no
+  value between the ends ([ADR-0101](../adr/0101-the-rest-of-s2.md), Q705). A range kept in a
+  binding is an iterator, which has neither.
 - Open ranges (`..b`, `a..`) are post-MVP.
 
 ## `match`

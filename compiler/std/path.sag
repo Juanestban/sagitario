@@ -140,3 +140,226 @@ pub fn stem(path: String) -> Option<String> {
     None => Some(name),
   }
 }
+
+// ---- Components (docs/adr/0101-the-rest-of-s2.md, Q707) ----------------------------------------
+
+/// A part of a path, as Rust's `Component`.
+pub enum Component impl Eq, Display {
+  /// A drive on Windows: `C:`.
+  Prefix(String),
+  /// The separator after the prefix, or at the start, of a path with a root.
+  RootDir,
+  /// A `.` at the start of a relative path; inside a path it is left out.
+  CurDir,
+  /// `..`.
+  ParentDir,
+  /// A name.
+  Normal(String),
+
+  pub fn equals(self, other: Component) -> bool {
+    self.to_string() == other.to_string() && self.is_normal() == other.is_normal()
+  }
+
+  /// Whether it is a name.
+  prv fn is_normal(self) -> bool {
+    match self {
+      Component::Normal(_) => true,
+      _ => false,
+    }
+  }
+
+  /// Its text: the separator of the system for `RootDir`, as Rust's `as_os_str`.
+  pub fn to_string(self) -> String {
+    match self {
+      Component::Prefix(text) => text,
+      Component::RootDir => if windows() { "\\" } else { "/" },
+      Component::CurDir => ".",
+      Component::ParentDir => "..",
+      Component::Normal(text) => text,
+    }
+  }
+}
+
+/// A component and where it is in the path's text.
+struct Part {
+  pub component: Component;
+  pub start: usize;
+  pub end: usize;
+}
+
+/// The components of `path` and where each is, as Rust's `components`: separators repeated or at
+/// the end are left out, and so is a `.` other than the first component of a relative path.
+fn parts(path: String) -> List<Part> {
+  const bytes: List<u8> = path.bytes().collect();
+  const found: List<Part> = new List();
+  var at = 0usize;
+  const letter = bytes.len() >= 2 && ((bytes[0] >= 65 && bytes[0] <= 90) || (bytes[0] >= 97 && bytes[0] <= 122));
+
+  if letter && bytes[1] == 58 && windows() {
+    found.push(Part { component: Component::Prefix(path.substring(0, 2)), start: 0, end: 2 });
+    at = 2;
+  }
+
+  const rooted = at < bytes.len() && is_separator(bytes[at]);
+
+  if rooted {
+    found.push(Part { component: Component::RootDir, start: at, end: at + 1 });
+  }
+
+  const relative = found.is_empty();
+
+  while at < bytes.len() {
+    while at < bytes.len() && is_separator(bytes[at]) {
+      at += 1;
+    }
+
+    const start = at;
+
+    while at < bytes.len() && !is_separator(bytes[at]) {
+      at += 1;
+    }
+
+    if at == start {
+      break;
+    }
+
+    const name = path.substring(start, at);
+
+    if name == "." {
+      if relative && found.is_empty() {
+        found.push(Part { component: Component::CurDir, start: start, end: at });
+      }
+    } else if name == ".." {
+      found.push(Part { component: Component::ParentDir, start: start, end: at });
+    } else {
+      found.push(Part { component: Component::Normal(name), start: start, end: at });
+    }
+  }
+
+  found
+}
+
+/// The components of `path`: `components("/a/./b/")` is `[RootDir, Normal("a"), Normal("b")]`.
+pub fn components(path: String) -> List<Component> {
+  const found: List<Component> = new List();
+
+  for part in parts(path) {
+    found.push(part.component);
+  }
+
+  found
+}
+
+/// Whether `path` starts with a root: `/`, or `\` after an optional drive on Windows.
+pub fn has_root(path: String) -> bool {
+  for part in parts(path) {
+    if let Component::RootDir = part.component {
+      return true;
+    }
+  }
+
+  false
+}
+
+/// Whether `path` does not depend on the current directory: it has a root, and on Windows a
+/// drive too (`C:\a`; `\a` and `C:a` are relative there), as Rust's.
+pub fn is_absolute(path: String) -> bool {
+  if !windows() {
+    return has_root(path);
+  }
+
+  const found = parts(path);
+
+  if found.len() < 2 {
+    return false;
+  }
+
+  match found[0].component {
+    Component::Prefix(_) => match found[1].component {
+      Component::RootDir => true,
+      _ => false,
+    },
+    _ => false,
+  }
+}
+
+pub fn is_relative(path: String) -> bool {
+  !is_absolute(path)
+}
+
+/// `path` with the extension of its file name replaced by `extension`, or removed when it is
+/// empty, as Rust's `with_extension`; a path without a file name is returned as it is.
+pub fn with_extension(path: String, extension: String) -> String {
+  const name = match file_name(path) {
+    Some(found) => found,
+    None => return path,
+  };
+  const base = match dot(name) {
+    Some(index) => name.substring(0, index),
+    None => name,
+  };
+  const renamed = if extension.is_empty() { base } else { base + "." + extension };
+
+  with_file_name(path, renamed)
+}
+
+/// `path` with its file name replaced by `name`, or with `name` joined to it when it has none,
+/// as Rust's `with_file_name`.
+pub fn with_file_name(path: String, name: String) -> String {
+  if file_name(path).is_none() {
+    return join(path, name);
+  }
+
+  match parent(path) {
+    Some(found) => if found.is_empty() { name } else { join(found, name) },
+    None => name,
+  }
+}
+
+/// The rest of `path` after the components of `base`, or `None` if `path` does not start with
+/// them: `strip_prefix("/a/b/c", "/a")` is `Some("b/c")`, with the separators of `path`.
+pub fn strip_prefix(path: String, base: String) -> Option<String> {
+  const found = parts(path);
+  const prefix = parts(base);
+
+  if prefix.len() > found.len() {
+    return None;
+  }
+
+  for index in 0..prefix.len() {
+    if found[index].component != prefix[index].component {
+      return None;
+    }
+  }
+
+  if prefix.len() == found.len() {
+    return Some("");
+  }
+
+  Some(path.substring(found[prefix.len()].start, found[found.len() - 1].end))
+}
+
+/// Whether the components of `path` start with those of `base`.
+pub fn starts_with(path: String, base: String) -> bool {
+  strip_prefix(path, base).is_some()
+}
+
+/// Whether the components of `path` end with those of `child`.
+pub fn ends_with(path: String, child: String) -> bool {
+  const found = components(path);
+  const tail = components(child);
+
+  if tail.len() > found.len() {
+    return false;
+  }
+
+  const offset = found.len() - tail.len();
+
+  for index in 0..tail.len() {
+    if found[offset + index] != tail[index] {
+      return false;
+    }
+  }
+
+  true
+}

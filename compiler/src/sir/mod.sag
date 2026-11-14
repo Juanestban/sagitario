@@ -2948,6 +2948,8 @@ pub class Lowering {
         BuiltinMethod::Prelude(function) => collections::prelude_method(self, value, function, ty, receiver, args),
         BuiltinMethod::TotalCompare => collections::total_compare(self, ty, receiver, args),
         BuiltinMethod::RangeRev => collections::range_iter(self, receiver, true, ty),
+        BuiltinMethod::RangeContains => collections::range_test(self, receiver, args.first()),
+        BuiltinMethod::RangeIsEmpty => collections::range_test(self, receiver, None),
         BuiltinMethod::Runtime { .. } | BuiltinMethod::Find | BuiltinMethod::ToDigit | BuiltinMethod::Parse(_) | BuiltinMethod::Checked(_)
           | BuiltinMethod::BuilderPop => {
           strings::text_method(self, builtin, ty, receiver, args)

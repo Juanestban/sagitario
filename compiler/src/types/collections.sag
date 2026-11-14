@@ -872,6 +872,29 @@ pub fn range_value(cx: Checker, value: Expr, start: Expr, end: Expr, expected: O
 }
 
 /// `(start..end).rev()`: the range's integers from the last one down.
+/// `contains(x)` and `is_empty()` of a range written directly, as `rev()`, with Rust's meaning
+/// (docs/adr/0101-the-rest-of-s2.md, Q705); `None` for other methods.
+pub fn range_test(cx: Checker, value: Expr, receiver: Expr, receiver_ty: Type, method: Ident, args: List<Expr>) -> Option<Type> {
+  if let ExprKind::Range { .. } = receiver.kind {
+  } else {
+    return None;
+  }
+
+  const elem = cx.typed.iter_elem(receiver_ty)?;
+
+  if method.name == "contains" {
+    exprs::check_args(cx, value.span, "method", List::from([elem]), args);
+    cx.typed.builtin_methods.insert(value.id, BuiltinMethod::RangeContains);
+  } else if method.name == "is_empty" {
+    exprs::check_args(cx, value.span, "method", new List(), args);
+    cx.typed.builtin_methods.insert(value.id, BuiltinMethod::RangeIsEmpty);
+  } else {
+    return None;
+  }
+
+  Some(types::of(TypeKind::Bool))
+}
+
 pub fn range_rev(cx: Checker, value: Expr, receiver: Expr, receiver_ty: Type, method: Ident, args: List<Expr>) -> Option<Type> {
   if method.name != "rev" || cx.typed.iter_elem(receiver_ty).is_none() {
     return None;

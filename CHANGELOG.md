@@ -28,6 +28,11 @@ The sources say 0.32.0.
 
 ### Added
 
+- `contains` and `is_empty` of a range written directly (`(1..=9).contains(x)`); `std::ptr` with
+  `null`, `null_mut`, `read`, `write`, `copy`, `copy_nonoverlapping` and `write_bytes`; and
+  `path::components`, `has_root`, `is_absolute`, `is_relative`, `with_extension`,
+  `with_file_name`, `strip_prefix`, `starts_with` and `ends_with`, with `path::Component`
+  ([ADR-0101](docs/adr/0101-the-rest-of-s2.md), increment 2).
 - `to_le_bytes`, `to_be_bytes` and `to_ne_bytes` of every integer type, and `from_le_bytes`,
   `from_be_bytes`, `from_ne_bytes` and `from_str_radix`; the operators `+`, `-`, `*` and `/` of
   `Duration`, and its `checked_` and `saturating_` arithmetic, `mul_f64`, `div_f64`,

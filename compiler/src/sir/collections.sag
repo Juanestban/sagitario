@@ -359,6 +359,41 @@ pub fn range_iter(lw: Lowering, range: Expr, reverse: bool, ty: Type) -> Result<
   Ok(lw.call(Callee::Fn(target), List::from([start_value, end_value, bool_operand(inclusive), bool_operand(reverse)]), ty))
 }
 
+/// `(a..b).contains(x)`, or `is_empty()` without `value`: comparisons of the bounds, which run in
+/// order, then of `x`, without an iterator (docs/adr/0101-the-rest-of-s2.md, Q705).
+pub fn range_test(lw: Lowering, range: Expr, value: Option<Expr>) -> Result<Operand, String> {
+  var start_expr: Option<Expr> = None;
+  var end_expr: Option<Expr> = None;
+  var inclusive = false;
+
+  if let ExprKind::Range { start: found_start, end: found_end, inclusive: found_inclusive } = range.kind {
+    start_expr = Some(found_start);
+    end_expr = Some(found_end);
+    inclusive = found_inclusive;
+  }
+
+  const low = match start_expr {
+    Some(found) => found,
+    None => return Err("`contains` of something other than a range"),
+  };
+  const high = end_expr.unwrap_or(low);
+  const int_ty = lw.type_of(low)?;
+  const start = lw.operand_as(low, int_ty)?;
+  const end = lw.operand_as(high, int_ty)?;
+
+  const tested = match value {
+    Some(found) => lw.operand_as(found, int_ty)?,
+    None => {
+      // Empty when no value lies between the bounds: `start >= end`, or `start > end` with `..=`.
+      return Ok(binary_value(lw, bool_type(), if inclusive { BinaryOp::Gt } else { BinaryOp::Ge }, int_ty, start, end));
+    }
+  };
+  const above = binary_value(lw, bool_type(), BinaryOp::Le, int_ty, start, tested);
+  const below = binary_value(lw, bool_type(), if inclusive { BinaryOp::Le } else { BinaryOp::Lt }, int_ty, tested, end);
+
+  Ok(binary_value(lw, bool_type(), BinaryOp::BitAnd, bool_type(), above, below))
+}
+
 /// `a.total_compare(b)` on floats.
 pub fn total_compare(lw: Lowering, ty: Type, receiver: Expr, args: List<Expr>) -> Result<Operand, String> {
   const float = lw.type_of(receiver)?;

@@ -100,7 +100,7 @@ The audit of the library found gaps of the language itself, which the library ne
 | `Hash`, `Hasher` | `Hash` | 🟡 | Types implement `hash`; a `Hasher` to combine fields, and a choice of hash function, are missing |
 | `Add`, `Sub`, `Mul`, `Div`, `Rem`, `Neg` | ✅ | ✅ | ADR-0081 |
 | `Index`, `IndexMut`, `Bit*`, `Shl`, `Shr`, `*Assign` | `Index`, `IndexMut` | 🟡 | ADR-0094: `index` gives the value and `index_set` writes it back, and `map[key]`; the bitwise interfaces and `*Assign` are missing |
-| `Range`, `RangeInclusive` | `a..b`, `a..=b` | 🟡 | In `for` and slices; not values with methods (`contains`, `len`) |
+| `Range`, `RangeInclusive` | `a..b`, `a..=b` | ✅ | Iterators with Rust's adapters, `rev` and `step_by`, and `contains` and `is_empty` written on the range ([ADR-0101](adr/0101-the-rest-of-s2.md), increment 2); a range kept in a binding is an iterator, whose length is `count()` |
 | `From`, `Into`, `TryFrom`, `AsRef` | `From`, `Into`, `TryFrom`, `TryInto` | ✅ | ADR-0094: Rust's conversions of numbers, `char`, `String`, lists and maps, and `?` through `From`; `AsRef` ➖, a `&T` parameter does its work |
 | `Default` | `Default`, `@default` | ✅ | ADR-0094: Rust's defaults of the prelude's types, `@default` for `#[derive(Default)]`, `unwrap_or_default`, `mem::take` and struct update |
 | `Clone`, `Copy` | ➖ | ➖ | Structs copy, classes share |
@@ -113,7 +113,7 @@ The audit of the library found gaps of the language itself, which the library ne
 |---|---|---|---|
 | `mem::size_of`, `align_of`, `zeroed` | `std::mem` | ✅ | G1 |
 | `mem::swap`, `replace`, `take` | `std::mem` | ✅ | On the place a `&mut` lends ([ADR-0094](adr/0094-conversions-and-defaults.md), Q637); `Option::take` and `replace` on a place too ([ADR-0097](adr/0097-processes-and-environment.md)) |
-| `ptr::null`, `read`, `write`, `copy`, `copy_nonoverlapping` | `0 as *const T`, `*p`, `memcpy` through the FFI | 🟡 | Named functions for raw memory are missing |
+| `ptr::null`, `read`, `write`, `copy`, `copy_nonoverlapping` | `std::ptr` | ✅ | Also `null_mut` and `write_bytes` ([ADR-0101](adr/0101-the-rest-of-s2.md), increment 2) |
 | `Box`, `Rc`, `Arc`, `Weak` | classes, `weak` | ➖ | See above |
 | `Cell`, `RefCell` | `var` fields of classes | ➖ | |
 | `Cow` | — | ⛔ | Needs references held in a type, which Sagitario does not have |
@@ -147,7 +147,7 @@ The audit of the library found gaps of the language itself, which the library ne
 | `File` (open, read in parts, seek, append) | `File`, `OpenOptions`, `SeekFrom` | ✅ | Closed by `Drop` or by `close` ([ADR-0096](adr/0096-streams-files-and-drop.md), increment 2) |
 | `fs::metadata` (size, times, permissions), `remove_dir_all`, `canonicalize`, `symlink` | `metadata`, `symlink_metadata`, `remove_dir_all`, `canonicalize` | ✅ | Size, kind, read-only and times ([ADR-0096](adr/0096-streams-files-and-drop.md), increment 4); making links and setting permissions wait for a record of `std::os` |
 | `env::set_current_dir` | `env::set_current_dir` | ✅ | [ADR-0097](adr/0097-processes-and-environment.md), increment 3 |
-| `Path`, `PathBuf` | `std::path` over `String` | 🟡 | `join`, `file_name`, `parent`, `extension`, `stem`. Missing: `components`, `is_absolute`, `with_extension`, `strip_prefix`, normalization |
+| `Path`, `PathBuf` | `std::path` over `String` | ✅ | `join`, `file_name`, `parent`, `extension`, `stem`, `components`, `has_root`, `is_absolute`, `with_extension`, `with_file_name`, `strip_prefix`, `starts_with`, `ends_with` ([ADR-0101](adr/0101-the-rest-of-s2.md), increment 2); `PathBuf` is ➖, a path being a `String`, and normalizing is `fs::canonicalize` |
 
 ### Networking (`net`)
 

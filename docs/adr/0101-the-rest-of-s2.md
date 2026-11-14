@@ -77,4 +77,10 @@ precisions, with the debug form of an interface value's type; and `source()` now
   them for the methods and the static functions (`u32::from_le_bytes`). `Duration`'s operators
   check their arithmetic, so that they panic in release builds too, as Rust's; its `nanos` is a
   `u64`, so the longest duration is about 584 years, where Rust's is far longer.
+- Increment 2 is done. `contains` and `is_empty` of a range are comparisons of its ends, which the
+  compiler writes where the range is, as it counts `rev()` without an iterator. `std::ptr` is
+  written in Sagitario on `memmove`, `memcpy` and `memset`; a program declaring them too keeps
+  its own, since the C of `std` is compiled apart. The components of a path are found with where
+  each lies in its text, so that `strip_prefix` gives the rest of the path with its own
+  separators; only drives are prefixes on Windows, not the `\\server\share` of UNC paths.
 

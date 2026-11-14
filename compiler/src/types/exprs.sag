@@ -1894,6 +1894,10 @@ fn method_call(cx: Checker, value: Expr, receiver: Expr, method: Ident, args: Li
     return interfaces::into_call(cx, value, receiver_ty, method, name == "try_into", expected);
   }
 
+  if let Some(ty) = collections::range_test(cx, value, receiver, receiver_ty, method, args) {
+    return ty;
+  }
+
   // The methods of iterators that need more of their values, keep both ends, or make what the
   // context expects (docs/adr/0093-everyday-methods.md, Q626-Q628).
   if let Some(elem) = cx.typed.iter_elem(receiver_ty) {

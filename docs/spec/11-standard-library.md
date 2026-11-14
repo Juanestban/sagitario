@@ -618,6 +618,28 @@ Rationale: [ADR-0100](../adr/0100-networking.md), Q696, as Rust's.
 - A read or a write whose time runs out is an error of kind `WouldBlock` on POSIX systems and
   `TimedOut` on Windows, as the system gives it and as in Rust.
 
+## `std::ptr`
+
+Rationale: [ADR-0101](../adr/0101-the-rest-of-s2.md), Q706. Null pointers and raw memory, as Rust's
+`std::ptr`, for code that works with C ([FFI](10-ffi.md#raw-pointers)).
+
+| Function | Result |
+|---|---|
+| `null<T>() -> *const T`, `null_mut<T>() -> *mut T` | The null pointer; `T` comes from the type expected |
+| `unsafe read(src: *const T) -> T`, `unsafe write(dst: *mut T, value: T)` | `*src`; `*dst = value` |
+| `unsafe copy(src, dst, count)` | Copies `count` values of `T`; the regions may overlap (`memmove`) |
+| `unsafe copy_nonoverlapping(src, dst, count)` | The same for regions that do not overlap (`memcpy`) |
+| `unsafe write_bytes(dst, byte: u8, count)` | Sets every byte of `count` values of `T` to `byte` (`memset`) |
+
+```sag
+use std::ptr;
+
+const from: List<u8> = List::from([1, 2, 3]);
+const to: List<u8> = List::from([0, 0, 0]);
+
+unsafe { ptr::copy_nonoverlapping(from.as_ptr(), to.as_mut_ptr(), 3); }
+```
+
 ## `std::path`
 
 Functions on paths as text; they never touch the file system. `/` separates components on
@@ -631,8 +653,18 @@ root of a path is its leading separators, after the drive on Windows.
 | `parent(path) -> Option<String>` | The path without its last component; `Some("")` for a single relative component, `None` for `""` or a root |
 | `extension(path) -> Option<String>` | The text after the last `.` of the file name; `None` without a `.` or when the name only starts with one (`.bashrc`) |
 | `stem(path) -> Option<String>` | The file name without its extension |
+| `components(path) -> List<Component>` | Its parts, as Rust's `Component`: `Prefix(drive)` on Windows, `RootDir`, `CurDir` (a `.` that starts a relative path), `ParentDir` and `Normal(name)` |
+| `has_root(path)`, `is_absolute(path)`, `is_relative(path)` | Whether it starts with a root; whether it does not depend on the current directory: a root, and a drive too on Windows (`C:\a`) |
+| `with_extension(path, extension)`, `with_file_name(path, name)` | The path with its extension (removed when empty) or its file name replaced; a path without a file name has `name` joined to it |
+| `strip_prefix(path, base) -> Option<String>` | The rest of `path` after the components of `base`, with the separators of `path` |
+| `starts_with(path, base)`, `ends_with(path, child)` | Whether its components start with those of `base`, or end with those of `child` |
 
 - Trailing separators are ignored: `file_name("a/b/")` is `Some("b")`.
+- The functions from `components` on are Rust's ([ADR-0101](../adr/0101-the-rest-of-s2.md),
+  Q707): they compare components, not text, so `starts_with("a/bc", "a/b")` is `false`. A path is
+  a `String`, so there is no `PathBuf`; normalizing one against the file system is
+  `fs::canonicalize`. `Component` implements `Eq` and `Display`, whose text of `RootDir` is the
+  separator of the system.
 - `join` separates with `/`, or with `\` on Windows when `base` uses only `\`.
 
 ```sag
