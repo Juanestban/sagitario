@@ -1,0 +1,135 @@
+// `std::hash::Hasher` and `DefaultHasher`, Rust's SipHash-1-3, whose hashes are Rust's for the
+// same bytes, a type combining its fields with one, and `Error::source`
+// (docs/adr/0101-the-rest-of-s2.md, Q708 and Q713).
+// expect-stdout: siphash: 15130871412783076140 13851880170939887858 17224545590736200989 8880661182590738257 10066911519617532978 9904005486622393783
+// expect-stdout: again: true | order matters: true | signed: true
+// expect-stdout: fields: true false | set: 2
+// expect-stdout: source: plain | cannot read the configuration: cannot open the file: no such file | true
+
+use std::hash::DefaultHasher;
+use std::io;
+
+/// A point hashed from both coordinates, as Rust's derived `Hash`.
+struct Point impl Hash {
+  pub x: i32;
+  pub y: i32;
+
+  pub fn equals(self, other: Point) -> bool {
+    self.x == other.x && self.y == other.y
+  }
+
+  pub fn hash(self) -> u64 {
+    const hasher = new DefaultHasher();
+
+    hasher.write_i32(self.x);
+    hasher.write_i32(self.y);
+    hasher.finish()
+  }
+}
+
+/// An error caused by another.
+class ConfigError impl Error {
+  prv const cause: Error;
+
+  pub fn new(self, cause: Error) {
+    self.cause = cause;
+  }
+
+  pub fn message(self) -> String {
+    "cannot read the configuration"
+  }
+
+  pub fn source(self) -> Option<Error> {
+    Some(self.cause)
+  }
+}
+
+class OpenError impl Error {
+  prv const cause: io::Error;
+
+  pub fn new(self, cause: io::Error) {
+    self.cause = cause;
+  }
+
+  pub fn message(self) -> String {
+    "cannot open the file"
+  }
+
+  pub fn source(self) -> Option<Error> {
+    Some(self.cause)
+  }
+}
+
+/// Every message of the chain of `error`.
+fn chain(error: Error) -> String {
+  var text = error.message();
+  var current = error.source();
+
+  while let Some(cause) = current {
+    text = text + ": " + cause.message();
+    current = cause.source();
+  }
+
+  text
+}
+
+/// The hash of what `fill` writes.
+fn hash_of(fill: fn(DefaultHasher)) -> u64 {
+  const hasher = new DefaultHasher();
+
+  fill(hasher);
+  hasher.finish()
+}
+
+fn main() {
+  const counting: List<u8> = new List();
+
+  for index in 0..16u8 {
+    counting.push(index);
+  }
+
+  const empty = hash_of((_h) => {});
+  const abc = hash_of((h) => h.write(&List::from([97u8, 98, 99])));
+  const text = hash_of((h) => h.write_str("abc"));
+  const word = hash_of((h) => h.write_u64(42));
+  const mixed = hash_of((h) => {
+    h.write_u32(7);
+    h.write_u8(1);
+  });
+  const sixteen = hash_of((h) => h.write(&counting));
+
+  println(f"siphash: {empty} {abc} {text} {word} {mixed} {sixteen}");
+
+  // `finish` gives the hash so far, and can be asked again.
+  const twice = new DefaultHasher();
+
+  twice.write_str("game");
+
+  const first = twice.finish();
+  const ab_c = hash_of((h) => {
+    h.write_str("ab");
+    h.write_str("c");
+  });
+  const a_bc = hash_of((h) => {
+    h.write_str("a");
+    h.write_str("bc");
+  });
+
+  print(f"again: {first == twice.finish()} | order matters: {ab_c != a_bc} | ");
+  println(f"signed: {hash_of((h) => h.write_i64(-1)) == hash_of((h) => h.write_u64(u64::MAX))}");
+
+  // A type hashed from its fields, as a key of a set.
+  const points: HashSet<Point> = new HashSet();
+
+  points.insert(Point { x: 1, y: 2 });
+  points.insert(Point { x: 1, y: 2 });
+  points.insert(Point { x: 2, y: 1 });
+  print(f"fields: {Point { x: 1, y: 2 }.hash() == Point { x: 1, y: 2 }.hash()} {Point { x: 1, y: 2 }.hash() == Point { x: 2, y: 1 }.hash()} | ");
+  println(f"set: {points.len()}");
+
+  // The chain of causes.
+  const plain: Error = Error("plain");
+  const wrapped = new ConfigError(new OpenError(new io::Error(io::ErrorKind::NotFound, "no such file")));
+
+  println(f"source: {chain(plain)} | {chain(wrapped)} | {plain.source().is_none()}");
+}

@@ -406,6 +406,38 @@ const log = OpenOptions::new().append(true).create(true).open("log.txt")?;
   Rust's do.
 
 
+## `std::hash`
+
+Rationale: [ADR-0101](../adr/0101-the-rest-of-s2.md), Q708. `Hash` stays `fn hash(self) -> u64`
+([interfaces](05-interfaces-generics.md#equality-order-and-hashing-f2)); a `Hasher` combines the
+hashes or bytes of a type's fields into one, as Rust's.
+
+```sag
+use std::hash::DefaultHasher;
+
+struct Point impl Hash {
+  pub x: i32;
+  pub y: i32;
+
+  pub fn equals(self, other: Point) -> bool { self.x == other.x && self.y == other.y }
+
+  pub fn hash(self) -> u64 {
+    const hasher = new DefaultHasher();
+
+    hasher.write_i32(self.x);
+    hasher.write_i32(self.y);
+    hasher.finish()
+  }
+}
+```
+
+| Item | Meaning |
+|---|---|
+| `interface Hasher { fn write(self, bytes: &[u8]); fn finish(self) -> u64; }` | Combines bytes into a hash; `finish` gives the hash of those written so far, and can be called again |
+| `write_u8` to `write_u64`, `write_usize`, `write_i8` to `write_i64`, `write_isize` | Writes the bytes of a value, in the order of the target; default methods of `Hasher` |
+| `write_str(text)` | The bytes of `text`, then `0xFF`, as Rust's |
+| `new DefaultHasher()` | Rust's `DefaultHasher`: SipHash-1-3 with zero keys, whose hashes are Rust's for the same bytes |
+
 ## `std::hint`
 
 `black_box<T>(value: T) -> T` returns its argument, but the compiler and the C compiler must

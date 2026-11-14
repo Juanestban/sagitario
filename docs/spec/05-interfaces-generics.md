@@ -171,6 +171,7 @@ Java/C# or `dyn Trait` in Rust, but without extra syntax.
 ```sag
 interface Error {
   fn message(self) -> String;
+  fn source(self) -> Option<Error> { None }
 }
 ```
 
@@ -181,7 +182,11 @@ interface Error {
   `Error`. See [errors](07-errors.md#the--operator) for how `?` converts errors.
 - `Display` is a separate prelude interface, for the text of a value
   ([ADR-0089](../adr/0089-display-debug-and-format-specifiers.md)); `Error` does not extend it.
-- Post-MVP: `source()` for error chains and backtraces.
+- `source()` gives the error that caused this one, `None` by default, as Rust's
+  ([ADR-0101](../adr/0101-the-rest-of-s2.md), Q713): an error wrapping another overrides it, and
+  code follows the chain with `while let Some(cause) = current { ... }`. `io::Error` holds no
+  source: a value of the interface `Error` is not `Send`, and `io::Error` is.
+- Backtraces wait for the runtime's core in Sagitario (S3).
 
 ## Generics
 

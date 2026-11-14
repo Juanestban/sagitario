@@ -88,7 +88,7 @@ The audit of the library found gaps of the language itself, which the library ne
 | Rust | Sagitario | State | Notes |
 |---|---|---|---|
 | `Option`, `Result` | ✅ | ✅ | Rust's methods, `Eq`, `Ord` and `Hash` ([ADR-0093](adr/0093-everyday-methods.md), increment 1). `take` and `replace` on a place ([ADR-0097](adr/0097-processes-and-environment.md), increment 1); `unwrap_or_default` ([ADR-0094](adr/0094-conversions-and-defaults.md)) |
-| `std::error::Error` | the prelude's `Error` interface | 🟡 | Missing: `source()` chains and backtraces (spec 7, post-MVP) |
+| `std::error::Error` | the prelude's `Error` interface | ✅ | `message()` and `source()`, the chain of causes ([ADR-0101](adr/0101-the-rest-of-s2.md), increment 3); backtraces are their own row |
 | `panic!`, `assert!`, `unreachable!`, `todo!` | `panic`, `assert`, `assert_eq`, `assert_ne`, `unreachable`, `todo` | ✅ | Functions that panic at the line of their call, without a message argument (ADR-0093, increment 1) |
 
 ### Comparison, hashing, operators, conversion (`cmp`, `hash`, `ops`, `convert`, `default`, `marker`)
@@ -97,7 +97,7 @@ The audit of the library found gaps of the language itself, which the library ne
 |---|---|---|---|
 | `PartialEq`, `Eq`, `PartialOrd`, `Ord`, `Ordering` | `Eq`, `Ord`, `Ordering` | ✅ | ADR-0081; floats have `total_compare` |
 | `cmp::min`, `max`, `Reverse`, `then_with` | `min`, `max`, `clamp`, the methods of `Ordering` | ✅ | ADR-0094; `Reverse` ➖ until structs with unnamed fields: `sort_by((a, b) => b.compare(a))` |
-| `Hash`, `Hasher` | `Hash` | 🟡 | Types implement `hash`; a `Hasher` to combine fields, and a choice of hash function, are missing |
+| `Hash`, `Hasher` | `Hash`, `std::hash::Hasher`, `DefaultHasher` | ✅ | `hash()` gives a `u64`; a `Hasher`, Rust's SipHash-1-3 by default, combines the fields of a type ([ADR-0101](adr/0101-the-rest-of-s2.md), increment 3) |
 | `Add`, `Sub`, `Mul`, `Div`, `Rem`, `Neg` | ✅ | ✅ | ADR-0081 |
 | `Index`, `IndexMut`, `Bit*`, `Shl`, `Shr`, `*Assign` | `Index`, `IndexMut` | 🟡 | ADR-0094: `index` gives the value and `index_set` writes it back, and `map[key]`; the bitwise interfaces and `*Assign` are missing |
 | `Range`, `RangeInclusive` | `a..b`, `a..=b` | ✅ | Iterators with Rust's adapters, `rev` and `step_by`, and `contains` and `is_empty` written on the range ([ADR-0101](adr/0101-the-rest-of-s2.md), increment 2); a range kept in a binding is an iterator, whose length is `count()` |
@@ -183,7 +183,7 @@ The audit of the library found gaps of the language itself, which the library ne
 | `os` (`unix::fs::PermissionsExt`, `windows::io::AsRawHandle`...) | `as_raw_handle` and `unsafe from_raw_handle` of `File` and the sockets | 🟡 | The descriptor or `HANDLE` of each is a `usize` on every system ([ADR-0096](adr/0096-streams-files-and-drop.md), [ADR-0100](adr/0100-networking.md)); the permissions of Unix and the rest of `os` are missing; programs reach the system through `extern "C"` |
 | `hint::black_box` | `std::hint::black_box` | ✅ | ADR-0090 |
 | `any`, `TypeId` | — | ⛔ | Reflection; interfaces cover the cases of a general-purpose program |
-| `backtrace` | — | ❌ | With error chains |
+| `backtrace` | — | ⛔ until S3 | It walks the stack and reads the symbols of each system from the runtime's core, which S3 rewrites in Sagitario ([ADR-0101](adr/0101-the-rest-of-s2.md), Q714) |
 | `panic::catch_unwind`, hooks | — | ⛔ | No unwinding; a panic hook (a message before exiting) could come with the backtraces |
 | `primitive`, `prelude` | the prelude | ✅ | |
 

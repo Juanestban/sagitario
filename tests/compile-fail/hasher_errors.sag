@@ -1,0 +1,34 @@
+// What a hasher takes, what implementing `Hasher` asks for, and the type of `source`
+// (docs/adr/0101-the-rest-of-s2.md, Q708 and Q713).
+use std::hash::{DefaultHasher, Hasher};
+
+class Counter impl Hasher { //~ ERROR E0329
+  pub var count: u64;
+
+  pub fn new(self) {
+    self.count = 0;
+  }
+
+  pub fn write(self, bytes: &[u8]) {
+    self.count += bytes.len() as u64;
+  }
+}
+
+class Wrong impl Error {
+  pub fn new(self) {}
+
+  pub fn message(self) -> String {
+    "wrong"
+  }
+
+  pub fn source(self) -> String { //~ ERROR E0329
+    "not an error"
+  }
+}
+
+fn main() {
+  const hasher = new DefaultHasher();
+
+  hasher.write("text"); //~ ERROR E0300
+  hasher.write_u8(256); //~ ERROR E0302
+}

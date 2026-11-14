@@ -28,6 +28,9 @@ The sources say 0.32.0.
 
 ### Added
 
+- `std::hash` with `Hasher` and `DefaultHasher`, Rust's SipHash-1-3, whose hashes are Rust's for
+  the same bytes; and `Error::source`, the error that caused one, `None` by default
+  ([ADR-0101](docs/adr/0101-the-rest-of-s2.md), increment 3).
 - `contains` and `is_empty` of a range written directly (`(1..=9).contains(x)`); `std::ptr` with
   `null`, `null_mut`, `read`, `write`, `copy`, `copy_nonoverlapping` and `write_bytes`; and
   `path::components`, `has_root`, `is_absolute`, `is_relative`, `with_extension`,

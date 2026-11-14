@@ -6,6 +6,12 @@
 /// The interface of error values (docs/spec/05-interfaces-generics.md#the-error-interface-f2).
 pub interface Error {
   fn message(self) -> String;
+
+  /// The error that caused this one, if any, as Rust's: `None` unless the type says
+  /// (docs/adr/0101-the-rest-of-s2.md, Q713). Code follows the chain with it.
+  fn source(self) -> Option<Error> {
+    None
+  }
 }
 
 /// The error `Error(message)` creates.

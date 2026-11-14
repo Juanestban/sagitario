@@ -83,4 +83,13 @@ precisions, with the debug form of an interface value's type; and `source()` now
   its own, since the C of `std` is compiled apart. The components of a path are found with where
   each lies in its text, so that `strip_prefix` gives the rest of the path with its own
   separators; only drives are prefixes on Windows, not the `\\server\share` of UNC paths.
+- Increment 3 is done. `DefaultHasher` is SipHash-1-3 with zero keys, written in Sagitario; its
+  hashes were checked against a reference of the algorithm, itself checked against the published
+  vector of SipHash-2-4, and its hash of no bytes is that of Rust's `DefaultHasher::new()`.
+  `Error::source` is a default method of the prelude's interface, after `message`, whose place in
+  the itable `main` reads stays the first. Q713's `io::Error::other(error)` is left out: keeping
+  its source would need a field holding a value of the interface `Error`, which is not `Send`, so
+  `io::Error`, which threads send through channels, would stop being `Send`; an error that wraps
+  another is a type of its own that overrides `source`, as the spec shows. The backtraces' row is
+  ⛔ until S3 (Q714).
 
