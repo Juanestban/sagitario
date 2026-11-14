@@ -1,0 +1,30 @@
+// The bitwise operators of a type other than an integer or a `bool` need the interface, chosen by
+// the left operand, and `op=` needs a result of the target's type
+// (docs/adr/0101-the-rest-of-s2.md, Q709).
+struct Mask {
+  pub bits: u8;
+}
+
+struct Wide impl BitOr<Wide, u8> {
+  pub bits: u8;
+
+  pub fn bitor(self, other: Wide) -> u8 {
+    self.bits | other.bits
+  }
+}
+
+fn both<T>(a: T, b: T) -> T {
+  a & b //~ ERROR E0310
+}
+
+fn main() {
+  const m = Mask { bits: 1 };
+  const _a = m | m; //~ ERROR E0310
+  const _b = !m; //~ ERROR E0310
+  const _c = 1 ^ m; //~ ERROR E0300
+  var w = Wide { bits: 2 };
+
+  w |= Wide { bits: 4 }; //~ ERROR E0310
+
+  const _d = w | 3; //~ ERROR E0300
+}

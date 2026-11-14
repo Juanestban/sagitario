@@ -28,6 +28,10 @@ The sources say 0.32.0.
 
 ### Added
 
+- The prelude's `BitAnd`, `BitOr`, `BitXor`, `Not`, `Shl` and `Shr`: `&`, `|`, `^`, `!`, `<<`, `>>`
+  and their `op=` on structs, enums, classes and type parameters implementing them, as Rust's;
+  integers and `bool` implement them, so generic code bounded by them takes numbers too
+  ([ADR-0101](docs/adr/0101-the-rest-of-s2.md), increment 4).
 - `std::hash` with `Hasher` and `DefaultHasher`, Rust's SipHash-1-3, whose hashes are Rust's for
   the same bytes; and `Error::source`, the error that caused one, `None` by default
   ([ADR-0101](docs/adr/0101-the-rest-of-s2.md), increment 3).

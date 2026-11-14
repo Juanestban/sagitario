@@ -496,8 +496,9 @@ pub fn is_primitive_method(lw: Lowering, function: u32, receiver_ty: Type) -> bo
     };
   }
 
+  // `bool` has the bitwise operators only (docs/adr/0101-the-rest-of-s2.md, Q709).
   const numeric = match receiver_ty.kind {
-    TypeKind::Int(_) | TypeKind::Float(_) | TypeKind::String => true,
+    TypeKind::Int(_) | TypeKind::Float(_) | TypeKind::String | TypeKind::Bool => true,
     _ => false,
   };
 
@@ -559,7 +560,17 @@ fn operator_of(lw: Lowering, function: u32) -> Option<Option<BinaryOp>> {
     Some(Some(BinaryOp::Div))
   } else if same_option(id, prelude.rem) {
     Some(Some(BinaryOp::Rem))
-  } else if same_option(id, prelude.neg) {
+  } else if same_option(id, prelude.bit_and) {
+    Some(Some(BinaryOp::BitAnd))
+  } else if same_option(id, prelude.bit_or) {
+    Some(Some(BinaryOp::BitOr))
+  } else if same_option(id, prelude.bit_xor) {
+    Some(Some(BinaryOp::BitXor))
+  } else if same_option(id, prelude.shl) {
+    Some(Some(BinaryOp::Shl))
+  } else if same_option(id, prelude.shr) {
+    Some(Some(BinaryOp::Shr))
+  } else if same_option(id, prelude.neg) || same_option(id, prelude.not) {
     Some(None)
   } else {
     None
@@ -575,11 +586,26 @@ pub fn primitive_operator(lw: Lowering, function: u32, receiver_ty: Type, lhs: O
         return Err("binary operator without one argument");
       }
 
+      // The amount of a shift is a `u32`, which the C takes as a `u64`, as for `a << b`.
+      if op == BinaryOp::Shl || op == BinaryOp::Shr {
+        const amount = lw.operand_as(args[0], types::int(IntTy::U32))?;
+        const wide = lw.new_value(types::int(IntTy::U64), Rvalue::Cast { from: types::int(IntTy::U32), to: types::int(IntTy::U64), operand: amount });
+
+        return Ok(pkg::sir::strings::binary(lw, op, receiver_ty, lhs, wide));
+      }
+
       const rhs = lw.operand_as(args[0], receiver_ty)?;
 
       Ok(pkg::sir::strings::binary(lw, op, receiver_ty, lhs, rhs))
     }
-    Some(None) => Ok(lw.new_value(receiver_ty, Rvalue::Unary { op: UnaryOp::Neg, ty: receiver_ty, operand: lhs })),
+    Some(None) => {
+      const negating = match lw.resolution.owner(function) {
+        Some(TypeItem::Interface(found)) => same_option(found, lw.typed.prelude.neg),
+        _ => false,
+      };
+
+      Ok(lw.new_value(receiver_ty, Rvalue::Unary { op: if negating { UnaryOp::Neg } else { UnaryOp::Not }, ty: receiver_ty, operand: lhs }))
+    }
     None => Err("primitive operator of another interface"),
   }
 }

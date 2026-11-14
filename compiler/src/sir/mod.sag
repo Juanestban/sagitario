@@ -3132,7 +3132,7 @@ pub class Lowering {
       return Ok(self.new_value(ty, Rvalue::Use(Operand::Place(place))));
     }
 
-    if op == UnaryOp::Neg && self.typed.method_calls.contains_key(value.id) {
+    if (op == UnaryOp::Neg || op == UnaryOp::Not) && self.typed.method_calls.contains_key(value.id) {
       return self.method_call_with(value, operand, new List(), ty, None, true);
     }
 

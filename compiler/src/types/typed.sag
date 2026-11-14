@@ -31,6 +31,13 @@ pub struct PreludeItems {
   pub div: Option<u32>;
   pub rem: Option<u32>;
   pub neg: Option<u32>;
+  /// The bitwise operators (docs/adr/0101-the-rest-of-s2.md, Q709).
+  pub bit_and: Option<u32>;
+  pub bit_or: Option<u32>;
+  pub bit_xor: Option<u32>;
+  pub shl: Option<u32>;
+  pub shr: Option<u32>;
+  pub not: Option<u32>;
   /// `From`, `Into`, `TryFrom` and `TryInto` (docs/adr/0094-conversions-and-defaults.md).
   pub from: Option<u32>;
   pub into: Option<u32>;
@@ -318,6 +325,12 @@ pub class TypedModule {
       div: None,
       rem: None,
       neg: None,
+      bit_and: None,
+      bit_or: None,
+      bit_xor: None,
+      shl: None,
+      shr: None,
+      not: None,
       from: None,
       into: None,
       try_from: None,
@@ -1054,6 +1067,35 @@ pub class TypedModule {
     if negatable {
       if let Some(id) = self.prelude.neg {
         result.push(NamedRef { id: id, name: "Neg", args: List::from([ty]) });
+      }
+    }
+
+    // `&`, `|`, `^` and `!` of integers and `bool`, and the shifts of integers by a `u32`
+    // (docs/adr/0101-the-rest-of-s2.md, Q709).
+    const bits = match ty.kind {
+      TypeKind::Int(_) | TypeKind::Bool => true,
+      _ => false,
+    };
+
+    if bits {
+      for entry in List::from([Operator { id: self.prelude.bit_and, name: "BitAnd" }, Operator { id: self.prelude.bit_or, name: "BitOr" }, Operator { id: self.prelude.bit_xor, name: "BitXor" }]) {
+        if let Some(id) = entry.id {
+          result.push(NamedRef { id: id, name: entry.name, args: pair });
+        }
+      }
+
+      if let Some(id) = self.prelude.not {
+        result.push(NamedRef { id: id, name: "Not", args: List::from([ty]) });
+      }
+    }
+
+    if let TypeKind::Int(_) = ty.kind {
+      const amount = List::from([types::int(IntTy::U32), ty]);
+
+      for entry in List::from([Operator { id: self.prelude.shl, name: "Shl" }, Operator { id: self.prelude.shr, name: "Shr" }]) {
+        if let Some(id) = entry.id {
+          result.push(NamedRef { id: id, name: entry.name, args: amount });
+        }
       }
     }
 

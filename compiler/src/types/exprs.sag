@@ -147,8 +147,48 @@ fn shift_amount(cx: Checker, amount: Expr) -> Type {
 }
 
 /// `a & b`, `a | b`, `a ^ b`, `a << n` and `a >> n` (docs/adr/0088-bitwise-operators-and-integer-methods.md).
-fn bitwise(cx: Checker, op: BinaryOp, lhs: Expr, rhs: Expr, expected: Option<Type>) -> Type {
+fn bitwise(cx: Checker, value: Expr, op: BinaryOp, lhs: Expr, rhs: Expr, expected: Option<Type>) -> Type {
   const symbol = ast::binary_symbol(op);
+
+  // A type other than an integer or a `bool` calls its operator, chosen by the left operand
+  // (docs/adr/0101-the-rest-of-s2.md, Q709).
+  if !is_untyped_literal(lhs) {
+    const lhs_ty = expr(cx, lhs, bits_hint(expected, is_shift(op)));
+
+    if operators::is_operator_operand(lhs_ty) {
+      return operators::binary_call(cx, value, op, lhs, lhs_ty, rhs);
+    }
+
+    if is_shift(op) {
+      shift_amount(cx, rhs);
+
+      return match lhs_ty.kind {
+        TypeKind::Int(_) | TypeKind::Error | TypeKind::Never => lhs_ty,
+        _ => {
+          cx.error(codes::INVALID_OPERAND, lhs.span, "cannot shift a value of type `" + types::text(lhs_ty) + "`; shifts take integers");
+
+          types::error()
+        }
+      };
+    }
+
+    const rhs_ty = expr(cx, rhs, Some(lhs_ty));
+
+    if operators::is_operator_operand(rhs_ty) && !types::is_error(lhs_ty) {
+      return right_operator(cx, lhs.span.to(rhs.span), symbol, lhs_ty, rhs_ty);
+    }
+
+    const ty = join_operands(cx, lhs, rhs, lhs_ty, rhs_ty, true);
+
+    return match ty.kind {
+      TypeKind::Int(_) | TypeKind::Bool | TypeKind::Error | TypeKind::Never => ty,
+      _ => {
+        cx.error(codes::INVALID_OPERAND, lhs.span.to(rhs.span), "cannot apply `" + symbol + "` to values of type `" + types::text(ty) + "`; it takes integers or `bool`s");
+
+        types::error()
+      }
+    };
+  }
 
   if is_shift(op) {
     const value_ty = expr(cx, lhs, bits_hint(expected, true));
@@ -569,6 +609,13 @@ fn assign(cx: Checker, target: Expr, op: Option<BinaryOp>, value: Expr) -> Type 
 /// Checks the target of `target op= value`; with an operator implemented by the target's type, it
 /// also checks `value` and returns `true` (docs/adr/0081-operator-overloading.md, Q512).
 fn compound_operand(cx: Checker, target: Expr, op: BinaryOp, ty: Type, value: Expr) -> bool {
+  // `a |= b` of a type implementing `BitOr` is `a = a | b` (docs/adr/0101-the-rest-of-s2.md, Q709).
+  if is_bitwise(op) && operators::is_operator_operand(ty) {
+    operators::compound_call(cx, target, op, ty, value);
+
+    return true;
+  }
+
   if is_bitwise(op) {
     const fits = is_int(ty) || types::is_error(ty) || (!is_shift(op) && types::same_type(ty, types::of(TypeKind::Bool)));
 
@@ -1085,6 +1132,10 @@ fn unary(cx: Checker, value: Expr, op: UnaryOp, operand: Expr, expected: Option<
       match ty.kind {
         TypeKind::Bool | TypeKind::Int(_) | TypeKind::Error | TypeKind::Never => ty,
         _ => {
+          if operators::is_operator_operand(ty) {
+            return operators::not_call(cx, value, ty);
+          }
+
           cx.error(codes::INVALID_OPERAND, value.span, "cannot apply `!` to a value of type `" + types::text(ty) + "`; it takes a `bool` or an integer");
 
           types::error()
@@ -1206,7 +1257,7 @@ fn binary(cx: Checker, value: Expr, op: BinaryOp, lhs: Expr, rhs: Expr, expected
   }
 
   if is_bitwise(op) {
-    return bitwise(cx, op, lhs, rhs, expected);
+    return bitwise(cx, value, op, lhs, rhs, expected);
   }
 
   const hint = if is_arithmetic(op) { numeric_only(expected) } else { None };

@@ -32,7 +32,7 @@ The audit of the library found gaps of the language itself, which the library ne
 
 | Gap | Effect on the library | Record |
 |---|---|---|
-| No bitwise operators (`&`, `\|`, `^`, `!` on integers, `<<`, `>>`) | Hashing, flags, bit sets, UTF-8 and parsing are written with `*`, `/` and `%`, slower and harder to read; `BitAnd`... cannot be implemented | ✅ [ADR-0088](adr/0088-bitwise-operators-and-integer-methods.md), increment 1; the interfaces `BitAnd`... are still missing |
+| No bitwise operators (`&`, `\|`, `^`, `!` on integers, `<<`, `>>`) | Hashing, flags, bit sets, UTF-8 and parsing are written with `*`, `/` and `%`, slower and harder to read; `BitAnd`... cannot be implemented | ✅ [ADR-0088](adr/0088-bitwise-operators-and-integer-methods.md), increment 1; the interfaces `BitAnd`... in [ADR-0101](adr/0101-the-rest-of-s2.md), increment 4 |
 | `wrapping_*`, `checked_*` and `saturating_*` are promised by spec 2 ("Integer arithmetic") but not implemented | Code that must not panic on overflow in debug builds cannot say so | ✅ [ADR-0088](adr/0088-bitwise-operators-and-integer-methods.md), increment 2 |
 | No `Display`: user types cannot be interpolated or turned into text (spec 2, "post-MVP") | No `to_string()`, no formatting of user types | ✅ [ADR-0089](adr/0089-display-debug-and-format-specifiers.md), increment 1 |
 | No tuples (spec 2: "may be added later") | `enumerate`, `zip`, `unzip`, `partition`, `split_once` and `char_indices` cannot have Rust's signatures | ✅ [ADR-0092](adr/0092-tuples.md), increments 1 and 2; the methods returning tuples come with record 4 |
@@ -99,7 +99,7 @@ The audit of the library found gaps of the language itself, which the library ne
 | `cmp::min`, `max`, `Reverse`, `then_with` | `min`, `max`, `clamp`, the methods of `Ordering` | ✅ | ADR-0094; `Reverse` ➖ until structs with unnamed fields: `sort_by((a, b) => b.compare(a))` |
 | `Hash`, `Hasher` | `Hash`, `std::hash::Hasher`, `DefaultHasher` | ✅ | `hash()` gives a `u64`; a `Hasher`, Rust's SipHash-1-3 by default, combines the fields of a type ([ADR-0101](adr/0101-the-rest-of-s2.md), increment 3) |
 | `Add`, `Sub`, `Mul`, `Div`, `Rem`, `Neg` | ✅ | ✅ | ADR-0081 |
-| `Index`, `IndexMut`, `Bit*`, `Shl`, `Shr`, `*Assign` | `Index`, `IndexMut` | 🟡 | ADR-0094: `index` gives the value and `index_set` writes it back, and `map[key]`; the bitwise interfaces and `*Assign` are missing |
+| `Index`, `IndexMut`, `Bit*`, `Shl`, `Shr`, `*Assign` | `Index`, `IndexMut`, `BitAnd`, `BitOr`, `BitXor`, `Not`, `Shl`, `Shr` | ✅ | ADR-0094: `index` gives the value and `index_set` writes it back, and `map[key]`; the bitwise interfaces ([ADR-0101](adr/0101-the-rest-of-s2.md), increment 4); `*Assign` is ➖, `a += b` being `a = a + b` for every type implementing the operator (Q710) |
 | `Range`, `RangeInclusive` | `a..b`, `a..=b` | ✅ | Iterators with Rust's adapters, `rev` and `step_by`, and `contains` and `is_empty` written on the range ([ADR-0101](adr/0101-the-rest-of-s2.md), increment 2); a range kept in a binding is an iterator, whose length is `count()` |
 | `From`, `Into`, `TryFrom`, `AsRef` | `From`, `Into`, `TryFrom`, `TryInto` | ✅ | ADR-0094: Rust's conversions of numbers, `char`, `String`, lists and maps, and `?` through `From`; `AsRef` ➖, a `&T` parameter does its work |
 | `Default` | `Default`, `@default` | ✅ | ADR-0094: Rust's defaults of the prelude's types, `@default` for `#[derive(Default)]`, `unwrap_or_default`, `mem::take` and struct update |

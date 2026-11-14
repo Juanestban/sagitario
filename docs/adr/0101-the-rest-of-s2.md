@@ -92,4 +92,11 @@ precisions, with the debug form of an interface value's type; and `source()` now
   `io::Error`, which threads send through channels, would stop being `Send`; an error that wraps
   another is a type of its own that overrides `source`, as the spec shows. The backtraces' row is
   ⛔ until S3 (Q714).
+- Increment 4 is done. The bitwise operators go through the code of the arithmetic ones: the
+  left operand's type chooses the implementation, and `op=` stores the result back. Integers and
+  `bool` implement the interfaces among the compiler's own implementations, and a call reached
+  through a type parameter is the operator itself, with a shift's amount a `u32`; `bool` became a
+  type whose operators the compiler writes, as numbers are, since without it a call through a
+  bound reached the interface's abstract method. A literal on the left of an operator of another
+  type stays an error of types, as before.
 

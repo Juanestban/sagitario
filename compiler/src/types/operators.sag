@@ -41,6 +41,16 @@ fn binary_interface(cx: Checker, op: BinaryOp) -> Option<OperatorInterface> {
     prelude.div
   } else if op == BinaryOp::Rem {
     prelude.rem
+  } else if op == BinaryOp::BitAnd {
+    prelude.bit_and
+  } else if op == BinaryOp::BitOr {
+    prelude.bit_or
+  } else if op == BinaryOp::BitXor {
+    prelude.bit_xor
+  } else if op == BinaryOp::Shl {
+    prelude.shl
+  } else if op == BinaryOp::Shr {
+    prelude.shr
   } else {
     None
   };
@@ -247,10 +257,22 @@ pub fn compound_call(cx: Checker, target: Expr, op: BinaryOp, ty: Type, value: E
 
 /// `-operand` with `operand` of type `ty`, already checked, a value other than a number.
 pub fn neg_call(cx: Checker, value: Expr, ty: Type) -> Type {
-  const id = match cx.typed.prelude.neg {
-    Some(found) => found,
+  unary_call(cx, value, ty, cx.typed.prelude.neg, "Neg", "-", "negate a value of type `" + types::text(ty) + "`")
+}
+
+/// `!operand` with `operand` of type `ty`, a value other than an integer or a `bool`
+/// (docs/adr/0101-the-rest-of-s2.md, Q709).
+pub fn not_call(cx: Checker, value: Expr, ty: Type) -> Type {
+  unary_call(cx, value, ty, cx.typed.prelude.not, "Not", "!", "apply `!` to a value of type `" + types::text(ty) + "`")
+}
+
+/// A prefix operator implemented by the interface `found`, named `name`; `what` follows
+/// "cannot" in its errors.
+fn unary_call(cx: Checker, value: Expr, ty: Type, found: Option<u32>, name: String, symbol: String, what: String) -> Type {
+  const id = match found {
+    Some(found_id) => found_id,
     None => {
-      cx.error(codes::INVALID_OPERAND, value.span, "cannot negate a value of type `" + types::text(ty) + "`");
+      cx.error(codes::INVALID_OPERAND, value.span, "cannot " + what);
 
       return types::error();
     }
@@ -266,16 +288,18 @@ pub fn neg_call(cx: Checker, value: Expr, ty: Type) -> Type {
   const shown = types::text(ty);
 
   if candidates.is_empty() {
-    const diagnostic = Diagnostic::error(codes::INVALID_OPERAND, value.span, "cannot negate a value of type `" + shown + "`");
+    const diagnostic = Diagnostic::error(codes::INVALID_OPERAND, value.span, "cannot " + what);
 
     cx.diagnostics.push(match ty.kind {
-      TypeKind::Param(_) => diagnostic.with_help("bound the type parameter: `" + shown + ": Neg<" + shown + ">`"),
-      _ => diagnostic.with_help("implement `Neg<" + shown + ">` for `" + shown + "`: `" + impl_header(cx, ty, "Neg<" + shown + ">") + " { ... }`"),
+      TypeKind::Param(_) => diagnostic.with_help("bound the type parameter: `" + shown + ": " + name + "<" + shown + ">`"),
+      _ => diagnostic.with_help("implement `" + name + "<" + shown + ">` for `" + shown + "`: `" + impl_header(cx, ty, name + "<" + shown + ">") + " { ... }`"),
     });
   } else {
+    const method = name.to_ascii_lowercase();
+
     cx.diagnostics.push(
-      Diagnostic::error(codes::AMBIGUOUS_METHOD, value.span, "`" + shown + "` implements `Neg` more than once")
-        .with_note("the result of `-` would not be known; call `neg` through a value of the interface you mean"),
+      Diagnostic::error(codes::AMBIGUOUS_METHOD, value.span, "`" + shown + "` implements `" + name + "` more than once")
+        .with_note("the result of `" + symbol + "` would not be known; call `" + method + "` through a value of the interface you mean"),
     );
   }
 

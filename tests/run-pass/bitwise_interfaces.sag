@@ -1,0 +1,43 @@
+// The bitwise operators of types other than integers and `bool`, through the prelude's `BitAnd`,
+// `BitOr`, `BitXor`, `Not`, `Shl` and `Shr`, their compound assignments, and type parameters bounded
+// by them, which integers and `bool` satisfy (docs/adr/0101-the-rest-of-s2.md, Q709).
+// expect-stdout: 7 1 6 4294967290 80 2 28
+// expect-stdout: 7 15 true 255 false 8 8
+// expect-stdout: 48 241 15 15 15 2147483648 false false
+
+struct Layers impl BitOr<Layers, Layers>, BitAnd<Layers, Layers>, BitXor<Layers, Layers>, Not<Layers>, Shl<u32, Layers>, Shr<u32, Layers> {
+  pub bits: u32;
+
+  pub fn bitor(self, other: Layers) -> Layers { Layers { bits: self.bits | other.bits } }
+  pub fn bitand(self, other: Layers) -> Layers { Layers { bits: self.bits & other.bits } }
+  pub fn bitxor(self, other: Layers) -> Layers { Layers { bits: self.bits ^ other.bits } }
+  pub fn not(self) -> Layers { Layers { bits: !self.bits } }
+  pub fn shl(self, n: u32) -> Layers { Layers { bits: self.bits << n } }
+  pub fn shr(self, n: u32) -> Layers { Layers { bits: self.bits >> n } }
+}
+
+fn join<T: BitOr<T, T>>(a: T, b: T) -> T {
+  a | b
+}
+
+fn flip<T: Not<T>>(a: T) -> T {
+  !a
+}
+
+fn shifted<T: Shl<u32, T>>(a: T) -> T {
+  a << 3
+}
+
+fn main() {
+  const a = Layers { bits: 0b0101 };
+  const b = Layers { bits: 0b0011 };
+  var c = a | b;
+
+  c &= Layers { bits: 0b0110 };
+  c ^= Layers { bits: 1 };
+  c <<= 2;
+  println(f"{(a | b).bits} {(a & b).bits} {(a ^ b).bits} {(!a).bits} {(a << 4).bits} {(a >> 1).bits} {c.bits}");
+  println(f"{join(a, b).bits} {join(5, 10)} {join(true, false)} {flip(0u8)} {flip(true)} {shifted(1u16)} {shifted(Layers { bits: 1 }).bits}");
+  const x = 0xF0u8;
+  println(f"{x & 0x3C} {x | 1} {x ^ 0xFF} {!x} {x >> 4} {1u32 << 31} {true & false} {true ^ true}");
+}

@@ -320,6 +320,12 @@ interface Mul<Rhs, Out> { fn mul(self, other: Rhs) -> Out; }   // a * b
 interface Div<Rhs, Out> { fn div(self, other: Rhs) -> Out; }   // a / b
 interface Rem<Rhs, Out> { fn rem(self, other: Rhs) -> Out; }   // a % b
 interface Neg<Out> { fn neg(self) -> Out; }                     // -a
+interface BitAnd<Rhs, Out> { fn bitand(self, other: Rhs) -> Out; }   // a & b
+interface BitOr<Rhs, Out> { fn bitor(self, other: Rhs) -> Out; }     // a | b
+interface BitXor<Rhs, Out> { fn bitxor(self, other: Rhs) -> Out; }   // a ^ b
+interface Shl<Rhs, Out> { fn shl(self, other: Rhs) -> Out; }         // a << b
+interface Shr<Rhs, Out> { fn shr(self, other: Rhs) -> Out; }         // a >> b
+interface Not<Out> { fn not(self) -> Out; }                          // !a
 ```
 
 ```sag
@@ -339,17 +345,23 @@ const clip = projection * view * model * position;   // Mat4 * Mat4 * Mat4 * Vec
   An operator without an implementation for the operands is an error (`E0310`) that names the
   interface to implement, or the right operands the type accepts. `-a` with several
   implementations of `Neg` is ambiguous (`E0344`).
-- `a += b` (and `-=`, `*=`, `/=`, `%=`) is `a = a + b`, with `a` evaluated once; the `Out` of the
-  implementation must be the type of `a` (`E0310`). There is no `AddAssign`.
+- `a += b` (and `-=`, `*=`, `/=`, `%=`, `&=`, `|=`, `^=`, `<<=`, `>>=`) is `a = a + b`, with `a`
+  evaluated once; the `Out` of the implementation must be the type of `a` (`E0310`). There is no
+  `AddAssign`.
+- The bitwise interfaces work as the arithmetic ones ([ADR-0101](../adr/0101-the-rest-of-s2.md),
+  Q709): on a struct, enum, class, interface value or type parameter, `a | b` calls the `bitor`
+  of the type of `a`, `!a` its `not`, with the rules above for literals, several implementations
+  and errors.
 - Operands are evaluated left to right and passed by value: a method of the operator that
   modifies `self` changes a copy of the left operand.
 - Integers and floats implement the five binary interfaces with their own type as `Rhs` and
   `Out`, signed integers and floats implement `Neg<Self>`, and `String` implements
-  `Add<String, String>`. Their operators keep their meaning (overflow and division by zero), and
+  `Add<String, String>`. Integers and `bool` implement `BitAnd`, `BitOr` and `BitXor` with their
+  own type and `Not<Self>`, and integers `Shl<u32, Self>` and `Shr<u32, Self>`. Their operators keep their meaning (overflow and division by zero), and
   generic code uses them through bounds: `fn sum<T: Add<T, T>>(a: T, b: T) -> T { a + b }`
   works for `i32`, `f64`, `String` and a `Vec2` implementing `Add<Vec2, Vec2>`. As with `Ord`,
   numbers and strings satisfy these bounds but do not convert to values of the interfaces.
-- `&&`, `||`, `!`, the bitwise operators and shifts are not overloadable; comparisons go through
+- `&&` and `||` are not overloadable, as in Rust; comparisons go through
   [`Eq` and `Ord`](#equality-order-and-hashing-f2), and indexing through
   [`Index` and `IndexMut`](#indexing).
 - A block for an interface that extends another one the type implements itself, such as

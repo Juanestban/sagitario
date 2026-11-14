@@ -170,6 +170,38 @@ pub interface Neg<Out> {
   fn neg(self) -> Out;
 }
 
+/// `a & b` for values of a type other than integers and `bool`, as `Add`
+/// (docs/adr/0101-the-rest-of-s2.md, Q709). Integers and `bool` implement the bitwise interfaces
+/// with their own type, and the shifts with a `u32` amount.
+pub interface BitAnd<Rhs, Out> {
+  fn bitand(self, other: Rhs) -> Out;
+}
+
+/// `a | b`.
+pub interface BitOr<Rhs, Out> {
+  fn bitor(self, other: Rhs) -> Out;
+}
+
+/// `a ^ b`.
+pub interface BitXor<Rhs, Out> {
+  fn bitxor(self, other: Rhs) -> Out;
+}
+
+/// `a << b`.
+pub interface Shl<Rhs, Out> {
+  fn shl(self, other: Rhs) -> Out;
+}
+
+/// `a >> b`.
+pub interface Shr<Rhs, Out> {
+  fn shr(self, other: Rhs) -> Out;
+}
+
+/// `!a`.
+pub interface Not<Out> {
+  fn not(self) -> Out;
+}
+
 /// A value of the implementing type made from a `T`, without failing, as Rust's `From`
 /// (docs/adr/0094-conversions-and-defaults.md, Q632): `Celsius::from(f)`. Every type is `From`
 /// itself. Numbers are `From` the narrower ones that fit them, `u32` and `u64` from `char`,
