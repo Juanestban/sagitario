@@ -18,7 +18,7 @@ sh bootstrap/build.sh           # build/bin/sag and build/bin/nova from the seed
 bootstrap/build.ps1             # the same on Windows (PowerShell)
 sh bootstrap/build.sh --install # also copy them to ~/.sagitario/bin and add it to PATH
 sh bootstrap/build.sh --debug   # the compiler in debug: an integer overflow in it panics
-sh bootstrap/build.sh --update-seed   # write the C of the compiler and the runtime to bootstrap/
+sh bootstrap/build.sh --update-seed   # write the seed of every host and the runtime to bootstrap/
 sh bootstrap/build.sh --dist          # also write the archive of a release to build/dist/
 SAG_CC=gcc sh bootstrap/build.sh      # choose the C compiler
 

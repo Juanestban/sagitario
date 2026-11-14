@@ -1,6 +1,6 @@
 # 0107. A seed for each host
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-14
 - Supersedes: Q363, Q364 and Q371 of [ADR-0067](0067-bootstrap-from-the-seed.md) (one seed for
   every host, and the same C of the compiler on every system)
@@ -51,3 +51,11 @@ The user chose a seed for each host.
 - `bootstrap/` holds five seeds of about 15 MB each, which Git stores as deltas when they change.
 - Supporting a new host takes a seed for it.
 - The seed is updated as rarely as before (Q369), now for every host at once.
+
+## Notes
+
+- Implemented. The seeds were generated on Windows with `--seed-host`; there, the seed of
+  `windows-x86_64` is byte for byte the C of stage 2. The FFI units of the other hosts compile for
+  their targets with clang, and their `sag.c` compiles too against a stand-in of `<math.h>`, the
+  one header of the system they need besides those of the C compiler; each CI job then checks its
+  own host (Q768).

@@ -1,6 +1,7 @@
 # Builds Sagitario from the seed with a C compiler alone (docs/adr/0067-bootstrap-from-the-seed.md):
-# the seed is stage 0, which builds stage 1, which builds stage 2; stages 1 and 2 must generate the
-# same C. Writes `build\bin\sag.exe` and `build\bin\nova.exe`. Windows; elsewhere, `build.sh`.
+# the seed of this host (docs/adr/0107-a-seed-per-host.md) is stage 0, which builds stage 1, which
+# builds stage 2; stages 1 and 2 must generate the same C. Writes `build\bin\sag.exe` and
+# `build\bin\nova.exe`. Windows; elsewhere, `build.sh`.
 
 $ErrorActionPreference = 'Stop'
 
@@ -9,7 +10,7 @@ Usage: bootstrap\build.ps1 [--debug] [--install] [--update-seed] [--dist]
 
   --debug        Build stages 1 and 2 without optimizations; integer overflow panics
   --install      Copy sag and nova to %USERPROFILE%\.sagitario\bin and add it to PATH
-  --update-seed  Write the C of stage 2 and the runtime to bootstrap\
+  --update-seed  Write the seed of every host and the runtime to bootstrap\
   --dist         Write the archive of a release for this system to build\dist\
   --help         Show this message
 
@@ -94,25 +95,41 @@ foreach ($dir in @('build\stage0', 'build\stage1', 'build\bin')) {
   New-Item -ItemType Directory -Force $dir | Out-Null
 }
 
+# The seed of this host: the C the compiler generates for itself depends on the system
+# (docs/adr/0107-a-seed-per-host.md, Q767).
+$hosts = @('windows-x86_64', 'linux-x86_64', 'linux-aarch64', 'macos-aarch64', 'macos-x86_64')
+$hostArch = switch ($env:PROCESSOR_ARCHITECTURE) {
+  'AMD64' { 'x86_64' }
+  'ARM64' { 'aarch64' }
+  default { $env:PROCESSOR_ARCHITECTURE }
+}
+$hostName = "windows-$hostArch"
+$seed = "bootstrap\seed\$hostName"
+
+if (-not (Test-Path "$seed\sag.c")) {
+  [Console]::Error.WriteLine("error: there is no seed for this host, ``$hostName``; the hosts with one are $($hosts -join ', ')")
+  exit 1
+}
+
 Step "stage 0: the seed, with $cc"
 $name = [IO.Path]::GetFileNameWithoutExtension($cc).ToLowerInvariant()
-$sources = @('bootstrap\sag.c', 'bootstrap\sagitario_runtime.c')
+$sources = @("$seed\sag.c", 'bootstrap\sagitario_runtime.c')
 # The units of the FFI are translation units of their own, as `sag` compiles them. They declare the
 # C library's functions without its headers, which clang asks for those that take a `FILE`
 # (`fwrite`, `fread`): its own declarations of them are left out (`cl` has none).
-$units = @('sag_ffi', 'sag_std_ffi') | Where-Object { Test-Path "bootstrap\$_.c" }
+$units = @('sag_ffi', 'sag_std_ffi') | Where-Object { Test-Path "$seed\$_.c" }
 
 # The flags `sag` uses for the generated C in release mode, and the stack it reserves on Windows,
 # the default of Linux and macOS. `cl` optimizes with `/O1`: its `/O2` miscompiles the compiler.
 if ($name -eq 'cl') {
-  $sources += $units | ForEach-Object { "bootstrap\$_.c" }
+  $sources += $units | ForEach-Object { "$seed\$_.c" }
   Invoke $cc (@('/nologo', '/std:c11', '/W3', '/utf-8', '/O1','/DSAG_RELEASE', '/I', 'bootstrap', '/Fobuild\stage0\', '/Febuild\stage0\sag.exe') + $sources + @('/link', '/STACK:8388608'))
 } else {
   $machine = & $cc -dumpmachine
   $stack = if ($machine -match 'mingw|gnu') { '-Wl,--stack,8388608' } else { '-Wl,/STACK:8388608' }
 
   foreach ($unit in $units) {
-    Invoke $cc @('-std=c11', '-pedantic-errors', '-O2', '-fno-builtin', '-c', "bootstrap\$unit.c", '-o', "build\stage0\$unit.o")
+    Invoke $cc @('-std=c11', '-pedantic-errors', '-O2', '-fno-builtin', '-c', "$seed\$unit.c", '-o', "build\stage0\$unit.o")
     $sources += "build\stage0\$unit.o"
   }
 
@@ -138,6 +155,14 @@ if ($first.Hash -ne $second.Hash) {
   exit 1
 }
 
+# A seed generated on another machine is the one this host generates (Q768).
+Invoke 'cmd' @('/c', "build\bin\sag.exe check --dump=c --seed-host $hostName compiler/src/main.sag > build\seed-host.c")
+
+if ((Get-FileHash 'build\seed-host.c').Hash -ne $second.Hash) {
+  [Console]::Error.WriteLine("error: ``--seed-host $hostName`` generates other C than stage 2 on this host (build\seed-host.c, build\sag.c)")
+  exit 1
+}
+
 Step 'no warnings in the compiler, Nova and the harness'
 CheckClean 'compiler/src/main.sag'
 CheckClean 'compiler/src/nova_main.sag'
@@ -147,28 +172,37 @@ Step 'nova'
 Invoke 'build\bin\sag.exe' (@('build') + $mode + @('compiler/src/nova_main.sag', '--output', 'build\bin\nova.exe'))
 
 if ($updateSeed) {
-  Step 'update the seed'
-  # `--dump=c` gives the program, then each unit of the FFI after its marker line.
-  $text = [IO.File]::ReadAllText((Join-Path $PWD 'build\sag.c'))
-  $units = @{}
+  Step "update the seeds: $($hosts -join ', ')"
+  $utf8 = New-Object System.Text.UTF8Encoding $false
 
-  foreach ($unit in @('sag_std_ffi.c', 'sag_ffi.c')) {
-    $marker = "/* ---- $unit ---- */`n"
-    $at = $text.IndexOf($marker)
-    Remove-Item (Join-Path 'bootstrap' $unit) -ErrorAction SilentlyContinue
+  foreach ($target in $hosts) {
+    $dir = Join-Path $PWD "bootstrap\seed\$target"
 
-    if ($at -ge 0) {
-      $units[$unit] = $text.Substring($at + $marker.Length)
-      $text = $text.Substring(0, $at)
+    Invoke 'cmd' @('/c', "build\bin\sag.exe check --dump=c --seed-host $target compiler/src/main.sag > build\seed-$target.c")
+    New-Item -ItemType Directory -Force $dir | Out-Null
+
+    # `--dump=c` gives the program, then each unit of the FFI after its marker line.
+    $text = [IO.File]::ReadAllText((Join-Path $PWD "build\seed-$target.c"))
+    $units = @{}
+
+    foreach ($unit in @('sag_std_ffi.c', 'sag_ffi.c')) {
+      $marker = "/* ---- $unit ---- */`n"
+      $at = $text.IndexOf($marker)
+      Remove-Item (Join-Path $dir $unit) -ErrorAction SilentlyContinue
+
+      if ($at -ge 0) {
+        $units[$unit] = $text.Substring($at + $marker.Length)
+        $text = $text.Substring(0, $at)
+      }
+    }
+
+    $units['sag.c'] = $text
+
+    foreach ($unit in $units.Keys) {
+      [IO.File]::WriteAllText((Join-Path $dir $unit), $units[$unit], $utf8)
     }
   }
 
-  $units['sag.c'] = $text
-  $utf8 = New-Object System.Text.UTF8Encoding $false
-
-  foreach ($unit in $units.Keys) {
-    [IO.File]::WriteAllText((Join-Path $PWD (Join-Path 'bootstrap' $unit)), $units[$unit], $utf8)
-  }
   Copy-Item 'runtime\sagitario_runtime.c', 'runtime\sagitario_runtime.h' 'bootstrap\'
 }
 

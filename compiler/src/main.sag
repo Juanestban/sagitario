@@ -130,6 +130,13 @@ fn parse_compile_options(args: List<String>, mode: Mode) -> Result<CompileOption
     } else if flag == "--output" || flag == "--out-dir" || flag == "--library" || flag == "--name" || flag.starts_with("--link-") || flag.starts_with("--dependency") || flag == "--env" || flag == "--uses" || flag == "--static" || flag == "--dynamic" {
       // Hidden: how Nova passes a package to the compiler (docs/adr/0060-driver-parity-for-nova.md).
       package_option(options, mode, flag, inline, args, index)?;
+    } else if flag == "--seed-host" {
+      // Hidden: the C of a seed for another host (docs/adr/0107-a-seed-per-host.md, Q766).
+      if mode != Mode::Check {
+        return Err("`--seed-host` is only accepted by `sag check --dump=c`");
+      }
+
+      options.seed_host = Some(flag_value(flag, inline, args, index)?);
     } else if flag == "--dump" {
       // Hidden: for the differential tests of the self-hosted compiler.
       if mode != Mode::Check {

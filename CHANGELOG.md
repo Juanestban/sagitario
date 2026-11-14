@@ -15,10 +15,17 @@ The sources say 0.32.0.
 
 ### Changed
 
+- The seed is one for each host, `bootstrap/seed/<host>/`, for Windows and Linux on x86-64, Linux
+  on AArch64 and macOS on both: since the standard library reaches each system through `@cfg`,
+  the C the compiler generates for itself is that system's, and the seed generated on Windows
+  broke the bootstraps of the others. `--update-seed` writes all of them from one machine with
+  `sag check --dump=c --seed-host <host>`, and CI checks that each host generates its own
+  ([ADR-0107](docs/adr/0107-a-seed-per-host.md)).
+
 - **Breaking:** `include_str("path")` is now the macro `include_str!("path")`, as in Rust, valid in
   any expression and not only in constants; the old form is an error that gives the new one
   ([ADR-0104](docs/adr/0104-include-str-as-a-macro.md)). The seed keeps the units of the FFI of
-  its C apart, `bootstrap/sag_ffi.c` and `bootstrap/sag_std_ffi.c`, which `--update-seed` writes
+  its C apart, `sag_ffi.c` and `sag_std_ffi.c`, which `--update-seed` writes
   and the bootstrap compiles on their own: since the standard library exports functions to the
   runtime, one file of C no longer compiled.
 
