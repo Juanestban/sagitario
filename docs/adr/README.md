@@ -75,7 +75,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0064](0064-nova-in-sagitario.md) | Nova in Sagitario | Accepted (refined by 0066) |
 | [0065](0065-module-directories.md) | Modules with submodules in `mod.sag` | Accepted |
 | [0066](0066-test-harness-in-sagitario.md) | The test harness in Sagitario | Accepted |
-| [0067](0067-bootstrap-from-the-seed.md) | The bootstrap from the seed, and retiring Rust | Accepted |
+| [0067](0067-bootstrap-from-the-seed.md) | The bootstrap from the seed, and retiring Rust | Accepted (Q363, Q364 and Q371 superseded by 0107) |
 | [0068](0068-releases-and-distribution.md) | Releases and distribution | Accepted (completed by 0069 and 0071; Q387 refined by 0070) |
 | [0069](0069-installers.md) | Installers | Accepted |
 | [0070](0070-nova-update-self.md) | `nova update self` | Accepted |
@@ -115,6 +115,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0104](0104-include-str-as-a-macro.md) | `include_str!` instead of `include_str` | Accepted |
 | [0105](0105-c-types-at-the-ffi-boundary.md) | C's own types at the FFI boundary, for callbacks | Accepted |
 | [0106](0106-the-core-in-sagitario.md) | The core of the runtime in Sagitario (S3) | Proposed |
+| [0107](0107-a-seed-per-host.md) | A seed for each host | Accepted |
 
 ## Template
 

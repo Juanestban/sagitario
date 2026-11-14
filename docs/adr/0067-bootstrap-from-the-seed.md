@@ -1,6 +1,6 @@
 # 0067. The bootstrap from the seed, and retiring Rust
 
-- Status: Accepted
+- Status: Accepted (Q363, Q364 and Q371 superseded by [ADR-0107](0107-a-seed-per-host.md))
 - Date: 2026-10-27
 - Refines: [ADR-0060](0060-driver-parity-for-nova.md) (the seed and its bootstrap, Q324–Q326; the
   standard library, Q330; CI, Q331; retiring Rust, Q332) and [ADR-0044](0044-c-toolchains.md)

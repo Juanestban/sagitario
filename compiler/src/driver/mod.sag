@@ -62,6 +62,9 @@ pub class CompileOptions {
   /// The name of the target to compile for (docs/nova.md#targets); the machine running the
   /// compiler when `None`.
   pub var target: Option<String>;
+  /// `--seed-host <host>`: the C of `check --dump=c` for that host, which a seed is
+  /// (docs/adr/0107-a-seed-per-host.md, Q766).
+  pub var seed_host: Option<String>;
   /// `check --dump=...`: print an intermediate result instead of checking.
   pub var dump: Option<String>;
   /// Where `build` and `run` write the executable (and `--emit-c` the C); by default next to
@@ -98,6 +101,7 @@ pub class CompileOptions {
     self.sanitize = false;
     self.thread_sanitizer = false;
     self.target = None;
+    self.seed_host = None;
     self.dump = None;
     self.output = None;
     self.library = false;
@@ -447,10 +451,21 @@ fn load_package(options: CompileOptions) -> Result<Loaded, i32> {
 
   const sources = new SourceMap();
   const diagnostics = new Diagnostics();
-  const target = match options.target {
+  var target = match options.target {
     Some(name) => targets::find(name)?.info,
     None => TargetInfo::host(),
   };
+
+  if let Some(host) = options.seed_host {
+    target = match targets::seed_host(host) {
+      Some(found) => found,
+      None => {
+        eprintln(`error: no seed is made for the host \`${host}\`; the hosts are ` + targets::SEED_HOSTS.split(" ").join(", "));
+        return Err(EXIT_FAILURE);
+      }
+    };
+  }
+
   const loader = new Loader(input, target);
 
   // The input's package comes first; dependency `i` is package `i + 1`.

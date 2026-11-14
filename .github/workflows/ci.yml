@@ -82,28 +82,33 @@ jobs:
       # (docs/adr/0066-test-harness-in-sagitario.md).
       - name: Run the harness with stage 2
         run: ./build/bin/sag run tests/harness/main.sag -- --sag build/bin/sag${{ runner.os == 'Windows' && '.exe' || '' }} --nova build/bin/nova${{ runner.os == 'Windows' && '.exe' || '' }}
+      # With the host, whose seed it is (docs/adr/0107-a-seed-per-host.md, Q768).
       - name: Hash the C of the compiler
         shell: bash
-        run: (sha256sum build/sag.c 2>/dev/null || shasum -a 256 build/sag.c) | cut -d ' ' -f 1 > build/sag.c.sha256
+        run: |
+          case "$(uname -s)" in Linux) os=linux ;; Darwin) os=macos ;; *) os=windows ;; esac
+          case "$(uname -m)" in x86_64 | amd64) arch=x86_64 ;; *) arch=aarch64 ;; esac
+          hash=$( (sha256sum build/sag.c 2>/dev/null || shasum -a 256 build/sag.c) | cut -d ' ' -f 1)
+          echo "$os-$arch $hash" > build/sag.c.sha256
       - uses: actions/upload-artifact@v4
         with:
           name: c-of-the-compiler-${{ strategy.job-index }}
           path: build/sag.c.sha256
 
-  # The C that stage 2 generates for the compiler is the same on every system and C compiler, so
-  # that one seed serves them all.
+  # The C that stage 2 generates for the compiler is the same with every C compiler of a host, so
+  # that its seed serves them all (docs/adr/0107-a-seed-per-host.md, Q768).
   same-c:
-    name: same C on every system
+    name: same C on each host
     needs: bootstrap
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
           pattern: c-of-the-compiler-*
-      - name: Compare the hashes
+      - name: Compare the hashes of each host
         run: |
           cat c-of-the-compiler-*/sag.c.sha256
-          test "$(cat c-of-the-compiler-*/sag.c.sha256 | sort -u | wc -l)" -eq 1
+          test -z "$(cat c-of-the-compiler-*/sag.c.sha256 | sort -u | cut -d ' ' -f 1 | uniq -d)"
 
   # The installers (docs/adr/0069-installers.md) install the archive that `--dist` writes, as they
   # install a release, and what they install builds and runs a new package.

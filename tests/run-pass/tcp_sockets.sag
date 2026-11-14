@@ -50,13 +50,17 @@ fn main() {
     served
   });
 
+  // The addresses are asked while connected: once both ends closed, Linux and macOS answer
+  // `ENOTCONN`.
   const by_text = TcpStream::connect(f"127.0.0.1:{port}").unwrap();
+  const peer = by_text.peer_addr().unwrap() == address;
 
-  print(f"text: {ask(by_text, "hello")} {by_text.peer_addr().unwrap() == address} | ");
+  print(f"text: {ask(by_text, "hello")} {peer} | ");
 
   const by_tuple = TcpStream::connect((IpAddr::V4(Ipv4Addr::LOCALHOST), port)).unwrap();
+  const loopback = by_tuple.local_addr().unwrap().ip().is_loopback();
 
-  print(f"tuple: {ask(by_tuple, "tuple")} {by_tuple.local_addr().unwrap().ip().is_loopback()} | ");
+  print(f"tuple: {ask(by_tuple, "tuple")} {loopback} | ");
   print(f"address: {ask(TcpStream::connect(address).unwrap(), "address")} | ");
   println(f"host: {ask(TcpStream::connect(("localhost", port)).unwrap(), "host")}");
   print(f"served {server.join()} | local {address.ip()} | ");
