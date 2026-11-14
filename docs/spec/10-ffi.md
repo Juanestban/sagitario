@@ -350,7 +350,8 @@ const back: Option<Result> = Result::from_raw(code);
 
 ## Not yet
 
-Automatic binding generation, in the style of `bindgen`, comes with S4
-([ADR-0103](../adr/0103-build-scripts-and-binding-generation.md)). Defining variadic functions,
+Bindings are generated from C headers by the library `bindgen` of build scripts
+([Nova](../nova.md#bindings-from-c-headers),
+[ADR-0103](../adr/0103-build-scripts-and-binding-generation.md)). Defining variadic functions,
 bitfields and packed structs are not supported. C++ libraries are used through their C
 interfaces.

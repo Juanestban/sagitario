@@ -24,6 +24,7 @@ pub fn tests() -> List<Test> {
     support::test("check_follows_the_target_of_cfg", check_follows_the_target_of_cfg),
     support::test("missing_output_directory_exits_with_1", missing_output_directory_exits_with_1),
     support::test("generic_code_cannot_hold_opaque_types", generic_code_cannot_hold_opaque_types),
+    support::test("an_undefined_c_function_is_an_error_of_the_program", an_undefined_c_function_is_an_error_of_the_program),
   ])
 }
 
@@ -351,6 +352,30 @@ fn main() {
   expect_exit("sag build", ran, 1)?;
   expect_contains("sag build", ran.stderr, "error[E0322]: this generic code holds a value of type `Window`")?;
   expect(!ran.stderr.contains("incomplete type"), "the C compiler saw a value of an opaque type:
+" + ran.stderr)
+}
+
+/// A C function the program declares that no library defines fails to link: an error of the
+/// program, with how to link its library, and not of the compiler (it was an internal compiler
+/// error without `[link]`).
+fn an_undefined_c_function_is_an_error_of_the_program(cx: Context) -> Result<(), String> {
+  const dir = cx.temp_dir("undefined-c-function")?;
+  const file = path::join(dir, "missing.sag");
+
+  support::write_file(file, "extern \"C\" {
+  fn no_library_defines_this() -> i32;
+}
+
+fn main() {
+  println(f\"{unsafe { no_library_defines_this() }}\");
+}
+")?;
+
+  const ran = sag(cx, List::from(["build", file, "--output", path::join(dir, "missing")]))?;
+
+  expect_exit("sag build", ran, 1)?;
+  expect_contains("sag build", ran.stderr, "error: linking failed: a C function the program declares is not defined")?;
+  expect(!ran.stderr.contains("internal compiler error"), "an internal compiler error:
 " + ran.stderr)
 }
 

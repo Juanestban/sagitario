@@ -806,8 +806,10 @@ fn emit_c(generated: GeneratedC, base: String) -> Result<(), i32> {
 }
 
 /// Reports a failed build. Failures with the package's own C sources or libraries are errors in
-/// the package; failures with the generated C alone are internal compiler errors.
-fn report_failure(failure: Failure, compiler: CCompiler, link: Link) -> i32 {
+/// the package, and so is a failure to link a program that declares C functions of its own
+/// (`own_ffi`), which may be in a library it does not link; failures with the generated C alone
+/// are internal compiler errors.
+fn report_failure(failure: Failure, compiler: CCompiler, link: Link, own_ffi: bool) -> i32 {
   match failure {
     Failure::Generated(stderr) => {
       eprintln(`internal compiler error: the generated C failed to compile with \`${compiler.command_name}\``);
@@ -820,14 +822,19 @@ fn report_failure(failure: Failure, compiler: CCompiler, link: Link) -> i32 {
       EXIT_FAILURE
     }
     Failure::Link(stderr) => {
-      if link.is_empty() {
-        eprintln(`internal compiler error: the generated C failed to link with \`${compiler.command_name}\``);
-      } else {
+      const package_error = !link.is_empty() || own_ffi;
+
+      if !link.is_empty() {
         eprintln("error: linking failed; check the C libraries and sources of `[link]`");
+      } else if own_ffi {
+        eprintln("error: linking failed: a C function the program declares is not defined");
+        eprintln("help: link its library with `libraries` of `[link]` in `Nova.toml`, or `nova::link-lib=NAME` in a build script");
+      } else {
+        eprintln(`internal compiler error: the generated C failed to link with \`${compiler.command_name}\``);
       }
 
       eprintln(stderr);
-      if link.is_empty() { EXIT_ICE } else { EXIT_FAILURE }
+      if package_error { EXIT_FAILURE } else { EXIT_ICE }
     }
     Failure::Spawn(tool, message) => {
       eprintln(`error: cannot run \`${tool}\`: ${message}`);
@@ -944,7 +951,7 @@ fn build_in(compiler: CCompiler, generated: GeneratedC, dir: String, options: Co
     }
   }
 
-  Err(report_failure(failure, compiler, options.link))
+  Err(report_failure(failure, compiler, options.link, generated.ffi.is_some()))
 }
 
 fn build_with(compiler: CCompiler, generated: GeneratedC, dir: String, mode: List<String>, sanitize: List<String>, files: List<String>, link: Link, executable: String) -> Result<(), Failure> {
@@ -1185,7 +1192,7 @@ fn build_library_in(options: CompileOptions, compiler: CCompiler, generated: Gen
     const toolchain = new Toolchain(compiler, dir, mode, new List(), generated, false);
     const objects = match toolchain.objects(sources, options.link.sources) {
       Ok(list) => list,
-      Err(failure) => return Err(report_failure(failure, compiler, options.link)),
+      Err(failure) => return Err(report_failure(failure, compiler, options.link, generated.ffi.is_some())),
     };
 
     // `ar` adds to an existing archive, which could keep stale objects.
@@ -1201,11 +1208,11 @@ fn build_library_in(options: CompileOptions, compiler: CCompiler, generated: Gen
 
     const output = match toolchain.output(command, archiver) {
       Ok(result) => result,
-      Err(failure) => return Err(report_failure(failure, compiler, options.link)),
+      Err(failure) => return Err(report_failure(failure, compiler, options.link, generated.ffi.is_some())),
     };
 
     if !output.success {
-      return Err(report_failure(Failure::Link(output.text), compiler, options.link));
+      return Err(report_failure(Failure::Link(output.text), compiler, options.link, generated.ffi.is_some()));
     }
 
     written.push(found);
@@ -1215,7 +1222,7 @@ fn build_library_in(options: CompileOptions, compiler: CCompiler, generated: Gen
     const toolchain = new Toolchain(compiler, dir, mode, new List(), generated, !windows_target);
     const objects = match toolchain.objects(sources, options.link.sources) {
       Ok(list) => list,
-      Err(failure) => return Err(report_failure(failure, compiler, options.link)),
+      Err(failure) => return Err(report_failure(failure, compiler, options.link, generated.ffi.is_some())),
     };
     const command = compiler.command();
 
@@ -1229,7 +1236,7 @@ fn build_library_in(options: CompileOptions, compiler: CCompiler, generated: Gen
     command.args(toolchain.link_args(options.link));
 
     if let Err(failure) = toolchain.link(command) {
-      return Err(report_failure(failure, compiler, options.link));
+      return Err(report_failure(failure, compiler, options.link, generated.ffi.is_some()));
     }
 
     // The MSVC linker also writes an exports file next to the import library.

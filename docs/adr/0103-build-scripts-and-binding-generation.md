@@ -148,4 +148,23 @@ The user chose:
   directory: `fs::canonicalize` gives `\\?\` paths on Windows, to which `/name` cannot be
   joined. The completion of the `nova::` directives of Q739 is a snippet, `buildscript`: they are
   written inside string literals, where the language server completes nothing.
+- Increment 4 is done. The library is one file, `compiler/src/bindgen.sag`, which uses `std`
+  only: Nova embeds it and writes it to `target/<profile>/build/.bindgen/lib.sag`, and compiles
+  each build script with it as the dependency `bindgen`; a new `bindgen` runs the scripts again.
+  Increment 5's command will use the same file as `pkg::bindgen`. As Sagitario's classes are
+  created with `new`, Q731's `bindgen::Builder::new()` is `new bindgen::Builder()`. Only the
+  standard library can name the prelude's `Error` interface beside a type of its own called
+  `Error`, so `bindgen::Error` has `message()` and `Display` without implementing the interface:
+  build scripts use `unwrap()` or `expect()`, as Rust's do.
+- The enumerations take `int` when the target, not this machine, is Windows with MSVC. The
+  fixture of the acceptance (Q738) is `tests/acceptance/s4/fixture`, beside F3's, rather than in
+  `tests/nova/`. A struct used only behind pointers whose definition is not allowed is opaque, as
+  Q734 says: Rust's `bindgen` would write its fields, which here takes allowing its name.
+- Open: a C callback whose parameters are pointers to structs is called by C through its own
+  struct types, which are not the program's in C's sense though they have the same layout, so
+  `--sanitize` (`-fsanitize=function`) reports the call. The fixture's callbacks take `void *`
+  until a record decides it.
+- Translating the headers of the system (MSVC's C library and `windows.h`) showed that a C
+  function no library defines failed to link as an internal compiler error when the program had
+  no `[link]`: it is now an error of the program, with a regression test.
 

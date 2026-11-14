@@ -14,6 +14,9 @@ use std::process::Command;
 /// The file of a package's build script, next to its `Nova.toml`.
 pub const FILE_NAME: String = "build.sag";
 
+/// The library `bindgen`, which build scripts see as a package of that name (Q731).
+const BINDGEN: String = include_str!("../bindgen.sag");
+
 /// What a package's build script asks for, from its last run.
 pub class Directives {
   pub const libraries: List<String>;
@@ -127,7 +130,8 @@ pub fn run(script: Script) -> Result<Outcome, String> {
 
   const extension = if windows() { ".exe" } else { "" };
   const executable = push_path(build_dir, "build-script" + extension);
-  const args = List::from(["build", push_path(script.dir, FILE_NAME), "--output", executable]);
+  const bindgen = write_bindgen(script.target_dir)?;
+  const args = List::from(["build", push_path(script.dir, FILE_NAME), "--output", executable, "--dependency", "bindgen=" + bindgen, "--uses", "0"]);
 
   if script.release {
     args.push("--release");
@@ -203,6 +207,26 @@ pub fn run(script: Script) -> Result<Outcome, String> {
   Ok(Outcome { out_dir: absolute(out_dir), directives: directives })
 }
 
+/// Writes the library `bindgen` where build scripts find it, unless it is there already, and
+/// gives its root module.
+fn write_bindgen(target_dir: String) -> Result<String, String> {
+  const dir = push_path(push_path(target_dir, "build"), ".bindgen");
+  const file = push_path(dir, "lib.sag");
+
+  if fs::read_to_string(file).unwrap_or("") == BINDGEN {
+    return Ok(file);
+  }
+
+  if let Err(error) = fs::create_dir_all(dir) {
+    return Err(`cannot create \`${dir}\`: ${error.message()}`);
+  }
+
+  match fs::write(file, BINDGEN) {
+    Ok(_) => Ok(file),
+    Err(error) => Err(`cannot write \`${file}\`: ${error.message()}`),
+  }
+}
+
 /// The directives of a script's output, the lines starting with `nova::` (Q729). Paths are
 /// relative to the package's directory unless absolute.
 pub fn parse(output: String, dir: String) -> Result<Directives, String> {
@@ -252,6 +276,12 @@ fn fingerprint(script: Script, directives: Directives) -> String {
 
   out.append(`profile ${script.profile} target ${script.target} cc ${c_compiler(script.cc)}\n`);
   out.append("script " + file_hash(push_path(script.dir, FILE_NAME)) + "\n");
+
+  // A new `bindgen` may write other bindings.
+  const library = new DefaultHasher();
+
+  library.write_str(BINDGEN);
+  out.append(f"bindgen {library.finish():x}\n");
   out.append("manifest " + file_hash(push_path(script.dir, "Nova.toml")) + "\n");
 
   for name in directives.rerun_env {

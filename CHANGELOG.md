@@ -35,6 +35,14 @@ The sources say 0.32.0.
 
 ### Added
 
+- `bindgen`, as Rust's: build scripts generate Sagitario declarations from C headers with
+  `new bindgen::Builder().header("lib.h").allow_prefix("LIB_").generate()`, which preprocesses
+  them with clang or gcc and writes `extern "C"` blocks with variadic functions and C globals,
+  `@repr(C)` structs and unions, opaque types, enumerations as constants and nullable function
+  pointers, leaving out with a comment what it cannot translate. A C function the program
+  declares that no library defines is now an error of the program when linking, with how to link
+  its library, and no longer an internal compiler error. The editor gains the snippet `bindgen`
+  ([ADR-0103](docs/adr/0103-build-scripts-and-binding-generation.md), increment 4).
 - Build scripts, as Cargo's `build.rs`: a package's `build.sag`, which Nova compiles and runs
   before the package with `OUT_DIR`, `TARGET`, `HOST`, `PROFILE` and the package's name, version
   and directory in its environment. Its output's `nova::link-lib`, `nova::link-search` and

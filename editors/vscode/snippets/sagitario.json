@@ -356,6 +356,19 @@
       "}"
     ]
   },
+  "bindgen": {
+    "prefix": "bindgen",
+    "description": "Generate the bindings of a C header in a build script",
+    "body": [
+      "new bindgen::Builder()",
+      "  .header(\"${1:include/lib.h}\")",
+      "  .allow_prefix(\"${2:LIB_}\")",
+      "  .generate()",
+      "  .expect(\"the bindings of ${3:lib}\")",
+      "  .write_to_file(env::variable(\"OUT_DIR\").unwrap() + \"/${4:lib}.sag\")",
+      "  .unwrap();$0"
+    ]
+  },
   "extern \"C\" variadic function": {
     "prefix": "externvariadic",
     "description": "Declare a variadic C function, called with extra arguments inside `unsafe`",

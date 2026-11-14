@@ -1,0 +1,16 @@
+// Generates the bindings of the fixture, and links its C (docs/nova.md#build-scripts).
+use std::env;
+
+fn main() {
+  const out = env::variable("OUT_DIR").unwrap();
+
+  new bindgen::Builder()
+    .header("c/fixture.h")
+    .generate()
+    .unwrap()
+    .write_to_file(out + "/fixture.sag")
+    .unwrap();
+
+  println("nova::link-source=c/fixture.c");
+  println("nova::rerun-if-changed=c");
+}

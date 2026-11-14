@@ -261,6 +261,74 @@ include!(concat!(env!("OUT_DIR"), "/version.sag"));
   directive fails the build, with what it printed. It runs with the user's permissions, as a
   package's code does.
 
+## Bindings from C headers
+
+Rationale: [ADR-0103](adr/0103-build-scripts-and-binding-generation.md) (Q731-Q737), as Rust's
+`bindgen`.
+
+```sag
+// build.sag
+use std::env;
+
+fn main() {
+  new bindgen::Builder()
+    .header("vendor/include/SDL3/SDL.h")
+    .include_path("vendor/include")
+    .allow_prefix("SDL_")
+    .generate()
+    .expect("the bindings of SDL")
+    .write_to_file(env::variable("OUT_DIR").unwrap() + "/sdl.sag")
+    .unwrap();
+
+  println("nova::link-lib=SDL3");
+}
+```
+
+```sag
+// src/main.sag
+include!(concat!(env!("OUT_DIR"), "/sdl.sag"));
+```
+
+A build script sees the library `bindgen` as a package of that name, which Nova writes to
+`target/<profile>/build/.bindgen/`. It runs the C compiler of the build (`SAG_CC` when it is clang
+or gcc, else `clang`) as `-E` on the headers, for the build's `TARGET` when it is not `HOST`, and
+reads the declarations of the result.
+
+| `bindgen::Builder` | |
+|---|---|
+| `new bindgen::Builder()` | No headers yet |
+| `header(file)` | A header to translate; several may be given |
+| `allow_prefix(prefix)`, `allow_file(file)` | Only the declarations whose names start with `prefix`, or of that header, and the types they use |
+| `block(name)` | Leaves `name` out |
+| `include_path(dir)`, `define(name, value)`, `clang_arg(arg)` | `-Idir`, `-Dname=value`, and any argument of the C compiler |
+| `target(triple)` | The target the headers are read for |
+| `generate() -> Result<Bindings, bindgen::Error>` | Preprocesses and translates |
+
+`Bindings` has `write_to_file(file) -> Result<(), bindgen::Error>` and `to_string()`;
+`bindgen::Error` has `message()` and `to_string()`.
+
+Without `allow_*`, the declarations of the headers' directories are written, not those of the
+system's headers they include. What C declares becomes:
+
+| C | Sagitario |
+|---|---|
+| `int f(const char *s, ...);` | `pub fn f(s: *const std::ffi::c_char, ...) -> std::ffi::c_int;` in an `extern "C"` block |
+| `extern int counter;`, `extern const char *const name;` | `pub static var counter: std::ffi::c_int;`, `pub static name: *const std::ffi::c_char;` |
+| `struct`, `union` | `@repr(C) pub struct` and `pub union` with `pub` fields; an anonymous one inside is `Outer__bindgen_ty_1`, held by a field `__bindgen_anon_1` when it has no name |
+| `typedef struct Window Window;` without a definition, or used only behind pointers and not allowed | an [opaque type](spec/10-ffi.md#opaque-types) |
+| `enum`, also anonymous | integer constants of its type: `int`, else `unsigned int`, as clang gives it (`int` with MSVC), and that type where the enum is used |
+| `void (*)(int)` | `Option<unsafe extern "C" fn(std::ffi::c_int)>` |
+| `T name[N]` | `[T; N]`; a parameter, `*mut T` |
+| `char`, `int`, `unsigned long`... | `std::ffi::c_char`, `c_int`, `c_ulong`...; `float` and `double` are `f32` and `f64`, `bool` is `bool` |
+| `int32_t`, `uint8_t`..., `size_t`, `ptrdiff_t` | `i32`, `u8`..., `usize`, `isize` |
+| a `typedef` | the type it names; a `typedef` of a struct names the struct |
+
+A name that is a keyword of Sagitario gets `_` (`type_`). The bindings are written with paths such
+as `std::ffi::c_int`, so they import nothing. Left out, with a comment saying why: bitfields and
+packed structs (the struct is opaque), `static inline` functions and functions defined in the
+headers, `long double`, `_Complex` and `__int128`, flexible array members, and symbols Sagitario
+reserves (`__name`, `_Name`, `name_t`).
+
 ## Targets
 
 Rationale: [ADR-0043](adr/0043-cross-compilation.md).
