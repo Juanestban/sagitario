@@ -99,4 +99,12 @@ precisions, with the debug form of an interface value's type; and `source()` now
   type whose operators the compiler writes, as numbers are, since without it a call through a
   bound reached the interface's abstract method. A literal on the left of an operator of another
   type stays an error of types, as before.
+- Increment 5 is done, and with it the ADR and S2. The parser makes `name$` in a specifier a path
+  expression of its own, which the specifier keeps, so that the passes resolve, check and capture
+  it as any binding; the checker asks for a `usize`, and lowering reads it after the value. Each
+  itable gains a pointer to the debug form of its type's values, written by the backend only when
+  the program writes an interface value with `{:?}`, as are the forms of every itable's type
+  then; an interface value's form is its value's. `Error("text")` is an instance of the prelude's
+  `MessageError`, whose form is written. The rows of `fmt`, `os` and `@cfg` on fields close the
+  audit: every row is ✅, ➖ or ⛔.
 

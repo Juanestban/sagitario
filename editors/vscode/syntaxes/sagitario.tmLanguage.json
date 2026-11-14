@@ -250,9 +250,16 @@
       },
       "patterns": [
         {
-          "comment": "A format specifier after the expression: {value:>8.2} (docs/adr/0089-display-debug-and-format-specifiers.md).",
+          "comment": "A format specifier after the expression: {value:>8.2}, and the bindings it reads, {value:>width$.precision$} (docs/adr/0089-display-debug-and-format-specifiers.md, docs/adr/0101-the-rest-of-s2.md).",
           "name": "constant.other.format-spec.sagitario",
-          "match": "(?<!:):(?!:)[^{}()\\[\\]\":]*(?=\\})"
+          "begin": "(?<!:):(?!:)(?=[^{}()\\[\\]\":]*\\})",
+          "end": "(?=\\})",
+          "patterns": [
+            {
+              "match": "([A-Za-z_][A-Za-z0-9_]*)(\\$)",
+              "captures": { "1": { "name": "variable.other.sagitario" }, "2": { "name": "punctuation.definition.format-argument.sagitario" } }
+            }
+          ]
         },
         {
           "include": "#braces"

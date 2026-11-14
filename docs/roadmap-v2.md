@@ -90,10 +90,9 @@ every platform of CI.
 
 The standard library a general-purpose language needs, with Rust's std as the reference (Q542).
 
-**Status:** in progress. The audit is written, [`docs/std-audit.md`](std-audit.md), with the order
-of the records that fill its gaps; the first are gaps of the language itself (bitwise operators,
-the integer helpers spec 2 promises, `Display`), done with `fmt` and the benchmarks, whose first
-results are [`docs/benchmarks.md`](benchmarks.md).
+**Status:** done. Every row of the audit, [`docs/std-audit.md`](std-audit.md), is ✅, ➖ or ⛔ with
+its reason, after its ten records and [ADR-0101](adr/0101-the-rest-of-s2.md), which took the rows
+they left; the benchmarks ran, with their first results in [`docs/benchmarks.md`](benchmarks.md).
 
 - An audit first, `docs/std-audit.md`, which compares each module of Rust's std with Sagitario
   and records what exists, what is missing, and what is out of scope with the reason. The modules

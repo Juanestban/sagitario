@@ -177,6 +177,7 @@ arguments have the type of the receiver, unless written otherwise.
   | Specifier | Meaning | Example |
   |---|---|---|
   | `width` | At least that many characters, filled with spaces: numbers align right, text left | `f"[{42:5}]"` is `[   42]`, `f"[{"Ada":5}]"` is `[Ada  ]` |
+| `name$`, `.name$` | The width or the precision read from the binding `name`, a `usize`, when the string is formatted | `{x:>width$}`, `{pi:.digits$}`, `{pi:>width$.digits$}` |
   | `<`, `^`, `>` | Left, centered (an odd fill goes right) or right, after an optional fill character | `{name:*^7}` is `**Ada**` |
   | `+` | The sign of every number | `{5:+}` is `+5` |
   | `0` | Zeros after the sign and prefix of a number, without an alignment | `{-42:05}` is `-0042` |
@@ -187,15 +188,18 @@ arguments have the type of the receiver, unless written otherwise.
 
   Width and alignment apply to the text of any interpolated value, `Display` types included. A
   specifier that does not fit its value (`x` on a float, a precision on an integer, `+` or `0` on
-  text, `#` without a base) or is not valid is an error (`E0007`). The widths and precisions are
-  literal numbers.
+  text, `#` without a base) or is not valid is an error (`E0007`). A width or a precision is a
+  literal number, or the name of a binding of type `usize` followed by `$`, as Rust's inline
+  arguments ([ADR-0101](../adr/0101-the-rest-of-s2.md), Q711): a binding of another type is an
+  error (`E0007`), and one that does not exist `E0200`. It is read after the value.
 - `{x:?}` writes the debug form of any value, which the compiler gives every type, as Rust's
   derived `Debug`: numbers and `bool` as above, `char` and `String` quoted with Rust's escapes
   (`'a'`, `"tab	"`), `Some(1)`, `None`, `Ok(..)`, `Err(..)`, structs and classes with every
   field (`Point { x: 1, y: 2 }`, those of a parent class first), enum variants by name with their
   fields (`Circle(2.5)`, `Rect { w: 1, h: 2 }`, `Empty`), lists, arrays and slices as `[1, 2]`, maps
   as `{"a": 1}`, a weak field as `(weak)`, a function value as `fn`, a raw pointer as its address
-  and an interface value as `dyn Name`. A class instance reached again while its own form is
+  and an interface value as the value it holds, through its itable
+  ([ADR-0101](../adr/0101-the-rest-of-s2.md), Q712). A class instance reached again while its own form is
   being written is `Name { .. }`. `{x:#?}` writes one field or element per line, indented by four
   spaces, each followed by a comma. A width, fill and alignment apply to the debug form too; `+`,
   `0` and a precision do not (`E0007`).

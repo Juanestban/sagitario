@@ -37,7 +37,7 @@ The audit of the library found gaps of the language itself, which the library ne
 | No `Display`: user types cannot be interpolated or turned into text (spec 2, "post-MVP") | No `to_string()`, no formatting of user types | ✅ [ADR-0089](adr/0089-display-debug-and-format-specifiers.md), increment 1 |
 | No tuples (spec 2: "may be added later") | `enumerate`, `zip`, `unzip`, `partition`, `split_once` and `char_indices` cannot have Rust's signatures | ✅ [ADR-0092](adr/0092-tuples.md), increments 1 and 2; the methods returning tuples come with record 4 |
 | No conversion interfaces (`From`, `Into`, `TryFrom`) nor `Default` | Conversions are named functions; `?` converts errors only to `Error` | ✅ [ADR-0094](adr/0094-conversions-and-defaults.md), increments 1 to 3 |
-| `@cfg` is not allowed on fields | Classes of `std::sys` that differ by system are written twice whole | 🟡 a small record, when it hurts |
+| `@cfg` is not allowed on fields | Classes of `std::sys` that differ by system are written twice whole | ⛔ for now: a small record, when it hurts ([ADR-0101](adr/0101-the-rest-of-s2.md), Q716) |
 
 ## Modules
 
@@ -62,7 +62,7 @@ The audit of the library found gaps of the language itself, which the library ne
 | `String`, `&str` | `String` (immutable, ARC; `trim` and `substring` share the buffer) | ✅ | Rust's methods, with Unicode's case mappings ([ADR-0093](adr/0093-everyday-methods.md), increment 2); `split`, `split_whitespace` and `matches` give lists. `char_count` is `chars().count()` and padding is a format specifier (➖) |
 | `String` (growable) | `StringBuilder` | ✅ | `insert`, `truncate`, `pop`, `capacity`, `reserve` (ADR-0093, increment 2) |
 | `char` | `char` | ✅ | Unicode 17's properties and case mappings, `len_utf8`, `len_utf16`, `char::from_digit` (ADR-0093, increment 2) |
-| `format!`, `fmt` | format strings `f"{expr}"` | 🟡 | `Display`, the specifiers (width, alignment, precision, radix) and the debug form `{:?}`, `{:#?}` are done (ADR-0089). Missing: widths and precisions given at run time (`{:>width$}`), and the debug form of an interface value (`dyn Name` for now) |
+| `format!`, `fmt` | format strings `f"{expr}"` | ✅ | `Display`, the specifiers (width, alignment, precision, radix) and the debug form `{:?}`, `{:#?}` (ADR-0089); widths and precisions read from bindings (`{:>width$}`), and the debug form of an interface value, its value's ([ADR-0101](adr/0101-the-rest-of-s2.md), increment 5) |
 
 ### Numbers (`num`, `f32`, `f64`, integer modules)
 
@@ -180,7 +180,7 @@ The audit of the library found gaps of the language itself, which the library ne
 | Rust | Sagitario | State | Notes |
 |---|---|---|---|
 | `ffi` (`CString`, `CStr`, C types, `c_void`) | `std::ffi`, `Library` | ✅ | ADR-0078; `OsString` is ⛔: paths and arguments are UTF-8 `String`s, UTF-16 on Windows inside `std::sys` |
-| `os` (`unix::fs::PermissionsExt`, `windows::io::AsRawHandle`...) | `as_raw_handle` and `unsafe from_raw_handle` of `File` and the sockets | 🟡 | The descriptor or `HANDLE` of each is a `usize` on every system ([ADR-0096](adr/0096-streams-files-and-drop.md), [ADR-0100](adr/0100-networking.md)); the permissions of Unix and the rest of `os` are missing; programs reach the system through `extern "C"` |
+| `os` (`unix::fs::PermissionsExt`, `windows::io::AsRawHandle`...) | `as_raw_handle` and `unsafe from_raw_handle` of `File` and the sockets | ➖ | The descriptor or `HANDLE` of each is a `usize` on every system ([ADR-0096](adr/0096-streams-files-and-drop.md), [ADR-0100](adr/0100-networking.md)); the permissions of Unix and the rest of `os` are missing; programs reach the system through `extern "C"`, without the traits Rust needs ([ADR-0101](adr/0101-the-rest-of-s2.md), Q715) |
 | `hint::black_box` | `std::hint::black_box` | ✅ | ADR-0090 |
 | `any`, `TypeId` | — | ⛔ | Reflection; interfaces cover the cases of a general-purpose program |
 | `backtrace` | — | ⛔ until S3 | It walks the stack and reads the symbols of each system from the runtime's core, which S3 rewrites in Sagitario ([ADR-0101](adr/0101-the-rest-of-s2.md), Q714) |
@@ -241,4 +241,5 @@ From what most programs need to what fewer do. Each line is one record, or a few
 
 **Acceptance of S2** ([roadmap](roadmap-v2.md#s2-a-complete-standard-library)): every row above is
 ✅, ➖ or ⛔ with its reason, and the benchmarks run, locally, with their results recorded
-([ADR-0090](adr/0090-benchmarks.md)).
+([ADR-0090](adr/0090-benchmarks.md)). ✅ Met with [ADR-0101](adr/0101-the-rest-of-s2.md), the
+rows the ten records left.

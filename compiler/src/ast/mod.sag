@@ -634,6 +634,28 @@ pub enum TemplatePart {
       TemplatePart::Formatted { expr, .. } => Some(expr),
     }
   }
+
+  /// The interpolated expression, then the bindings its specifier reads for its width and
+  /// precision (`{x:>width$.precision$}`, docs/adr/0101-the-rest-of-s2.md, Q711).
+  pub fn exprs(self) -> List<Expr> {
+    const found: List<Expr> = new List();
+
+    if let Some(inner) = self.expr() {
+      found.push(inner);
+    }
+
+    if let TemplatePart::Formatted { spec, .. } = self {
+      if let Some(width) = spec.width_expr {
+        found.push(width);
+      }
+
+      if let Some(precision) = spec.precision_expr {
+        found.push(precision);
+      }
+    }
+
+    found
+  }
 }
 
 /// A format specifier, Rust's `[[fill]align][+][#][0][width][.precision][type]`
@@ -647,6 +669,9 @@ pub struct FormatSpec {
   pub zero: bool;
   pub width: Option<u64>;
   pub precision: Option<u64>;
+  /// `width$` and `.precision$`: a binding read for them when the string is formatted (Q711).
+  pub width_expr: Option<Expr>;
+  pub precision_expr: Option<Expr>;
   /// `""`, `"?"`, `"x"`, `"X"`, `"o"`, `"b"`, `"e"` or `"E"`.
   pub kind: String;
   pub span: Span;

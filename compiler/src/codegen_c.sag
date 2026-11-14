@@ -110,6 +110,7 @@ pub fn generate(program: Program) -> GeneratedC {
   generator.out = new StringBuilder();
   generator.list_support();
   generator.class_support(order);
+  generator.debug_closure(program);
   generator.interface_support(program);
   generator.closure_support(program);
   generator.statics(program);
@@ -370,6 +371,12 @@ class Generator {
   /// The C types `mem::zeroed` makes, which get helpers.
   pub const zeroed_types: List<String>;
   pub const zeroed_keys: Map<String, usize>;
+  /// Every type whose debug form the program writes, those `{x:?}` names first, then those inside
+  /// them; with an interface among them, the types of every itable too
+  /// (docs/adr/0101-the-rest-of-s2.md, Q712).
+  pub var debug_all: List<Type>;
+  /// Whether an interface value is written with `{x:?}`: every itable then has a debug thunk.
+  pub var dyn_debug: bool;
 
   pub fn new(self, program: Program) {
     self.layouts = program.layouts;
@@ -423,6 +430,8 @@ class Generator {
     self.converted_fn_pointers = new List();
     self.zeroed_types = new List();
     self.zeroed_keys = new Map<String, usize>();
+    self.debug_all = new List();
+    self.dyn_debug = false;
   }
 
   /// Every aggregate type, each after the ones it contains, as C requires.
@@ -814,6 +823,10 @@ class Generator {
 
     for index in 0..program.itables.len() {
       self.out.append(`static const sag_itable sag_it_${index};\n`);
+
+      if self.dyn_debug {
+        self.out.append(`static void sag_itd_${index}(sag_sb *sb, sag_object *object, int32_t indent, bool pretty);\n`);
+      }
     }
 
     for index in 0..program.itables.len() {
@@ -846,7 +859,9 @@ class Generator {
         parents_name = `sag_itp_${index}`;
       }
 
-      self.out.append(`static const sag_itable sag_it_${index} = { ` + parents_name + ", " + methods_name + " };\n");
+      const debug_name = if self.dyn_debug { `sag_itd_${index}` } else { "NULL" };
+
+      self.out.append(`static const sag_itable sag_it_${index} = { ` + parents_name + ", " + methods_name + ", " + debug_name + " };\n");
 
       const value_ty = self.c_type(itable.concrete);
 
@@ -1439,23 +1454,7 @@ class Generator {
       return;
     }
 
-    const all: List<Type> = new List();
-
-    for ty in program.debug_types {
-      all.push(ty);
-    }
-
-    var next = 0usize;
-
-    while next < all.len() {
-      for child in self.debug_children(all[next], program) {
-        if debug_position(all, child).is_none() {
-          all.push(child);
-        }
-      }
-
-      next += 1;
-    }
+    const all = self.debug_all;
 
     for index in 0..all.len() {
       self.out.append(`static void sag_debug_${index}(sag_sb *sb, ` + self.c_type(all[index]) + " v, int32_t indent, bool pretty);\n");
@@ -1475,7 +1474,50 @@ class Generator {
       self.out.append(body.join("\n") + "\n}\n");
     }
 
+    // The debug thunk of each itable writes the value of its type, unboxed (Q712).
+    if self.dyn_debug {
+      for index in 0..program.itables.len() {
+        const concrete = program.itables[index].concrete;
+        const position = debug_position(all, concrete).unwrap_or(0);
+        const value = match self.box_index(program, concrete) {
+          Some(box_index) => `((sag_b${box_index} *)object)->value`,
+          None => "(" + self.c_type(concrete) + ")object",
+        };
+
+        self.out.append(`static void sag_itd_${index}(sag_sb *sb, sag_object *object, int32_t indent, bool pretty) {\n`);
+        self.out.append(`  sag_debug_${position}(sb, ` + value + ", indent, pretty);\n}\n");
+      }
+    }
+
     self.out.append("\n");
+  }
+
+  /// The types whose debug form the program writes, and whether an interface is among them, before
+  /// the itables are written.
+  pub fn debug_closure(self, program: Program) {
+    const all: List<Type> = new List();
+
+    for ty in program.debug_types {
+      all.push(ty);
+    }
+
+    var next = 0usize;
+
+    while next < all.len() {
+      if let TypeKind::Interface(_) = all[next].kind {
+        self.dyn_debug = true;
+      }
+
+      for child in self.debug_children(all[next], program) {
+        if debug_position(all, child).is_none() {
+          all.push(child);
+        }
+      }
+
+      next += 1;
+    }
+
+    self.debug_all = all;
   }
 
   /// The types whose debug form that of `ty` writes.
@@ -1501,6 +1543,12 @@ class Generator {
       TypeKind::Tuple(elems) => {
         for elem in elems {
           result.push(elem);
+        }
+      }
+      // An interface value may hold a value of the type of any itable.
+      TypeKind::Interface(_) => {
+        for itable in program.itables {
+          result.push(itable.concrete);
         }
       }
       TypeKind::Class(class_ref) => {
@@ -1577,7 +1625,8 @@ class Generator {
       TypeKind::Function { .. } | TypeKind::CFn { .. } => body.push(push_text("fn")),
       TypeKind::StringBuilder => body.push(push_text("StringBuilder")),
       TypeKind::CString => body.push(push_text("CString")),
-      TypeKind::Interface(interface_ref) => body.push(push_text("dyn " + interface_ref.name)),
+      // The value's own form, through its itable (Q712).
+      TypeKind::Interface(_) => body.push("  v.itable->debug(sb, v.object, indent, pretty);"),
       TypeKind::Struct(named) => {
         const layout = self.layouts.structs.get(named.id as usize);
         const name = match layout {

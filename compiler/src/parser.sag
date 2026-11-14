@@ -241,6 +241,12 @@ pub fn describe(kind: TokenKind) -> String {
   }
 }
 
+/// A binding named in a format specifier, and where the specifier goes on after its `$`.
+struct SpecName {
+  pub expr: Expr;
+  pub next: usize;
+}
+
 enum Member {
   Field(FieldDecl),
   /// `pub const NAME: Type = value;`, a constant of the type
@@ -3766,7 +3772,8 @@ class Parser {
     const span = Span::new(self.eof.span.file, start as u32, (start + text.len()) as u32);
     const chars = text.chars().collect();
     const none: Option<u64> = None;
-    var spec = FormatSpec { fill: ' ', align: 0, plus: false, alternate: false, zero: false, width: none, precision: none, kind: "", span: span };
+    const no_expr: Option<Expr> = None;
+    var spec = FormatSpec { fill: ' ', align: 0, plus: false, alternate: false, zero: false, width: none, precision: none, width_expr: no_expr, precision_expr: no_expr, kind: "", span: span };
     var at = 0usize;
 
     if chars.len() >= 2 && alignment(chars[1]) > 0 {
@@ -3796,7 +3803,13 @@ class Parser {
     var width = 0u64;
     var has_width = false;
 
-    while at < chars.len() && chars[at].is_ascii_digit() && width < 100000 {
+    // `width$`: the width of a binding (docs/adr/0101-the-rest-of-s2.md, Q711).
+    if let Some(found) = self.spec_name(text, chars, at, start) {
+      spec.width_expr = Some(found.expr);
+      at = found.next;
+    }
+
+    while spec.width_expr.is_none() && at < chars.len() && chars[at].is_ascii_digit() && width < 100000 {
       width = width * 10 + chars[at].to_digit(10).unwrap_or(0) as u64;
       has_width = true;
       at += 1;
@@ -3812,17 +3825,22 @@ class Parser {
       var precision = 0u64;
       var digits = 0usize;
 
-      while at < chars.len() && chars[at].is_ascii_digit() && precision < 100000 {
-        precision = precision * 10 + chars[at].to_digit(10).unwrap_or(0) as u64;
-        digits += 1;
-        at += 1;
-      }
+      if let Some(found) = self.spec_name(text, chars, at, start) {
+        spec.precision_expr = Some(found.expr);
+        at = found.next;
+      } else {
+        while at < chars.len() && chars[at].is_ascii_digit() && precision < 100000 {
+          precision = precision * 10 + chars[at].to_digit(10).unwrap_or(0) as u64;
+          digits += 1;
+          at += 1;
+        }
 
-      if digits == 0 {
-        return Err(self.spec_error(span, text, "a `.` needs the digits of the precision after it, as in `{x:.2}`"));
-      }
+        if digits == 0 {
+          return Err(self.spec_error(span, text, "a `.` needs the digits of the precision after it, as in `{x:.2}` or `{x:.precision$}`"));
+        }
 
-      spec.precision = Some(precision);
+        spec.precision = Some(precision);
+      }
     }
 
     const kind = text.substring(byte_offset(chars, at), text.len());
@@ -3833,6 +3851,32 @@ class Parser {
 
     spec.kind = kind;
     Ok(spec)
+  }
+
+  /// `name$` at `at` of a specifier written from `start`: the binding a width or a precision
+  /// is read from, as a path expression (Q711).
+  prv fn spec_name(self, text: String, chars: List<char>, at: usize, start: usize) -> Option<SpecName> {
+    if at >= chars.len() || !(chars[at].is_ascii_alphabetic() || chars[at] == '_') {
+      return None;
+    }
+
+    var end = at;
+
+    while end < chars.len() && (chars[end].is_ascii_alphanumeric() || chars[end] == '_') {
+      end += 1;
+    }
+
+    if end >= chars.len() || chars[end] != '$' {
+      return None;
+    }
+
+    const from = byte_offset(chars, at);
+    const to = byte_offset(chars, end);
+    const span = Span::new(self.eof.span.file, (start + from) as u32, (start + to) as u32);
+    const name = Ident { name: text.substring(from, to), span: span };
+    const path = self.expr_node(ExprKind::Path(Path { id: self.next_id(), segments: List::from([name]), type_args: None, span: span }), span);
+
+    Some(SpecName { expr: path, next: end + 1 })
   }
 
   prv fn spec_error(self, span: Span, text: String, message: String) {

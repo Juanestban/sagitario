@@ -717,10 +717,11 @@ fn check_spec(cx: Checker, spec: FormatSpec, ty: Type) {
   const kind = spec.kind;
   const what = "`" + types::text(ty) + "`";
   var problem: Option<String> = None;
+  const has_precision = spec.precision.is_some() || spec.precision_expr.is_some();
 
   // Every type has a debug form (docs/adr/0089-display-debug-and-format-specifiers.md, Q588).
   if kind == "?" {
-    if spec.plus || spec.zero || spec.precision.is_some() {
+    if spec.plus || spec.zero || has_precision {
       cx.error(codes::INVALID_FORMAT_STRING, spec.span, "the debug form `?` takes a width, a fill, an alignment and `#`, not `+`, `0` or a precision");
     }
 
@@ -731,7 +732,7 @@ fn check_spec(cx: Checker, spec: FormatSpec, ty: Type) {
     problem = Some("the format `" + kind + "` writes integers, not " + what);
   } else if (kind == "e" || kind == "E") && !float_value {
     problem = Some("the format `" + kind + "` writes floats, not " + what);
-  } else if spec.precision.is_some() && int_value {
+  } else if has_precision && int_value {
     problem = Some("an integer has no precision; it applies to floats and text");
   } else if (spec.plus || spec.zero) && !int_value && !float_value {
     problem = Some("`+` and `0` apply to numbers, not " + what);
@@ -878,6 +879,20 @@ fn other_expr_kind(cx: Checker, value: Expr, expected: Option<Type>) -> Type {
           if let TemplatePart::Formatted { spec, .. } = part {
             check_spec(cx, spec, ty);
             debug = spec.kind == "?";
+
+            // A width or a precision read from a binding is a `usize`, as in Rust (Q711).
+            for given in List::from([spec.width_expr, spec.precision_expr]) {
+              if let Some(found) = given {
+                const given_ty = expr(cx, found, None);
+
+                if !types::same_type(given_ty, types::int(IntTy::Usize)) && !types::is_error(given_ty) {
+                  cx.diagnostics.push(
+                    Diagnostic::error(codes::INVALID_FORMAT_STRING, found.span, "a width or a precision is a `usize`, not a `" + types::text(given_ty) + "`")
+                      .with_help("convert it: `const width = value as usize;`"),
+                  );
+                }
+              }
+            }
           }
 
           if !debug && !cx.typed.displayable(ty) {

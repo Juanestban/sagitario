@@ -2742,18 +2742,37 @@ pub class Lowering {
   /// `{value:spec}`: the text the functions of `std` give it
   /// (docs/adr/0089-display-debug-and-format-specifiers.md, Q585–Q587).
   prv fn formatted(self, value: Operand, ty: Type, spec: FormatSpec) -> Result<Operand, String> {
+    // A width or a precision written as a number, or read from a binding after the value
+    // (docs/adr/0101-the-rest-of-s2.md, Q711).
+    const usize_ty = types::int(IntTy::Usize);
+    const width = match spec.width_expr {
+      Some(found) => self.operand_as(found, usize_ty)?,
+      None => int_operand(spec.width.unwrap_or(0), false, IntTy::Usize),
+    };
+    const precision = match spec.precision_expr {
+      Some(found) => {
+        const read = self.operand_as(found, usize_ty)?;
+
+        self.new_value(types::int(IntTy::I64), Rvalue::Cast { from: usize_ty, to: types::int(IntTy::I64), operand: read })
+      }
+      None => match spec.precision {
+        Some(given) => int_operand(given, false, IntTy::I64),
+        None => int_operand(1, true, IntTy::I64),
+      },
+    };
+
     // The debug form, whose C the backend writes for each type, then the width of any text.
     if spec.kind == "?" {
       const index = self.debug_index(ty);
       const callee = Callee::Runtime { function: `sag_debug_string_${index}`, located: false };
       const text = self.call(callee, List::from([value, Operand::Const(Const::Bool(spec.alternate))]), types::string());
 
-      if spec.width.is_none() {
+      if spec.width.is_none() && spec.width_expr.is_none() {
         return Ok(text);
       }
 
       const function = self.std_function("format_text")?;
-      const padding = List::from([text, Operand::Const(Const::Char(spec.fill)), int_operand(spec.align as u64, false, IntTy::U32), int_operand(spec.width.unwrap_or(0), false, IntTy::Usize), int_operand(1, true, IntTy::I64)]);
+      const padding = List::from([text, Operand::Const(Const::Char(spec.fill)), int_operand(spec.align as u64, false, IntTy::U32), width, int_operand(1, true, IntTy::I64)]);
 
       return Ok(self.call(Callee::Fn(function), padding, types::string()));
     }
@@ -2773,11 +2792,6 @@ pub class Lowering {
     }
 
     const kind = if spec.kind.is_empty() { ' ' } else { spec.kind.chars().collect()[0] };
-    const width = int_operand(spec.width.unwrap_or(0), false, IntTy::Usize);
-    const precision = match spec.precision {
-      Some(found) => int_operand(found, false, IntTy::I64),
-      None => int_operand(1, true, IntTy::I64),
-    };
     const fill = Operand::Const(Const::Char(spec.fill));
     const align = int_operand(spec.align as u64, false, IntTy::U32);
     const flag_bits = int_operand(flags, false, IntTy::U32);

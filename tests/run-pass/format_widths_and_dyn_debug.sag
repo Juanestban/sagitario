@@ -1,0 +1,69 @@
+// Widths and precisions read from bindings at run time (`{x:>width$.precision$}`), and the debug
+// form of an interface value, its type's own (docs/adr/0101-the-rest-of-s2.md, Q711 and Q712).
+// expect-stdout: [      42] [   ab   ] [3.142] [   3.142] [3.142***] [00000007] [wor]
+// expect-stdout: [1] [ 2] [  3]
+// expect-stdout: [  [1, 2]] [[3]     ]
+// expect-stdout: [Circle { r: 1.5 }, Square { side: 2 }]
+// expect-stdout: Some(Circle { r: 0.5 })
+// expect-stdout: Circle {
+// expect-stdout:     r: 1.5,
+// expect-stdout: }
+// expect-stdout: [    Square { side: 4 }]
+
+interface Shape {
+  fn area(self) -> f64;
+}
+
+struct Circle impl Shape {
+  pub r: f64;
+
+  pub fn area(self) -> f64 {
+    self.r * self.r * 3.0
+  }
+}
+
+class Square impl Shape {
+  pub const side: f64;
+
+  pub fn new(self, side: f64) {
+    self.side = side;
+  }
+
+  pub fn area(self) -> f64 {
+    self.side * self.side
+  }
+}
+
+fn main() {
+  const width = 8usize;
+  const precision = 3usize;
+  const pi = 3.14159265;
+
+  println(f"[{42:>width$}] [{"ab":^width$}] [{pi:.precision$}] [{pi:>width$.precision$}] [{pi:*<width$.precision$}] [{7:0width$}] [{"word":.precision$}]");
+
+  // A width that changes, also inside a lambda that captures it.
+  const sizes: List<String> = new List();
+
+  for size in 1..4usize {
+    sizes.push(f"[{size:>size$}]");
+  }
+
+  println(sizes.join(" "));
+
+  const items = List::from([1, 2]);
+  const w = 8usize;
+  const show = () => f"[{items:>w$?}]";
+
+  println(show() + f" [{List::from([3]):<w$?}]");
+
+  // Interface values show the value they hold.
+  const shapes: List<Shape> = List::from([Circle { r: 1.5 }, new Square(2.0)]);
+  const maybe: Option<Shape> = Some(Circle { r: 0.5 });
+  const square: Shape = new Square(4.0);
+  const wide = 22usize;
+
+  println(f"{shapes:?}");
+  println(f"{maybe:?}");
+  println(f"{shapes[0]:#?}");
+  println(f"[{square:>wide$?}]");
+}

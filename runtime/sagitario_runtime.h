@@ -270,6 +270,9 @@ sag_object *sag_object_upgrade(sag_object *object);
 typedef struct sag_itable {
   const struct sag_itable *const *parents;
   const sag_method *methods;
+  /* Writes the debug form of the object's value, of the itable's type, or NULL when the program
+   * writes no interface value with `{:?}` (docs/adr/0101-the-rest-of-s2.md, Q712). */
+  void (*debug)(sag_sb *sb, sag_object *object, int32_t indent, bool pretty);
 } sag_itable;
 
 /* A value of an interface type: a reference to an object (an instance, or a box holding a

@@ -28,6 +28,10 @@ The sources say 0.32.0.
 
 ### Added
 
+- Widths and precisions read from bindings in format strings, `{x:>width$}`, `{pi:.digits$}`, as
+  Rust's inline arguments, and the debug form of an interface value, which is that of the value
+  it holds instead of `dyn Name`; the grammar colors the bindings. With them every row of the
+  audit of S2 is closed, and S2 is done ([ADR-0101](docs/adr/0101-the-rest-of-s2.md), increment 5).
 - The prelude's `BitAnd`, `BitOr`, `BitXor`, `Not`, `Shl` and `Shr`: `&`, `|`, `^`, `!`, `<<`, `>>`
   and their `op=` on structs, enums, classes and type parameters implementing them, as Rust's;
   integers and `bool` implement them, so generic code bounded by them takes numbers too
