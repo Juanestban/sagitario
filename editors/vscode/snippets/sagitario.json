@@ -341,6 +341,21 @@
       "}"
     ]
   },
+  "build script": {
+    "prefix": "buildscript",
+    "description": "A package's build.sag: writes to OUT_DIR and prints directives for Nova",
+    "body": [
+      "use std::env;",
+      "use std::fs;",
+      "",
+      "fn main() {",
+      "  const out = env::variable(\"OUT_DIR\").unwrap();",
+      "",
+      "  fs::write(out + \"/${1:generated}.sag\", \"${2}\").unwrap();",
+      "  println(\"nova::${3|link-lib,link-search,link-source,rerun-if-changed,rerun-if-env-changed,warning|}=${4:value}\");$0",
+      "}"
+    ]
+  },
   "extern \"C\" variadic function": {
     "prefix": "externvariadic",
     "description": "Declare a variadic C function, called with extra arguments inside `unsafe`",

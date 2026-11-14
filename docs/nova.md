@@ -41,7 +41,7 @@ Programs use libraries through [dependencies](#dependencies), and C uses them th
 | `nova build` | Compiles the package into `target/debug/<name>` |
 | `nova run [-- args]` | Compiles and runs the program with `args`; Nova exits with the program's exit code |
 | `nova check` | Checks the package without generating code |
-| `nova clean` | Removes `target/` |
+| `nova clean` | Removes `target/`, the outputs of [build scripts](#build-scripts) with it |
 | `nova update self` | Updates Sagitario (`sag` and `nova`) to the latest release ([updating](#updating)) |
 | `nova help`, `nova version` | Usage and version |
 
@@ -205,6 +205,61 @@ sources = ["c/helpers.c"]         # compiled as C11 and linked
 - The C functions are then declared in `extern "C"` blocks ([FFI](spec/10-ffi.md)).
 - A source that does not compile, or a library the linker cannot find, is an error of the
   package, shown with the C compiler's or the linker's message.
+
+## Build scripts
+
+Rationale: [ADR-0103](adr/0103-build-scripts-and-binding-generation.md) (Q727-Q730), as Cargo's
+`build.rs`.
+
+```sag
+// build.sag, next to Nova.toml
+use std::env;
+use std::fs;
+
+fn main() {
+  const out = env::variable("OUT_DIR").unwrap();
+
+  fs::write(out + "/version.sag", "pub const BUILT_FOR: String = \"" + env::variable("TARGET").unwrap() + "\";\n").unwrap();
+  println("nova::link-lib=SDL3");
+  println("nova::rerun-if-changed=build.sag");
+}
+```
+
+```sag
+// src/main.sag
+include!(concat!(env!("OUT_DIR"), "/version.sag"));
+```
+
+- A package with `build.sag` next to its `Nova.toml` has a build script: a program Nova compiles
+  for this machine, with the build's `--release` and `--cc`, and runs in the package's directory
+  before compiling the package, also for `nova check`. It sees the standard library, not the
+  package's dependencies. The scripts of the dependencies run first.
+- Its environment has `OUT_DIR` (`target/<profile>/build/<package>/out`, kept between runs),
+  `TARGET` (the `--target` of the build, or this machine's), `HOST` (this machine's triple, as
+  `x86_64-pc-windows-msvc`, `aarch64-apple-darwin` or `x86_64-unknown-linux-gnu`), `PROFILE`
+  (`debug` or `release`), `NOVA_MANIFEST_DIR` (the package's directory, absolute),
+  `NOVA_PKG_NAME`, `NOVA_PKG_VERSION`, and `SAG_CC` (the C compiler of the build). Paths are
+  absolute. In the package, `env!("OUT_DIR")` is the directory of its own script.
+- Lines of its output starting with `nova::` are directives; the rest is only kept in
+  `target/<profile>/build/<package>/output`:
+
+  | Directive | Effect |
+  |---|---|
+  | `nova::link-lib=NAME` | Links the library, as `libraries` of `[link]` |
+  | `nova::link-search=PATH` | A directory for libraries, as `search_paths` |
+  | `nova::link-source=PATH` | Compiles and links a C source, as `sources` |
+  | `nova::rerun-if-changed=PATH` | Runs it again when the file, or a file below the directory, changes |
+  | `nova::rerun-if-env-changed=NAME` | Runs it again when the variable changes |
+  | `nova::warning=MESSAGE` | Shows `warning: package@version: MESSAGE` |
+
+  Relative paths start from the package's directory. Any other `nova::` line is an error.
+- It runs again when the script, the `Nova.toml` or the C compiler change, or with the paths and
+  variables of its `rerun-if-*` directives; without them, when any file of the package outside
+  `target/` changes. Otherwise Nova reuses what its last run asked for. `nova clean` removes its
+  outputs.
+- A script that does not compile, panics, exits with another code than 0 or prints an unknown
+  directive fails the build, with what it printed. It runs with the user's permissions, as a
+  package's code does.
 
 ## Targets
 

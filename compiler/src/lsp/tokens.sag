@@ -26,9 +26,12 @@ const VARIABLE: u32 = 8;
 const PARAMETER: u32 = 9;
 const PROPERTY: u32 = 10;
 const METHOD: u32 = 11;
+/// A built-in macro and its `!`, as rust-analyzer gives them
+/// (docs/adr/0103-build-scripts-and-binding-generation.md, Q723).
+const MACRO: u32 = 12;
 
 pub fn legend() -> Json {
-  const names = List::from(["namespace", "type", "class", "enum", "interface", "struct", "function", "enumMember", "variable", "parameter", "property", "method"]);
+  const names = List::from(["namespace", "type", "class", "enum", "interface", "struct", "function", "enumMember", "variable", "parameter", "property", "method", "macro"]);
   const types: List<Json> = new List();
 
   for name in names {
@@ -581,6 +584,10 @@ pub fn semantic_tokens(analysis: Analysis, module: Module, module_index: usize) 
   collector.module(module);
 
   const tokens = collector.tokens;
+
+  for span in module.macros {
+    tokens.push(Token { span: span, kind: MACRO });
+  }
 
   // In source order; the walk visits nodes out of it.
   tokens.sort_by((a, b) => a.span.start.compare(b.span.start));

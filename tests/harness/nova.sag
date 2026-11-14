@@ -30,6 +30,9 @@ pub fn tests() -> List<Test> {
     support::test("builds_a_library_that_c_programs_use", builds_a_library_that_c_programs_use),
     support::test("builds_only_the_chosen_library_outputs", builds_only_the_chosen_library_outputs),
     support::test("links_c_sources_and_libraries_into_programs", links_c_sources_and_libraries),
+    support::test("runs_build_scripts_before_their_packages", runs_build_scripts),
+    support::test("runs_build_scripts_again_only_when_needed", reruns_build_scripts),
+    support::test("reports_build_script_failures", reports_build_script_failures),
     support::test("reads_and_writes_the_globals_of_c", reads_and_writes_the_globals_of_c),
     support::test("cross_compiles_libraries_and_programs_for_android", cross_compiles_for_android),
     support::test("checks_integer_sizes_for_the_target", checks_integer_sizes_for_the_target),
@@ -716,6 +719,172 @@ fn links_c_sources_and_libraries(cx: Context) -> Result<(), String> {
   const broken = nova_fails(cx, app, List::from(["build"]), 1)?;
 
   expect_contains("nova build", broken.stderr, "cannot compile the C source")
+}
+
+/// The build script of a library and of the program using it
+/// (docs/adr/0103-build-scripts-and-binding-generation.md, Q727-Q730): each one writes Sagitario
+/// to its own `OUT_DIR`, which its package includes, and the library's adds a C source and a
+/// warning; both see the variables Nova gives them.
+fn runs_build_scripts(cx: Context) -> Result<(), String> {
+  const temp = cx.temp_dir("nova")?;
+  const geo = path::join(temp, "geo");
+  const app = path::join(temp, "app");
+
+  package(geo, manifest("geo", no_pairs()), List::from([
+    pair("lib.sag", "include!(concat!(env!(\"OUT_DIR\"), \"/generated.sag\"));\n\npub fn area(w: i32, h: i32) -> i32 {\n  unsafe { geo_area(w, h) }\n}\n"),
+  ]))?;
+  support::write_file(under(geo, List::from(["c", "area.c"])), "int geo_area(int w, int h) {\n  return w * h;\n}\n")?;
+  support::write_file(path::join(geo, "build.sag"), List::from([
+    "use std::env;",
+    "use std::fs;",
+    "",
+    "fn main() {",
+    "  const out = env::variable(\"OUT_DIR\").unwrap();",
+    "  const code = \"pub const SIDES: i32 = 4;\\n\\nextern \\\"C\\\" {\\n  pub fn geo_area(w: i32, h: i32) -> i32;\\n}\\n\";",
+    "",
+    "  fs::write(out + \"/generated.sag\", code).unwrap();",
+    "  println(\"nova::link-source=c/area.c\");",
+    "  println(\"nova::rerun-if-changed=build.sag\");",
+    "  println(\"nova::warning=generated for \" + env::variable(\"TARGET\").unwrap());",
+    "  println(\"other output is kept, not read\");",
+    "}",
+    "",
+  ]).join("\n"))?;
+
+  package(app, manifest("app", List::from([pair("geo", "../geo")])), List::from([
+    pair("main.sag", "include!(concat!(env!(\"OUT_DIR\"), \"/info.sag\"));\n\nfn main() {\n  println(f\"{geo::SIDES} {geo::area(3, 4)} {info()}\");\n}\n"),
+  ]))?;
+  support::write_file(path::join(app, "build.sag"), List::from([
+    "use std::env;",
+    "use std::fs;",
+    "",
+    "fn main() {",
+    "  const names = List::from([\"PROFILE\", \"NOVA_PKG_NAME\", \"NOVA_PKG_VERSION\"]);",
+    "  const values = names.map((name) => env::variable(name).unwrap()).collect();",
+    "  const manifest = env::variable(\"NOVA_MANIFEST_DIR\").unwrap();",
+    "  const found = fs::is_file(manifest + \"/Nova.toml\") && env::variable(\"HOST\").is_some() && env::variable(\"SAG_CC\").is_some();",
+    "  const code = \"pub fn info() -> String {\\n  \\\"\" + values.join(\" \") + f\" {found}\\\"\\n\" + \"}\\n\";",
+    "",
+    "  fs::write(env::variable(\"OUT_DIR\").unwrap() + \"/info.sag\", code).unwrap();",
+    "}",
+    "",
+  ]).join("\n"))?;
+
+  const run = nova_ok(cx, app, List::from(["run"]))?;
+
+  support::expect_equal(`nova run (stderr: ${run.stderr})`, run.stdout, "4 12 debug app 0.1.0 true\n")?;
+  expect_contains("nova run", run.stderr, "Building geo v0.1.0 (build script)")?;
+  expect_contains("nova run", run.stderr, "Building app v0.1.0 (build script)")?;
+  expect_contains("nova run", run.stderr, "warning: geo@0.1.0: generated for ")?;
+  expect(run.stderr.find("Building geo").unwrap_or(0) < run.stderr.find("Building app").unwrap_or(0), "the build script of the dependency runs first:\n" + run.stderr)?;
+
+  const output = read(under(app, List::from(["target", "debug", "build", "geo", "output"])))?;
+
+  expect_contains("the output of the build script", output, "other output is kept, not read")?;
+
+  // `nova check` runs them too, since the package includes what they write.
+  nova_ok(cx, app, List::from(["clean"]))?;
+  nova_ok(cx, app, List::from(["check"]))?;
+
+  // A release build has its own.
+  const release = nova_ok(cx, app, List::from(["run", "--release"]))?;
+
+  support::expect_equal(`nova run --release (stderr: ${release.stderr})`, release.stdout, "4 12 release app 0.1.0 true\n")
+}
+
+/// A build script runs again when what it depends on changes: the paths of `rerun-if-changed`,
+/// or, without directives, any file of its package (Q730).
+fn reruns_build_scripts(cx: Context) -> Result<(), String> {
+  const temp = cx.temp_dir("nova")?;
+  const app = path::join(temp, "app");
+  const script = List::from([
+    "use std::env;",
+    "use std::fs;",
+    "",
+    "fn main() {",
+    "  const text = fs::read_to_string(\"data.txt\").unwrap();",
+    "  fs::write(env::variable(\"OUT_DIR\").unwrap() + \"/data.sag\", \"pub const DATA: String = \\\"\" + text.trim() + \"\\\";\\n\").unwrap();",
+    "  println(\"nova::rerun-if-changed=data.txt\");",
+    "  println(\"nova::rerun-if-env-changed=NOVA_TEST_DATA\");",
+    "}",
+    "",
+  ]).join("\n");
+
+  package(app, manifest("app", no_pairs()), List::from([
+    pair("main.sag", "include!(concat!(env!(\"OUT_DIR\"), \"/data.sag\"));\n\nfn main() {\n  println(DATA);\n}\n"),
+  ]))?;
+  support::write_file(path::join(app, "build.sag"), script)?;
+  support::write_file(path::join(app, "data.txt"), "first\n")?;
+
+  const first = nova_ok(cx, app, List::from(["run"]))?;
+
+  support::expect_equal("the first run", first.stdout, "first\n")?;
+  expect_contains("the first run", first.stderr, "(build script)")?;
+
+  // Nothing it named changed: it does not run.
+  support::write_file(under(app, List::from(["src", "other.sag"])), "pub fn unused() {}\n")?;
+
+  const second = nova_ok(cx, app, List::from(["run"]))?;
+
+  expect(!second.stderr.contains("(build script)"), "the build script ran again with nothing changed:\n" + second.stderr)?;
+
+  // A path it named changed.
+  support::write_file(path::join(app, "data.txt"), "second\n")?;
+
+  const third = nova_ok(cx, app, List::from(["run"]))?;
+
+  support::expect_equal("after data.txt changed", third.stdout, "second\n")?;
+  expect_contains("after data.txt changed", third.stderr, "(build script)")?;
+
+  // A variable it named changed.
+  const fourth = support::run(nova_command(cx, app, List::from(["run"]))?.env("NOVA_TEST_DATA", "set"))?;
+
+  expect_success("nova run with NOVA_TEST_DATA", fourth)?;
+  expect_contains("after NOVA_TEST_DATA changed", fourth.stderr, "(build script)")?;
+
+  // Without directives, any file of the package runs it again.
+  support::write_file(path::join(app, "build.sag"), script.replace("  println(\"nova::rerun-if-changed=data.txt\");\n  println(\"nova::rerun-if-env-changed=NOVA_TEST_DATA\");\n", ""))?;
+  nova_ok(cx, app, List::from(["run"]))?;
+  support::write_file(under(app, List::from(["src", "other.sag"])), "pub fn unused() {}\n\npub fn more() {}\n")?;
+
+  const fifth = nova_ok(cx, app, List::from(["run"]))?;
+
+  expect_contains("after a file of the package changed", fifth.stderr, "(build script)")
+}
+
+/// A build script that does not compile, panics or prints an unknown directive fails the build.
+fn reports_build_script_failures(cx: Context) -> Result<(), String> {
+  const temp = cx.temp_dir("nova")?;
+  const app = path::join(temp, "app");
+  const script = path::join(app, "build.sag");
+
+  package(app, manifest("app", no_pairs()), List::from([pair("main.sag", "fn main() {}\n")]))?;
+
+  support::write_file(script, "fn main() {\n  const x: i32 = \"text\";\n}\n")?;
+
+  const broken = nova_fails(cx, app, List::from(["build"]), 1)?;
+
+  expect_contains("a build script that does not compile", broken.stderr, "E0300")?;
+  expect_contains("a build script that does not compile", broken.stderr, "the build script of `app` does not compile")?;
+
+  support::write_file(script, "fn main() {\n  println(\"explaining the failure\");\n  panic(\"no headers\");\n}\n")?;
+
+  const panicked = nova_fails(cx, app, List::from(["build"]), 1)?;
+
+  expect_contains("a build script that panics", panicked.stderr, "explaining the failure")?;
+  expect_contains("a build script that panics", panicked.stderr, "no headers")?;
+  expect_contains("a build script that panics", panicked.stderr, "the build script of `app` failed with exit code 101")?;
+
+  support::write_file(script, "fn main() {\n  println(\"nova::link-everything=yes\");\n}\n")?;
+
+  const unknown = nova_fails(cx, app, List::from(["build"]), 1)?;
+
+  expect_contains("an unknown directive", unknown.stderr, "the unknown directive `nova::link-everything`")?;
+
+  // The next build runs it again: a failed run leaves nothing to reuse.
+  const again = nova_fails(cx, app, List::from(["build"]), 1)?;
+
+  expect_contains("a failed build script runs again", again.stderr, "(build script)")
 }
 
 /// C's global variables (docs/adr/0086-c-globals-and-std-io.md): a program reads and writes those

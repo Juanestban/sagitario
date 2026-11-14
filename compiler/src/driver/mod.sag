@@ -75,6 +75,9 @@ pub class CompileOptions {
   pub var dependencies: List<DependencySpec>;
   /// Indices in `dependencies` of the input's own dependencies.
   pub var direct_dependencies: List<usize>;
+  /// The variables `env!` reads in each package before the environment: Nova's `OUT_DIR` for the
+  /// package of each build script (docs/adr/0103-build-scripts-and-binding-generation.md, Q728).
+  pub var package_env: List<PackageEnv>;
   /// C libraries and sources to link (docs/nova.md#linking-c).
   pub var link: Link;
   /// Where `build` writes a library's files.
@@ -101,12 +104,21 @@ pub class CompileOptions {
     self.name = "";
     self.dependencies = new List();
     self.direct_dependencies = new List();
+    self.package_env = new List();
     self.link = new Link();
     self.out_dir = None;
     self.static_lib = true;
     self.dynamic_lib = true;
     self.picked_outputs = false;
   }
+}
+
+/// `--env NAME=VALUE` (package 0, the input's) or `--dependency-env INDEX=NAME=VALUE` (package
+/// `INDEX + 1`).
+pub struct PackageEnv {
+  pub package: usize;
+  pub name: String;
+  pub value: String;
 }
 
 /// A library package the program depends on, compiled together with it.
@@ -447,6 +459,10 @@ fn load_package(options: CompileOptions) -> Result<Loaded, i32> {
   }
 
   loader.set_direct_dependencies(options.direct_dependencies);
+
+  for entry in options.package_env {
+    loader.set_env(entry.package, entry.name, entry.value);
+  }
 
   if !loader.load_entries(sources, diagnostics) || !loader.load_references(sources, diagnostics) {
     return Err(EXIT_FAILURE);

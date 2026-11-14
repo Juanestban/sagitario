@@ -135,5 +135,17 @@ The user chose:
   `include_str(...)` of ADR-0049, by [ADR-0104](0104-include-str-as-a-macro.md): the seed was
   updated so that the compiler's sources could use it, which showed that the seed, one file of C,
   no longer compiled once the standard library exported functions to the runtime; it now keeps
-  the units of the FFI apart.
+  the units of the FFI apart. The parser keeps where each macro was called (`Module.macros`), so
+  that the language server gives the names and their `!` as `macro` semantic tokens.
+- Increment 3 is done. `sag` compiles the whole graph of packages at once, so Nova gives each
+  package's `OUT_DIR` to `env!` through `--env NAME=VALUE` (the input's) and
+  `--dependency-env INDEX=NAME=VALUE`, which the loader hands to the parser of each package's
+  files before the compiler's environment. `TARGET` is the `--target` of the build, or `HOST`,
+  this machine's triple as Rust and clang name it. Whether a script runs again is decided from a
+  fingerprint of what it depends on (the hashes of the files' bytes, the variables, the profile,
+  the target and the C compiler), kept in `target/<profile>/build/<package>/stamp`, with the
+  directives of its last run. The variables hold absolute paths, built from the current
+  directory: `fs::canonicalize` gives `\\?\` paths on Windows, to which `/name` cannot be
+  joined. The completion of the `nova::` directives of Q739 is a snippet, `buildscript`: they are
+  written inside string literals, where the language server completes nothing.
 

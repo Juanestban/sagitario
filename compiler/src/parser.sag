@@ -40,10 +40,11 @@ pub fn parse_module(file: u32, tokens: List<Token>, target: TargetInfo, diagnost
 /// Parses one module of a package; node ids continue from `ids`, so they stay unique across the
 /// modules of the package. `location` is the file on disk, which the paths of `include_str!`,
 /// `include_bytes!` and `include!` are relative to; an embedded module has none.
-pub fn parse_module_from(file: u32, tokens: List<Token>, ids: Ids, target: TargetInfo, diagnostics: Diagnostics, location: Option<String>) -> Module {
+pub fn parse_module_from(file: u32, tokens: List<Token>, ids: Ids, target: TargetInfo, diagnostics: Diagnostics, location: Option<String>, env: Map<String, String>) -> Module {
   const parser = new Parser(file, tokens, ids, target, diagnostics);
 
   parser.location = location;
+  parser.env = env;
 
   var module = parser.module(file);
 
@@ -313,8 +314,13 @@ class Parser {
   prv var extern_statics: List<Item>;
   /// The file being parsed, on disk.
   pub var location: Option<String>;
+  /// The variables `env!` reads for the package of the file before the compiler's environment:
+  /// Nova's `OUT_DIR` for each package (docs/adr/0103-build-scripts-and-binding-generation.md, Q728).
+  pub var env: Map<String, String>;
   /// The files of the `include!`s of the module.
   prv var includes: List<Include>;
+  /// The names of the macros called, shared with the parsers of template interpolations.
+  prv var macros: List<Span>;
 
   pub fn new(self, file: u32, tokens: List<Token>, ids: Ids, target: TargetInfo, diagnostics: Diagnostics) {
     // Documentation comments are not processed in the MVP (docs/spec/01-lexical.md).
@@ -343,7 +349,9 @@ class Parser {
     self.slice_allowed = false;
     self.extern_statics = new List();
     self.location = None;
+    self.env = new Map<String, String>();
     self.includes = new List();
+    self.macros = new List();
   }
 
   prv fn current(self) -> Token {
@@ -536,7 +544,7 @@ class Parser {
       }
     }
 
-    Module { file: file, path: new List(), package: 0, location: None, uses: uses, items: items, includes: self.includes }
+    Module { file: file, path: new List(), package: 0, location: None, uses: uses, items: items, includes: self.includes, macros: self.macros }
   }
 
   /// Whether a call of the macro `name` starts here: `name!(`.
@@ -570,8 +578,9 @@ class Parser {
   /// `name!(args)`: the name and the arguments, each one expanded already.
   prv fn macro_call(self) -> Result<MacroCall, ()> {
     const name = self.ident("the name of a macro")?;
+    const bang = self.expect("!")?.span;
 
-    self.expect("!")?;
+    self.macros.push(name.span.to(bang));
     self.expect("(")?;
 
     const args: List<Expr> = new List();
@@ -614,7 +623,12 @@ class Parser {
       const variable = self.macro_text(call.args[0], "env!")?;
       const message: Option<String> = if call.args.len() == 2 { Some(self.macro_text(call.args[1], "env!")?) } else { None };
 
-      return match env::variable(variable) {
+      const found = match self.env.get(variable) {
+        Some(value) => Some(value),
+        None => env::variable(variable),
+      };
+
+      return match found {
         Some(value) => Ok(self.expr_node(ExprKind::Str(value), span)),
         None => {
           const text = match message {
@@ -4223,6 +4237,8 @@ class Parser {
           const sub = new Parser(self.eof.span.file, tokens, self.ids, self.target, self.diagnostics);
 
           sub.location = self.location;
+          sub.env = self.env;
+          sub.macros = self.macros;
 
           if sub.at_eof() {
             return Err(sub.unexpected("an expression inside `${}`"));

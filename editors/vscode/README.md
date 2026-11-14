@@ -10,7 +10,7 @@ Support for the [Sagitario](https://github.com/Juanestban/sagitario) programming
   `@` (`@cfg`, `@default`, `@export`, `@repr`, `@thread_local`), of their representations after `@repr(` and
   of the conditions of `@cfg(`, of names
   (module-level constants and statics with their types, the builtins, `assert` and `assert_eq` among them, and the built-in macros `include!`, `include_str!`, `include_bytes!`, `concat!` and `env!`) and of types, the outline of a document (`Ctrl+Shift+O`), the constants of types included, and the colors of modules, functions,
-  types and constants in paths (semantic tokens). Inside the braces of format strings, as rust-analyzer does
+  types and constants in paths, and of the built-in macros with their `!`, as rust-analyzer's `macro` tokens (semantic tokens). Inside the braces of format strings, as rust-analyzer does
   in Rust's, it also colors the variables, parameters, fields, methods and functions.
 - Syntax highlighting of `.sag` files: keywords, types, operators (the bitwise ones and shifts
   too, and the `...` of variadic C functions), the built-in macros (`include_str!`...), numbers with their suffixes, the indices of tuples' elements (`pair.0`) and the names a tuple pattern declares
@@ -23,7 +23,7 @@ Support for the [Sagitario](https://github.com/Juanestban/sagitario) programming
 - Snippets: `main`, `mainr`, `asyncmain`, `asyncfn`, `fn`, `pfn`, `static`, `staticvar`, `typeconst`,
   `threadlocal`, `cfg`, `struct`, `class`, `enum`, `interface`, `implfor`, `match`, `iflet`, `whilelet`, `for`,
   `forin`, `fortuple`, `consttuple`, `assert`, `asserteq`, `if`, `ifelse`, `println`, `fstr` (a format string) and `use`; for operators and text, `impleq`, `implord`, `impldisplay`, `implop` (`+`, `-`, `*`,
-  `/`, `%`) and `implneg`; for conversions, defaults, indexing and iteration, `implfrom`, `impltryfrom`, `impldefault`, `default` (a struct with `@default`), `implindex`, `impliterable`, `implfromiter` and `impldrop`; for streams, `implread` and `implwrite`; and for the FFI, `extern` (a block of C functions), `externvariadic` (a variadic C function), `externstatic` (a global variable of C), `externfn`,
+  `/`, `%`) and `implneg`; for conversions, defaults, indexing and iteration, `implfrom`, `impltryfrom`, `impldefault`, `default` (a struct with `@default`), `implindex`, `impliterable`, `implfromiter` and `impldrop`; for streams, `implread` and `implwrite`; for build scripts, `buildscript` (a `build.sag` with the `nova::` directives); and for the FFI, `extern` (a block of C functions), `externvariadic` (a variadic C function), `externstatic` (a global variable of C), `externfn`,
   `export`, `reprc`, `opaque` (an opaque C type), `union`, `reprenum`, `cfn`, `unsafe`, `cstring` and `library` (a function
   loaded from a dynamic library).
 

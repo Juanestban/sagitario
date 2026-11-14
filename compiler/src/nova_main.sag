@@ -8,6 +8,7 @@
 use pkg::diagnostics;
 use pkg::diagnostics::{Diagnostic, DiagnosticFormat};
 use pkg::loader::{path_key, push_path, windows};
+use pkg::nova::build;
 use pkg::nova::codes;
 use pkg::nova::manifest;
 use pkg::nova::manifest::Manifest;
@@ -816,6 +817,48 @@ fn compile(options: Options, mode: Mode) -> i32 {
     args.push(direct.join(","));
   }
 
+  // The build scripts, those of the dependencies first; each package's `env!("OUT_DIR")` is the
+  // directory of its own (docs/adr/0103-build-scripts-and-binding-generation.md, Q727-Q730).
+  const scripts: List<build::Directives> = new List();
+  var position = packages.len();
+
+  while position > 0 {
+    position -= 1;
+
+    const member = packages[position];
+
+    if !fs::is_file(push_path(member.dir, build::FILE_NAME)) {
+      continue;
+    }
+
+    const script = build::Script {
+      dir: member.dir,
+      name: member.manifest.name,
+      version: member.manifest.version,
+      target_dir: target_dir,
+      profile: profile,
+      release: options.release,
+      target: options.target.unwrap_or(build::host_triple()),
+      host: build::host_triple(),
+      cc: options.cc,
+      sag: sag,
+    };
+    const outcome = match build::run(script) {
+      Ok(found) => found,
+      Err(message) => return fail(message),
+    };
+
+    if position == 0 {
+      args.push("--env");
+      args.push("OUT_DIR=" + outcome.out_dir);
+    } else {
+      args.push("--dependency-env");
+      args.push(`${position - 1}=OUT_DIR=` + outcome.out_dir);
+    }
+
+    scripts.push(outcome.directives);
+  }
+
   // `[link]` of every package of the graph applies to the whole program.
   const libraries: List<String> = new List();
 
@@ -838,6 +881,27 @@ fn compile(options: Options, mode: Mode) -> i32 {
     for item in member.manifest.link.sources {
       args.push("--link-source");
       args.push(tidy(push_path(member.dir, item.text)));
+    }
+  }
+
+  // What the build scripts asked for, as `[link]` (Q729).
+  for directives in scripts {
+    for library in directives.libraries {
+      if !libraries.contains(library) {
+        libraries.push(library);
+        args.push("--link-lib");
+        args.push(library);
+      }
+    }
+
+    for item in directives.search_paths {
+      args.push("--link-search");
+      args.push(tidy(item));
+    }
+
+    for item in directives.sources {
+      args.push("--link-source");
+      args.push(tidy(item));
     }
   }
 

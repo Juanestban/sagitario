@@ -468,12 +468,15 @@ pub class LoadedPackage {
   pub const entry: String;
   /// Indices in `Loader::packages` of its dependencies.
   pub const dependencies: List<usize>;
+  /// The variables `env!` reads in its files first (`--env`, `--dependency-env`).
+  pub const env: Map<String, String>;
 
   pub fn new(self, name: String, entry: String, dependencies: List<usize>) {
     self.name = name;
     self.root = path::parent(entry).unwrap_or("");
     self.entry = entry;
     self.dependencies = dependencies;
+    self.env = new Map<String, String>();
   }
 }
 
@@ -525,6 +528,21 @@ pub class Loader {
     self.packages.push(new LoadedPackage(name, entry, packages));
   }
 
+  /// Gives `env!` in the files of package `package` (0 is the input's) the variable `name`.
+  pub fn set_env(self, package: usize, name: String, value: String) {
+    if let Some(found) = self.packages.get(package) {
+      found.env.insert(name, value);
+    }
+  }
+
+  /// The variables of the package `package` for `env!`.
+  prv fn package_env(self, package: usize) -> Map<String, String> {
+    match self.packages.get(package) {
+      Some(found) => found.env,
+      None => new Map<String, String>(),
+    }
+  }
+
   /// Sets the direct dependencies of the input's package, by their index among the dependencies.
   pub fn set_direct_dependencies(self, dependencies: List<usize>) {
     if let Some(input) = self.packages.first() {
@@ -565,9 +583,9 @@ pub class Loader {
     const tokens = lexer::lex(id, text, diagnostics);
 
     if diagnostics.error_count() == errors {
-      var module = parser::parse_module_from(id, tokens, self.ids, self.target, diagnostics, Some(file));
+      var module = parser::parse_module_from(id, tokens, self.ids, self.target, diagnostics, Some(file), self.package_env(package));
 
-      self.expand_includes(module, sources, diagnostics);
+      self.expand_includes(module, package, sources, diagnostics);
       module.path = module_path;
       module.package = package;
       self.modules.push(module);
@@ -578,7 +596,7 @@ pub class Loader {
 
   /// Puts the items of the files `include!` names in their module, as if written there; their
   /// spans are the file's (docs/adr/0103-build-scripts-and-binding-generation.md, Q724).
-  prv fn expand_includes(self, module: Module, sources: SourceMap, diagnostics: Diagnostics) {
+  prv fn expand_includes(self, module: Module, package: usize, sources: SourceMap, diagnostics: Diagnostics) {
     for include in module.includes {
       const text = match self.overrides.get(path_key(include.path)) {
         Some(found) => found,
@@ -608,7 +626,7 @@ pub class Loader {
         continue;
       }
 
-      const included = parser::parse_module_from(id, tokens, self.ids, self.target, diagnostics, Some(include.path));
+      const included = parser::parse_module_from(id, tokens, self.ids, self.target, diagnostics, Some(include.path), self.package_env(package));
 
       for nested in included.includes {
         diagnostics.push(
@@ -717,7 +735,7 @@ pub class Loader {
   prv fn load_embedded(self, file: String, text: String, module_path: List<String>, sources: SourceMap, diagnostics: Diagnostics) -> usize {
     const id = sources.add(file, text);
     const tokens = lexer::lex(id, text, diagnostics);
-    var module = parser::parse_module_from(id, tokens, self.ids, self.target, diagnostics, None);
+    var module = parser::parse_module_from(id, tokens, self.ids, self.target, diagnostics, None, new Map<String, String>());
 
     module.path = module_path;
     self.modules.push(module);

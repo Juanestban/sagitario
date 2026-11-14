@@ -35,11 +35,20 @@ The sources say 0.32.0.
 
 ### Added
 
+- Build scripts, as Cargo's `build.rs`: a package's `build.sag`, which Nova compiles and runs
+  before the package with `OUT_DIR`, `TARGET`, `HOST`, `PROFILE` and the package's name, version
+  and directory in its environment. Its output's `nova::link-lib`, `nova::link-search` and
+  `nova::link-source` add to `[link]`, `nova::rerun-if-changed` and `nova::rerun-if-env-changed`
+  say when it runs again, and `nova::warning` shows a warning. Each package's
+  `env!("OUT_DIR")` is its own script's directory, through the new options `--env` and
+  `--dependency-env` that Nova passes to `sag`. The editor gains the snippet `buildscript`
+  ([ADR-0103](docs/adr/0103-build-scripts-and-binding-generation.md), increment 3).
 - Rust's built-in macros: `include!("file.sag");` puts the items of a file in the module, as
   `include!(concat!(env!("OUT_DIR"), "/bindings.sag"))` will for build scripts;
   `include_str!` and `include_bytes!` give the text and the bytes of a file; `concat!` joins
   literals, and `env!` reads a variable of the compiler's environment. They are expanded when the
-  file is parsed. Programs cannot define macros. The editor colors and completes them
+  file is parsed. Programs cannot define macros. The editor colors and completes them, and the
+  language server gives them as `macro` semantic tokens, as rust-analyzer does
   ([ADR-0103](docs/adr/0103-build-scripts-and-binding-generation.md), increment 2).
 - Calls of variadic C functions, as Rust's: `fn printf(format: *const c_char, ...) -> c_int;` in
   an `extern "C"` block, whose extra arguments keep their types; those C promotes (`u8`, `bool`,
