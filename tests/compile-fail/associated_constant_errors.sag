@@ -1,0 +1,39 @@
+// The rules of the constants of types: names, types, privacy, values and inheritance
+// (docs/adr/0099-associated-and-composite-constants.md, Q683).
+struct Point {
+  pub x: i32;
+
+  pub const ORIGIN: Point = Point { x: 0 };
+  prv const HIDDEN: i32 = 1;
+  pub const x: i32 = 2; //~ ERROR E0201
+  pub const LIST: List<i32> = new List(); //~ ERROR E0334
+}
+
+class Base {
+  pub var count: i32;
+  pub const SIZE: i32 = 4;
+
+  pub fn new(self) {
+    self.count = 0;
+  }
+}
+
+class Derived extends Base {
+  pub fn new(self) {
+    zod.new();
+  }
+}
+
+enum Level {
+  Low,
+
+  pub const Low: i32 = 0; //~ ERROR E0201
+}
+
+fn main() {
+  const p = Point::ORIGIN;
+  const _a = Point::HIDDEN; //~ ERROR E0205
+  const _b = p.ORIGIN; //~ ERROR E0316
+  const _c = Derived::SIZE; //~ ERROR E0200
+  const _d = Point::ORIGNI; //~ ERROR E0200
+}

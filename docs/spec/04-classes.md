@@ -36,7 +36,8 @@ const dog = new Dog("Rex");
 
 ## Visibility of members
 
-- Every class member (field or method) **must** declare `pub` or `prv`.
+- Every class member (field, [constant](03-memory.md#constants-of-types) or method) **must**
+  declare `pub` or `prv`.
 - `pub`: visible wherever the class is visible.
 - `prv`: visible only inside the declaring class. Subclasses cannot access it.
 - There is no `protected` level in the MVP (open for reconsideration later).
@@ -50,7 +51,9 @@ const dog = new Dog("Rex");
 - Objects are created with `new ClassName(args)`, which allocates and calls `new`. A `prv`
   initializer can only be used inside the class.
 - A class without fields may omit `new`; it then has an implicit `new(self)` without parameters. A
-  class with fields must declare it. Fields have no initializers in their declaration.
+  class with fields must declare it. Fields have no initializers in their declaration: a
+  `const` with a value is a [constant of the class](03-memory.md#constants-of-types), not a
+  field.
 - Every field, `const` and `var`, must be assigned before `new` returns: at the end of its body
   and at every `return`. A `const` field is assigned exactly once. No field is read before it is
   assigned, and `self` cannot be used otherwise (calling its methods, passing it along) until
@@ -112,7 +115,39 @@ const d = Dog::puppy();
 - Class values are references: assigning or passing one shares the instance (ARC).
 - `==` and `!=` compare identity. Classes cannot be interpolated or compared with `<`.
 - Instances are destroyed when their last strong reference goes away (see
-  [memory](03-memory.md#automatic-reference-counting-f2)). There are no destructors in the MVP.
+  [memory](03-memory.md#automatic-reference-counting-f2)).
+
+### `Drop`
+
+Rationale: [ADR-0096](../adr/0096-streams-files-and-drop.md), Q655. A class implementing the
+prelude's `interface Drop { fn drop(self); }` runs its `drop` when its last strong reference
+goes, before its fields are released, as Swift's `deinit`:
+
+```sag
+class Connection impl Drop {
+  pub const name: String;
+
+  pub fn new(self, name: String) { self.name = name; }
+  pub fn drop(self) { println(f"closing {self.name}"); }
+}
+
+{
+  const connection = new Connection("db");
+}   // closing db
+```
+
+- Only classes implement `Drop` (`E0329`): structs and enums are copied, so no copy is the last.
+- `drop` runs once per instance, then the fields are released, so a field that is itself a
+  `Drop` runs its own after. Instances whose last references go together are dropped in the
+  order those references went: the elements of a list first to last, the locals of a scope from
+  the last declared.
+- `drop` is a virtual method: a subclass implementing it calls `zod.drop()` to run its parent's.
+  Calling `drop` in any other way is an error (`E0314`); the last reference going calls it.
+- Inside `drop`, `self` can be copied and passed; what holds a copy must let it go before `drop`
+  returns. If `self` still has a strong reference then (it was stored in a field, a list or a
+  static), the program panics (`drop kept a reference to its instance`).
+- Instances in a cycle that `weak` does not break are never freed, so their `drop` never runs; a
+  panic and `exit()` end the program without running it, as in Rust.
 
 ## Weak references
 

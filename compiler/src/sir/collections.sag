@@ -4,10 +4,11 @@
 
 use pkg::ast::{BinaryOp, Block, Expr, ExprKind, UnaryOp};
 use pkg::resolve::{ParamOwner, Res, TypeItem};
-use pkg::sir::{Callee, Lowering, Operand, Place, Projection, Rvalue, Stmt, bool_operand, int_operand, local_place, project, unit_operand};
+use pkg::sir::{Callee, Lowering, Operand, Place, Projection, Rvalue, SliceSource, Stmt, TemplatePiece, bool_operand, int_operand, local_place, project, unit_operand};
+use pkg::sir::interfaces;
 use pkg::sir::matching;
 use pkg::sir::mono;
-use pkg::types::{FloatTy, IntTy, Subst, Type, TypeKind};
+use pkg::types::{FloatTy, IntTy, NamedRef, Subst, Type, TypeKind};
 use pkg::types;
 use pkg::types::typed::{BuiltinMethod, ListMethod};
 
@@ -48,7 +49,7 @@ pub fn list_from(lw: Lowering, ty: Type, args: List<Expr>) -> Result<Operand, St
   Ok(list_from_array(lw, ty, array_ty, value))
 }
 
-fn list_from_array(lw: Lowering, list_ty: Type, array_ty: Type, value: Operand) -> Operand {
+pub fn list_from_array(lw: Lowering, list_ty: Type, array_ty: Type, value: Operand) -> Operand {
   if lw.managed(array_ty) {
     lw.emit(Stmt::Retain(value));
   }
@@ -264,12 +265,24 @@ pub fn prelude_method(lw: Lowering, value: Expr, function: u32, ty: Type, receiv
   };
   const target = mono::instance(lw, function, subst);
   const receiver_ty = lw.type_of(receiver)?;
-  var receiver_value = lw.expr(receiver)?;
+  const first = params.first().unwrap_or(types::error());
+  var lent = false;
+
+  // An array or a list calling a method of slices is lent as a slice of all its elements
+  // (docs/adr/0093-everyday-methods.md, Q624).
+  if let TypeKind::Slice { .. } = first.kind {
+    lent = match receiver_ty.kind {
+      TypeKind::Array { .. } | TypeKind::List(_) => true,
+      _ => false,
+    };
+  }
+
+  var receiver_value = if lent { lw.slice(receiver, first)? } else { lw.expr(receiver)? };
 
   // Arrays become lists.
   if let TypeKind::Array { .. } = receiver_ty.kind {
-    if let Some(list_ty) = params.first() {
-      receiver_value = list_from_array(lw, list_ty, receiver_ty, receiver_value);
+    if !lent {
+      receiver_value = list_from_array(lw, first, receiver_ty, receiver_value);
     }
   }
 
@@ -346,6 +359,41 @@ pub fn range_iter(lw: Lowering, range: Expr, reverse: bool, ty: Type) -> Result<
   Ok(lw.call(Callee::Fn(target), List::from([start_value, end_value, bool_operand(inclusive), bool_operand(reverse)]), ty))
 }
 
+/// `(a..b).contains(x)`, or `is_empty()` without `value`: comparisons of the bounds, which run in
+/// order, then of `x`, without an iterator (docs/adr/0101-the-rest-of-s2.md, Q705).
+pub fn range_test(lw: Lowering, range: Expr, value: Option<Expr>) -> Result<Operand, String> {
+  var start_expr: Option<Expr> = None;
+  var end_expr: Option<Expr> = None;
+  var inclusive = false;
+
+  if let ExprKind::Range { start: found_start, end: found_end, inclusive: found_inclusive } = range.kind {
+    start_expr = Some(found_start);
+    end_expr = Some(found_end);
+    inclusive = found_inclusive;
+  }
+
+  const low = match start_expr {
+    Some(found) => found,
+    None => return Err("`contains` of something other than a range"),
+  };
+  const high = end_expr.unwrap_or(low);
+  const int_ty = lw.type_of(low)?;
+  const start = lw.operand_as(low, int_ty)?;
+  const end = lw.operand_as(high, int_ty)?;
+
+  const tested = match value {
+    Some(found) => lw.operand_as(found, int_ty)?,
+    None => {
+      // Empty when no value lies between the bounds: `start >= end`, or `start > end` with `..=`.
+      return Ok(binary_value(lw, bool_type(), if inclusive { BinaryOp::Gt } else { BinaryOp::Ge }, int_ty, start, end));
+    }
+  };
+  const above = binary_value(lw, bool_type(), BinaryOp::Le, int_ty, start, tested);
+  const below = binary_value(lw, bool_type(), if inclusive { BinaryOp::Le } else { BinaryOp::Lt }, int_ty, tested, end);
+
+  Ok(binary_value(lw, bool_type(), BinaryOp::BitAnd, bool_type(), above, below))
+}
+
 /// `a.total_compare(b)` on floats.
 pub fn total_compare(lw: Lowering, ty: Type, receiver: Expr, args: List<Expr>) -> Result<Operand, String> {
   const float = lw.type_of(receiver)?;
@@ -390,6 +438,28 @@ fn is_primitive(ty: Type) -> bool {
   }
 }
 
+/// Whether `function` is `iter` of `Iterable`.
+fn is_iterable_iter(lw: Lowering, function: u32) -> bool {
+  match lw.typed.prelude.iterable {
+    Some(id) => match lw.typed.interface_def(id) {
+      Some(def) => match def.methods.first() {
+        Some(found) => found == function,
+        None => false,
+      },
+      None => false,
+    },
+    None => false,
+  }
+}
+
+/// Whether `function` is `to_string` of `Display`.
+fn is_display(lw: Lowering, function: u32) -> bool {
+  match lw.resolution.owner(function) {
+    Some(TypeItem::Interface(id)) => same_option(id, lw.typed.prelude.display),
+    _ => false,
+  }
+}
+
 fn same_option(id: u32, found: Option<u32>) -> bool {
   match found {
     Some(other) => other == id,
@@ -399,9 +469,36 @@ fn same_option(id: u32, found: Option<u32>) -> bool {
 
 /// Whether `function` is a method of the prelude's `Eq`, `Ord` or `Hash`, called on an integer,
 /// `bool`, `char` or `String`.
+/// Whether `function` is `to_socket_addrs` of `ToSocketAddrs` of `std::net`.
+fn is_socket_addrs(lw: Lowering, function: u32) -> bool {
+  match lw.typed.net {
+    Some(net) => match lw.resolution.owner(function) {
+      Some(TypeItem::Interface(id)) => id == net.to_socket_addrs,
+      _ => false,
+    },
+    None => false,
+  }
+}
+
 pub fn is_primitive_method(lw: Lowering, function: u32, receiver_ty: Type) -> bool {
+  // `to_socket_addrs` of the types the compiler implements `ToSocketAddrs` for
+  // (docs/adr/0100-networking.md, Q693).
+  if is_socket_addrs(lw, function) {
+    return lw.typed.socket_addrs_of(receiver_ty).is_some();
+  }
+
+  // `iter` of `Iterable` on a list or an array, called in generic code
+  // (docs/adr/0095-collections.md, Q645).
+  if is_iterable_iter(lw, function) {
+    return match receiver_ty.kind {
+      TypeKind::List(_) | TypeKind::Array { .. } => true,
+      _ => false,
+    };
+  }
+
+  // `bool` has the bitwise operators only (docs/adr/0101-the-rest-of-s2.md, Q709).
   const numeric = match receiver_ty.kind {
-    TypeKind::Int(_) | TypeKind::Float(_) | TypeKind::String => true,
+    TypeKind::Int(_) | TypeKind::Float(_) | TypeKind::String | TypeKind::Bool => true,
     _ => false,
   };
 
@@ -409,7 +506,32 @@ pub fn is_primitive_method(lw: Lowering, function: u32, receiver_ty: Type) -> bo
     return true;
   }
 
-  if !is_primitive(receiver_ty) {
+  // `to_string` of numbers, `bool`, `char` and `String` is their interpolation.
+  if is_display(lw, function) {
+    return match receiver_ty.kind {
+      TypeKind::Float(_) => true,
+      _ => is_primitive(receiver_ty),
+    };
+  }
+
+  const tuple = match receiver_ty.kind {
+    TypeKind::Tuple(_) | TypeKind::Option(_) | TypeKind::Result { .. } | TypeKind::List(_) | TypeKind::Array { .. } => true,
+    TypeKind::Class(named) => compared_by_compiler(lw, named),
+    _ => false,
+  };
+
+  if !is_primitive(receiver_ty) && !tuple {
+    return false;
+  }
+
+  // `equals`, `compare` and `hash`; the default methods of these interfaces, such as `clamp`, are
+  // compiled for the type (docs/adr/0094-conversions-and-defaults.md, Q638).
+  const name = match lw.resolution.fn_decl(lw.package, function) {
+    Some(decl) => decl.name.name,
+    None => "",
+  };
+
+  if name != "equals" && name != "compare" && name != "hash" {
     return false;
   }
 
@@ -438,7 +560,17 @@ fn operator_of(lw: Lowering, function: u32) -> Option<Option<BinaryOp>> {
     Some(Some(BinaryOp::Div))
   } else if same_option(id, prelude.rem) {
     Some(Some(BinaryOp::Rem))
-  } else if same_option(id, prelude.neg) {
+  } else if same_option(id, prelude.bit_and) {
+    Some(Some(BinaryOp::BitAnd))
+  } else if same_option(id, prelude.bit_or) {
+    Some(Some(BinaryOp::BitOr))
+  } else if same_option(id, prelude.bit_xor) {
+    Some(Some(BinaryOp::BitXor))
+  } else if same_option(id, prelude.shl) {
+    Some(Some(BinaryOp::Shl))
+  } else if same_option(id, prelude.shr) {
+    Some(Some(BinaryOp::Shr))
+  } else if same_option(id, prelude.neg) || same_option(id, prelude.not) {
     Some(None)
   } else {
     None
@@ -454,11 +586,26 @@ pub fn primitive_operator(lw: Lowering, function: u32, receiver_ty: Type, lhs: O
         return Err("binary operator without one argument");
       }
 
+      // The amount of a shift is a `u32`, which the C takes as a `u64`, as for `a << b`.
+      if op == BinaryOp::Shl || op == BinaryOp::Shr {
+        const amount = lw.operand_as(args[0], types::int(IntTy::U32))?;
+        const wide = lw.new_value(types::int(IntTy::U64), Rvalue::Cast { from: types::int(IntTy::U32), to: types::int(IntTy::U64), operand: amount });
+
+        return Ok(pkg::sir::strings::binary(lw, op, receiver_ty, lhs, wide));
+      }
+
       const rhs = lw.operand_as(args[0], receiver_ty)?;
 
       Ok(pkg::sir::strings::binary(lw, op, receiver_ty, lhs, rhs))
     }
-    Some(None) => Ok(lw.new_value(receiver_ty, Rvalue::Unary { op: UnaryOp::Neg, ty: receiver_ty, operand: lhs })),
+    Some(None) => {
+      const negating = match lw.resolution.owner(function) {
+        Some(TypeItem::Interface(found)) => same_option(found, lw.typed.prelude.neg),
+        _ => false,
+      };
+
+      Ok(lw.new_value(receiver_ty, Rvalue::Unary { op: if negating { UnaryOp::Neg } else { UnaryOp::Not }, ty: receiver_ty, operand: lhs }))
+    }
     None => Err("primitive operator of another interface"),
   }
 }
@@ -467,7 +614,40 @@ pub fn primitive_operator(lw: Lowering, function: u32, receiver_ty: Type, lhs: O
 /// number or a `String`.
 pub fn primitive_method(lw: Lowering, function: u32, ty: Type, receiver: Expr, args: List<Expr>) -> Result<Operand, String> {
   const receiver_ty = lw.type_of(receiver)?;
+
+  // A function of `std::net` for each type the compiler implements `ToSocketAddrs` for.
+  if is_socket_addrs(lw, function) {
+    const name = match lw.typed.socket_addrs_of(receiver_ty) {
+      Some(found) => found,
+      None => return Err("`to_socket_addrs` of a type without it"),
+    };
+    const target = match lw.resolution.std_fn("net", name) {
+      Some(found) => found,
+      None => return Err("`std::net` has no `" + name + "`"),
+    };
+    const value = lw.expr(receiver)?;
+
+    return Ok(lw.call(Callee::Fn(mono::instance(lw, target, Subst::empty())), List::from([value]), ty));
+  }
+
+  if is_iterable_iter(lw, function) {
+    const elem = match receiver_ty.kind {
+      TypeKind::List(found) | TypeKind::Array { elem: found, .. } => found,
+      _ => return Err("`iter` of `Iterable` on another type"),
+    };
+    const to_iter = match lw.resolution.prelude_fn("list_iter") {
+      Some(found) => found,
+      None => return Err("the prelude has no `list_iter`"),
+    };
+
+    return iter_of(lw, receiver, to_iter, List::from([elem]));
+  }
+
   const lhs = lw.expr(receiver)?;
+
+  if is_display(lw, function) {
+    return Ok(lw.new_value(types::string(), Rvalue::Template(List::from([TemplatePiece::Value { ty: receiver_ty, value: lhs }]))));
+  }
 
   if operator_of(lw, function).is_some() {
     return primitive_operator(lw, function, receiver_ty, lhs, args);
@@ -483,15 +663,7 @@ pub fn primitive_method(lw: Lowering, function: u32, ty: Type, receiver: Expr, a
   };
 
   if is_hash {
-    const u64_type = types::int(IntTy::U64);
-
-    if types::is_string(receiver_ty) {
-      return Ok(lw.new_value(u64_type, Rvalue::Call { callee: runtime("sag_string_hash"), args: List::from([lhs]) }));
-    }
-
-    const bits = lw.new_value(u64_type, Rvalue::Cast { from: receiver_ty, to: u64_type, operand: lhs });
-
-    return Ok(lw.new_value(u64_type, Rvalue::Call { callee: runtime("sag_hash_u64"), args: List::from([bits]) }));
+    return value_hash(lw, receiver_ty, lhs);
   }
 
   if args.len() != 1 {
@@ -505,25 +677,398 @@ pub fn primitive_method(lw: Lowering, function: u32, ty: Type, receiver: Expr, a
   };
 
   if is_eq {
-    return Ok(pkg::sir::strings::binary(lw, BinaryOp::Eq, receiver_ty, lhs, rhs));
+    return values_equal(lw, receiver_ty, lhs, rhs);
   }
 
-  const i32_type = types::int(IntTy::I32);
-  var order = unit_operand();
+  values_order(lw, ty, receiver_ty, lhs, rhs)
+}
 
-  if types::is_string(receiver_ty) {
-    order = lw.new_value(i32_type, Rvalue::Call { callee: runtime("sag_string_cmp"), args: List::from([lhs, rhs]) });
-  } else {
-    // -1, 0 or 1 from two comparisons.
-    const less = binary_value(lw, bool_type(), BinaryOp::Lt, receiver_ty, lhs, rhs);
-    const greater = binary_value(lw, bool_type(), BinaryOp::Gt, receiver_ty, lhs, rhs);
-    const less_int = lw.new_value(i32_type, Rvalue::Cast { from: bool_type(), to: i32_type, operand: less });
-    const greater_int = lw.new_value(i32_type, Rvalue::Cast { from: bool_type(), to: i32_type, operand: greater });
+// ---- `Eq`, `Ord` and `Hash` of values the compiler compares itself ----------------------------
+//
+// Primitives compare with C's operators, and tuples element by element, the first one first
+// (docs/adr/0092-tuples.md, Q611); the elements of other types call their own methods.
 
-    order = binary_value(lw, i32_type, BinaryOp::Sub, i32_type, greater_int, less_int);
+/// The method of a prelude interface, by the interface's id.
+fn interface_method(lw: Lowering, id: Option<u32>) -> Result<u32, String> {
+  const found = match id {
+    Some(interface_id) => lw.typed.interface_def(interface_id),
+    None => None,
+  };
+
+  match found {
+    Some(def) => match def.methods.first() {
+      Some(method) => Ok(method),
+      None => Err("prelude interface without a method"),
+    },
+    None => Err("prelude interface missing"),
+  }
+}
+
+/// The method `id` of a prelude interface on the value `receiver` of type `ty`, with `args`.
+fn element_call(lw: Lowering, id: Option<u32>, ty: Type, receiver: Operand, args: List<Operand>, result: Type) -> Result<Operand, String> {
+  const found = interfaces::concrete_method(lw, interface_method(lw, id)?, ty);
+
+  if found.by_ref {
+    return Err("an element compared through a method that modifies `self`");
   }
 
-  Ok(ordering(lw, ty, order))
+  const all = List::from([receiver]);
+
+  for arg in args {
+    all.push(arg);
+  }
+
+  Ok(lw.call(found.callee, all, result))
+}
+
+/// The element `index` of the tuple `value`, of type `ty`.
+fn element(lw: Lowering, value: Operand, ty: Type, index: usize, elem: Type) -> Result<Operand, String> {
+  Ok(Operand::Place(project(lw.operand_place(value, ty)?, Projection::Field(index), elem)))
+}
+
+/// Whether `lhs` and `rhs`, of type `ty`, are equal: a `bool`.
+pub fn values_equal(lw: Lowering, ty: Type, lhs: Operand, rhs: Operand) -> Result<Operand, String> {
+  if is_primitive(ty) {
+    return Ok(pkg::sir::strings::binary(lw, BinaryOp::Eq, ty, lhs, rhs));
+  }
+
+  if is_option_or_result(ty) {
+    return variants_equal(lw, ty, lhs, rhs);
+  }
+
+  if let Some(result) = collection_call(lw, "equals", ty, List::from([lhs, rhs]), bool_type())? {
+    return Ok(result);
+  }
+
+  const elems = match ty.kind {
+    TypeKind::Tuple(found) => found,
+    _ => return element_call(lw, lw.typed.prelude.eq, ty, lhs, List::from([rhs]), bool_type()),
+  };
+  const result = lw.temp(bool_type());
+
+  for index in 0..elems.len() {
+    // Each element is compared only while the earlier ones were equal.
+    const mark = lw.open_buffer();
+    const left = element(lw, lhs, ty, index, elems[index])?;
+    const right = element(lw, rhs, ty, index, elems[index])?;
+    const equal = values_equal(lw, elems[index], left, right)?;
+
+    lw.emit(Stmt::Assign { dest: result, value: Rvalue::Use(equal) });
+
+    const body = lw.close_buffer(mark);
+
+    if index == 0 {
+      for statement in body {
+        lw.emit(statement);
+      }
+    } else {
+      lw.emit(Stmt::If { cond: Operand::Local(result), then_body: body, else_body: new List() });
+    }
+  }
+
+  Ok(Operand::Local(result))
+}
+
+/// The `Ordering` of `lhs` against `rhs`, of type `ty`; `ordering_ty` is `Ordering`.
+pub fn values_order(lw: Lowering, ordering_ty: Type, ty: Type, lhs: Operand, rhs: Operand) -> Result<Operand, String> {
+  if is_primitive(ty) {
+    const i32_type = types::int(IntTy::I32);
+    var order = unit_operand();
+
+    if types::is_string(ty) {
+      order = lw.new_value(i32_type, Rvalue::Call { callee: runtime("sag_string_cmp"), args: List::from([lhs, rhs]) });
+    } else {
+      // -1, 0 or 1 from two comparisons.
+      const less = binary_value(lw, bool_type(), BinaryOp::Lt, ty, lhs, rhs);
+      const greater = binary_value(lw, bool_type(), BinaryOp::Gt, ty, lhs, rhs);
+      const less_int = lw.new_value(i32_type, Rvalue::Cast { from: bool_type(), to: i32_type, operand: less });
+      const greater_int = lw.new_value(i32_type, Rvalue::Cast { from: bool_type(), to: i32_type, operand: greater });
+
+      order = binary_value(lw, i32_type, BinaryOp::Sub, i32_type, greater_int, less_int);
+    }
+
+    return Ok(ordering(lw, ordering_ty, order));
+  }
+
+  if is_option_or_result(ty) {
+    return variants_order(lw, ordering_ty, ty, lhs, rhs);
+  }
+
+  if let Some(result) = collection_call(lw, "compare", ty, List::from([lhs, rhs]), ordering_ty)? {
+    return Ok(result);
+  }
+
+  const elems = match ty.kind {
+    TypeKind::Tuple(found) => found,
+    _ => return element_call(lw, lw.typed.prelude.ord, ty, lhs, List::from([rhs]), ordering_ty),
+  };
+  const result = lw.temp(ordering_ty);
+
+  for index in 0..elems.len() {
+    // The first element that differs decides; `Equal` is variant 1.
+    const mark = lw.open_buffer();
+    const left = element(lw, lhs, ty, index, elems[index])?;
+    const right = element(lw, rhs, ty, index, elems[index])?;
+    const order = values_order(lw, ordering_ty, elems[index], left, right)?;
+
+    lw.emit(Stmt::Assign { dest: result, value: Rvalue::Use(order) });
+
+    const body = lw.close_buffer(mark);
+
+    if index == 0 {
+      for statement in body {
+        lw.emit(statement);
+      }
+    } else {
+      const equal = matching::tag_is(lw, local_place(result, ordering_ty), 1)?;
+
+      lw.emit(Stmt::If { cond: equal, then_body: body, else_body: new List() });
+    }
+  }
+
+  Ok(Operand::Local(result))
+}
+
+/// Whether a class type is the prelude's `Map`.
+pub fn is_map(lw: Lowering, class_ref: NamedRef) -> bool {
+  match lw.typed.prelude.map {
+    Some(map) => map == class_ref.id,
+    None => false,
+  }
+}
+
+/// Whether instances of the class compare as values of the compiler: a map, or a collection of
+/// `std::collections` compared as a list of its elements (docs/adr/0095-collections.md, Q648-Q650).
+pub fn compared_by_compiler(lw: Lowering, class_ref: NamedRef) -> bool {
+  is_map(lw, class_ref) || lw.typed.compared_elements(class_ref.id)
+}
+
+/// The list of the elements of such a collection, in the order of its `iter()`, which it
+/// compares and hashes as.
+fn elements_list(lw: Lowering, value: Operand, collection: NamedRef, elem: Type) -> Result<Operand, String> {
+  const iter = match lw.resolution.type_function(lw.package, TypeItem::Class(collection.id), "iter") {
+    Some(found) => found,
+    None => return Err("a collection without `iter`"),
+  };
+  const target = mono::instance(lw, iter, Subst::of(ParamOwner::Item(TypeItem::Class(collection.id)), collection.args));
+  const values = lw.call(Callee::Fn(target), List::from([value]), lw.typed.double_iter_type(elem));
+  const list_ty = types::of(TypeKind::List(elem));
+
+  interfaces::from_iter_value(lw, values, elem, list_ty, 0)
+}
+
+/// `equals`, `compare` or `hash` of lists, arrays and maps: the prelude's `slice_<action>` on
+/// slices of all their elements, or `map_equals` (docs/adr/0093-everyday-methods.md, Q623).
+/// `None` for other types.
+fn collection_call(lw: Lowering, action: String, ty: Type, values: List<Operand>, result: Type) -> Result<Option<Operand>, String> {
+  var elem = types::error();
+  var name = "slice_" + action;
+  var args: List<Type> = new List();
+
+  match ty.kind {
+    TypeKind::List(found) | TypeKind::Array { elem: found, .. } => {
+      elem = found;
+      args = List::from([found]);
+    }
+    TypeKind::Class(named) => {
+      if let Some(compared) = lw.typed.compared_element(named) {
+        const lists: List<Operand> = new List();
+
+        for value in values {
+          lists.push(elements_list(lw, value, named, compared)?);
+        }
+
+        return collection_call(lw, action, types::of(TypeKind::List(compared)), lists, result);
+      }
+
+      if !is_map(lw, named) || action != "equals" {
+        return Ok(None);
+      }
+
+      name = "map_equals";
+      args = named.args;
+    }
+    _ => return Ok(None),
+  }
+
+  const function = match lw.resolution.prelude_fn(name) {
+    Some(found) => found,
+    None => return Err("`" + name + "` is missing from the prelude"),
+  };
+  const operands: List<Operand> = new List();
+
+  for value in values {
+    // Lists and arrays are lent as slices of all their elements.
+    operands.push(match ty.kind {
+      TypeKind::List(_) => lw.new_value(types::of(TypeKind::Slice { mutable: false, elem: elem }), Rvalue::Slice { source: SliceSource::List(value), elem: elem, range: None }),
+      TypeKind::Array { len, .. } => {
+        const place = lw.operand_place(value, ty)?;
+
+        lw.new_value(types::of(TypeKind::Slice { mutable: false, elem: elem }), Rvalue::Slice { source: SliceSource::Array { place: place, len: len }, elem: elem, range: None })
+      }
+      _ => value,
+    });
+  }
+
+  const target = mono::instance(lw, function, Subst::of(ParamOwner::Fn(function), args));
+
+  Ok(Some(lw.call(Callee::Fn(target), operands, result)))
+}
+
+fn is_option_or_result(ty: Type) -> bool {
+  match ty.kind {
+    TypeKind::Option(_) | TypeKind::Result { .. } => true,
+    _ => false,
+  }
+}
+
+/// The value held by the variant `variant` of an `Option` or a `Result`.
+fn held(lw: Lowering, value: Operand, ty: Type, variant: u32, held_ty: Type) -> Result<Operand, String> {
+  Ok(Operand::Place(project(lw.operand_place(value, ty)?, Projection::VariantField { variant: variant, field: 0 }, held_ty)))
+}
+
+/// Each variant of an `Option` or a `Result` with the type of the value it holds.
+fn holding_variants(lw: Lowering, ty: Type) -> List<VariantHolding> {
+  const result: List<VariantHolding> = new List();
+
+  if let Some(variants) = lw.layouts.variants(ty) {
+    for index in 0..variants.len() {
+      if let Some(held_ty) = variants[index].first() {
+        result.push(VariantHolding { variant: index as u32, ty: held_ty });
+      }
+    }
+  }
+
+  result
+}
+
+struct VariantHolding {
+  pub variant: u32;
+  pub ty: Type;
+}
+
+/// `Option` and `Result` are equal when they are the same variant holding equal values
+/// (docs/adr/0093-everyday-methods.md, Q619).
+fn variants_equal(lw: Lowering, ty: Type, lhs: Operand, rhs: Operand) -> Result<Operand, String> {
+  const left_tag = matching::tag(lw, lhs, ty)?;
+  const right_tag = matching::tag(lw, rhs, ty)?;
+  const result = lw.temp(bool_type());
+
+  lw.emit(Stmt::Assign { dest: result, value: Rvalue::Binary { op: BinaryOp::Eq, ty: pkg::sir::tag_type(), lhs: left_tag, rhs: right_tag } });
+
+  for holding in holding_variants(lw, ty) {
+    const mark = lw.open_buffer();
+    const left = held(lw, lhs, ty, holding.variant, holding.ty)?;
+    const right = held(lw, rhs, ty, holding.variant, holding.ty)?;
+    const equal = values_equal(lw, holding.ty, left, right)?;
+
+    lw.emit(Stmt::Assign { dest: result, value: Rvalue::Use(equal) });
+
+    const body = lw.close_buffer(mark);
+    const this_variant = binary_value(lw, bool_type(), BinaryOp::Eq, pkg::sir::tag_type(), left_tag, int_operand(holding.variant as u64, false, IntTy::U32));
+    const both = lw.temp(bool_type());
+
+    lw.emit(Stmt::Assign { dest: both, value: Rvalue::Use(bool_operand(false)) });
+    lw.emit(Stmt::If { cond: Operand::Local(result), then_body: List::from([Stmt::Assign { dest: both, value: Rvalue::Use(this_variant) }]), else_body: new List() });
+    lw.emit(Stmt::If { cond: Operand::Local(both), then_body: body, else_body: new List() });
+  }
+
+  Ok(Operand::Local(result))
+}
+
+/// The order of `Option` and `Result` values: by variant, as they are declared (`None` before
+/// `Some`, `Ok` before `Err`), then by the values they hold.
+fn variants_order(lw: Lowering, ordering_ty: Type, ty: Type, lhs: Operand, rhs: Operand) -> Result<Operand, String> {
+  const left_tag = matching::tag(lw, lhs, ty)?;
+  const right_tag = matching::tag(lw, rhs, ty)?;
+  const order = values_order(lw, ordering_ty, types::int(IntTy::U32), left_tag, right_tag)?;
+  const result = lw.temp(ordering_ty);
+
+  lw.emit(Stmt::Assign { dest: result, value: Rvalue::Use(order) });
+
+  for holding in holding_variants(lw, ty) {
+    const mark = lw.open_buffer();
+    const left = held(lw, lhs, ty, holding.variant, holding.ty)?;
+    const right = held(lw, rhs, ty, holding.variant, holding.ty)?;
+    const inner = values_order(lw, ordering_ty, holding.ty, left, right)?;
+
+    lw.emit(Stmt::Assign { dest: result, value: Rvalue::Use(inner) });
+
+    const body = lw.close_buffer(mark);
+    const equal = matching::tag_is(lw, local_place(result, ordering_ty), 1)?;
+    const this_variant = binary_value(lw, bool_type(), BinaryOp::Eq, pkg::sir::tag_type(), left_tag, int_operand(holding.variant as u64, false, IntTy::U32));
+    const both = lw.temp(bool_type());
+
+    lw.emit(Stmt::Assign { dest: both, value: Rvalue::Use(bool_operand(false)) });
+    lw.emit(Stmt::If { cond: equal, then_body: List::from([Stmt::Assign { dest: both, value: Rvalue::Use(this_variant) }]), else_body: new List() });
+    lw.emit(Stmt::If { cond: Operand::Local(both), then_body: body, else_body: new List() });
+  }
+
+  Ok(Operand::Local(result))
+}
+
+/// The hash of an `Option` or a `Result`: its variant's, with the hash of the value it holds.
+fn variants_hash(lw: Lowering, ty: Type, value: Operand) -> Result<Operand, String> {
+  const u64_type = types::int(IntTy::U64);
+  const tag = matching::tag(lw, value, ty)?;
+  const bits = lw.new_value(u64_type, Rvalue::Cast { from: types::int(IntTy::U32), to: u64_type, operand: tag });
+  const result = lw.temp(u64_type);
+
+  lw.emit(Stmt::Assign { dest: result, value: Rvalue::Call { callee: runtime("sag_hash_u64"), args: List::from([bits]) } });
+
+  for holding in holding_variants(lw, ty) {
+    const mark = lw.open_buffer();
+    const part = value_hash(lw, holding.ty, held(lw, value, ty, holding.variant, holding.ty)?)?;
+    const mixed = binary_value(lw, u64_type, BinaryOp::BitXor, u64_type, Operand::Local(result), part);
+
+    lw.emit(Stmt::Assign { dest: result, value: Rvalue::Call { callee: runtime("sag_hash_u64"), args: List::from([mixed]) } });
+
+    const body = lw.close_buffer(mark);
+    const this_variant = binary_value(lw, bool_type(), BinaryOp::Eq, pkg::sir::tag_type(), tag, int_operand(holding.variant as u64, false, IntTy::U32));
+
+    lw.emit(Stmt::If { cond: this_variant, then_body: body, else_body: new List() });
+  }
+
+  Ok(Operand::Local(result))
+}
+
+/// The hash of `value`, of type `ty`: a `u64`. A tuple mixes the hash of each element into the
+/// hash of those before it.
+pub fn value_hash(lw: Lowering, ty: Type, value: Operand) -> Result<Operand, String> {
+  const u64_type = types::int(IntTy::U64);
+
+  if types::is_string(ty) {
+    return Ok(lw.new_value(u64_type, Rvalue::Call { callee: runtime("sag_string_hash"), args: List::from([value]) }));
+  }
+
+  if is_primitive(ty) {
+    const bits = lw.new_value(u64_type, Rvalue::Cast { from: ty, to: u64_type, operand: value });
+
+    return Ok(lw.new_value(u64_type, Rvalue::Call { callee: runtime("sag_hash_u64"), args: List::from([bits]) }));
+  }
+
+  if is_option_or_result(ty) {
+    return variants_hash(lw, ty, value);
+  }
+
+  if let Some(result) = collection_call(lw, "hash", ty, List::from([value]), u64_type)? {
+    return Ok(result);
+  }
+
+  const elems = match ty.kind {
+    TypeKind::Tuple(found) => found,
+    _ => return element_call(lw, lw.typed.prelude.hash, ty, value, new List(), u64_type),
+  };
+  var hash = int_operand(elems.len() as u64, false, IntTy::U64);
+
+  for index in 0..elems.len() {
+    const part = value_hash(lw, elems[index], element(lw, value, ty, index, elems[index])?)?;
+    const mixed = binary_value(lw, u64_type, BinaryOp::BitXor, u64_type, hash, part);
+
+    hash = lw.new_value(u64_type, Rvalue::Call { callee: runtime("sag_hash_u64"), args: List::from([mixed]) });
+  }
+
+  Ok(hash)
 }
 
 /// `for var in iter` over a list, an iterator or a map; `false` for other iterables.
@@ -563,6 +1108,38 @@ pub fn for_collection(lw: Lowering, variable: u32, iter: Expr, body: Block) -> R
       source = lw.call(Callee::Fn(target), List::from([map]), iter_of_entries);
     }
     None => {
+      if let Some(elem) = lw.typed.iterable_fors.get(iter.id) {
+        // `for x in value` over `value.iter()` of `Iterable` (docs/adr/0095-collections.md, Q645),
+        // unless the instance's type is iterated by itself: an iterator, or an array, whose loop
+        // is its own.
+        const own_loop = match iter_ty.kind {
+          TypeKind::Array { .. } => true,
+          _ => lw.typed.iter_elem(iter_ty).is_some(),
+        };
+
+        if !own_loop {
+          const iterable = match lw.typed.prelude.iterable {
+            Some(found) => found,
+            None => return Err("`Iterable` without the prelude"),
+          };
+          const function = match lw.typed.interface_def(iterable) {
+            Some(def) => match def.methods.first() {
+              Some(found) => found,
+              None => return Err("`Iterable` without `iter`"),
+            },
+            None => return Err("`Iterable` without the prelude"),
+          };
+          const item = types::substitute(elem, lw.subst);
+          const value = lw.expr(iter)?;
+          const place = lw.operand_place(value, iter_ty)?;
+
+          source = lw.interface_method_call(function, List::from([item]), place, new List(), lw.typed.iter_type(item))?;
+          for_iter(lw, variable, source, body)?;
+
+          return Ok(true);
+        }
+      }
+
       if lw.typed.iter_elem(iter_ty).is_none() {
         return Ok(false);
       }
@@ -644,11 +1221,12 @@ fn for_list(lw: Lowering, variable: u32, iter: Expr, list_ty: Type, elem: Type, 
 
 /// The loop over an iterator: `next` is called until it returns `None`.
 fn for_iter(lw: Lowering, variable: u32, source: Operand, body: Block) -> Result<(), String> {
-  const source_local = match source {
-    Operand::Local(local) => local,
+  // A local, or a place such as the payload of `option.unwrap()`, which `store` retains.
+  const iter_ty = match source {
+    Operand::Local(local) => lw.local_type(local),
+    Operand::Place(place) => place.ty,
     _ => return Err("iterator without a local"),
   };
-  const iter_ty = lw.local_type(source_local);
   const class_ref = match iter_ty.kind {
     TypeKind::Class(found) => found,
     _ => return Err("iterator that is not a class"),
@@ -660,11 +1238,18 @@ fn for_iter(lw: Lowering, variable: u32, source: Operand, body: Block) -> Result
   lw.store(iter, source);
   lw.pending.push(iter);
 
-  const next = match lw.resolution.type_function(lw.package, TypeItem::Class(class_ref.id), "next") {
+  // A `DoubleEndedIter<T>` inherits `next` from `Iter<T>`, with the same argument.
+  var owner = class_ref.id;
+
+  if lw.typed.is_double_iter(iter_ty) {
+    owner = lw.typed.prelude.iter.unwrap_or(owner);
+  }
+
+  const next = match lw.resolution.type_function(lw.package, TypeItem::Class(owner), "next") {
     Some(found) => found,
     None => return Err("`Iter` without `next`"),
   };
-  const target = mono::instance(lw, next, Subst::of(ParamOwner::Item(TypeItem::Class(class_ref.id)), class_ref.args));
+  const target = mono::instance(lw, next, Subst::of(ParamOwner::Item(TypeItem::Class(owner)), class_ref.args));
   const option_ty = types::option(elem);
   const mark = lw.open_loop(None);
   // Not pending: the value moves into `var`.

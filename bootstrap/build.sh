@@ -1,7 +1,8 @@
 #!/bin/sh
 # Builds Sagitario from the seed with a C compiler alone (docs/adr/0067-bootstrap-from-the-seed.md):
-# the seed is stage 0, which builds stage 1, which builds stage 2; stages 1 and 2 must generate the
-# same C. Writes `build/bin/sag` and `build/bin/nova`. Linux and macOS; on Windows, `build.ps1`.
+# the seed of this host (docs/adr/0107-a-seed-per-host.md) is stage 0, which builds stage 1, which
+# builds stage 2; stages 1 and 2 must generate the same C. Writes `build/bin/sag` and
+# `build/bin/nova`. Linux and macOS; on Windows, `build.ps1`.
 set -eu
 
 usage() {
@@ -10,7 +11,7 @@ Usage: bootstrap/build.sh [--debug] [--install] [--update-seed] [--dist]
 
   --debug        Build stages 1 and 2 without optimizations; integer overflow panics
   --install      Copy sag and nova to ~/.sagitario/bin and add it to PATH
-  --update-seed  Write the C of stage 2 and the runtime to bootstrap/
+  --update-seed  Write the seed of every host and the runtime to bootstrap/
   --dist         Write the archive of a release for this system to build/dist/
   --help         Show this message
 
@@ -51,6 +52,31 @@ esac
 SAG_CC=${SAG_CC:-cc}
 export SAG_CC
 
+# The seed of this host: the C the compiler generates for itself depends on the system
+# (docs/adr/0107-a-seed-per-host.md, Q767).
+hosts="windows-x86_64 linux-x86_64 linux-aarch64 macos-aarch64 macos-x86_64"
+
+case "$(uname -s)" in
+  Linux) host_os=linux ;;
+  Darwin) host_os=macos ;;
+  MINGW* | MSYS* | CYGWIN*) host_os=windows ;;
+  *) host_os=$(uname -s) ;;
+esac
+
+case "$(uname -m)" in
+  x86_64 | amd64) host_arch=x86_64 ;;
+  aarch64 | arm64) host_arch=aarch64 ;;
+  *) host_arch=$(uname -m) ;;
+esac
+
+host="$host_os-$host_arch"
+seed="bootstrap/seed/$host"
+
+if [ ! -f "$seed/sag.c" ]; then
+  printf 'error: there is no seed for this host, `%s`; the hosts with one are %s\n' "$host" "$hosts" >&2
+  exit 1
+fi
+
 step() {
   printf '==> %s\n' "$1"
 }
@@ -81,9 +107,20 @@ else
 fi
 
 step "stage 0: the seed, with $SAG_CC"
+# The units of the FFI are translation units of their own, as `sag` compiles them. They declare the
+# C library's functions without its headers, which clang asks for those that take a `FILE`
+# (`fwrite`, `fread`): its own declarations of them are left out.
+ffi_objects=""
+for unit in sag_ffi sag_std_ffi; do
+  if [ -f "$seed/$unit.c" ]; then
+    "$SAG_CC" -std=c11 -pedantic-errors -O2 -fno-builtin -c "$seed/$unit.c" -o "build/stage0/$unit.o"
+    ffi_objects="$ffi_objects build/stage0/$unit.o"
+  fi
+done
+
 # The flags `sag` uses for the generated C in release mode.
 "$SAG_CC" -std=c11 -pedantic-errors -O2 -DSAG_RELEASE -I bootstrap -o build/stage0/sag$exe \
-  bootstrap/sag.c bootstrap/sagitario_runtime.c $link
+  "$seed/sag.c" bootstrap/sagitario_runtime.c $ffi_objects $link
 
 step "stage 1"
 build/stage0/sag$exe build $mode compiler/src/main.sag --output build/stage1/sag$exe
@@ -100,6 +137,14 @@ if ! cmp -s build/stage1/sag.c build/sag.c; then
   exit 1
 fi
 
+# A seed generated on another machine is the one this host generates (Q768).
+build/bin/sag$exe check --dump=c --seed-host "$host" compiler/src/main.sag > build/seed-host.c
+
+if ! cmp -s build/seed-host.c build/sag.c; then
+  printf 'error: `--seed-host %s` generates other C than stage 2 on this host (build/seed-host.c, build/sag.c)\n' "$host" >&2
+  exit 1
+fi
+
 step "no warnings in the compiler, Nova and the harness"
 check_clean compiler/src/main.sag
 check_clean compiler/src/nova_main.sag
@@ -109,8 +154,22 @@ step "nova"
 build/bin/sag$exe build $mode compiler/src/nova_main.sag --output build/bin/nova$exe
 
 if [ "$update_seed" = 1 ]; then
-  step "update the seed"
-  cp build/sag.c bootstrap/sag.c
+  step "update the seeds: $hosts"
+  for target in $hosts; do
+    dir="bootstrap/seed/$target"
+
+    build/bin/sag$exe check --dump=c --seed-host "$target" compiler/src/main.sag > "build/seed-$target.c"
+    mkdir -p "$dir"
+    rm -f "$dir/sag.c" "$dir/sag_ffi.c" "$dir/sag_std_ffi.c"
+    # `--dump=c` gives the program, then each unit of the FFI after its marker line.
+    awk -v dir="$dir" '
+      BEGIN { out = dir "/sag.c"; printf "" > out }
+      $0 == "/* ---- sag_ffi.c ---- */" { out = dir "/sag_ffi.c"; next }
+      $0 == "/* ---- sag_std_ffi.c ---- */" { out = dir "/sag_std_ffi.c"; next }
+      { print > out }
+    ' "build/seed-$target.c"
+  done
+
   cp runtime/sagitario_runtime.c runtime/sagitario_runtime.h bootstrap/
 fi
 

@@ -1,0 +1,21 @@
+// `Builder::spawn` is checked as `thread::spawn`, and only `std::thread` makes a `Thread` or a
+// `ThreadId` (docs/adr/0098-locks-orderings-and-threads.md, Q678 and Q679).
+use std::thread;
+use std::thread::{Builder, Thread, ThreadId};
+
+fn work() -> i32 {
+  1
+}
+
+fn main() {
+  const values = List::from([1, 2]);
+  const _a = new Builder().spawn(() => values.len()); //~ ERROR E0332
+  const body = () => 1;
+  const _b = new Builder().name("worker").spawn(body); //~ ERROR E0333
+  const _c = new Builder().stack_size(-1).spawn(work); //~ ERROR E0310
+  const _d = Builder::spawn; //~ ERROR E0314
+  const _e = new Thread(1); //~ ERROR E0300
+  const _f = ThreadId { value: 1 }; //~ ERROR E0205
+  const _g = thread::current().id() < thread::current().id(); //~ ERROR E0310
+  const _h = new Builder().name(1); //~ ERROR E0300
+}

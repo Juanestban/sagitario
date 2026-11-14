@@ -1,0 +1,11 @@
+// The rules of statics (docs/adr/0083-global-state.md).
+
+static LIST: List<i32> = new List(); //~ ERROR E0332
+static WRONG: i32 = "text"; //~ ERROR E0300
+const COPY: i32 = ANSWER; //~ ERROR E0334
+static ANSWER: i32 = 42;
+
+fn main() {
+  ANSWER = 3; //~ ERROR E0307
+  println(f"{LIST.len()} {WRONG} {COPY}");
+}

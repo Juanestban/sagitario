@@ -1,0 +1,12 @@
+// What `ToSocketAddrs` takes, and what only `std::net` and `unsafe` code make
+// (docs/adr/0100-networking.md, Q693 and Q694).
+use std::net::{Ipv4Addr, TcpListener, TcpStream};
+
+fn main() {
+  const _a = TcpListener::bind(8080); //~ ERROR E0330
+  const _b = TcpStream::connect((Ipv4Addr::LOCALHOST, 70000)); //~ ERROR E0302
+  const _c = TcpStream::connect(("localhost", 80u32)); //~ ERROR E0330
+  const _d = new TcpStream(3); //~ ERROR E0205
+  const _e = TcpStream::from_raw_handle(3); //~ ERROR E0323
+  const _f = 80.to_socket_addrs(); //~ ERROR E0316
+}

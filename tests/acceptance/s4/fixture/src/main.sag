@@ -1,0 +1,55 @@
+// The bindings of `c/fixture.h`, which `build.sag` generates with `bindgen`
+// (docs/adr/0103-build-scripts-and-binding-generation.md, Q731-Q737): every construct of C it
+// translates, used without being edited.
+include!(concat!(env!("OUT_DIR"), "/fixture.sag"));
+
+use std::ffi::{c_char, c_int, c_long, c_void, string_from_c, CString};
+
+extern "C" fn on_event(user: *mut c_void, code: c_int) {
+  unsafe { *(user as *mut c_int) = code; }
+}
+
+extern "C" fn accept(area: *const fx_rect) -> c_int {
+  if area.is_null() { 1 } else { 0 }
+}
+
+extern "C" fn on_log(message: *const c_char, level: c_long) -> c_long {
+  println(unsafe { string_from_c(message) } + f" {level}");
+  level * 2
+}
+
+fn main() {
+  const title = CString::new("game").unwrap();
+  const area = fx_rect { x: 0, y: 0, w: 640, h: 480 };
+  const window = unsafe { fx_window_create(title.as_ptr(), area, FX_VISIBLE | FX_RESIZABLE) };
+
+  println(f"{FX_ALL} {FX_LIMIT} {FX_NEGATIVE} {unsafe { fx_window_area(window) }} {unsafe { fx_counter }}");
+
+  const inside = fx_point { x: 10.0, y: 20.0 };
+  println(f"{unsafe { fx_rect_contains(&raw const area, inside) }} {unsafe { fx_sum(3, 1, 2, 3) }} {unsafe { fx_match(4) }}");
+
+  var buffer = [0u8; 16];
+  const length = unsafe { fx_copy_title(buffer.as_mut_ptr() as *mut c_char, 16, window) };
+  println(f"{length} " + unsafe { string_from_c(buffer.as_ptr() as *const c_char) } + " " + unsafe { string_from_c(fx_version) });
+
+  var seen = 0 as c_int;
+  var events = fx_events {
+    on_event: Some(on_event),
+    user: &raw mut seen as *mut c_void,
+    filter: Some(accept),
+    stats: fx_events__bindgen_ty_1 { count: 0, name: [0 as c_char; 8] },
+  };
+  unsafe { fx_events_fire(&raw mut events, 7); }
+  println(f"{seen} {events.stats.count}");
+
+  println(f"{unsafe { fx_log(Some(on_log), 21) }}");
+
+  const value = unsafe { fx_value_of_int(99) };
+  println(f"{unsafe { value.integer }}");
+
+  unsafe { fx_window_destroy(window); }
+  println(f"{unsafe { fx_counter }}");
+
+  const macros = f"{FX_VERSION_MAJOR} {FX_MASK} {FX_SHIFTED} {FX_COMBINED} {FX_CAST} {FX_NEGATIVE_MACRO} {FX_BIG} {FX_RATIO} {FX_SMALL} {FX_LETTER}";
+  println(macros + " " + FX_NAME);
+}

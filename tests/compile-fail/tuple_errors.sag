@@ -1,0 +1,17 @@
+// Tuples: an index past the end, interfaces their elements lack, mutability and C
+// (docs/adr/0092-tuples.md, Q609, Q611 and Q612).
+extern "C" {
+  fn takes_pair(pair: (i32, i32)); //~ ERROR E0322
+}
+
+fn main() {
+  const pair = (1, "a");
+  const _past = pair.2; //~ ERROR E0316
+  const _named = pair.first; //~ ERROR E0316
+  const floats = (1.5, 2);
+  const _equal = floats == floats; //~ ERROR E0310
+  const _hashed = floats.hash(); //~ ERROR E0316
+  const _keys = new Map<(f64, i32), bool>(); //~ ERROR E0330
+  const _shown = f"{pair}"; //~ ERROR E0306
+  pair.0 = 2; //~ ERROR E0312
+}

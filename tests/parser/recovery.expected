@@ -75,6 +75,10 @@ module: Module
   item: Fn 926..957 #36 not_extern@942..952 module extern_c=false abstract=false override=false
     body: Block 955..957
   item: Extern 959..1057
+    function: ExternFn 974..995 takes@977..982 module
+      param: Param 983..989 a@983..984
+        ty: PathType 986..989
+          path: Path 986..989 #37 i32@986..989
     function: ExternFn 1013..1055 fine@1016..1020 module
       param: Param 1021..1033 a@1021..1022
         ty: PtrType 1024..1033 mutable=false
@@ -249,7 +253,7 @@ error[E0105]: unknown attribute `@unknown`
    |
 54 | @unknown
    | ^^^^^^^^
-   = help: the attributes are `@export("symbol")` and `@repr(C)`
+   = help: the attributes are `@cfg(condition)`, `@default`, `@export("symbol")`, `@repr(C)` and `@thread_local`
 
 error[E0105]: `@repr(C)` applies to structs
   --> tests/parser/recovery.sag:55:1
@@ -289,11 +293,12 @@ error[E0105]: `@export` applies to `extern "C"` functions
    | ^^^^^^^^^^^^
    = help: write `@export("name") extern "C" fn ...`
 
-error[E0900]: variadic C functions are not implemented yet
+error[E0100]: the extra arguments of a variadic C function are written `...`
   --> tests/parser/recovery.sag:71:20
    |
 71 |   fn takes(a: i32, ..);
    |                    ^^
+   = help: write `...` after the last parameter, as in `fn printf(format: *const c_char, ...)`
 
 error[E0100]: functions in an `extern` block have no body
   --> tests/parser/recovery.sag:72:13

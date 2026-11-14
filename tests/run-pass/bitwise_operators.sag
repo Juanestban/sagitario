@@ -1,0 +1,72 @@
+// The bitwise operators and shifts (docs/adr/0088-bitwise-operators-and-integer-methods.md): `&`,
+// `|`, `^`, `!`, `<<` and `>>`, their assignments, Rust's precedence and constants.
+// expect-stdout: and 8 or 14 xor 6 not 245 -13
+// expect-stdout: bools false true true false
+// expect-stdout: shl 24 -8 -2147483648 255 0
+// expect-stdout: shr 3 -4 -1 2147483647 -4611686018427387904
+// expect-stdout: amounts 16 16 16 2
+// expect-stdout: precedence true 24 7 -1
+// expect-stdout: assign 4 7 1 8 2
+// expect-stdout: constants 4 6 -1 -4 15 255 128
+// expect-stdout: generics 3
+// expect-stdout: flags read+write, not exec
+
+const READ: u32 = 1 << 2;
+const WRITE: u32 = 1 << 1;
+const EXEC: u32 = 1;
+const ALL: i32 = !0;
+const QUARTER: i32 = -16 >> 2;
+const LOW: u8 = 0xF0 ^ 0xFF;
+const FULL: u8 = !0;
+const TOP: u8 = 1 << 7;
+
+/// The values are read at run time, so the C computes them.
+fn value<T>(x: T) -> T {
+  x
+}
+
+fn describe(mode: u32) -> String {
+  const can = if mode & READ != 0 && mode & WRITE != 0 { "read+write" } else { "less" };
+  const exec = if mode & EXEC == 0 { "not exec" } else { "exec" };
+
+  f"{can}, {exec}"
+}
+
+fn main() {
+  const a = value(12u8);
+  const b = value(10u8);
+  const n = value(12i32);
+
+  println(f"and {a & b} or {a | b} xor {a ^ b} not {!b} {!n}");
+  println(f"bools {value(true) & false} {value(true) | false} {value(true) ^ false} {!value(true)}");
+
+  const big = value(255u8);
+  println(f"shl {value(3i32) << 3} {value(-1i32) << 3} {value(1i32) << 31} {big << 0} {big << 7 << 1}");
+  println(f"shr {value(24u8) >> 3} {value(-16i32) >> 2} {value(-1i32) >> 31} {value(-1i32) as u32 >> 1} {value(-9223372036854775807i64 - 1) >> 1}");
+
+  // The amount of a shift is any integer.
+  println(f"amounts {value(1u32) << value(4u8)} {value(1u32) << value(4i64)} {value(1u32) << value(4usize)} {value(16i16) >> value(3u64)}");
+
+  // Rust's precedence: `&` before `==`, `+` before `<<`, `&` before `^` before `|`.
+  println(f"precedence {value(6) & 3 == 2} {1 + 2 << 3} {value(4) | 2 ^ 3 & 1} {!value(0i64)}");
+
+  var x = value(12u8);
+  x &= 6;
+  var y = value(5u8);
+  y |= 2;
+  var z = value(3u8);
+  z ^= 2;
+  var w = value(1u64);
+  w <<= 3;
+  var v = value(16i32);
+  v >>= value(3u8);
+  println(f"assign {x & 255} {y} {z} {w} {v}");
+
+  println(f"constants {READ} {READ | WRITE} {ALL} {QUARTER} {LOW} {FULL} {TOP}");
+
+  // `>>` closing two generic types is still two `>`.
+  const nested: List<List<i32>> = List::from([List::from([1, 2, 3])]);
+  println(f"generics {nested[0].len()}");
+
+  println(f"flags {describe(READ | WRITE)}");
+}

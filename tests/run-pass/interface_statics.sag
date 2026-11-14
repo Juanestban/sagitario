@@ -1,0 +1,79 @@
+// Static functions of interfaces: declared with or without a default, provided by a type's body or
+// an `impl ... for` block, and called through a type, `Self` or a type parameter
+// (docs/adr/0094-conversions-and-defaults.md, Q631).
+// expect-stdout: (Point { x: 0, y: 0 }, "zero of Point") (Red, "the first color") 0 zero of Counter
+// expect-stdout: Point { x: 0, y: 0 } the first color None Some(Wrap { value: "a" }) 2 None
+
+interface Zero {
+  fn zero() -> Self;
+  fn label() -> String { "zero of " + Self::kind() }
+  fn kind() -> String;
+}
+
+interface Parse<T> {
+  fn parse(text: String) -> Option<Self>;
+}
+
+interface Sized2 extends Zero {
+  fn size() -> usize;
+}
+
+struct Point impl Sized2 {
+  pub x: i32;
+  pub y: i32;
+
+  pub fn zero() -> Point { Point { x: 0, y: 0 } }
+  pub fn kind() -> String { "Point" }
+  pub fn size() -> usize { 2 }
+}
+
+enum Color { Red, Green }
+
+impl Zero for Color {
+  fn zero() -> Color { Color::Red }
+  fn kind() -> String { "Color" }
+  fn label() -> String { "the first color" }
+}
+
+class Counter impl Zero {
+  pub var count: i32;
+
+  pub fn new(self, count: i32) { self.count = count; }
+  pub fn zero() -> Counter { new Counter(0) }
+  pub fn kind() -> String { "Counter" }
+}
+
+struct Wrap<T> {
+  pub value: T;
+}
+
+impl<T> Parse<T> for Wrap<T> {
+  fn parse(_text: String) -> Option<Wrap<T>> { None }
+}
+
+impl Parse<String> for Point {
+  fn parse(_text: String) -> Option<Point> { None }
+}
+
+fn zeros<T: Zero>() -> (T, String) {
+  (T::zero(), T::label())
+}
+
+// Through a parent of the bound.
+fn size_of_zero<T: Sized2>() -> usize {
+  const _zero = T::zero();
+
+  T::size()
+}
+
+fn main() {
+  const p: (Point, String) = zeros();
+  const c = zeros<Color>();
+  const k = zeros<Counter>();
+  const direct = Point::zero();
+  const w: Option<Wrap<i32>> = Wrap::parse("1");
+  const v = Some(Wrap<String> { value: "a" }).or(Wrap<String>::parse("a"));
+
+  println(f"{p:?} {c:?} {k.0.count} {k.1}");
+  println(f"{direct:?} {Color::label()} {w:?} {v:?} {size_of_zero<Point>()} {Point::parse("x"):?}");
+}

@@ -1,0 +1,59 @@
+// `contains` and `is_empty` of ranges, `std::ptr`, and the components and other functions of
+// `std::path`, as Rust's (docs/adr/0101-the-rest-of-s2.md, Q705–Q707).
+// expect-stdout: ranges: true false true true | false true false true | true false
+// expect-stdout: ptr: [1, 1, 2, 3, 4] [1, 2, 3, -1, 9] true true 2
+// expect-stdout: components: [RootDir, Normal("a"), Normal("b"), Normal("c")] [CurDir, Normal("x"), ParentDir, Normal("y")] [] [Normal("a")]
+// expect-stdout: root: true true false true | absolute: true false true false
+// expect-stdout: with: dir/a.tar.zip a dir/b.md /a b
+// expect-stdout: strip: Some("b/c") Some("") None None | starts: true false | ends: true false true
+// expect-stdout: shown: . .. x
+
+use std::env;
+use std::path;
+use std::path::Component;
+use std::ptr;
+
+fn main() {
+  // Ranges written directly, with Rust's meaning of their ends.
+  const x = 10;
+
+  print(f"ranges: {(1..20).contains(x)} {(1..10).contains(x)} {(1..=10).contains(x)} {(-5..5).contains(-5)} | ");
+  print(f"{(3..3).contains(3)} {(3..3).is_empty()} {(3..=3).is_empty()} {(4..=3).is_empty()} | ");
+  println(f"{(0u8..=255).contains(255)} {(10..1).contains(5)}");
+
+  // Raw memory.
+  const values: List<i32> = List::from([1, 2, 3, 4, 5]);
+  const other: List<i32> = List::from([0, 0, 0, 0, 0]);
+  const nothing: *const i32 = ptr::null();
+  const none_mut: *mut u8 = ptr::null_mut();
+
+  unsafe {
+    ptr::copy_nonoverlapping(values.as_ptr(), other.as_mut_ptr(), 3);
+    ptr::copy(values.as_ptr(), values.as_mut_ptr().add(1), 4);
+    ptr::write(other.as_mut_ptr().add(4), 9);
+    ptr::write_bytes(other.as_mut_ptr().add(3), 0xFF, 1);
+  }
+
+  println(f"ptr: {values:?} {other:?} {nothing.is_null()} {none_mut.is_null()} {unsafe { ptr::read(values.as_ptr().add(2)) }}");
+
+  // Components.
+  print(f"components: {path::components("/a/./b//c/"):?} {path::components("./x/../y"):?} {path::components(""):?} ");
+  println(f"{path::components("a/."):?}");
+
+  // A root and an absolute path, which on Windows also needs a drive.
+  const windows = env::FAMILY == "windows";
+  const absolute = if windows { "C:\\a\\b" } else { "/a/b" };
+
+  print(f"root: {path::has_root("/a")} {path::has_root(absolute)} {path::has_root("a/b")} {path::is_relative("a/b")} | ");
+  println(f"absolute: {path::is_absolute(absolute)} {path::is_absolute("a/b")} {path::is_absolute(absolute + "/c")} {path::is_absolute("")}");
+
+  // Changing names.
+  print(f"with: {path::with_extension("dir/a.tar.gz", "zip")} {path::with_extension("a.txt", "")} {path::with_file_name("dir/a.txt", "b.md")} ");
+  println(f"{path::with_file_name("/", "a")} {path::with_file_name("a", "b")}");
+
+  // By components, not by text.
+  print(f"strip: {path::strip_prefix("/a/b/c", "/a"):?} {path::strip_prefix("/a/b", "/a/b/"):?} {path::strip_prefix("/ab/c", "/a"):?} {path::strip_prefix("a/b", "/a"):?} | ");
+  print(f"starts: {path::starts_with("a/b/c", "a/b")} {path::starts_with("a/bc", "a/b")} | ");
+  println(f"ends: {path::ends_with("a/b/c", "b/c")} {path::ends_with("a/b/c", "a/c")} {path::ends_with("a/b/c", "")}");
+  println(f"shown: {Component::CurDir} {Component::ParentDir} {Component::Normal("x")}");
+}

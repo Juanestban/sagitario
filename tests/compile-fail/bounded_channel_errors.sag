@@ -1,0 +1,19 @@
+// Bounded channels hold values of one type that can be sent, and their errors are matched as
+// any enum (docs/adr/0098-locks-orderings-and-threads.md, Q675).
+use std::sync::{Channel, ReceiveTimeoutError, TryReceiveError, TrySendError};
+
+fn main() {
+  const _negative: Channel<i32> = Channel::bounded(-1); //~ ERROR E0310
+  const _lists: Channel<List<i32>> = Channel::bounded(1); //~ ERROR E0330, ERROR E0330
+  const ints: Channel<i32> = Channel::bounded(1);
+  const _text = ints.try_send("one"); //~ ERROR E0300
+  const _missing = match ints.try_send(1) { //~ ERROR E0319
+    Ok(_) => 0,
+    Err(TrySendError::Full(value)) => value,
+  };
+  const _wrong = match ints.try_receive() {
+    Ok(value) => value,
+    Err(TryReceiveError::Timeout) => 0, //~ ERROR E0200
+  };
+  const _closed: ReceiveTimeoutError = TryReceiveError::Closed; //~ ERROR E0300
+}

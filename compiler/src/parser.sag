@@ -3,16 +3,22 @@
 //! reported") and the parser recovers at item and statement boundaries.
 
 use pkg::ast::{
-  ArrayLen, BinaryOp, Block, ClassDecl, ConstDecl, Discriminant, EnumDecl, Export, Expr, ExprKind, ExternBlock, ExternFn, FieldDecl, FieldInit, FieldPattern,
+  ArrayLen, BinaryOp, Include, Block, ClassDecl, ConstDecl, StaticDecl, Discriminant, EnumDecl, Export, Expr, ExprKind, ExternBlock, ExternFn, FieldDecl, FieldInit, FieldPattern,
   FnDecl, GenericParam, Ident, ImplBlock, InterfaceDecl, Item, LambdaParam, LetStmt, MatchArm, Module, Param, Path, Pattern, PatternKind, Stmt,
-  StructDecl, TemplatePart, TypeArgs, TypeExpr, TypeExprKind, UnaryOp, UseDecl, UseTree, UseTreeKind, VariantDecl, VariantFieldDecl,
+  StructDecl, TargetInfo, FormatSpec, TemplatePart, TupleShape, TypeArgs, TypeExpr, TypeExprKind, UnaryOp, UseDecl, UseTree, UseTreeKind, VariantDecl, VariantFieldDecl,
   VariantFields, Visibility,
 };
+use pkg::cfg;
+use pkg::cfg::{Cfg, CfgKind};
 use pkg::diagnostics::{Diagnostic, Diagnostics};
 use pkg::diagnostics::codes;
 use pkg::lexer;
 use pkg::lexer::{Token, TokenKind};
 use pkg::span::Span;
+use std::env;
+use std::fs;
+use std::io::ErrorKind;
+use std::path;
 
 /// The next node id, shared by the parsers of a module and of its template interpolations.
 pub class Ids {
@@ -23,24 +29,38 @@ pub class Ids {
   }
 }
 
-pub fn parse_module(file: u32, tokens: List<Token>, diagnostics: Diagnostics) -> Module {
-  const parser = new Parser(file, tokens, new Ids(0), diagnostics);
+/// Parses a module for `target`, which the conditions of `@cfg` are evaluated for: an item whose
+/// condition does not hold is parsed and left out (docs/adr/0085-conditional-compilation-and-std-time.md).
+pub fn parse_module(file: u32, tokens: List<Token>, target: TargetInfo, diagnostics: Diagnostics) -> Module {
+  const parser = new Parser(file, tokens, new Ids(0), target, diagnostics);
 
   parser.module(file)
 }
 
 /// Parses one module of a package; node ids continue from `ids`, so they stay unique across the
-/// modules of the package.
-pub fn parse_module_from(file: u32, tokens: List<Token>, ids: Ids, diagnostics: Diagnostics) -> Module {
-  const parser = new Parser(file, tokens, ids, diagnostics);
+/// modules of the package. `location` is the file on disk, which the paths of `include_str!`,
+/// `include_bytes!` and `include!` are relative to; an embedded module has none.
+pub fn parse_module_from(file: u32, tokens: List<Token>, ids: Ids, target: TargetInfo, diagnostics: Diagnostics, location: Option<String>, env: Map<String, String>) -> Module {
+  const parser = new Parser(file, tokens, ids, target, diagnostics);
 
-  parser.module(file)
+  parser.location = location;
+  parser.env = env;
+
+  var module = parser.module(file);
+
+  module.location = location;
+  module
 }
+
+/// The built-in macros, as Rust's (docs/adr/0103-build-scripts-and-binding-generation.md, Q723).
+pub const MACROS: String = "include include_str include_bytes concat env";
 
 /// An attribute as written; `Parser::apply_attributes` checks it against its item.
 struct Attribute {
   pub name: Ident;
   pub args: List<AttributeArg>;
+  /// The condition of `@cfg(...)`, when it is well formed.
+  pub cfg: Option<Cfg>;
   pub span: Span;
 }
 
@@ -62,6 +82,12 @@ enum AttributeTarget {
   Member,
   Const,
   Impl,
+  Static,
+  Use,
+  /// A function inside an `extern "C"` block.
+  ExternBlockFn,
+  /// A variant of an enum.
+  Variant,
 }
 
 /// What the attributes of an item set.
@@ -70,6 +96,10 @@ struct Applied {
   pub repr_c: bool;
   /// The representation of an enum: an integer type, or `C`.
   pub repr: Option<Ident>;
+  /// `@thread_local` on a static.
+  pub thread_local: Option<Span>;
+  /// `@default` on a struct, an enum or a variant (docs/adr/0094-conversions-and-defaults.md).
+  pub default: Option<Span>;
 }
 
 /// The parameters and result of a function type, and where it ends.
@@ -94,13 +124,18 @@ enum InfixKind {
 /// The integer types, which an enum may take as its representation.
 const INT_TYPES: String = "i8 i16 i32 i64 isize u8 u16 u32 u64 usize";
 
+// Rust's precedence (docs/adr/0088-bitwise-operators-and-integer-methods.md, Q575).
 const PREC_RANGE: u8 = 1;
 const PREC_OR: u8 = 2;
 const PREC_AND: u8 = 3;
 const PREC_COMPARE: u8 = 4;
-const PREC_ADD: u8 = 5;
-const PREC_MUL: u8 = 6;
-const PREC_AS: u8 = 7;
+const PREC_BIT_OR: u8 = 5;
+const PREC_BIT_XOR: u8 = 6;
+const PREC_BIT_AND: u8 = 7;
+const PREC_SHIFT: u8 = 8;
+const PREC_ADD: u8 = 9;
+const PREC_MUL: u8 = 10;
+const PREC_AS: u8 = 11;
 
 fn binary(prec: u8, op: BinaryOp) -> Option<Infix> {
   Some(Infix { prec: prec, kind: InfixKind::Binary(op) })
@@ -124,6 +159,10 @@ fn infix(kind: TokenKind) -> Option<Infix> {
       "*" => binary(PREC_MUL, BinaryOp::Mul),
       "/" => binary(PREC_MUL, BinaryOp::Div),
       "%" => binary(PREC_MUL, BinaryOp::Rem),
+      "|" => binary(PREC_BIT_OR, BinaryOp::BitOr),
+      "^" => binary(PREC_BIT_XOR, BinaryOp::BitXor),
+      "&" => binary(PREC_BIT_AND, BinaryOp::BitAnd),
+      "<<" => binary(PREC_SHIFT, BinaryOp::Shl),
       _ => None,
     },
     TokenKind::Keyword(text) if text == "as" => Some(Infix { prec: PREC_AS, kind: InfixKind::As }),
@@ -145,6 +184,10 @@ fn assignment_op(kind: TokenKind) -> Option<Assignment> {
       "*=" => Some(Assignment { op: Some(BinaryOp::Mul) }),
       "/=" => Some(Assignment { op: Some(BinaryOp::Div) }),
       "%=" => Some(Assignment { op: Some(BinaryOp::Rem) }),
+      "&=" => Some(Assignment { op: Some(BinaryOp::BitAnd) }),
+      "|=" => Some(Assignment { op: Some(BinaryOp::BitOr) }),
+      "^=" => Some(Assignment { op: Some(BinaryOp::BitXor) }),
+      "<<=" => Some(Assignment { op: Some(BinaryOp::Shl) }),
       _ => None,
     },
     _ => None,
@@ -212,8 +255,24 @@ pub fn describe(kind: TokenKind) -> String {
   }
 }
 
+/// `name!(args)`, before it is expanded.
+struct MacroCall {
+  pub name: Ident;
+  pub args: List<Expr>;
+  pub span: Span;
+}
+
+/// A binding named in a format specifier, and where the specifier goes on after its `$`.
+struct SpecName {
+  pub expr: Expr;
+  pub next: usize;
+}
+
 enum Member {
   Field(FieldDecl),
+  /// `pub const NAME: Type = value;`, a constant of the type
+  /// (docs/adr/0099-associated-and-composite-constants.md, Q683).
+  Const(ConstDecl),
   Fn(FnDecl),
 }
 
@@ -229,6 +288,8 @@ enum Body {
 
 enum StmtOrTail {
   Stmt(Stmt),
+  /// The statements a declaration with a tuple pattern becomes.
+  Stmts(List<Stmt>),
   /// An expression without `;`: the block's value if `}` follows, otherwise a block-like
   /// expression statement.
   Tail(Expr),
@@ -240,6 +301,8 @@ class Parser {
   prv const eof: Token;
   prv const ids: Ids;
   prv const diagnostics: Diagnostics;
+  /// What the conditions of `@cfg` are evaluated for.
+  prv const target: TargetInfo;
   /// Set in the condition of `if`/`while` and the iterable of `for`, where `{` starts the body.
   prv var no_struct_literal: bool;
   /// Set in the guard of a `match` arm, where `name =>` ends the guard instead of starting a
@@ -247,8 +310,19 @@ class Parser {
   prv var in_guard: bool;
   /// Whether the type being parsed may be a slice `[T]`: right after the `&` of a parameter's type.
   prv var slice_allowed: bool;
+  /// The C globals of the `extern` block being parsed, which become items of the module.
+  prv var extern_statics: List<Item>;
+  /// The file being parsed, on disk.
+  pub var location: Option<String>;
+  /// The variables `env!` reads for the package of the file before the compiler's environment:
+  /// Nova's `OUT_DIR` for each package (docs/adr/0103-build-scripts-and-binding-generation.md, Q728).
+  pub var env: Map<String, String>;
+  /// The files of the `include!`s of the module.
+  prv var includes: List<Include>;
+  /// The names of the macros called, shared with the parsers of template interpolations.
+  prv var macros: List<Span>;
 
-  pub fn new(self, file: u32, tokens: List<Token>, ids: Ids, diagnostics: Diagnostics) {
+  pub fn new(self, file: u32, tokens: List<Token>, ids: Ids, target: TargetInfo, diagnostics: Diagnostics) {
     // Documentation comments are not processed in the MVP (docs/spec/01-lexical.md).
     const kept: List<Token> = new List();
 
@@ -269,9 +343,15 @@ class Parser {
     self.eof = Token { kind: TokenKind::Eof, span: eof_span };
     self.ids = ids;
     self.diagnostics = diagnostics;
+    self.target = target;
     self.no_struct_literal = false;
     self.in_guard = false;
     self.slice_allowed = false;
+    self.extern_statics = new List();
+    self.location = None;
+    self.env = new Map<String, String>();
+    self.includes = new List();
+    self.macros = new List();
   }
 
   prv fn current(self) -> Token {
@@ -295,6 +375,37 @@ class Parser {
 
   prv fn at(self, text: String) -> bool {
     is_punct(self.kind(), text)
+  }
+
+  /// Whether the token after the current one is `text`, with nothing between them.
+  prv fn joined(self, text: String) -> bool {
+    match self.tokens.get(self.pos + 1) {
+      Some(next) => is_punct(next.kind, text) && next.span.start == self.span().end,
+      None => false,
+    }
+  }
+
+  /// The infix operator at the current token. `>>` is two `>` with nothing between them, and
+  /// `>>=` a `>` joined to a `>=`, an assignment (docs/adr/0088-bitwise-operators-and-integer-methods.md, Q578).
+  prv fn infix_here(self) -> Option<Infix> {
+    if self.at(">") && self.joined(">") {
+      return binary(PREC_SHIFT, BinaryOp::Shr);
+    }
+
+    if self.at(">") && self.joined(">=") {
+      return None;
+    }
+
+    infix(self.kind())
+  }
+
+  /// The assignment at the current token, `>>=` included.
+  prv fn assignment_here(self) -> Option<Assignment> {
+    if self.at(">") && self.joined(">=") {
+      return Some(Assignment { op: Some(BinaryOp::Shr) });
+    }
+
+    assignment_op(self.kind())
   }
 
   prv fn at_keyword(self, text: String) -> bool {
@@ -379,18 +490,53 @@ class Parser {
 
     while !self.at_eof() {
       const start = self.pos;
+      const item_start = self.span();
 
-      if self.at_keyword("use") {
-        match self.use_decl() {
-          Ok(decl) => uses.push(decl),
-          Err(_) => self.skip_item(),
+      match self.attributes() {
+        Ok(attributes) => {
+          const kept = self.cfg_holds(attributes);
+
+          if self.at_macro("include") {
+            match self.include_item() {
+              Ok(include) => {
+                self.apply_attributes(attributes, AttributeTarget::Use);
+
+                if kept {
+                  self.includes.push(include);
+                }
+              }
+              Err(_) => self.skip_item(),
+            }
+          } else if self.at_keyword("use") {
+            match self.use_decl() {
+              Ok(decl) => {
+                self.apply_attributes(attributes, AttributeTarget::Use);
+
+                if kept {
+                  uses.push(decl);
+                }
+              }
+              Err(_) => self.skip_item(),
+            }
+          } else {
+            match self.item(item_start, attributes) {
+              Ok(Some(item)) => {
+                if kept {
+                  items.push(item);
+
+                  for global in self.extern_statics {
+                    items.push(global);
+                  }
+                }
+
+                self.extern_statics = new List();
+              }
+              Ok(None) => {}
+              Err(_) => self.skip_item(),
+            }
+          }
         }
-      } else {
-        match self.item() {
-          Ok(Some(item)) => items.push(item),
-          Ok(None) => {}
-          Err(_) => self.skip_item(),
-        }
+        Err(_) => self.skip_item(),
       }
 
       if self.pos == start {
@@ -398,7 +544,240 @@ class Parser {
       }
     }
 
-    Module { file: file, path: new List(), package: 0, location: None, uses: uses, items: items }
+    Module { file: file, path: new List(), package: 0, location: None, uses: uses, items: items, includes: self.includes, macros: self.macros }
+  }
+
+  /// Whether a call of the macro `name` starts here: `name!(`.
+  prv fn at_macro(self, name: String) -> bool {
+    if let TokenKind::Ident(found) = self.kind() {
+      return found == name && is_punct(self.nth_kind(1), "!") && is_punct(self.nth_kind(2), "(");
+    }
+
+    false
+  }
+
+  /// `include!(path);` where an item may be (Q724).
+  prv fn include_item(self) -> Result<Include, ()> {
+    const start = self.span();
+    const call = self.macro_call()?;
+    const end = self.expect(";")?.span;
+    const span = start.to(end);
+
+    if call.args.len() != 1 {
+      return Err(self.macro_error(call.span, "`include!` takes one argument: the path of a file", Some("write `include!(\"file.sag\");`")));
+    }
+
+    const given = self.macro_text(call.args[0], "include!")?;
+
+    match self.macro_path(call.span, given, "include!") {
+      Some(full) => Ok(Include { path: full, span: span }),
+      None => Err(()),
+    }
+  }
+
+  /// `name!(args)`: the name and the arguments, each one expanded already.
+  prv fn macro_call(self) -> Result<MacroCall, ()> {
+    const name = self.ident("the name of a macro")?;
+    const bang = self.expect("!")?.span;
+
+    self.macros.push(name.span.to(bang));
+    self.expect("(")?;
+
+    const args: List<Expr> = new List();
+
+    while !self.at(")") && !self.at_eof() {
+      args.push(self.expr()?);
+
+      if !self.eat(",") {
+        break;
+      }
+    }
+
+    const end = self.expect(")")?.span;
+
+    Ok(MacroCall { name: name, args: args, span: name.span.to(end) })
+  }
+
+  /// A built-in macro written as an expression, expanded to the literal it gives (Q723, Q725,
+  /// Q726).
+  prv fn macro_expr(self) -> Result<Expr, ()> {
+    const call = self.macro_call()?;
+    const name = call.name.name;
+    const span = call.span;
+
+    if name == "concat" {
+      const text = new StringBuilder();
+
+      for arg in call.args {
+        text.append(self.concat_part(arg)?);
+      }
+
+      return Ok(self.expr_node(ExprKind::Str(text.to_string()), span));
+    }
+
+    if name == "env" {
+      if call.args.is_empty() || call.args.len() > 2 {
+        return Err(self.macro_error(span, "`env!` takes the name of a variable, and optionally a message", Some("write `env!(\"NAME\")` or `env!(\"NAME\", \"message\")`")));
+      }
+
+      const variable = self.macro_text(call.args[0], "env!")?;
+      const message: Option<String> = if call.args.len() == 2 { Some(self.macro_text(call.args[1], "env!")?) } else { None };
+
+      const found = match self.env.get(variable) {
+        Some(value) => Some(value),
+        None => env::variable(variable),
+      };
+
+      return match found {
+        Some(value) => Ok(self.expr_node(ExprKind::Str(value), span)),
+        None => {
+          const text = match message {
+            Some(given) => given,
+            None => "the environment variable `" + variable + "` is not set",
+          };
+
+          self.diagnostics.push(
+            Diagnostic::error(codes::INVALID_MACRO, span, text)
+              .with_note("`env!` reads the environment of the compiler, when the program is compiled")
+              .with_help("set `" + variable + "` before compiling"),
+          );
+
+          Err(())
+        }
+      };
+    }
+
+    if name == "include_str" || name == "include_bytes" {
+      const macro_name = name + "!";
+
+      if call.args.len() != 1 {
+        return Err(self.macro_error(span, "`" + macro_name + "` takes one argument: the path of a file", None));
+      }
+
+      const given = self.macro_text(call.args[0], macro_name)?;
+      const full = match self.macro_path(span, given, macro_name) {
+        Some(found) => found,
+        None => return Err(()),
+      };
+
+      if name == "include_str" {
+        return match fs::read_to_string(full) {
+          Ok(text) => Ok(self.expr_node(ExprKind::Str(text), span)),
+          Err(problem) => Err(self.unreadable(call.args[0].span, full, problem.kind(), true)),
+        };
+      }
+
+      const bytes = match fs::read(full) {
+        Ok(found) => found,
+        Err(problem) => return Err(self.unreadable(call.args[0].span, full, problem.kind(), false)),
+      };
+
+      return Ok(self.byte_array(bytes, span));
+    }
+
+    if name == "include" {
+      return Err(self.macro_error(span, "`include!` puts the items of a file in the module, so it is written where an item may be", Some("move it to the module level: `include!(\"file.sag\");`")));
+    }
+
+    Err(self.macro_error(call.name.span, "there is no macro `" + name + "!`", Some("the built-in macros are `include!`, `include_str!`, `include_bytes!`, `concat!` and `env!`; programs cannot define macros")))
+  }
+
+  /// `[1u8, 2u8, ...]`, the bytes of `include_bytes!`, or `[0u8; 0]` for none.
+  prv fn byte_array(self, bytes: List<u8>, span: Span) -> Expr {
+    if bytes.is_empty() {
+      const zero = self.expr_node(ExprKind::Int { value: "0", suffix: Some("u8") }, span);
+
+      return self.expr_node(ExprKind::ArrayRepeat { value: zero, len: ArrayLen { value: "0", suffix: None, span: span } }, span);
+    }
+
+    const elems: List<Expr> = new List();
+
+    for byte in bytes {
+      elems.push(self.expr_node(ExprKind::Int { value: `${byte}`, suffix: Some("u8") }, span));
+    }
+
+    self.expr_node(ExprKind::ArrayLit(elems), span)
+  }
+
+  /// A literal joined by `concat!`: strings, integers, floats, characters and `bool`s, also
+  /// negative numbers.
+  prv fn concat_part(self, arg: Expr) -> Result<String, ()> {
+    match arg.kind {
+      ExprKind::Str(text) => Ok(text),
+      ExprKind::Int { value, .. } => Ok(value),
+      ExprKind::Float { text, .. } => Ok(text),
+      ExprKind::Char(c) => Ok(`${c}`),
+      ExprKind::Bool(value) => Ok(if value { "true" } else { "false" }),
+      ExprKind::Unary { op, operand } => {
+        if op == UnaryOp::Neg {
+          match operand.kind {
+            ExprKind::Int { value, .. } => return Ok("-" + value),
+            ExprKind::Float { text, .. } => return Ok("-" + text),
+            _ => {}
+          }
+        }
+
+        Err(self.macro_error(arg.span, "`concat!` joins literals: strings, numbers, characters and `bool`s", None))
+      }
+      _ => Err(self.macro_error(arg.span, "`concat!` joins literals: strings, numbers, characters and `bool`s", None)),
+    }
+  }
+
+  /// The text of a macro's argument, which must be a string literal or a macro giving one.
+  prv fn macro_text(self, arg: Expr, macro_name: String) -> Result<String, ()> {
+    match arg.kind {
+      ExprKind::Str(text) => Ok(text),
+      _ => Err(self.macro_error(arg.span, "the arguments of `" + macro_name + "` are string literals, or `concat!` and `env!` of them", None)),
+    }
+  }
+
+  /// The file a macro names: an absolute path, or one relative to the directory of the file
+  /// being parsed.
+  prv fn macro_path(self, span: Span, given: String, macro_name: String) -> Option<String> {
+    if path::is_absolute(given) {
+      return Some(given);
+    }
+
+    match self.location {
+      Some(file) => match path::parent(file) {
+        Some(dir) => Some(path::join(dir, given)),
+        None => Some(given),
+      },
+      None => {
+        self.macro_error(span, "`" + macro_name + "` needs a source file on disk, which its relative path starts from", None);
+
+        None
+      }
+    }
+  }
+
+  /// A file a macro cannot read, with the reason by kind: the system's message depends on the
+  /// platform.
+  prv fn unreadable(self, span: Span, full: String, kind: ErrorKind, text: bool) {
+    const reason = match kind {
+      ErrorKind::NotFound => "the file does not exist",
+      ErrorKind::PermissionDenied => "permission denied",
+      ErrorKind::InvalidData => "the file is not UTF-8",
+      _ => "the file cannot be read",
+    };
+    var diagnostic = Diagnostic::error(codes::INVALID_INCLUDE, span, "cannot read `" + full + "`: " + reason)
+      .with_note("a relative path starts from the directory of this source file");
+
+    if text {
+      diagnostic = diagnostic.with_help("`include_str!` reads UTF-8 text; `include_bytes!` reads any file");
+    }
+
+    self.diagnostics.push(diagnostic);
+  }
+
+  prv fn macro_error(self, span: Span, message: String, help: Option<String>) {
+    var diagnostic = Diagnostic::error(codes::INVALID_MACRO, span, message);
+
+    if let Some(text) = help {
+      diagnostic = diagnostic.with_help(text);
+    }
+
+    self.diagnostics.push(diagnostic);
   }
 
   /// `use tree;`
@@ -499,9 +878,8 @@ class Parser {
     }
   }
 
-  prv fn item(self) -> Result<Option<Item>, ()> {
-    const start = self.span();
-    const attributes = self.attributes()?;
+  /// The item after `attributes`, which start at `start`.
+  prv fn item(self, start: Span, attributes: List<Attribute>) -> Result<Option<Item>, ()> {
     const visibility = self.visibility();
     const kind = self.kind();
 
@@ -517,8 +895,10 @@ class Parser {
 
     if is_keyword(kind, "struct") {
       var decl = self.struct_decl(visibility, start, false)?;
+      const applied = self.apply_attributes(attributes, AttributeTarget::Struct);
 
-      decl.repr_c = self.apply_attributes(attributes, AttributeTarget::Struct).repr_c;
+      decl.repr_c = applied.repr_c;
+      decl.default = applied.default;
 
       return Ok(Some(Item::Struct(decl)));
     }
@@ -526,8 +906,14 @@ class Parser {
     // `union` is a keyword only before the name of a union, as in Rust.
     if is_contextual(kind, "union") && is_ident(self.nth_kind(1)) {
       var decl = self.struct_decl(visibility, start, true)?;
+      const applied = self.apply_attributes(attributes, AttributeTarget::Struct);
 
-      decl.repr_c = self.apply_attributes(attributes, AttributeTarget::Struct).repr_c;
+      decl.repr_c = applied.repr_c;
+
+      // The fields of a union share their memory: none is the default of the others.
+      if let Some(span) = applied.default {
+        self.attribute_error(span, "`@default` applies to structs and enums, not to unions", None);
+      }
 
       if !decl.repr_c {
         self.diagnostics.push(
@@ -540,8 +926,10 @@ class Parser {
 
     if is_keyword(kind, "enum") {
       var decl = self.enum_decl(visibility, start)?;
+      const applied = self.apply_attributes(attributes, AttributeTarget::Enum);
 
-      decl.repr = self.apply_attributes(attributes, AttributeTarget::Enum).repr;
+      decl.repr = applied.repr;
+      decl.default = applied.default;
 
       return Ok(Some(Item::Enum(decl)));
     }
@@ -582,6 +970,25 @@ class Parser {
       self.apply_attributes(attributes, AttributeTarget::Const);
 
       return Ok(Some(Item::Const(decl)));
+    }
+
+    if is_keyword(kind, "static") {
+      var decl = self.static_decl(visibility, start)?;
+
+      // An immutable value per thread is a `static` or a `const` (docs/adr/0083-global-state.md, Q529).
+      if let Some(span) = self.apply_attributes(attributes, AttributeTarget::Static).thread_local {
+        if decl.mutable {
+          decl.thread_local = true;
+        } else {
+          self.attribute_error(
+            span,
+            "`@thread_local` applies to `static var`",
+            Some("a `static` never changes, so one value serves every thread; write `static var` for one value per thread"),
+          );
+        }
+      }
+
+      return Ok(Some(Item::Static(decl)));
     }
 
     if is_keyword(kind, "impl") {
@@ -682,6 +1089,54 @@ class Parser {
     Ok(ConstDecl { visibility: visibility, name: name, ty: ty, value: value, span: start.to(end) })
   }
 
+  /// `static NAME: Type = value;` or `static var ...` at module level; the type is required
+  /// (docs/adr/0083-global-state.md).
+  prv fn static_decl(self, visibility: Visibility, start: Span) -> Result<StaticDecl, ()> {
+    self.expect_keyword("static")?;
+
+    const mutable = self.eat_keyword("var");
+
+    const name = self.ident("a static name")?;
+
+    if !self.at(":") {
+      self.diagnostics.push(
+        Diagnostic::error(codes::UNEXPECTED_TOKEN, self.span(), "a `static` needs a type")
+          .with_help("write it after the name: `static " + name.name + ": i32 = ...;`"),
+      );
+
+      return Err(());
+    }
+
+    self.advance();
+
+    const ty = self.type_expr()?;
+
+    self.expect("=")?;
+
+    const value = self.expr()?;
+    const end = self.expect(";")?.span;
+    const body = Block { stmts: new List(), tail: Some(value), span: value.span };
+    const init = FnDecl {
+      id: self.next_id(),
+      extern_c: false,
+      export: None,
+      visibility: Visibility::Module,
+      is_abstract: false,
+      is_override: false,
+      is_async: false,
+      is_unsafe: false,
+      name: name,
+      generics: new List(),
+      self_param: None,
+      params: new List(),
+      return_type: Some(ty),
+      body: body,
+      span: start.to(end),
+    };
+
+    Ok(StaticDecl { visibility: visibility, mutable: mutable, thread_local: false, extern_c: false, name: name, ty: ty, init: init, span: start.to(end) })
+  }
+
   /// `@name` or `@name(arg, ...)` before an item; the arguments are string literals or names.
   prv fn attributes(self) -> Result<List<Attribute>, ()> {
     const attributes: List<Attribute> = new List();
@@ -691,6 +1146,23 @@ class Parser {
       const name = self.ident("an attribute name")?;
       const args: List<AttributeArg> = new List();
       var end = name.span;
+
+      if name.name == "cfg" {
+        if !self.eat("(") {
+          self.attribute_error(start.to(end), "`@cfg` takes a condition: `@cfg(windows)`", None);
+          attributes.push(Attribute { name: name, args: args, cfg: None, span: start.to(end) });
+          continue;
+        }
+
+        const condition = self.cfg_condition()?;
+
+        end = self.expect(")")?.span;
+
+        const checked: Option<Cfg> = if cfg::check(condition, self.diagnostics) { Some(condition) } else { None };
+
+        attributes.push(Attribute { name: name, args: args, cfg: checked, span: start.to(end) });
+        continue;
+      }
 
       if self.eat("(") {
         while !self.at(")") {
@@ -711,23 +1183,89 @@ class Parser {
         end = self.expect(")")?.span;
       }
 
-      attributes.push(Attribute { name: name, args: args, span: start.to(end) });
+      attributes.push(Attribute { name: name, args: args, cfg: None, span: start.to(end) });
     }
 
     Ok(attributes)
   }
 
+  /// A condition of `@cfg`: `name`, `name = "value"`, or `all(...)`, `any(...)` or `not(...)`.
+  prv fn cfg_condition(self) -> Result<Cfg, ()> {
+    const name = self.ident("a condition such as `windows`")?;
+
+    if self.eat("=") {
+      const value = match self.kind() {
+        TokenKind::Str(text) => text,
+        _ => return Err(self.unexpected("a string such as `\"linux\"`")),
+      };
+      const end = self.advance().span;
+
+      return Ok(new Cfg(CfgKind::Value { key: name.name, value: value }, name.span.to(end)));
+    }
+
+    if !self.at("(") {
+      return Ok(new Cfg(CfgKind::Name(name.name), name.span));
+    }
+
+    if !cfg::COMBINATORS.split(" ").contains(name.name) {
+      self.attribute_error(name.span, "unknown combination `" + name.name + "(...)` in `@cfg`", Some("conditions are combined with `all(...)`, `any(...)` and `not(...)`"));
+
+      return Err(());
+    }
+
+    self.advance();
+
+    const conditions: List<Cfg> = new List();
+
+    while !self.at(")") {
+      conditions.push(self.cfg_condition()?);
+
+      if !self.eat(",") {
+        break;
+      }
+    }
+
+    const end = self.expect(")")?.span;
+    const span = name.span.to(end);
+
+    if name.name == "not" {
+      if conditions.len() != 1 {
+        self.attribute_error(span, "`not` takes one condition", Some("write `not(any(a, b))` to negate several"));
+
+        return Err(());
+      }
+
+      return Ok(new Cfg(CfgKind::Not(conditions[0]), span));
+    }
+
+    if name.name == "all" { Ok(new Cfg(CfgKind::All(conditions), span)) } else { Ok(new Cfg(CfgKind::Any(conditions), span)) }
+  }
+
+  /// Whether the item after `attributes` is kept for the target: it has no `@cfg`, or its condition
+  /// holds. A malformed `@cfg` was reported, and keeps the item.
+  prv fn cfg_holds(self, attributes: List<Attribute>) -> bool {
+    for attribute in attributes {
+      if let Some(condition) = attribute.cfg {
+        return cfg::holds(condition, self.target);
+      }
+    }
+
+    true
+  }
+
   /// Checks the attributes of an item: `@export("symbol")` on an `extern "C" fn`, `@repr(C)` on
   /// a struct. Errors are reported and the attribute is ignored.
   prv fn apply_attributes(self, attributes: List<Attribute>, target: AttributeTarget) -> Applied {
-    var applied = Applied { export: None, repr_c: false, repr: None };
+    var applied = Applied { export: None, repr_c: false, repr: None, thread_local: None, default: None };
     const seen: List<String> = new List();
 
     for attribute in attributes {
       const name = attribute.name.name;
 
       if seen.contains(name) {
-        self.attribute_error(attribute.span, "the attribute `@" + name + "` is repeated", None);
+        const help: Option<String> = if name == "cfg" { Some("combine the conditions in one: `@cfg(all(a, b))`") } else { None };
+
+        self.attribute_error(attribute.span, "the attribute `@" + name + "` is repeated", help);
         continue;
       }
 
@@ -745,6 +1283,20 @@ class Parser {
         AttributeTarget::Enum => true,
         _ => false,
       };
+      const is_static = match target {
+        AttributeTarget::Static => true,
+        _ => false,
+      };
+      const is_variant = match target {
+        AttributeTarget::Variant => true,
+        _ => false,
+      };
+
+      // A variant takes `@default` only.
+      if is_variant && name != "default" {
+        self.attribute_error(attribute.span, "a variant takes only `@default`", None);
+        continue;
+      }
 
       if name == "export" && extern_fn {
         var symbol: Option<String> = None;
@@ -792,14 +1344,47 @@ class Parser {
           }
           None => self.attribute_error(attribute.span, "the representation of an enum is an integer type, such as `@repr(i32)`, or `@repr(C)`", None),
         }
+      } else if name == "cfg" {
+        const is_member = match target {
+          AttributeTarget::Member => true,
+          _ => false,
+        };
+
+        if is_member {
+          self.attribute_error(
+            attribute.span,
+            "`@cfg` applies to module-level items and to the functions of `extern` blocks",
+            Some("choose the whole struct or class with `@cfg`, once per condition"),
+          );
+        }
+      } else if name == "thread_local" && is_static {
+        if attribute.args.is_empty() {
+          applied.thread_local = Some(attribute.span);
+        } else {
+          self.attribute_error(attribute.span, "`@thread_local` takes no arguments", None);
+        }
+      } else if name == "default" && (is_struct || is_enum || is_variant) {
+        if attribute.args.is_empty() {
+          applied.default = Some(attribute.span);
+        } else {
+          self.attribute_error(attribute.span, "`@default` takes no arguments", None);
+        }
+      } else if name == "default" {
+        self.attribute_error(attribute.span, "`@default` applies to structs, enums and the variants of enums", Some("implement `Default` for other types: `impl Default for Name { fn default() -> Name { ... } }`"));
       } else if name == "test" || name == "deprecated" {
         self.diagnostics.push(Diagnostic::error(codes::NOT_IMPLEMENTED, attribute.span, "the attribute `@" + name + "` is not implemented yet"));
       } else if name == "export" {
         self.attribute_error(attribute.span, "`@export` applies to `extern \"C\"` functions", Some("write `@export(\"name\") extern \"C\" fn ...`"));
       } else if name == "repr" {
         self.attribute_error(attribute.span, "`@repr(C)` applies to structs", None);
+      } else if name == "thread_local" {
+        self.attribute_error(attribute.span, "`@thread_local` applies to `static var`", None);
       } else {
-        self.attribute_error(attribute.span, "unknown attribute `@" + name + "`", Some("the attributes are `@export(\"symbol\")` and `@repr(C)`"));
+        self.attribute_error(
+          attribute.span,
+          "unknown attribute `@" + name + "`",
+          Some("the attributes are `@cfg(condition)`, `@default`, `@export(\"symbol\")`, `@repr(C)` and `@thread_local`"),
+        );
       }
     }
 
@@ -858,7 +1443,8 @@ class Parser {
       const before = self.pos;
 
       match self.extern_fn() {
-        Ok(function) => functions.push(function),
+        Ok(Some(function)) => functions.push(function),
+        Ok(None) => {}
         Err(_) => self.skip_member(),
       }
 
@@ -870,6 +1456,51 @@ class Parser {
     const end = self.expect("}")?.span;
 
     Ok(Item::Extern(ExternBlock { functions: functions, span: start.to(end) }))
+  }
+
+  /// `static NAME: T;` or `static var NAME: T;` inside an `extern "C"` block: a global variable of
+  /// C (docs/adr/0086-c-globals-and-std-io.md, Q557). Its function has no body, which nothing
+  /// checks or calls: it is marked abstract, as a method without a body is.
+  prv fn extern_static(self, visibility: Visibility, start: Span) -> Result<StaticDecl, ()> {
+    self.expect_keyword("static")?;
+
+    const mutable = self.eat_keyword("var");
+    const name = self.ident("the name of a C global")?;
+
+    self.expect(":")?;
+
+    const ty = self.type_expr()?;
+
+    if self.at("=") {
+      self.diagnostics.push(
+        Diagnostic::error(codes::UNEXPECTED_TOKEN, self.span(), "a C global has no value in Sagitario")
+          .with_help("C defines its value; end the declaration with `;`"),
+      );
+
+      return Err(());
+    }
+
+    const end = self.expect(";")?.span;
+    const span = start.to(end);
+    const init = FnDecl {
+      id: self.next_id(),
+      extern_c: false,
+      export: None,
+      visibility: Visibility::Module,
+      is_abstract: true,
+      is_override: false,
+      is_async: false,
+      is_unsafe: false,
+      name: name,
+      generics: new List(),
+      self_param: None,
+      params: new List(),
+      return_type: Some(ty),
+      body: Block { stmts: new List(), tail: None, span: span },
+      span: span,
+    };
+
+    Ok(StaticDecl { visibility: visibility, mutable: mutable, thread_local: false, extern_c: true, name: name, ty: ty, init: init, span: span })
   }
 
   /// The ABI string after `extern`, which must be `"C"`.
@@ -888,10 +1519,24 @@ class Parser {
     }
   }
 
-  /// `fn name(params) -> Ret;` inside an `extern "C"` block.
-  prv fn extern_fn(self) -> Result<ExternFn, ()> {
+  /// `fn name(params) -> Ret;` inside an `extern "C"` block, or `None` if its `@cfg` does not hold
+  /// or it is a C global, which goes to `extern_statics`.
+  prv fn extern_fn(self) -> Result<Option<ExternFn>, ()> {
     const start = self.span();
+    const attributes = self.attributes()?;
     const visibility = self.visibility();
+
+    if self.at_keyword("static") {
+      const global = self.extern_static(visibility, start)?;
+
+      self.apply_attributes(attributes, AttributeTarget::ExternBlockFn);
+
+      if self.cfg_holds(attributes) {
+        self.extern_statics.push(Item::Static(global));
+      }
+
+      return Ok(None);
+    }
 
     self.expect_keyword("fn")?;
 
@@ -900,9 +1545,26 @@ class Parser {
     self.expect("(")?;
 
     const params = self.params()?;
+    var variadic = false;
 
-    if self.at("..") || self.at("..=") {
-      return Err(self.not_implemented(self.span(), "variadic C functions"));
+    if self.at("...") {
+      const dots = self.advance().span;
+
+      variadic = true;
+
+      if params.is_empty() {
+        self.diagnostics.push(
+          Diagnostic::error(codes::UNEXPECTED_TOKEN, dots, "a variadic C function needs a parameter before `...`")
+            .with_help("declare the parameter C names before `...`, as in `fn printf(format: *const c_char, ...)`"),
+        );
+      }
+    } else if self.at("..") || self.at("..=") {
+      self.diagnostics.push(
+        Diagnostic::error(codes::UNEXPECTED_TOKEN, self.span(), "the extra arguments of a variadic C function are written `...`")
+          .with_help("write `...` after the last parameter, as in `fn printf(format: *const c_char, ...)`"),
+      );
+      self.advance();
+      variadic = true;
     }
 
     self.expect(")")?;
@@ -920,14 +1582,20 @@ class Parser {
 
     const end = self.expect(";")?.span;
 
-    Ok(ExternFn { visibility: visibility, name: name, params: params, return_type: return_type, span: start.to(end) })
+    self.apply_attributes(attributes, AttributeTarget::ExternBlockFn);
+
+    if !self.cfg_holds(attributes) {
+      return Ok(None);
+    }
+
+    Ok(Some(ExternFn { visibility: visibility, name: name, params: params, variadic: variadic, return_type: return_type, span: start.to(end) }))
   }
 
   /// The parameters `name: Type, ...` up to the closing `)`, which is not consumed.
   prv fn params(self) -> Result<List<Param>, ()> {
     const params: List<Param> = new List();
 
-    while !self.at(")") && !self.at("..") && !self.at("..=") {
+    while !self.at(")") && !self.at("..") && !self.at("..=") && !self.at("...") {
       const param_name = self.ident("a parameter name")?;
 
       self.expect(":")?;
@@ -984,12 +1652,14 @@ class Parser {
     self.expect("{")?;
 
     const fields: List<FieldDecl> = new List();
+    const consts: List<ConstDecl> = new List();
     const functions: List<FnDecl> = new List();
 
     while !self.at("}") && !self.at_eof() {
       const before = self.pos;
 
       match self.member() {
+        Ok(Member::Const(decl)) => consts.push(decl),
         Ok(Member::Field(field)) => {
           if field.mutable.is_some() {
             self.diagnostics.push(
@@ -1014,6 +1684,8 @@ class Parser {
 
     const end = self.expect("}")?.span;
 
+    self.generic_consts(generics, consts);
+
     if is_union {
       if !generics.is_empty() || !impls.is_empty() {
         self.not_implemented(name.span, "generic unions and unions implementing interfaces");
@@ -1026,15 +1698,26 @@ class Parser {
 
     Ok(StructDecl {
       repr_c: false,
+      default: None,
       is_union: is_union,
       visibility: visibility,
       name: name,
       generics: generics,
       impls: impls,
       fields: fields,
+      consts: consts,
       functions: functions,
       span: start.to(end),
     })
+  }
+
+  /// A generic type cannot declare constants yet: `Type::NAME` would need its arguments (Q683).
+  prv fn generic_consts(self, generics: List<GenericParam>, consts: List<ConstDecl>) {
+    if !generics.is_empty() {
+      if let Some(decl) = consts.first() {
+        self.not_implemented(decl.name.span, "constants of generic types");
+      }
+    }
   }
 
   /// `impl A, B<T>` after a type's name (and its `extends`).
@@ -1092,6 +1775,8 @@ class Parser {
 
           fields.push(field);
         }
+        // Constants of interfaces, read as `T::NAME`, are deferred (Q688).
+        Ok(Member::Const(decl)) => self.not_implemented(decl.name.span, "constants of interfaces"),
         Ok(Member::Fn(function)) => functions.push(function),
         Err(_) => self.skip_member(),
       }
@@ -1141,12 +1826,14 @@ class Parser {
     self.expect("{")?;
 
     const fields: List<FieldDecl> = new List();
+    const consts: List<ConstDecl> = new List();
     const functions: List<FnDecl> = new List();
 
     while !self.at("}") && !self.at_eof() {
       const before = self.pos;
 
       match self.member() {
+        Ok(Member::Const(decl)) => consts.push(decl),
         Ok(Member::Field(field)) => {
           if field.mutable.is_none() {
             const field_name = field.name.name;
@@ -1170,6 +1857,8 @@ class Parser {
 
     const end = self.expect("}")?.span;
 
+    self.generic_consts(generics, consts);
+
     Ok(ClassDecl {
       is_abstract: is_abstract,
       visibility: visibility,
@@ -1178,6 +1867,7 @@ class Parser {
       parent: parent,
       impls: impls,
       fields: fields,
+      consts: consts,
       functions: functions,
       span: start.to(end),
     })
@@ -1195,10 +1885,18 @@ class Parser {
 
     const variants: List<VariantDecl> = new List();
 
-    // Variants come first, separated by commas.
-    while is_ident(self.kind()) {
+    // Variants come first, separated by commas; `@default` may mark one.
+    while is_ident(self.kind()) || self.attributed_variant() {
+      const attributes = self.attributes()?;
+      const default = self.apply_attributes(attributes, AttributeTarget::Variant).default;
+
       match self.variant() {
-        Ok(variant) => variants.push(variant),
+        Ok(found) => {
+          var variant = found;
+
+          variant.default = default;
+          variants.push(variant);
+        }
         Err(_) => self.skip_variant(),
       }
 
@@ -1214,6 +1912,7 @@ class Parser {
       );
     }
 
+    const consts: List<ConstDecl> = new List();
     const functions: List<FnDecl> = new List();
 
     while !self.at("}") && !self.at_eof() {
@@ -1224,6 +1923,7 @@ class Parser {
           self.class_only_modifiers(function);
           functions.push(function);
         }
+        Ok(Member::Const(decl)) => consts.push(decl),
         Ok(Member::Field(field)) => {
           self.diagnostics.push(
             Diagnostic::error(codes::UNEXPECTED_TOKEN, field.span, "enums cannot have fields")
@@ -1240,7 +1940,44 @@ class Parser {
 
     const end = self.expect("}")?.span;
 
-    Ok(EnumDecl { repr: None, visibility: visibility, name: name, generics: generics, impls: impls, variants: variants, functions: functions, span: start.to(end) })
+    self.generic_consts(generics, consts);
+
+    Ok(EnumDecl { repr: None, default: None, visibility: visibility, name: name, generics: generics, impls: impls, variants: variants, consts: consts, functions: functions, span: start.to(end) })
+  }
+
+  /// Whether attributes before a name start the next variant: `@default Normal`, not the
+  /// attributes of the functions that follow the variants.
+  prv fn attributed_variant(self) -> bool {
+    var offset = 0usize;
+
+    while is_punct(self.nth_kind(offset), "@") {
+      offset += 2;
+
+      // The arguments of the attribute, up to their closing parenthesis.
+      if is_punct(self.nth_kind(offset), "(") {
+        var depth = 0usize;
+
+        while true {
+          const kind = self.nth_kind(offset);
+
+          if is_punct(kind, "(") {
+            depth += 1;
+          } else if is_punct(kind, ")") {
+            depth -= 1;
+          } else if let TokenKind::Eof = kind {
+            return false;
+          }
+
+          offset += 1;
+
+          if depth == 0 {
+            break;
+          }
+        }
+      }
+    }
+
+    offset > 0 && is_ident(self.nth_kind(offset))
   }
 
   prv fn empty_variant(self, span: Span, name: Ident) {
@@ -1271,7 +2008,7 @@ class Parser {
         self.empty_variant(name.span.to(end), name);
       }
 
-      return Ok(VariantDecl { span: name.span.to(end), name: name, fields: VariantFields::Tuple(types), discriminant: None });
+      return Ok(VariantDecl { default: None, span: name.span.to(end), name: name, fields: VariantFields::Tuple(types), discriminant: None });
     }
 
     if self.eat("{") {
@@ -1297,7 +2034,7 @@ class Parser {
         self.empty_variant(name.span.to(end), name);
       }
 
-      return Ok(VariantDecl { span: name.span.to(end), name: name, fields: VariantFields::Named(fields), discriminant: None });
+      return Ok(VariantDecl { default: None, span: name.span.to(end), name: name, fields: VariantFields::Named(fields), discriminant: None });
     }
 
     // `Name = 7`: an explicit discriminant.
@@ -1317,13 +2054,13 @@ class Parser {
 
           const discriminant = Discriminant { value: value, negative: negative, span: start.to(end) };
 
-          return Ok(VariantDecl { span: name.span.to(end), name: name, fields: VariantFields::Unit, discriminant: Some(discriminant) });
+          return Ok(VariantDecl { default: None, span: name.span.to(end), name: name, fields: VariantFields::Unit, discriminant: Some(discriminant) });
         }
         _ => return Err(self.unexpected("an integer literal")),
       }
     }
 
-    Ok(VariantDecl { span: name.span, name: name, fields: VariantFields::Unit, discriminant: None })
+    Ok(VariantDecl { default: None, span: name.span, name: name, fields: VariantFields::Unit, discriminant: None })
   }
 
   /// Skips a malformed variant: to the next `,` or the `}` closing the enum, at depth zero.
@@ -1395,7 +2132,8 @@ class Parser {
     self.field_member(visibility, start)
   }
 
-  /// A field `weak var name: Type;` after its visibility.
+  /// A field `weak var name: Type;` after its visibility, or a constant of the type,
+  /// `const NAME: Type = value;`, which its value tells apart (Q683).
   prv fn field_member(self, visibility: Visibility, start: Span) -> Result<Member, ()> {
     // The type checker decides where `weak` is allowed.
     const is_weak = self.eat_keyword("weak");
@@ -1416,6 +2154,27 @@ class Parser {
     self.expect(":")?;
 
     const ty = self.type_expr()?;
+
+    if self.at("=") {
+      const equals = self.advance().span;
+      const value = self.expr()?;
+      const end = self.expect(";")?.span;
+
+      const is_const = match mutable {
+        Some(found) => !found,
+        None => false,
+      };
+
+      if !is_const || is_weak {
+        self.diagnostics.push(
+          Diagnostic::error(codes::UNEXPECTED_TOKEN, equals, "only a constant of a type has a value in its declaration")
+            .with_help("declare it `const " + name.name + ": ... = ...;`, or give the field its value in `new`"),
+        );
+      }
+
+      return Ok(Member::Const(ConstDecl { visibility: visibility, name: name, ty: ty, value: value, span: start.to(end) }));
+    }
+
     const end = self.expect(";")?.span;
 
     Ok(Member::Field(FieldDecl { visibility: visibility, mutable: mutable, is_weak: is_weak, name: name, ty: ty, span: start.to(end) }))
@@ -1544,6 +2303,16 @@ class Parser {
 
     const params = self.params()?;
 
+    if self.at("...") {
+      self.diagnostics.push(
+        Diagnostic::error(codes::UNEXPECTED_TOKEN, self.span(), "Sagitario functions cannot be variadic")
+          .with_note("`...` declares a C function of an `extern` block that takes more arguments")
+          .with_help("take a list or a slice of the arguments instead"),
+      );
+
+      return Err(());
+    }
+
     self.expect(")")?;
 
     const return_type: Option<TypeExpr> = if self.eat("->") { Some(self.type_expr()?) } else { None };
@@ -1613,7 +2382,8 @@ class Parser {
     }
   }
 
-  /// The name of a struct member, which may be `new` (the conventional constructor name).
+  /// The name of a struct member, which may be `new` (the conventional constructor name), or the
+  /// index of an element of a tuple, a decimal integer without a suffix.
   prv fn member_name(self, expected: String) -> Result<Ident, ()> {
     if self.at_keyword("new") {
       const span = self.advance().span;
@@ -1621,7 +2391,21 @@ class Parser {
       return Ok(Ident { name: "new", span: span });
     }
 
+    if let TokenKind::Int { value, suffix: None } = self.kind() {
+      const span = self.advance().span;
+
+      return Ok(Ident { name: value, span: span });
+    }
+
     self.ident(expected)
+  }
+
+  /// A tuple of one element, `(x,)`, reported where its comma is.
+  prv fn one_element_tuple(self, comma: Span, what: String) {
+    self.diagnostics.push(
+      Diagnostic::error(codes::ONE_ELEMENT_TUPLE, comma, "a tuple " + what + " has two or more elements")
+        .with_help("remove the comma: `(x)` is `x`"),
+    );
   }
 
   /// The type of a parameter: a type, `&T` or `&mut T` (docs/spec/03-memory.md#references).
@@ -1698,6 +2482,39 @@ class Parser {
       const end = self.advance().span;
 
       return Ok(new TypeExpr(TypeExprKind::Unit, start.to(end)));
+    }
+
+    // `(T)` is `T`; `(A, B)` is a tuple (docs/adr/0092-tuples.md, Q608).
+    if is_punct(kind, "(") {
+      self.advance();
+
+      const first = self.type_expr()?;
+
+      if !self.at(",") {
+        self.expect(")")?;
+
+        return Ok(first);
+      }
+
+      const elems = List::from([first]);
+
+      while self.at(",") {
+        const comma = self.advance().span;
+
+        if self.at(")") {
+          if elems.len() == 1 {
+            self.one_element_tuple(comma, "type");
+          }
+
+          break;
+        }
+
+        elems.push(self.type_expr()?);
+      }
+
+      const end = self.expect(")")?.span;
+
+      return Ok(new TypeExpr(TypeExprKind::Tuple(elems), start.to(end)));
     }
 
     if is_ident(kind) || is_keyword(kind, "pkg") || is_keyword(kind, "super") || is_keyword(kind, "self") {
@@ -1807,6 +2624,15 @@ class Parser {
     const params: List<TypeExpr> = new List();
 
     while !self.at(")") {
+      if self.at("...") {
+        self.diagnostics.push(
+          Diagnostic::error(codes::UNEXPECTED_TOKEN, self.span(), "a function pointer cannot be variadic")
+            .with_note("only the C functions of an `extern` block can be variadic, and they are called directly (docs/spec/10-ffi.md)"),
+        );
+
+        return Err(());
+      }
+
       params.push(self.param_type()?);
 
       if !self.eat(",") {
@@ -1901,6 +2727,7 @@ class Parser {
   /// no diagnostic remains.
   prv fn try_type_args(self, segment: usize) -> Option<TypeArgs> {
     const pos = self.pos;
+    const next_id = self.ids.next;
     const reported = self.diagnostics.len();
     const parsed = self.type_args(segment);
     const follows = self.at("(") || self.at("::") || (self.at("{") && !self.no_struct_literal);
@@ -1908,7 +2735,9 @@ class Parser {
     match parsed {
       Ok(args) if follows => Some(args),
       _ => {
+        // The ids of the paths parsed meanwhile are given again.
         self.pos = pos;
+        self.ids.next = next_id;
         self.diagnostics.truncate(reported);
 
         None
@@ -2040,6 +2869,11 @@ class Parser {
 
       match self.stmt() {
         Ok(StmtOrTail::Stmt(stmt)) => stmts.push(stmt),
+        Ok(StmtOrTail::Stmts(several)) => {
+          for stmt in several {
+            stmts.push(stmt);
+          }
+        }
         Ok(StmtOrTail::Tail(expr)) => {
           tail = Some(expr);
         }
@@ -2053,6 +2887,10 @@ class Parser {
   }
 
   prv fn stmt(self) -> Result<StmtOrTail, ()> {
+    if (self.at_keyword("const") || self.at_keyword("var")) && is_punct(self.nth_kind(1), "(") {
+      return Ok(StmtOrTail::Stmts(self.let_pattern()?));
+    }
+
     if self.at_keyword("const") || self.at_keyword("var") {
       return Ok(StmtOrTail::Stmt(self.let_stmt()?));
     }
@@ -2062,9 +2900,14 @@ class Parser {
       return Err(self.unexpected("a statement"));
     }
 
-    const expr = self.expr()?;
+    const expr = self.stmt_expr()?;
 
-    if let Some(assignment) = assignment_op(self.kind()) {
+    if let Some(assignment) = self.assignment_here() {
+      // `>>=` is two tokens.
+      if self.at(">") {
+        self.advance();
+      }
+
       self.advance();
 
       const value = self.expr()?;
@@ -2093,7 +2936,100 @@ class Parser {
     const init: Option<Expr> = if self.eat("=") { Some(self.expr()?) } else { None };
     const end = self.expect(";")?.span;
 
-    Ok(Stmt::Let(LetStmt { id: id, mutable: mutable, name: name, ty: ty, init: init, span: start.to(end) }))
+    Ok(Stmt::Let(LetStmt { id: id, mutable: mutable, name: name, ty: ty, init: init, span: start.to(end), shape: None }))
+  }
+
+  /// `const (a, b) = value;` or `var (a, b): (A, B) = value;`: a hidden binding holding the value,
+  /// then a binding for each name, read from it (docs/adr/0092-tuples.md, Q610).
+  prv fn let_pattern(self) -> Result<List<Stmt>, ()> {
+    const start = self.span();
+    const mutable = is_keyword(self.advance().kind, "var");
+    const pattern = self.pattern()?;
+    const ty: Option<TypeExpr> = if self.eat(":") { Some(self.type_expr()?) } else { None };
+
+    self.expect("=")?;
+
+    const init = self.expr()?;
+    const end = self.expect(";")?.span;
+    const stmts: List<Stmt> = new List();
+
+    if self.always_matches(pattern) {
+      self.take_apart(pattern, mutable, ty, init, start.to(end), stmts);
+    }
+
+    Ok(stmts)
+  }
+
+  /// Whether every value matches `pattern`, as a declaration requires: names, `_` and tuple
+  /// patterns of them. Reports the first part that might not match.
+  prv fn always_matches(self, pattern: Pattern) -> bool {
+    match pattern.kind {
+      PatternKind::Wildcard => true,
+      // `None` is the prelude's variant, not a new name.
+      PatternKind::Ident(name) if name.name != "None" => true,
+      PatternKind::Elements { elems, .. } => {
+        for elem in elems {
+          if !self.always_matches(elem) {
+            return false;
+          }
+        }
+
+        true
+      }
+      _ => {
+        self.diagnostics.push(
+          Diagnostic::error(codes::REFUTABLE_PATTERN, pattern.span, "this pattern might not match the value")
+            .with_note("a declaration and a `for` take every value apart: their patterns are names, `_`, `..` and tuples of them")
+            .with_help("use `if let` or `match` to test the value"),
+        );
+
+        false
+      }
+    }
+  }
+
+  /// The statements binding the names of `pattern` to the parts of `value`: a hidden binding for
+  /// a tuple pattern, then one for each element; a name binds the value itself.
+  prv fn take_apart(self, pattern: Pattern, mutable: bool, ty: Option<TypeExpr>, value: Expr, span: Span, stmts: List<Stmt>) {
+    match pattern.kind {
+      PatternKind::Ident(name) => {
+        stmts.push(Stmt::Let(LetStmt { id: self.next_id(), mutable: mutable, name: name, ty: ty, init: Some(value), span: span, shape: None }));
+      }
+      PatternKind::Elements { elems, rest } => {
+        const hidden = Ident { name: `_tuple#${pattern.id}`, span: pattern.span };
+        const count = elems.len();
+
+        stmts.push(Stmt::Let(LetStmt {
+          id: self.next_id(),
+          mutable: false,
+          name: hidden,
+          ty: ty,
+          init: Some(value),
+          span: span,
+          shape: Some(TupleShape { count: count, rest: rest.is_some(), span: pattern.span }),
+        }));
+
+        for index in 0..count {
+          const elem = elems[index];
+
+          if let PatternKind::Wildcard = elem.kind {
+            continue;
+          }
+
+          // After `..`, elements count from the end: `-1` is the last one.
+          const after_rest = match rest {
+            Some(position) => index >= position,
+            None => false,
+          };
+          const element = if after_rest { `-${count - index}` } else { `${index}` };
+          const base = self.expr_node(ExprKind::Path(Path { id: self.next_id(), segments: List::from([hidden]), type_args: None, span: pattern.span }), pattern.span);
+          const read = self.expr_node(ExprKind::Field { base: base, name: Ident { name: element, span: elem.span } }, elem.span);
+
+          self.take_apart(elem, mutable, None, read, elem.span, stmts);
+        }
+      }
+      _ => {}
+    }
   }
 
   /// Skips to just after the next `;`, or to the `}` closing the current block, at depth zero.
@@ -2170,14 +3106,61 @@ class Parser {
     Ok(CallArgs { args: args, end: end })
   }
 
-  prv fn binary_expr(self, min_prec: u8) -> Result<Expr, ()> {
-    var lhs = self.unary_expr()?;
+  /// An expression that starts a statement or the body of a match arm. As in Rust, one that
+  /// starts with a block-like expression ends at its `}`, unless `.` or `?` follows: after
+  /// `unsafe { ... }`, `*p - *q` is the next statement, not a multiplication.
+  prv fn stmt_expr(self) -> Result<Expr, ()> {
+    if !self.at_block_like() {
+      return self.expr();
+    }
 
-    while let Some(operator) = infix(self.kind()) {
+    const head = self.primary_expr()?;
+
+    if !self.at(".") && !self.at("?") {
+      // `-` and `*` start the next statement; the other operators cannot.
+      if self.infix_here().is_some() && !self.at("-") && !self.at("*") {
+        self.diagnostics.push(
+          Diagnostic::error(codes::UNEXPECTED_TOKEN, self.span(), "found " + describe(self.kind()) + " after a block-like expression, which ends at its `}` here")
+            .with_label(head.span, "this expression is complete")
+            .with_help("wrap it in parentheses to use its value"),
+        );
+
+        return Err(());
+      }
+
+      return Ok(head);
+    }
+
+    const chained = self.postfix_ops(head, true)?;
+
+    self.binary_rest(chained, PREC_RANGE)
+  }
+
+  prv fn at_block_like(self) -> bool {
+    self.at("{") || self.at_keyword("if") || self.at_keyword("match") || self.at_keyword("while") || self.at_keyword("loop")
+      || self.at_keyword("for") || self.at_keyword("unsafe")
+  }
+
+  prv fn binary_expr(self, min_prec: u8) -> Result<Expr, ()> {
+    const lhs = self.unary_expr()?;
+
+    self.binary_rest(lhs, min_prec)
+  }
+
+  /// The infix operators after `first`, of precedence `min_prec` or higher.
+  prv fn binary_rest(self, first: Expr, min_prec: u8) -> Result<Expr, ()> {
+    var lhs = first;
+
+    while let Some(operator) = self.infix_here() {
       const prec = operator.prec;
 
       if prec < min_prec {
         break;
+      }
+
+      // `>>` is two tokens.
+      if let InfixKind::Binary(BinaryOp::Shr) = operator.kind {
+        self.advance();
       }
 
       const op_span = self.advance().span;
@@ -2209,7 +3192,7 @@ class Parser {
 
       // Comparisons and ranges are not associative: `a < b < c` is an error.
       if prec == PREC_COMPARE || prec == PREC_RANGE {
-        if let Some(next) = infix(self.kind()) {
+        if let Some(next) = self.infix_here() {
           if next.prec == prec {
             self.diagnostics.push(
               Diagnostic::error(codes::CHAINED_OPERATORS, self.span(), "comparison and range operators cannot be chained; use parentheses or `&&`"),
@@ -2448,6 +3431,23 @@ class Parser {
       return self.lambda_body(span, params);
     }
 
+    // `name!(...)`, a built-in macro (Q723).
+    if is_ident(kind) && is_punct(self.nth_kind(1), "!") && is_punct(self.nth_kind(2), "(") {
+      return self.macro_expr();
+    }
+
+    // The form of `include_str` before it was a macro (docs/adr/0104-include-str-as-a-macro.md).
+    if let TokenKind::Ident(name) = kind {
+      if name == "include_str" && is_punct(self.nth_kind(1), "(") {
+        self.diagnostics.push(
+          Diagnostic::error(codes::INVALID_MACRO, span, "`include_str` is a macro: write `include_str!(\"file\")`")
+            .with_note("it reads the file when the program is compiled, as Rust's `include_str!`"),
+        );
+
+        return Err(());
+      }
+    }
+
     if is_ident(kind) || is_keyword(kind, "self") || is_keyword(kind, "Self") || is_keyword(kind, "pkg") || is_keyword(kind, "super") {
       const path = self.expr_path()?;
 
@@ -2475,9 +3475,32 @@ class Parser {
 
       const inner = self.expr_with_struct_literals(true)?;
 
-      self.expect(")")?;
+      if !self.at(",") {
+        self.expect(")")?;
 
-      return Ok(inner);
+        return Ok(inner);
+      }
+
+      // `(a, b)`: a tuple (docs/adr/0092-tuples.md, Q609).
+      const elems = List::from([inner]);
+
+      while self.at(",") {
+        const comma = self.advance().span;
+
+        if self.at(")") {
+          if elems.len() == 1 {
+            self.one_element_tuple(comma, "value");
+          }
+
+          break;
+        }
+
+        elems.push(self.expr_with_struct_literals(true)?);
+      }
+
+      const end = self.expect(")")?.span;
+
+      return Ok(self.expr_node(ExprKind::Tuple(elems), span.to(end)));
     }
 
     if self.at_keyword("while") {
@@ -2512,12 +3535,39 @@ class Parser {
     if self.at_keyword("for") {
       self.advance();
 
-      const var_name = self.ident("a loop variable")?;
+      // `for (index, value) in ...`: a hidden loop variable, taken apart at the start of the body.
+      var pattern: Option<Pattern> = None;
+      var var_name = Ident { name: "", span: self.span() };
+
+      if self.at("(") {
+        const found = self.pattern()?;
+
+        var_name = Ident { name: `_tuple#${found.id}`, span: found.span };
+        pattern = Some(found);
+      } else {
+        var_name = self.ident("a loop variable")?;
+      }
 
       self.expect_keyword("in")?;
 
       const iter = self.expr_with_struct_literals(false)?;
-      const body = self.block()?;
+      var body = self.block()?;
+
+      if let Some(found) = pattern {
+        const stmts: List<Stmt> = new List();
+
+        if self.always_matches(found) {
+          const variable = self.expr_node(ExprKind::Path(Path { id: self.next_id(), segments: List::from([var_name]), type_args: None, span: found.span }), found.span);
+
+          self.take_apart(found, false, None, variable, found.span, stmts);
+        }
+
+        for stmt in body.stmts {
+          stmts.push(stmt);
+        }
+
+        body = Block { stmts: stmts, tail: body.tail, span: body.span };
+      }
 
       return Ok(self.expr_node(ExprKind::For { variable: var_name, iter: iter, body: body }, span.to(body.span)));
     }
@@ -2723,13 +3773,28 @@ class Parser {
     Ok(self.expr_node(ExprKind::Loop(Block { stmts: List::from([Stmt::Expr(matching)]), tail: None, span: span }), span))
   }
 
-  /// `Name { a: 1, b }` after its path.
+  /// `Name { a: 1, b }` or `Name { a: 1, ..base }` after its path.
   prv fn struct_literal(self, path: Path) -> Result<Expr, ()> {
     self.expect("{")?;
 
     const fields: List<FieldInit> = new List();
+    var base: Option<Expr> = None;
 
     while !self.at("}") {
+      // The base comes last (docs/adr/0094-conversions-and-defaults.md, Q643).
+      if self.eat("..") {
+        base = Some(self.expr_with_struct_literals(true)?);
+
+        if self.at(",") {
+          self.diagnostics.push(
+            Diagnostic::error(codes::UNEXPECTED_TOKEN, self.advance().span, "`..base` comes last in a struct literal, without a comma after it")
+              .with_help("remove the comma"),
+          );
+        }
+
+        break;
+      }
+
       const name = self.ident("a field name")?;
       var value: Option<Expr> = None;
 
@@ -2752,7 +3817,7 @@ class Parser {
 
     const end = self.expect("}")?.span;
 
-    Ok(self.expr_node(ExprKind::StructLit { path: path, fields: fields }, path.span.to(end)))
+    Ok(self.expr_node(ExprKind::StructLit { path: path, fields: fields, base: base }, path.span.to(end)))
   }
 
   /// `match scrutinee { pattern if guard => body, ... }`
@@ -2824,7 +3889,7 @@ class Parser {
 
       self.expect("=>")?;
 
-      const body = self.expr()?;
+      const body = self.stmt_expr()?;
       const span = pattern.span.to(body.span);
       // A comma separates arms; it is optional after a block-like body and before `}`.
       const separated = self.eat(",") || self.at("}") || body.is_block_like();
@@ -2863,6 +3928,11 @@ class Parser {
   prv fn pattern_alternative(self) -> Result<Pattern, ()> {
     const start = self.span();
     const kind = self.kind();
+
+    if is_punct(kind, "(") {
+      return self.tuple_pattern();
+    }
+
     const literal = match kind {
       TokenKind::Int { .. } | TokenKind::Float { .. } | TokenKind::Str(_) | TokenKind::Char(_) => true,
       TokenKind::Keyword(keyword) => keyword == "true" || keyword == "false",
@@ -2943,6 +4013,55 @@ class Parser {
     Ok(new Pattern(self.next_id(), pattern_kind, path.span))
   }
 
+  /// `(a, b)`, `(first, ..)` or `(a, .., z)`; `(p)` is `p` (docs/adr/0092-tuples.md, Q610).
+  prv fn tuple_pattern(self) -> Result<Pattern, ()> {
+    const start = self.expect("(")?.span;
+    const elems: List<Pattern> = new List();
+    var rest: Option<usize> = None;
+    var commas = 0usize;
+
+    while !self.at(")") {
+      if self.at("..") {
+        const dots = self.advance().span;
+
+        if rest.is_some() {
+          self.diagnostics.push(
+            Diagnostic::error(codes::UNEXPECTED_TOKEN, dots, "`..` can stand only once in a tuple pattern")
+              .with_help("name or ignore with `_` the elements between"),
+          );
+        }
+
+        rest = Some(elems.len());
+      } else {
+        elems.push(self.pattern()?);
+      }
+
+      if !self.at(",") {
+        break;
+      }
+
+      const comma = self.advance().span;
+
+      commas += 1;
+
+      if self.at(")") && commas == 1 && elems.len() == 1 && rest.is_none() {
+        self.one_element_tuple(comma, "pattern");
+      }
+    }
+
+    const end = self.expect(")")?.span;
+
+    if commas == 0 && rest.is_none() {
+      if let Some(only) = elems.first() {
+        return Ok(only);
+      }
+
+      return Err(self.unexpected("a pattern"));
+    }
+
+    Ok(new Pattern(self.next_id(), PatternKind::Elements { elems: elems, rest: rest }, start.to(end)))
+  }
+
   /// `[a, b, c]` or `[value; N]`.
   prv fn array_literal(self) -> Result<Expr, ()> {
     const start = self.expect("[")?.span;
@@ -2978,14 +4097,148 @@ class Parser {
   }
 
   /// Parses each `${...}` interpolation with a sub-parser that shares node ids and diagnostics.
+  /// A format specifier, `[[fill]align][+][#][0][width][.precision][type]`, whose text starts at
+  /// byte `start` of the file (docs/adr/0089-display-debug-and-format-specifiers.md, Q585).
+  prv fn format_spec(self, text: String, start: usize) -> Result<FormatSpec, ()> {
+    const span = Span::new(self.eof.span.file, start as u32, (start + text.len()) as u32);
+    const chars = text.chars().collect();
+    const none: Option<u64> = None;
+    const no_expr: Option<Expr> = None;
+    var spec = FormatSpec { fill: ' ', align: 0, plus: false, alternate: false, zero: false, width: none, precision: none, width_expr: no_expr, precision_expr: no_expr, kind: "", span: span };
+    var at = 0usize;
+
+    if chars.len() >= 2 && alignment(chars[1]) > 0 {
+      spec.fill = chars[0];
+      spec.align = alignment(chars[1]);
+      at = 2;
+    } else if chars.len() >= 1 && alignment(chars[0]) > 0 {
+      spec.align = alignment(chars[0]);
+      at = 1;
+    }
+
+    if at < chars.len() && chars[at] == '+' {
+      spec.plus = true;
+      at += 1;
+    }
+
+    if at < chars.len() && chars[at] == '#' {
+      spec.alternate = true;
+      at += 1;
+    }
+
+    if at < chars.len() && chars[at] == '0' {
+      spec.zero = true;
+      at += 1;
+    }
+
+    var width = 0u64;
+    var has_width = false;
+
+    // `width$`: the width of a binding (docs/adr/0101-the-rest-of-s2.md, Q711).
+    if let Some(found) = self.spec_name(text, chars, at, start) {
+      spec.width_expr = Some(found.expr);
+      at = found.next;
+    }
+
+    while spec.width_expr.is_none() && at < chars.len() && chars[at].is_ascii_digit() && width < 100000 {
+      width = width * 10 + chars[at].to_digit(10).unwrap_or(0) as u64;
+      has_width = true;
+      at += 1;
+    }
+
+    if has_width {
+      spec.width = Some(width);
+    }
+
+    if at < chars.len() && chars[at] == '.' {
+      at += 1;
+
+      var precision = 0u64;
+      var digits = 0usize;
+
+      if let Some(found) = self.spec_name(text, chars, at, start) {
+        spec.precision_expr = Some(found.expr);
+        at = found.next;
+      } else {
+        while at < chars.len() && chars[at].is_ascii_digit() && precision < 100000 {
+          precision = precision * 10 + chars[at].to_digit(10).unwrap_or(0) as u64;
+          digits += 1;
+          at += 1;
+        }
+
+        if digits == 0 {
+          return Err(self.spec_error(span, text, "a `.` needs the digits of the precision after it, as in `{x:.2}` or `{x:.precision$}`"));
+        }
+
+        spec.precision = Some(precision);
+      }
+    }
+
+    const kind = text.substring(byte_offset(chars, at), text.len());
+
+    if !List::from(["", "?", "x", "X", "o", "b", "e", "E"]).contains(kind) {
+      return Err(self.spec_error(span, text, "unknown format `" + kind + "`: the types are `?`, `x`, `X`, `o`, `b`, `e` and `E`"));
+    }
+
+    spec.kind = kind;
+    Ok(spec)
+  }
+
+  /// `name$` at `at` of a specifier written from `start`: the binding a width or a precision
+  /// is read from, as a path expression (Q711).
+  prv fn spec_name(self, text: String, chars: List<char>, at: usize, start: usize) -> Option<SpecName> {
+    if at >= chars.len() || !(chars[at].is_ascii_alphabetic() || chars[at] == '_') {
+      return None;
+    }
+
+    var end = at;
+
+    while end < chars.len() && (chars[end].is_ascii_alphanumeric() || chars[end] == '_') {
+      end += 1;
+    }
+
+    if end >= chars.len() || chars[end] != '$' {
+      return None;
+    }
+
+    const from = byte_offset(chars, at);
+    const to = byte_offset(chars, end);
+    const span = Span::new(self.eof.span.file, (start + from) as u32, (start + to) as u32);
+    const name = Ident { name: text.substring(from, to), span: span };
+    const path = self.expr_node(ExprKind::Path(Path { id: self.next_id(), segments: List::from([name]), type_args: None, span: span }), span);
+
+    Some(SpecName { expr: path, next: end + 1 })
+  }
+
+  prv fn spec_error(self, span: Span, text: String, message: String) {
+    self.diagnostics.push(
+      Diagnostic::error(codes::INVALID_FORMAT_STRING, span, "invalid format specifier `" + text + "`: " + message)
+        .with_note("a specifier is `[[fill]align][+][#][0][width][.precision][type]`, as in Rust: `{x:>8.2}`, `{n:#x}`, `{v:?}`"),
+    );
+  }
+
   prv fn template_parts(self, parts: List<lexer::TemplatePart>) -> Result<List<TemplatePart>, ()> {
     const result: List<TemplatePart> = new List();
 
     for part in parts {
       match part {
         lexer::TemplatePart::Text(text) => result.push(TemplatePart::Text(text)),
+        // The specifier of the expression just before it.
+        lexer::TemplatePart::Spec { text, start } => {
+          const spec = self.format_spec(text, start)?;
+
+          match result.pop() {
+            Some(TemplatePart::Expr(expr)) => result.push(TemplatePart::Formatted { expr: expr, spec: spec }),
+            Some(other) => result.push(other),
+            None => {}
+          }
+        }
         lexer::TemplatePart::Expr(tokens) => {
-          const sub = new Parser(self.eof.span.file, tokens, self.ids, self.diagnostics);
+          const sub = new Parser(self.eof.span.file, tokens, self.ids, self.target, self.diagnostics);
+
+          sub.location = self.location;
+          sub.env = self.env;
+          sub.macros = self.macros;
 
           if sub.at_eof() {
             return Err(sub.unexpected("an expression inside `${}`"));
@@ -3017,4 +4270,20 @@ fn is_mut(kind: TokenKind) -> bool {
     TokenKind::Ident(name) => name == "mut",
     _ => false,
   }
+}
+
+/// The alignment a character of a specifier names: 1 for `<`, 2 for `^`, 3 for `>`, 0 otherwise.
+fn alignment(c: char) -> u32 {
+  if c == '<' { 1 } else if c == '^' { 2 } else if c == '>' { 3 } else { 0 }
+}
+
+/// The byte offset of character `index` of `chars`.
+fn byte_offset(chars: List<char>, index: usize) -> usize {
+  var offset = 0usize;
+
+  for at in 0..index {
+    offset += `${chars[at]}`.len();
+  }
+
+  offset
 }

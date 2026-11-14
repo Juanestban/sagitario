@@ -1,0 +1,51 @@
+// Format specifiers, Rust's mini-language after a `:` in the braces
+// (docs/adr/0089-display-debug-and-format-specifiers.md, increment 2).
+// expect-stdout: width [   42] [42   ] [ 42  ] [**42] [Ada   ] [Ada   ] [  Ada  ] [Ada***]
+// expect-stdout: zeros 00042 -0042 +0042 [  -42]
+// expect-stdout: sign +5 -5 +0 +2.5
+// expect-stdout: bases ff FF 0xff 377 0o377 1010 0b1010 ff ffffffff 0x00ff
+// expect-stdout: floats 3.14 2.67 3.000 -0.50 0 1e3 1.5e3 1.50e3 1.2E-4 inf NaN -inf
+// expect-stdout: precision Ada... [Ad] [héy]
+// expect-stdout: display [  (1, -2)] [(1, -2)    ] [(1, ]
+// expect-stdout: f32 0.1 0.10
+// expect-stdout: paths 127 [7]
+
+struct Point {
+  pub x: i32;
+  pub y: i32;
+}
+
+impl Display for Point {
+  fn to_string(self) -> String {
+    f"({self.x}, {self.y})"
+  }
+}
+
+/// The values are read at run time, so the C computes them.
+fn value<T>(x: T) -> T {
+  x
+}
+
+fn main() {
+  const n = value(42);
+  const name = value("Ada");
+  println(f"width [{n:5}] [{n:<5}] [{n:^5}] [{n:*>4}] [{name:6}] [{name:<6}] [{name:^7}] [{name:*<6}]");
+
+  println(f"zeros {n:05} {-n:05} {n:+05} [{-n:>5}]");
+  println(f"sign {value(5):+} {value(-5):+} {value(0):+} {value(2.5):+}");
+
+  const b = value(255u8);
+  println(f"bases {b:x} {b:X} {b:#x} {b:o} {b:#o} {value(10):b} {value(10):#b} {value(-1i8):x} {value(-1i32):x} {value(255):#06x}");
+
+  println(f"floats {value(3.14159):.2} {value(2.675):.2} {value(3.0):.3} {value(-0.5):.2} {value(0.4):.0} {value(1000.0):e} {value(1500.0):e} {value(1500.0):.2e} {value(0.00012):E} {value(1.0) / 0.0} {value(0.0) / 0.0:.2} {value(-1.0) / 0.0:e}");
+
+  println(f"precision {name:.3}... [{name:.2}] [{value("héyo"):.3}]");
+
+  const p = Point { x: 1, y: -2 };
+  println(f"display [{p:>9}] [{p:<11}] [{p:.4}]");
+
+  println(f"f32 {value(0.1f32)} {value(0.1f32):.2}");
+
+  // `::` is part of the expression, and a `:` inside parentheses too.
+  println(f"paths {i8::MAX} [{value((x: i32) => x + 4)(3)}]");
+}

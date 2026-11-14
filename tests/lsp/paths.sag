@@ -18,3 +18,22 @@ fn describe(meters: Meters, count: i32) -> String {
 
   f"{meters.value} m, {total} items, {double(count) * 2} doubled, {meters.value.abs()}"
 }
+
+// A tuple pattern: its names are variables in format strings, its hidden parts have no tokens.
+fn split(pair: (i32, i32)) -> String {
+  const (q, r) = pair;
+
+  f"{q} {r}"
+}
+
+// A constant of a type, by its path (docs/adr/0099-associated-and-composite-constants.md, Q687).
+struct Limits {
+  pub const MAX: i32 = 99;
+}
+
+fn limit() -> i32 {
+  Limits::MAX
+}
+
+// The built-in macros, with their `!` (docs/adr/0103-build-scripts-and-binding-generation.md).
+const JOINED: String = concat!("built-in ", concat!("macros ", 2));

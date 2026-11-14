@@ -1,0 +1,120 @@
+// The debug form of values, `{x:?}` and `{x:#?}` (docs/adr/0089-display-debug-and-format-specifiers.md,
+// increment 3): the compiler gives every type one.
+// expect-stdout: point Point { x: 1, y: -2 } [Point { x: 1, y: -2 }]
+// expect-stdout: shapes [Circle(2.5), Rect { w: 1, h: 2 }, Empty]
+// expect-stdout: text "tab\t \"q\" \\ ñ" 'a' '\'' '\n'
+// expect-stdout: options Some(3) None Ok(1) Err("no")
+// expect-stdout: list [1, 2, 3] [] array [true, false]
+// expect-stdout: map {"a": 1, "b": 2}
+// expect-stdout: class Node { value: 1, next: Some(Node { value: 2, next: None }) }
+// expect-stdout: cycle Ring { label: "r", next: Some(Ring { .. }) }
+// expect-stdout: inherited Dog { name: "Rex", barks: true }
+// expect-stdout: width [Some(3)   ]
+// expect-stdout: generic Pair { a: 1, b: "x" }
+// expect-stdout: pretty:
+// expect-stdout: Pair {
+// expect-stdout:     a: [
+// expect-stdout:         1,
+// expect-stdout:         2,
+// expect-stdout:     ],
+// expect-stdout:     b: Some(
+// expect-stdout:         Circle(
+// expect-stdout:             1,
+// expect-stdout:         ),
+// expect-stdout:     ),
+// expect-stdout: }
+
+struct Point {
+  pub x: i32;
+  pub y: i32;
+}
+
+enum Shape {
+  Circle(f64),
+  Rect { w: i32, h: i32 },
+  Empty,
+}
+
+class Node {
+  pub const value: i32;
+  pub const next: Option<Node>;
+
+  pub fn new(self, value: i32, next: Option<Node>) {
+    self.value = value;
+    self.next = next;
+  }
+}
+
+class Ring {
+  pub const label: String;
+  pub var next: Option<Ring>;
+
+  pub fn new(self, label: String) {
+    self.label = label;
+    self.next = None;
+  }
+}
+
+class Animal {
+  pub const name: String;
+
+  pub fn new(self, name: String) {
+    self.name = name;
+  }
+}
+
+class Dog extends Animal {
+  pub const barks: bool;
+
+  pub fn new(self, name: String) {
+    zod.new(name);
+    self.barks = true;
+  }
+}
+
+struct Pair<A, B> {
+  pub a: A;
+  pub b: B;
+}
+
+fn main() {
+  const p = Point { x: 1, y: -2 };
+  println(f"point {p:?} [{p:?}]");
+
+  const shapes = List::from([Shape::Circle(2.5), Shape::Rect { w: 1, h: 2 }, Shape::Empty]);
+  println(f"shapes {shapes:?}");
+
+  println(f"text {"tab\t \"q\" \\ ñ":?} {'a':?} {'\'':?} {'\n':?}");
+
+  const some: Option<i32> = Some(3);
+  const none: Option<i32> = None;
+  const ok: Result<i32, String> = Ok(1);
+  const err: Result<i32, String> = Err("no");
+  println(f"options {some:?} {none:?} {ok:?} {err:?}");
+
+  const empty: List<i32> = new List();
+  println(f"list {List::from([1, 2, 3]):?} {empty:?} array {[true, false]:?}");
+
+  const ages = new Map<String, i32>();
+  ages.insert("a", 1);
+  ages.insert("b", 2);
+  println(f"map {ages:?}");
+
+  const list = new Node(1, Some(new Node(2, None)));
+  println(f"class {list:?}");
+
+  // A cycle: the class reached again is written without its fields.
+  const ring = new Ring("r");
+  ring.next = Some(ring);
+  println(f"cycle {ring:?}");
+  ring.next = None;
+
+  println(f"inherited {new Dog("Rex"):?}");
+  println(f"width [{some:<10?}]");
+
+  const pair = Pair { a: 1, b: "x" };
+  println(f"generic {pair:?}");
+
+  const nested = Pair { a: List::from([1, 2]), b: Some(Shape::Circle(1.0)) };
+  println(f"pretty:\n{nested:#?}");
+}

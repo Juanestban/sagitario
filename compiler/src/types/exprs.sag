@@ -2,7 +2,7 @@
 //! (docs/spec/02-types.md, 06-control-flow.md). The port of the expression checking of
 //! `sagitario_types` (its `lib.rs`), as functions taking the checker.
 
-use pkg::ast::{BinaryOp, Block, Expr, ExprKind, FieldInit, FnDecl, Ident, Path, Stmt, TemplatePart, TypeExpr, UnaryOp};
+use pkg::ast::{BinaryOp, Block, Expr, ExprKind, FieldInit, FnDecl, FormatSpec, Ident, Path, Stmt, TemplatePart, TupleShape, TypeExpr, UnaryOp};
 use pkg::ast;
 use pkg::diagnostics;
 use pkg::diagnostics::Diagnostic;
@@ -27,7 +27,7 @@ use pkg::types::operators;
 use pkg::types::patterns;
 use pkg::types::send;
 use pkg::types::strings;
-use pkg::types::typed::{BuiltinMethod, item_key};
+use pkg::types::typed::{BuiltinMethod, Conversion, item_key};
 
 /// The signature of a builtin, by its name.
 pub fn builtin_sig(name: String, target: TargetInfo) -> FnSig {
@@ -41,8 +41,26 @@ pub fn builtin_sig(name: String, target: TargetInfo) -> FnSig {
     return FnSig { receiver: None, params: List::from([string]), ret: types::of(TypeKind::Never) };
   }
 
+  if name == "assert" {
+    return FnSig { receiver: None, params: List::from([types::of(TypeKind::Bool)]), ret: types::unit() };
+  }
+
+  if name == "unreachable" || name == "todo" {
+    return FnSig { receiver: None, params: new List(), ret: types::of(TypeKind::Never) };
+  }
+
   if name == "exit" {
     return FnSig { receiver: None, params: List::from([types::int(IntTy::I32)]), ret: types::of(TypeKind::Never) };
+  }
+
+  if name == "abort" {
+    return FnSig { receiver: None, params: new List(), ret: types::of(TypeKind::Never) };
+  }
+
+  // C11's `atomic_thread_fence`, with an ordering of `std::sync`
+  // (docs/adr/0098-locks-orderings-and-threads.md, Q676).
+  if name == "Atomic::fence" {
+    return FnSig { receiver: None, params: List::from([types::int(IntTy::I32)]), ret: types::unit() };
   }
 
   if name == "CString::new" {
@@ -51,10 +69,6 @@ pub fn builtin_sig(name: String, target: TargetInfo) -> FnSig {
 
   if name == "string_from_c" {
     return FnSig { receiver: None, params: List::from([ffi::c_string_ptr(target)]), ret: string };
-  }
-
-  if name == "include_str" {
-    return FnSig { receiver: None, params: List::from([string]), ret: string };
   }
 
   if name == "char::from_u32" {
@@ -86,6 +100,117 @@ fn numeric_only(expected: Option<Type>) -> Option<Type> {
 
 fn is_arithmetic(op: BinaryOp) -> bool {
   op == BinaryOp::Add || op == BinaryOp::Sub || op == BinaryOp::Mul || op == BinaryOp::Div || op == BinaryOp::Rem
+}
+
+fn is_shift(op: BinaryOp) -> bool {
+  op == BinaryOp::Shl || op == BinaryOp::Shr
+}
+
+fn is_bitwise(op: BinaryOp) -> bool {
+  op == BinaryOp::BitAnd || op == BinaryOp::BitOr || op == BinaryOp::BitXor || is_shift(op)
+}
+
+fn is_int(ty: Type) -> bool {
+  match ty.kind {
+    TypeKind::Int(_) => true,
+    _ => false,
+  }
+}
+
+/// The expected type when it is an integer or, for `&`, `|` and `^`, a `bool`.
+fn bits_hint(expected: Option<Type>, shift: bool) -> Option<Type> {
+  match expected {
+    Some(ty) => match ty.kind {
+      TypeKind::Int(_) => Some(ty),
+      TypeKind::Bool => if shift { None } else { Some(ty) },
+      _ => None,
+    },
+    None => None,
+  }
+}
+
+/// The amount of a shift: any integer, a `u32` when it is an unsuffixed literal
+/// (docs/adr/0088-bitwise-operators-and-integer-methods.md, Q576).
+fn shift_amount(cx: Checker, amount: Expr) -> Type {
+  const ty = if is_untyped_literal(amount) { expr(cx, amount, Some(types::int(IntTy::U32))) } else { expr(cx, amount, None) };
+
+  match ty.kind {
+    TypeKind::Int(_) | TypeKind::Error | TypeKind::Never => {}
+    _ => cx.error(codes::INVALID_OPERAND, amount.span, "the amount of a shift is an integer, not `" + types::text(ty) + "`"),
+  }
+
+  ty
+}
+
+/// `a & b`, `a | b`, `a ^ b`, `a << n` and `a >> n` (docs/adr/0088-bitwise-operators-and-integer-methods.md).
+fn bitwise(cx: Checker, value: Expr, op: BinaryOp, lhs: Expr, rhs: Expr, expected: Option<Type>) -> Type {
+  const symbol = ast::binary_symbol(op);
+
+  // A type other than an integer or a `bool` calls its operator, chosen by the left operand
+  // (docs/adr/0101-the-rest-of-s2.md, Q709).
+  if !is_untyped_literal(lhs) {
+    const lhs_ty = expr(cx, lhs, bits_hint(expected, is_shift(op)));
+
+    if operators::is_operator_operand(lhs_ty) {
+      return operators::binary_call(cx, value, op, lhs, lhs_ty, rhs);
+    }
+
+    if is_shift(op) {
+      shift_amount(cx, rhs);
+
+      return match lhs_ty.kind {
+        TypeKind::Int(_) | TypeKind::Error | TypeKind::Never => lhs_ty,
+        _ => {
+          cx.error(codes::INVALID_OPERAND, lhs.span, "cannot shift a value of type `" + types::text(lhs_ty) + "`; shifts take integers");
+
+          types::error()
+        }
+      };
+    }
+
+    const rhs_ty = expr(cx, rhs, Some(lhs_ty));
+
+    if operators::is_operator_operand(rhs_ty) && !types::is_error(lhs_ty) {
+      return right_operator(cx, lhs.span.to(rhs.span), symbol, lhs_ty, rhs_ty);
+    }
+
+    const ty = join_operands(cx, lhs, rhs, lhs_ty, rhs_ty, true);
+
+    return match ty.kind {
+      TypeKind::Int(_) | TypeKind::Bool | TypeKind::Error | TypeKind::Never => ty,
+      _ => {
+        cx.error(codes::INVALID_OPERAND, lhs.span.to(rhs.span), "cannot apply `" + symbol + "` to values of type `" + types::text(ty) + "`; it takes integers or `bool`s");
+
+        types::error()
+      }
+    };
+  }
+
+  if is_shift(op) {
+    const value_ty = expr(cx, lhs, bits_hint(expected, true));
+
+    shift_amount(cx, rhs);
+
+    return match value_ty.kind {
+      TypeKind::Int(_) | TypeKind::Error | TypeKind::Never => value_ty,
+      _ => {
+        cx.error(codes::INVALID_OPERAND, lhs.span, "cannot shift a value of type `" + types::text(value_ty) + "`; shifts take integers");
+
+        types::error()
+      }
+    };
+  }
+
+  const ty = same_type_operands(cx, lhs, rhs, bits_hint(expected, false));
+
+  match ty.kind {
+    TypeKind::Int(_) | TypeKind::Bool | TypeKind::Error | TypeKind::Never => ty,
+    _ => {
+      cx.error(codes::INVALID_OPERAND, lhs.span.to(rhs.span), "cannot apply `" + symbol + "` to values of type `" + types::text(ty) + "`; it takes integers or `bool`s");
+
+      types::error()
+    }
+  }
 }
 
 /// Checks the body of a function.
@@ -151,17 +276,23 @@ pub fn function(cx: Checker, id: u32, decl: FnDecl) {
   const body_ty = if decl.is_abstract { ret } else { block(cx, decl.body, Some(ret)) };
 
   cx.in_async = false;
+  atomic_misuses(cx);
 
   if !cx.fits(body_ty, ret) {
     const span = match decl.body.tail {
       Some(tail) => tail.span,
       None => decl.body.span,
     };
-    var diagnostic = Diagnostic::error(codes::MISMATCHED_TYPES, span, "expected `" + types::text(ret) + "`, found `" + types::text(body_ty) + "`")
-      .with_note("the function `" + decl.name.name + "` must return a value of type `" + types::text(ret) + "` on every path");
+    // The value of a static is the body of a function of its own (docs/adr/0083-global-state.md).
+    const of_static = cx.resolution.static_of(id).is_some();
+    var diagnostic = Diagnostic::error(codes::MISMATCHED_TYPES, span, "expected `" + types::text(ret) + "`, found `" + types::text(body_ty) + "`");
+
+    if !of_static {
+      diagnostic = diagnostic.with_note("the function `" + decl.name.name + "` must return a value of type `" + types::text(ret) + "` on every path");
+    }
 
     if let Some(ret_span) = cx.ret_span {
-      diagnostic = diagnostic.with_label(ret_span, "expected because of the return type");
+      diagnostic = diagnostic.with_label(ret_span, if of_static { "expected because of the type of the static" } else { "expected because of the return type" });
     }
 
     cx.diagnostics.push(diagnostic);
@@ -230,6 +361,33 @@ pub fn block(cx: Checker, body: Block, expected: Option<Type>) -> Type {
   }
 }
 
+/// Whether `ty` is a tuple a pattern with `shape` takes apart; reports it when it is not.
+fn tuple_fits_shape(cx: Checker, ty: Type, shape: TupleShape) -> bool {
+  const len = match ty.kind {
+    TypeKind::Tuple(elems) => elems.len(),
+    TypeKind::Error | TypeKind::Never => return false,
+    _ => {
+      cx.error(codes::MISMATCHED_TYPES, shape.span, "expected a value of type `" + types::text(ty) + "`, found a tuple pattern");
+
+      return false;
+    }
+  };
+
+  if len == shape.count || (shape.rest && len >= shape.count) {
+    return true;
+  }
+
+  const wanted = if shape.rest { `at least ${shape.count}` } else { `${shape.count}` };
+
+  cx.diagnostics.push(
+    Diagnostic::error(codes::MISMATCHED_TYPES, shape.span, `this pattern takes ${wanted} elements, but the tuple has ${len}`)
+      .with_note("the value has type `" + types::text(ty) + "`")
+      .with_help("name or ignore with `_` each element, or write `..` for the rest"),
+  );
+
+  false
+}
+
 /// Checks a statement and returns `never` if it diverges.
 fn stmt(cx: Checker, statement: Stmt) -> Type {
   match statement {
@@ -270,6 +428,16 @@ fn stmt(cx: Checker, statement: Stmt) -> Type {
         None => {
           if let Some(ty) = init_ty {
             local_ty = Some(if types::is_never(ty) { types::error() } else { ty });
+          }
+        }
+      }
+
+      // The hidden binding of a tuple pattern holds a tuple with the elements the pattern takes
+      // apart (docs/adr/0092-tuples.md, Q610).
+      if let Some(shape) = decl.shape {
+        if let Some(ty) = local_ty {
+          if !tuple_fits_shape(cx, ty, shape) {
+            local_ty = Some(types::error());
           }
         }
       }
@@ -321,6 +489,8 @@ fn assign(cx: Checker, target: Expr, op: Option<BinaryOp>, value: Expr) -> Type 
 
     cx.union_write = None;
 
+    // `grid[i] = v` on a type implementing `IndexMut` (docs/adr/0094-conversions-and-defaults.md, Q639).
+    interfaces::assigned_indexes(cx, target);
     classes::check_mutable_place(cx, target, PlaceUse::Assign);
 
     var checked = false;
@@ -332,6 +502,15 @@ fn assign(cx: Checker, target: Expr, op: Option<BinaryOp>, value: Expr) -> Type 
     if !checked {
       expect(cx, value, target_ty);
     }
+
+    if let TypeKind::Atomic(_) = target_ty.kind {
+      atomic_used(cx, target);
+
+      if let ExprKind::Call { .. } = value.kind {
+        atomic_used(cx, value);
+      }
+    }
+
     closures::check_closure_cycle(cx, target, value);
 
     const never = match cx.typed.expr_types.get(value.id) {
@@ -350,6 +529,10 @@ fn assign(cx: Checker, target: Expr, op: Option<BinaryOp>, value: Expr) -> Type 
   const id = match target_local {
     Some(id) => id,
     None => {
+      if let Some(Res::Static(found)) = cx.resolution.paths.get(target.id) {
+        return static_assignment(cx, target, found, op, value);
+      }
+
       // An unresolved name was already reported.
       if !is_path || cx.resolution.paths.contains_key(target.id) {
         cx.error(codes::INVALID_ASSIGNMENT_TARGET, target.span, "only bindings, fields and array elements can be assigned");
@@ -422,6 +605,30 @@ fn assign(cx: Checker, target: Expr, op: Option<BinaryOp>, value: Expr) -> Type 
 /// Checks the target of `target op= value`; with an operator implemented by the target's type, it
 /// also checks `value` and returns `true` (docs/adr/0081-operator-overloading.md, Q512).
 fn compound_operand(cx: Checker, target: Expr, op: BinaryOp, ty: Type, value: Expr) -> bool {
+  // `a |= b` of a type implementing `BitOr` is `a = a | b` (docs/adr/0101-the-rest-of-s2.md, Q709).
+  if is_bitwise(op) && operators::is_operator_operand(ty) {
+    operators::compound_call(cx, target, op, ty, value);
+
+    return true;
+  }
+
+  if is_bitwise(op) {
+    const fits = is_int(ty) || types::is_error(ty) || (!is_shift(op) && types::same_type(ty, types::of(TypeKind::Bool)));
+
+    if !fits {
+      cx.error(codes::INVALID_OPERAND, target.span, "cannot apply `" + ast::binary_symbol(op) + "=` to a value of type `" + types::text(ty) + "`");
+    }
+
+    // The amount of a shift has a type of its own.
+    if is_shift(op) {
+      shift_amount(cx, value);
+
+      return true;
+    }
+
+    return false;
+  }
+
   if is_arithmetic(op) && operators::is_operator_operand(ty) {
     operators::compound_call(cx, target, op, ty, value);
 
@@ -457,6 +664,11 @@ pub fn expect_because(cx: Checker, value: Expr, expected: Type, because: Option<
 
   var diagnostic = Diagnostic::error(codes::MISMATCHED_TYPES, value.span, "expected `" + types::text(expected) + "`, found `" + types::text(actual) + "`");
 
+  // Such as `std::sync::Ordering` and the prelude's `Ordering` of comparisons.
+  if types::text(expected) == types::text(actual) {
+    diagnostic = diagnostic.with_note("they are two different types with the same name");
+  }
+
   if let Some(reason) = because {
     diagnostic = diagnostic.with_label(reason.span, reason.message);
   }
@@ -474,7 +686,146 @@ pub fn expr(cx: Checker, value: Expr, expected: Option<Type>) -> Type {
 
   cx.typed.expr_types.insert(value.id, ty);
 
+  if let TypeKind::Atomic(_) = ty.kind {
+    cx.atomic_uses.push(value);
+  }
+
   ty
+}
+
+/// Whether the specifier fits the type of the value it formats
+/// (docs/adr/0089-display-debug-and-format-specifiers.md, Q587).
+fn check_spec(cx: Checker, spec: FormatSpec, ty: Type) {
+  var int_value = false;
+  var float_value = false;
+
+  match ty.kind {
+    TypeKind::Int(_) => {
+      int_value = true;
+    }
+    TypeKind::Float(_) => {
+      float_value = true;
+    }
+    TypeKind::Error | TypeKind::Never => return,
+    _ => {}
+  }
+
+  const kind = spec.kind;
+  const what = "`" + types::text(ty) + "`";
+  var problem: Option<String> = None;
+  const has_precision = spec.precision.is_some() || spec.precision_expr.is_some();
+
+  // Every type has a debug form (docs/adr/0089-display-debug-and-format-specifiers.md, Q588).
+  if kind == "?" {
+    if spec.plus || spec.zero || has_precision {
+      cx.error(codes::INVALID_FORMAT_STRING, spec.span, "the debug form `?` takes a width, a fill, an alignment and `#`, not `+`, `0` or a precision");
+    }
+
+    return;
+  }
+
+  if (kind == "x" || kind == "X" || kind == "o" || kind == "b") && !int_value {
+    problem = Some("the format `" + kind + "` writes integers, not " + what);
+  } else if (kind == "e" || kind == "E") && !float_value {
+    problem = Some("the format `" + kind + "` writes floats, not " + what);
+  } else if has_precision && int_value {
+    problem = Some("an integer has no precision; it applies to floats and text");
+  } else if (spec.plus || spec.zero) && !int_value && !float_value {
+    problem = Some("`+` and `0` apply to numbers, not " + what);
+  } else if spec.alternate && !(kind == "x" || kind == "X" || kind == "o" || kind == "b") {
+    problem = Some("`#` goes with `x`, `X`, `o` or `b`, which it gives their prefix");
+  }
+
+  if let Some(message) = problem {
+    cx.error(codes::INVALID_FORMAT_STRING, spec.span, message);
+  }
+}
+
+/// An expression of an `Atomic` type used as it may be: as the receiver of a method, or as the
+/// field it initializes.
+fn atomic_used(cx: Checker, value: Expr) {
+  const left: List<Expr> = new List();
+
+  for found in cx.atomic_uses {
+    if found.id != value.id {
+      left.push(found);
+    }
+  }
+
+  cx.atomic_uses = left;
+}
+
+/// Reports the expressions of an `Atomic` type used other than through its methods
+/// (docs/adr/0087-atomic-storage-and-std-sync.md, Q567).
+fn atomic_misuses(cx: Checker) {
+  for found in cx.atomic_uses {
+    cx.error(codes::INVALID_REFERENCE, found.span, "an `Atomic` is only used through its methods, and created as the value of its field");
+  }
+
+  cx.atomic_uses = new List();
+}
+
+/// A method of `Atomic<T>` (docs/adr/0087-atomic-storage-and-std-sync.md, Q568). Each one takes
+/// its orderings last, as numbers that `std::sync` gives from its `Ordering`
+/// (docs/adr/0098-locks-orderings-and-threads.md, Q676).
+fn atomic_method(cx: Checker, value: Expr, receiver: Expr, inner: Type, method: Ident, args: List<Expr>) -> Type {
+  const name = method.name;
+  const is_int = match inner.kind {
+    TypeKind::Int(_) => true,
+    _ => false,
+  };
+  const order = types::int(IntTy::I32);
+  var params: List<Type> = new List();
+  var ret = inner;
+
+  atomic_used(cx, receiver);
+
+  if name == "load" {
+    params = List::from([order]);
+  } else if name == "store" {
+    params = List::from([inner, order]);
+    ret = types::unit();
+  } else if name == "swap" || (is_int && (name == "fetch_add" || name == "fetch_sub" || name == "fetch_and" || name == "fetch_or" || name == "fetch_xor")) {
+    params = List::from([inner, order]);
+  } else if name == "compare_exchange" || name == "compare_exchange_weak" {
+    params = List::from([inner, inner, order, order]);
+    ret = types::of(TypeKind::Result { value: inner, error: inner });
+  } else {
+    cx.error(codes::UNKNOWN_MEMBER, method.span, "no method `" + name + "` on type `Atomic<" + types::text(inner) + ">`");
+    unchecked_args(cx, args);
+
+    return types::error();
+  }
+
+  check_args(cx, value.span, "method", params, args);
+  cx.typed.builtin_methods.insert(value.id, BuiltinMethod::Atomic(name));
+
+  ret
+}
+
+/// `Atomic::new(value)`, only the value given to a field of type `Atomic<T>`, which is expected.
+fn atomic_new(cx: Checker, value: Expr, args: List<Expr>, expected: Option<Type>) -> Type {
+  const inner = match expected {
+    Some(ty) => match ty.kind {
+      TypeKind::Atomic(inner) => Some(inner),
+      _ => None,
+    },
+    None => None,
+  };
+
+  match inner {
+    Some(found) => {
+      check_args(cx, value.span, "function", List::from([found]), args);
+
+      types::of(TypeKind::Atomic(found))
+    }
+    None => {
+      cx.error(codes::INVALID_REFERENCE, value.span, "`Atomic::new` only gives its value to a `const` field of type `Atomic<T>`, in the initializer of its class");
+      unchecked_args(cx, args);
+
+      types::error()
+    }
+  }
 }
 
 fn path_of(value: Expr) -> Option<Path> {
@@ -516,17 +867,35 @@ fn other_expr_kind(cx: Checker, value: Expr, expected: Option<Type>) -> Type {
     }
     ExprKind::Template(parts) => {
       for part in parts {
-        if let TemplatePart::Expr(inner) = part {
+        if let Some(inner) = part.expr() {
           const ty = expr(cx, inner, None);
-          const interpolable = match ty.kind {
-            TypeKind::Int(_) | TypeKind::Float(_) | TypeKind::Bool | TypeKind::Char | TypeKind::String | TypeKind::Never | TypeKind::Error => true,
-            _ => false,
-          };
 
-          if !interpolable {
+          var debug = false;
+
+          if let TemplatePart::Formatted { spec, .. } = part {
+            check_spec(cx, spec, ty);
+            debug = spec.kind == "?";
+
+            // A width or a precision read from a binding is a `usize`, as in Rust (Q711).
+            for given in List::from([spec.width_expr, spec.precision_expr]) {
+              if let Some(found) = given {
+                const given_ty = expr(cx, found, None);
+
+                if !types::same_type(given_ty, types::int(IntTy::Usize)) && !types::is_error(given_ty) {
+                  cx.diagnostics.push(
+                    Diagnostic::error(codes::INVALID_FORMAT_STRING, found.span, "a width or a precision is a `usize`, not a `" + types::text(given_ty) + "`")
+                      .with_help("convert it: `const width = value as usize;`"),
+                  );
+                }
+              }
+            }
+          }
+
+          if !debug && !cx.typed.displayable(ty) {
             cx.diagnostics.push(
               Diagnostic::error(codes::NOT_INTERPOLABLE, inner.span, "a value of type `" + types::text(ty) + "` cannot be interpolated")
-                .with_note("integers, floats, `bool`, `char` and `String` can be interpolated; interpolate the fields instead"),
+                .with_note("numbers, `bool`, `char`, `String` and the types implementing `Display` can be interpolated")
+                .with_help("implement `Display` for it (`fn to_string(self) -> String`), or interpolate its fields"),
             );
           }
         }
@@ -545,7 +914,20 @@ fn other_expr_kind(cx: Checker, value: Expr, expected: Option<Type>) -> Type {
       }
       Some(Res::Fn(id)) => closures::fn_value(cx, value, path, id, expected),
       Some(Res::Const(id)) => cx.typed.const_types.get(id as usize).unwrap_or(types::error()),
-      Some(Res::Extern(id)) if !cx.resolution.is_runtime_extern(cx.package, id) => ffi::extern_value(cx, id),
+      Some(Res::Static(id)) => {
+        if let Some(decl) = cx.resolution.static_decl(cx.package, id) {
+          // C may change a C global at any time (docs/adr/0086-c-globals-and-std-io.md, Q558);
+          // another thread cannot reach a `@thread_local` one (Q529).
+          if decl.extern_c {
+            ffi::require_unsafe(cx, value.span, "using the C global `" + decl.name.name + "`");
+          } else if decl.mutable && !decl.thread_local {
+            ffi::require_unsafe(cx, value.span, "using the `static var` `" + decl.name.name + "`");
+          }
+        }
+
+        cx.typed.static_type(cx.resolution, id).unwrap_or(types::error())
+      }
+      Some(Res::Extern(id)) if !cx.resolution.is_runtime_extern(cx.package, id) => ffi::extern_value(cx, value.span, id),
       Some(Res::FromRaw(_)) => {
         cx.diagnostics.push(
           Diagnostic::error(codes::WRONG_CALL_FORM, value.span, "`from_raw` cannot be used as a value").with_help("wrap the call in a lambda: `(n) => Name::from_raw(n)`"),
@@ -553,6 +935,20 @@ fn other_expr_kind(cx: Checker, value: Expr, expected: Option<Type>) -> Type {
 
         types::error()
       }
+      // Its implementation is chosen by the type in the call (docs/adr/0094-conversions-and-defaults.md, Q631).
+      Some(Res::InterfaceFn { name, .. }) => {
+        cx.diagnostics.push(
+          Diagnostic::error(codes::WRONG_CALL_FORM, value.span, "the static function `" + name + "` of an interface cannot be used as a value")
+            .with_help("wrap the call in a lambda: `(x) => Type::" + name + "(x)`"),
+        );
+
+        types::error()
+      }
+      // `i32::MAX` (docs/adr/0088-bitwise-operators-and-integer-methods.md, Q580).
+      Some(Res::Builtin(name)) if numbers::int_limit(name).is_some() => match numbers::int_limit(name) {
+        Some(limit) => types::int(limit.ty),
+        None => types::error(),
+      },
       Some(Res::Extern(_)) | Some(Res::Builtin(_)) => {
         cx.diagnostics.push(
           Diagnostic::error(codes::WRONG_CALL_FORM, value.span, "C functions and prelude functions cannot be used as values")
@@ -577,15 +973,16 @@ fn other_expr_kind(cx: Checker, value: Expr, expected: Option<Type>) -> Type {
 
       call(cx, value, callee, args, expected)
     }
-    ExprKind::Try(inner) => try_expr(cx, inner),
+    ExprKind::Try(inner) => try_expr(cx, value.id, inner),
     ExprKind::Await(inner) => await_expr(cx, value, inner, expected),
     ExprKind::New { path, args } => strings::new_expr(cx, value, path, args, expected),
     ExprKind::Match { scrutinee, arms } => patterns::match_expr(cx, scrutinee, arms, expected),
-    ExprKind::MethodCall { receiver, method, args } => method_call(cx, value, receiver, method, args),
+    ExprKind::MethodCall { receiver, method, args } => method_call(cx, value, receiver, method, args, expected),
     ExprKind::Field { base, name } => field(cx, base, name),
-    ExprKind::Index { base, index: position } => index(cx, base, position),
-    ExprKind::StructLit { path, fields } => struct_literal(cx, value, path, fields, expected),
+    ExprKind::Index { base, index: position } => index(cx, value, base, position),
+    ExprKind::StructLit { path, fields, base } => struct_literal(cx, value, path, fields, base, expected),
     ExprKind::ArrayLit(elems) => array_literal(cx, value.span, elems, expected),
+    ExprKind::Tuple(elems) => tuple_literal(cx, elems, expected),
     ExprKind::ArrayRepeat { value: repeated, len } => {
       var elem: Option<Type> = None;
 
@@ -738,10 +1135,23 @@ fn unary(cx: Checker, value: Expr, op: UnaryOp, operand: Expr, expected: Option<
 
   match op {
     UnaryOp::Deref => ffi::deref(cx, value, operand),
+    // The logical not of a `bool`, or every bit of an integer flipped
+    // (docs/adr/0088-bitwise-operators-and-integer-methods.md, Q574).
     UnaryOp::Not => {
-      expect(cx, operand, types::of(TypeKind::Bool));
+      const ty = expr(cx, operand, bits_hint(expected, false));
 
-      types::of(TypeKind::Bool)
+      match ty.kind {
+        TypeKind::Bool | TypeKind::Int(_) | TypeKind::Error | TypeKind::Never => ty,
+        _ => {
+          if operators::is_operator_operand(ty) {
+            return operators::not_call(cx, value, ty);
+          }
+
+          cx.error(codes::INVALID_OPERAND, value.span, "cannot apply `!` to a value of type `" + types::text(ty) + "`; it takes a `bool` or an integer");
+
+          types::error()
+        }
+      }
     }
     UnaryOp::Neg => {
       const ty = expr(cx, operand, numeric_only(expected));
@@ -855,6 +1265,10 @@ fn binary(cx: Checker, value: Expr, op: BinaryOp, lhs: Expr, rhs: Expr, expected
     expect(cx, rhs, bool_ty);
 
     return bool_ty;
+  }
+
+  if is_bitwise(op) {
+    return bitwise(cx, value, op, lhs, rhs, expected);
   }
 
   const hint = if is_arithmetic(op) { numeric_only(expected) } else { None };
@@ -1188,9 +1602,16 @@ fn for_iter(cx: Checker, iter: Expr) -> Type {
         TypeKind::Array { elem, .. } | TypeKind::Slice { elem, .. } => elem,
         TypeKind::Error | TypeKind::Never => types::error(),
         _ => {
+          // A type implementing `Iterable` (docs/adr/0095-collections.md, Q645).
+          if let Some(elem) = interfaces::iterable_elem(cx, ty) {
+            cx.typed.iterable_fors.insert(iter.id, elem);
+
+            return elem;
+          }
+
           cx.diagnostics.push(
             Diagnostic::error(codes::INVALID_OPERAND, iter.span, "cannot iterate over a value of type `" + types::text(ty) + "`")
-              .with_note("`for` iterates over ranges, arrays, lists, maps and iterators"),
+              .with_note("`for` iterates over ranges, arrays, lists, maps, iterators and the types implementing `Iterable`"),
           );
 
           types::error()
@@ -1275,6 +1696,7 @@ fn call(cx: Checker, value: Expr, callee: Expr, args: List<Expr>, expected: Opti
     None => return closures::call_value(cx, value, callee, args),
   };
   var sig: Option<FnSig> = None;
+  var variadic = false;
 
   match cx.resolution.paths.get(callee.id) {
     Some(Res::Fn(id)) => {
@@ -1286,8 +1708,10 @@ fn call(cx: Checker, value: Expr, callee: Expr, args: List<Expr>, expected: Opti
 
       return ty;
     }
+    Some(Res::InterfaceFn { target, name }) => return interfaces::static_call(cx, value, path, target, name, args, expected),
     Some(Res::Extern(id)) => {
       sig = ffi::extern_call_sig(cx, callee, id);
+      variadic = ffi::is_variadic(cx, id);
     }
     Some(Res::FromRaw(id)) => {
       const enum_ty = cx.type_ref(TypeItem::Enum(id));
@@ -1308,16 +1732,41 @@ fn call(cx: Checker, value: Expr, callee: Expr, args: List<Expr>, expected: Opti
         sig = Some(FnSig { receiver: None, params: List::from([types::string()]), ret: ret });
       } else if name == "List::from" {
         return collections::list_from(cx, value, callee, args, expected);
+      } else if name == "List::with_capacity" {
+        return collections::inferred_call_expecting(cx, value, cx.resolution.prelude_fn("list_with_capacity"), name, args, expected);
+      } else if let Some(ty) = interfaces::primitive_default(cx, value, name, args) {
+        // Defaults of the prelude (docs/adr/0094-conversions-and-defaults.md, Q636).
+        return ty;
+      } else if let Some(ty) = interfaces::primitive_conversion(cx, value, path, name, args, expected) {
+        // Conversions of the prelude (docs/adr/0094-conversions-and-defaults.md, Q632 and Q634).
+        return ty;
+      } else if let Some(function) = numbers::int_static(name) {
+        // Written in the prelude for each integer type (docs/adr/0101-the-rest-of-s2.md, Q702, Q703).
+        return collections::inferred_call_of(cx, value, cx.resolution.prelude_fn(function), name, args);
+      } else if name == "char::from_digit" || name.starts_with("String::from_") {
+        // Written in the root of `std` (docs/adr/0093-everyday-methods.md, Q620 and Q621).
+        const function = if name == "char::from_digit" { "char_from_digit" } else { "text_" + name.substring(8, name.len()) };
+
+        return collections::inferred_call_of(cx, value, collections::std_root_fn(cx, function), name, args);
+      } else if name == "assert_eq" || name == "assert_ne" {
+        // The message comes from a generic function of the prelude, which also checks `Eq`.
+        collections::inferred_prelude_call(cx, value, name + "_failure", args);
+
+        return types::unit();
+      } else if name == "Atomic::new" {
+        return atomic_new(cx, value, args, expected);
+      } else if name == "hint::black_box" {
+        // Its argument's type is its result's (docs/adr/0090-benchmarks.md, Q596).
+        if args.len() != 1 {
+          cx.error(codes::WRONG_ARGUMENT_COUNT, value.span, `\`black_box\` takes 1 argument but ${args.len()} were supplied`);
+          unchecked_args(cx, args);
+
+          return types::error();
+        }
+
+        return expr(cx, args[0], expected);
       } else if name.starts_with("mem::") {
         return ffi::mem_call(cx, value, path, name, args, expected);
-      } else if name == "include_str" {
-        cx.diagnostics.push(
-          Diagnostic::error(codes::INVALID_INCLUDE, value.span, "`include_str` can only give the value of a module-level constant")
-            .with_help("declare `const TEXT: String = include_str(\"file\");` and use `TEXT`"),
-        );
-        unchecked_args(cx, args);
-
-        return types::string();
       } else {
         if name == "string_from_c" {
           ffi::require_unsafe(cx, callee.span, "reading a C string");
@@ -1339,7 +1788,11 @@ fn call(cx: Checker, value: Expr, callee: Expr, args: List<Expr>, expected: Opti
     }
   };
 
-  check_args(cx, value.span, "function", found.params, args);
+  if variadic {
+    ffi::variadic_args(cx, value.span, found.params, args);
+  } else {
+    check_args(cx, value.span, "function", found.params, args);
+  }
 
   found.ret
 }
@@ -1438,13 +1891,86 @@ fn ambiguous_method(cx: Checker, method: Ident, receiver_ty: Type, own: Option<u
   );
 }
 
-fn method_call(cx: Checker, value: Expr, receiver: Expr, method: Ident, args: List<Expr>) -> Type {
+/// Whether a struct, enum or class (or an ancestor) declares a function `name`.
+fn declares_method(cx: Checker, ty: Type, name: String) -> bool {
+  match ty.kind {
+    TypeKind::Class(class_ref) => inheritance::class_method(cx, class_ref.id, name).is_some(),
+    _ => match types::type_item_of(ty) {
+      Some(item) => cx.resolution.type_function(cx.package, item, name).is_some(),
+      None => false,
+    },
+  }
+}
+
+/// `(a..b).rev()`, which `for` runs as a loop.
+fn is_range_rev(receiver: Expr, name: String) -> bool {
+  match receiver.kind {
+    ExprKind::Range { .. } => name == "rev",
+    _ => false,
+  }
+}
+
+fn method_call(cx: Checker, value: Expr, receiver: Expr, method: Ident, args: List<Expr>, expected: Option<Type>) -> Type {
   if let ExprKind::Zod = receiver.kind {
     return inheritance::zod_call(cx, value, receiver, method, args);
   }
 
   const receiver_ty = borrow::deref_base(cx, receiver);
   const name = method.name;
+
+  // The last reference going calls `drop` of `Drop` (docs/adr/0096-streams-files-and-drop.md, Q655);
+  // `zod.drop()` in a `drop` calls the parent's, above.
+  if name == "drop" && args.is_empty() {
+    if let Some(drop) = cx.typed.prelude.drop {
+      if cx.typed.implements(receiver_ty, NamedRef { id: drop, name: "Drop", args: new List() }) {
+        cx.diagnostics.push(
+          Diagnostic::error(codes::WRONG_CALL_FORM, method.span, "`drop` of `Drop` is not called directly")
+            .with_note("it runs when the last reference to the instance goes")
+            .with_help("let the value go, or call a method that frees the resource now, such as `close`"),
+        );
+
+        return types::unit();
+      }
+    }
+  }
+
+  // `to_socket_addrs` of `String` and the tuples the compiler implements `ToSocketAddrs` for
+  // (docs/adr/0100-networking.md, Q693).
+  if name == "to_socket_addrs" && args.is_empty() && cx.typed.socket_addrs_of(receiver_ty).is_some() {
+    if let Some(net) = cx.typed.net {
+      if let Some(function) = cx.resolution.type_function(cx.package, TypeItem::Interface(net.to_socket_addrs), name) {
+        if let Some(sig) = cx.typed.sig(function) {
+          cx.typed.method_calls.insert(value.id, function);
+
+          return sig.ret;
+        }
+      }
+    }
+  }
+
+  // `into` and `try_into`, unless the type declares a method of that name
+  // (docs/adr/0094-conversions-and-defaults.md, Q633 and Q634).
+  if (name == "into" || name == "try_into") && args.is_empty() && !declares_method(cx, receiver_ty, name) {
+    return interfaces::into_call(cx, value, receiver_ty, method, name == "try_into", expected);
+  }
+
+  if let Some(ty) = collections::range_test(cx, value, receiver, receiver_ty, method, args) {
+    return ty;
+  }
+
+  // The methods of iterators that need more of their values, keep both ends, or make what the
+  // context expects (docs/adr/0093-everyday-methods.md, Q626-Q628).
+  if let Some(elem) = cx.typed.iter_elem(receiver_ty) {
+    if !is_range_rev(receiver, name) {
+      if let Some(ty) = collections::iter_method(cx, value, receiver_ty, elem, method, args, expected) {
+        return ty;
+      }
+    }
+  }
+
+  if let TypeKind::Atomic(inner) = receiver_ty.kind {
+    return atomic_method(cx, value, receiver, inner, method, args);
+  }
 
   if let TypeKind::Slice { .. } = receiver_ty.kind {
     return borrow::slice_method(cx, value, receiver_ty, method, args);
@@ -1504,6 +2030,7 @@ fn method_call(cx: Checker, value: Expr, receiver: Expr, method: Ident, args: Li
     TypeKind::Interface(named) => {
       owner = TypeItem::Interface(named.id);
     }
+    TypeKind::Option(inner) if name == "take" || name == "replace" => return option_take(cx, value, receiver, receiver_ty, inner, method, args),
     TypeKind::Option(_) | TypeKind::Result { .. } => return builtin_method(cx, value, receiver_ty, method, args),
     TypeKind::List(_) => return collections::list_method(cx, value, receiver, receiver_ty, method, args),
     TypeKind::Error | TypeKind::Never => {
@@ -1512,16 +2039,21 @@ fn method_call(cx: Checker, value: Expr, receiver: Expr, method: Ident, args: Li
       return types::error();
     }
     TypeKind::String | TypeKind::Char | TypeKind::StringBuilder => return strings::text_method(cx, value, receiver_ty, method, args),
-    TypeKind::Array { .. } => {
+    TypeKind::Array { elem, .. } => {
       if name == "len" {
         check_args(cx, value.span, "method", new List(), args);
 
         return types::int(IntTy::Usize);
       }
 
+      // Lent as a slice (docs/adr/0093-everyday-methods.md, Q624).
+      if collections::SLICE_METHODS.split(" ").contains(name) {
+        return collections::slice_method_of(cx, value, receiver, receiver_ty, elem, method, args);
+      }
+
       cx.diagnostics.push(
         Diagnostic::error(codes::UNKNOWN_MEMBER, method.span, "no method `" + name + "` on type `" + types::text(receiver_ty) + "`")
-          .with_help("arrays have the methods `len()`, `iter()` and those of iterators, `as_ptr()` and `as_mut_ptr()`"),
+          .with_help("arrays have the methods `len()`, `iter()` and those of iterators, `as_ptr()`, `as_mut_ptr()` and those of slices, such as `contains` and `sort`"),
       );
       unchecked_args(cx, args);
 
@@ -1689,16 +2221,73 @@ fn method_call(cx: Checker, value: Expr, receiver: Expr, method: Ident, args: Li
     }
   }
 
-  generic::generic_method_call(cx, value, receiver_ty, function, args)
+  const ty = generic::generic_method_call(cx, value, receiver_ty, function, args);
+
+  // `Builder::spawn` (docs/adr/0098-locks-orderings-and-threads.md, Q678).
+  if let Some(spawn) = send::spawn_name(cx, function) {
+    send::check_spawn_argument(cx, spawn, args);
+  }
+
+  ty
+}
+
+/// The help of `value.NAME` when `NAME` is a constant of the value's type, which is named
+/// through the type (docs/adr/0099-associated-and-composite-constants.md, Q683).
+pub fn const_help(cx: Checker, item: TypeItem, name: String) -> Option<String> {
+  cx.resolution.type_const(cx.package, item, name)?;
+
+  const shown = cx.resolution.type_name(cx.package, item);
+
+  Some("`" + name + "` is a constant of `" + shown + "`; name it through the type: `" + shown + "::" + name + "`")
 }
 
 fn resolve_same(a: TypeItem, b: TypeItem) -> bool {
   pkg::resolve::same_type_item(a, b)
 }
 
+/// `(a, b, ...)`: a tuple of the types of its elements, each expected to be the element of an
+/// expected tuple of as many (docs/adr/0092-tuples.md, Q609).
+fn tuple_literal(cx: Checker, elems: List<Expr>, expected: Option<Type>) -> Type {
+  var hints: List<Type> = new List();
+
+  if let Some(ty) = expected {
+    if let TypeKind::Tuple(expected_elems) = ty.kind {
+      if expected_elems.len() == elems.len() {
+        hints = expected_elems;
+      }
+    }
+  }
+
+  const types: List<Type> = new List();
+
+  for index in 0..elems.len() {
+    types.push(expr(cx, elems[index], hints.get(index)));
+  }
+
+  types::of(TypeKind::Tuple(types))
+}
+
+/// `t.0`: the element of a tuple at the index the name gives.
+fn tuple_element(cx: Checker, base_ty: Type, elems: List<Type>, name: Ident) -> Type {
+  if let Some(position) = types::tuple_index(name.name, elems.len()) {
+    return elems[position];
+  }
+
+  cx.diagnostics.push(
+    Diagnostic::error(codes::UNKNOWN_MEMBER, name.span, "no field `" + name.name + "` on type `" + types::text(base_ty) + "`")
+      .with_note(`its elements are \`0\` to \`${elems.len() - 1}\``),
+  );
+
+  types::error()
+}
+
 fn field(cx: Checker, base: Expr, name: Ident) -> Type {
   const base_ty = borrow::deref_base(cx, base);
   const field_name = name.name;
+
+  if let TypeKind::Tuple(elems) = base_ty.kind {
+    return tuple_element(cx, base_ty, elems, name);
+  }
 
   if let TypeKind::Class(class_ref) = base_ty.kind {
     return classes::class_field(cx, class_ref.id, base_ty, name);
@@ -1713,7 +2302,15 @@ fn field(cx: Checker, base: Expr, name: Ident) -> Type {
     TypeKind::Struct(named) => named,
     TypeKind::Error | TypeKind::Never => return types::error(),
     _ => {
-      cx.error(codes::UNKNOWN_MEMBER, name.span, "no field `" + field_name + "` on type `" + types::text(base_ty) + "`");
+      var diagnostic = Diagnostic::error(codes::UNKNOWN_MEMBER, name.span, "no field `" + field_name + "` on type `" + types::text(base_ty) + "`");
+
+      if let TypeKind::Enum(named) = base_ty.kind {
+        if let Some(help) = const_help(cx, TypeItem::Enum(named.id), field_name) {
+          diagnostic = diagnostic.with_help(help);
+        }
+      }
+
+      cx.diagnostics.push(diagnostic);
 
       return types::error();
     }
@@ -1748,6 +2345,8 @@ fn field(cx: Checker, base: Expr, name: Ident) -> Type {
 
       if cx.resolution.type_function(cx.package, TypeItem::Struct(owner.id), field_name).is_some() {
         diagnostic = diagnostic.with_help("`" + field_name + "` is a method; call it with `" + field_name + "(...)`, or wrap it in a lambda to use it as a value");
+      } else if let Some(help) = const_help(cx, TypeItem::Struct(owner.id), field_name) {
+        diagnostic = diagnostic.with_help(help);
       } else {
         const names: List<String> = new List();
 
@@ -1780,11 +2379,32 @@ fn field(cx: Checker, base: Expr, name: Ident) -> Type {
   types::substitute(found_field.ty, Subst::of(ParamOwner::Item(TypeItem::Struct(owner.id)), owner.args))
 }
 
-fn index(cx: Checker, base: Expr, position: Expr) -> Type {
+fn index(cx: Checker, value: Expr, base: Expr, position: Expr) -> Type {
   const base_ty = borrow::deref_base(cx, base);
 
   if let ExprKind::Range { start, end, .. } = position.kind {
     return borrow::range_index(cx, base, base_ty, start, end);
+  }
+
+  // A type of the program, or a type parameter, through `Index`
+  // (docs/adr/0094-conversions-and-defaults.md, Q639).
+  const user_type = match base_ty.kind {
+    TypeKind::Struct(_) | TypeKind::Enum(_) | TypeKind::Class(_) | TypeKind::Interface(_) | TypeKind::Param(_) => true,
+    _ => false,
+  };
+
+  if user_type {
+    if let Some(ty) = interfaces::user_index(cx, value, base_ty, position) {
+      return ty;
+    }
+
+    cx.diagnostics.push(
+      Diagnostic::error(codes::INVALID_OPERAND, base.span, "cannot index a value of type `" + types::text(base_ty) + "`")
+        .with_help("implement `Index<Idx, Out>` for `" + types::text(base_ty) + "`, whose `index` gives `value[i]`"),
+    );
+    expr(cx, position, None);
+
+    return types::error();
   }
 
   expect(cx, position, types::int(IntTy::Usize));
@@ -1825,13 +2445,28 @@ pub fn find_seen(seen: List<Seen>, name: String) -> Option<Span> {
   None
 }
 
-fn struct_literal(cx: Checker, value: Expr, path: Path, fields: List<FieldInit>, expected: Option<Type>) -> Type {
+fn struct_literal(cx: Checker, value: Expr, path: Path, fields: List<FieldInit>, base: Option<Expr>, expected: Option<Type>) -> Type {
   const id = match cx.resolution.paths.get(value.id) {
     Some(Res::Struct(id)) => id,
-    Some(Res::Variant(variant)) => return named_variant_literal(cx, path, variant, fields, expected),
+    Some(Res::Variant(variant)) => {
+      // As in Rust, only structs take a base (docs/adr/0094-conversions-and-defaults.md, Q643).
+      if let Some(found) = base {
+        cx.diagnostics.push(
+          Diagnostic::error(codes::INVALID_STRUCT_BASE, found.span, "`..base` builds structs, not the variants of enums")
+            .with_help("write every field of the variant"),
+        );
+        expr(cx, found, None);
+      }
+
+      return named_variant_literal(cx, path, variant, fields, expected);
+    }
     _ => {
       for init in fields {
         expr(cx, init.value, None);
+      }
+
+      if let Some(found) = base {
+        expr(cx, found, None);
       }
 
       return types::error();
@@ -1839,6 +2474,14 @@ fn struct_literal(cx: Checker, value: Expr, path: Path, fields: List<FieldInit>,
   };
   const def = cx.typed.struct_def(id).unwrap_or(StructDef { name: "", fields: new List(), is_union: false });
   const seen: List<Seen> = new List();
+
+  if ffi::is_opaque(cx, id) {
+    for init in fields {
+      expr(cx, init.value, None);
+    }
+
+    return ffi::bare_opaque(cx, path.span, id);
+  }
   // The type arguments of a generic struct come from the path, the expected type and the field
   // values.
   const owner = ParamOwner::Item(TypeItem::Struct(id));
@@ -1915,6 +2558,30 @@ fn struct_literal(cx: Checker, value: Expr, path: Path, fields: List<FieldInit>,
     };
 
     ty = cx.named_type(TypeItem::Struct(id), struct_args);
+  }
+
+  // The fields not written come from a value of the same struct, checked after the fields, as
+  // it runs after them (Q643).
+  if let Some(found) = base {
+    const base_ty = expr(cx, found, Some(ty));
+
+    if !types::is_error(base_ty) && !types::same_type(base_ty, ty) {
+      cx.diagnostics.push(
+        Diagnostic::error(codes::INVALID_STRUCT_BASE, found.span, "the base of a literal of `" + types::text(ty) + "` has the type `" + types::text(base_ty) + "`")
+          .with_note("`..base` gives the fields not written, from a value of the same struct"),
+      );
+    }
+
+    if def.is_union {
+      cx.diagnostics.push(Diagnostic::error(codes::INVALID_STRUCT_BASE, found.span, "a union literal takes no base"));
+    }
+
+    // Every field is given.
+    for candidate in def.fields {
+      if find_seen(seen, candidate.name).is_none() {
+        seen.push(Seen { name: candidate.name, span: found.span });
+      }
+    }
   }
 
   const missing: List<String> = new List();
@@ -2246,6 +2913,25 @@ fn named_variant_literal(cx: Checker, path: Path, variant: VariantRef, fields: L
   ty
 }
 
+/// The methods of `Option` written in the prelude, as `option_<name>`.
+const OPTION_PRELUDE_METHODS: String = "ok_or ok_or_else or or_else and xor map_or map_or_else is_some_and is_none_or zip flatten iter unwrap_or_default";
+
+/// The methods of `Result` written in the prelude, as `result_<name>`.
+const RESULT_PRELUDE_METHODS: String = "ok err and or or_else map_or map_or_else is_ok_and is_err_and iter unwrap_or_default";
+
+/// `place.take()`, which gives the value of an `Option` place and leaves `None`, and
+/// `place.replace(value)`, which leaves `Some(value)`: the place is assigned, under the rules of
+/// an assignment (docs/adr/0097-processes-and-environment.md, Q663).
+fn option_take(cx: Checker, value: Expr, receiver: Expr, option_ty: Type, inner: Type, method: Ident, args: List<Expr>) -> Type {
+  const replace = method.name == "replace";
+
+  check_args(cx, value.span, "method", if replace { List::from([inner]) } else { new List() }, args);
+  classes::check_mutable_place(cx, receiver, PlaceUse::Assign);
+  cx.typed.builtin_methods.insert(value.id, if replace { BuiltinMethod::Replace } else { BuiltinMethod::Take });
+
+  option_ty
+}
+
 /// A method of `Option` or `Result` (docs/spec/07-errors.md).
 fn builtin_method(cx: Checker, value: Expr, receiver_ty: Type, method: Ident, args: List<Expr>) -> Type {
   if let Some(ty) = closures::closure_method(cx, value, receiver_ty, method, args) {
@@ -2306,22 +2992,41 @@ fn builtin_method(cx: Checker, value: Expr, receiver_ty: Type, method: Ident, ar
         builtin = Some(BuiltinMethod::UnwrapErr);
         ret = error;
       }
+    } else if name == "expect_err" {
+      if let Some(error) = result_error {
+        builtin = Some(BuiltinMethod::ExpectErr);
+        params = List::from([types::string()]);
+        ret = error;
+      }
+    }
+  }
+
+  // The methods written in the prelude (docs/adr/0093-everyday-methods.md, Q619).
+  if builtin.is_none() {
+    var nested = false;
+
+    if let Some(found) = option_value {
+      if let TypeKind::Option(_) = found.kind {
+        nested = true;
+      }
+    }
+
+    const prelude_names = if option_value.is_some() { OPTION_PRELUDE_METHODS } else { RESULT_PRELUDE_METHODS };
+
+    if prelude_names.split(" ").contains(name) && (name != "flatten" || nested) {
+      const prefix = if option_value.is_some() { "option_" } else { "result_" };
+
+      return collections::inferred_prelude_method(cx, value, prefix + name, receiver_ty, args);
     }
   }
 
   const chosen = match builtin {
     Some(chosen) => chosen,
     None => {
-      const available = if option_value.is_some() {
-        "`is_some`, `is_none`, `unwrap`, `expect` and `unwrap_or`"
-      } else {
-        "`is_ok`, `is_err`, `unwrap`, `expect`, `unwrap_or` and `unwrap_err`"
-      };
+      const flattening = name == "flatten" && option_value.is_some();
+      const note = if flattening { "only an `Option<Option<T>>` is flattened" } else { "the methods of `Option` and `Result` are those of Rust's" };
 
-      cx.diagnostics.push(
-        Diagnostic::error(codes::UNKNOWN_MEMBER, method.span, "no method `" + name + "` on type `" + types::text(receiver_ty) + "`")
-          .with_note("in F1 its methods are " + available + "; methods taking closures arrive in F2"),
-      );
+      cx.diagnostics.push(Diagnostic::error(codes::UNKNOWN_MEMBER, method.span, "no method `" + name + "` on type `" + types::text(receiver_ty) + "`").with_note(note));
       unchecked_args(cx, args);
 
       return types::error();
@@ -2387,7 +3092,7 @@ fn await_expr(cx: Checker, value: Expr, inner: Expr, expected: Option<Type>) -> 
   }
 }
 
-fn try_expr(cx: Checker, inner: Expr) -> Type {
+fn try_expr(cx: Checker, id: u32, inner: Expr) -> Type {
   const ty = expr(cx, inner, None);
   const ret = cx.ret;
 
@@ -2415,14 +3120,19 @@ fn try_expr(cx: Checker, inner: Expr) -> Type {
             }
           }
 
-          if !cx.fits(error, expected) && !into_error {
-            try_fails(
-              cx,
-              inner,
-              ret,
-              "the error type `" + types::text(error) + "` does not match the function's error type `" + types::text(expected) + "`",
-              Some("convert the error explicitly with a `match`; `?` never converts errors (`map_err` arrives with closures in F2)"),
-            );
+          if !cx.fits(error, expected) && !into_error && !types::is_error(expected) {
+            // Through `From`, as Rust's `?` (docs/adr/0094-conversions-and-defaults.md, Q635).
+            if cx.typed.converts(error, expected) {
+              cx.typed.conversions.insert(id, Conversion { from: error, to: expected, error: None });
+            } else {
+              try_fails(
+                cx,
+                inner,
+                ret,
+                "the error type `" + types::text(error) + "` does not match the function's error type `" + types::text(expected) + "`",
+                Some("implement `From<" + types::text(error) + ">` for `" + types::text(expected) + "`, or convert the error with `map_err`"),
+              );
+            }
           }
         }
         TypeKind::Error => {}
@@ -2518,4 +3228,36 @@ fn float_literal_type(suffix: Option<String>, expected: Option<Type>) -> Type {
   }
 
   types::of(TypeKind::Float(FloatTy::F64))
+}
+
+/// `NAME = value` and `NAME += value` on a static: a `static var` in `unsafe` (Q528), never a
+/// `static`, which holds one value for the program (Q526).
+fn static_assignment(cx: Checker, target: Expr, id: u32, op: Option<BinaryOp>, value: Expr) -> Type {
+  const decl = match cx.resolution.static_decl(cx.package, id) {
+    Some(found) => found,
+    None => return expr(cx, value, None),
+  };
+
+  if !decl.mutable {
+    cx.diagnostics.push(
+      Diagnostic::error(codes::INVALID_ASSIGNMENT_TARGET, target.span, "cannot assign to a `static`")
+        .with_label(decl.name.span, "declared with `static` here")
+        .with_help("change its value through its methods, such as those of a `Mutex` or an atomic, or declare it `static var`"),
+    );
+
+    return expr(cx, value, None);
+  }
+
+  const target_ty = expr(cx, target, None);
+  var checked = false;
+
+  if let Some(compound) = op {
+    checked = compound_operand(cx, target, compound, target_ty, value);
+  }
+
+  if !checked {
+    expect(cx, value, target_ty);
+  }
+
+  types::unit()
 }

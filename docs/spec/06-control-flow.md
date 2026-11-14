@@ -8,8 +8,12 @@ The last expression of a block, written without a trailing `;`, is the value of 
 fn square(x: i32) -> i32 { x * x }
 ```
 
-- Block-like expressions (`if`, `while`, `loop`, `for`, `{ ... }`) used as statements need no
-  `;`; their value must then be `()`.
+- Block-like expressions (`if`, `match`, `while`, `loop`, `for`, `unsafe { ... }`, `{ ... }`)
+  used as statements need no `;`; their value must then be `()`.
+- As in Rust, a statement, final expression or match arm body that starts with a block-like
+  expression ends at its `}`, unless `.` or `?` continues it: after `unsafe { n += 1; }`, a line
+  `*a - *b` is the next expression, not a multiplication. Another operator there is an error
+  (`E0100`); parentheses use the value: `(if c { 1 } else { 2 }) + 1`.
 - A function with `-> T` must produce a `T` on every path: through its final expression or
   `return expr;`. A function without `-> T` uses `return;`.
 
@@ -59,8 +63,11 @@ for i in 0..10 { ... }
   the type. A `loop` without any `break` never finishes.
 - `break` and `continue` apply to the innermost loop. Labels are post-MVP.
 - `for` iterates over ranges, arrays and `s.chars()`/`s.bytes()` (F1) and, from F2, over lists,
-  maps (their entries) and iterators (`Iter<T>`). The loop variable is a new `const` binding on
-  each iteration. An array is iterated through a copy taken before the loop, so assigning to it
+  maps (their entries) and iterators (`Iter<T>`), and over the values of any type implementing
+  [`Iterable<T>`](05-interfaces-generics.md#iteration-and-collection), whose `iter()` it runs
+  over ([ADR-0095](../adr/0095-collections.md), Q645). The loop variable is a new `const` binding on
+  each iteration, or a tuple pattern whose parts always match, which binds each of its names:
+  `for (index, c) in text.char_indices() { ... }`. An array is iterated through a copy taken before the loop, so assigning to it
   inside the body does not change the iteration. A list is read by position at every step, so
   changes made by the body are seen (see [lists](02-types.md#lists-f2)).
 - The condition of `if`/`while` and the iterable of `for` cannot be a struct literal written
@@ -90,6 +97,10 @@ for i in 1..=10 { ... }   // 1 to 10
   range. `step_by(n)` keeps the first value and every `n`-th after it; a step of 0 panics. In a
   `for`, both compile to a counting loop without an iterator, and never step past the type's
   limits: `for b in (0u8..=255u8).rev()` visits 256 values.
+- `(a..b).contains(x)` and `(a..b).is_empty()`, written directly on a range as `rev()` is, test
+  its ends without an iterator, as Rust's: `a <= x && x < b` (`x <= b` for `a..=b`), and no
+  value between the ends ([ADR-0101](../adr/0101-the-rest-of-s2.md), Q705). A range kept in a
+  binding is an iterator, which has neither.
 - Open ranges (`..b`, `a..`) are post-MVP.
 
 ## `match`
@@ -115,6 +126,8 @@ match s {
   | `None`, `Shape::Empty` | that variant without data |
   | `Some(p)`, `Shape::Circle(p)` | that variant, with its fields matching the sub-patterns |
   | `Shape::Rect { w, h: p, .. }` | that variant by field name; `w` is shorthand for `w: w`, `..` ignores the rest (otherwise every field is listed) |
+  | `(p1, p2, ...)` | a tuple with as many elements, each matching its sub-pattern |
+  | `(p1, .., pn)` | a tuple, `..` standing once for any number of elements |
   | `p1 \| p2` | either pattern |
 
 - A guard, `pattern if condition => ...`, only takes the arm when the condition holds; guarded
@@ -132,11 +145,15 @@ match s {
 | 3 | `as` | left |
 | 4 | `*` `/` `%` | left |
 | 5 | `+` `-` | left |
-| 6 | `==` `!=` `<` `<=` `>` `>=` | none: `a < b < c` is an error |
-| 7 | `&&` | left, short-circuit |
-| 8 | `\|\|` | left, short-circuit |
-| 9 | `..` `..=` | none |
-| 10 | `=` `+=` `-=` `*=` `/=` `%=` | statements, not expressions |
+| 6 | `<<` `>>` | left |
+| 7 | `&` | left |
+| 8 | `^` | left |
+| 9 | `\|` | left |
+| 10 | `==` `!=` `<` `<=` `>` `>=` | none: `a < b < c` is an error |
+| 11 | `&&` | left, short-circuit |
+| 12 | `\|\|` | left, short-circuit |
+| 13 | `..` `..=` | none |
+| 14 | `=` `+=` `-=` `*=` `/=` `%=` `&=` `\|=` `^=` `<<=` `>>=` | statements, not expressions |
 
 - Operands of binary operators must have identical types (no implicit conversions), except for
   [operators of other types](05-interfaces-generics.md#operators), whose right operand has the
@@ -148,7 +165,19 @@ match s {
 - Unary `-` applies to signed integers and floats, and to types implementing `Neg`; it is an
   error on unsigned types. A negative literal such as `-128i8` is a single value and fits its
   type.
-- `!`, `&&` and `||` apply only to `bool`. There are no bitwise operators in the MVP.
+- `&&` and `||` apply only to `bool`. `!` is the logical not of a `bool`, and flips every bit of
+  an integer (`!0u8` is `255`), as in Rust.
+- The bitwise operators ([ADR-0088](../adr/0088-bitwise-operators-and-integer-methods.md)):
+  `&`, `|` and `^` (and, or, exclusive or) take two integers of the same type, or two `bool`s,
+  both evaluated. `a << n` and `a >> n` shift an integer `a` by `n` bits, an integer of any type
+  (`u32` when it is an unsuffixed literal), and keep the type of `a`. `<<` drops the bits
+  shifted out, also of signed numbers; `>>` is arithmetic on signed numbers and logical on
+  unsigned ones (`-16 >> 2` is `-4`). A shift by a negative amount, or by the width of the type
+  or more, panics in debug builds (`attempt to shift left with overflow`) and shifts by the
+  amount modulo the width in release builds. Their precedence is Rust's, so `flags & MASK == 0`
+  is `(flags & MASK) == 0`. They are not overloadable yet.
+- `>>` is two `>` with nothing between them, so the `>>` that closes `List<List<T>>` stays two;
+  `a > > b` is not a shift. `~` is not an operator: the bitwise not is `!`.
 - `==` and `!=` apply to integers, floats, `char`, `bool` and `String`; `<` `<=` `>` `>=` to
   integers, floats, `char` and `String` (byte-wise lexicographic order). `+` also concatenates
   `String`s.

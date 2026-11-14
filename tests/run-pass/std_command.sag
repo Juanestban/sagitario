@@ -5,6 +5,7 @@
 // expect-stdout: variable: hijo ñ
 // expect-stdout: stderr: to stderr
 // expect-stdout: input: HOLA|MUNDO|
+// expect-stdout: long input: 200000 bytes
 // expect-stdout: big: 300 lines, 300 lines
 // expect-stdout: fail: Some(3), success false
 // expect-stdout: cannot run "no-such-program-sag": No such file or directory
@@ -81,6 +82,11 @@ fn main() -> Result<(), io::Error> {
 
   const upper = new Command(me).arg("upper").input("hola\nmundo\n").output()?;
   println(`input: ${lines(upper.stdout)}`);
+
+  // More input than a pipe holds.
+  const long = new Command(me).arg("upper").input("abc
+".repeat(50000)).output()?;
+  println(`long input: ${long.stdout.replace("", "").len()} bytes`);
 
   const big = new Command(me).arg("big").output()?;
   println(`big: ${big.stdout.lines().len()} lines, ${big.stderr.lines().len()} lines`);

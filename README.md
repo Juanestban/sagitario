@@ -240,7 +240,7 @@ fn main() -> Result<(), String> {
 | Area            | What there is                                                                                     | Spec |
 |-----------------|---------------------------------------------------------------------------------------------------|------|
 | Types           | integers with checked overflow, `f32`/`f64`, `String`, arrays, `List`, `Map`, slices, `Option`, `Result` | [02](docs/spec/02-types.md) |
-| Memory          | value structs, classes with ARC, `weak` references, `const`/`var`, `&T` and `&mut T` with a borrow checker | [03](docs/spec/03-memory.md) |
+| Memory          | value structs, classes with ARC, `weak` references, `const`/`var`, `&T` and `&mut T` with a borrow checker, `static` and `@thread_local` globals | [03](docs/spec/03-memory.md) |
 | Classes         | constructors, inheritance, `abstract`, `override`, visibility (`pub`, `prv`)                       | [04](docs/spec/04-classes.md) |
 | Interfaces      | generics with bounds, default methods, `impl ... for` blocks, operators, `Eq`/`Ord`/`Hash`         | [05](docs/spec/05-interfaces-generics.md) |
 | Control flow    | exhaustive `match`, `if let`, `while let`, ranges, `f"..."` strings              | [06](docs/spec/06-control-flow.md) |
@@ -277,16 +277,21 @@ The phases and their acceptance criteria are in [docs/roadmap.md](docs/roadmap.m
 | F6    | Language server, VS Code, and a bootstrap from a seed without Rust        | ✅ Done        |
 | F7    | Distribution: releases, installers, `nova update self`                    | 🟡 Acceptance  |
 | F8    | `async`/`await`                                                           | ✅ Done        |
-| G1    | Language prerequisites of a game engine: math, FFI, references, operators | 🟡 In progress |
-| G2–G9 | A game engine in Sagitario: windows, Vulkan, audio, physics, networking, an editor | ⬜ Planned |
+| G1    | Language prerequisites: math, FFI, references, operators, global state    | ✅ Done        |
+| S1    | The standard library in Sagitario, over the C library of each system      | ✅ Done        |
+| S2    | A standard library as complete as Rust's, from an audit of its modules    | ✅ Done        |
+| S3    | The core of the runtime in Sagitario (ARC, strings, lists, tasks)         | ⬜ Planned     |
+| S4    | Binding generation from C headers, as `bindgen` (before S3)               | ✅ Done        |
+
+The game engine is a project apart, written in Sagitario; its plan is in
+[docs/engine-roadmap.md](docs/engine-roadmap.md) until its repository exists.
 
 What a complete language still needs, from the deferred decisions of the roadmaps. Each one
 needs an ADR before it is implemented.
 
 **The language**
 
-- [ ] Mutable globals and static fields, or a sanctioned alternative
-- [ ] Arenas or pools for many short-lived values, without one reference count each
+- [x] Global state: `static`, `static var` in `unsafe`, and `@thread_local static var`
 - [ ] Derived `Eq`, `Ord` and `Hash` (today they are written by hand)
 - [ ] A `Display` interface for interpolating user types in `f"..."`
 - [ ] Automatic error conversion with `From<T>` in `?`, and `Error::source()`
@@ -302,6 +307,8 @@ needs an ADR before it is implemented.
 
 **The standard library**
 
+- [x] Written in Sagitario over the C library of each system, instead of the C runtime (S1)
+- [x] The modules of Rust's std it still lacks, from an audit (S2)
 - [ ] `std::net` (TCP, UDP), then HTTP
 - [ ] Asynchronous I/O for `async` tasks
 - [ ] Bounded channels, `try_receive` and timeouts
@@ -310,7 +317,7 @@ needs an ADR before it is implemented.
 
 - [ ] `@test` and a test runner (`nova test`), and `@deprecated`
 - [ ] A formatter (`sag fmt`) and a documentation generator (`sag doc`)
-- [ ] Binding generation from C headers and `vk.xml`
+- [x] Binding generation from C headers, and build scripts (S4)
 - [ ] Debugging with the names and types of Sagitario (today `#line` maps the C back to the lines)
 - [ ] Backtraces in panics, and diagnostics in other languages
 - [ ] Signed executables, native packages (`.msi`, `.pkg`, `.deb`) and the VS Code Marketplace
@@ -397,7 +404,8 @@ in [docs/architecture.md](docs/architecture.md). Every language feature needs a 
 - [Design decisions (ADRs)](docs/adr/README.md)
 - [Compiler architecture](docs/architecture.md)
 - [Test harness](docs/testing.md)
-- [Roadmap](docs/roadmap.md) and [roadmap v2: a game engine](docs/roadmap-v2.md)
+- [Roadmap](docs/roadmap.md), [roadmap v2: a complete language](docs/roadmap-v2.md) and the
+  [plan of a game engine](docs/engine-roadmap.md)
 - [Contributing](CONTRIBUTING.md)
 
 ## License

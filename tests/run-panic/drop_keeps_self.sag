@@ -1,0 +1,25 @@
+// A `drop` that keeps `self` alive panics: the instance is being freed
+// (docs/adr/0096-streams-files-and-drop.md, Q655).
+// expect-panic: drop kept a reference to its instance
+
+class Keeper impl Drop {
+  pub const kept: List<Keeper>;
+
+  pub fn new(self, kept: List<Keeper>) {
+    self.kept = kept;
+  }
+
+  pub fn drop(self) {
+    self.kept.push(self);
+  }
+}
+
+fn main() {
+  const kept = new List<Keeper>();
+
+  {
+    const _keeper = new Keeper(kept);
+  }
+
+  println(f"{kept.len()}");
+}

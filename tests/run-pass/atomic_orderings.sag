@@ -1,0 +1,131 @@
+// Atomic orderings, the new atomic types and their operations
+// (docs/adr/0098-locks-orderings-and-threads.md, Q676 and Q677).
+// expect-stdout: published: 42 true
+// expect-stdout: counted: 8000 8000
+// expect-stdout: small: 127 -128 | 255 0 | -32768 65535
+// expect-stdout: bits: 12 8 14 6 -5 | -5 0
+// expect-stdout: max min: 7 9 | 3 3
+// expect-stdout: bool: true true false true | false true
+// expect-stdout: exchange: Ok(5) Err(6) | weak: 7
+// expect-stdout: update: Ok(10) Err(20) 20
+// expect-stdout: pointer: 1 2 true Ok
+// expect-stdout: fence: 3
+
+use std::sync;
+use std::sync::{AtomicBool, AtomicI16, AtomicI32, AtomicI64, AtomicI8, AtomicIsize, AtomicPtr, AtomicU16, AtomicU8, AtomicUsize, Ordering};
+use std::thread;
+use std::thread::JoinHandle;
+use std::time::Duration;
+
+fn main() {
+  // A value published with `Release` is seen by the thread that reads the flag with `Acquire`.
+  const data = new AtomicI64(0);
+  const ready = new AtomicBool(false);
+  const reader = thread::spawn(() => {
+    while !ready.load(Ordering::Acquire) {
+      thread::sleep(Duration::from_millis(1));
+    }
+
+    data.load(Ordering::Relaxed)
+  });
+
+  data.store(42, Ordering::Relaxed);
+  ready.store(true, Ordering::Release);
+  println(f"published: {reader.join()} {ready.load(Ordering::SeqCst)}");
+
+  // Counting with `Relaxed` loses nothing: each addition is atomic.
+  const relaxed = new AtomicUsize(0);
+  const strict = new AtomicIsize(0);
+  const workers: List<JoinHandle<()>> = new List();
+
+  for _ in 0..8 {
+    workers.push(thread::spawn(() => {
+      for _ in 0..1000 {
+        relaxed.fetch_add(1, Ordering::Relaxed);
+        strict.fetch_add(1, Ordering::AcqRel);
+      }
+    }));
+  }
+
+  for worker in workers {
+    worker.join();
+  }
+
+  println(f"counted: {relaxed.load(Ordering::Relaxed)} {strict.load(Ordering::SeqCst)}");
+
+  // The small types wrap around at their limits.
+  const i8 = new AtomicI8(126);
+  const u8 = new AtomicU8(254);
+  const i16 = new AtomicI16(-32767);
+  const u16 = new AtomicU16(0);
+
+  i8.fetch_add(1, Ordering::SeqCst);
+  print(f"small: {i8.load(Ordering::SeqCst)} ");
+  i8.fetch_add(1, Ordering::SeqCst);
+  u8.fetch_add(1, Ordering::SeqCst);
+  print(f"{i8.load(Ordering::SeqCst)} | {u8.load(Ordering::SeqCst)} ");
+  u8.fetch_add(1, Ordering::SeqCst);
+  i16.fetch_sub(1, Ordering::SeqCst);
+  u16.fetch_sub(1, Ordering::SeqCst);
+  println(f"{u8.load(Ordering::SeqCst)} | {i16.load(Ordering::SeqCst)} {u16.load(Ordering::SeqCst)}");
+
+  // Bitwise operations return the value before them.
+  const bits = new AtomicI32(12);
+
+  print(f"bits: {bits.fetch_and(10, Ordering::SeqCst)} {bits.fetch_or(6, Ordering::SeqCst)} ");
+  print(f"{bits.fetch_xor(8, Ordering::SeqCst)} {bits.fetch_nand(12, Ordering::SeqCst)} {bits.load(Ordering::SeqCst)} | ");
+
+  const wide = new AtomicI64(12);
+
+  wide.fetch_nand(7, Ordering::Relaxed);
+  println(f"{wide.fetch_xor(-1, Ordering::Relaxed)} {wide.load(Ordering::Relaxed) & 3}");
+
+  const high = new AtomicI32(7);
+  const low = new AtomicI32(3);
+
+  print(f"max min: {high.fetch_max(9, Ordering::SeqCst)} {high.fetch_max(2, Ordering::SeqCst)} | ");
+  println(f"{low.fetch_min(5, Ordering::SeqCst)} {low.load(Ordering::SeqCst)}");
+
+  const flag = new AtomicBool(true);
+
+  print(f"bool: {flag.fetch_and(true, Ordering::SeqCst)} {flag.fetch_not(Ordering::SeqCst)} {flag.fetch_or(true, Ordering::SeqCst)} ");
+  print(f"{flag.fetch_xor(true, Ordering::SeqCst)} | {flag.fetch_nand(true, Ordering::SeqCst)} {flag.load(Ordering::SeqCst)}");
+  println("");
+
+  // A failure ordering stronger than the success one is allowed, as in Rust.
+  const cell = new AtomicI32(5);
+  const first = cell.compare_exchange(5, 6, Ordering::Relaxed, Ordering::SeqCst);
+  const second = cell.compare_exchange(5, 7, Ordering::Release, Ordering::Acquire);
+
+  // A weak exchange may fail although the value is the one expected, so it is tried in a loop.
+  while cell.compare_exchange_weak(6, 7, Ordering::AcqRel, Ordering::Relaxed).is_err() {}
+
+  println(f"exchange: {first:?} {second:?} | weak: {cell.load(Ordering::SeqCst)}");
+
+  const counter = new AtomicU16(10);
+  const doubled = counter.fetch_update(Ordering::SeqCst, Ordering::SeqCst, (value) => Some(value * 2));
+  const refused = counter.fetch_update(Ordering::SeqCst, Ordering::Acquire, (value) => if value > 15 { None } else { Some(value) });
+
+  println(f"update: {doubled:?} {refused:?} {counter.load(Ordering::SeqCst)}");
+
+  // A pointer, exchanged; what it points to is reached through `unsafe`.
+  var one = 1;
+  var two = 2;
+  const pointer = new AtomicPtr(&raw mut one);
+  const previous = pointer.swap(&raw mut two, Ordering::AcqRel);
+  const back = pointer.compare_exchange(&raw mut two, previous, Ordering::SeqCst, Ordering::SeqCst);
+  const read = unsafe { *previous };
+  const now = unsafe { *pointer.load(Ordering::Acquire) };
+
+  println(f"pointer: {read} {two} {now == 1} {if back.is_ok() { "Ok" } else { "Err" }}");
+
+  // Fences order plain atomics around them.
+  const plain = new AtomicI32(0);
+
+  plain.store(3, Ordering::Relaxed);
+  sync::fence(Ordering::Release);
+  sync::fence(Ordering::Acquire);
+  sync::fence(Ordering::AcqRel);
+  sync::fence(Ordering::SeqCst);
+  println(f"fence: {plain.load(Ordering::Relaxed)}");
+}

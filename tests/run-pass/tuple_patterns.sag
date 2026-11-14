@@ -1,0 +1,79 @@
+// Tuple patterns in `const`, `var`, `for`, `match`, `if let` and `while let`, with `..`, nested
+// tuples and the exhaustiveness of matches on tuples (docs/adr/0092-tuples.md, increment 2).
+// expect-stdout: 3 2 1 8
+// expect-stdout: 1 2.5 h 1 two [3] kept
+// expect-stdout: 1 7
+// expect-stdout: 0: zero
+// expect-stdout: 1: one
+// expect-stdout: origin
+// expect-stdout: axis
+// expect-stdout: diagonal
+// expect-stdout: plane
+// expect-stdout: matched
+// expect-stdout: 1x
+// expect-stdout: 2y
+// expect-stdout: some 3
+
+fn divmod(a: i32, b: i32) -> (i32, i32) {
+  (a / b, a % b)
+}
+
+fn describe(point: (i32, i32)) -> String {
+  match point {
+    (0, 0) => "origin",
+    (0, _) | (_, 0) => "axis",
+    (x, y) if x == y => "diagonal",
+    _ => "plane",
+  }
+}
+
+fn main() {
+  const (q, r) = divmod(17, 5);
+  var (low, high): (i32, i32) = (0, 9);
+
+  low += 1;
+  high -= 1;
+  println(f"{q} {r} {low} {high}");
+
+  const (first, .., last) = (1, "a", 'b', 2.5);
+  const (head, ..) = ("h", 1, 2);
+  const (a, (b, c)) = (1, ("two", [3]));
+  const (_, kept) = (List::from([1]), "kept");
+
+  println(f"{first} {last} {head} {a} {b} {c:?} {kept}");
+
+  const (x, y) = (y_of(), 1);
+  const (y2, x2) = (x, y);
+
+  println(f"{x2} {y2}");
+
+  for (index, word) in List::from([(0, "zero"), (1, "one")]) {
+    println(f"{index}: {word}");
+  }
+
+  for point in List::from([(0, 0), (0, 3), (2, 2), (1, 5)]) {
+    println(describe(point));
+  }
+
+  if let (1, name) = (1, "matched") {
+    println(name);
+  }
+
+  const pairs = List::from([(1, "x"), (2, "y")]);
+  var index = 0usize;
+
+  while let Some((n, s)) = pairs.get(index) {
+    println(f"{n}{s}");
+    index += 1;
+  }
+
+  match (true, Some(3)) {
+    (true, Some(v)) => println(f"some {v}"),
+    (true, None) => println("none"),
+    (false, _) => println("false"),
+  }
+}
+
+fn y_of() -> i32 {
+  7
+}

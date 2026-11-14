@@ -1,0 +1,20 @@
+// The built-in macros (docs/adr/0103-build-scripts-and-binding-generation.md, Q723-Q726).
+include!("nested.sag");
+include!("missing.sag"); //~ ERROR E0335
+include!("a.sag", "b.sag"); //~ ERROR E0346
+
+const NAME: String = "data.txt";
+
+fn main() {
+  nested();
+
+  const _unknown = format!("x"); //~ ERROR E0346
+  const _missing = include_str!("does-not-exist.txt"); //~ ERROR E0335
+  const _not_literal = include_str!(NAME); //~ ERROR E0346
+  const _no_args = include_bytes!(); //~ ERROR E0346
+  const _not_set = env!("SAG_MACRO_ERRORS_SURELY_UNSET"); //~ ERROR E0346
+  const _own_message = env!("SAG_MACRO_ERRORS_SURELY_UNSET", "set it to the directory of the assets"); //~ ERROR E0346
+  const _joined = concat!("a", NAME); //~ ERROR E0346
+  const _items = include!("nested.sag"); //~ ERROR E0346
+  const _old = include_str("data.txt"); //~ ERROR E0346
+}

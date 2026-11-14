@@ -6,7 +6,7 @@
 //! the body repeats, and the second pass starts from that state. Lists are references in
 //! Sagitario, so every state Rust clones is copied here with `copy_state`.
 
-use pkg::ast::{BinaryOp, Block, Expr, ExprKind, FnDecl, Pattern, PatternKind, Stmt, TemplatePart, UnaryOp};
+use pkg::ast::{BinaryOp, Block, Expr, ExprKind, FnDecl, Pattern, PatternKind, Stmt, UnaryOp};
 use pkg::diagnostics::{Diagnostic, Diagnostics};
 use pkg::diagnostics::codes;
 use pkg::resolve::{LambdaInfo, LocalInfo, LocalKind, Res, Resolution};
@@ -596,6 +596,17 @@ class Flow {
           as_mut_ptr = function == "SAG_ARRAY_MUT_PTR";
         }
 
+        // An array lent as `&mut [T]` to a method of slices changes in place.
+        if let Some(BuiltinMethod::Prelude(function)) = self.typed.builtin_methods.get(value.id) {
+          if let Some(sig) = self.typed.sig(function) {
+            if let Some(first) = sig.params.first() {
+              if let TypeKind::Slice { mutable: true, .. } = first.kind {
+                as_mut_ptr = true;
+              }
+            }
+          }
+        }
+
         var by_var = false;
 
         if let Some(function) = self.typed.method_calls.get(value.id) {
@@ -606,7 +617,14 @@ class Flow {
           }
         }
 
-        if as_mut_ptr || by_var {
+        // `take` and `replace` of an `Option` assign their receiver
+        // (docs/adr/0097-processes-and-environment.md, Q663).
+        const takes = match self.typed.builtin_methods.get(value.id) {
+          Some(BuiltinMethod::Take) | Some(BuiltinMethod::Replace) => true,
+          _ => false,
+        };
+
+        if as_mut_ptr || by_var || takes {
           self.mutate(receiver);
         }
       }
@@ -653,12 +671,16 @@ class Flow {
         self.expr(base);
         self.expr(index);
       }
-      ExprKind::StructLit { fields, .. } => {
+      ExprKind::StructLit { fields, base, .. } => {
         for field in fields {
           self.expr(field.value);
         }
+
+        if let Some(found) = base {
+          self.expr(found);
+        }
       }
-      ExprKind::ArrayLit(elems) => self.exprs(elems),
+      ExprKind::ArrayLit(elems) | ExprKind::Tuple(elems) => self.exprs(elems),
       ExprKind::ArrayRepeat { value: repeated, .. } => self.expr(repeated),
       ExprKind::Try(inner) | ExprKind::Await(inner) => self.expr(inner),
       ExprKind::Match { scrutinee, arms } => {
@@ -699,7 +721,7 @@ class Flow {
       }
       ExprKind::Template(parts) => {
         for part in parts {
-          if let TemplatePart::Expr(inner) = part {
+          for inner in part.exprs() {
             self.expr(inner);
           }
         }
@@ -814,7 +836,7 @@ class Flow {
           self.pattern_bindings(elem, out);
         }
       }
-      PatternKind::Or(alternatives) => {
+      PatternKind::Or(alternatives) | PatternKind::Elements { elems: alternatives, .. } => {
         for alternative in alternatives {
           self.pattern_bindings(alternative, out);
         }

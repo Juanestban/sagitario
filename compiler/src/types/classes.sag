@@ -6,7 +6,7 @@
 use pkg::ast::{Expr, ExprKind, FieldDecl, Ident, Path, Stmt};
 use pkg::diagnostics::Diagnostic;
 use pkg::diagnostics::codes;
-use pkg::resolve::{LocalKind, ParamOwner, TypeItem};
+use pkg::resolve::{LocalKind, ParamOwner, Res, TypeItem};
 use pkg::types::{Checker, ClassDef, FieldDef, Receiver, ReceiverCheck, SelfCall, Subst, Type, TypeKind};
 use pkg::types;
 use pkg::diagnostics;
@@ -35,6 +35,9 @@ pub fn class_defs(cx: Checker) {
     const fields: List<FieldDef> = new List();
 
     for field in decl.fields {
+      // An instance of a class keeps one address, which an atomic needs.
+      cx.atomic_field = types::is_const(field);
+
       const ty = cx.type_expr(field.ty);
       const is_weak = field.is_weak && check_weak_field(cx, field, ty);
 
@@ -288,7 +291,9 @@ pub fn class_field(cx: Checker, id: u32, base_ty: Type, name: Ident) -> Type {
         }
       }
 
-      if inheritance::class_method(cx, id, field_name).is_some() {
+      if let Some(help) = exprs::const_help(cx, TypeItem::Class(id), field_name) {
+        diagnostic = diagnostic.with_help(help);
+      } else if inheritance::class_method(cx, id, field_name).is_some() {
         diagnostic = diagnostic.with_help("`" + field_name + "` is a method; call it with `" + field_name + "(...)`, or wrap it in a lambda to use it as a value");
       } else if let Some(similar) = diagnostics::closest_match(field_name, fields) {
         diagnostic = diagnostic.with_help("a field with a similar name exists: `" + similar + "`");
@@ -374,6 +379,11 @@ enum PlaceBase {
   ListElement(bool),
   /// A value that is not stored anywhere.
   Temporary,
+  /// A `static`, or a part of one (docs/adr/0083-global-state.md): only a `static var` changes.
+  Static(u32),
+  /// What `index` gives for a type implementing `Index`, or a part of it: `IndexMut` writes it
+  /// back when it is assigned to (docs/adr/0094-conversions-and-defaults.md, Q639).
+  Indexed,
   /// A name that is not a binding: already reported.
   Unknown,
 }
@@ -390,7 +400,10 @@ fn place_base(cx: Checker, place: Expr) -> PlaceBase {
   match place.kind {
     ExprKind::Path(_) => match exprs::local(cx, place) {
       Some(id) => PlaceBase::Local(id),
-      None => PlaceBase::Unknown,
+      None => match cx.resolution.paths.get(place.id) {
+        Some(Res::Static(id)) => PlaceBase::Static(id),
+        _ => PlaceBase::Unknown,
+      },
     },
     ExprKind::Field { base, name } => match cx.typed.expr_types.get(base.id) {
       Some(ty) => match ty.kind {
@@ -401,6 +414,10 @@ fn place_base(cx: Checker, place: Expr) -> PlaceBase {
       None => part_of(cx, base),
     },
     ExprKind::Index { base, .. } => {
+      if cx.typed.index_calls.contains_key(place.id) {
+        return PlaceBase::Indexed;
+      }
+
       if let Some(ty) = cx.typed.expr_types.get(base.id) {
         if let TypeKind::List(_) = ty.kind {
           return PlaceBase::ListElement(true);
@@ -468,6 +485,46 @@ fn place_access(cx: Checker, place: Expr, place_use: PlaceUse) -> PlaceAccess {
 
   match place_base(cx, place) {
     PlaceBase::Unknown => PlaceAccess::Mutable,
+    PlaceBase::Indexed => {
+      if is_assign {
+        return PlaceAccess::Mutable;
+      }
+
+      // A change in place would be lost in the copy `index` gives.
+      const diagnostic = if is_borrow {
+        Diagnostic::error(codes::INVALID_BORROW, place.span, "cannot lend an element that `index` gives")
+      } else {
+        Diagnostic::error(code, place.span, "cannot call the method `" + method_name + "`, which modifies `self`, on an element that `index` gives")
+      };
+
+      PlaceAccess::Immutable(
+        diagnostic
+          .with_note("`value[i]` gives a copy, which `IndexMut` writes back only when it is assigned to")
+          .with_help("modify a copy and store it back: `var item = value[i]; ...; value[i] = item;`"),
+      )
+    }
+    PlaceBase::Static(id) => {
+      const decl = match cx.resolution.static_decl(cx.package, id) {
+        Some(found) => found,
+        None => return PlaceAccess::Mutable,
+      };
+
+      if decl.mutable {
+        return PlaceAccess::Mutable;
+      }
+
+      const diagnostic = if is_assign {
+        Diagnostic::error(code, place.span, "cannot modify the static `" + decl.name.name + "`")
+      } else {
+        Diagnostic::error(code, place.span, "cannot call the method `" + method_name + "`, which modifies `self`, on the static `" + decl.name.name + "`")
+      };
+
+      PlaceAccess::Immutable(
+        diagnostic
+          .with_label(decl.name.span, "declared with `static` here")
+          .with_help("a `static` holds one value that does not change in place: keep it in a `Mutex`, or declare it `static var`"),
+      )
+    }
     PlaceBase::Temporary => {
       const diagnostic = if is_assign {
         Diagnostic::error(codes::INVALID_ASSIGNMENT_TARGET, place.span, "cannot assign to a part of a temporary value")

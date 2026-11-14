@@ -1,0 +1,20 @@
+// Methods of slices that change the elements need `&mut [T]` or a `var` array, and the bounds of
+// the methods and comparisons of collections (docs/adr/0093-everyday-methods.md, Q622-Q624).
+fn view(values: &[i32]) {
+  values.sort(); //~ ERROR E0313
+}
+
+fn main() {
+  const fixed = [3, 1];
+
+  fixed.sort(); //~ ERROR E0313
+  [2, 1].reverse(); //~ ERROR E0313
+  const _c = List::from([1]).concat(); //~ ERROR E0316
+  const _m = List::from([1.5]).max(); //~ ERROR E0330
+  const _e: List<i32> = List::with_space(3); //~ ERROR E0200
+  const floats = List::from([1.5]);
+  const _a = floats == floats; //~ ERROR E0310
+  const map = new Map<String, i32>();
+  const _b = map < map; //~ ERROR E0310
+  view(&[1]);
+}

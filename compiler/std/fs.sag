@@ -3,62 +3,57 @@
 
 use std::io;
 use std::path;
+use std::sys;
+use std::time;
+use std::time::{Duration, SystemTime};
 
-extern "C" {
-  fn sag_fs_kind(path: String) -> i32;
-  fn sag_fs_read(path: String, status: *mut i32) -> String;
-  fn sag_fs_read_bytes(path: String, status: *mut i32) -> String;
-  fn sag_fs_write(path: String, text: String, append: bool) -> i32;
-  fn sag_fs_write_bytes(path: String, data: *const u8, len: usize) -> i32;
-  fn sag_fs_create_dir(path: String) -> i32;
-  fn sag_fs_remove_dir(path: String) -> i32;
-  fn sag_fs_remove_file(path: String) -> i32;
-  fn sag_fs_rename(from: String, to: String) -> i32;
-  fn sag_fs_copy(from: String, to: String) -> i32;
-  fn sag_fs_read_dir(path: String, status: *mut i32) -> String;
-  fn sag_fs_current_dir(status: *mut i32) -> String;
-}
-
-/// The error with this runtime code, described as `action: system message`.
+/// The error with this code, described as `action: system message`.
 fn failure(code: i32, action: String) -> io::Error {
   super::os_error(code, action)
 }
 
 /// What `path` names: 0 nothing (or an error), 1 a file, 2 a directory, 3 something else.
 fn kind_of(path: String) -> i32 {
-  unsafe { sag_fs_kind(path) }
+  sys::path_kind(path)
+}
+
+/// Systems report a directory used as a file differently; they all become `EISDIR`.
+fn file_code(path: String, code: i32) -> i32 {
+  if code != 0 && kind_of(path) == sys::KIND_DIR { sys::EISDIR } else { code }
+}
+
+/// The bytes of the file at `path`, or the code of the failure.
+fn read_bytes(path: String) -> Result<List<u8>, i32> {
+  match sys::read_file(path) {
+    Ok(data) => Ok(data),
+    Err(code) => Err(file_code(path, code)),
+  }
 }
 
 /// The whole file at `path`. A file that is not UTF-8 is an error of kind `InvalidData`.
 pub fn read_to_string(path: String) -> Result<String, io::Error> {
-  var status = [0i32; 1];
-  const text = unsafe { sag_fs_read(path, status.as_mut_ptr()) };
+  const data = match read_bytes(path) {
+    Ok(found) => found,
+    Err(code) => return Err(failure(code, `cannot read "${path}"`)),
+  };
 
-  if status[0] == 0 { Ok(text) } else { Err(failure(status[0], `cannot read "${path}"`)) }
+  match super::utf8(&data) {
+    Some(text) => Ok(text),
+    None => Err(failure(super::INVALID_DATA, `cannot read "${path}"`)),
+  }
 }
 
 /// The bytes of the file at `path`, such as an image or SPIR-V code.
 pub fn read(path: String) -> Result<List<u8>, io::Error> {
-  var status = [0i32; 1];
-  // The runtime gives the bytes in a string, which is never used as text.
-  const raw = unsafe { sag_fs_read_bytes(path, status.as_mut_ptr()) };
-
-  if status[0] != 0 {
-    return Err(failure(status[0], `cannot read "${path}"`));
+  match read_bytes(path) {
+    Ok(data) => Ok(data),
+    Err(code) => Err(failure(code, `cannot read "${path}"`)),
   }
-
-  const bytes: List<u8> = new List();
-
-  for byte in raw.bytes() {
-    bytes.push(byte);
-  }
-
-  Ok(bytes)
 }
 
 /// Writes `text` to the file at `path`, creating it or replacing its contents.
 pub fn write(path: String, text: String) -> Result<(), io::Error> {
-  const code = unsafe { sag_fs_write(path, text, false) };
+  const code = file_code(path, sys::write_file(path, text.as_ptr(), text.len(), false));
 
   if code == 0 { Ok(()) } else { Err(failure(code, `cannot write "${path}"`)) }
 }
@@ -66,14 +61,14 @@ pub fn write(path: String, text: String) -> Result<(), io::Error> {
 /// Writes `bytes` to the file at `path`, creating it or replacing its contents: the counterpart of
 /// `read` (docs/adr/0079-references-and-borrowing.md, Q497).
 pub fn write_bytes(path: String, bytes: &[u8]) -> Result<(), io::Error> {
-  const code = unsafe { sag_fs_write_bytes(path, bytes.as_ptr(), bytes.len()) };
+  const code = file_code(path, sys::write_file(path, bytes.as_ptr(), bytes.len(), false));
 
   if code == 0 { Ok(()) } else { Err(failure(code, `cannot write "${path}"`)) }
 }
 
 /// Writes `text` at the end of the file at `path`, creating it if needed.
 pub fn append(path: String, text: String) -> Result<(), io::Error> {
-  const code = unsafe { sag_fs_write(path, text, true) };
+  const code = file_code(path, sys::write_file(path, text.as_ptr(), text.len(), true));
 
   if code == 0 { Ok(()) } else { Err(failure(code, `cannot append to "${path}"`)) }
 }
@@ -93,7 +88,7 @@ pub fn is_dir(path: String) -> bool {
 
 /// Creates the directory `path`; its parent must exist.
 pub fn create_dir(path: String) -> Result<(), io::Error> {
-  const code = unsafe { sag_fs_create_dir(path) };
+  const code = sys::create_dir(path);
 
   if code == 0 { Ok(()) } else { Err(failure(code, `cannot create directory "${path}"`)) }
 }
@@ -120,28 +115,28 @@ pub fn create_dir_all(path: String) -> Result<(), io::Error> {
 
 /// Removes the directory `path`, which must be empty.
 pub fn remove_dir(path: String) -> Result<(), io::Error> {
-  const code = unsafe { sag_fs_remove_dir(path) };
+  const code = sys::remove_dir(path);
 
   if code == 0 { Ok(()) } else { Err(failure(code, `cannot remove directory "${path}"`)) }
 }
 
 /// Removes the file at `path`.
 pub fn remove_file(path: String) -> Result<(), io::Error> {
-  const code = unsafe { sag_fs_remove_file(path) };
+  const code = file_code(path, sys::remove_file(path));
 
   if code == 0 { Ok(()) } else { Err(failure(code, `cannot remove "${path}"`)) }
 }
 
 /// Moves `from` to `to`, replacing `to` if it is a file that exists.
 pub fn rename(from: String, to: String) -> Result<(), io::Error> {
-  const code = unsafe { sag_fs_rename(from, to) };
+  const code = sys::rename_path(from, to);
 
   if code == 0 { Ok(()) } else { Err(failure(code, `cannot rename "${from}" to "${to}"`)) }
 }
 
 /// Copies the file `from` to `to`, replacing `to` if it exists.
 pub fn copy(from: String, to: String) -> Result<(), io::Error> {
-  const code = unsafe { sag_fs_copy(from, to) };
+  const code = if kind_of(from) == sys::KIND_DIR { sys::EISDIR } else { sys::copy_file(from, to) };
 
   if code == 0 { Ok(()) } else { Err(failure(code, `cannot copy "${from}" to "${to}"`)) }
 }
@@ -149,28 +144,383 @@ pub fn copy(from: String, to: String) -> Result<(), io::Error> {
 /// The names of the entries of the directory `path`, without `.` and `..`, sorted by their
 /// bytes.
 pub fn read_dir(path: String) -> Result<List<String>, io::Error> {
-  var status = [0i32; 1];
-  const text = unsafe { sag_fs_read_dir(path, status.as_mut_ptr()) };
+  const found: Result<List<String>, i32> = if kind_of(path) == sys::KIND_FILE { Err(sys::ENOTDIR) } else { sys::read_dir(path) };
 
-  if status[0] != 0 {
-    return Err(failure(status[0], `cannot read directory "${path}"`));
+  match found {
+    Ok(names) => {
+      names.sort();
+      Ok(names)
+    }
+    Err(code) => Err(failure(code, `cannot read directory "${path}"`)),
   }
-
-  if text.is_empty() {
-    return Ok(new List<String>());
-  }
-
-  // The runtime separates the names with NUL, which no file name contains.
-  const names = text.split("\0");
-  names.sort();
-
-  Ok(names)
 }
 
 /// The current working directory, as an absolute path.
 pub fn current_dir() -> Result<String, io::Error> {
-  var status = [0i32; 1];
-  const dir = unsafe { sag_fs_current_dir(status.as_mut_ptr()) };
+  match sys::current_dir() {
+    Ok(dir) => Ok(dir),
+    Err(code) => Err(failure(code, "cannot get the current directory")),
+  }
+}
 
-  if status[0] == 0 { Ok(dir) } else { Err(failure(status[0], "cannot get the current directory")) }
+// ---- Open files (docs/adr/0096-streams-files-and-drop.md, Q657) --------------------------------
+
+/// An open file, as Rust's `File`: it reads and writes where its position is, and closes when
+/// its last reference goes, or earlier with `close`, which reports what the system says.
+pub class File impl io::Read, io::Write, Drop {
+  /// The descriptor or handle of the system.
+  prv var handle: usize;
+  prv var is_open: bool;
+  prv const path: String;
+
+  prv fn new(self, handle: usize, path: String) {
+    self.handle = handle;
+    self.is_open = true;
+    self.path = path;
+  }
+
+  /// The file of a descriptor (POSIX) or `HANDLE` (Windows) of the system, opened for `path`,
+  /// which the `File` closes, as Rust's `from_raw_fd`. It is `unsafe`: nothing else may close
+  /// or use the handle.
+  pub unsafe fn from_raw_handle(handle: usize, path: String) -> File {
+    new File(handle, path)
+  }
+
+  /// The descriptor (POSIX) or `HANDLE` (Windows) of the system, which stays the file's, as Rust's
+  /// `as_raw_fd`; after `close` it names nothing.
+  pub fn as_raw_handle(self) -> usize {
+    self.handle
+  }
+
+  /// Another `File` of the same open file, sharing its position, as Rust's `try_clone`.
+  pub fn try_clone(self) -> Result<File, io::Error> {
+    if !self.is_open {
+      return Err(self.error(sys::EBADF, "clone"));
+    }
+
+    match sys::file_duplicate(self.handle) {
+      Ok(handle) => Ok(new File(handle, self.path)),
+      Err(code) => Err(self.error(code, "clone")),
+    }
+  }
+
+  /// Opens the file at `path` to read it.
+  pub fn open(path: String) -> Result<File, io::Error> {
+    OpenOptions::new().read(true).open(path)
+  }
+
+  /// Opens the file at `path` to write it, creating it or emptying it.
+  pub fn create(path: String) -> Result<File, io::Error> {
+    OpenOptions::new().write(true).create(true).truncate(true).open(path)
+  }
+
+  /// The error of a failed operation on this file, or of one after `close`.
+  prv fn error(self, code: i32, action: String) -> io::Error {
+    failure(code, `cannot ${action} "${self.path}"`)
+  }
+
+  pub fn read(self, buffer: &mut [u8]) -> Result<usize, io::Error> {
+    if !self.is_open {
+      return Err(self.error(sys::EBADF, "read"));
+    }
+
+    match sys::file_read(self.handle, buffer.as_mut_ptr(), buffer.len()) {
+      Ok(count) => Ok(count),
+      Err(code) => Err(self.error(code, "read")),
+    }
+  }
+
+  pub fn write(self, bytes: &[u8]) -> Result<usize, io::Error> {
+    if !self.is_open {
+      return Err(self.error(sys::EBADF, "write"));
+    }
+
+    match sys::file_write(self.handle, bytes.as_ptr(), bytes.len()) {
+      Ok(count) => Ok(count),
+      Err(code) => Err(self.error(code, "write")),
+    }
+  }
+
+  /// A file has no buffer of its own: its writes are the system's.
+  pub fn flush(self) -> Result<(), io::Error> {
+    Ok(())
+  }
+
+  /// Moves the position, and gives it, from the start of the file.
+  pub fn seek(self, position: io::SeekFrom) -> Result<u64, io::Error> {
+    if !self.is_open {
+      return Err(self.error(sys::EBADF, "seek in"));
+    }
+
+    const found = match position {
+      io::SeekFrom::Start(offset) => sys::file_seek(self.handle, offset as i64, 0),
+      io::SeekFrom::Current(offset) => sys::file_seek(self.handle, offset, 1),
+      io::SeekFrom::End(offset) => sys::file_seek(self.handle, offset, 2),
+    };
+
+    match found {
+      Ok(at) => Ok(at),
+      Err(code) => Err(self.error(code, "seek in")),
+    }
+  }
+
+  /// Makes the file `size` bytes long, cutting it or adding zeros; the position stays.
+  pub fn set_len(self, size: u64) -> Result<(), io::Error> {
+    if !self.is_open {
+      return Err(self.error(sys::EBADF, "resize"));
+    }
+
+    const code = sys::file_set_len(self.handle, size);
+
+    if code == 0 { Ok(()) } else { Err(self.error(code, "resize")) }
+  }
+
+  /// What the file is: its size, kind and times.
+  pub fn metadata(self) -> Result<Metadata, io::Error> {
+    if !self.is_open {
+      return Err(self.error(sys::EBADF, "read the metadata of"));
+    }
+
+    match sys::file_metadata(self.handle) {
+      Ok(info) => Ok(Metadata::from_system(info)),
+      Err(code) => Err(self.error(code, "read the metadata of")),
+    }
+  }
+
+  /// Waits until the system has stored what was written.
+  pub fn sync_all(self) -> Result<(), io::Error> {
+    if !self.is_open {
+      return Err(self.error(sys::EBADF, "sync"));
+    }
+
+    const code = sys::file_sync(self.handle);
+
+    if code == 0 { Ok(()) } else { Err(self.error(code, "sync")) }
+  }
+
+  /// Closes the file now; reading or writing it after is an error. Closing it again does nothing.
+  pub fn close(self) -> Result<(), io::Error> {
+    if !self.is_open {
+      return Ok(());
+    }
+
+    self.is_open = false;
+
+    const code = sys::file_close(self.handle);
+
+    if code == 0 { Ok(()) } else { Err(self.error(code, "close")) }
+  }
+
+  /// Closes the file, unless `close` did; an error there has no one to go to.
+  pub fn drop(self) {
+    if self.is_open {
+      self.is_open = false;
+      sys::file_close(self.handle);
+    }
+  }
+}
+
+/// How `open` opens a file, as Rust's `OpenOptions`: each method gives the options with one set.
+pub struct OpenOptions {
+  prv reading: bool;
+  prv writing: bool;
+  prv appending: bool;
+  prv truncating: bool;
+  prv creating: bool;
+  prv creating_new: bool;
+
+  /// No option set.
+  pub fn new() -> OpenOptions {
+    OpenOptions { reading: false, writing: false, appending: false, truncating: false, creating: false, creating_new: false }
+  }
+
+  pub fn read(self, value: bool) -> OpenOptions {
+    var options = self;
+
+    options.reading = value;
+    options
+  }
+
+  pub fn write(self, value: bool) -> OpenOptions {
+    var options = self;
+
+    options.writing = value;
+    options
+  }
+
+  /// Every write goes at the end; it writes, as `write` does.
+  pub fn append(self, value: bool) -> OpenOptions {
+    var options = self;
+
+    options.appending = value;
+    options
+  }
+
+  /// Empties a file that exists; it needs `write`.
+  pub fn truncate(self, value: bool) -> OpenOptions {
+    var options = self;
+
+    options.truncating = value;
+    options
+  }
+
+  /// Creates the file if it does not exist; it needs `write` or `append`.
+  pub fn create(self, value: bool) -> OpenOptions {
+    var options = self;
+
+    options.creating = value;
+    options
+  }
+
+  /// Creates the file, which must not exist; it needs `write` or `append`.
+  pub fn create_new(self, value: bool) -> OpenOptions {
+    var options = self;
+
+    options.creating_new = value;
+    options
+  }
+
+  /// Opens the file at `path` with these options. Options that do not go together are an error of
+  /// kind `InvalidInput`, as Rust's: none to read or write, `truncate` without `write`, `truncate`
+  /// with `append`, and `create` or `create_new` without writing.
+  pub fn open(self, path: String) -> Result<File, io::Error> {
+    const writes = self.writing || self.appending;
+    const valid = (self.reading || writes) && !(self.truncating && !self.writing) && !(self.truncating && self.appending)
+      && !((self.creating || self.creating_new) && !writes);
+
+    if !valid {
+      return Err(failure(sys::EINVAL, `cannot open "${path}"`));
+    }
+
+    match sys::file_open(path, self.reading, self.writing, self.appending, self.truncating, self.creating, self.creating_new) {
+      Ok(handle) => Ok(unsafe { File::from_raw_handle(handle, path) }),
+      Err(code) => Err(failure(file_code(path, code), `cannot open "${path}"`)),
+    }
+  }
+}
+
+// ---- Metadata (docs/adr/0096-streams-files-and-drop.md, Q659) ------------------------------------
+
+/// What a path names, as Rust's `Metadata`: its size, its kind, whether it is read-only, and its
+/// times, where the system has them.
+pub struct Metadata {
+  prv kind: i32;
+  prv symlink: bool;
+  prv size: u64;
+  prv read_only: bool;
+  prv accessed_at: Option<u64>;
+  prv modified_at: Option<u64>;
+  prv created_at: Option<u64>;
+
+  /// The size in bytes.
+  pub fn len(self) -> u64 {
+    self.size
+  }
+
+  pub fn is_file(self) -> bool {
+    self.kind == sys::KIND_FILE
+  }
+
+  pub fn is_dir(self) -> bool {
+    self.kind == sys::KIND_DIR
+  }
+
+  /// Whether it is a symbolic link, which only `symlink_metadata` sees: `metadata` follows it.
+  pub fn is_symlink(self) -> bool {
+    self.symlink
+  }
+
+  /// Whether no one may write it: Rust's `permissions().readonly()`.
+  pub fn readonly(self) -> bool {
+    self.read_only
+  }
+
+  pub fn modified(self) -> Result<SystemTime, io::Error> {
+    time_of(self.modified_at, "modification")
+  }
+
+  pub fn accessed(self) -> Result<SystemTime, io::Error> {
+    time_of(self.accessed_at, "access")
+  }
+
+  /// The time of creation, which Linux and Android do not keep: an error of kind `Unsupported`.
+  pub fn created(self) -> Result<SystemTime, io::Error> {
+    time_of(self.created_at, "creation")
+  }
+
+  /// The metadata of what `std::sys` read, which only the standard library can name.
+  pub fn from_system(info: sys::FileInfo) -> Metadata {
+    Metadata {
+      kind: info.kind,
+      symlink: info.symlink,
+      size: info.size,
+      read_only: info.readonly,
+      accessed_at: info.accessed,
+      modified_at: info.modified,
+      created_at: info.created,
+    }
+  }
+}
+
+fn time_of(nanos: Option<u64>, what: String) -> Result<SystemTime, io::Error> {
+  match nanos {
+    Some(found) => Ok(time::UNIX_EPOCH + Duration::from_nanos(found)),
+    None => Err(new io::Error(io::ErrorKind::Unsupported, `${what} time is not available on this platform`)),
+  }
+}
+
+/// What `path` names, following a symbolic link.
+pub fn metadata(path: String) -> Result<Metadata, io::Error> {
+  match sys::metadata(path, true) {
+    Ok(info) => Ok(Metadata::from_system(info)),
+    Err(code) => Err(failure(code, `cannot read the metadata of "${path}"`)),
+  }
+}
+
+/// What `path` names, a symbolic link itself and not what it names.
+pub fn symlink_metadata(path: String) -> Result<Metadata, io::Error> {
+  match sys::metadata(path, false) {
+    Ok(info) => Ok(Metadata::from_system(info)),
+    Err(code) => Err(failure(code, `cannot read the metadata of "${path}"`)),
+  }
+}
+
+/// Removes a directory with everything in it, as Rust's. A symbolic link is removed itself, not
+/// what it names; a path that names a file is an error.
+pub fn remove_dir_all(path: String) -> Result<(), io::Error> {
+  const info = symlink_metadata(path)?;
+
+  if !info.is_dir() && !info.is_symlink() {
+    return Err(failure(sys::ENOTDIR, `cannot remove "${path}"`));
+  }
+
+  remove_tree(path, info)
+}
+
+fn remove_tree(path: String, info: Metadata) -> Result<(), io::Error> {
+  // A link to a directory is a directory to Windows, a file to the others.
+  if info.is_symlink() {
+    return if info.is_dir() { remove_dir(path) } else { remove_file(path) };
+  }
+
+  if !info.is_dir() {
+    return remove_file(path);
+  }
+
+  for name in read_dir(path)? {
+    const child = path::join(path, name);
+
+    remove_tree(child, symlink_metadata(child)?)?;
+  }
+
+  remove_dir(path)
+}
+
+/// The absolute path of `path`, with `.`, `..` and symbolic links resolved, as Rust's: on Windows
+/// it starts with `\\?\`.
+pub fn canonicalize(path: String) -> Result<String, io::Error> {
+  match sys::canonical(path) {
+    Ok(found) => Ok(found),
+    Err(code) => Err(failure(code, `cannot canonicalize "${path}"`)),
+  }
 }

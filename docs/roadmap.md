@@ -257,8 +257,10 @@ signed in F7.
   error with `?` after `await`, and orders timers by their deadlines; it passes with
   ThreadSanitizer on Linux and macOS, and with the leak check. `async` lambdas, cancellation, a
   multi-threaded executor and asynchronous I/O are left for later.
-- **Roadmap v2:** a game engine written in Sagitario, with the language and library features it
-  needs ([roadmap-v2.md](roadmap-v2.md)).
+- **Roadmap v2:** a complete language: the standard library and the core of the runtime in
+  Sagitario, a standard library as complete as Rust's, and binding generation
+  ([roadmap-v2.md](roadmap-v2.md), [ADR-0084](adr/0084-a-complete-language-and-the-engine-apart.md)).
+  The game engine is a project apart ([engine-roadmap.md](engine-roadmap.md)).
 
 ## Deferred decisions
 
@@ -267,7 +269,8 @@ channels, `try_receive` and timeouts (ADR-0047), `protected` visibility, `weak` 
 overloading and derived `Eq`, binding generation, internationalized diagnostics, automatic
 error conversion with `From<T>` (and implementing one generic interface several times),
 `Error::source()` and backtraces, a `Display` interface, slices, open ranges, general tuples,
-raw strings, `@test` / `@deprecated`, static fields and mutable globals, `sag doc`, inference of `None`/`Ok`/`Err` from later uses, re-exports (`pub use`), glob
+raw strings, `@test` / `@deprecated`, static fields and mutable globals (decided and done by
+[ADR-0083](adr/0083-global-state.md)), `sag doc`, inference of `None`/`Ok`/`Err` from later uses, re-exports (`pub use`), glob
 imports, importing enum variants or a type's functions, `use` inside blocks.
 Undecided points needed during the MVP are tracked as open questions in the
 [spec index](spec/README.md#open-questions).

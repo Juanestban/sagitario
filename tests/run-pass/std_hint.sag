@@ -1,0 +1,24 @@
+// `std::hint::black_box` returns its argument, of any type (docs/adr/0090-benchmarks.md, Q596).
+// expect-stdout: sum 1499998500000
+// expect-stdout: text hello, list 3, point (1, 2)
+use std::hint;
+
+struct Point {
+  pub x: i32;
+  pub y: i32;
+}
+
+fn main() {
+  var sum = 0u64;
+
+  for i in 0..1_000_000u64 {
+    sum = sum.wrapping_add(hint::black_box(i) * 3);
+  }
+
+  println(f"sum {sum}");
+
+  const text = hint::black_box("hello");
+  const list = hint::black_box(List::from([1, 2, 3]));
+  const point = hint::black_box(Point { x: 1, y: 2 });
+  println(f"text {text}, list {list.len()}, point ({point.x}, {point.y})");
+}

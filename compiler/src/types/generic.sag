@@ -8,12 +8,12 @@ use pkg::diagnostics::Diagnostic;
 use pkg::diagnostics::codes;
 use pkg::resolve::{ParamOwner, TypeItem};
 use pkg::span::Span;
-use pkg::types::{Checker, GenericDef, NamedRef, ParamRef, SpanType, Subst, SubstEntry, Type, TypeKind};
+use pkg::types::{Checker, GenericDef, IntTy, NamedRef, ParamRef, SpanType, Subst, SubstEntry, Type, TypeKind};
 use pkg::types;
 use pkg::types::exprs;
 use pkg::types::ffi;
 use pkg::types::interfaces;
-use pkg::types::typed::{GenericsEntry, owner_key};
+use pkg::types::typed::{GenericsEntry, TypedModule, owner_key};
 
 /// The type parameters of every generic declaration, with their bounds.
 pub fn generic_defs(cx: Checker) {
@@ -148,9 +148,12 @@ pub struct UnknownGroup {
 /// The type arguments being inferred for some generic declarations.
 pub class Unknowns {
   pub var groups: List<UnknownGroup>;
+  /// The classes, to unify a class with an instance of one of its subclasses.
+  pub var typed: Option<TypedModule>;
 
   pub fn new(self) {
     self.groups = new List();
+    self.typed = None;
   }
 
   /// Adds the parameters of `owner`, with the arguments given explicitly, if any.
@@ -243,6 +246,15 @@ pub class Unknowns {
           self.unify(elem, actual_elem);
         }
       }
+      TypeKind::Tuple(elems) => {
+        if let TypeKind::Tuple(actual_elems) = actual.kind {
+          if elems.len() == actual_elems.len() {
+            for index in 0..elems.len() {
+              self.unify(elems[index], actual_elems[index]);
+            }
+          }
+        }
+      }
       TypeKind::List(elem) => {
         if let TypeKind::List(actual_elem) = actual.kind {
           self.unify(elem, actual_elem);
@@ -287,6 +299,13 @@ pub class Unknowns {
         if let TypeKind::Class(other) = actual.kind {
           if named.id == other.id {
             self.unify_all(named.args, other.args);
+          } else if let Some(typed) = self.typed {
+            // An instance of a subclass is one of its parent: `DoubleEndedIter<T>` is an `Iter<T>`.
+            for ancestor in typed.class_ancestors(other) {
+              if ancestor.id == named.id {
+                self.unify_all(named.args, ancestor.args);
+              }
+            }
           }
         }
       }
@@ -343,6 +362,7 @@ fn mentions_unknown(ty: Type, unknowns: Unknowns) -> bool {
     TypeKind::Class(named) => any_unknown(named.args, unknowns),
     TypeKind::Interface(named) => any_unknown(named.args, unknowns),
     TypeKind::Array { elem, .. } => mentions_unknown(elem, unknowns),
+    TypeKind::Tuple(elems) => any_unknown(elems, unknowns),
     TypeKind::List(elem) => mentions_unknown(elem, unknowns),
     TypeKind::Option(elem) => mentions_unknown(elem, unknowns),
     TypeKind::Ptr { pointee, .. } | TypeKind::Ref { pointee, .. } | TypeKind::Slice { elem: pointee, .. } => mentions_unknown(pointee, unknowns),
@@ -391,6 +411,8 @@ pub fn is_lambda(expr: Expr) -> bool {
 /// inferred: each argument teaches `unknowns` what it can, and is checked against its type once
 /// known.
 pub fn generic_args(cx: Checker, span: Span, what: String, params: List<Type>, args: List<Expr>, fixed: Subst, unknowns: Unknowns) {
+  unknowns.typed = Some(cx.typed);
+
   if args.len() != params.len() {
     cx.error(codes::WRONG_ARGUMENT_COUNT, span, `this ${what} takes ${params.len()} argument${types::plural(params.len())} but ${args.len()} were supplied`);
   }
@@ -415,6 +437,24 @@ pub fn generic_args(cx: Checker, span: Span, what: String, params: List<Type>, a
 }
 
 /// Checks one value against a type that may mention parameters being inferred.
+/// Whether `ty` is a type parameter bounded by `ToSocketAddrs` of `std::net`.
+fn socket_addrs_param(cx: Checker, ty: Type) -> bool {
+  const net = match cx.typed.net {
+    Some(found) => found,
+    None => return false,
+  };
+
+  if let TypeKind::Param(param) = ty.kind {
+    for bound in cx.typed.param_bounds(param) {
+      if bound.id == net.to_socket_addrs {
+        return true;
+      }
+    }
+  }
+
+  false
+}
+
 pub fn generic_arg(cx: Checker, arg: Expr, param: Type, fixed: Subst, unknowns: Unknowns) {
   const pattern = types::substitute(param, fixed);
   const known = types::substitute(pattern, unknowns.subst());
@@ -441,6 +481,14 @@ pub fn generic_arg(cx: Checker, arg: Expr, param: Type, fixed: Subst, unknowns: 
     hint = Some(known);
   }
 
+  // A pair given for a type parameter bounded by `ToSocketAddrs` has a `u16` port, as Rust's
+  // `(ip, 80)` (docs/adr/0100-networking.md, Q693).
+  if let ExprKind::Tuple(elems) = arg.kind {
+    if elems.len() == 2 && socket_addrs_param(cx, known) {
+      hint = Some(types::of(TypeKind::Tuple(List::from([types::error(), types::int(IntTy::U16)]))));
+    }
+  }
+
   const actual = exprs::expr(cx, arg, hint);
 
   unknowns.unify(pattern, actual);
@@ -448,7 +496,26 @@ pub fn generic_arg(cx: Checker, arg: Expr, param: Type, fixed: Subst, unknowns: 
   const expected = types::substitute(pattern, unknowns.subst());
 
   if !mentions_unknown(expected, unknowns) && !cx.fits(actual, expected) {
-    exprs::mismatch(cx, arg.span, expected, actual);
+    // A lambda takes its type from the context: one whose body gives an instance of a subclass
+    // of the result expected gives the result expected, as a `return` would.
+    if is_lambda(arg) && lambda_fits(cx, actual, expected) {
+      cx.typed.expr_types.insert(arg.id, expected);
+    } else {
+      exprs::mismatch(cx, arg.span, expected, actual);
+    }
+  }
+}
+
+/// Whether a lambda of type `actual` can have the function type `expected`: the same parameters,
+/// and a result that fits the one expected.
+fn lambda_fits(cx: Checker, actual: Type, expected: Type) -> bool {
+  match actual.kind {
+    TypeKind::Function { params, ret } => match expected.kind {
+      TypeKind::Function { params: expected_params, ret: expected_ret } =>
+        types::same_types(params, expected_params) && cx.fits(ret, expected_ret),
+      _ => false,
+    },
+    _ => false,
   }
 }
 
@@ -458,7 +525,8 @@ pub fn mentions_params(ty: Type) -> bool {
     TypeKind::Param(_) => true,
     TypeKind::Struct(named) | TypeKind::Enum(named) | TypeKind::Class(named) | TypeKind::Interface(named) => named.args.iter().any((arg) => mentions_params(arg)),
     TypeKind::Array { elem, .. } | TypeKind::List(elem) | TypeKind::Option(elem) => mentions_params(elem),
-    TypeKind::Ptr { pointee, .. } | TypeKind::Ref { pointee, .. } | TypeKind::Slice { elem: pointee, .. } => mentions_params(pointee),
+    TypeKind::Tuple(elems) => elems.iter().any((elem) => mentions_params(elem)),
+    TypeKind::Ptr { pointee, .. } | TypeKind::Ref { pointee, .. } | TypeKind::Slice { elem: pointee, .. } | TypeKind::Atomic(pointee) => mentions_params(pointee),
     TypeKind::Result { value, error } => mentions_params(value) || mentions_params(error),
     TypeKind::Function { params, ret } | TypeKind::CFn { params, ret, .. } => params.iter().any((param) => mentions_params(param)) || mentions_params(ret),
     _ => false,
@@ -467,7 +535,7 @@ pub fn mentions_params(ty: Type) -> bool {
 
 /// The type arguments given for one declaration, or `{error}` for each parameter when their
 /// number is wrong.
-fn given_args(cx: Checker, span: Span, what: String, count: usize, args: List<Type>) -> List<Type> {
+pub fn given_args(cx: Checker, span: Span, what: String, count: usize, args: List<Type>) -> List<Type> {
   if cx.check_arg_count(span, what, count, args.len()) {
     return args;
   }

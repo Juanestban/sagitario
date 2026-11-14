@@ -3,7 +3,7 @@
 //! diagnostics as `sag check` reports them, hover, go to definition, completion, the symbols of a
 //! document and semantic tokens. One thread analyses after every change.
 
-use pkg::ast::{Item, Module};
+use pkg::ast::{ConstDecl, Item, Module};
 use pkg::lsp::analysis;
 use pkg::lsp::analysis::{Analysis, Document};
 use pkg::lsp::completion;
@@ -24,6 +24,7 @@ const FIELD: i64 = 8;
 const ENUM: i64 = 10;
 const INTERFACE: i64 = 11;
 const FUNCTION: i64 = 12;
+const VARIABLE: i64 = 13;
 const CONSTANT: i64 = 14;
 const ENUM_MEMBER: i64 = 22;
 const STRUCT: i64 = 23;
@@ -381,7 +382,14 @@ fn symbol(analysis: Analysis, name: String, kind: i64, span: Span, name_span: Sp
   ]))
 }
 
-/// The items of a module, with their fields, variants and functions inside.
+/// The constants of a type (docs/adr/0099-associated-and-composite-constants.md, Q687).
+fn const_symbols(analysis: Analysis, consts: List<ConstDecl>, children: List<Json>) {
+  for decl in consts {
+    children.push(symbol(analysis, decl.name.name, CONSTANT, decl.span, decl.name.span, new List()));
+  }
+}
+
+/// The items of a module, with their fields, constants, variants and functions inside.
 fn document_symbols(analysis: Analysis, module: Module) -> List<Json> {
   const found: List<Json> = new List();
 
@@ -389,12 +397,15 @@ fn document_symbols(analysis: Analysis, module: Module) -> List<Json> {
     match item {
       Item::Fn(decl) => found.push(symbol(analysis, decl.name.name, FUNCTION, decl.span, decl.name.span, new List())),
       Item::Const(decl) => found.push(symbol(analysis, decl.name.name, CONSTANT, decl.span, decl.name.span, new List())),
+      Item::Static(decl) => found.push(symbol(analysis, decl.name.name, VARIABLE, decl.span, decl.name.span, new List())),
       Item::Struct(decl) => {
         const children: List<Json> = new List();
 
         for field in decl.fields {
           children.push(symbol(analysis, field.name.name, FIELD, field.span, field.name.span, new List()));
         }
+
+        const_symbols(analysis, decl.consts, children);
 
         for function in decl.functions {
           children.push(symbol(analysis, function.name.name, METHOD, function.span, function.name.span, new List()));
@@ -409,6 +420,8 @@ fn document_symbols(analysis: Analysis, module: Module) -> List<Json> {
           children.push(symbol(analysis, variant.name.name, ENUM_MEMBER, variant.span, variant.name.span, new List()));
         }
 
+        const_symbols(analysis, decl.consts, children);
+
         for function in decl.functions {
           children.push(symbol(analysis, function.name.name, METHOD, function.span, function.name.span, new List()));
         }
@@ -421,6 +434,8 @@ fn document_symbols(analysis: Analysis, module: Module) -> List<Json> {
         for field in decl.fields {
           children.push(symbol(analysis, field.name.name, FIELD, field.span, field.name.span, new List()));
         }
+
+        const_symbols(analysis, decl.consts, children);
 
         for function in decl.functions {
           children.push(symbol(analysis, function.name.name, METHOD, function.span, function.name.span, new List()));

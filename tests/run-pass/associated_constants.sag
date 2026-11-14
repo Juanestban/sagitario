@@ -1,0 +1,51 @@
+// Constants of structs, enums and classes, named through their types and `Self`, of primitive
+// and composite values (docs/adr/0099-associated-and-composite-constants.md, Q683 and Q684).
+// expect-stdout: [127, 0, 0, 1] [0, 0, 0, 0] 127 84
+// expect-stdout: Low high web 8080 (1, 8080) 8081
+
+struct Ipv4 {
+  prv bytes: [u8; 4];
+
+  pub const LOCALHOST: Ipv4 = Ipv4 { bytes: [127, 0, 0, 1] };
+  pub const UNSPECIFIED: Self = Self { bytes: [0; 4] };
+  prv const SECRET: u8 = 42;
+  pub const FIRST: u8 = Self::LOCALHOST.bytes[0];
+
+  pub fn octets(self) -> [u8; 4] {
+    self.bytes
+  }
+
+  pub fn secret() -> u8 {
+    Self::SECRET + Ipv4::SECRET
+  }
+}
+
+enum Level {
+  Low,
+  High,
+
+  pub const DEFAULT: Level = Level::Low;
+  pub const NAMES: [String; 2] = ["low", "high"];
+}
+
+class Server {
+  pub const name: String;
+  pub const DEFAULT_PORT: u16 = 8080;
+  pub const LIMITS: (u16, u16) = (1, Server::DEFAULT_PORT);
+
+  pub fn new(self, name: String) {
+    self.name = name;
+  }
+
+  pub fn port(self) -> u16 {
+    Self::DEFAULT_PORT
+  }
+}
+
+const TOTAL: u16 = Server::DEFAULT_PORT + 1;
+
+fn main() {
+  const server = new Server("web");
+  println(f"{Ipv4::LOCALHOST.octets():?} {Ipv4::UNSPECIFIED.octets():?} {Ipv4::FIRST} {Ipv4::secret()}");
+  println(f"{Level::DEFAULT:?} {Level::NAMES[1]} {server.name} {server.port()} {Server::LIMITS:?} {TOTAL}");
+}

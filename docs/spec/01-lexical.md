@@ -24,14 +24,21 @@ treated as comments. A documentation tool (`sag doc`) is post-MVP.
 abstract  as        async     await     break     class     const     continue
 else      enum      extends   extern    false     fn        for       if
 impl      in        interface let       loop      match     new       override
-pkg       prv       pub       return    self      Self      struct    super
-true      unsafe    use       var       weak      where     while     zod
+pkg       prv       pub       return    self      Self      static    struct
+super     true      unsafe    use       var       weak      where     while
+zod
 ```
 
-`async` and `await` are those of [`async` functions](12-async.md) (F8).
+`async` and `await` are those of [`async` functions](12-async.md) (F8), and `static` declares a
+[static](03-memory.md#global-state-g1) (G1, [ADR-0083](../adr/0083-global-state.md)).
 
 `union` is a contextual keyword, as in Rust: it declares a [union](10-ffi.md#unions) only before
 the name of one, and is an ordinary name elsewhere.
+
+`include`, `include_str`, `include_bytes`, `concat` and `env` are the names of the
+[built-in macros](09-modules.md#built-in-macros-s4) when `!(` follows them (`include_str!("file")`),
+and ordinary names elsewhere. `...` ends the parameters of a
+[variadic C function](10-ffi.md#variadic-functions).
 
 `let` only appears in `if let` and `while let` (F5,
 [control flow](06-control-flow.md#if-let-and-while-let)); bindings are `const` and `var`.
@@ -71,8 +78,11 @@ struct Timespec { pub tv_sec: i64; pub tv_nsec: i64; }
   struct, enum, class, field, method).
 - The set of attributes is **closed**: unknown attributes are a compile error. There are no
   user-defined attributes.
-- Attributes: `@export("symbol")`; `@repr(C)` on structs and unions, and `@repr(C)` or an
-  integer type (`@repr(i32)`) on enums (see [FFI](10-ffi.md)).
+- Attributes: `@cfg(condition)` on items ([conditional compilation](09-modules.md#conditional-compilation-s1));
+  `@default` on structs, enums and the variants of enums ([defaults](05-interfaces-generics.md#defaults));
+  `@export("symbol")`; `@repr(C)` on structs and unions, and `@repr(C)` or an
+  integer type (`@repr(i32)`) on enums (see [FFI](10-ffi.md)); `@thread_local` on a
+  `static var` (see [global state](03-memory.md#global-state-g1)).
 - Reserved for later: `@test`, `@deprecated`.
 
 ## Numeric literals (F1)
@@ -97,7 +107,10 @@ struct Timespec { pub tv_sec: i64; pub tv_nsec: i64; }
   expressions and produces a new `String`. The prefix is `f` immediately followed by `"` (`f "x"`
   is the name `f` and a string). Each `{...}` holds any expression, which may contain braces and
   strings; `{{` and `}}` write `{` and `}`, and a `}` that closes nothing or an empty `{}` is an
-  error (`E0007`). There are no format specifiers (`{x:.2}`).
+  error (`E0007`). A format specifier may follow the expression after a `:`, `{x:>8.2}`
+  ([ADR-0089](../adr/0089-display-debug-and-format-specifiers.md)): the first `:` outside
+  parentheses, brackets, braces and strings that is not part of `::`, so `{a::b}` names a path.
+  Template strings have no specifiers.
 - Template strings: `` `total = ${expr}` `` interpolates expressions too. They are
   **deprecated**: they keep compiling with the same meaning, but new code writes format strings.
 - Escapes, valid in `'...'`, `"..."`, `f"..."` and `` `...` ``: `\n` `\r` `\t` `\\` `\0` `\"`

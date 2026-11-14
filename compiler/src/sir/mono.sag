@@ -5,7 +5,8 @@
 use pkg::diagnostics::Diagnostic;
 use pkg::diagnostics::codes;
 use pkg::resolve::{ParamOwner, Resolution, TypeItem};
-use pkg::sir::{ClassInstance, Instance, Lowering, subst_key, type_key};
+use pkg::sir::{ClassInstance, Instance, Lowering, Registry, subst_key, type_key};
+use pkg::sir::interfaces;
 use pkg::types::{NamedRef, Subst, Type, TypeKind};
 use pkg::types;
 use pkg::types::typed::{TypedModule, owner_key};
@@ -83,9 +84,28 @@ pub fn instance(lw: Lowering, function: u32, subst: Subst) -> u32 {
 
   lw.registry.instances.push(Instance { template: function, subst: subst, lambda: false });
   lw.registry.instance_index.insert(key, index);
+  lw.registry.instance_spans.insert(index, lw.span);
   lw.registry.pending.push(index);
 
   lw.registry.first_instance + index as u32
+}
+
+/// The instance of a function of the standard library that no Sagitario code calls: an
+/// `extern "C" fn` the runtime's core calls (docs/adr/0085-conditional-compilation-and-std-time.md,
+/// Q552).
+pub fn require(registry: Registry, function: u32) {
+  const subst = Subst::empty();
+  const key = `${function}:` + subst_key(subst);
+
+  if registry.instance_index.contains_key(key) {
+    return;
+  }
+
+  const index = registry.instances.len();
+
+  registry.instances.push(Instance { template: function, subst: subst, lambda: false });
+  registry.instance_index.insert(key, index);
+  registry.pending.push(index);
 }
 
 /// The type arguments a call recorded by the type checker gives `function`, in the function
@@ -157,15 +177,17 @@ pub fn class_instance(lw: Lowering, class_ref: NamedRef) -> usize {
   const def = lw.typed.class_def(class_ref.id);
   const fields = lw.typed.class_field_types(class_ref);
   const weak_fields: List<bool> = new List();
+  const field_names: List<String> = new List();
 
   if let Some(found) = def {
     for field in found.fields {
       weak_fields.push(field.is_weak);
+      field_names.push(field.name);
     }
   }
 
   // Reserved first: a class may refer to itself through its fields.
-  const created = new ClassInstance(class_ref, fields, weak_fields);
+  const created = new ClassInstance(class_ref, fields, weak_fields, field_names);
 
   lw.registry.classes.push(created);
   lw.registry.class_index.insert(key, index);
@@ -195,12 +217,28 @@ pub fn class_instance(lw: Lowering, class_ref: NamedRef) -> usize {
 
   created.parent = parent;
   created.vtable = vtable;
+  created.user_drop = user_drop(lw, class_ref);
 
   for field in fields {
     register_types(lw, field);
   }
 
   index
+}
+
+/// The function implementing `drop` of `Drop` for the class, its own or inherited, when the class
+/// implements it (docs/adr/0096-streams-files-and-drop.md, Q655).
+fn user_drop(lw: Lowering, class_ref: NamedRef) -> Option<u32> {
+  const drop = lw.typed.prelude.drop?;
+  const class_ty = types::of(TypeKind::Class(class_ref));
+
+  if !lw.typed.implements(class_ty, NamedRef { id: drop, name: "Drop", args: new List() }) {
+    return None;
+  }
+
+  const method = lw.typed.interface_def(drop)?.methods.first()?;
+
+  Some(interfaces::method_for(lw, method, class_ty, Subst::empty().with_self(class_ty), new List<Type>()).function)
 }
 
 /// Registers the class instances a type needs, inside structs, enums, arrays and the like.
@@ -232,6 +270,11 @@ pub fn register_types(lw: Lowering, ty: Type) {
       }
     }
     TypeKind::Array { elem, .. } => register_types(lw, elem),
+    TypeKind::Tuple(elems) => {
+      for elem in elems {
+        register_types(lw, elem);
+      }
+    }
     TypeKind::List(elem) => register_types(lw, elem),
     TypeKind::Ptr { pointee, .. } | TypeKind::Ref { pointee, .. } | TypeKind::Slice { elem: pointee, .. } => register_types(lw, pointee),
     TypeKind::CFn { params, ret, .. } => {

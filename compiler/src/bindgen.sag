@@ -1,0 +1,2977 @@
+//! bindgen: Sagitario declarations from C headers, as Rust's `bindgen`
+//! (docs/adr/0103-build-scripts-and-binding-generation.md, Q731-Q737). The C compiler of the
+//! build preprocesses the headers (`clang -E`), and a parser of the declarations headers use
+//! reads the result; its line markers say which file each declaration comes from.
+//!
+//! The library is one file that uses `std` only: Nova gives it to build scripts as the package
+//! `bindgen`, and Nova itself uses it as `pkg::bindgen`.
+
+use std::env;
+use std::fs;
+use std::path;
+use std::process::Command;
+
+// ---- The API ----------------------------------------------------------------------------------
+
+/// Why the bindings could not be generated.
+pub struct Error impl Display {
+  pub text: String;
+
+  pub fn message(self) -> String {
+    self.text
+  }
+
+  pub fn to_string(self) -> String {
+    self.text
+  }
+}
+
+fn error(text: String) -> Error {
+  Error { text: text }
+}
+
+/// What to generate bindings for, as Rust's `bindgen::Builder`.
+pub class Builder {
+  prv const headers: List<String>;
+  prv const prefixes: List<String>;
+  prv const files: List<String>;
+  prv const blocked: List<String>;
+  prv const include_paths: List<String>;
+  prv const defines: List<String>;
+  prv const extra: List<String>;
+  prv var target_triple: Option<String>;
+
+  pub fn new(self) {
+    self.headers = new List();
+    self.prefixes = new List();
+    self.files = new List();
+    self.blocked = new List();
+    self.include_paths = new List();
+    self.defines = new List();
+    self.extra = new List();
+    self.target_triple = None;
+  }
+
+  /// A header to translate; relative paths start from the current directory.
+  pub fn header(self, file: String) -> Builder {
+    self.headers.push(file);
+    self
+  }
+
+  /// Writes only the declarations whose names start with `prefix`, and the types they use.
+  pub fn allow_prefix(self, prefix: String) -> Builder {
+    self.prefixes.push(prefix);
+    self
+  }
+
+  /// Writes only the declarations of this header, and the types they use.
+  pub fn allow_file(self, file: String) -> Builder {
+    self.files.push(file);
+    self
+  }
+
+  /// Leaves out the declaration `name`.
+  pub fn block(self, name: String) -> Builder {
+    self.blocked.push(name);
+    self
+  }
+
+  /// A directory the C compiler looks for headers in (`-I`).
+  pub fn include_path(self, dir: String) -> Builder {
+    self.include_paths.push(dir);
+    self
+  }
+
+  /// A macro defined before the headers (`-D name=value`).
+  pub fn define(self, name: String, value: String) -> Builder {
+    self.defines.push(name + "=" + value);
+    self
+  }
+
+  /// An argument for the C compiler, as it is.
+  pub fn clang_arg(self, arg: String) -> Builder {
+    self.extra.push(arg);
+    self
+  }
+
+  /// The target the headers are read for; by default the `TARGET` of a build script when it is
+  /// not its `HOST`, else this machine.
+  pub fn target(self, triple: String) -> Builder {
+    self.target_triple = Some(triple);
+    self
+  }
+
+  /// Preprocesses the headers and translates their declarations.
+  pub fn generate(self) -> Result<Bindings, Error> {
+    if self.headers.is_empty() {
+      return Err(error("no header to translate: call `header(\"file.h\")`"));
+    }
+
+    const absolute: List<String> = new List();
+
+    for file in self.headers {
+      if !fs::is_file(file) {
+        return Err(error(`the header \`${file}\` does not exist`));
+      }
+
+      absolute.push(absolute_path(file));
+    }
+
+    const text = self.preprocess(absolute, false)?;
+    const lexed = lex(text)?;
+    const parser = new Parser(lexed);
+
+    parser.parse();
+
+    const roots: List<String> = new List();
+
+    for file in absolute {
+      roots.push(dir_key(file));
+    }
+
+    const allowed_files: List<String> = new List();
+
+    for file in self.files {
+      allowed_files.push(file_key(absolute_path(file)));
+    }
+
+    const target = match self.chosen_target() {
+      Some(found) => found,
+      None => env::variable("HOST").unwrap_or(if env::OS == "windows" { "x86_64-pc-windows-msvc" } else { "" }),
+    };
+    const msvc = target.contains("windows-msvc") || (target.contains("windows") && !target.contains("gnu"));
+    const choice = Choice { roots: roots, prefixes: self.prefixes, files: allowed_files, blocked: self.blocked, msvc: msvc };
+    const macros = macro_definitions(self.preprocess(absolute, true)?, lexed, choice);
+    const writer = new Writer(parser, choice, macros);
+
+    Ok(Bindings { text: writer.write(self.headers) })
+  }
+
+  /// The headers through the C compiler's preprocessor, with their line markers, or (`macros`)
+  /// the definitions of every macro they leave (`-dM`).
+  prv fn preprocess(self, headers: List<String>, macros: bool) -> Result<String, Error> {
+    const compiler = preprocessor()?;
+    const args = List::from(["-E", "-x", "c"]);
+
+    if macros {
+      args.push("-dM");
+    }
+
+    if let Some(triple) = self.chosen_target() {
+      args.push("--target=" + triple);
+    }
+
+    for dir in self.include_paths {
+      args.push("-I" + dir);
+    }
+
+    for define in self.defines {
+      args.push("-D" + define);
+    }
+
+    for arg in self.extra {
+      args.push(arg);
+    }
+
+    args.push("-");
+
+    const input = new StringBuilder();
+
+    for file in headers {
+      input.append("#include \"" + file.replace("\\", "/") + "\"\n");
+    }
+
+    const ran = match new Command(compiler).args(args).input(input.to_string()).output() {
+      Ok(found) => found,
+      Err(problem) => return Err(error(`cannot run the C compiler \`${compiler}\`: ${problem.message()}`)),
+    };
+
+    if !ran.status.success() {
+      return Err(error(`the C compiler \`${compiler}\` cannot preprocess the headers:\n` + ran.stderr));
+    }
+
+    Ok(ran.stdout)
+  }
+
+  prv fn chosen_target(self) -> Option<String> {
+    if let Some(given) = self.target_triple {
+      return Some(given);
+    }
+
+    const target = env::variable("TARGET")?;
+
+    match env::variable("HOST") {
+      Some(host) if host == target => None,
+      _ => Some(target),
+    }
+  }
+}
+
+/// The generated declarations.
+pub struct Bindings impl Display {
+  pub text: String;
+
+  pub fn to_string(self) -> String {
+    self.text
+  }
+
+  /// Writes them to `file`, as Rust's `write_to_file`.
+  pub fn write_to_file(self, file: String) -> Result<(), Error> {
+    match fs::write(file, self.text) {
+      Ok(_) => Ok(()),
+      Err(problem) => Err(error(`cannot write \`${file}\`: ${problem.message()}`)),
+    }
+  }
+}
+
+/// The C compiler that preprocesses: `SAG_CC` when it is clang or gcc, else `clang`. MSVC's `cl`
+/// writes another kind of output.
+fn preprocessor() -> Result<String, Error> {
+  match env::variable("SAG_CC") {
+    Some(found) if !found.trim().is_empty() => {
+      const name = path::file_name(found).unwrap_or(found).to_ascii_lowercase();
+
+      if name.starts_with("cl.") || name == "cl" {
+        return Err(error("bindgen preprocesses headers with clang or gcc, not `cl`: set SAG_CC to one of them"));
+      }
+
+      Ok(found)
+    }
+    _ => Ok("clang"),
+  }
+}
+
+fn absolute_path(file: String) -> String {
+  if path::is_absolute(file) {
+    return file;
+  }
+
+  match fs::current_dir() {
+    Ok(dir) => path::join(dir, file),
+    Err(_) => file,
+  }
+}
+
+/// A file name to compare: `/` as separator, `.` and `..` removed, and on Windows in lowercase.
+fn file_key(file: String) -> String {
+  const parts: List<String> = new List();
+
+  for part in file.replace("\\", "/").split("/") {
+    if part == "." || (part.is_empty() && !parts.is_empty()) {
+      continue;
+    }
+
+    if part == ".." && !parts.is_empty() {
+      parts.pop();
+      continue;
+    }
+
+    parts.push(part);
+  }
+
+  const joined = parts.join("/");
+
+  if env::OS == "windows" { joined.to_ascii_lowercase() } else { joined }
+}
+
+/// The directory of a header, as `file_key` gives it, ending in `/`.
+fn dir_key(file: String) -> String {
+  const key = file_key(file);
+
+  match key.rfind("/") {
+    Some(at) => key.substring(0, at + 1),
+    None => "",
+  }
+}
+
+// ---- Tokens -----------------------------------------------------------------------------------
+
+enum Kind {
+  Ident,
+  Number,
+  Str,
+  Char,
+  Punct,
+}
+
+struct Token {
+  pub kind: Kind;
+  pub text: String;
+  /// The file the token comes from, as `file_key` gives it.
+  pub file: String;
+}
+
+const PUNCTUATORS: String = "... <<= >>= -> ++ -- << >> <= >= == != && || += -= *= /= %= &= ^= |= ## :: ";
+
+/// The tokens of preprocessed C. Line markers set the file of the tokens after them; `#pragma
+/// pack` becomes the token `#pragma-pack` with its argument.
+fn lex(text: String) -> Result<List<Token>, Error> {
+  const tokens: List<Token> = new List();
+  const chars = text.chars().collect();
+  var at = 0usize;
+  var file = "";
+  var line_start = true;
+
+  while at < chars.len() {
+    const c = chars[at];
+
+    if c == '\n' {
+      line_start = true;
+      at += 1;
+      continue;
+    }
+
+    if c == ' ' || c == '\t' || c == '\r' || c == '\x0c' {
+      at += 1;
+      continue;
+    }
+
+    if c == '#' && line_start {
+      var end = at;
+
+      while end < chars.len() && chars[end] != '\n' {
+        end += 1;
+      }
+
+      const line = text_of(chars, at + 1, end).trim();
+
+      if line.starts_with("pragma") {
+        const rest = line.substring(6, line.len()).trim();
+
+        if rest.starts_with("pack") {
+          tokens.push(Token { kind: Kind::Punct, text: "#pragma-pack", file: file });
+          tokens.push(Token { kind: Kind::Str, text: rest.substring(4, rest.len()).replace(" ", ""), file: file });
+        }
+      } else {
+        // `# 12 "file.h" 1` or `#line 12 "file.h"`.
+        if let Some(quote) = line.find("\"") {
+          if let Some(last) = line.rfind("\"") {
+            if last > quote {
+              file = file_key(unescape(line.substring(quote + 1, last)));
+            }
+          }
+        }
+      }
+
+      at = end;
+      continue;
+    }
+
+    line_start = false;
+
+    if c.is_ascii_alphabetic() || c == '_' || c == '$' {
+      var end = at;
+
+      while end < chars.len() && (chars[end].is_ascii_alphanumeric() || chars[end] == '_' || chars[end] == '$') {
+        end += 1;
+      }
+
+      // `L"text"`, `u8"text"`: the string.
+      if end < chars.len() && (chars[end] == '"' || chars[end] == '\'') {
+        const prefix = text_of(chars, at, end);
+
+        if prefix == "L" || prefix == "u" || prefix == "U" || prefix == "u8" {
+          at = end;
+          continue;
+        }
+      }
+
+      tokens.push(Token { kind: Kind::Ident, text: text_of(chars, at, end), file: file });
+      at = end;
+      continue;
+    }
+
+    if c.is_ascii_digit() || (c == '.' && at + 1 < chars.len() && chars[at + 1].is_ascii_digit()) {
+      var end = at;
+
+      while end < chars.len() && (chars[end].is_ascii_alphanumeric() || chars[end] == '.' || chars[end] == '_' || ((chars[end] == '+' || chars[end] == '-') && (chars[end - 1] == 'e' || chars[end - 1] == 'E' || chars[end - 1] == 'p' || chars[end - 1] == 'P'))) {
+        end += 1;
+      }
+
+      tokens.push(Token { kind: Kind::Number, text: text_of(chars, at, end), file: file });
+      at = end;
+      continue;
+    }
+
+    if c == '"' || c == '\'' {
+      var end = at + 1;
+
+      while end < chars.len() && chars[end] != c && chars[end] != '\n' {
+        if chars[end] == '\\' {
+          end += 1;
+        }
+
+        end += 1;
+      }
+
+      if end >= chars.len() || chars[end] != c {
+        return Err(error("the preprocessed headers have an unterminated literal"));
+      }
+
+      tokens.push(Token { kind: if c == '"' { Kind::Str } else { Kind::Char }, text: text_of(chars, at + 1, end), file: file });
+      at = end + 1;
+      continue;
+    }
+
+    var length = 1usize;
+
+    for size in [3usize, 2] {
+      if at + size <= chars.len() && PUNCTUATORS.contains(text_of(chars, at, at + size) + " ") {
+        length = size;
+        break;
+      }
+    }
+
+    tokens.push(Token { kind: Kind::Punct, text: text_of(chars, at, at + length), file: file });
+    at += length;
+  }
+
+  Ok(tokens)
+}
+
+fn text_of(chars: List<char>, start: usize, end: usize) -> String {
+  const out = new StringBuilder();
+
+  for index in start..end {
+    out.append_char(chars[index]);
+  }
+
+  out.to_string()
+}
+
+/// The text of a C string literal's contents, for the paths of line markers.
+fn unescape(text: String) -> String {
+  const out = new StringBuilder();
+  const chars = text.chars().collect();
+  var at = 0usize;
+
+  while at < chars.len() {
+    if chars[at] == '\\' && at + 1 < chars.len() {
+      out.append_char(chars[at + 1]);
+      at += 2;
+      continue;
+    }
+
+    out.append_char(chars[at]);
+    at += 1;
+  }
+
+  out.to_string()
+}
+
+// ---- C types ----------------------------------------------------------------------------------
+
+/// A C type. `kind` is `void`, `bool`, `int` (with its Sagitario `name`), `float`, `double`,
+/// `pointer`, `array`, `function`, `record` (a struct or union, by its key), `enum` (by its key),
+/// or `unsupported` (with the reason in `name`).
+class CType {
+  pub var kind: String;
+  pub var name: String;
+  /// Declared `const`.
+  pub var konst: bool;
+  /// The pointee, the element or the result.
+  pub var inner: Option<CType>;
+  /// The length of an array, `None` for `[]`.
+  pub var len: Option<u64>;
+  pub var params: List<CType>;
+  pub var variadic: bool;
+  /// The C typedef it was named by, for the fixed-width integer types.
+  pub var typedef_name: String;
+
+  pub fn new(self, kind: String, name: String) {
+    self.kind = kind;
+    self.name = name;
+    self.konst = false;
+    self.inner = None;
+    self.len = None;
+    self.params = new List();
+    self.variadic = false;
+    self.typedef_name = "";
+  }
+
+  /// A copy, which `const` or a typedef name may change.
+  pub fn copy(self) -> CType {
+    const result = new CType(self.kind, self.name);
+
+    result.konst = self.konst;
+    result.inner = self.inner;
+    result.len = self.len;
+    result.params = self.params;
+    result.variadic = self.variadic;
+    result.typedef_name = self.typedef_name;
+    result
+  }
+}
+
+fn simple(kind: String, name: String) -> CType {
+  new CType(kind, name)
+}
+
+fn pointer_to(pointee: CType) -> CType {
+  const result = new CType("pointer", "");
+
+  result.inner = Some(pointee);
+  result
+}
+
+fn unsupported(reason: String) -> CType {
+  new CType("unsupported", reason)
+}
+
+/// A struct or union of the headers.
+class Record {
+  /// The name the bindings give it: its tag, the typedef naming it, or one made for an
+  /// anonymous record.
+  pub var name: String;
+  pub const is_union: bool;
+  /// Whether its fields are known.
+  pub var defined: bool;
+  pub var field_names: List<String>;
+  pub var field_types: List<CType>;
+  /// Why it cannot be laid out in Sagitario, so that it is written opaque.
+  pub var problem: Option<String>;
+  pub var file: String;
+  pub var order: usize;
+  /// Its name comes from no tag or typedef yet.
+  pub var anonymous: bool;
+  /// `struct tag`, `union tag`, or one made for an anonymous record.
+  pub var key: String;
+
+  pub fn new(self, name: String, is_union: bool, file: String, order: usize) {
+    self.key = "";
+    self.name = name;
+    self.is_union = is_union;
+    self.defined = false;
+    self.field_names = new List();
+    self.field_types = new List();
+    self.problem = None;
+    self.file = file;
+    self.order = order;
+    self.anonymous = false;
+  }
+}
+
+/// An enumeration: its constants and their values.
+class EnumDef {
+  pub var name: String;
+  pub const names: List<String>;
+  pub const values: List<i64>;
+  pub const file: String;
+  pub const order: usize;
+  pub var anonymous: bool;
+  pub var key: String;
+
+  pub fn new(self, name: String, file: String, order: usize) {
+    self.key = "";
+    self.name = name;
+    self.names = new List();
+    self.values = new List();
+    self.file = file;
+    self.order = order;
+    self.anonymous = false;
+  }
+}
+
+/// A function or a global variable of the headers.
+struct Declaration {
+  pub name: String;
+  pub ty: CType;
+  pub param_names: List<String>;
+  pub is_function: bool;
+  pub file: String;
+  pub order: usize;
+}
+
+/// A declaration bindgen cannot write, with why: a comment in the output.
+struct Skipped {
+  pub name: String;
+  pub reason: String;
+  pub file: String;
+}
+
+// ---- The parser -------------------------------------------------------------------------------
+
+/// A declarator: the pointers before the name, the name, the suffixes after it, and the
+/// declarator inside parentheses, as in `int (*callback)(int)`.
+class Declarator {
+  pub var name: String;
+  /// For each `*`, whether the pointer itself is `const`.
+  pub const pointers: List<bool>;
+  pub const suffixes: List<CType>;
+  pub var inner: Option<Declarator>;
+  /// The parameters' names of the function it declares.
+  pub var param_names: List<String>;
+  /// A bitfield, `int flags : 3`.
+  pub var bitfield: bool;
+
+  pub fn new(self) {
+    self.name = "";
+    self.pointers = new List();
+    self.suffixes = new List();
+    self.inner = None;
+    self.param_names = new List();
+    self.bitfield = false;
+  }
+
+  /// The type it gives `base`. A suffix's `inner` is filled with the type it applies to.
+  pub fn apply(self, base: CType) -> CType {
+    var ty = base;
+
+    for konst in self.pointers {
+      const next = pointer_to(ty);
+
+      next.konst = konst;
+      ty = next;
+    }
+
+    var index = self.suffixes.len();
+
+    while index > 0 {
+      index -= 1;
+
+      const suffix = self.suffixes[index].copy();
+
+      suffix.inner = Some(ty);
+      ty = suffix;
+    }
+
+    match self.inner {
+      Some(nested) => nested.apply(ty),
+      None => ty,
+    }
+  }
+
+  /// The name, also inside parentheses.
+  pub fn declared_name(self) -> String {
+    if !self.name.is_empty() {
+      return self.name;
+    }
+
+    match self.inner {
+      Some(nested) => nested.declared_name(),
+      None => "",
+    }
+  }
+
+  /// The parameters' names of the outermost function suffix.
+  pub fn names_of_params(self) -> List<String> {
+    if !self.param_names.is_empty() {
+      return self.param_names;
+    }
+
+    match self.inner {
+      Some(nested) => nested.names_of_params(),
+      None => new List(),
+    }
+  }
+}
+
+/// What the specifiers of a declaration say.
+struct Specifiers {
+  pub ty: CType;
+  pub is_typedef: bool;
+  pub is_static: bool;
+  pub is_extern: bool;
+  pub packed: bool;
+}
+
+/// Which declarations the headers have.
+class Parser {
+  prv const tokens: List<Token>;
+  prv var pos: usize;
+  pub const typedefs: Map<String, CType>;
+  pub const records: List<Record>;
+  /// By `struct name` or `union name`.
+  pub const record_index: Map<String, usize>;
+  pub const enums: List<EnumDef>;
+  pub const enum_index: Map<String, usize>;
+  /// Every enumeration constant, with its value.
+  pub const constants: Map<String, i64>;
+  pub const declarations: List<Declaration>;
+  pub const skipped: List<Skipped>;
+  prv var order: usize;
+  prv var anonymous: usize;
+  /// The alignment `#pragma pack` set, 0 for the default.
+  prv var pack: i64;
+  prv const pack_stack: List<i64>;
+
+  pub fn new(self, tokens: List<Token>) {
+    self.tokens = tokens;
+    self.pos = 0;
+    self.typedefs = new Map<String, CType>();
+    self.records = new List();
+    self.record_index = new Map<String, usize>();
+    self.enums = new List();
+    self.enum_index = new Map<String, usize>();
+    self.constants = new Map<String, i64>();
+    self.declarations = new List();
+    self.skipped = new List();
+    self.order = 0;
+    self.anonymous = 0;
+    self.pack = 0;
+    self.pack_stack = new List();
+  }
+
+  prv fn peek(self) -> String {
+    match self.tokens.get(self.pos) {
+      Some(token) => token.text,
+      None => "",
+    }
+  }
+
+  prv fn peek_at(self, offset: usize) -> String {
+    match self.tokens.get(self.pos + offset) {
+      Some(token) => token.text,
+      None => "",
+    }
+  }
+
+  prv fn at_end(self) -> bool {
+    self.pos >= self.tokens.len()
+  }
+
+  prv fn file(self) -> String {
+    match self.tokens.get(self.pos) {
+      Some(token) => token.file,
+      None => "",
+    }
+  }
+
+  prv fn is_ident(self) -> bool {
+    match self.tokens.get(self.pos) {
+      Some(token) => match token.kind {
+        Kind::Ident => true,
+        _ => false,
+      },
+      None => false,
+    }
+  }
+
+  prv fn advance(self) -> String {
+    const text = self.peek();
+
+    self.pos += 1;
+    text
+  }
+
+  prv fn eat(self, text: String) -> bool {
+    if self.peek() == text {
+      self.pos += 1;
+      return true;
+    }
+
+    false
+  }
+
+  prv fn expect(self, text: String) -> Result<(), String> {
+    if self.eat(text) {
+      return Ok(());
+    }
+
+    Err(`expected \`${text}\`, found \`${self.peek()}\``)
+  }
+
+  /// Skips a balanced group starting at `(`, `[` or `{`.
+  prv fn skip_group(self) {
+    var depth = 0i32;
+
+    while !self.at_end() {
+      const text = self.advance();
+
+      if text == "(" || text == "[" || text == "{" {
+        depth += 1;
+      } else if text == ")" || text == "]" || text == "}" {
+        depth -= 1;
+
+        if depth <= 0 {
+          return;
+        }
+      }
+    }
+  }
+
+  /// Skips to the end of the declaration that failed: past its `;`, or past a body.
+  prv fn recover(self) {
+    while !self.at_end() {
+      const text = self.peek();
+
+      if text == ";" {
+        self.pos += 1;
+        return;
+      }
+
+      if text == "{" {
+        self.skip_group();
+        self.eat(";");
+        return;
+      }
+
+      if text == "(" || text == "[" {
+        self.skip_group();
+        continue;
+      }
+
+      self.pos += 1;
+    }
+  }
+
+  prv fn next_order(self) -> usize {
+    self.order += 1;
+    self.order
+  }
+
+  /// Every declaration at file scope.
+  pub fn parse(self) {
+    while !self.at_end() {
+      const start = self.pos;
+      const file = self.file();
+
+      if let Err(reason) = self.external_declaration() {
+        const name = self.name_near(start);
+
+        self.skipped.push(Skipped { name: name, reason: reason, file: file });
+        self.pos = start;
+        self.recover();
+      }
+
+      if self.pos == start {
+        self.pos += 1;
+      }
+    }
+  }
+
+  /// The first identifier from `start` that is not a keyword, to name what failed.
+  prv fn name_near(self, start: usize) -> String {
+    var index = start;
+    var found = "";
+
+    while index < self.tokens.len() && index < start + 40 {
+      const token = self.tokens[index];
+
+      if token.text == ";" || token.text == "{" {
+        break;
+      }
+
+      if let Kind::Ident = token.kind {
+        if !is_c_keyword(token.text) && !self.typedefs.contains_key(token.text) {
+          found = token.text;
+
+          if index + 1 < self.tokens.len() && self.tokens[index + 1].text == "(" {
+            return found;
+          }
+        }
+      }
+
+      index += 1;
+    }
+
+    found
+  }
+
+  prv fn external_declaration(self) -> Result<(), String> {
+    const text = self.peek();
+
+    if text == ";" {
+      self.pos += 1;
+      return Ok(());
+    }
+
+    if text == "#pragma-pack" {
+      self.pos += 1;
+      self.pragma_pack(self.advance());
+      return Ok(());
+    }
+
+    if text == "_Static_assert" || text == "static_assert" || text == "__asm__" || text == "__asm" || text == "asm" {
+      self.recover();
+      return Ok(());
+    }
+
+    if text == "__extension__" {
+      self.pos += 1;
+      return Ok(());
+    }
+
+    const file = self.file();
+    const specs = self.specifiers()?;
+
+    if self.eat(";") {
+      return Ok(());
+    }
+
+    loop {
+      const declarator = self.declarator(false)?;
+
+      self.attributes();
+
+      // `= value`
+      if self.eat("=") {
+        while !self.at_end() && self.peek() != "," && self.peek() != ";" {
+          if self.peek() == "(" || self.peek() == "{" {
+            self.skip_group();
+          } else {
+            self.pos += 1;
+          }
+        }
+      }
+
+      const name = declarator.declared_name();
+      const ty = declarator.apply(specs.ty);
+
+      if specs.is_typedef {
+        self.typedef(name, ty);
+      } else if !name.is_empty() {
+        if ty.kind == "function" {
+          // A definition: a body, which has no symbol when it is `static inline`.
+          if self.peek() == "{" {
+            self.skip_group();
+
+            if specs.is_static {
+              self.skipped.push(Skipped { name: name, reason: "a `static` function, which has no symbol", file: file });
+            } else {
+              self.skipped.push(Skipped { name: name, reason: "a function defined in the header, whose symbol it may not export", file: file });
+            }
+
+            return Ok(());
+          }
+
+          if specs.is_static {
+            self.skipped.push(Skipped { name: name, reason: "a `static` function, which has no symbol", file: file });
+          } else {
+            self.declarations.push(Declaration { name: name, ty: ty, param_names: declarator.names_of_params(), is_function: true, file: file, order: self.next_order() });
+          }
+        } else if !specs.is_static {
+          self.declarations.push(Declaration { name: name, ty: ty, param_names: new List(), is_function: false, file: file, order: self.next_order() });
+        }
+      }
+
+      if self.eat(",") {
+        continue;
+      }
+
+      break;
+    }
+
+    self.expect(";")
+  }
+
+  /// `#pragma pack(...)`: whether records are packed.
+  prv fn pragma_pack(self, argument: String) {
+    const inner = argument.replace("(", "").replace(")", "");
+
+    if inner.is_empty() {
+      self.pack = 0;
+      return;
+    }
+
+    const parts = inner.split(",");
+
+    if parts[0] == "push" {
+      self.pack_stack.push(self.pack);
+
+      if parts.len() > 1 {
+        self.pack = parts[parts.len() - 1].parse_i64().unwrap_or(self.pack);
+      }
+
+      return;
+    }
+
+    if parts[0] == "pop" {
+      self.pack = self.pack_stack.pop().unwrap_or(0);
+      return;
+    }
+
+    self.pack = parts[0].parse_i64().unwrap_or(0);
+  }
+
+  /// A typedef: `name` stands for `ty`, and names the record or enumeration it is, if anonymous
+  /// or named apart, as Q734 says.
+  prv fn typedef(self, name: String, ty: CType) {
+    if name.is_empty() {
+      return;
+    }
+
+    const named = ty.copy();
+
+    if named.typedef_name.is_empty() {
+      named.typedef_name = name;
+    }
+
+    if ty.kind == "record" && !ty.konst {
+      if let Some(index) = self.record_index.get(ty.name) {
+        const record = self.records[index];
+
+        if record.anonymous || !self.typedef_named(record.name) {
+          record.name = name;
+          record.anonymous = false;
+        }
+      }
+    }
+
+    if ty.kind == "enum" {
+      if let Some(index) = self.enum_index.get(ty.name) {
+        const found = self.enums[index];
+
+        if found.anonymous {
+          found.name = name;
+          found.anonymous = false;
+        }
+      }
+    }
+
+    self.typedefs.insert(name, named);
+  }
+
+  /// Whether a record already took a typedef's name.
+  prv fn typedef_named(self, name: String) -> bool {
+    self.typedefs.contains_key(name)
+  }
+
+  /// `__attribute__((...))`, `__declspec(...)` and the like; whether one said `packed`.
+  prv fn attributes(self) -> bool {
+    var packed = false;
+
+    loop {
+      const text = self.peek();
+
+      if text == "__attribute__" || text == "__attribute" || text == "__declspec" || text == "__asm__" || text == "__asm" || text == "asm" || text == "_Alignas" || text == "alignas" || text == "__pragma" {
+        self.pos += 1;
+
+        const start = self.pos;
+
+        self.skip_group();
+
+        for index in start..self.pos {
+          const word = self.tokens[index].text;
+
+          if word == "packed" || word == "__packed__" {
+            packed = true;
+          }
+        }
+
+        continue;
+      }
+
+      return packed;
+    }
+  }
+
+  /// The specifiers of a declaration: storage, qualifiers and the type.
+  prv fn specifiers(self) -> Result<Specifiers, String> {
+    var ty: Option<CType> = None;
+    var konst = false;
+    var is_typedef = false;
+    var is_static = false;
+    var is_extern = false;
+    var packed = false;
+    var signed = false;
+    var unsigned = false;
+    var shorts = 0usize;
+    var longs = 0usize;
+    var base = "";
+
+    loop {
+      if self.attributes() {
+        packed = true;
+      }
+
+      const text = self.peek();
+
+      if text == "typedef" {
+        is_typedef = true;
+      } else if text == "static" {
+        is_static = true;
+      } else if text == "extern" {
+        is_extern = true;
+      } else if text == "const" || text == "__const" {
+        konst = true;
+      } else if is_ignored_word(text) {
+      } else if text == "signed" || text == "__signed__" || text == "__signed" {
+        signed = true;
+      } else if text == "unsigned" {
+        unsigned = true;
+      } else if text == "short" {
+        shorts += 1;
+      } else if text == "long" {
+        longs += 1;
+      } else if text == "int" || text == "char" || text == "void" || text == "float" || text == "double" || text == "_Bool" || text == "bool" || text == "__int64" || text == "__int32" || text == "__int16" || text == "__int8" {
+        base = text;
+      } else if text == "_Complex" || text == "__int128" || text == "_Float128" || text == "__float128" || text == "_Decimal64" || text == "__fp16" || text == "_Float16" {
+        self.pos += 1;
+        ty = Some(unsupported(`the C type \`${text}\`, which Sagitario has no type for`));
+        continue;
+      } else if text == "__builtin_va_list" {
+        self.pos += 1;
+        ty = Some(pointer_to(simple("void", "")));
+        continue;
+      } else if text == "struct" || text == "union" {
+        self.pos += 1;
+
+        const record = self.record(text == "union", packed)?;
+
+        ty = Some(record);
+        continue;
+      } else if text == "enum" {
+        self.pos += 1;
+        ty = Some(self.enumeration()?);
+        continue;
+      } else if text == "__typeof__" || text == "typeof" || text == "__typeof" {
+        self.pos += 1;
+        self.skip_group();
+        ty = Some(unsupported("`typeof`"));
+        continue;
+      } else if text == "_Atomic" {
+        self.pos += 1;
+
+        if self.peek() == "(" {
+          self.skip_group();
+        }
+
+        ty = Some(unsupported("an `_Atomic` type"));
+        continue;
+      } else if ty.is_none() && base.is_empty() && !signed && !unsigned && shorts == 0 && longs == 0 && self.is_ident() && self.typedefs.contains_key(text) {
+        ty = self.typedefs.get(text);
+      } else {
+        break;
+      }
+
+      self.pos += 1;
+    }
+
+    const result = match ty {
+      Some(found) => found.copy(),
+      None => {
+        if base.is_empty() && !signed && !unsigned && shorts == 0 && longs == 0 {
+          return Err(`a type was expected, found \`${self.peek()}\``);
+        }
+
+        int_type(base, signed, unsigned, shorts, longs)
+      }
+    };
+
+    if konst {
+      result.konst = true;
+    }
+
+    Ok(Specifiers { ty: result, is_typedef: is_typedef, is_static: is_static, is_extern: is_extern, packed: packed })
+  }
+
+  /// `struct name`, `struct name { fields }` or `struct { fields }`, after the keyword.
+  prv fn record(self, is_union: bool, packed_before: bool) -> Result<CType, String> {
+    var packed = packed_before;
+
+    if self.attributes() {
+      packed = true;
+    }
+
+    const file = self.file();
+    var tag = "";
+
+    if self.is_ident() {
+      tag = self.advance();
+    }
+
+    if self.attributes() {
+      packed = true;
+    }
+
+    const keyword = if is_union { "union" } else { "struct" };
+    var key = keyword + " " + tag;
+
+    if tag.is_empty() {
+      self.anonymous += 1;
+      key = keyword + ` <anonymous ${self.anonymous}>`;
+    }
+
+    const index = match self.record_index.get(key) {
+      Some(found) => found,
+      None => {
+        const created = new Record(if tag.is_empty() { `__bindgen_ty_${self.anonymous}` } else { tag }, is_union, file, self.next_order());
+
+        created.anonymous = tag.is_empty();
+        created.key = key;
+        self.records.push(created);
+        self.record_index.insert(key, self.records.len() - 1);
+        self.records.len() - 1
+      }
+    };
+    const record = self.records[index];
+
+    if self.peek() == "{" {
+      self.pos += 1;
+      record.defined = true;
+      record.file = file;
+      record.order = self.next_order();
+
+      if self.pack > 0 && self.pack < 8 {
+        record.problem = Some(`packed by \`#pragma pack(${self.pack})\`, which Sagitario cannot lay out`);
+      }
+
+      while !self.at_end() && self.peek() != "}" {
+        if self.eat(";") {
+          continue;
+        }
+
+        if self.peek() == "_Static_assert" || self.peek() == "static_assert" {
+          self.recover();
+          continue;
+        }
+
+        if self.peek() == "#pragma-pack" {
+          self.pos += 2;
+          continue;
+        }
+
+        const specs = self.specifiers()?;
+
+        // An anonymous struct or union inside: its fields are reached through a field of its own.
+        if self.peek() == ";" {
+          if specs.ty.kind == "record" {
+            record.field_names.push(`__bindgen_anon_${record.field_names.len() + 1}`);
+            record.field_types.push(specs.ty);
+          }
+
+          self.pos += 1;
+          continue;
+        }
+
+        loop {
+          const declarator = self.declarator(false)?;
+
+          if declarator.bitfield {
+            record.problem = Some("it has bitfields, whose layout only the C compiler knows");
+          }
+
+          self.attributes();
+
+          const ty = declarator.apply(specs.ty);
+
+          if ty.kind == "array" && ty.len.is_none() {
+            record.problem = Some("it ends with a flexible array member, which Sagitario cannot lay out");
+          }
+
+          record.field_names.push(declarator.declared_name());
+          record.field_types.push(ty);
+
+          if !self.eat(",") {
+            break;
+          }
+        }
+
+        self.expect(";")?;
+      }
+
+      self.expect("}")?;
+
+      if self.attributes() {
+        packed = true;
+      }
+
+      if packed {
+        record.problem = Some("it is packed, which Sagitario cannot lay out");
+      }
+
+      if record.field_names.is_empty() && record.problem.is_none() {
+        record.problem = Some("it has no fields");
+      }
+    }
+
+    Ok(simple("record", key))
+  }
+
+  /// `enum name`, `enum name { constants }` or `enum { constants }`, after the keyword.
+  prv fn enumeration(self) -> Result<CType, String> {
+    self.attributes();
+
+    const file = self.file();
+    var tag = "";
+
+    if self.is_ident() {
+      tag = self.advance();
+    }
+
+    self.attributes();
+
+    // C23's `enum name : type`.
+    if self.peek() == ":" {
+      return Err("an enumeration with a fixed underlying type");
+    }
+
+    var key = "enum " + tag;
+
+    if tag.is_empty() {
+      self.anonymous += 1;
+      key = `enum <anonymous ${self.anonymous}>`;
+    }
+
+    const index = match self.enum_index.get(key) {
+      Some(found) => found,
+      None => {
+        const created = new EnumDef(tag, file, self.next_order());
+
+        created.anonymous = tag.is_empty();
+        created.key = key;
+        self.enums.push(created);
+        self.enum_index.insert(key, self.enums.len() - 1);
+        self.enums.len() - 1
+      }
+    };
+    const found = self.enums[index];
+
+    if self.eat("{") {
+      var next = 0i64;
+
+      while !self.at_end() && self.peek() != "}" {
+        if !self.is_ident() {
+          return Err(`a constant of an enumeration was expected, found \`${self.peek()}\``);
+        }
+
+        const name = self.advance();
+
+        self.attributes();
+
+        if self.eat("=") {
+          const start = self.pos;
+
+          while !self.at_end() && self.peek() != "," && self.peek() != "}" {
+            if self.peek() == "(" {
+              self.skip_group();
+            } else {
+              self.pos += 1;
+            }
+          }
+
+          next = match evaluate(self.tokens, start, self.pos, self.constants, self.typedefs) {
+            Some(value) => value,
+            None => return Err(`the value of the constant \`${name}\` is not an integer the bindings can compute`),
+          };
+        }
+
+        found.names.push(name);
+        found.values.push(next);
+        self.constants.insert(name, next);
+        next = next.wrapping_add(1);
+
+        if !self.eat(",") {
+          break;
+        }
+      }
+
+      self.expect("}")?;
+    }
+
+    Ok(simple("enum", key))
+  }
+
+  /// A declarator, named or `abstract` (in a parameter or a cast).
+  prv fn declarator(self, is_abstract: bool) -> Result<Declarator, String> {
+    const result = new Declarator();
+
+    loop {
+      self.attributes();
+
+      if self.eat("*") || self.eat("^") {
+        var konst = false;
+
+        loop {
+          const text = self.peek();
+
+          if text == "const" || text == "__const" {
+            konst = true;
+          } else if !is_ignored_word(text) {
+            break;
+          }
+
+          self.pos += 1;
+        }
+
+        result.pointers.push(konst);
+        continue;
+      }
+
+      if is_ignored_word(self.peek()) {
+        self.pos += 1;
+        continue;
+      }
+
+      break;
+    }
+
+    self.attributes();
+
+    // `(*name)`: a declarator inside parentheses, which a parameter list is not.
+    if self.peek() == "(" && self.nested_declarator_ahead() {
+      self.pos += 1;
+      result.inner = Some(self.declarator(is_abstract)?);
+      self.expect(")")?;
+    } else if self.is_ident() && !self.typedefs.contains_key(self.peek()) && !is_c_keyword(self.peek()) {
+      result.name = self.advance();
+    } else if !is_abstract && self.is_ident() && self.typedefs.contains_key(self.peek()) {
+      // A name that is also a typedef, declared again as a field or a parameter.
+      result.name = self.advance();
+    }
+
+    loop {
+      self.attributes();
+
+      if self.eat("[") {
+        const start = self.pos;
+
+        while !self.at_end() && self.peek() != "]" {
+          if self.peek() == "(" || self.peek() == "[" {
+            self.skip_group();
+          } else {
+            self.pos += 1;
+          }
+        }
+
+        const end = self.pos;
+
+        self.expect("]")?;
+
+        const array = simple("array", "");
+
+        // `[static 10]`, `[const]` in parameters.
+        var first = start;
+
+        while first < end && (self.tokens[first].text == "static" || self.tokens[first].text == "const" || self.tokens[first].text == "restrict" || self.tokens[first].text == "__restrict") {
+          first += 1;
+        }
+
+        if first < end {
+          match evaluate(self.tokens, first, end, self.constants, self.typedefs) {
+            Some(value) => {
+              if value < 0 {
+                return Err("an array of negative length");
+              }
+
+              array.len = Some(value as u64);
+            }
+            None => return Err("an array whose length the bindings cannot compute"),
+          }
+        }
+
+        result.suffixes.push(array);
+        continue;
+      }
+
+      if self.peek() == "(" {
+        self.pos += 1;
+
+        const function = simple("function", "");
+        const names: List<String> = new List();
+
+        if self.peek() == "void" && self.peek_at(1) == ")" {
+          self.pos += 1;
+        }
+
+        while !self.at_end() && self.peek() != ")" {
+          if self.eat("...") {
+            function.variadic = true;
+            break;
+          }
+
+          const specs = self.specifiers()?;
+          const param = self.declarator(true)?;
+          var ty = param.apply(specs.ty);
+
+          // Arrays and functions are passed as pointers.
+          if ty.kind == "array" {
+            const decayed = pointer_to(ty.inner.unwrap_or(simple("void", "")));
+
+            ty = decayed;
+          } else if ty.kind == "function" {
+            ty = pointer_to(ty);
+          }
+
+          function.params.push(ty);
+          names.push(param.declared_name());
+
+          if !self.eat(",") {
+            break;
+          }
+        }
+
+        self.expect(")")?;
+        result.suffixes.push(function);
+
+        if result.param_names.is_empty() {
+          result.param_names = names;
+        }
+
+        continue;
+      }
+
+      break;
+    }
+
+    if self.eat(":") {
+      const start = self.pos;
+
+      while !self.at_end() && self.peek() != "," && self.peek() != ";" {
+        self.pos += 1;
+      }
+
+      if evaluate(self.tokens, start, self.pos, self.constants, self.typedefs).is_none() {
+        return Err("a bitfield whose width the bindings cannot compute");
+      }
+
+      result.bitfield = true;
+    }
+
+    Ok(result)
+  }
+
+  /// Whether the `(` here opens a declarator, `(*name)` or `(name)`, rather than parameters.
+  prv fn nested_declarator_ahead(self) -> bool {
+    var offset = 1usize;
+
+    loop {
+      const text = self.peek_at(offset);
+
+      if text == "__attribute__" || text == "__declspec" {
+        return true;
+      }
+
+      if is_ignored_word(text) {
+        offset += 1;
+        continue;
+      }
+
+      return text == "*" || text == "^" || text == "(" || text == "[" || (text != ")" && !is_type_word(text) && !self.typedefs.contains_key(text) && is_identifier(text));
+    }
+  }
+}
+
+/// The integer or floating type of the keywords of a declaration.
+fn int_type(base: String, signed: bool, unsigned: bool, shorts: usize, longs: usize) -> CType {
+  if base == "void" {
+    return simple("void", "");
+  }
+
+  if base == "_Bool" || base == "bool" {
+    return simple("bool", "");
+  }
+
+  if base == "float" {
+    return simple("float", "");
+  }
+
+  if base == "double" {
+    return if longs > 0 { unsupported("the C type `long double`, which Sagitario has no type for") } else { simple("double", "") };
+  }
+
+  if base == "char" {
+    return simple("int", if unsigned { "c_uchar" } else if signed { "c_schar" } else { "c_char" });
+  }
+
+  if base == "__int8" {
+    return simple("int", if unsigned { "u8" } else { "i8" });
+  }
+
+  if base == "__int16" || shorts > 0 {
+    return simple("int", if unsigned { "c_ushort" } else { "c_short" });
+  }
+
+  if base == "__int64" || longs >= 2 {
+    return simple("int", if unsigned { "c_ulonglong" } else { "c_longlong" });
+  }
+
+  if longs == 1 {
+    return simple("int", if unsigned { "c_ulong" } else { "c_long" });
+  }
+
+  simple("int", if unsigned { "c_uint" } else { "c_int" })
+}
+
+/// Words of declarations that change nothing in the bindings: qualifiers, calling conventions
+/// and nullability.
+fn is_ignored_word(text: String) -> bool {
+  " volatile __volatile__ __volatile restrict __restrict __restrict__ inline __inline __inline__ __forceinline _Noreturn __noreturn register auto _Thread_local __thread __cdecl _cdecl __stdcall _stdcall __fastcall __vectorcall __thiscall __w64 __ptr32 __ptr64 __unaligned __sptr __uptr _Nullable _Nonnull _Null_unspecified _Nullable_result __nullable __nonnull __null_unspecified __kindof __extension__ __CRTDECL WINAPI ".contains(" " + text + " ")
+}
+
+/// Words that start a type.
+fn is_type_word(text: String) -> bool {
+  " void char short int long float double signed unsigned _Bool bool struct union enum const volatile __int64 __int32 __int16 __int8 __builtin_va_list _Complex _Atomic __typeof__ typeof ".contains(" " + text + " ")
+}
+
+fn is_c_keyword(text: String) -> bool {
+  is_type_word(text) || is_ignored_word(text) || " typedef static extern sizeof return if else while for do switch case default break continue goto _Alignof alignof _Static_assert static_assert __attribute__ __declspec ".contains(" " + text + " ")
+}
+
+fn is_identifier(text: String) -> bool {
+  if text.is_empty() {
+    return false;
+  }
+
+  for c in text.chars() {
+    if !(c.is_ascii_alphanumeric() || c == '_' || c == '$') {
+      return false;
+    }
+  }
+
+  !text.chars().collect()[0].is_ascii_digit()
+}
+
+// ---- Constant expressions ---------------------------------------------------------------------
+
+/// The value of the integer constant expression `tokens[start..end]`, as C computes it, with the
+/// enumeration constants known so far; `None` for anything else, such as `sizeof`.
+fn evaluate(tokens: List<Token>, start: usize, end: usize, constants: Map<String, i64>, types: Map<String, CType>) -> Option<i64> {
+  const evaluator = new Evaluator(tokens, start, end, constants, types);
+  const value = evaluator.conditional()?;
+
+  if evaluator.pos != end {
+    return None;
+  }
+
+  Some(value)
+}
+
+class Evaluator {
+  prv const tokens: List<Token>;
+  pub var pos: usize;
+  prv const end: usize;
+  prv const constants: Map<String, i64>;
+  /// The typedefs, whose names cast: `((Uint32)0x20u)`.
+  prv const types: Map<String, CType>;
+
+  pub fn new(self, tokens: List<Token>, start: usize, end: usize, constants: Map<String, i64>, types: Map<String, CType>) {
+    self.tokens = tokens;
+    self.pos = start;
+    self.end = end;
+    self.constants = constants;
+    self.types = types;
+  }
+
+  prv fn peek(self) -> String {
+    if self.pos < self.end { self.tokens[self.pos].text } else { "" }
+  }
+
+  prv fn eat(self, text: String) -> bool {
+    if self.peek() == text {
+      self.pos += 1;
+      return true;
+    }
+
+    false
+  }
+
+  pub fn conditional(self) -> Option<i64> {
+    const condition = self.binary(0)?;
+
+    if self.eat("?") {
+      const then_value = self.conditional()?;
+
+      if !self.eat(":") {
+        return None;
+      }
+
+      const else_value = self.conditional()?;
+
+      return Some(if condition != 0 { then_value } else { else_value });
+    }
+
+    Some(condition)
+  }
+
+  /// Binary operators by C's precedence, from `||` (0) to `*` (9).
+  prv fn binary(self, level: usize) -> Option<i64> {
+    if level > 9 {
+      return self.unary();
+    }
+
+    var left = self.binary(level + 1)?;
+
+    loop {
+      const op = self.peek();
+
+      if !operator_at(op, level) {
+        return Some(left);
+      }
+
+      self.pos += 1;
+
+      const right = self.binary(level + 1)?;
+
+      left = apply_binary(op, left, right)?;
+    }
+  }
+
+  prv fn unary(self) -> Option<i64> {
+    const text = self.peek();
+
+    if text == "-" {
+      self.pos += 1;
+      return Some(self.unary()?.wrapping_neg());
+    }
+
+    if text == "+" {
+      self.pos += 1;
+      return self.unary();
+    }
+
+    if text == "~" {
+      self.pos += 1;
+      return Some(!self.unary()?);
+    }
+
+    if text == "!" {
+      self.pos += 1;
+      return Some(if self.unary()? == 0 { 1 } else { 0 });
+    }
+
+    if text == "(" {
+      self.pos += 1;
+
+      // A cast to an integer type, `(int)x`, `(unsigned long)(x)` or `(Uint32)x`, keeps the value.
+      if is_type_word(self.peek()) || self.types.contains_key(self.peek()) {
+        while self.pos < self.end && self.peek() != ")" {
+          self.pos += 1;
+        }
+
+        if !self.eat(")") {
+          return None;
+        }
+
+        return self.unary();
+      }
+
+      const value = self.conditional()?;
+
+      if !self.eat(")") {
+        return None;
+      }
+
+      return Some(value);
+    }
+
+    if self.pos >= self.end {
+      return None;
+    }
+
+    const token = self.tokens[self.pos];
+
+    self.pos += 1;
+
+    match token.kind {
+      Kind::Number => parse_integer(token.text),
+      Kind::Char => char_value(token.text),
+      Kind::Ident => self.constants.get(token.text),
+      _ => None,
+    }
+  }
+}
+
+fn operator_at(op: String, level: usize) -> bool {
+  match level {
+    0 => op == "||",
+    1 => op == "&&",
+    2 => op == "|",
+    3 => op == "^",
+    4 => op == "&",
+    5 => op == "==" || op == "!=",
+    6 => op == "<" || op == ">" || op == "<=" || op == ">=",
+    7 => op == "<<" || op == ">>",
+    8 => op == "+" || op == "-",
+    9 => op == "*" || op == "/" || op == "%",
+    _ => false,
+  }
+}
+
+fn apply_binary(op: String, left: i64, right: i64) -> Option<i64> {
+  if op == "||" {
+    return Some(if left != 0 || right != 0 { 1 } else { 0 });
+  }
+
+  if op == "&&" {
+    return Some(if left != 0 && right != 0 { 1 } else { 0 });
+  }
+
+  if op == "|" {
+    return Some(left | right);
+  }
+
+  if op == "^" {
+    return Some(left ^ right);
+  }
+
+  if op == "&" {
+    return Some(left & right);
+  }
+
+  if op == "==" || op == "!=" || op == "<" || op == ">" || op == "<=" || op == ">=" {
+    const holds = if op == "==" { left == right } else if op == "!=" { left != right } else if op == "<" { left < right } else if op == ">" { left > right } else if op == "<=" { left <= right } else { left >= right };
+
+    return Some(if holds { 1 } else { 0 });
+  }
+
+  if op == "<<" || op == ">>" {
+    if right < 0 || right > 63 {
+      return None;
+    }
+
+    return Some(if op == "<<" { left.wrapping_shl(right as u32) } else { left >> (right as u32) });
+  }
+
+  if op == "+" {
+    return Some(left.wrapping_add(right));
+  }
+
+  if op == "-" {
+    return Some(left.wrapping_sub(right));
+  }
+
+  if op == "*" {
+    return Some(left.wrapping_mul(right));
+  }
+
+  if right == 0 || (left == i64::MIN && right == -1) {
+    return None;
+  }
+
+  Some(if op == "/" { left / right } else { left % right })
+}
+
+/// A C integer literal: decimal, `0x`, `0b` or octal, with its suffixes.
+fn parse_integer(text: String) -> Option<i64> {
+  var digits = text.to_ascii_lowercase();
+
+  while digits.ends_with("u") || digits.ends_with("l") || digits.ends_with("z") {
+    digits = digits.substring(0, digits.len() - 1);
+  }
+
+  digits = digits.replace("'", "");
+
+  var radix = 10u32;
+
+  if digits.starts_with("0x") {
+    radix = 16;
+    digits = digits.substring(2, digits.len());
+  } else if digits.starts_with("0b") {
+    radix = 2;
+    digits = digits.substring(2, digits.len());
+  } else if digits.len() > 1 && digits.starts_with("0") {
+    radix = 8;
+    digits = digits.substring(1, digits.len());
+  }
+
+  match u64::from_str_radix(digits, radix) {
+    Ok(value) => Some(value as i64),
+    Err(_) => None,
+  }
+}
+
+/// The value of a character literal's contents, `a` or an escape.
+fn char_value(text: String) -> Option<i64> {
+  const chars = text.chars().collect();
+
+  if chars.len() == 1 {
+    return Some(chars[0] as u32 as i64);
+  }
+
+  if chars.len() >= 2 && chars[0] == '\\' {
+    const c = chars[1];
+
+    if c == 'n' { return Some(10); }
+    if c == 't' { return Some(9); }
+    if c == 'r' { return Some(13); }
+    if c == '0' && chars.len() == 2 { return Some(0); }
+    if c == '\\' || c == '\'' || c == '"' { return Some(c as u32 as i64); }
+  }
+
+  None
+}
+
+// ---- The bindings -----------------------------------------------------------------------------
+
+/// What the bindings keep (Q737): the declarations of the headers' directories, or with an allow
+/// list, those it names; then the types they use.
+struct Choice {
+  /// The directories of the headers given.
+  pub roots: List<String>;
+  pub prefixes: List<String>;
+  pub files: List<String>;
+  pub blocked: List<String>;
+  /// The target is Windows with MSVC, whose enumerations are always `int`.
+  pub msvc: bool;
+}
+
+/// Sagitario's keywords, which a C name gets `_` after.
+const KEYWORDS: String = " abstract as async await break class const continue else enum extends extern false fn for if impl in interface let loop match mod new override pkg prv pub return self Self static struct super true type union unsafe use var weak where while zod ";
+
+/// C names that Sagitario keeps for C itself or its runtime: they cannot be the symbols of a
+/// program's `extern` block (docs/spec/10-ffi.md#c-symbols).
+fn symbol_problem(symbol: String) -> Option<String> {
+  if symbol.starts_with("__") || (symbol.starts_with("_") && symbol.len() > 1 && symbol.chars().collect()[1].is_ascii_uppercase()) {
+    return Some("its symbol is reserved in C, which Sagitario does not let programs declare");
+  }
+
+  if symbol.starts_with("sag_") || symbol.starts_with("SAG_") || symbol.ends_with("_t") || symbol == "main" {
+    return Some("its symbol is reserved by Sagitario");
+  }
+
+  None
+}
+
+/// A name Sagitario can declare: keywords get `_` after them.
+fn rust_name(name: String) -> String {
+  if KEYWORDS.contains(" " + name + " ") { name + "_" } else { name }
+}
+
+class Writer {
+  prv const parser: Parser;
+  prv const choice: Choice;
+  /// Records written with their fields, by key, and those written opaque.
+  prv const full: Map<String, bool>;
+  prv const opaque: Map<String, bool>;
+  prv const used_enums: Map<String, bool>;
+  /// The names the output declares, so that a type and a function never share one.
+  prv const names: Map<String, bool>;
+  /// The macros without parameters of the headers.
+  prv var macros: List<MacroDef>;
+
+  pub fn new(self, parser: Parser, choice: Choice, macros: List<MacroDef>) {
+    self.parser = parser;
+    self.choice = choice;
+    self.macros = macros;
+    self.full = new Map<String, bool>();
+    self.opaque = new Map<String, bool>();
+    self.used_enums = new Map<String, bool>();
+    self.names = new Map<String, bool>();
+  }
+
+  /// Whether the declaration `name` of `file` is chosen by itself.
+  prv fn chosen(self, name: String, file: String) -> bool {
+    if self.choice.blocked.contains(name) || name.is_empty() {
+      return false;
+    }
+
+    if self.choice.prefixes.is_empty() && self.choice.files.is_empty() {
+      for root in self.choice.roots {
+        if file.starts_with(root) {
+          return true;
+        }
+      }
+
+      return false;
+    }
+
+    for prefix in self.choice.prefixes {
+      if name.starts_with(prefix) {
+        return true;
+      }
+    }
+
+    self.choice.files.contains(file)
+  }
+
+  prv fn record_of(self, key: String) -> Option<Record> {
+    match self.parser.record_index.get(key) {
+      Some(index) => self.parser.records.get(index),
+      None => None,
+    }
+  }
+
+  /// Marks the records and enumerations `ty` uses: by value with their fields, behind a pointer
+  /// opaque unless chosen otherwise.
+  prv fn mark(self, ty: CType, by_value: bool) {
+    if ty.kind == "pointer" {
+      if let Some(inner) = ty.inner {
+        self.mark(inner, false);
+      }
+
+      return;
+    }
+
+    if ty.kind == "array" {
+      if let Some(inner) = ty.inner {
+        self.mark(inner, by_value);
+      }
+
+      return;
+    }
+
+    if ty.kind == "function" {
+      if let Some(inner) = ty.inner {
+        self.mark(inner, true);
+      }
+
+      for param in ty.params {
+        self.mark(param, true);
+      }
+
+      return;
+    }
+
+    if ty.kind == "enum" {
+      self.used_enums.insert(ty.name, true);
+      return;
+    }
+
+    if ty.kind == "record" {
+      const record = match self.record_of(ty.name) {
+        Some(found) => found,
+        None => return,
+      };
+
+      if by_value && record.defined && record.problem.is_none() {
+        if !self.full.contains_key(ty.name) {
+          self.full.insert(ty.name, true);
+
+          for field in record.field_types {
+            self.mark(field, true);
+          }
+        }
+
+        return;
+      }
+
+      if !self.full.contains_key(ty.name) {
+        self.opaque.insert(ty.name, true);
+      }
+    }
+  }
+
+  /// Names the anonymous records inside others after them, as bindgen does:
+  /// `fx_events__bindgen_ty_1` for the first one of `fx_events`.
+  prv fn name_anonymous(self) {
+    for record in self.parser.records {
+      var count = 0usize;
+
+      for field in record.field_types {
+        var ty = field;
+
+        while ty.kind == "array" {
+          ty = ty.inner.unwrap_or(simple("void", ""));
+        }
+
+        if ty.kind != "record" {
+          continue;
+        }
+
+        if let Some(inner) = self.record_of(ty.name) {
+          if inner.anonymous {
+            count += 1;
+            inner.name = record.name + `__bindgen_ty_${count}`;
+            inner.anonymous = false;
+          }
+        }
+      }
+    }
+  }
+
+  /// The bindings of the headers.
+  pub fn write(self, headers: List<String>) -> String {
+    const parser = self.parser;
+
+    self.name_anonymous();
+    const functions: List<Declaration> = new List();
+    const comments: List<String> = new List();
+
+    // The chosen records and enumerations, then the functions and globals and what they use.
+    for index in 0..parser.records.len() {
+      const record = parser.records[index];
+
+      if record.defined && !record.anonymous && self.chosen(record.name, record.file) {
+        self.mark(simple("record", self.record_key(index)), true);
+      }
+    }
+
+    for index in 0..parser.enums.len() {
+      const found = parser.enums[index];
+
+      if self.enum_chosen(found) {
+        self.used_enums.insert(self.enum_key(index), true);
+      }
+    }
+
+    for declaration in parser.declarations {
+      if !self.chosen(declaration.name, declaration.file) {
+        continue;
+      }
+
+      if let Some(problem) = symbol_problem(declaration.name) {
+        comments.push(`// \`${declaration.name}\` is left out: ${problem}.`);
+        continue;
+      }
+
+      if rust_name(declaration.name) != declaration.name {
+        comments.push(`// \`${declaration.name}\` is left out: its name is a keyword of Sagitario, and a C symbol cannot be renamed.`);
+        continue;
+      }
+
+      if let Some(reason) = self.unsupported_in(declaration.ty) {
+        comments.push(`// \`${declaration.name}\` is left out: it uses ${reason}.`);
+        continue;
+      }
+
+      self.mark(declaration.ty, true);
+      functions.push(declaration);
+    }
+
+    for skipped in parser.skipped {
+      if !skipped.name.is_empty() && self.chosen(skipped.name, skipped.file) {
+        comments.push(`// \`${skipped.name}\` is left out: ${skipped.reason}.`);
+      }
+    }
+
+    // A record that cannot be laid out is opaque, and so is one holding it by value, until
+    // nothing changes.
+    for index in 0..parser.records.len() {
+      const record = parser.records[index];
+
+      if let Some(problem) = record.problem {
+        if record.defined && (self.opaque.contains_key(record.key) || self.chosen(record.name, record.file)) {
+          comments.push(`// \`${record.name}\` is opaque: ${problem}.`);
+        }
+      }
+    }
+
+    var changed = true;
+
+    while changed {
+      changed = false;
+
+      for record in parser.records {
+        if !self.full.contains_key(record.key) {
+          continue;
+        }
+
+        for field in record.field_types {
+          if let Some(held) = self.opaque_by_value(field) {
+            self.full.remove(record.key);
+            self.opaque.insert(record.key, true);
+            comments.push(`// \`${record.name}\` is opaque: it holds a \`${held}\`, which is opaque, by value.`);
+            changed = true;
+            break;
+          }
+        }
+      }
+    }
+
+    const kept: List<Declaration> = new List();
+
+    for declaration in functions {
+      if let Some(held) = self.opaque_by_value(declaration.ty) {
+        comments.push(`// \`${declaration.name}\` is left out: it takes or gives a \`${held}\`, which is opaque, by value.`);
+        continue;
+      }
+
+      self.names.insert(declaration.name, true);
+      kept.push(declaration);
+    }
+
+    functions.clear();
+
+    for declaration in kept {
+      functions.push(declaration);
+    }
+
+    const out = new StringBuilder();
+    const shown: List<String> = new List();
+
+    for file in headers {
+      shown.push(path::file_name(file).unwrap_or(file));
+    }
+
+    out.append("// Generated by bindgen of Sagitario from " + shown.join(", ") + ". Do not edit.\n");
+
+    if !comments.is_empty() {
+      out.append("\n");
+
+      for comment in comments {
+        out.append(comment + "\n");
+      }
+    }
+
+    // The constants of the enumerations.
+    for index in 0..parser.enums.len() {
+      const found = parser.enums[index];
+
+      if !self.used_enums.contains_key(self.enum_key(index)) || found.names.is_empty() {
+        continue;
+      }
+
+      const repr = enum_repr(found.values, self.choice.msvc);
+
+      out.append("\n");
+
+      if !found.name.is_empty() {
+        out.append(`// enum ${found.name}\n`);
+      }
+
+      for position in 0..found.names.len() {
+        const name = rust_name(found.names[position]);
+
+        if self.choice.blocked.contains(found.names[position]) {
+          continue;
+        }
+
+        out.append(`pub const ${name}: std::ffi::${repr} = ${literal(found.values[position], repr)};\n`);
+      }
+    }
+
+    out.append(self.macro_constants());
+
+    // The records, in the order of the headers.
+    for index in 0..parser.records.len() {
+      const key = self.record_key(index);
+      const record = parser.records[index];
+
+      if self.full.contains_key(key) {
+        out.append("\n@repr(C)\n");
+        out.append((if record.is_union { "pub union " } else { "pub struct " }) + self.type_name(record) + " {\n");
+
+        const seen: List<String> = new List();
+
+        for field in 0..record.field_names.len() {
+          var name = rust_name(record.field_names[field]);
+
+          if name.is_empty() || seen.contains(name) {
+            name = `field_${field}`;
+          }
+
+          seen.push(name);
+          out.append("  pub " + name + ": " + self.field_type(record.field_types[field]) + ";\n");
+        }
+
+        out.append("}\n");
+      } else if self.opaque.contains_key(key) {
+        out.append("\n@repr(C)\npub struct " + self.type_name(record) + " {\n  prv _unused: [u8; 0];\n}\n");
+      }
+    }
+
+    if !functions.is_empty() {
+      out.append("\nextern \"C\" {\n");
+
+      for declaration in functions {
+        if declaration.is_function {
+          out.append("  " + self.function(declaration) + "\n");
+        } else {
+          const keyword = if declaration.ty.konst { "static" } else { "static var" };
+
+          out.append("  pub " + keyword + " " + declaration.name + ": " + self.field_type(declaration.ty) + ";\n");
+        }
+      }
+
+      out.append("}\n");
+    }
+
+    out.to_string()
+  }
+
+  prv fn record_key(self, index: usize) -> String {
+    match self.parser.records.get(index) {
+      Some(record) => record.key,
+      None => "",
+    }
+  }
+
+  prv fn enum_key(self, index: usize) -> String {
+    match self.parser.enums.get(index) {
+      Some(found) => found.key,
+      None => "",
+    }
+  }
+
+  /// The constants of the chosen macros whose bodies are constants (Q736): integers, floats,
+  /// strings and characters, also computed from other macros, enumeration constants and casts.
+  /// Macros with parameters and the others are left out, as bindgen does.
+  prv fn macro_constants(self) -> String {
+    const taken = new Map<String, bool>();
+
+    for entry in self.parser.constants.keys() {
+      taken.insert(entry, true);
+    }
+
+    for record in self.parser.records {
+      taken.insert(record.name, true);
+    }
+
+    for declaration in self.parser.declarations {
+      taken.insert(declaration.name, true);
+    }
+
+    // Integer macros may name others: each pass computes those whose names are known.
+    const values = new Map<String, i64>();
+
+    for entry in self.parser.constants.keys() {
+      values.insert(entry, self.parser.constants.get(entry).unwrap_or(0));
+    }
+
+    const integers = new Map<String, i64>();
+    var progress = true;
+
+    while progress {
+      progress = false;
+
+      for found in self.macros {
+        if integers.contains_key(found.name) || !is_integer_body(found.body) {
+          continue;
+        }
+
+        if let Some(value) = evaluate(found.body, 0, found.body.len(), values, self.parser.typedefs) {
+          integers.insert(found.name, value);
+          values.insert(found.name, value);
+          progress = true;
+        }
+      }
+    }
+
+    const out = new StringBuilder();
+
+    for found in self.macros {
+      if taken.contains_key(found.name) || self.choice.blocked.contains(found.name) || !self.chosen(found.name, found.file) {
+        continue;
+      }
+
+      const line = macro_line(rust_name(found.name), found.body, integers.get(found.name));
+
+      if !line.is_empty() {
+        out.append(line + "\n");
+      }
+    }
+
+    const text = out.to_string();
+
+    if text.is_empty() { "" } else { "\n// Macros\n" + text }
+  }
+
+  /// Whether an enumeration's constants are chosen by themselves: by its name or theirs.
+  prv fn enum_chosen(self, found: EnumDef) -> bool {
+    if self.chosen(found.name, found.file) {
+      return true;
+    }
+
+    for name in found.names {
+      if self.chosen(name, found.file) {
+        return true;
+      }
+    }
+
+    false
+  }
+
+  /// The name a record gets: with `_struct` or `_union` when a function or global has its name,
+  /// as C keeps tags apart.
+  prv fn type_name(self, record: Record) -> String {
+    const name = rust_name(record.name);
+
+    if self.names.contains_key(record.name) {
+      return name + (if record.is_union { "_union" } else { "_struct" });
+    }
+
+    name
+  }
+
+  /// The name of a record `ty` holds by value that is written opaque, if any: a field, an element,
+  /// a parameter or a result, not behind a pointer.
+  prv fn opaque_by_value(self, ty: CType) -> Option<String> {
+    if ty.kind == "record" {
+      if self.full.contains_key(ty.name) {
+        return None;
+      }
+
+      return match self.record_of(ty.name) {
+        Some(record) => Some(record.name),
+        None => Some(ty.name),
+      };
+    }
+
+    if ty.kind == "array" || ty.kind == "function" {
+      if let Some(inner) = ty.inner {
+        if let Some(found) = self.opaque_by_value(inner) {
+          return Some(found);
+        }
+      }
+    }
+
+    if ty.kind == "function" {
+      for param in ty.params {
+        if let Some(found) = self.opaque_by_value(param) {
+          return Some(found);
+        }
+      }
+    }
+
+    None
+  }
+
+  /// What in `ty` the bindings cannot write, if anything.
+  prv fn unsupported_in(self, ty: CType) -> Option<String> {
+    if ty.kind == "unsupported" {
+      return Some(ty.name);
+    }
+
+    if ty.kind == "array" && ty.len.is_none() {
+      return Some("an array without a length");
+    }
+
+    if let Some(inner) = ty.inner {
+      if let Some(found) = self.unsupported_in(inner) {
+        return Some(found);
+      }
+    }
+
+    for param in ty.params {
+      if let Some(found) = self.unsupported_in(param) {
+        return Some(found);
+      }
+    }
+
+    None
+  }
+
+  /// `pub fn name(a: T, ...) -> R;`
+  prv fn function(self, declaration: Declaration) -> String {
+    const ty = declaration.ty;
+    const params: List<String> = new List();
+    const seen: List<String> = new List();
+
+    for index in 0..ty.params.len() {
+      var name = rust_name(declaration.param_names.get(index).unwrap_or(""));
+
+      if name.is_empty() || seen.contains(name) || name == "self" {
+        name = `arg${index}`;
+      }
+
+      seen.push(name);
+      params.push(name + ": " + self.field_type(ty.params[index]));
+    }
+
+    if ty.variadic {
+      params.push("...");
+    }
+
+    var result = "pub fn " + declaration.name + "(" + params.join(", ") + ")";
+
+    if let Some(ret) = ty.inner {
+      if ret.kind != "void" {
+        result = result + " -> " + self.field_type(ret);
+      }
+    }
+
+    result + ";"
+  }
+
+  /// The Sagitario type of a C type in a field, a parameter or a result.
+  prv fn field_type(self, ty: CType) -> String {
+    const fixed = fixed_width(ty.typedef_name);
+
+    if !fixed.is_empty() && (ty.kind == "int") {
+      return fixed;
+    }
+
+    if ty.kind == "int" {
+      if ty.name.starts_with("c_") {
+        return "std::ffi::" + ty.name;
+      }
+
+      return ty.name;
+    }
+
+    if ty.kind == "bool" {
+      return "bool";
+    }
+
+    if ty.kind == "float" {
+      return "f32";
+    }
+
+    if ty.kind == "double" {
+      return "f64";
+    }
+
+    if ty.kind == "void" {
+      return "()";
+    }
+
+    if ty.kind == "enum" {
+      const found = match self.parser.enum_index.get(ty.name) {
+        Some(index) => self.parser.enums[index],
+        None => return "std::ffi::c_int",
+      };
+
+      return "std::ffi::" + enum_repr(found.values, self.choice.msvc);
+    }
+
+    if ty.kind == "record" {
+      return match self.record_of(ty.name) {
+        Some(record) => self.type_name(record),
+        None => "std::ffi::c_void",
+      };
+    }
+
+    if ty.kind == "array" {
+      const elem = ty.inner.unwrap_or(simple("void", ""));
+
+      return "[" + self.field_type(elem) + `; ${ty.len.unwrap_or(0)}]`;
+    }
+
+    if ty.kind == "function" {
+      return "*mut std::ffi::c_void";
+    }
+
+    if ty.kind == "pointer" {
+      const pointee = ty.inner.unwrap_or(simple("void", ""));
+
+      // A pointer to a function is the nullable C function pointer.
+      if pointee.kind == "function" {
+        if pointee.variadic {
+          return "*mut std::ffi::c_void";
+        }
+
+        const params: List<String> = new List();
+
+        for param in pointee.params {
+          params.push(self.field_type(param));
+        }
+
+        var text = "Option<unsafe extern \"C\" fn(" + params.join(", ") + ")";
+
+        if let Some(ret) = pointee.inner {
+          if ret.kind != "void" {
+            text = text + " -> " + self.field_type(ret);
+          }
+        }
+
+        return text + ">";
+      }
+
+      const star = if pointee.konst { "*const " } else { "*mut " };
+
+      if pointee.kind == "void" {
+        return star + "std::ffi::c_void";
+      }
+
+      return star + self.field_type(pointee);
+    }
+
+    "std::ffi::c_void"
+  }
+}
+
+// ---- Macros -----------------------------------------------------------------------------------
+
+/// The constant of a macro's body, or nothing: a character is a `u8`, as bindgen writes it, and
+/// then integers, strings and floats.
+fn macro_line(name: String, body: List<Token>, integer: Option<i64>) -> String {
+  if body.len() == 1 {
+    if let Kind::Char = body[0].kind {
+      if let Some(value) = char_value(body[0].text) {
+        if value >= 0 && value < 256 {
+          return f"pub const {name}: u8 = {value};";
+        }
+      }
+    }
+  }
+
+  if let Some(value) = integer {
+    return `pub const ${name}: ` + macro_int_type(value) + f" = {macro_int_literal(value)};";
+  }
+
+  if let Some(text) = string_body(body) {
+    return `pub const ${name}: String = ` + sagitario_string(text) + ";";
+  }
+
+  match float_body(body) {
+    Some(text) => `pub const ${name}: f64 = ${text};`,
+    None => "",
+  }
+}
+
+/// A macro without parameters: its name, the tokens of its body, and the header that defines
+/// it, when it is one bindgen reads (empty otherwise).
+struct MacroDef {
+  pub name: String;
+  pub body: List<Token>;
+  pub file: String;
+}
+
+/// The macros without parameters of `-dM`'s output, with the files that define them: those of the
+/// headers' directories and the files allowed, whose `#define` lines are read, since `-dM` says
+/// nothing of where a macro comes from.
+fn macro_definitions(dump: String, tokens: List<Token>, choice: Choice) -> List<MacroDef> {
+  const origin = new Map<String, String>();
+  const order: List<String> = new List();
+  const files = new Map<String, bool>();
+
+  for token in tokens {
+    if !files.contains_key(token.file) {
+      files.insert(token.file, true);
+      order.push(token.file);
+    }
+  }
+
+  const defined: List<String> = new List();
+
+  for file in order {
+    var wanted = choice.files.contains(file);
+
+    for root in choice.roots {
+      wanted = wanted || file.starts_with(root);
+    }
+
+    if !wanted {
+      continue;
+    }
+
+    if let Ok(text) = fs::read_to_string(file) {
+      for raw in text.lines() {
+        const line = raw.trim();
+
+        if !line.starts_with("#") {
+          continue;
+        }
+
+        const rest = line.substring(1, line.len()).trim();
+
+        if !rest.starts_with("define") {
+          continue;
+        }
+
+        const name = leading_identifier(rest.substring(6, rest.len()).trim());
+
+        if !name.is_empty() && !origin.contains_key(name) {
+          origin.insert(name, file);
+          defined.push(name);
+        }
+      }
+    }
+  }
+
+  const bodies = new Map<String, List<Token>>();
+  const names: List<String> = new List();
+
+  for raw in dump.lines() {
+    const line = raw.trim();
+
+    if !line.starts_with("#define ") {
+      continue;
+    }
+
+    const rest = line.substring(8, line.len());
+    const name = leading_identifier(rest);
+
+    // `NAME(` without a space is a macro with parameters.
+    if name.is_empty() || rest.substring(name.len(), rest.len()).starts_with("(") {
+      continue;
+    }
+
+    const body = rest.substring(name.len(), rest.len()).trim();
+
+    if body.is_empty() {
+      continue;
+    }
+
+    match lex(body) {
+      Ok(found) => {
+        if !bodies.contains_key(name) {
+          names.push(name);
+        }
+
+        bodies.insert(name, found);
+      }
+      Err(_) => {}
+    }
+  }
+
+  // Those of the headers first, in their order, then the others the allow list may name.
+  const result: List<MacroDef> = new List();
+  const added = new Map<String, bool>();
+
+  for name in defined {
+    if let Some(body) = bodies.get(name) {
+      result.push(MacroDef { name: name, body: body, file: origin.get(name).unwrap_or("") });
+      added.insert(name, true);
+    }
+  }
+
+  names.sort();
+
+  for name in names {
+    if !added.contains_key(name) {
+      result.push(MacroDef { name: name, body: bodies.get(name).unwrap_or(new List()), file: "" });
+    }
+  }
+
+  result
+}
+
+/// The identifier at the start of `text`.
+fn leading_identifier(text: String) -> String {
+  const out = new StringBuilder();
+
+  for c in text.chars() {
+    if c.is_ascii_alphanumeric() || c == '_' {
+      out.append_char(c);
+    } else {
+      break;
+    }
+  }
+
+  const name = out.to_string();
+
+  if is_identifier(name) { name } else { "" }
+}
+
+/// Whether a body may be an integer expression: no strings, and no floats.
+fn is_integer_body(body: List<Token>) -> bool {
+  for token in body {
+    match token.kind {
+      Kind::Str => return false,
+      Kind::Number => {
+        if is_float_literal(token.text) {
+          return false;
+        }
+      }
+      _ => {}
+    }
+  }
+
+  !body.is_empty()
+}
+
+fn is_float_literal(text: String) -> bool {
+  const lower = text.to_ascii_lowercase();
+
+  if lower.starts_with("0x") {
+    return lower.contains("p");
+  }
+
+  lower.contains(".") || lower.contains("e")
+}
+
+/// The text of a body of string literals, joined as C joins them.
+fn string_body(body: List<Token>) -> Option<String> {
+  if body.is_empty() {
+    return None;
+  }
+
+  const out = new StringBuilder();
+
+  for token in body {
+    match token.kind {
+      Kind::Str => out.append(c_unescape(token.text)?),
+      _ => return None,
+    }
+  }
+
+  Some(out.to_string())
+}
+
+/// A float literal, maybe negative and in parentheses, as Sagitario writes it.
+fn float_body(body: List<Token>) -> Option<String> {
+  var start = 0usize;
+  var end = body.len();
+
+  while end > start + 1 && body[start].text == "(" && body[end - 1].text == ")" {
+    start += 1;
+    end -= 1;
+  }
+
+  var sign = "";
+
+  if end > start && body[start].text == "-" {
+    sign = "-";
+    start += 1;
+  }
+
+  if end != start + 1 {
+    return None;
+  }
+
+  const token = body[start];
+
+  match token.kind {
+    Kind::Number => {}
+    _ => return None,
+  }
+
+  if !is_float_literal(token.text) || token.text.to_ascii_lowercase().starts_with("0x") {
+    return None;
+  }
+
+  var digits = token.text.to_ascii_lowercase();
+
+  while digits.ends_with("f") || digits.ends_with("l") {
+    digits = digits.substring(0, digits.len() - 1);
+  }
+
+  if digits.starts_with(".") {
+    digits = "0" + digits;
+  }
+
+  digits = digits.replace(".e", ".0e");
+
+  if digits.ends_with(".") {
+    digits = digits + "0";
+  }
+
+  if !digits.contains(".") {
+    // `1e5`: Sagitario writes the fraction.
+    match digits.find("e") {
+      Some(at) => {
+        digits = digits.substring(0, at) + ".0" + digits.substring(at, digits.len());
+      }
+      None => return None,
+    }
+  }
+
+  Some(sign + digits)
+}
+
+/// The text of a C string literal's contents, with its escapes, or `None` for escapes bindgen
+/// does not read.
+fn c_unescape(text: String) -> Option<String> {
+  const out = new StringBuilder();
+  const chars = text.chars().collect();
+  var at = 0usize;
+
+  while at < chars.len() {
+    const c = chars[at];
+
+    if c != '\\' {
+      out.append_char(c);
+      at += 1;
+      continue;
+    }
+
+    if at + 1 >= chars.len() {
+      return None;
+    }
+
+    const next = chars[at + 1];
+
+    at += 2;
+
+    if next == 'n' {
+      out.append_char('\n');
+    } else if next == 't' {
+      out.append_char('\t');
+    } else if next == 'r' {
+      out.append_char('\r');
+    } else if next == '0' {
+      out.append_char('\0');
+    } else if next == '\\' || next == '"' || next == '\'' || next == '?' {
+      out.append_char(next);
+    } else {
+      return None;
+    }
+  }
+
+  Some(out.to_string())
+}
+
+/// A Sagitario string literal of `text`.
+fn sagitario_string(text: String) -> String {
+  const out = new StringBuilder();
+
+  out.append_char('"');
+
+  for c in text.chars() {
+    if c == '"' {
+      out.append("\\\"");
+    } else if c == '\\' {
+      out.append("\\\\");
+    } else if c == '\n' {
+      out.append("\\n");
+    } else if c == '\t' {
+      out.append("\\t");
+    } else if c == '\r' {
+      out.append("\\r");
+    } else if c == '\0' {
+      out.append("\\0");
+    } else {
+      out.append_char(c);
+    }
+  }
+
+  out.append_char('"');
+  out.to_string()
+}
+
+/// The type of an integer macro, as bindgen gives it: `u32` or `i32` when the value fits, else
+/// `u64` or `i64`.
+fn macro_int_type(value: i64) -> String {
+  if value >= 0 {
+    return if value <= 4294967295 { "u32" } else { "u64" };
+  }
+
+  if value >= -2147483648 { "i32" } else { "i64" }
+}
+
+fn macro_int_literal(value: i64) -> String {
+  if value == i64::MIN {
+    return "-9223372036854775807 - 1";
+  }
+
+  if value == -2147483648 {
+    return "-2147483647 - 1";
+  }
+
+  f"{value}"
+}
+
+/// The type of a C typedef that has a Sagitario type of its own (Q734).
+fn fixed_width(name: String) -> String {
+  if name == "int8_t" { return "i8"; }
+  if name == "int16_t" { return "i16"; }
+  if name == "int32_t" { return "i32"; }
+  if name == "int64_t" { return "i64"; }
+  if name == "uint8_t" { return "u8"; }
+  if name == "uint16_t" { return "u16"; }
+  if name == "uint32_t" { return "u32"; }
+  if name == "uint64_t" { return "u64"; }
+  if name == "size_t" || name == "uintptr_t" { return "usize"; }
+  if name == "ssize_t" || name == "ptrdiff_t" || name == "intptr_t" { return "isize"; }
+
+  ""
+}
+
+/// The integer type of an enumeration, as clang gives it (Q735): `int` when its values fit, as
+/// MSVC always does, else `unsigned int`, else the 64-bit types.
+fn enum_repr(values: List<i64>, msvc: bool) -> String {
+  var negative = false;
+  var fits_int = true;
+  var fits_uint = true;
+
+  for value in values {
+    negative = negative || value < 0;
+    fits_int = fits_int && value >= -2147483648 && value <= 2147483647;
+    fits_uint = fits_uint && value >= 0 && value <= 4294967295;
+  }
+
+  if msvc && fits_int {
+    return "c_int";
+  }
+
+  if negative {
+    return if fits_int { "c_int" } else { "c_longlong" };
+  }
+
+  if fits_uint {
+    return "c_uint";
+  }
+
+  "c_ulonglong"
+}
+
+/// A value of an enumeration's type as a literal of it; the smallest of a signed type is
+/// written as a subtraction, since its magnitude does not fit.
+fn literal(value: i64, repr: String) -> String {
+  if repr == "c_uint" || repr == "c_ulonglong" {
+    return f"{value as u64}";
+  }
+
+  if value == i64::MIN {
+    return "-9223372036854775807 - 1";
+  }
+
+  if repr == "c_int" && value == -2147483648 {
+    return "-2147483647 - 1";
+  }
+
+  f"{value}"
+}

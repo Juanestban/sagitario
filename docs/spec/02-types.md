@@ -11,8 +11,8 @@ Sagitario is statically typed with **local type inference**:
 ## Unit type
 
 `()` is both a type and its only value. It is the implicit return type of functions without
-`->` and is used in `Result<(), E>`. There are no general tuples (`(i32, String)`) in the
-MVP; they may be added later.
+`->` and is used in `Result<(), E>`. Tuples of two or more values are
+[below](#tuples-s2).
 
 ## `Self`
 
@@ -37,7 +37,9 @@ MVP; they may be added later.
 ## Conversions
 
 - There are **no implicit numeric conversions**. `i32 + i64` is a compile error.
-- Explicit conversion uses `as`: `x as i64`. `as` never panics, in any build mode.
+- Explicit conversion uses `as`: `x as i64`. `as` never panics, in any build mode. Conversions
+  that keep every value or report the ones that do not fit are `From` and `TryFrom`
+  (`i64::from(x)`, `u8::try_from(x)`; [conversions](05-interfaces-generics.md#conversions)).
 - Conditions of `if` and `while` must have type `bool`; there is no "truthiness".
 
 | Conversion | Result |
@@ -68,7 +70,10 @@ Division by zero, out-of-bounds indexing and every other panic behave the same i
 ## Integer arithmetic
 
 - Overflow **panics in debug builds** and **wraps in release builds**.
-- The standard library provides explicit `wrapping_*`, `checked_*` and `saturating_*` methods.
+- The [methods of integers](#methods-of-numbers-g1) `wrapping_*`, `checked_*` and `saturating_*`
+  never panic on overflow: they wrap, give `None`, or stop at the limit of the type.
+- `i32::MIN` and `i32::MAX` (and those of every integer type) are the limits of the type, as
+  constants.
 - Integer division by zero always panics, in every build mode.
 - The generated C must never rely on undefined behavior (see
   [architecture](../architecture.md#c-code-generation)).
@@ -77,7 +82,8 @@ Division by zero, out-of-bounds indexing and every other panic behave the same i
 
 Rationale: [ADR-0076](../adr/0076-std-math-and-methods-of-numbers.md),
 [ADR-0077](../adr/0077-std-math-powers-and-logarithms.md),
-[ADR-0080](../adr/0080-std-math-trigonometry.md). Besides `equals`,
+[ADR-0080](../adr/0080-std-math-trigonometry.md),
+[ADR-0088](../adr/0088-bitwise-operators-and-integer-methods.md). Besides `equals`,
 `compare` and `hash` (integers) and `total_compare` (floats), numbers have these methods; their
 arguments have the type of the receiver, unless written otherwise.
 
@@ -105,6 +111,27 @@ arguments have the type of the receiver, unless written otherwise.
 | `atan2(x)` | | yes | the angle of the point `(x, y)` with `y` the receiver, in `[-Ï€, Ï€]`, following the signs of zeros (`0.0.atan2(-0.0)` is Ï€) |
 | `sinh()`, `cosh()`, `tanh()` | | yes | the hyperbolic functions |
 | `to_degrees()`, `to_radians()` | | yes | the angle in degrees or in radians |
+| `wrapping_add(other)`, `wrapping_sub(other)`, `wrapping_mul(other)` | yes | | the result modulo the width of the type, in every build |
+| `wrapping_neg()` | signed | | `-x` modulo the width: the smallest value stays itself |
+| `wrapping_shl(n: u32)`, `wrapping_shr(n: u32)` | yes | | `x << (n % width)`, `x >> (n % width)` |
+| `checked_add(other)`, `checked_sub(other)`, `checked_mul(other)`, `checked_div(other)`, `checked_rem(other)` | yes | | `Option<T>`: the result, or `None` on overflow or a division by zero |
+| `checked_neg()` | signed | | `Option<T>`: `None` for the smallest value |
+| `checked_shl(n: u32)`, `checked_shr(n: u32)` | yes | | `Option<T>`: `None` when `n` is the width of the type or more |
+| `saturating_add(other)`, `saturating_sub(other)`, `saturating_mul(other)` | yes | | the result, or the limit of the type it would pass |
+| `count_ones()`, `count_zeros()`, `leading_zeros()`, `trailing_zeros()` | yes | | `u32`: the bits set or clear, in all or before the first set bit from the top or the bottom; the width for zero |
+| `rotate_left(n: u32)`, `rotate_right(n: u32)` | yes | | the bits moved by `n % width`, those leaving one end entering at the other |
+| `swap_bytes()` | yes | | the bytes in the reverse order |
+| `is_power_of_two()` | unsigned | | whether `x` is `1`, `2`, `4`...; `false` for `0` |
+| `to_le_bytes()`, `to_be_bytes()`, `to_ne_bytes()` | yes | | `[u8; N]`, `N` the size of the type: the bytes from the lowest, from the highest, or in the order of the target |
+| `T::from_le_bytes(bytes)`, `from_be_bytes`, `from_ne_bytes` | yes | | the integer of `[u8; N]` in that order |
+| `T::from_str_radix(text, radix: u32)` | yes | | `Result<T, String>`: the integer `text` writes in `radix`, as `parse_i32` |
+
+- The conversions to bytes and parsing in a radix are Rust's
+  ([ADR-0101](../adr/0101-the-rest-of-s2.md), Q702 and Q703). `usize` and `isize` have the
+  target's size; the native order is little-endian on every supported target.
+  `from_str_radix` takes an optional `+`, or `-` for signed types, then digits of the radix in
+  either case, with Rust's messages (`invalid digit found in string`,
+  `number too large to fit in target type`...); a radix outside 2 to 36 panics.
 
 - `abs()` and `pow()` overflow as arithmetic does: a panic in debug builds, wrapping in release
   builds (the `abs()` of the smallest value of a type is itself). On unsigned integers `abs()`
@@ -135,8 +162,47 @@ arguments have the type of the receiver, unless written otherwise.
   | `char` | the character |
   | `String` | as is |
 
-  User-defined types (structs, enums, classes) cannot be interpolated until a `Display`
-  interface exists (post-MVP).
+  | types implementing `Display` | the text of their `to_string()` |
+
+  `Display` is a prelude interface, `fn to_string(self) -> String`
+  ([ADR-0089](../adr/0089-display-debug-and-format-specifiers.md)): a struct, enum or class
+  implementing it, in its body or in an `impl Display for T` block, can be interpolated, and so
+  can a type parameter bounded by it or a `Display` value. Numbers, `bool`, `char` and `String`
+  implement it with the formats above (`5.to_string()` is `"5"`). Interpolating any other value
+  is an error (`E0306`). Lists, maps, options and results do not implement it.
+- A format specifier after a `:` shapes the text, with Rust's mini-language
+  `[[fill]align][+][#][0][width][.precision][type]`
+  ([ADR-0089](../adr/0089-display-debug-and-format-specifiers.md)):
+
+  | Specifier | Meaning | Example |
+  |---|---|---|
+  | `width` | At least that many characters, filled with spaces: numbers align right, text left | `f"[{42:5}]"` is `[   42]`, `f"[{"Ada":5}]"` is `[Ada  ]` |
+| `name$`, `.name$` | The width or the precision read from the binding `name`, a `usize`, when the string is formatted | `{x:>width$}`, `{pi:.digits$}`, `{pi:>width$.digits$}` |
+  | `<`, `^`, `>` | Left, centered (an odd fill goes right) or right, after an optional fill character | `{name:*^7}` is `**Ada**` |
+  | `+` | The sign of every number | `{5:+}` is `+5` |
+  | `0` | Zeros after the sign and prefix of a number, without an alignment | `{-42:05}` is `-0042` |
+  | `.precision` | That many decimals of a float, rounded to the nearest; the first characters of a text | `{3.14159:.2}` is `3.14`, `{"Ada":.2}` is `Ad` |
+  | `x`, `X`, `o`, `b` | An integer in hexadecimal, octal or binary; negative numbers show their two's complement bits | `{255:x}` is `ff`, `{-1i8:x}` is `ff` |
+  | `#` | With `x`, `X`, `o`, `b`: the prefix `0x`, `0o`, `0b` | `{255:#06x}` is `0x00ff` |
+  | `e`, `E` | A float in scientific notation | `{1500.0:e}` is `1.5e3`, `{1500.0:.2e}` is `1.50e3` |
+
+  Width and alignment apply to the text of any interpolated value, `Display` types included. A
+  specifier that does not fit its value (`x` on a float, a precision on an integer, `+` or `0` on
+  text, `#` without a base) or is not valid is an error (`E0007`). A width or a precision is a
+  literal number, or the name of a binding of type `usize` followed by `$`, as Rust's inline
+  arguments ([ADR-0101](../adr/0101-the-rest-of-s2.md), Q711): a binding of another type is an
+  error (`E0007`), and one that does not exist `E0200`. It is read after the value.
+- `{x:?}` writes the debug form of any value, which the compiler gives every type, as Rust's
+  derived `Debug`: numbers and `bool` as above, `char` and `String` quoted with Rust's escapes
+  (`'a'`, `"tab	"`), `Some(1)`, `None`, `Ok(..)`, `Err(..)`, structs and classes with every
+  field (`Point { x: 1, y: 2 }`, those of a parent class first), enum variants by name with their
+  fields (`Circle(2.5)`, `Rect { w: 1, h: 2 }`, `Empty`), lists, arrays and slices as `[1, 2]`, maps
+  as `{"a": 1}`, a weak field as `(weak)`, a function value as `fn`, a raw pointer as its address
+  and an interface value as the value it holds, through its itable
+  ([ADR-0101](../adr/0101-the-rest-of-s2.md), Q712). A class instance reached again while its own form is
+  being written is `Name { .. }`. `{x:#?}` writes one field or element per line, indented by four
+  spaces, each followed by a comma. A width, fill and alignment apply to the debug form too; `+`,
+  `0` and a precision do not (`E0007`).
 - Byte indexing (`s[i]`) is not allowed; use `s.chars()` or `s.bytes()`.
 - `a + b` creates a new `String`; `s += t` is `s = s + t`. `==`, `!=`, `<`, `<=`, `>`, `>=`
   compare the bytes lexicographically.
@@ -152,6 +218,20 @@ arguments have the type of the receiver, unless written otherwise.
   | `to_ascii_uppercase()`, `to_ascii_lowercase()` | `String`; only ASCII letters change |
   | `replace(from, to)`, `repeat(n)`, `substring(start, end)` | `String` |
   | `parse_i32()` (every integer type), `parse_f32()`, `parse_f64()` | `Result<T, String>` with Rust's messages (`invalid digit found in string`) |
+  | `rfind(p)` | `Option<usize>`: byte index of the last occurrence |
+  | `split_once(p)`, `rsplit_once(p)` | `Option<(String, String)>`: the text before and after the first or last occurrence |
+  | `strip_prefix(p)`, `strip_suffix(p)` | `Option<String>`: the text without `p`, if it starts or ends with it |
+  | `split_whitespace()` | `List<String>`: the parts between runs of Unicode white space, none empty |
+  | `splitn(n, sep)`, `rsplit(sep)` | `List<String>`: at most `n` parts, the last holding the rest; the parts of `split` from the last |
+  | `matches(p)` | `List<String>`: the occurrences of `p`, without overlapping |
+  | `replacen(from, to, n)` | `String` with the first `n` occurrences replaced |
+  | `char_indices()` | `Iter<(usize, char)>`: each character with the byte index where it starts |
+  | `to_uppercase()`, `to_lowercase()` | `String` with Unicode's full case mappings, without a locale, as Rust's: `"Straße"` is `"STRASSE"`, and a final `Σ` becomes `ς` |
+
+  `String::from_utf8(bytes: List<u8>)` and `String::from_utf16(units: List<u16>)` give a
+  `Result<String, String>` with Rust's messages (`invalid utf-8 sequence of 1 bytes from index 0`),
+  and `String::from_utf8_lossy(bytes)` replaces each ill-formed sequence with U+FFFD
+  ([ADR-0093](../adr/0093-everyday-methods.md), Q620).
 
 - `for c in s.chars()` iterates the characters (`char`) and `for b in s.bytes()` the bytes
   (`u8`) of the string as it was before the loop. Elsewhere they are iterators (F2):
@@ -163,6 +243,12 @@ arguments have the type of the receiver, unless written otherwise.
   `is_ascii_alphanumeric()`, `is_ascii_whitespace()`, `is_ascii_uppercase()`,
   `is_ascii_lowercase()`, `to_ascii_uppercase()`, `to_ascii_lowercase()`, and
   `to_digit(radix) -> Option<u32>` (panics unless `radix` is 2 to 36).
+- `char` methods (Unicode 17, as Rust's `char`; [ADR-0093](../adr/0093-everyday-methods.md),
+  Q621): `is_alphabetic()`, `is_numeric()` (the categories `Nd`, `Nl` and `No`),
+  `is_alphanumeric()`, `is_whitespace()`, `is_uppercase()`, `is_lowercase()`, `is_control()`
+  (`Cc`), `to_uppercase()` and `to_lowercase()` (a `String` of one to three characters: `'ß'` is
+  `"SS"`), `len_utf8()` and `len_utf16()`. `char::from_digit(digit, radix)` gives the character
+  of a digit, lowercase past 9, or `None`; a radix past 36 panics.
 
 ## `StringBuilder` (F1)
 
@@ -177,7 +263,9 @@ const text = builder.to_string();
   builder, and it can be modified through a `const` binding. `new StringBuilder()` is the only
   `new` expression in F1.
 - Methods: `append(s: String)`, `append_char(c: char)`, `len()` (bytes), `is_empty()`,
-  `clear()`, `to_string()` (a new `String`; the builder stays usable).
+  `clear()`, `to_string()` (a new `String`; the builder stays usable), and Rust's
+  `insert(index, text)`, `truncate(len)`, `pop() -> Option<char>`, `capacity()` and
+  `reserve(additional)`. An index inside a character, or past the end for `insert`, panics.
 - It cannot be compared with `==` or interpolated.
 
 ## Equality (F1/F2)
@@ -191,8 +279,10 @@ const text = builder.to_string();
   compare by `a.compare(b)` ([ADR-0081](../adr/0081-operator-overloading.md), Q514). A data-less
   enum implementing `Eq` uses its `equals` too. Classes call `a.equals(b)`, since their `==` stays
   identity.
-- Arrays, lists, maps, iterators, interface values and function values cannot be compared with
-  `==`.
+- Iterators, interface values and function values cannot be compared with `==`. Tuples,
+  `Option`, `Result`, arrays, lists and maps compare when the values they hold do
+  ([tuples](#tuples-s2), [`Option` and `Result`](#optiont-and-resultt-e-f1),
+  [lists](#lists-f2), [maps](#maps-f2)); a map is the one class instance `==` compares by value.
 - [Arithmetic operators](05-interfaces-generics.md#operators) (`+`, `-`, `*`, `/`, `%`, unary
   `-`) apply to other types through the prelude interfaces `Add`, `Sub`, `Mul`, `Div`, `Rem` and
   `Neg` ([ADR-0081](../adr/0081-operator-overloading.md)).
@@ -239,6 +329,36 @@ enum Shape impl Display {
   to integers ([FFI](10-ffi.md#enums-with-an-integer-representation)).
 - Values are inspected with an exhaustive `match` (see [control flow](06-control-flow.md#match)).
 
+## Tuples (S2)
+
+Rationale: [ADR-0092](../adr/0092-tuples.md).
+
+```sag
+fn divmod(a: i32, b: i32) -> (i32, i32) {
+  (a / b, a % b)
+}
+
+const pair = ("Ada", 36);
+const (q, r) = divmod(17, 5);
+println(f"{pair.0} is {pair.1}, {q} rest {r}, {pair:?}");   // Ada is 36, 3 rest 2, ("Ada", 36)
+```
+
+- `(T1, T2, ..., Tn)` is a tuple of two or more values, of any types, with a trailing comma
+  allowed. `()` is the unit type and `(T)` is `T`; there are no tuples of one element, and
+  `(T,)` is an error.
+- `(a, b)` makes a tuple; `t.0`, `t.1`... read its elements, by a decimal index without a
+  suffix (`t.0.1` reads element 1 of element 0). An index past the last element is an error.
+- Tuples are value types, as structs: copied on assignment, with the references they hold
+  counted, and mutable through a `var` binding, `self` or a `var` field of a class
+  ([struct mutability](03-memory.md#struct-mutability-f1)): `t.0 = 1`.
+- A tuple implements `Eq`, `Ord` and `Hash` when every element does: `==` compares element by
+  element, and `<` orders by the first element that differs, the first one first. It is `Send`
+  when every element is. It has a debug form, `(1, "a")`, but no `Display`, so `{t:?}`
+  interpolates it and `{t}` does not. A program cannot implement interfaces for tuple types.
+- Tuple patterns, `(p1, p2)` and `(first, ..)`, take tuples apart in `match`, `if let`,
+  `while let`, `const`, `var` and `for` ([control flow](06-control-flow.md#match)).
+- Tuples cannot cross to C: `extern` declarations take `@repr(C)` structs.
+
 ## Arrays and lists
 
 | | Fixed array `[T; N]` (F1) | `List<T>` (F2) |
@@ -258,7 +378,12 @@ enum Shape impl Display {
 - Indices have type `usize` and `a.len()` returns `usize`. An index out of bounds panics in
   every build mode: `index out of bounds: the len is 3 but the index is 5`.
 - Arrays are copied when assigned, passed or returned (copying retains the `String`s inside).
-  They are not compared with `==` and cannot be interpolated.
+  They cannot be interpolated. They compare with `==` and order with `<` when their elements
+  do, element by element, as lists ([ADR-0093](../adr/0093-everyday-methods.md), Q623).
+- Arrays have the [methods of slices](#slices) below, lent all their elements: `contains`,
+  `index_of`, `binary_search`, `min`, `max`, and, on a `var` array, `sort`, `sort_by`,
+  `sort_by_key`, `reverse`, `fill`, `swap` and `copy_from_slice` ([ADR-0093](../adr/0093-everyday-methods.md),
+  Q624).
 - `for x in a` iterates over a copy of `a` taken before the first iteration (see
   [control flow](06-control-flow.md#loops)).
 - From F2, arrays expose iterators: `[1, 2, 3].map((x) => x * 2)` returns an iterator that can
@@ -295,10 +420,28 @@ Rationale: [ADR-0034](../adr/0034-collections-and-iterators.md).
   | `resize(n, value)` | `()`: removes the elements past `n`, or adds copies of `value` up to `n` (Rust's `Vec::resize`) |
   | `as_ptr()`, `as_mut_ptr()` | `*const T`, `*mut T` to the first element, for C ([FFI](10-ffi.md#raw-pointers)) |
   | `iter()` and the methods of `Iter<T>` | see [iterators](08-closures.md#iterators) |
+  | `extend(values)`, `append(other)` | `()`: adds the values of an `Iter<T>`, or moves every element of `other`, which is left empty |
+  | `truncate(n)`, `retain(keep)`, `dedup()` | `()`: keeps the first `n`, those for which `keep(v)` is `true`, or drops each element equal to the one before it (`T: Eq`) |
+  | `split_off(at)`, `drain(start, end)` | `List<T>`: the elements from `at`, or from `start` to `end`, removed; past the end panics |
+  | `binary_search(v)`, `binary_search_by(f)` | `Result<usize, usize>`: where `v` is in a sorted list (`T: Ord`), or `Err` with where it would go |
+  | `sort_by_key(key)` | `()`: stable, by `key: fn(T) -> K` with `K: Ord` |
+  | `min()`, `max()` | `Option<T>` (`T: Ord`): the first smallest, the last largest |
+  | `fill(v)`, `swap(a, b)` | `()` |
+  | `windows(n)`, `chunks(n)` | `Iter<List<T>>`: each run of `n` elements, or the elements in lists of `n`, as copies; `n == 0` panics |
+  | `concat()` | `List<T>`, only on a `List<List<T>>` |
+  | `capacity()`, `reserve(n)` | `usize`, `()`: the room for elements without growing, and room for `n` more |
+
+  `List::with_capacity(n)` is an empty list with room for `n` elements; its element type comes
+  from the context. These are Rust's ([ADR-0093](../adr/0093-everyday-methods.md), Q622):
+  `drain` takes indices, since ranges are not values, and `windows` and `chunks` give copies,
+  since slices are only parameters.
 
 - `for x in list` visits the elements by position and reads the length at every step:
   elements added or removed by the body are seen, and the loop never reads out of bounds.
-- Lists are not compared with `==` and cannot be interpolated.
+- A list implements `Eq`, `Ord` and `Hash` when its elements do, as Rust's `Vec`: `==` compares
+  their lengths and elements, and `<` orders by the first element that differs, then by length
+  ([ADR-0093](../adr/0093-everyday-methods.md), Q623). A list that is the key of a map must not
+  change while it is one. Lists cannot be interpolated.
 
 ### Slices
 
@@ -335,6 +478,11 @@ double(&mut list);
   outlive the call), `as_ptr()` and, through a `&mut [T]`, `as_mut_ptr()` for C. Through a
   `&mut [T]`, `s[i] = value`, `s[i].field = value`, methods that modify `self` on `s[i]`, and
   `&mut s[i]` change the viewed elements; through a `&[T]` they are errors (`E0312`, `E0313`).
+- **Methods** ([ADR-0093](../adr/0093-everyday-methods.md), Q624): `contains(v)`, `index_of(v)`
+  (`T: Eq`), `binary_search(v)` (`T: Ord`), `binary_search_by(f)`, `min()` and `max()`; through a
+  `&mut [T]`, `sort()`, `sort_by(f)`, `sort_by_key(key)`, `reverse()`, `fill(v)`, `swap(a, b)` and
+  `copy_from_slice(source)`, which panics unless `source` has as many elements. Arrays and lists
+  have them too, lent as slices of all their elements. `split_at` is `&s[..i]` and `&s[i..]`.
 - **Mutability.** `&mut array` needs an array that can be modified (a `var` binding, a `&mut`
   parameter, a `var` field). A list is a reference, so `&mut list` works through any binding, as
   `list[i] = value` does. `&mut slice` needs a `&mut [T]` slice.
@@ -364,10 +512,51 @@ for entry in ages {
   keeps the order in which keys were first inserted.
 - Methods: `insert(k, v) -> Option<V>` (the previous value), `get(k) -> Option<V>` (a copy),
   `contains_key(k) -> bool`, `remove(k) -> Option<V>`, `len()`, `is_empty()`, `clear()`, and the
-  iterators `keys()`, `values()` and `entries()`. There is no `map[k]`.
+  iterators `keys()`, `values()` and `entries()`. `map[k]` gives the value of a key that must be
+  present, and panics without it (`no entry found for key`), as Rust's: a map implements
+  [`Index<K, V>`](05-interfaces-generics.md#indexing), and not `IndexMut`, so `map[k] = v` is an
+  error that `insert` replaces.
+- Rust's other methods ([ADR-0093](../adr/0093-everyday-methods.md), Q625): `iter()` gives the
+  entries as `(K, V)` pairs, `retain(keep)` keeps those for which `keep(k, v)` is `true`,
+  `extend(pairs)` inserts the pairs of an `Iter<(K, V)>`, and `Map::from(pairs)` makes a map of
+  a `List<(K, V)>`. Rust's `entry` lends the map; three methods do what it is used for:
+  `update(k, f) -> bool` changes the value of a key that is present to `f(value)`,
+  `upsert(k, default, f)` inserts `default` or changes the value present with `f`
+  (`entry(k).and_modify(f).or_insert(default)`), and `get_or_insert(k, v) -> V` gives the value
+  present or inserts `v`. `get_key_value(k)` and `remove_entry(k)` give the key the map holds
+  with its value, as `Option<(K, V)>` ([ADR-0095](../adr/0095-collections.md), Q647).
 - `for entry in map` iterates over `entries()`: values of the prelude struct
   `Entry<K, V> { key: K, value: V }`.
-- Maps are not compared with `==` and cannot be interpolated.
+- A map implements `Eq` when its values do: two maps are equal when they hold the same keys with
+  equal values, in any order ([ADR-0093](../adr/0093-everyday-methods.md), Q623). Maps are not
+  ordered and cannot be interpolated.
+
+### Sets (S2)
+
+Rationale: [ADR-0095](../adr/0095-collections.md), Q647.
+
+```sag
+const seen = new HashSet<String>();
+
+seen.insert("a");                                    // true
+seen.insert("a");                                    // false: already there
+const other = HashSet::from(List::from(["a", "b"]));
+
+println(f"{seen.is_subset(other)} {other.difference(seen).collect():?} {seen:?}");   // true ["b"] {"a"}
+```
+
+- `HashSet<T: Hash>` is a prelude class, Rust's `HashSet`, on a `Map` of its values: it keeps
+  the order in which values were first inserted, which Rust leaves unspecified.
+- `new HashSet<T>()`, `HashSet::with_capacity(n)`, `HashSet::from(list)`, `insert(v) -> bool`
+  (whether it was added; an equal value already there stays), `remove(v) -> bool`,
+  `contains(v)`, `get(v)` and `take(v)` (the equal value the set holds, as `Option<T>`), `len()`,
+  `is_empty()`, `clear()`, `iter()`, `retain(keep)` and `extend(iter)`.
+- `union`, `intersection`, `difference` and `symmetric_difference` of another set give an
+  `Iter<T>` of copies of the elements (Rust's lend both sets), those of this set first;
+  `is_subset`, `is_superset` and `is_disjoint` compare two sets.
+- A set implements `Eq`, `Iterable`, `FromIterator` and `Default`: `==` compares the elements in
+  any order, as for maps; `for x in set` and `collect()` work; it is not ordered. Its debug form is
+  `{1, 2}`, as Rust's.
 
 ## `Option<T>` and `Result<T, E>` (F1)
 
@@ -386,3 +575,18 @@ for entry in ages {
   value is `None` or `Err`, with Rust's message (``called `Option::unwrap()` on a `None` value``)
   or the one given to `expect`. Methods taking closures (`map`, `map_err`, `and_then`,
   `unwrap_or_else`, `filter`) are described in [08-closures.md](08-closures.md).
+- Rust's other methods ([ADR-0093](../adr/0093-everyday-methods.md), Q619): on `Option`,
+  `ok_or`, `ok_or_else`, `or`, `or_else`, `and`, `xor`, `map_or`, `map_or_else`, `is_some_and`,
+  `is_none_or`, `zip` (an `Option` of a tuple), `flatten` (of an `Option<Option<T>>`) and `iter`;
+  on `Result`, `ok`, `err`, `and`, `or`, `or_else`, `map_or`, `map_or_else`, `is_ok_and`,
+  `is_err_and`, `iter` and `expect_err(message)`, which panics on `Ok`.
+- `place.take()` gives the value of an `Option` place and leaves `None` there, and
+  `place.replace(value)` gives it and leaves `Some(value)`, as Rust's
+  ([ADR-0097](../adr/0097-processes-and-environment.md), Q663): the receiver is assigned, so it
+  must be a place an assignment could change, a `var` binding, a `var` field or an element of
+  one (`E0312` for a `const` one, `E0307` for a value that is not a place), and is evaluated
+  once: `child.stdin.take()` takes a pipe out of a `var` field of a class instance.
+- `Option<T>` and `Result<T, E>` implement `Eq`, `Ord` and `Hash` when the types they hold do:
+  equal when they are the same variant holding equal values, and ordered by variant as declared
+  (`None` before `Some`, `Ok` before `Err`), then by those values: `Some(1) == Some(1)`,
+  `None < Some(0)`.

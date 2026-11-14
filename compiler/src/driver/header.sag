@@ -16,7 +16,8 @@ pub struct Export {
   pub ret: Type;
 }
 
-/// The exported functions of the program (`extern "C" fn`), in declaration order.
+/// The exported functions of the program (`extern "C" fn`), in declaration order. Those of the
+/// standard library, which the runtime calls, are not the library's.
 pub fn exports(package: Package, resolution: Resolution, typed: TypedModule) -> List<Export> {
   const found: List<Export> = new List();
 
@@ -26,7 +27,7 @@ pub fn exports(package: Package, resolution: Resolution, typed: TypedModule) -> 
       None => continue,
     };
 
-    if !decl.extern_c {
+    if !decl.extern_c || resolution.is_std_source(resolution.functions[id].module) {
       continue;
     }
 

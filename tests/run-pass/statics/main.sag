@@ -1,0 +1,102 @@
+// Statics (docs/adr/0083-global-state.md): one value for the whole program, computed on its first
+// use, exactly once even when several threads reach it, and changed only through the methods of
+// its value, such as those of an atomic or a `Mutex`.
+// sanitize: thread
+// expect-stdout: 640 1280 Sagitario demo
+// expect-stdout: before the mode
+// expect-stdout: computing the mode
+// expect-stdout: windowed fullscreen
+// expect-stdout: origin (1, 2) and 3, 7
+// expect-stdout: Optional settings: some
+// expect-stdout: 800 hits, 8 dots, computed once: true
+// expect-stdout: answer 42, borrowed 42
+
+use pkg::config;
+use pkg::config::{TITLE, WIDTH};
+use std::sync::{AtomicI64, Mutex, Ordering};
+use std::thread;
+
+const BASE: i32 = 40;
+
+/// Computed from constants: no state is kept for it.
+static ANSWER: i32 = BASE + 2;
+
+struct Point {
+  pub x: i32;
+  pub y: i32;
+}
+
+static ORIGIN: Point = Point { x: 1, y: 2 };
+
+enum Setting {
+  On(String),
+  Off,
+}
+
+static SETTING: Option<Setting> = Some(Setting::On("some"));
+
+/// A class with only `const` fields is `Send`.
+class Limits {
+  pub const low: i32;
+  pub const high: i32;
+
+  pub fn new(self, low: i32, high: i32) {
+    self.low = low;
+    self.high = high;
+  }
+
+  pub fn span(self) -> i32 {
+    self.high - self.low
+  }
+}
+
+static LIMITS: Limits = new Limits(3, 10);
+
+static HITS: AtomicI64 = new AtomicI64(0);
+static INITS: AtomicI64 = new AtomicI64(0);
+static LOG: Mutex<String> = new Mutex(first_entry());
+
+fn first_entry() -> String {
+  INITS.fetch_add(1, Ordering::SeqCst);
+  ""
+}
+
+fn read(value: &i32) -> i32 {
+  *value
+}
+
+fn main() {
+  println(f"{WIDTH} {config::scaled_width()} {TITLE}");
+  println("before the mode");
+
+  const mode = config::MODE.get();
+
+  config::MODE.set("fullscreen");
+  println(f"{mode} {config::MODE.get()}");
+  println(f"origin ({ORIGIN.x}, {ORIGIN.y}) and {ORIGIN.x + ORIGIN.y}, {LIMITS.span()}");
+
+  match SETTING {
+    Some(Setting::On(text)) => println(f"Optional settings: {text}"),
+    Some(Setting::Off) => println("off"),
+    None => println("none"),
+  }
+
+  const handles = new List<thread::JoinHandle<()>>();
+
+  for _ in 0..8 {
+    handles.push(thread::spawn(() => {
+      for _ in 0..100 {
+        HITS.fetch_add(1, Ordering::SeqCst);
+      }
+
+      LOG.update((text) => text + ".");
+    }));
+  }
+
+  for handle in handles {
+    handle.join();
+  }
+
+  println(f"{HITS.load(Ordering::SeqCst)} hits, {LOG.get().len()} dots, computed once: {INITS.load(Ordering::SeqCst) == 1}");
+  println(f"answer {ANSWER}, borrowed {read(&ANSWER)}");
+}

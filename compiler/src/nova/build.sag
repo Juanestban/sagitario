@@ -1,0 +1,361 @@
+//! Build scripts (docs/adr/0103-build-scripts-and-binding-generation.md, Q727-Q730): a package's
+//! `build.sag`, which Nova compiles for this machine and runs before the package, as Cargo runs
+//! `build.rs`. It writes files to `OUT_DIR` and tells Nova, on its output, what to link and when
+//! it must run again.
+
+use pkg::loader::{push_path, windows};
+use std::env;
+use std::fs;
+use std::hash::DefaultHasher;
+use std::io;
+use std::path;
+use std::process::Command;
+
+/// The file of a package's build script, next to its `Nova.toml`.
+pub const FILE_NAME: String = "build.sag";
+
+/// The library `bindgen`, which build scripts see as a package of that name (Q731).
+const BINDGEN: String = include_str!("../bindgen.sag");
+
+/// What a package's build script asks for, from its last run.
+pub class Directives {
+  pub const libraries: List<String>;
+  pub const search_paths: List<String>;
+  pub const sources: List<String>;
+  pub const rerun_paths: List<String>;
+  pub const rerun_env: List<String>;
+  pub const warnings: List<String>;
+
+  pub fn new(self) {
+    self.libraries = new List();
+    self.search_paths = new List();
+    self.sources = new List();
+    self.rerun_paths = new List();
+    self.rerun_env = new List();
+    self.warnings = new List();
+  }
+}
+
+/// A package whose build script runs, and the build it runs for.
+pub struct Script {
+  /// The directory of the package's `Nova.toml`, empty for the current one.
+  pub dir: String;
+  pub name: String;
+  pub version: String;
+  /// `target/<profile>` or `target/<target>/<profile>`.
+  pub target_dir: String;
+  pub profile: String;
+  pub release: bool;
+  /// The target of the build, and this machine's.
+  pub target: String;
+  pub host: String;
+  /// `--cc`, if given.
+  pub cc: Option<String>;
+  /// The compiler Nova runs.
+  pub sag: String;
+}
+
+/// What running the script left: the directory its files are in, absolute, and what it asked for.
+pub struct Outcome {
+  pub out_dir: String;
+  pub directives: Directives;
+}
+
+/// The triple of this machine, as Rust and clang name it.
+pub fn host_triple() -> String {
+  if env::OS == "windows" {
+    return env::ARCH + "-pc-windows-msvc";
+  }
+
+  if env::OS == "macos" {
+    return (if env::ARCH == "aarch64" { "aarch64" } else { env::ARCH }) + "-apple-darwin";
+  }
+
+  if env::ARCH == "arm" {
+    return "arm-unknown-linux-gnueabihf";
+  }
+
+  env::ARCH + "-unknown-linux-gnu"
+}
+
+/// The C compiler of the build, as `sag` chooses it: `--cc`, then `SAG_CC`, then `clang`.
+fn c_compiler(cc: Option<String>) -> String {
+  if let Some(given) = cc {
+    return given;
+  }
+
+  match env::variable("SAG_CC") {
+    Some(found) if !found.trim().is_empty() => found,
+    _ => "clang",
+  }
+}
+
+/// An absolute form of a path relative to the current directory, for the script's variables. Not
+/// `fs::canonicalize`, whose paths on Windows start with `\\?\`, to which `/name` cannot be joined.
+fn absolute(dir: String) -> String {
+  if path::is_absolute(dir) {
+    return dir;
+  }
+
+  match fs::current_dir() {
+    Ok(current) => if dir.is_empty() { current } else { push_path(current, dir) },
+    Err(_) => dir,
+  }
+}
+
+/// Runs the build script of a package when it must run, and gives what it asked for: from this
+/// run, or from the last one when nothing it depends on changed (Q730).
+pub fn run(script: Script) -> Result<Outcome, String> {
+  const build_dir = push_path(push_path(script.target_dir, "build"), script.name);
+  const out_dir = push_path(build_dir, "out");
+  const output_file = push_path(build_dir, "output");
+  const stamp_file = push_path(build_dir, "stamp");
+
+  if let Err(error) = fs::create_dir_all(out_dir) {
+    return Err(`cannot create \`${out_dir}\`: ${error.message()}`);
+  }
+
+  // Whether it must run again depends on what its last run asked for.
+  if let Ok(previous) = fs::read_to_string(output_file) {
+    if let Ok(directives) = parse(previous, script.dir) {
+      const stamp = fingerprint(script, directives);
+
+      if fs::read_to_string(stamp_file).unwrap_or("") == stamp {
+        return Ok(Outcome { out_dir: absolute(out_dir), directives: directives });
+      }
+    }
+  }
+
+  eprintln(`Building ${script.name} v${script.version} (build script)`);
+
+  const extension = if windows() { ".exe" } else { "" };
+  const executable = push_path(build_dir, "build-script" + extension);
+  const bindgen = write_bindgen(script.target_dir)?;
+  const args = List::from(["build", push_path(script.dir, FILE_NAME), "--output", executable, "--dependency", "bindgen=" + bindgen, "--uses", "0"]);
+
+  if script.release {
+    args.push("--release");
+  }
+
+  if let Some(cc) = script.cc {
+    args.push("--cc");
+    args.push(cc);
+  }
+
+  match new Command(script.sag).args(args).status() {
+    Ok(status) => {
+      if !status.success() {
+        return Err(`the build script of \`${script.name}\` does not compile`);
+      }
+    }
+    Err(error) => return Err(`cannot run \`${script.sag}\`: ${error.message()}`),
+  }
+
+  const manifest_dir = absolute(script.dir);
+  // Absolute: on Unix the path of the program is read in the directory the script runs in.
+  const command = new Command(absolute(executable))
+    .current_dir(if script.dir.is_empty() { "." } else { script.dir })
+    .env("OUT_DIR", absolute(out_dir))
+    .env("TARGET", script.target)
+    .env("HOST", script.host)
+    .env("PROFILE", script.profile)
+    .env("NOVA_MANIFEST_DIR", manifest_dir)
+    .env("NOVA_PKG_NAME", script.name)
+    .env("NOVA_PKG_VERSION", script.version)
+    .env("SAG_CC", c_compiler(script.cc));
+  const ran = match command.output() {
+    Ok(found) => found,
+    Err(error) => return Err(`cannot run the build script of \`${script.name}\`: ${error.message()}`),
+  };
+
+  if let Err(error) = fs::write(output_file, ran.stdout) {
+    return Err(`cannot write \`${output_file}\`: ${error.message()}`);
+  }
+
+  if !ran.status.success() {
+    const code = match ran.status.code {
+      Some(found) => `exit code ${found}`,
+      None => "a signal",
+    };
+
+    // What the script printed explains why.
+    io::eprint(ran.stdout);
+    io::eprint(ran.stderr);
+    fs::remove_file(stamp_file).unwrap_or(());
+
+    return Err(`the build script of \`${script.name}\` failed with ${code}`);
+  }
+
+  io::eprint(ran.stderr);
+
+  const directives = match parse(ran.stdout, script.dir) {
+    Ok(found) => found,
+    Err(message) => {
+      fs::remove_file(stamp_file).unwrap_or(());
+
+      return Err(`the build script of \`${script.name}\` printed ${message}`);
+    }
+  };
+
+  for warning in directives.warnings {
+    eprintln(`warning: ${script.name}@${script.version}: ${warning}`);
+  }
+
+  if let Err(error) = fs::write(stamp_file, fingerprint(script, directives)) {
+    return Err(`cannot write \`${stamp_file}\`: ${error.message()}`);
+  }
+
+  Ok(Outcome { out_dir: absolute(out_dir), directives: directives })
+}
+
+/// Writes the library `bindgen` where build scripts find it, unless it is there already, and
+/// gives its root module.
+fn write_bindgen(target_dir: String) -> Result<String, String> {
+  const dir = push_path(push_path(target_dir, "build"), ".bindgen");
+  const file = push_path(dir, "lib.sag");
+
+  if fs::read_to_string(file).unwrap_or("") == BINDGEN {
+    return Ok(file);
+  }
+
+  if let Err(error) = fs::create_dir_all(dir) {
+    return Err(`cannot create \`${dir}\`: ${error.message()}`);
+  }
+
+  match fs::write(file, BINDGEN) {
+    Ok(_) => Ok(file),
+    Err(error) => Err(`cannot write \`${file}\`: ${error.message()}`),
+  }
+}
+
+/// The directives of a script's output, the lines starting with `nova::` (Q729). Paths are
+/// relative to the package's directory unless absolute.
+pub fn parse(output: String, dir: String) -> Result<Directives, String> {
+  const directives = new Directives();
+
+  for raw in output.lines() {
+    const line = raw.trim();
+
+    if !line.starts_with("nova::") {
+      continue;
+    }
+
+    const rest = line.substring(6, line.len());
+    const equals = match rest.find("=") {
+      Some(found) => found,
+      None => return Err(`\`${line}\`, a directive without \`=\`: write \`nova::name=value\``),
+    };
+    const name = rest.substring(0, equals);
+    const value = rest.substring(equals + 1, rest.len());
+    const at_package = if path::is_absolute(value) { value } else { push_path(dir, value) };
+
+    if name == "link-lib" {
+      directives.libraries.push(value);
+    } else if name == "link-search" {
+      directives.search_paths.push(at_package);
+    } else if name == "link-source" {
+      directives.sources.push(at_package);
+    } else if name == "rerun-if-changed" {
+      directives.rerun_paths.push(at_package);
+    } else if name == "rerun-if-env-changed" {
+      directives.rerun_env.push(value);
+    } else if name == "warning" {
+      directives.warnings.push(value);
+    } else {
+      return Err(`the unknown directive \`nova::${name}\`; the directives are \`link-lib\`, \`link-search\`, \`link-source\`, \`rerun-if-changed\`, \`rerun-if-env-changed\` and \`warning\``);
+    }
+  }
+
+  Ok(directives)
+}
+
+/// What the run of a script depends on: its source, the package's manifest, the C compiler, the
+/// build, and the paths and variables it named, or every file of the package when it named none,
+/// as Cargo does. A change in any of them runs it again.
+fn fingerprint(script: Script, directives: Directives) -> String {
+  const out = new StringBuilder();
+
+  out.append(`profile ${script.profile} target ${script.target} cc ${c_compiler(script.cc)}\n`);
+  out.append("script " + file_hash(push_path(script.dir, FILE_NAME)) + "\n");
+
+  // A new `bindgen` may write other bindings.
+  const library = new DefaultHasher();
+
+  library.write_str(BINDGEN);
+  out.append(f"bindgen {library.finish():x}\n");
+  out.append("manifest " + file_hash(push_path(script.dir, "Nova.toml")) + "\n");
+
+  for name in directives.rerun_env {
+    out.append(`env ${name}=` + env::variable(name).unwrap_or("") + "\n");
+  }
+
+  const paths: List<String> = new List();
+
+  if directives.rerun_paths.is_empty() && directives.rerun_env.is_empty() {
+    for entry in package_files(script.dir) {
+      paths.push(entry);
+    }
+  } else {
+    for entry in directives.rerun_paths {
+      tree_files(entry, paths);
+    }
+
+    for entry in directives.rerun_paths {
+      if !fs::exists(entry) {
+        out.append(`missing ${entry}\n`);
+      }
+    }
+  }
+
+  for entry in paths {
+    out.append(`file ${entry} ` + file_hash(entry) + "\n");
+  }
+
+  out.to_string()
+}
+
+/// The files of the package, but those of `target/`.
+fn package_files(dir: String) -> List<String> {
+  const found: List<String> = new List();
+  const base = if dir.is_empty() { "." } else { dir };
+
+  match fs::read_dir(base) {
+    Ok(names) => {
+      for name in names {
+        if name != "target" {
+          tree_files(push_path(dir, name), found);
+        }
+      }
+    }
+    Err(_) => {}
+  }
+
+  found
+}
+
+/// `entry` if it is a file, or the files below it if it is a directory, in order.
+fn tree_files(entry: String, found: List<String>) {
+  if fs::is_file(entry) {
+    found.push(entry);
+    return;
+  }
+
+  if let Ok(names) = fs::read_dir(entry) {
+    for name in names {
+      tree_files(push_path(entry, name), found);
+    }
+  }
+}
+
+/// The hash of a file's bytes, or `none` if it cannot be read.
+fn file_hash(file: String) -> String {
+  match fs::read(file) {
+    Ok(bytes) => {
+      const hasher = new DefaultHasher();
+
+      hasher.write(&bytes);
+      f"{bytes.len()}:{hasher.finish():x}"
+    }
+    Err(_) => "none",
+  }
+}

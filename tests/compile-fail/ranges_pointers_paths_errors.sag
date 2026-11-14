@@ -1,0 +1,16 @@
+// `contains` is a method of a range written directly, the functions of `std::ptr` that touch
+// memory are `unsafe`, and `null` takes its type from the context
+// (docs/adr/0101-the-rest-of-s2.md, Q705–Q707).
+use std::path;
+use std::ptr;
+
+fn main() {
+  const _a = (1..5).contains("x"); //~ ERROR E0300
+  const _b = (1..5).is_empty(1); //~ ERROR E0301
+  const stored = 1..5;
+  const _c = stored.contains(3); //~ ERROR E0316
+  const values: List<i32> = List::from([1]);
+  const _d = ptr::read(values.as_ptr()); //~ ERROR E0323
+  const _e = ptr::null(); //~ ERROR E0311
+  const _f = path::strip_prefix(1, "a"); //~ ERROR E0300
+}

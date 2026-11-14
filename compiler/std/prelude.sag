@@ -6,6 +6,12 @@
 /// The interface of error values (docs/spec/05-interfaces-generics.md#the-error-interface-f2).
 pub interface Error {
   fn message(self) -> String;
+
+  /// The error that caused this one, if any, as Rust's: `None` unless the type says
+  /// (docs/adr/0101-the-rest-of-s2.md, Q713). Code follows the chain with it.
+  fn source(self) -> Option<Error> {
+    None
+  }
 }
 
 /// The error `Error(message)` creates.
@@ -26,6 +32,76 @@ pub enum Ordering {
   Less,
   Equal,
   Greater,
+
+  /// `Greater` for `Less` and `Less` for `Greater`, as Rust's
+  /// (docs/adr/0094-conversions-and-defaults.md, Q638).
+  pub fn reverse(self) -> Ordering {
+    match self {
+      Ordering::Less => Ordering::Greater,
+      Ordering::Equal => Ordering::Equal,
+      Ordering::Greater => Ordering::Less,
+    }
+  }
+
+  /// This order, or `other` when this one is `Equal`: the order by a first key, then a second.
+  pub fn then(self, other: Ordering) -> Ordering {
+    match self {
+      Ordering::Equal => other,
+      _ => self,
+    }
+  }
+
+  /// This order, or the one `f` gives when this one is `Equal`; `f` runs only then.
+  pub fn then_with(self, f: fn() -> Ordering) -> Ordering {
+    match self {
+      Ordering::Equal => f(),
+      _ => self,
+    }
+  }
+
+  pub fn is_eq(self) -> bool {
+    match self {
+      Ordering::Equal => true,
+      _ => false,
+    }
+  }
+
+  pub fn is_ne(self) -> bool {
+    !self.is_eq()
+  }
+
+  pub fn is_lt(self) -> bool {
+    match self {
+      Ordering::Less => true,
+      _ => false,
+    }
+  }
+
+  pub fn is_gt(self) -> bool {
+    match self {
+      Ordering::Greater => true,
+      _ => false,
+    }
+  }
+
+  pub fn is_le(self) -> bool {
+    !self.is_gt()
+  }
+
+  pub fn is_ge(self) -> bool {
+    !self.is_lt()
+  }
+}
+
+/// The smaller of two values, `a` when they are equal, as Rust's `cmp::min` (Q638). Floats,
+/// which are not `Ord`, have their own `min`.
+pub fn min<T: Ord>(a: T, b: T) -> T {
+  if b < a { b } else { a }
+}
+
+/// The larger of two values, `b` when they are equal, as Rust's `cmp::max`.
+pub fn max<T: Ord>(a: T, b: T) -> T {
+  if b < a { a } else { b }
 }
 
 /// Values that can be compared for equality. Integers, `bool`, `char` and `String` implement
@@ -37,12 +113,29 @@ pub interface Eq {
 /// Values with a total order. Integers, `bool`, `char` and `String` implement it.
 pub interface Ord extends Eq {
   fn compare(self, other: Self) -> Ordering;
+
+  /// The value restricted to `low..=high`; panics unless `low <= high`, as Rust's (Q638).
+  /// Numbers have their own, which floats need too.
+  fn clamp(self, low: Self, high: Self) -> Self {
+    if high < low {
+      panic("`clamp` needs min <= max");
+    }
+
+    if self < low { low } else if high < self { high } else { self }
+  }
 }
 
 /// Values that can be keys of a `Map`: equal values must have the same hash. Integers, `bool`,
 /// `char` and `String` implement it.
 pub interface Hash extends Eq {
   fn hash(self) -> u64;
+}
+
+/// Values with a text for people: a format string interpolates them, `f"{value}"`, with this text
+/// (docs/adr/0089-display-debug-and-format-specifiers.md). Numbers, `bool`, `char` and `String`
+/// implement it.
+pub interface Display {
+  fn to_string(self) -> String;
 }
 
 /// `a + b` for values of a type other than numbers and `String`, with a right operand of type
@@ -77,6 +170,117 @@ pub interface Neg<Out> {
   fn neg(self) -> Out;
 }
 
+/// `a & b` for values of a type other than integers and `bool`, as `Add`
+/// (docs/adr/0101-the-rest-of-s2.md, Q709). Integers and `bool` implement the bitwise interfaces
+/// with their own type, and the shifts with a `u32` amount.
+pub interface BitAnd<Rhs, Out> {
+  fn bitand(self, other: Rhs) -> Out;
+}
+
+/// `a | b`.
+pub interface BitOr<Rhs, Out> {
+  fn bitor(self, other: Rhs) -> Out;
+}
+
+/// `a ^ b`.
+pub interface BitXor<Rhs, Out> {
+  fn bitxor(self, other: Rhs) -> Out;
+}
+
+/// `a << b`.
+pub interface Shl<Rhs, Out> {
+  fn shl(self, other: Rhs) -> Out;
+}
+
+/// `a >> b`.
+pub interface Shr<Rhs, Out> {
+  fn shr(self, other: Rhs) -> Out;
+}
+
+/// `!a`.
+pub interface Not<Out> {
+  fn not(self) -> Out;
+}
+
+/// A value of the implementing type made from a `T`, without failing, as Rust's `From`
+/// (docs/adr/0094-conversions-and-defaults.md, Q632): `Celsius::from(f)`. Every type is `From`
+/// itself. Numbers are `From` the narrower ones that fit them, `u32` and `u64` from `char`,
+/// `char` from `u8` and `String` from `char`.
+pub interface From<T> {
+  fn from(value: T) -> Self;
+}
+
+/// A value converted into a `U`, as Rust's `Into` (Q633). The compiler implements it for every
+/// type `U` is `From`; programs implement `From` instead: `const f: Fahrenheit = c.into();`.
+pub interface Into<U> {
+  fn into(self) -> U;
+}
+
+/// A value of the implementing type made from a `T`, or the error `E` (Q634): integers try every
+/// other integer type, with Rust's message, and `char` tries `u32`.
+pub interface TryFrom<T, E> {
+  fn try_from(value: T) -> Result<Self, E>;
+}
+
+/// A value converted into a `U`, or the error `E`: the compiler implements it for every type `U`
+/// is `TryFrom`.
+pub interface TryInto<U, E> {
+  fn try_into(self) -> Result<U, E>;
+}
+
+/// What a class does when its last strong reference goes, before its fields are released, as
+/// Swift's `deinit` (docs/adr/0096-streams-files-and-drop.md, Q655): closing a file, a socket or a
+/// lock. Only classes implement it; it is never called directly, and `drop` must not keep `self`.
+pub interface Drop {
+  fn drop(self);
+}
+
+/// What `for` iterates over, as Rust's `IntoIterator` (docs/adr/0095-collections.md, Q645):
+/// `for x in value` runs over `value.iter()`. Lists, arrays and iterators implement it.
+pub interface Iterable<T> {
+  fn iter(self) -> Iter<T>;
+}
+
+/// What `collect()` makes, as Rust's `FromIterator` (Q646): `const set: Bag = values.collect();`
+/// calls `Bag::from_iter`. Lists, maps, strings and `Result<List<T>, E>` implement it.
+pub interface FromIterator<T> {
+  fn from_iter(iter: Iter<T>) -> Self;
+}
+
+/// `value[index]` for a type other than lists, arrays and slices, as Rust's `Index`
+/// (docs/adr/0094-conversions-and-defaults.md, Q639). A reference cannot be a result, so `index`
+/// gives the value: a copy of a struct, the same instance of a class.
+pub interface Index<Idx, Out> {
+  fn index(self, index: Idx) -> Out;
+}
+
+/// `value[index] = new`, `value[index] += x` and `value[index].field = x`, as Rust's `IndexMut`:
+/// the compiler reads the element with `index`, changes it, and writes it back with `index_set`.
+pub interface IndexMut<Idx, Out> extends Index<Idx, Out> {
+  fn index_set(self, index: Idx, value: Out);
+}
+
+/// The value a type starts from, as Rust's `Default` (docs/adr/0094-conversions-and-defaults.md,
+/// Q636): `0` for numbers, `false`, `'\0'`, `""`, empty collections, `None`, and for tuples and
+/// arrays the default of each element. A struct or enum written after `@default` has the default
+/// of each field, or the variant marked `@default`: `Config::default()`, `T::default()`.
+pub interface Default {
+  fn default() -> Self;
+}
+
+/// `String::from(c)` of a `char`.
+fn string_from_char(c: char) -> String {
+  c.to_string()
+}
+
+/// `char::try_from(n)` of a `u32`, with Rust's message.
+fn char_try_from_u32(n: u32) -> Result<char, String> {
+  match char::from_u32(n) {
+    Some(c) => Ok(c),
+    None => Err("converted integer out of range for `char`"),
+  }
+}
+
 /// Values that can cross to another thread (docs/spec/05-interfaces-generics.md#send): those
 /// no other thread can change. The compiler infers which types are `Send`; no type names it
 /// after `impl`, and it is only a bound (`T: Send`), not a type.
@@ -101,15 +305,38 @@ class Cell<T> {
 /// (docs/spec/08-closures.md#iterators).
 pub class Iter<T> {
   prv const step: fn() -> Option<T>;
+  /// What `peek` read ahead: `Some` of the next value, which `next` gives first.
+  prv var waiting: Option<Option<T>>;
 
   /// An iterator whose values `step` returns, until it returns `None`.
   pub fn new(self, step: fn() -> Option<T>) {
     self.step = step;
+    self.waiting = None;
   }
 
   /// The next value, or `None` once the iterator is exhausted.
   pub fn next(self) -> Option<T> {
-    self.step()
+    match self.waiting {
+      Some(found) => {
+        self.waiting = None;
+        found
+      }
+      None => self.step(),
+    }
+  }
+
+  /// The next value, without consuming it: the following `next` gives it. Rust's `Peekable`
+  /// lends its iterator, so every iterator peeks here (docs/adr/0093-everyday-methods.md, Q626).
+  pub fn peek(self) -> Option<T> {
+    match self.waiting {
+      Some(found) => found,
+      None => {
+        const found = self.step();
+
+        self.waiting = Some(found);
+        found
+      }
+    }
   }
 
   pub fn map<U>(self, f: fn(T) -> U) -> Iter<U> {
@@ -261,6 +488,442 @@ pub class Iter<T> {
 
     None
   }
+
+  // ---- Rust's other adapters and consumers (docs/adr/0093-everyday-methods.md, Q626) ---------
+
+  /// Each value with its position, from 0.
+  pub fn enumerate(self) -> Iter<(usize, T)> {
+    const source = self;
+    const position = new Cell<usize>(0);
+
+    new Iter<(usize, T)>(() => {
+      const value = source.next()?;
+      const index = position.value;
+
+      position.value = index + 1;
+      Some((index, value))
+    })
+  }
+
+  /// Pairs of a value of each, until either ends.
+  pub fn zip<U>(self, other: Iter<U>) -> Iter<(T, U)> {
+    const source = self;
+
+    new Iter<(T, U)>(() => {
+      const first = source.next()?;
+      const second = other.next()?;
+
+      Some((first, second))
+    })
+  }
+
+  /// The values of this iterator, then those of `other`.
+  pub fn chain(self, other: Iter<T>) -> Iter<T> {
+    const source = self;
+
+    new Iter<T>(() => {
+      match source.next() {
+        Some(found) => Some(found),
+        None => other.next(),
+      }
+    })
+  }
+
+  /// The values of the iterators `f` gives for each value, one after another.
+  pub fn flat_map<U>(self, f: fn(T) -> Iter<U>) -> Iter<U> {
+    const source = self;
+    const current = new Cell<Option<Iter<U>>>(None);
+
+    new Iter<U>(() => {
+      loop {
+        if let Some(inner) = current.value {
+          if let Some(found) = inner.next() {
+            return Some(found);
+          }
+        }
+
+        match source.next() {
+          Some(value) => {
+            current.value = Some(f(value));
+          }
+          None => return None,
+        }
+      }
+    })
+  }
+
+  /// The values while `keep` returns `true` for them.
+  pub fn take_while(self, keep: fn(T) -> bool) -> Iter<T> {
+    const source = self;
+    const done = new Cell<bool>(false);
+
+    new Iter<T>(() => {
+      if done.value {
+        return None;
+      }
+
+      const value = source.next()?;
+
+      if keep(value) {
+        return Some(value);
+      }
+
+      done.value = true;
+      None
+    })
+  }
+
+  /// The values from the first for which `skip` returns `false`.
+  pub fn skip_while(self, skip: fn(T) -> bool) -> Iter<T> {
+    const source = self;
+    const started = new Cell<bool>(false);
+
+    new Iter<T>(() => {
+      if started.value {
+        return source.next();
+      }
+
+      loop {
+        const value = source.next()?;
+
+        if !skip(value) {
+          started.value = true;
+          return Some(value);
+        }
+      }
+    })
+  }
+
+  /// What `f` gives for each value, until it gives `None`.
+  pub fn map_while<U>(self, f: fn(T) -> Option<U>) -> Iter<U> {
+    const source = self;
+    const done = new Cell<bool>(false);
+
+    new Iter<U>(() => {
+      if done.value {
+        return None;
+      }
+
+      const value = source.next()?;
+      const mapped = f(value);
+
+      if mapped.is_none() {
+        done.value = true;
+      }
+
+      mapped
+    })
+  }
+
+  /// The same values, calling `f` with each as it passes.
+  pub fn inspect(self, f: fn(T)) -> Iter<T> {
+    const source = self;
+
+    new Iter<T>(() => {
+      const value = source.next()?;
+
+      f(value);
+      Some(value)
+    })
+  }
+
+  /// The values over and over. Rust's clones the iterator; this one keeps the values it has
+  /// given, to give them again.
+  pub fn cycle(self) -> Iter<T> {
+    const source = self;
+    const seen = new List<T>();
+    const replay = new Cell<usize>(0);
+    const replaying = new Cell<bool>(false);
+
+    new Iter<T>(() => {
+      if !replaying.value {
+        match source.next() {
+          Some(value) => {
+            seen.push(value);
+            return Some(value);
+          }
+          None => {
+            replaying.value = true;
+          }
+        }
+      }
+
+      if seen.is_empty() {
+        return None;
+      }
+
+      const value = seen[replay.value % seen.len()];
+
+      replay.value += 1;
+      Some(value)
+    })
+  }
+
+  /// The first smallest value by `compare`.
+  pub fn min_by(self, compare: fn(T, T) -> Ordering) -> Option<T> {
+    var best = self.next()?;
+
+    for value in self {
+      if compare(value, best) == Ordering::Less {
+        best = value;
+      }
+    }
+
+    Some(best)
+  }
+
+  /// The last largest value by `compare`.
+  pub fn max_by(self, compare: fn(T, T) -> Ordering) -> Option<T> {
+    var best = self.next()?;
+
+    for value in self {
+      if compare(value, best) != Ordering::Less {
+        best = value;
+      }
+    }
+
+    Some(best)
+  }
+
+  /// The first value whose key is the smallest.
+  pub fn min_by_key<K: Ord>(self, key: fn(T) -> K) -> Option<T> {
+    self.min_by((a, b) => key(a).compare(key(b)))
+  }
+
+  /// The last value whose key is the largest.
+  pub fn max_by_key<K: Ord>(self, key: fn(T) -> K) -> Option<T> {
+    self.max_by((a, b) => key(a).compare(key(b)))
+  }
+
+  /// The position of the first value for which `test` returns `true`.
+  pub fn position(self, test: fn(T) -> bool) -> Option<usize> {
+    var index = 0usize;
+
+    for value in self {
+      if test(value) {
+        return Some(index);
+      }
+
+      index += 1;
+    }
+
+    None
+  }
+
+  /// The last value.
+  pub fn last(self) -> Option<T> {
+    var found: Option<T> = None;
+
+    for value in self {
+      found = Some(value);
+    }
+
+    found
+  }
+
+  /// The value at position `n`, consuming those before it.
+  pub fn nth(self, n: usize) -> Option<T> {
+    var index = 0usize;
+
+    while index < n {
+      self.next()?;
+      index += 1;
+    }
+
+    self.next()
+  }
+
+  /// The values for which `keep` returns `true`, and the others.
+  pub fn partition(self, keep: fn(T) -> bool) -> (List<T>, List<T>) {
+    const kept = new List<T>();
+    const others = new List<T>();
+
+    for value in self {
+      if keep(value) {
+        kept.push(value);
+      } else {
+        others.push(value);
+      }
+    }
+
+    (kept, others)
+  }
+}
+
+/// An iterator that can also give its last value: Rust's `DoubleEndedIterator`. `list.iter()`,
+/// the iterators of arrays, slices, ranges and strings give one (docs/adr/0093-everyday-methods.md,
+/// Q627).
+pub class DoubleEndedIter<T> extends Iter<T> {
+  prv const back: fn() -> Option<T>;
+
+  /// An iterator whose values come from `front` and, from the end, from `back`, which share what
+  /// is left between them.
+  pub fn new(self, front: fn() -> Option<T>, back: fn() -> Option<T>) {
+    zod.new(front);
+    self.back = back;
+  }
+
+  /// The last value left. When the back has nothing left, the value `peek` read ahead, if any, is
+  /// the last one, and `next` gives it.
+  pub fn next_back(self) -> Option<T> {
+    match self.back() {
+      Some(found) => Some(found),
+      None => self.next(),
+    }
+  }
+
+  /// The values from the last one.
+  pub fn rev(self) -> DoubleEndedIter<T> {
+    const source = self;
+
+    new DoubleEndedIter<T>(() => source.next_back(), () => source.next())
+  }
+}
+
+// ---- The methods of iterators that need more of their values, or keep both ends --------------
+//
+// The compiler calls these for a method of an `Iter<T>` whose values are of a kind, or of a
+// `DoubleEndedIter<T>` (docs/adr/0093-everyday-methods.md, Q626-Q628).
+
+fn double_map<T, U>(iter: DoubleEndedIter<T>, f: fn(T) -> U) -> DoubleEndedIter<U> {
+  new DoubleEndedIter<U>(() => iter.next().map(f), () => iter.next_back().map(f))
+}
+
+fn double_filter<T>(iter: DoubleEndedIter<T>, keep: fn(T) -> bool) -> DoubleEndedIter<T> {
+  const front: fn() -> Option<T> = () => {
+    for value in iter {
+      if keep(value) {
+        return Some(value);
+      }
+    }
+
+    None
+  };
+  const back: fn() -> Option<T> = () => {
+    loop {
+      const value = iter.next_back()?;
+
+      if keep(value) {
+        return Some(value);
+      }
+    }
+  };
+
+  new DoubleEndedIter<T>(front, back)
+}
+
+fn double_inspect<T>(iter: DoubleEndedIter<T>, f: fn(T)) -> DoubleEndedIter<T> {
+  const front: fn() -> Option<T> = () => {
+    const value = iter.next()?;
+
+    f(value);
+    Some(value)
+  };
+  const back: fn() -> Option<T> = () => {
+    const value = iter.next_back()?;
+
+    f(value);
+    Some(value)
+  };
+
+  new DoubleEndedIter<T>(front, back)
+}
+
+/// `a.chain(b)` of an iterator with two ends and one without: an `Iter<T>`.
+fn iter_chain<T>(first: Iter<T>, second: Iter<T>) -> Iter<T> {
+  first.chain(second)
+}
+
+fn double_chain<T>(first: DoubleEndedIter<T>, second: DoubleEndedIter<T>) -> DoubleEndedIter<T> {
+  const front: fn() -> Option<T> = () => {
+    match first.next() {
+      Some(found) => Some(found),
+      None => second.next(),
+    }
+  };
+  const back: fn() -> Option<T> = () => {
+    match second.next_back() {
+      Some(found) => Some(found),
+      None => first.next_back(),
+    }
+  };
+
+  new DoubleEndedIter<T>(front, back)
+}
+
+/// The first smallest value.
+fn iter_min<T: Ord>(iter: Iter<T>) -> Option<T> {
+  iter.min_by((a, b) => a.compare(b))
+}
+
+/// The last largest value.
+fn iter_max<T: Ord>(iter: Iter<T>) -> Option<T> {
+  iter.max_by((a, b) => a.compare(b))
+}
+
+fn iter_unzip<A, B>(iter: Iter<(A, B)>) -> (List<A>, List<B>) {
+  const firsts = new List<A>();
+  const seconds = new List<B>();
+
+  for (first, second) in iter {
+    firsts.push(first);
+    seconds.push(second);
+  }
+
+  (firsts, seconds)
+}
+
+fn iter_flatten<U>(iter: Iter<Iter<U>>) -> Iter<U> {
+  iter.flat_map((inner) => inner)
+}
+
+fn iter_flatten_lists<U>(iter: Iter<List<U>>) -> Iter<U> {
+  iter.flat_map((inner) => list_iter(inner))
+}
+
+fn iter_flatten_options<U>(iter: Iter<Option<U>>) -> Iter<U> {
+  iter.flat_map((inner) => option_iter(inner))
+}
+
+fn iter_collect_map<K: Hash, V>(iter: Iter<(K, V)>) -> Map<K, V> {
+  const map = new Map<K, V>();
+
+  map.extend(iter);
+  map
+}
+
+fn iter_collect_chars(iter: Iter<char>) -> String {
+  const text = new StringBuilder();
+
+  for c in iter {
+    text.append_char(c);
+  }
+
+  text.to_string()
+}
+
+fn iter_collect_strings(iter: Iter<String>) -> String {
+  const text = new StringBuilder();
+
+  for part in iter {
+    text.append(part);
+  }
+
+  text.to_string()
+}
+
+/// The values of the `Ok`s, or the first `Err`, after which no value is read.
+fn iter_collect_result<T, E>(iter: Iter<Result<T, E>>) -> Result<List<T>, E> {
+  const values = new List<T>();
+
+  for item in iter {
+    match item {
+      Ok(value) => values.push(value),
+      Err(error) => return Err(error),
+    }
+  }
+
+  Ok(values)
 }
 
 /// A hash map from keys to values that keeps the order in which keys were first inserted
@@ -269,8 +932,11 @@ pub class Iter<T> {
 pub class Map<K: Hash, V> {
   /// The entries in insertion order; `None` where one was removed.
   prv var items: List<Option<Entry<K, V>>>;
-  /// The open-addressing table: the index of an entry, -1 for a free slot or -2 for a removed
-  /// one.
+  /// The hash of the key of each entry, beside it, so a lookup compares keys only when their
+  /// hashes match and a rebuild needs none again.
+  prv var hashes: List<u64>;
+  /// The open-addressing table, whose size is a power of two: the index of an entry, -1 for a
+  /// free slot or -2 for a removed one.
   prv var slots: List<i64>;
   /// The number of entries.
   prv var count: usize;
@@ -279,6 +945,7 @@ pub class Map<K: Hash, V> {
 
   pub fn new(self) {
     self.items = new List<Option<Entry<K, V>>>();
+    self.hashes = new List<u64>();
     self.slots = new List<i64>();
     self.count = 0;
     self.used = 0;
@@ -294,33 +961,43 @@ pub class Map<K: Hash, V> {
 
   /// A copy of the value of `key`.
   pub fn get(self, key: K) -> Option<V> {
-    match self.slot_of(key) {
-      Some(slot) => self.items[self.slots[slot] as usize].map(entry => entry.value),
+    match self.slot_of(key, key.hash()) {
+      Some(slot) => match self.items[self.slots[slot] as usize] {
+        Some(entry) => Some(entry.value),
+        None => None,
+      },
       None => None,
     }
   }
 
   pub fn contains_key(self, key: K) -> bool {
-    self.slot_of(key).is_some()
+    self.slot_of(key, key.hash()).is_some()
   }
 
   /// Sets the value of `key`, and returns its previous value. A new key goes last.
   pub fn insert(self, key: K, value: V) -> Option<V> {
-    match self.slot_of(key) {
+    const hash = key.hash();
+
+    match self.slot_of(key, hash) {
       Some(slot) => {
         const index = self.slots[slot] as usize;
         const previous = self.items[index];
 
         self.items[index] = Some(Entry { key: key, value: value });
-        previous.map(entry => entry.value)
+
+        match previous {
+          Some(entry) => Some(entry.value),
+          None => None,
+        }
       }
       None => {
         if (self.used + 1) * 4 > self.slots.len() * 3 {
           self.rebuild();
         }
 
-        self.place(key.hash(), self.items.len());
+        self.place(hash, self.items.len());
         self.items.push(Some(Entry { key: key, value: value }));
+        self.hashes.push(hash);
         self.count += 1;
         self.used += 1;
         None
@@ -330,7 +1007,7 @@ pub class Map<K: Hash, V> {
 
   /// Removes `key`, and returns its value.
   pub fn remove(self, key: K) -> Option<V> {
-    match self.slot_of(key) {
+    match self.slot_of(key, key.hash()) {
       Some(slot) => {
         const index = self.slots[slot] as usize;
         const previous = self.items[index];
@@ -338,14 +1015,42 @@ pub class Map<K: Hash, V> {
         self.items[index] = None;
         self.slots[slot] = -2;
         self.count -= 1;
-        previous.map(entry => entry.value)
+
+        match previous {
+          Some(entry) => Some(entry.value),
+          None => None,
+        }
       }
       None => None,
     }
   }
 
+  /// The key the map holds that is equal to `key`, with its value, as Rust's
+  /// (docs/adr/0095-collections.md, Q647).
+  pub fn get_key_value(self, key: K) -> Option<(K, V)> {
+    match self.slot_of(key, key.hash()) {
+      Some(slot) => match self.items[self.slots[slot] as usize] {
+        Some(entry) => Some((entry.key, entry.value)),
+        None => None,
+      },
+      None => None,
+    }
+  }
+
+  /// Removes `key`, and returns the key the map held with its value.
+  pub fn remove_entry(self, key: K) -> Option<(K, V)> {
+    const found = self.get_key_value(key);
+
+    if found.is_some() {
+      self.remove(key);
+    }
+
+    found
+  }
+
   pub fn clear(self) {
     self.items = new List<Option<Entry<K, V>>>();
+    self.hashes = new List<u64>();
     self.slots = new List<i64>();
     self.count = 0;
     self.used = 0;
@@ -375,29 +1080,106 @@ pub class Map<K: Hash, V> {
     self.entries().map(entry => entry.key)
   }
 
+  // ---- Rust's other methods (docs/adr/0093-everyday-methods.md, Q625). `entry` lends the map in
+  // Rust; `update`, `upsert` and `get_or_insert` do what it is used for.
+
+  /// The entries as pairs, in insertion order.
+  pub fn iter(self) -> Iter<(K, V)> {
+    self.entries().map((entry) => (entry.key, entry.value))
+  }
+
+  /// Changes the value of `key` to what `f` gives for it, if `key` is present: whether it was.
+  pub fn update(self, key: K, f: fn(V) -> V) -> bool {
+    match self.slot_of(key, key.hash()) {
+      Some(slot) => {
+        const index = self.slots[slot] as usize;
+
+        if let Some(entry) = self.items[index] {
+          const changed = f(entry.value);
+
+          self.items[index] = Some(Entry { key: entry.key, value: changed });
+        }
+
+        true
+      }
+      None => false,
+    }
+  }
+
+  /// Inserts `default` for `key`, or changes the value present with `f`: Rust's
+  /// `entry(key).and_modify(f).or_insert(default)`.
+  pub fn upsert(self, key: K, default: V, f: fn(V) -> V) {
+    if !self.update(key, f) {
+      self.insert(key, default);
+    }
+  }
+
+  /// The value of `key`, inserting `value` first if `key` is not present.
+  pub fn get_or_insert(self, key: K, value: V) -> V {
+    match self.get(key) {
+      Some(found) => found,
+      None => {
+        self.insert(key, value);
+        value
+      }
+    }
+  }
+
+  /// Keeps the entries for which `keep` returns `true`.
+  pub fn retain(self, keep: fn(K, V) -> bool) {
+    for index in 0..self.items.len() {
+      if let Some(entry) = self.items[index] {
+        if !keep(entry.key, entry.value) {
+          self.remove(entry.key);
+        }
+      }
+    }
+  }
+
+  /// Inserts each pair, in order; a later value of a key replaces an earlier one.
+  pub fn extend(self, pairs: Iter<(K, V)>) {
+    for (key, value) in pairs {
+      self.insert(key, value);
+    }
+  }
+
+  /// A map of the pairs, in order, as Rust's `HashMap::from`.
+  pub fn from(pairs: List<(K, V)>) -> Map<K, V> {
+    const map = new Map<K, V>();
+
+    map.extend(pairs.iter());
+    map
+  }
+
   pub fn values(self) -> Iter<V> {
     self.entries().map(entry => entry.value)
   }
 
-  /// The slot holding `key`.
-  prv fn slot_of(self, key: K) -> Option<usize> {
-    const capacity = self.slots.len();
+  /// The slot holding `key`, whose hash is `hash`. The lists are read from the fields once: each
+  /// read of a field holding a list counts a reference.
+  prv fn slot_of(self, key: K, hash: u64) -> Option<usize> {
+    const slots = self.slots;
+    const hashes = self.hashes;
+    const items = self.items;
+    const capacity = slots.len();
 
     if capacity == 0 {
       return None;
     }
 
-    var slot = (key.hash() % capacity as u64) as usize;
+    const mask = capacity - 1;
+    var slot = (hash as usize) & mask;
 
     loop {
-      const index = self.slots[slot];
+      const index = slots[slot];
 
       if index == -1 {
         return None;
       }
 
-      if index >= 0 {
-        match self.items[index as usize] {
+      // The key is read, and compared, only when the hashes match.
+      if index >= 0 && hashes[index as usize] == hash {
+        match items[index as usize] {
           Some(entry) => {
             if entry.key.equals(key) {
               return Some(slot);
@@ -407,29 +1189,34 @@ pub class Map<K: Hash, V> {
         }
       }
 
-      slot = (slot + 1) % capacity;
+      slot = (slot + 1) & mask;
     }
   }
 
   /// Records entry `index`, whose key has hash `hash`, in the first free slot of its chain.
   prv fn place(self, hash: u64, index: usize) {
-    const capacity = self.slots.len();
-    var slot = (hash % capacity as u64) as usize;
+    const slots = self.slots;
+    const mask = slots.len() - 1;
+    var slot = (hash as usize) & mask;
 
-    while self.slots[slot] != -1 {
-      slot = (slot + 1) % capacity;
+    while slots[slot] != -1 {
+      slot = (slot + 1) & mask;
     }
 
-    self.slots[slot] = index as i64;
+    slots[slot] = index as i64;
   }
 
   /// Drops removed entries and makes the table large enough for one more entry.
   prv fn rebuild(self) {
     const live = new List<Option<Entry<K, V>>>();
+    const hashes = new List<u64>();
 
-    for entry in self.items {
+    for index in 0..self.items.len() {
+      const entry = self.items[index];
+
       if entry.is_some() {
         live.push(entry);
+        hashes.push(self.hashes[index]);
       }
     }
 
@@ -441,38 +1228,47 @@ pub class Map<K: Hash, V> {
 
     const slots = new List<i64>();
 
-    for _ in 0..capacity {
-      slots.push(-1);
-    }
-
+    slots.resize(capacity, -1);
     self.items = live;
+    self.hashes = hashes;
     self.slots = slots;
     self.used = live.len();
 
     for index in 0..live.len() {
-      match live[index] {
-        Some(entry) => self.place(entry.key.hash(), index),
-        None => {}
-      }
+      self.place(hashes[index], index);
     }
   }
 }
 
 /// `list.iter()`: the elements by position, reading the length at every step, so elements
 /// added while iterating are seen.
-fn list_iter<T>(list: List<T>) -> Iter<T> {
+fn list_iter<T>(list: List<T>) -> DoubleEndedIter<T> {
+  // The positions left are `next` up to `end`, which the back sets when it first reads: elements
+  // added while iterating are seen until then.
   const next = new Cell<usize>(0);
+  const end = new Cell<usize>(usize::MAX);
+  const front: fn() -> Option<T> = () => {
+    const position = next.value;
 
-  new Iter<T>(() => {
-    if next.value >= list.len() {
+    if position >= list.len() || position >= end.value {
       return None;
     }
 
-    const value = list[next.value];
+    next.value = position + 1;
+    Some(list[position])
+  };
+  const back: fn() -> Option<T> = () => {
+    const limit = smaller(end.value, list.len());
 
-    next.value += 1;
-    Some(value)
-  })
+    if limit <= next.value {
+      return None;
+    }
+
+    end.value = limit - 1;
+    Some(list[limit - 1])
+  };
+
+  new DoubleEndedIter<T>(front, back)
 }
 
 fn list_index_of<T: Eq>(list: List<T>, value: T) -> Option<usize> {
@@ -491,7 +1287,7 @@ fn list_contains<T: Eq>(list: List<T>, value: T) -> bool {
 
 /// `slice.iter()`: an iterator over a copy of the elements, which may outlive the call that lent
 /// the slice (docs/adr/0079-references-and-borrowing.md, Q494).
-fn slice_iter<T>(slice: &[T]) -> Iter<T> {
+fn slice_iter<T>(slice: &[T]) -> DoubleEndedIter<T> {
   const copy = new List<T>();
 
   for value in slice {
@@ -512,61 +1308,795 @@ fn list_resize<T>(list: List<T>, len: usize, value: T) {
   }
 }
 
+/// The length of the runs the sorts order by insertion before merging them.
+const SORT_RUN: usize = 32;
+
+fn smaller(a: usize, b: usize) -> usize {
+  if a < b { a } else { b }
+}
+
+/// A stable sort: runs of `SORT_RUN` elements ordered by insertion, then merged bottom-up from
+/// the list into one buffer and back, so it makes no list but that buffer
+/// (docs/adr/0090-benchmarks.md). `list_sort_by` is the same with `compare` instead of `<`: a
+/// function value called for every comparison would make `sort` slower.
 fn list_sort<T: Ord>(list: List<T>) {
-  list_sort_by(list, (a: T, b: T) => a.compare(b));
-}
+  const count = list.len();
+  var start = 0usize;
 
-/// A stable merge sort.
-fn list_sort_by<T>(list: List<T>, compare: fn(T, T) -> Ordering) {
-  const sorted = merge_sort(list, compare);
+  while start < count {
+    const end = smaller(start + SORT_RUN, count);
 
-  for index in 0..sorted.len() {
-    list[index] = sorted[index];
+    for i in start + 1..end {
+      const item = list[i];
+      var j = i;
+
+      // Equal elements keep their order: only a smaller one moves before another.
+      while j > start && item < list[j - 1] {
+        list[j] = list[j - 1];
+        j -= 1;
+      }
+
+      list[j] = item;
+    }
+
+    start = end;
   }
-}
 
-fn merge_sort<T>(items: List<T>, compare: fn(T, T) -> Ordering) -> List<T> {
-  const count = items.len();
-
-  if count <= 1 {
-    return items;
+  if count <= SORT_RUN {
+    return;
   }
 
-  const left = new List<T>();
-  const right = new List<T>();
+  var source = list;
+  var target = new List<T>();
+  var in_list = true;
 
   for index in 0..count {
-    if index < count / 2 { left.push(items[index]); } else { right.push(items[index]); }
+    target.push(list[index]);
   }
 
-  const a = merge_sort(left, compare);
-  const b = merge_sort(right, compare);
-  const merged = new List<T>();
-  var i: usize = 0;
-  var j: usize = 0;
+  var width = SORT_RUN;
 
-  while i < a.len() && j < b.len() {
-    // Equal elements keep their order: the one from the left goes first.
-    if compare(b[j], a[i]) == Ordering::Less {
-      merged.push(b[j]);
-      j += 1;
-    } else {
-      merged.push(a[i]);
-      i += 1;
+  while width < count {
+    var left = 0usize;
+
+    while left < count {
+      const mid = smaller(left + width, count);
+      const right = smaller(left + 2 * width, count);
+      var i = left;
+      var j = mid;
+      var k = left;
+
+      while i < mid && j < right {
+        // The left one goes first when they are equal.
+        if source[j] < source[i] {
+          target[k] = source[j];
+          j += 1;
+        } else {
+          target[k] = source[i];
+          i += 1;
+        }
+
+        k += 1;
+      }
+
+      while i < mid {
+        target[k] = source[i];
+        i += 1;
+        k += 1;
+      }
+
+      while j < right {
+        target[k] = source[j];
+        j += 1;
+        k += 1;
+      }
+
+      left = right;
+    }
+
+    const merged = target;
+
+    target = source;
+    source = merged;
+    in_list = !in_list;
+    width *= 2;
+  }
+
+  if !in_list {
+    for index in 0..count {
+      list[index] = source[index];
+    }
+  }
+}
+
+fn list_sort_by<T>(list: List<T>, compare: fn(T, T) -> Ordering) {
+  const count = list.len();
+  var start = 0usize;
+
+  while start < count {
+    const end = smaller(start + SORT_RUN, count);
+
+    for i in start + 1..end {
+      const item = list[i];
+      var j = i;
+
+      while j > start && compare(item, list[j - 1]) == Ordering::Less {
+        list[j] = list[j - 1];
+        j -= 1;
+      }
+
+      list[j] = item;
+    }
+
+    start = end;
+  }
+
+  if count <= SORT_RUN {
+    return;
+  }
+
+  var source = list;
+  var target = new List<T>();
+  var in_list = true;
+
+  for index in 0..count {
+    target.push(list[index]);
+  }
+
+  var width = SORT_RUN;
+
+  while width < count {
+    var left = 0usize;
+
+    while left < count {
+      const mid = smaller(left + width, count);
+      const right = smaller(left + 2 * width, count);
+      var i = left;
+      var j = mid;
+      var k = left;
+
+      while i < mid && j < right {
+        if compare(source[j], source[i]) == Ordering::Less {
+          target[k] = source[j];
+          j += 1;
+        } else {
+          target[k] = source[i];
+          i += 1;
+        }
+
+        k += 1;
+      }
+
+      while i < mid {
+        target[k] = source[i];
+        i += 1;
+        k += 1;
+      }
+
+      while j < right {
+        target[k] = source[j];
+        j += 1;
+        k += 1;
+      }
+
+      left = right;
+    }
+
+    const merged = target;
+
+    target = source;
+    source = merged;
+    in_list = !in_list;
+    width *= 2;
+  }
+
+  if !in_list {
+    for index in 0..count {
+      list[index] = source[index];
+    }
+  }
+}
+
+// ---- The methods of `Option` and `Result` (docs/adr/0093-everyday-methods.md, Q619) -----------
+//
+// Called as methods: `value.ok_or(error)` is `option_ok_or(value, error)`. `take` and `replace`
+// change the place holding the value, which `mem::replace` does.
+
+/// The message of a failed `assert_eq`, or `None` (docs/adr/0093-everyday-methods.md, Q618).
+fn assert_eq_failure<T: Eq>(left: T, right: T) -> Option<String> {
+  if left == right { None } else { Some(f"assertion failed: left == right\n  left: {left:?}\n right: {right:?}") }
+}
+
+/// The message of a failed `assert_ne`, or `None`.
+fn assert_ne_failure<T: Eq>(left: T, right: T) -> Option<String> {
+  if left != right { None } else { Some(f"assertion failed: left != right\n  left: {left:?}\n right: {right:?}") }
+}
+
+fn option_ok_or<T, E>(value: Option<T>, error: E) -> Result<T, E> {
+  match value {
+    Some(found) => Ok(found),
+    None => Err(error),
+  }
+}
+
+fn option_ok_or_else<T, E>(value: Option<T>, error: fn() -> E) -> Result<T, E> {
+  match value {
+    Some(found) => Ok(found),
+    None => Err(error()),
+  }
+}
+
+fn option_or<T>(value: Option<T>, other: Option<T>) -> Option<T> {
+  match value {
+    Some(found) => Some(found),
+    None => other,
+  }
+}
+
+fn option_or_else<T>(value: Option<T>, other: fn() -> Option<T>) -> Option<T> {
+  match value {
+    Some(found) => Some(found),
+    None => other(),
+  }
+}
+
+fn option_and<T, U>(value: Option<T>, other: Option<U>) -> Option<U> {
+  match value {
+    Some(_) => other,
+    None => None,
+  }
+}
+
+fn option_xor<T>(value: Option<T>, other: Option<T>) -> Option<T> {
+  match value {
+    Some(found) => if other.is_none() { Some(found) } else { None },
+    None => other,
+  }
+}
+
+fn option_map_or<T, U>(value: Option<T>, default: U, f: fn(T) -> U) -> U {
+  match value {
+    Some(found) => f(found),
+    None => default,
+  }
+}
+
+fn option_map_or_else<T, U>(value: Option<T>, default: fn() -> U, f: fn(T) -> U) -> U {
+  match value {
+    Some(found) => f(found),
+    None => default(),
+  }
+}
+
+fn option_is_some_and<T>(value: Option<T>, f: fn(T) -> bool) -> bool {
+  match value {
+    Some(found) => f(found),
+    None => false,
+  }
+}
+
+fn option_is_none_or<T>(value: Option<T>, f: fn(T) -> bool) -> bool {
+  match value {
+    Some(found) => f(found),
+    None => true,
+  }
+}
+
+fn option_zip<T, U>(value: Option<T>, other: Option<U>) -> Option<(T, U)> {
+  match value {
+    Some(first) => match other {
+      Some(second) => Some((first, second)),
+      None => None,
+    },
+    None => None,
+  }
+}
+
+fn option_flatten<T>(value: Option<Option<T>>) -> Option<T> {
+  match value {
+    Some(inner) => inner,
+    None => None,
+  }
+}
+
+fn option_iter<T>(value: Option<T>) -> Iter<T> {
+  const left = new Cell<Option<T>>(value);
+
+  new Iter<T>(() => {
+    const found = left.value;
+
+    left.value = None;
+    found
+  })
+}
+
+/// The value, or the default of its type (docs/adr/0094-conversions-and-defaults.md, Q637).
+fn option_unwrap_or_default<T: Default>(value: Option<T>) -> T {
+  match value {
+    Some(found) => found,
+    None => T::default(),
+  }
+}
+
+/// The value, or the default of its type when it is an error.
+fn result_unwrap_or_default<T: Default, E>(value: Result<T, E>) -> T {
+  match value {
+    Ok(found) => found,
+    Err(_) => T::default(),
+  }
+}
+
+fn result_ok<T, E>(value: Result<T, E>) -> Option<T> {
+  match value {
+    Ok(found) => Some(found),
+    Err(_) => None,
+  }
+}
+
+fn result_err<T, E>(value: Result<T, E>) -> Option<E> {
+  match value {
+    Ok(_) => None,
+    Err(error) => Some(error),
+  }
+}
+
+fn result_and<T, E, U>(value: Result<T, E>, other: Result<U, E>) -> Result<U, E> {
+  match value {
+    Ok(_) => other,
+    Err(error) => Err(error),
+  }
+}
+
+fn result_or<T, E, F>(value: Result<T, E>, other: Result<T, F>) -> Result<T, F> {
+  match value {
+    Ok(found) => Ok(found),
+    Err(_) => other,
+  }
+}
+
+fn result_or_else<T, E, F>(value: Result<T, E>, other: fn(E) -> Result<T, F>) -> Result<T, F> {
+  match value {
+    Ok(found) => Ok(found),
+    Err(error) => other(error),
+  }
+}
+
+fn result_map_or<T, E, U>(value: Result<T, E>, default: U, f: fn(T) -> U) -> U {
+  match value {
+    Ok(found) => f(found),
+    Err(_) => default,
+  }
+}
+
+fn result_map_or_else<T, E, U>(value: Result<T, E>, default: fn(E) -> U, f: fn(T) -> U) -> U {
+  match value {
+    Ok(found) => f(found),
+    Err(error) => default(error),
+  }
+}
+
+fn result_is_ok_and<T, E>(value: Result<T, E>, f: fn(T) -> bool) -> bool {
+  match value {
+    Ok(found) => f(found),
+    Err(_) => false,
+  }
+}
+
+fn result_is_err_and<T, E>(value: Result<T, E>, f: fn(E) -> bool) -> bool {
+  match value {
+    Ok(_) => false,
+    Err(error) => f(error),
+  }
+}
+
+fn result_iter<T, E>(value: Result<T, E>) -> Iter<T> {
+  option_iter(result_ok(value))
+}
+
+// ---- The methods of slices, arrays and lists (docs/adr/0093-everyday-methods.md, Q622, Q624) ----
+//
+// Written once on slices: an array or a list calling one is lent as a slice of all its elements.
+
+fn slice_contains<T: Eq>(items: &[T], value: T) -> bool {
+  slice_index_of(items, value).is_some()
+}
+
+fn slice_index_of<T: Eq>(items: &[T], value: T) -> Option<usize> {
+  for index in 0..items.len() {
+    if items[index] == value {
+      return Some(index);
     }
   }
 
-  while i < a.len() {
-    merged.push(a[i]);
-    i += 1;
+  None
+}
+
+/// The index of `value` in sorted `items`, or `Err` with the index where it would go.
+fn slice_binary_search<T: Ord>(items: &[T], value: T) -> Result<usize, usize> {
+  var low = 0usize;
+  var high = items.len();
+
+  while low < high {
+    const middle = low + (high - low) / 2;
+    const found = items[middle];
+
+    if found < value {
+      low = middle + 1;
+    } else if found > value {
+      high = middle;
+    } else {
+      return Ok(middle);
+    }
   }
 
-  while j < b.len() {
-    merged.push(b[j]);
-    j += 1;
+  Err(low)
+}
+
+/// As `binary_search`, with `compare` telling how each element orders against the one sought.
+fn slice_binary_search_by<T>(items: &[T], compare: fn(T) -> Ordering) -> Result<usize, usize> {
+  var low = 0usize;
+  var high = items.len();
+
+  while low < high {
+    const middle = low + (high - low) / 2;
+
+    match compare(items[middle]) {
+      Ordering::Less => {
+        low = middle + 1;
+      }
+      Ordering::Greater => {
+        high = middle;
+      }
+      Ordering::Equal => return Ok(middle),
+    }
   }
 
-  merged
+  Err(low)
+}
+
+/// The first of the smallest elements, as Rust's `Iterator::min`.
+fn slice_min<T: Ord>(items: &[T]) -> Option<T> {
+  if items.is_empty() {
+    return None;
+  }
+
+  var best = items[0];
+
+  for index in 1..items.len() {
+    if items[index] < best {
+      best = items[index];
+    }
+  }
+
+  Some(best)
+}
+
+/// The last of the largest elements, as Rust's `Iterator::max`.
+fn slice_max<T: Ord>(items: &[T]) -> Option<T> {
+  if items.is_empty() {
+    return None;
+  }
+
+  var best = items[0];
+
+  for index in 1..items.len() {
+    if items[index] >= best {
+      best = items[index];
+    }
+  }
+
+  Some(best)
+}
+
+/// Copies the elements of a slice into a new list.
+fn slice_to_list<T>(items: &[T]) -> List<T> {
+  const copy = new List<T>();
+
+  for value in items {
+    copy.push(value);
+  }
+
+  copy
+}
+
+/// Puts the elements of `sorted` back into `items`, which has as many.
+fn slice_copy_back<T>(items: &mut [T], sorted: List<T>) {
+  for index in 0..sorted.len() {
+    items[index] = sorted[index];
+  }
+}
+
+fn slice_sort<T: Ord>(items: &mut [T]) {
+  const copy = slice_to_list(items);
+
+  list_sort(copy);
+  slice_copy_back(items, copy);
+}
+
+fn slice_sort_by<T>(items: &mut [T], compare: fn(T, T) -> Ordering) {
+  const copy = slice_to_list(items);
+
+  list_sort_by(copy, compare);
+  slice_copy_back(items, copy);
+}
+
+/// Stable, by the key each element gives, which is computed once per comparison as Rust's.
+fn slice_sort_by_key<T, K: Ord>(items: &mut [T], key: fn(T) -> K) {
+  slice_sort_by(items, (a, b) => key(a).compare(key(b)));
+}
+
+fn slice_reverse<T>(items: &mut [T]) {
+  var low = 0usize;
+  var high = items.len();
+
+  while low + 1 < high {
+    high -= 1;
+
+    const first = items[low];
+
+    items[low] = items[high];
+    items[high] = first;
+    low += 1;
+  }
+}
+
+fn slice_fill<T>(items: &mut [T], value: T) {
+  for index in 0..items.len() {
+    items[index] = value;
+  }
+}
+
+/// Swaps two elements; an index past the end panics.
+fn slice_swap<T>(items: &mut [T], a: usize, b: usize) {
+  const first = items[a];
+
+  items[a] = items[b];
+  items[b] = first;
+}
+
+/// Copies `source`, which must have as many elements, into `items`.
+fn slice_copy_from_slice<T>(items: &mut [T], source: &[T]) {
+  if items.len() != source.len() {
+    panic(`source slice length (${source.len()}) does not match destination slice length (${items.len()})`);
+  }
+
+  for index in 0..source.len() {
+    items[index] = source[index];
+  }
+}
+
+/// `==` on lists and arrays: as many elements, equal one by one (docs/adr/0093-everyday-methods.md,
+/// Q623).
+fn slice_equals<T: Eq>(a: &[T], b: &[T]) -> bool {
+  if a.len() != b.len() {
+    return false;
+  }
+
+  for index in 0..a.len() {
+    if a[index] != b[index] {
+      return false;
+    }
+  }
+
+  true
+}
+
+/// The order of lists and arrays: by the first element that differs, then by length.
+fn slice_compare<T: Ord>(a: &[T], b: &[T]) -> Ordering {
+  const common = smaller(a.len(), b.len());
+
+  for index in 0..common {
+    const order = a[index].compare(b[index]);
+
+    if order != Ordering::Equal {
+      return order;
+    }
+  }
+
+  a.len().compare(b.len())
+}
+
+fn slice_hash<T: Hash>(items: &[T]) -> u64 {
+  var hash = items.len().hash();
+
+  for value in items {
+    hash = (hash ^ value.hash()).hash();
+  }
+
+  hash
+}
+
+/// `==` on maps: the same keys, with equal values, in any order.
+/// `a == b` of sets: the same elements, in any order (docs/adr/0095-collections.md, Q647).
+fn set_equals<T: Hash>(a: HashSet<T>, b: HashSet<T>) -> bool {
+  a.len() == b.len() && a.is_subset(b)
+}
+
+fn map_equals<K: Hash, V: Eq>(a: Map<K, V>, b: Map<K, V>) -> bool {
+  if a.len() != b.len() {
+    return false;
+  }
+
+  for entry in a {
+    if b.get(entry.key) != Some(entry.value) {
+      return false;
+    }
+  }
+
+  true
+}
+
+fn list_extend<T>(list: List<T>, values: Iter<T>) {
+  for value in values {
+    list.push(value);
+  }
+}
+
+/// Moves every element of `other` to the end of `list`, leaving `other` empty. A list appended to
+/// itself is doubled, since there is no other list to empty.
+fn list_append<T>(list: List<T>, other: List<T>) {
+  const count = other.len();
+
+  for index in 0..count {
+    list.push(other[index]);
+  }
+
+  if other.len() == count {
+    other.clear();
+  }
+}
+
+fn list_truncate<T>(list: List<T>, len: usize) {
+  while list.len() > len {
+    list.pop();
+  }
+}
+
+/// Keeps the elements for which `keep` returns `true`, in their order.
+fn list_retain<T>(list: List<T>, keep: fn(T) -> bool) {
+  var kept = 0usize;
+
+  for index in 0..list.len() {
+    const value = list[index];
+
+    if keep(value) {
+      list[kept] = value;
+      kept += 1;
+    }
+  }
+
+  list_truncate(list, kept);
+}
+
+/// Removes the elements equal to the one before them.
+fn list_dedup<T: Eq>(list: List<T>) {
+  if list.is_empty() {
+    return;
+  }
+
+  var kept = 1usize;
+
+  for index in 1..list.len() {
+    const value = list[index];
+
+    if value != list[kept - 1] {
+      list[kept] = value;
+      kept += 1;
+    }
+  }
+
+  list_truncate(list, kept);
+}
+
+/// The elements from `at` on, removed from `list`.
+fn list_split_off<T>(list: List<T>, at: usize) -> List<T> {
+  if at > list.len() {
+    panic(`\`at\` split index (is ${at}) should be <= len (is ${list.len()})`);
+  }
+
+  const tail = new List<T>();
+
+  for index in at..list.len() {
+    tail.push(list[index]);
+  }
+
+  list_truncate(list, at);
+  tail
+}
+
+/// The elements from `start` to `end`, removed from `list`; those after them move down.
+fn list_drain<T>(list: List<T>, start: usize, end: usize) -> List<T> {
+  if start > end {
+    panic(`slice index starts at ${start} but ends at ${end}`);
+  }
+
+  if end > list.len() {
+    panic(`range end index ${end} out of range for slice of length ${list.len()}`);
+  }
+
+  const removed = new List<T>();
+  const count = end - start;
+
+  for index in start..end {
+    removed.push(list[index]);
+  }
+
+  for index in end..list.len() {
+    list[index - count] = list[index];
+  }
+
+  list_truncate(list, list.len() - count);
+  removed
+}
+
+/// A list with room for `capacity` elements, as Rust's `Vec::with_capacity`.
+fn list_with_capacity<T>(capacity: usize) -> List<T> {
+  const list = new List<T>();
+
+  list.reserve(capacity);
+  list
+}
+
+/// Every run of `size` consecutive elements, as copies; a size of 0 panics.
+fn list_windows<T>(list: List<T>, size: usize) -> Iter<List<T>> {
+  if size == 0 {
+    panic("window size must be non-zero");
+  }
+
+  const next = new Cell<usize>(0);
+
+  new Iter<List<T>>(() => {
+    if next.value + size > list.len() {
+      return None;
+    }
+
+    const window = new List<T>();
+
+    for index in next.value..next.value + size {
+      window.push(list[index]);
+    }
+
+    next.value += 1;
+    Some(window)
+  })
+}
+
+/// The elements in lists of `size`, the last one shorter; a size of 0 panics.
+fn list_chunks<T>(list: List<T>, size: usize) -> Iter<List<T>> {
+  if size == 0 {
+    panic("chunk size must be non-zero");
+  }
+
+  const next = new Cell<usize>(0);
+
+  new Iter<List<T>>(() => {
+    if next.value >= list.len() {
+      return None;
+    }
+
+    const chunk = new List<T>();
+    const end = smaller(next.value + size, list.len());
+
+    for index in next.value..end {
+      chunk.push(list[index]);
+    }
+
+    next.value = end;
+    Some(chunk)
+  })
+}
+
+/// The elements of the lists of `lists`, one list after another.
+fn list_concat<T>(lists: List<List<T>>) -> List<T> {
+  const all = new List<T>();
+
+  for list in lists {
+    for value in list {
+      all.push(value);
+    }
+  }
+
+  all
 }
 
 fn list_join(list: List<String>, separator: String) -> String {
@@ -584,7 +2114,7 @@ fn list_join(list: List<String>, separator: String) -> String {
 }
 
 /// `text.chars()` outside of `for`.
-fn string_chars(text: String) -> Iter<char> {
+fn string_chars(text: String) -> DoubleEndedIter<char> {
   const chars = new List<char>();
 
   for c in text.chars() {
@@ -595,7 +2125,7 @@ fn string_chars(text: String) -> Iter<char> {
 }
 
 /// `text.bytes()` outside of `for`.
-fn string_bytes(text: String) -> Iter<u8> {
+fn string_bytes(text: String) -> DoubleEndedIter<u8> {
   const bytes = new List<u8>();
 
   for b in text.bytes() {
@@ -710,5 +2240,153 @@ pub class Task<T> {
       Some(value) => value,
       None => panic("the task has not finished"),
     }
+  }
+}
+
+/// `map[key]`: the value of a key, which must be present, as Rust's (Q639). `get` gives an
+/// `Option` instead.
+impl<K, V> Index<K, V> for Map<K, V> {
+  fn index(self, key: K) -> V {
+    match self.get(key) {
+      Some(value) => value,
+      None => panic("no entry found for key"),
+    }
+  }
+}
+
+/// An iterator is iterated as itself (Q645).
+impl<T> Iterable<T> for Iter<T> {
+  fn iter(self) -> Iter<T> {
+    self
+  }
+}
+
+/// A set of values without repeats, as Rust's `HashSet`, on a `Map` of its values, so it keeps
+/// the order in which values were first inserted (docs/adr/0095-collections.md, Q647). The
+/// operations between two sets give iterators of copies of the elements, since Rust's lend both.
+pub class HashSet<T: Hash> impl Eq, Iterable<T>, FromIterator<T>, Default {
+  prv const map: Map<T, ()>;
+
+  pub fn new(self) {
+    self.map = new Map<T, ()>();
+  }
+
+  /// An empty set; the map behind it grows as it needs.
+  pub fn with_capacity(_capacity: usize) -> HashSet<T> {
+    new HashSet<T>()
+  }
+
+  /// The set of the values of a list, the first of equal ones kept.
+  pub fn from(values: List<T>) -> HashSet<T> {
+    HashSet::from_iter(values.iter())
+  }
+
+  pub fn from_iter(iter: Iter<T>) -> HashSet<T> {
+    const set = new HashSet<T>();
+
+    set.extend(iter);
+    set
+  }
+
+  pub fn default() -> HashSet<T> {
+    new HashSet<T>()
+  }
+
+  pub fn len(self) -> usize {
+    self.map.len()
+  }
+
+  pub fn is_empty(self) -> bool {
+    self.map.is_empty()
+  }
+
+  /// Adds `value`, unless an equal one is in the set; whether it was added.
+  pub fn insert(self, value: T) -> bool {
+    if self.map.contains_key(value) {
+      return false;
+    }
+
+    self.map.insert(value, ());
+    true
+  }
+
+  /// Removes the value equal to `value`; whether there was one.
+  pub fn remove(self, value: T) -> bool {
+    self.map.remove(value).is_some()
+  }
+
+  pub fn contains(self, value: T) -> bool {
+    self.map.contains_key(value)
+  }
+
+  /// The value of the set equal to `value`.
+  pub fn get(self, value: T) -> Option<T> {
+    self.map.get_key_value(value).map((pair) => pair.0)
+  }
+
+  /// Removes the value of the set equal to `value`, and gives it.
+  pub fn take(self, value: T) -> Option<T> {
+    self.map.remove_entry(value).map((pair) => pair.0)
+  }
+
+  pub fn clear(self) {
+    self.map.clear();
+  }
+
+  /// The values in the order they were first inserted.
+  pub fn iter(self) -> Iter<T> {
+    self.map.keys()
+  }
+
+  /// Keeps the values for which `keep` holds.
+  pub fn retain(self, keep: fn(T) -> bool) {
+    self.map.retain((value, _unit) => keep(value));
+  }
+
+  pub fn extend(self, values: Iter<T>) {
+    for value in values {
+      self.insert(value);
+    }
+  }
+
+  /// The values of this set, then those of `other` that it lacks.
+  pub fn union(self, other: HashSet<T>) -> Iter<T> {
+    const own = self;
+
+    self.iter().chain(other.iter().filter((value) => !own.contains(value)))
+  }
+
+  /// The values of this set that `other` has too.
+  pub fn intersection(self, other: HashSet<T>) -> Iter<T> {
+    self.iter().filter((value) => other.contains(value))
+  }
+
+  /// The values of this set that `other` lacks.
+  pub fn difference(self, other: HashSet<T>) -> Iter<T> {
+    self.iter().filter((value) => !other.contains(value))
+  }
+
+  /// The values that only one of the two sets has, those of this one first.
+  pub fn symmetric_difference(self, other: HashSet<T>) -> Iter<T> {
+    self.difference(other).chain(other.difference(self))
+  }
+
+  /// Whether every value of this set is in `other`.
+  pub fn is_subset(self, other: HashSet<T>) -> bool {
+    self.len() <= other.len() && self.iter().all((value) => other.contains(value))
+  }
+
+  pub fn is_superset(self, other: HashSet<T>) -> bool {
+    other.is_subset(self)
+  }
+
+  /// Whether the sets have no value in common.
+  pub fn is_disjoint(self, other: HashSet<T>) -> bool {
+    self.iter().all((value) => !other.contains(value))
+  }
+
+  /// The same values, in any order: `a == b` of sets.
+  pub fn equals(self, other: HashSet<T>) -> bool {
+    set_equals(self, other)
   }
 }

@@ -21,19 +21,32 @@ fn parse_age(s: String) -> Result<i32, String> {
 - On `Option`: if the value is `None`, the function returns `None`; otherwise it evaluates
   to the `Some` value.
 - `?` is only valid inside a function whose return type is compatible.
-- The error type must match the function's `E`, with two conversions (F2), as in Rust's `?`
-  into `Box<dyn Error>`: an error whose type implements an interface `E` becomes an `E`, and a
-  `String` error becomes an `Error` when `E` is `Error`
-  (`fn parse(s: String) -> Result<i32, Error> { const n = s.parse_i32()?; Ok(n) }`).
-- Any other conversion is explicit, and the diagnostic must suggest it, with a `match` or with
+- The error type must match the function's `E`, with three conversions, as in Rust's `?`: an
+  error whose type implements an interface `E` becomes an `E`, and a `String` error becomes an
+  `Error` when `E` is `Error`, as Rust's into `Box<dyn Error>`
+  (`fn parse(s: String) -> Result<i32, Error> { const n = s.parse_i32()?; Ok(n) }`); otherwise,
+  an error of type `X` becomes `E::from(e)` when `E` implements
+  [`From<X>`](05-interfaces-generics.md#conversions)
+  ([ADR-0094](../adr/0094-conversions-and-defaults.md), Q635):
+
+```sag
+enum AppError { Parse(String), Io(io::Error) }
+
+impl From<String> for AppError {
+  fn from(message: String) -> AppError { AppError::Parse(message) }
+}
+
+fn port(text: String) -> Result<i32, AppError> {
+  Ok(text.parse_i32()?)   // a `String` error becomes an `AppError`
+}
+```
+
+- Any other conversion is explicit, and the diagnostic (`E0321`) suggests implementing `From`, or
   `map_err` ([08-closures.md](08-closures.md)):
 
 ```sag
 const text = fs::read(path).map_err((e) => AppError::Io(e))?;
 ```
-
-Automatic conversion through a `From<T>` interface is post-MVP; it will be designed together
-with implementing the same generic interface several times on one type.
 
 ## Panics
 
@@ -42,6 +55,21 @@ message with the source file and line to stderr and **aborts the process**.
 
 `panic(message)` (prelude) panics explicitly; it never returns, so it fits where any type is
 expected: `_ => panic("unsupported shape"),`.
+
+Assertions ([ADR-0093](../adr/0093-everyday-methods.md), Q618) are prelude functions that panic,
+in every build mode, at the file and line of their call:
+
+| Call | Panics when | Message |
+|---|---|---|
+| `assert(condition)` | `condition` is `false` | `assertion failed` |
+| `assert_eq(left, right)` | `left != right` (`T: Eq`) | `assertion failed: left == right`, then `  left: ` and ` right: ` with the debug form of each |
+| `assert_ne(left, right)` | `left == right` (`T: Eq`) | `assertion failed: left != right`, then both values |
+| `unreachable()` | always | `entered unreachable code` |
+| `todo()` | always | `not yet implemented` |
+
+`unreachable()` and `todo()` never return, as `panic`. There is no message argument: a message
+is `if !condition { panic(f"...") }`. A function of a program with one of these names takes
+their place in that program.
 
 Operations that always panic, in every build mode:
 

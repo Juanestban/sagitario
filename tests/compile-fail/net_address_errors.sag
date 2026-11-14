@@ -1,0 +1,14 @@
+// Only `std::net` builds its addresses from their parts and makes its errors, and an address is
+// changed through a `var` (docs/adr/0100-networking.md, Q690–Q692).
+use std::net::{AddrParseError, Ipv4Addr, Ipv6Addr, SocketAddrV4};
+
+fn main() {
+  const _a = Ipv4Addr { bytes: [1, 2, 3, 4] }; //~ ERROR E0205
+  const _b = new AddrParseError("invalid"); //~ ERROR E0300
+  const _c = Ipv4Addr::new(256, 0, 0, 1); //~ ERROR E0302
+  const _d = Ipv4Addr::LOCALHOST.BROADCAST; //~ ERROR E0316
+  const _e = Ipv4Addr::LOCALHOST < Ipv6Addr::LOCALHOST; //~ ERROR E0300
+  const socket = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 80);
+
+  socket.set_port(81); //~ ERROR E0313
+}

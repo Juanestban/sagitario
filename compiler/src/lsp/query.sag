@@ -1,7 +1,8 @@
 //! What is under the cursor: the innermost expression, type or binding at an offset of a module,
 //! its type for hover, and where it is declared (docs/adr/0058-language-server.md).
 
-use pkg::ast::{Block, Expr, ExprKind, FnDecl, Ident, Item, Module, Package, Path, Pattern, PatternKind, Stmt, TemplatePart, TypeExpr, TypeExprKind, UseTree, UseTreeKind};
+use pkg::ast::{Block, Expr, ExprKind, FnDecl, Ident, Item, Module, Package, Path, Pattern, PatternKind, Stmt, TypeExpr, TypeExprKind, UseTree, UseTreeKind};
+use pkg::ast;
 use pkg::lsp::analysis::Analysis;
 use pkg::resolve::{EnumKind, ItemRef, Res, Resolution, TypeItem, TypeRes};
 use pkg::span::Span;
@@ -165,6 +166,11 @@ class Finder {
         }
       }
       TypeExprKind::Unit => {}
+      TypeExprKind::Tuple(elems) => {
+        for elem in elems {
+          self.type_expr(elem);
+        }
+      }
     }
   }
 
@@ -183,6 +189,7 @@ class Finder {
   prv fn item(self, item: Item) {
     match item {
       Item::Fn(decl) => self.function(decl),
+      Item::Static(decl) => self.function(decl.init),
       Item::Struct(decl) => {
         self.name(decl.name);
 
@@ -295,7 +302,10 @@ class Finder {
     for stmt in block.stmts {
       match stmt {
         Stmt::Let(decl) => {
-          self.name(decl.name);
+          // The hidden binding of a tuple pattern spans the pattern, whose names come next.
+          if !ast::is_hidden(decl.name.name) {
+            self.name(decl.name);
+          }
 
           if let Some(ty) = decl.ty {
             self.type_expr(ty);
@@ -340,7 +350,7 @@ class Finder {
           self.pattern(field.pattern);
         }
       }
-      PatternKind::Or(alternatives) => {
+      PatternKind::Or(alternatives) | PatternKind::Elements { elems: alternatives, .. } => {
         for alternative in alternatives {
           self.pattern(alternative);
         }
@@ -367,7 +377,7 @@ class Finder {
       ExprKind::Path(path) => self.path_prefix(path),
       ExprKind::Template(parts) => {
         for part in parts {
-          if let TemplatePart::Expr(inner) = part {
+          for inner in part.exprs() {
             self.expr(inner);
           }
         }
@@ -385,14 +395,18 @@ class Finder {
         self.expr(base);
         self.expr(index);
       }
-      ExprKind::StructLit { path, fields } => {
+      ExprKind::StructLit { path, fields, base } => {
         self.path_prefix(path);
 
         for field in fields {
           self.expr(field.value);
         }
+
+        if let Some(found) = base {
+          self.expr(found);
+        }
       }
-      ExprKind::ArrayLit(elems) => self.exprs(elems),
+      ExprKind::ArrayLit(elems) | ExprKind::Tuple(elems) => self.exprs(elems),
       ExprKind::ArrayRepeat { value, .. } => self.expr(value),
       ExprKind::Unary { operand, .. } => self.expr(operand),
       ExprKind::AddrOf { place, .. } => self.expr(place),
@@ -458,7 +472,10 @@ class Finder {
       }
       ExprKind::Loop(body) => self.block(body),
       ExprKind::For { variable, iter, body } => {
-        self.name(variable);
+        if !ast::is_hidden(variable.name) {
+          self.name(variable);
+        }
+
         self.expr(iter);
         self.block(body);
       }
@@ -674,6 +691,11 @@ fn declaration_text(analysis: Analysis, module: Module, ident: Ident) -> Option<
           });
         }
       }
+      Item::Static(decl) => {
+        if decl.name.span.start == at {
+          return Some(static_text(analysis, decl.name.name));
+        }
+      }
       Item::Extern(_) | Item::Impl(_) => {}
     }
   }
@@ -681,7 +703,26 @@ fn declaration_text(analysis: Analysis, module: Module, ident: Ident) -> Option<
   None
 }
 
-/// `const NAME: Type` for a module-level constant of this module.
+/// `static NAME: Type`, `static var ...` or `@thread_local static var ...` for a static of this
+/// module.
+fn static_text(analysis: Analysis, name: String) -> String {
+  if let Some(package) = analysis.package {
+    if let Some(resolution) = analysis.resolution {
+      for index in 0..resolution.statics.len() {
+        if let Some(text) = item_text(analysis, ItemRef::Static(index as u32)) {
+          if let Some(decl) = resolution.static_decl(package, index as u32) {
+            if decl.name.name == name {
+              return text;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  "static " + name
+}
+
 fn const_text(analysis: Analysis, resolution: Resolution, typed: TypedModule, name: String) -> String {
   if let Some(package) = analysis.package {
     for index in 0..resolution.consts.len() {
@@ -816,6 +857,7 @@ pub fn item_span(analysis: Analysis, item: ItemRef) -> Option<Span> {
     ItemRef::Fn(id) => Some(resolution.fn_decl(package, id)?.name.span),
     ItemRef::Extern(id) => Some(resolution.extern_decl(package, id)?.name.span),
     ItemRef::Const(id) => Some(resolution.const_decl(package, id)?.name.span),
+    ItemRef::Static(id) => Some(resolution.static_decl(package, id)?.name.span),
     ItemRef::Type(found) => type_item_span(package, resolution, found),
     ItemRef::Std(_) => None,
   }
@@ -835,6 +877,21 @@ pub fn item_text(analysis: Analysis, item: ItemRef) -> Option<String> {
       const ty = analysis.typed?.const_types.get(id as usize)?;
 
       Some("const " + name + ": " + types::text(ty))
+    }
+    ItemRef::Static(id) => {
+      const decl = resolution.static_decl(analysis.package?, id)?;
+      const ty = analysis.typed?.static_type(resolution, id)?;
+      var keyword = if decl.mutable { "static var " } else { "static " };
+
+      if decl.thread_local {
+        keyword = "@thread_local " + keyword;
+      }
+
+      if decl.extern_c {
+        keyword = "extern " + keyword;
+      }
+
+      Some(keyword + decl.name.name + ": " + types::text(ty))
     }
     ItemRef::Extern(id) => Some("extern fn " + resolution.extern_decl(analysis.package?, id)?.name.name),
     ItemRef::Std(_) => None,
@@ -864,13 +921,14 @@ fn res_span(package: Package, resolution: Resolution, function: Option<u32>, res
     Res::Extern(id) => Some(resolution.extern_decl(package, id)?.name.span),
     Res::Struct(id) => Some(resolution.struct_decl(package, id)?.name.span),
     Res::Const(id) => Some(resolution.const_decl(package, id)?.name.span),
+    Res::Static(id) => Some(resolution.static_decl(package, id)?.name.span),
     Res::Variant(variant) => match variant.owner {
       EnumKind::User(id) => Some(resolution.enum_decl(package, id)?.variants.get(variant.index as usize)?.name.span),
       _ => None,
     },
     // The enum it converts to.
     Res::FromRaw(id) => Some(resolution.enum_decl(package, id)?.name.span),
-    Res::Builtin(_) => None,
+    Res::Builtin(_) | Res::InterfaceFn { .. } => None,
   }
 }
 

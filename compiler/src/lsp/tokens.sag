@@ -4,7 +4,8 @@
 //! format string or a template, as rust-analyzer does in Rust's format strings, also the
 //! variables, parameters, fields and methods, which would otherwise take the color of the string.
 
-use pkg::ast::{Block, Expr, ExprKind, FnDecl, Ident, Item, Module, Path, Pattern, PatternKind, Stmt, TemplatePart, TypeExpr, TypeExprKind, UseTree, UseTreeKind};
+use pkg::ast::{Block, ConstDecl, Expr, ExprKind, FnDecl, Ident, Item, Module, Path, Pattern, PatternKind, Stmt, TypeExpr, TypeExprKind, UseTree, UseTreeKind};
+use pkg::ast;
 use pkg::lsp::analysis::Analysis;
 use pkg::lsp::json;
 use pkg::lsp::json::{Json, member};
@@ -25,9 +26,12 @@ const VARIABLE: u32 = 8;
 const PARAMETER: u32 = 9;
 const PROPERTY: u32 = 10;
 const METHOD: u32 = 11;
+/// A built-in macro and its `!`, as rust-analyzer gives them
+/// (docs/adr/0103-build-scripts-and-binding-generation.md, Q723).
+const MACRO: u32 = 12;
 
 pub fn legend() -> Json {
-  const names = List::from(["namespace", "type", "class", "enum", "interface", "struct", "function", "enumMember", "variable", "parameter", "property", "method"]);
+  const names = List::from(["namespace", "type", "class", "enum", "interface", "struct", "function", "enumMember", "variable", "parameter", "property", "method", "macro"]);
   const types: List<Json> = new List();
 
   for name in names {
@@ -61,10 +65,10 @@ fn item_kind(item: ItemRef) -> Option<u32> {
     ItemRef::Std(StdItem::Root) => Some(NAMESPACE),
     ItemRef::Std(StdItem::Ffi) => Some(NAMESPACE),
     ItemRef::Std(StdItem::CType(_)) => Some(TYPE),
-    ItemRef::Std(StdItem::CString) => Some(CLASS),
+    ItemRef::Std(StdItem::CString) | ItemRef::Std(StdItem::Atomic) => Some(CLASS),
     ItemRef::Std(_) => Some(FUNCTION),
-    // Constants keep the color of their SCREAMING_SNAKE_CASE names.
-    ItemRef::Const(_) => None,
+    // Constants and statics keep the color of their SCREAMING_SNAKE_CASE names.
+    ItemRef::Const(_) | ItemRef::Static(_) => None,
   }
 }
 
@@ -167,11 +171,21 @@ class Collector {
       Some(Res::Extern(_)) => Some(FUNCTION),
       Some(Res::Variant(_)) => Some(ENUM_MEMBER),
       Some(Res::Struct(_)) => Some(STRUCT),
+      // A constant, of a module or of a type (`Point::ORIGIN`): the legend has no kind of its own.
+      Some(Res::Const(_)) => Some(VARIABLE),
       _ => None,
     };
 
     if let Some(last) = path.segments.last() {
       self.add(last, kind);
+    }
+  }
+
+  /// The types and values of the constants of a type.
+  prv fn consts(self, consts: List<ConstDecl>) {
+    for decl in consts {
+      self.type_expr(decl.ty);
+      self.expr(decl.value);
     }
   }
 
@@ -260,6 +274,11 @@ class Collector {
         }
       }
       TypeExprKind::Unit => {}
+      TypeExprKind::Tuple(elems) => {
+        for elem in elems {
+          self.type_expr(elem);
+        }
+      }
     }
   }
 
@@ -280,6 +299,8 @@ class Collector {
             self.type_expr(field.ty);
           }
 
+          self.consts(decl.consts);
+
           for function in decl.functions {
             self.function(function);
           }
@@ -288,6 +309,8 @@ class Collector {
           for ty in decl.impls {
             self.type_expr(ty);
           }
+
+          self.consts(decl.consts);
 
           for function in decl.functions {
             self.function(function);
@@ -305,6 +328,8 @@ class Collector {
           for field in decl.fields {
             self.type_expr(field.ty);
           }
+
+          self.consts(decl.consts);
 
           for function in decl.functions {
             self.function(function);
@@ -338,6 +363,7 @@ class Collector {
           self.type_expr(decl.ty);
           self.expr(decl.value);
         }
+        Item::Static(decl) => self.function(decl.init),
         Item::Impl(block) => {
           self.type_expr(block.implemented);
           self.type_expr(block.target);
@@ -374,8 +400,11 @@ class Collector {
             self.type_expr(ty);
           }
 
+          // What the parser wrote for a tuple pattern has no tokens of its own.
           if let Some(init) = decl.init {
-            self.expr(init);
+            if !ast::is_hidden_read(init) {
+              self.expr(init);
+            }
           }
         }
         Stmt::Assign { target, value, .. } => {
@@ -408,7 +437,7 @@ class Collector {
           self.pattern(field.pattern);
         }
       }
-      PatternKind::Or(alternatives) => {
+      PatternKind::Or(alternatives) | PatternKind::Elements { elems: alternatives, .. } => {
         for alternative in alternatives {
           self.pattern(alternative);
         }
@@ -433,7 +462,7 @@ class Collector {
         self.interpolations += 1;
 
         for part in parts {
-          if let TemplatePart::Expr(inner) = part {
+          for inner in part.exprs() {
             self.expr(inner);
           }
         }
@@ -457,14 +486,18 @@ class Collector {
         self.expr(base);
         self.expr(index);
       }
-      ExprKind::StructLit { path, fields } => {
+      ExprKind::StructLit { path, fields, base } => {
         self.value_path(path, expr.id);
 
         for field in fields {
           self.expr(field.value);
         }
+
+        if let Some(found) = base {
+          self.expr(found);
+        }
       }
-      ExprKind::ArrayLit(elems) => self.exprs(elems),
+      ExprKind::ArrayLit(elems) | ExprKind::Tuple(elems) => self.exprs(elems),
       ExprKind::ArrayRepeat { value, .. } => self.expr(value),
       ExprKind::Unary { operand, .. } => self.expr(operand),
       ExprKind::AddrOf { place, .. } => self.expr(place),
@@ -551,6 +584,10 @@ pub fn semantic_tokens(analysis: Analysis, module: Module, module_index: usize) 
   collector.module(module);
 
   const tokens = collector.tokens;
+
+  for span in module.macros {
+    tokens.push(Token { span: span, kind: MACRO });
+  }
 
   // In source order; the walk visits nodes out of it.
   tokens.sort_by((a, b) => a.span.start.compare(b.span.start));

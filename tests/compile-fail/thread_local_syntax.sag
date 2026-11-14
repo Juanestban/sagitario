@@ -1,0 +1,13 @@
+// `@thread_local` applies only to `static var`, without arguments (docs/adr/0083-global-state.md,
+// Q529).
+
+@thread_local //~ ERROR E0105
+static FIXED: i32 = 1;
+
+@thread_local("x") //~ ERROR E0105
+static var NAMED: i32 = 0;
+
+@thread_local //~ ERROR E0105
+fn helper() {}
+
+fn main() {}

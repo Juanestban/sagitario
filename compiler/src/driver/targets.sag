@@ -34,8 +34,8 @@ const ANDROID_API: u32 = 24;
 /// The minimum iOS version.
 const IOS_VERSION: String = "13.0";
 
-fn lp64() -> TargetInfo {
-  TargetInfo { pointer_width: 64, long_is_32: false, char_is_unsigned: false }
+fn info(os: String, arch: String, pointer_width: u32, char_is_unsigned: bool) -> TargetInfo {
+  TargetInfo { os: os, arch: arch, pointer_width: pointer_width, long_is_32: pointer_width == 32, char_is_unsigned: char_is_unsigned }
 }
 
 fn target(name: String, description: String, platform: Platform, arch: String, simulator: bool, info: TargetInfo) -> Target {
@@ -44,16 +44,33 @@ fn target(name: String, description: String, platform: Platform, arch: String, s
 
 pub fn targets() -> List<Target> {
   List::from([
-    target("aarch64-linux-android", "Android on 64-bit ARM", Platform::Android, "aarch64-linux-android", false, TargetInfo { pointer_width: 64, long_is_32: false, char_is_unsigned: true }),
-    target("armv7-linux-androideabi", "Android on 32-bit ARM", Platform::Android, "armv7a-linux-androideabi", false, TargetInfo { pointer_width: 32, long_is_32: true, char_is_unsigned: true }),
-    target("x86_64-linux-android", "Android on x86-64 (the emulator)", Platform::Android, "x86_64-linux-android", false, lp64()),
-    target("aarch64-apple-ios", "iOS devices", Platform::Ios, "arm64-apple-ios", false, lp64()),
-    target("aarch64-apple-ios-sim", "the iOS simulator on Apple silicon", Platform::Ios, "arm64-apple-ios", true, lp64()),
-    target("x86_64-apple-ios", "the iOS simulator on Intel Macs", Platform::Ios, "x86_64-apple-ios", true, lp64()),
+    target("aarch64-linux-android", "Android on 64-bit ARM", Platform::Android, "aarch64-linux-android", false, info("android", "aarch64", 64, true)),
+    target("armv7-linux-androideabi", "Android on 32-bit ARM", Platform::Android, "armv7a-linux-androideabi", false, info("android", "arm", 32, true)),
+    target("x86_64-linux-android", "Android on x86-64 (the emulator)", Platform::Android, "x86_64-linux-android", false, info("android", "x86_64", 64, false)),
+    target("aarch64-apple-ios", "iOS devices", Platform::Ios, "arm64-apple-ios", false, info("ios", "aarch64", 64, false)),
+    target("aarch64-apple-ios-sim", "the iOS simulator on Apple silicon", Platform::Ios, "arm64-apple-ios", true, info("ios", "aarch64", 64, false)),
+    target("x86_64-apple-ios", "the iOS simulator on Intel Macs", Platform::Ios, "x86_64-apple-ios", true, info("ios", "x86_64", 64, false)),
   ])
 }
 
 /// The target called `name`, or an error listing the supported ones.
+/// The hosts with a seed of their own (docs/adr/0107-a-seed-per-host.md, Q765).
+pub const SEED_HOSTS: String = "windows-x86_64 linux-x86_64 linux-aarch64 macos-aarch64 macos-x86_64";
+
+/// The host `name` of `--seed-host`, as `TargetInfo::host` finds it on that host: C's `long` has
+/// 32 bits on Windows alone, and C's `char` is unsigned on Linux for ARM alone (Q766).
+pub fn seed_host(name: String) -> Option<TargetInfo> {
+  if !SEED_HOSTS.split(" ").contains(name) {
+    return None;
+  }
+
+  const parts = name.split("-");
+  const os = parts[0];
+  const arch = parts[1];
+
+  Some(TargetInfo { os: os, arch: arch, pointer_width: 64, long_is_32: os == "windows", char_is_unsigned: os == "linux" && arch == "aarch64" })
+}
+
 pub fn find(name: String) -> Result<Target, i32> {
   const names: List<String> = new List();
 

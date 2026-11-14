@@ -1,0 +1,5798 @@
+//! `std::sys`: the C API of each system that the standard library is written on, and the code that
+//! differs by system, as Rust's `std/src/sys` (docs/adr/0085-conditional-compilation-and-std-time.md,
+//! Q551). Only the modules of `std` can name it.
+
+use std::ffi::{c_char, c_int, c_void, string_from_c, CString};
+use std::mem;
+@cfg(unix)
+use std::ffi::c_long;
+use std::sys::Atomic;
+
+// ---- errno ------------------------------------------------------------------------------------
+
+@cfg(target_os = "linux")
+extern "C" {
+  fn __errno_location() -> *mut c_int;
+}
+
+@cfg(target_os = "android")
+extern "C" {
+  fn __errno() -> *mut c_int;
+}
+
+@cfg(any(target_os = "macos", target_os = "ios"))
+extern "C" {
+  fn __error() -> *mut c_int;
+}
+
+@cfg(windows)
+extern "C" {
+  fn _errno() -> *mut c_int;
+}
+
+/// Where C's `errno` is for this thread: a macro reaching a function whose name changes with the
+/// C library.
+@cfg(target_os = "linux")
+fn errno_place() -> *mut c_int {
+  unsafe { __errno_location() }
+}
+
+@cfg(target_os = "android")
+fn errno_place() -> *mut c_int {
+  unsafe { __errno() }
+}
+
+@cfg(any(target_os = "macos", target_os = "ios"))
+fn errno_place() -> *mut c_int {
+  unsafe { __error() }
+}
+
+@cfg(windows)
+fn errno_place() -> *mut c_int {
+  unsafe { _errno() }
+}
+
+/// The error of the last call to the C library that failed in this thread.
+pub fn errno() -> i32 {
+  unsafe { *errno_place() }
+}
+
+pub fn clear_errno() {
+  unsafe { *errno_place() = 0; }
+}
+
+extern "C" {
+  // C's own types, as the C library declares it (docs/adr/0105-c-types-at-the-ffi-boundary.md, Q747).
+  fn strerror(code: c_int) -> *mut c_char;
+}
+
+/// The C library's description of the `errno` value `code`; invalid UTF-8 becomes U+FFFD.
+@cfg(unix)
+pub fn error_message(code: i32) -> String {
+  unsafe { string_from_c(strerror(code) as *const c_char) }
+}
+
+/// The same; a code of Winsock without an `errno` value, from 10000, is described by Windows
+/// (docs/adr/0100-networking.md, Q697).
+@cfg(windows)
+pub fn error_message(code: i32) -> String {
+  if code >= 10000 { windows_message(code as u32) } else { unsafe { string_from_c(strerror(code) as *const c_char) } }
+}
+
+/// A call interrupted by a signal, on every Unix system.
+@cfg(unix)
+const EINTR: i32 = 4;
+
+// The `errno` values of the failures of sockets, which differ between C libraries; on Windows,
+// those of its C runtime, which the `WSA` codes become (docs/adr/0100-networking.md, Q697).
+@cfg(any(target_os = "linux", target_os = "android"))
+pub const ECONNREFUSED: i32 = 111;
+@cfg(any(target_os = "linux", target_os = "android"))
+pub const ECONNRESET: i32 = 104;
+@cfg(any(target_os = "linux", target_os = "android"))
+pub const ECONNABORTED: i32 = 103;
+@cfg(any(target_os = "linux", target_os = "android"))
+pub const ENOTCONN: i32 = 107;
+@cfg(any(target_os = "linux", target_os = "android"))
+pub const EADDRINUSE: i32 = 98;
+@cfg(any(target_os = "linux", target_os = "android"))
+pub const EADDRNOTAVAIL: i32 = 99;
+@cfg(any(target_os = "linux", target_os = "android"))
+pub const EAGAIN: i32 = 11;
+@cfg(any(target_os = "linux", target_os = "android"))
+pub const EWOULDBLOCK: i32 = 11;
+@cfg(any(target_os = "linux", target_os = "android"))
+pub const ETIMEDOUT: i32 = 110;
+@cfg(any(target_os = "linux", target_os = "android"))
+pub const EINPROGRESS: i32 = 115;
+
+@cfg(any(target_os = "macos", target_os = "ios"))
+pub const ECONNREFUSED: i32 = 61;
+@cfg(any(target_os = "macos", target_os = "ios"))
+pub const ECONNRESET: i32 = 54;
+@cfg(any(target_os = "macos", target_os = "ios"))
+pub const ECONNABORTED: i32 = 53;
+@cfg(any(target_os = "macos", target_os = "ios"))
+pub const ENOTCONN: i32 = 57;
+@cfg(any(target_os = "macos", target_os = "ios"))
+pub const EADDRINUSE: i32 = 48;
+@cfg(any(target_os = "macos", target_os = "ios"))
+pub const EADDRNOTAVAIL: i32 = 49;
+@cfg(any(target_os = "macos", target_os = "ios"))
+pub const EAGAIN: i32 = 35;
+@cfg(any(target_os = "macos", target_os = "ios"))
+pub const EWOULDBLOCK: i32 = 35;
+@cfg(any(target_os = "macos", target_os = "ios"))
+pub const ETIMEDOUT: i32 = 60;
+@cfg(any(target_os = "macos", target_os = "ios"))
+pub const EINPROGRESS: i32 = 36;
+
+@cfg(windows)
+pub const ECONNREFUSED: i32 = 107;
+@cfg(windows)
+pub const ECONNRESET: i32 = 108;
+@cfg(windows)
+pub const ECONNABORTED: i32 = 106;
+@cfg(windows)
+pub const ENOTCONN: i32 = 126;
+@cfg(windows)
+pub const EADDRINUSE: i32 = 100;
+@cfg(windows)
+pub const EADDRNOTAVAIL: i32 = 101;
+@cfg(windows)
+pub const EAGAIN: i32 = 11;
+@cfg(windows)
+pub const EWOULDBLOCK: i32 = 140;
+@cfg(windows)
+pub const ETIMEDOUT: i32 = 138;
+@cfg(windows)
+pub const EINPROGRESS: i32 = 112;
+
+// ---- Clocks and sleeping ----------------------------------------------------------------------
+
+/// `struct timespec`, whose `time_t` has 64 bits, except on 32-bit Android.
+@cfg(all(unix, not(all(target_os = "android", target_pointer_width = "32"))))
+@repr(C)
+pub struct Timespec {
+  pub tv_sec: i64;
+  pub tv_nsec: c_long;
+
+  pub fn of(secs: u64, nanos: u64) -> Timespec {
+    Timespec { tv_sec: secs as i64, tv_nsec: nanos as c_long }
+  }
+
+  /// The nanoseconds it holds, or zero for a time before 1970.
+  pub fn nanos(self) -> u64 {
+    if self.tv_sec < 0 { 0 } else { self.tv_sec as u64 * 1_000_000_000 + self.tv_nsec as u64 }
+  }
+}
+
+/// `struct timespec` on 32-bit Android, whose `time_t` has 32 bits.
+@cfg(all(target_os = "android", target_pointer_width = "32"))
+@repr(C)
+pub struct Timespec {
+  pub tv_sec: i32;
+  pub tv_nsec: c_long;
+
+  /// At most 2^31 - 1 seconds, about 68 years.
+  pub fn of(secs: u64, nanos: u64) -> Timespec {
+    Timespec { tv_sec: if secs > 0x7FFF_FFFF { 0x7FFF_FFFF } else { secs as i32 }, tv_nsec: nanos as c_long }
+  }
+
+  pub fn nanos(self) -> u64 {
+    if self.tv_sec < 0 { 0 } else { self.tv_sec as u64 * 1_000_000_000 + self.tv_nsec as u64 }
+  }
+}
+
+@cfg(unix)
+const CLOCK_REALTIME: c_int = 0;
+
+@cfg(any(target_os = "linux", target_os = "android"))
+const CLOCK_MONOTONIC: c_int = 1;
+
+@cfg(any(target_os = "macos", target_os = "ios"))
+const CLOCK_MONOTONIC: c_int = 6;
+
+@cfg(unix)
+extern "C" {
+  fn clock_gettime(clock: c_int, now: *mut Timespec) -> c_int;
+  fn nanosleep(duration: *const Timespec, left: *mut Timespec) -> c_int;
+}
+
+/// `FILETIME`: 100-nanosecond intervals since 1601-01-01, in two halves.
+@cfg(windows)
+@repr(C)
+pub struct FileTime {
+  pub low: u32;
+  pub high: u32;
+}
+
+@cfg(windows)
+extern "C" {
+  fn QueryPerformanceCounter(count: *mut i64) -> c_int;
+  fn QueryPerformanceFrequency(frequency: *mut i64) -> c_int;
+  fn GetSystemTimePreciseAsFileTime(time: *mut FileTime);
+  fn Sleep(milliseconds: u32);
+}
+
+/// A monotonic clock, in nanoseconds since a start that means nothing outside the program.
+@cfg(unix)
+pub fn monotonic_nanos() -> u64 {
+  clock(CLOCK_MONOTONIC)
+}
+
+/// The system clock, in nanoseconds since 1970-01-01 00:00:00 UTC, or zero before it.
+@cfg(unix)
+pub fn system_nanos() -> u64 {
+  clock(CLOCK_REALTIME)
+}
+
+@cfg(unix)
+fn clock(id: c_int) -> u64 {
+  var now = Timespec::of(0, 0);
+
+  if unsafe { clock_gettime(id, &mut now) } != 0 {
+    return 0;
+  }
+
+  now.nanos()
+}
+
+@cfg(windows)
+pub fn monotonic_nanos() -> u64 {
+  var count = 0i64;
+  var frequency = 1i64;
+
+  unsafe {
+    QueryPerformanceCounter(&mut count);
+    QueryPerformanceFrequency(&mut frequency);
+  }
+
+  if frequency <= 0 || count < 0 {
+    return 0;
+  }
+
+  const ticks = count as u64;
+  const rate = frequency as u64;
+
+  // Split so that `ticks * 10^9` cannot overflow.
+  ticks / rate * 1_000_000_000 + ticks % rate * 1_000_000_000 / rate
+}
+
+@cfg(windows)
+pub fn system_nanos() -> u64 {
+  var now = FileTime { low: 0, high: 0 };
+
+  unsafe { GetSystemTimePreciseAsFileTime(&mut now); }
+
+  // The Unix epoch is 11644473600 seconds after 1601-01-01.
+  const intervals = now.high as u64 * 0x1_0000_0000 + now.low as u64;
+  const epoch = 116_444_736_000_000_000u64;
+
+  if intervals < epoch { 0 } else { (intervals - epoch) * 100 }
+}
+
+/// Pauses the calling thread for at least `nanos` nanoseconds, resuming after a signal.
+@cfg(unix)
+pub fn sleep_nanos(nanos: u64) {
+  var left = Timespec::of(nanos / 1_000_000_000, nanos % 1_000_000_000);
+
+  loop {
+    const asked = left;
+
+    if unsafe { nanosleep(&asked, &mut left) } == 0 || errno() != EINTR {
+      return;
+    }
+  }
+}
+
+/// In whole milliseconds, rounded up so that the program never sleeps less than asked.
+@cfg(windows)
+pub fn sleep_nanos(nanos: u64) {
+  var millis = nanos / 1_000_000 + if nanos % 1_000_000 != 0 { 1 } else { 0 };
+
+  while millis > 0 {
+    const part = if millis > 0x7FFF_FFFF { 0x7FFF_FFFFu64 } else { millis };
+
+    unsafe { Sleep(part as u32); }
+    millis -= part;
+  }
+}
+
+// ---- Arguments and environment variables ------------------------------------------------------
+
+/// What C's `main` received, which the runtime's core passes on when the program starts
+/// (`std::env`, `sag_env_init`), as Rust's `lang_start` gives them to its `std`. The address of
+/// `argv` is kept as a number, so that the static is computed by the compiler.
+@cfg(unix)
+static var ARGC: c_int = 0;
+
+@cfg(unix)
+static var ARGV: usize = 0;
+
+@cfg(unix)
+extern "C" {
+  fn getenv(name: *const c_char) -> *const c_char;
+  fn setenv(name: *const c_char, value: *const c_char, overwrite: c_int) -> c_int;
+  fn unsetenv(name: *const c_char) -> c_int;
+  fn chdir(path: *const c_char) -> c_int;
+  fn getpid() -> c_int;
+  fn getuid() -> u32;
+  fn getpwuid_r(uid: u32, info: *mut c_void, buffer: *mut c_char, size: usize, result: *mut *mut c_void) -> c_int;
+}
+
+@cfg(any(target_os = "linux", target_os = "android"))
+extern "C" {
+  fn readlink(path: *const c_char, buffer: *mut c_char, size: usize) -> isize;
+}
+
+@cfg(any(target_os = "macos", target_os = "ios"))
+extern "C" {
+  fn _NSGetExecutablePath(buffer: *mut c_char, size: *mut u32) -> c_int;
+}
+
+@cfg(unix)
+pub fn set_args(argc: c_int, argv: *const *const c_char) {
+  unsafe {
+    ARGC = argc;
+    ARGV = argv as usize;
+    MAIN_THREAD = thread_id();
+  }
+}
+
+/// Windows reads its own command line, as UTF-16.
+@cfg(windows)
+pub fn set_args(_argc: c_int, _argv: *const *const c_char) {
+  // C's `argv` is in the ANSI code page, not UTF-16.
+  unsafe { MAIN_THREAD = thread_id(); }
+}
+
+/// The arguments C's `main` received; invalid UTF-8 becomes U+FFFD.
+@cfg(unix)
+pub fn args() -> List<String> {
+  const args = new List<String>();
+  const count = unsafe { ARGC };
+  const argv = unsafe { ARGV } as *const *const c_char;
+
+  if argv.is_null() || count <= 0 {
+    return args;
+  }
+
+  for index in 0..count as usize {
+    const arg = unsafe { *argv.add(index) };
+
+    if arg.is_null() {
+      break;
+    }
+
+    args.push(unsafe { string_from_c(arg) });
+  }
+
+  args
+}
+
+/// The value of an environment variable; invalid UTF-8 becomes U+FFFD.
+@cfg(unix)
+pub fn variable(name: String) -> Option<String> {
+  const c_name = match CString::new(name) {
+    Ok(found) => found,
+    Err(_) => return None,
+  };
+  const value = unsafe { getenv(c_name.as_ptr()) };
+
+  if value.is_null() { None } else { Some(unsafe { string_from_c(value) }) }
+}
+
+/// The name and the value of a `NAME=value` entry of the environment. As Rust's, a name may start
+/// with `=`, which Windows gives its hidden variables; an entry without `=` after that is skipped.
+fn entry_of(text: String) -> Option<(String, String)> {
+  const from = if text.starts_with("=") { 1usize } else { 0usize };
+  const at = text.substring(from, text.len()).find("=")? + from;
+
+  Some((text.substring(0, at), text.substring(at + 1, text.len())))
+}
+
+/// The identifier of this program.
+@cfg(unix)
+pub fn process_id() -> u32 {
+  (unsafe { getpid() }) as u32
+}
+
+/// Every variable of the environment, in its order; invalid UTF-8 becomes U+FFFD.
+@cfg(unix)
+pub fn variables() -> List<(String, String)> {
+  const found = new List<(String, String)>();
+  const entries = environment();
+
+  if entries.is_null() {
+    return found;
+  }
+
+  var index = 0usize;
+
+  loop {
+    const entry = unsafe { *entries.add(index) };
+
+    if entry.is_null() {
+      return found;
+    }
+
+    if let Some(pair) = entry_of(unsafe { string_from_c(entry as *const c_char) }) {
+      found.push(pair);
+    }
+
+    index += 1;
+  }
+}
+
+/// Sets the variable `name` to `value`; `std::env` gives a name that is not empty and has no `=`.
+@cfg(unix)
+pub fn set_variable(name: String, value: String) -> Result<(), i32> {
+  const c_name = match c_path(name) {
+    Some(found) => found,
+    None => return Err(EINVAL),
+  };
+  const c_value = match c_path(value) {
+    Some(found) => found,
+    None => return Err(EINVAL),
+  };
+
+  if unsafe { setenv(c_name.as_ptr(), c_value.as_ptr(), 1) } != 0 { Err(failure()) } else { Ok(()) }
+}
+
+@cfg(unix)
+pub fn remove_variable(name: String) -> Result<(), i32> {
+  const c_name = match c_path(name) {
+    Some(found) => found,
+    None => return Err(EINVAL),
+  };
+
+  if unsafe { unsetenv(c_name.as_ptr()) } != 0 { Err(failure()) } else { Ok(()) }
+}
+
+@cfg(unix)
+pub fn set_current_dir(path: String) -> Result<(), i32> {
+  const name = match c_path(path) {
+    Some(found) => found,
+    None => return Err(EINVAL),
+  };
+
+  if unsafe { chdir(name.as_ptr()) } != 0 { Err(failure()) } else { Ok(()) }
+}
+
+/// The file of this program, as Linux's `/proc/self/exe` names it.
+@cfg(any(target_os = "linux", target_os = "android"))
+pub fn current_exe() -> Result<String, i32> {
+  const link = match c_path("/proc/self/exe") {
+    Some(found) => found,
+    None => return Err(EINVAL),
+  };
+  var size = 256usize;
+
+  loop {
+    const buffer = new List<u8>();
+
+    buffer.resize(size, 0);
+
+    const len = unsafe { readlink(link.as_ptr(), buffer.as_mut_ptr() as *mut c_char, size) };
+
+    if len < 0 {
+      return Err(failure());
+    }
+
+    // A path that fills the buffer may have been cut.
+    if (len as usize) < size {
+      buffer.truncate(len as usize);
+
+      return Ok(String::from_utf8_lossy(buffer));
+    }
+
+    size *= 2;
+  }
+}
+
+/// The file of this program, which `_NSGetExecutablePath` gives as it was started, made absolute
+/// without links, as Rust's.
+@cfg(any(target_os = "macos", target_os = "ios"))
+pub fn current_exe() -> Result<String, i32> {
+  var size = 0u32;
+
+  // Without room, it gives the size it needs, with the terminator.
+  unsafe { _NSGetExecutablePath(0 as *mut c_char, &mut size); }
+
+  const buffer = new List<u8>();
+
+  buffer.resize(size as usize + 1, 0);
+
+  if unsafe { _NSGetExecutablePath(buffer.as_mut_ptr() as *mut c_char, &mut size) } != 0 {
+    return Err(super::UNKNOWN);
+  }
+
+  canonical(unsafe { string_from_c(buffer.as_ptr() as *const c_char) })
+}
+
+/// Where `pw_dir` is in `struct passwd`.
+@cfg(all(any(target_os = "linux", target_os = "android"), not(all(target_os = "android", target_pointer_width = "32"))))
+const HOME_OFFSET: usize = 32;
+@cfg(all(target_os = "android", target_pointer_width = "32"))
+const HOME_OFFSET: usize = 16;
+@cfg(any(target_os = "macos", target_os = "ios"))
+const HOME_OFFSET: usize = 48;
+
+/// The home directory of the user running this program, from the system's database of users.
+@cfg(unix)
+pub fn user_home() -> Option<String> {
+  // Room for C's `struct passwd` on every system.
+  var info = [0u64; 16];
+  var result = 0 as *mut c_void;
+  var size = 1024usize;
+
+  loop {
+    const buffer = new List<u8>();
+
+    buffer.resize(size, 0);
+
+    const code = unsafe { getpwuid_r(getuid(), &raw mut info as *mut c_void, buffer.as_mut_ptr() as *mut c_char, size, &mut result) };
+
+    if code == ERANGE {
+      size *= 2;
+      continue;
+    }
+
+    if code != 0 || result.is_null() {
+      return None;
+    }
+
+    const dir = unsafe { *((&raw const info as *const u8).add(HOME_OFFSET) as *const *const c_char) };
+
+    return if dir.is_null() { None } else { Some(unsafe { string_from_c(dir) }) };
+  }
+}
+
+@cfg(windows)
+extern "C" {
+  fn GetCommandLineW() -> *const u16;
+  fn GetEnvironmentVariableW(name: *const u16, buffer: *mut u16, size: u32) -> u32;
+  fn SetEnvironmentVariableW(name: *const u16, value: *const u16) -> c_int;
+  fn SetCurrentDirectoryW(path: *const u16) -> c_int;
+  fn GetModuleFileNameW(module: *mut c_void, buffer: *mut u16, size: u32) -> u32;
+  fn GetTempPathW(size: u32, buffer: *mut u16) -> u32;
+}
+
+/// `ERROR_ENVVAR_NOT_FOUND`.
+@cfg(windows)
+const ERROR_ENVVAR_NOT_FOUND: u32 = 203;
+
+@cfg(windows)
+const QUOTE: u16 = 0x22;
+@cfg(windows)
+const BACKSLASH: u16 = 0x5C;
+@cfg(windows)
+const SPACE: u16 = 0x20;
+@cfg(windows)
+const TAB: u16 = 0x09;
+
+/// The code unit `at` of a NUL-terminated UTF-16 text.
+@cfg(windows)
+fn unit(text: *const u16, at: usize) -> u16 {
+  unsafe { *text.add(at) }
+}
+
+/// The arguments, split from the command line with the rules of Microsoft's C runtime.
+@cfg(windows)
+pub fn args() -> List<String> {
+  const args = new List<String>();
+  const line = unsafe { GetCommandLineW() };
+
+  if line.is_null() {
+    return args;
+  }
+
+  const arg = new List<u16>();
+  var at = 0usize;
+
+  // The program ends at the first space, or at the closing quote; backslashes are kept.
+  if unit(line, at) == QUOTE {
+    at += 1;
+
+    while unit(line, at) != 0 && unit(line, at) != QUOTE {
+      arg.push(unit(line, at));
+      at += 1;
+    }
+
+    if unit(line, at) == QUOTE {
+      at += 1;
+    }
+  } else {
+    while unit(line, at) != 0 && unit(line, at) != SPACE && unit(line, at) != TAB {
+      arg.push(unit(line, at));
+      at += 1;
+    }
+  }
+
+  args.push(from_utf16_lossy(&arg));
+
+  loop {
+    while unit(line, at) == SPACE || unit(line, at) == TAB {
+      at += 1;
+    }
+
+    if unit(line, at) == 0 {
+      return args;
+    }
+
+    var quoted = false;
+
+    arg.clear();
+
+    while unit(line, at) != 0 && (quoted || (unit(line, at) != SPACE && unit(line, at) != TAB)) {
+      const c = unit(line, at);
+
+      if c == BACKSLASH {
+        var slashes = 0usize;
+
+        while unit(line, at) == BACKSLASH {
+          slashes += 1;
+          at += 1;
+        }
+
+        // 2n backslashes and a quote: n backslashes, and the quote delimits. 2n + 1: n
+        // backslashes and a literal quote. Backslashes elsewhere are literal.
+        const kept = if unit(line, at) == QUOTE { slashes / 2 } else { slashes };
+
+        for _ in 0..kept {
+          arg.push(BACKSLASH);
+        }
+
+        if unit(line, at) == QUOTE && slashes % 2 == 1 {
+          arg.push(QUOTE);
+          at += 1;
+        }
+      } else if c == QUOTE {
+        if quoted && unit(line, at + 1) == QUOTE {
+          arg.push(QUOTE);
+          at += 2;
+        } else {
+          quoted = !quoted;
+          at += 1;
+        }
+      } else {
+        arg.push(c);
+        at += 1;
+      }
+    }
+
+    args.push(from_utf16_lossy(&arg));
+  }
+}
+
+/// The value of an environment variable, read as UTF-16.
+@cfg(windows)
+pub fn variable(name: String) -> Option<String> {
+  const wide = to_utf16(name);
+  // Without a buffer, the size it needs with its terminator; 0 when the variable is not set.
+  const size = unsafe { GetEnvironmentVariableW(wide.as_ptr(), 0 as *mut u16, 0) };
+
+  if size == 0 {
+    return None;
+  }
+
+  const value = new List<u16>();
+
+  value.resize(size as usize, 0);
+
+  const written = unsafe { GetEnvironmentVariableW(wide.as_ptr(), value.as_mut_ptr(), size) };
+
+  // The variable grew in between.
+  if written >= size {
+    return None;
+  }
+
+  Some(from_utf16_lossy(&value[0..written as usize]))
+}
+
+/// The identifier of this program.
+@cfg(windows)
+pub fn process_id() -> u32 {
+  unsafe { GetCurrentProcessId() }
+}
+
+/// Every variable of the environment, in its order, read as UTF-16.
+@cfg(windows)
+pub fn variables() -> List<(String, String)> {
+  const found = new List<(String, String)>();
+  const block = unsafe { GetEnvironmentStringsW() };
+
+  if block.is_null() {
+    return found;
+  }
+
+  const units = block as *const u16;
+  var at = 0usize;
+
+  while unit(units, at) != 0 {
+    var end = at;
+
+    while unit(units, end) != 0 {
+      end += 1;
+    }
+
+    const entry = new List<u16>();
+
+    for index in at..end {
+      entry.push(unit(units, index));
+    }
+
+    if let Some(pair) = entry_of(from_utf16_lossy(&entry)) {
+      found.push(pair);
+    }
+
+    at = end + 1;
+  }
+
+  unsafe { FreeEnvironmentStringsW(block); }
+  found
+}
+
+@cfg(windows)
+pub fn set_variable(name: String, value: String) -> Result<(), i32> {
+  const wide_name = to_utf16(name);
+  const wide_value = to_utf16(value);
+
+  if unsafe { SetEnvironmentVariableW(wide_name.as_ptr(), wide_value.as_ptr()) } == 0 { Err(failure()) } else { Ok(()) }
+}
+
+/// A variable that is not set is no error, as on POSIX systems.
+@cfg(windows)
+pub fn remove_variable(name: String) -> Result<(), i32> {
+  const wide = to_utf16(name);
+
+  if unsafe { SetEnvironmentVariableW(wide.as_ptr(), 0 as *const u16) } == 0 && unsafe { GetLastError() } != ERROR_ENVVAR_NOT_FOUND {
+    return Err(failure());
+  }
+
+  Ok(())
+}
+
+@cfg(windows)
+pub fn set_current_dir(path: String) -> Result<(), i32> {
+  const wide = to_utf16(path);
+
+  if unsafe { SetCurrentDirectoryW(wide.as_ptr()) } == 0 { Err(failure()) } else { Ok(()) }
+}
+
+/// The file of this program, as Windows loaded it.
+@cfg(windows)
+pub fn current_exe() -> Result<String, i32> {
+  var size = 260u32;
+
+  loop {
+    const buffer = new List<u16>();
+
+    buffer.resize(size as usize, 0);
+
+    const len = unsafe { GetModuleFileNameW(0 as *mut c_void, buffer.as_mut_ptr(), size) };
+
+    if len == 0 {
+      return Err(failure());
+    }
+
+    // A path that fills the buffer was cut.
+    if len < size {
+      return Ok(from_utf16_lossy(&buffer[0..len as usize]));
+    }
+
+    size *= 2;
+  }
+}
+
+/// The directory of temporary files Windows gives, ending in `\`: `TMP`, `TEMP` or
+/// `USERPROFILE`, else the directory of Windows.
+@cfg(windows)
+pub fn temp_dir() -> Result<String, i32> {
+  // Without room, the size it needs with its terminator.
+  const size = unsafe { GetTempPathW(0, 0 as *mut u16) };
+
+  if size == 0 {
+    return Err(failure());
+  }
+
+  const buffer = new List<u16>();
+
+  buffer.resize(size as usize, 0);
+
+  const len = unsafe { GetTempPathW(size, buffer.as_mut_ptr()) };
+
+  if len == 0 {
+    return Err(failure());
+  }
+
+  if len >= size {
+    return Err(super::UNKNOWN);
+  }
+
+  Ok(from_utf16_lossy(&buffer[0..len as usize]))
+}
+
+/// UTF-16 code units as a string; an unpaired surrogate becomes U+FFFD.
+@cfg(windows)
+pub fn from_utf16_lossy(units: &[u16]) -> String {
+  const text = new StringBuilder();
+  var index = 0usize;
+
+  while index < units.len() {
+    var code = units[index] as u32;
+
+    index += 1;
+
+    if code >= 0xD800 && code <= 0xDBFF && index < units.len() && units[index] as u32 >= 0xDC00 && units[index] as u32 <= 0xDFFF {
+      code = 0x10000 + ((code - 0xD800) << 10) + (units[index] as u32 - 0xDC00);
+      index += 1;
+    } else if code >= 0xD800 && code <= 0xDFFF {
+      code = 0xFFFD;
+    }
+
+    text.append_char(char::from_u32(code).unwrap_or('?'));
+  }
+
+  text.to_string()
+}
+
+/// A string as NUL-terminated UTF-16.
+@cfg(windows)
+pub fn to_utf16(text: String) -> List<u16> {
+  const units = new List<u16>();
+
+  for c in text.chars() {
+    const code = c as u32;
+
+    if code >= 0x10000 {
+      units.push((0xD800 + ((code - 0x10000) >> 10)) as u16);
+      units.push((0xDC00 + ((code - 0x10000) & 0x3FF)) as u16);
+    } else {
+      units.push(code as u16);
+    }
+  }
+
+  units.push(0);
+  units
+}
+
+// ---- The standard streams ---------------------------------------------------------------------
+
+/// C's streams, through which the runtime's core prints too, so that both write in order and the
+/// C library locks them for threads (docs/adr/0086-c-globals-and-std-io.md, Q564).
+@cfg(any(target_os = "linux", target_os = "android"))
+extern "C" {
+  static stdin: *mut c_void;
+  static stdout: *mut c_void;
+  static stderr: *mut c_void;
+}
+
+@cfg(any(target_os = "macos", target_os = "ios"))
+extern "C" {
+  static __stdinp: *mut c_void;
+  static __stdoutp: *mut c_void;
+  static __stderrp: *mut c_void;
+}
+
+@cfg(windows)
+extern "C" {
+  fn __acrt_iob_func(index: u32) -> *mut c_void;
+}
+
+extern "C" {
+  pub fn fwrite(data: *const c_void, size: usize, count: usize, stream: *mut c_void) -> usize;
+  pub fn fputc(c: c_int, stream: *mut c_void) -> c_int;
+  pub fn fflush(stream: *mut c_void) -> c_int;
+  pub fn getc(stream: *mut c_void) -> c_int;
+  pub fn fread(data: *mut c_void, size: usize, count: usize, stream: *mut c_void) -> usize;
+  pub fn ferror(stream: *mut c_void) -> c_int;
+  pub fn clearerr(stream: *mut c_void);
+}
+
+/// C's `FILE *` of a standard stream: 0 is stdin, 1 stdout and 2 stderr.
+@cfg(any(target_os = "linux", target_os = "android"))
+pub fn stream(index: i32) -> *mut c_void {
+  unsafe { if index == 0 { stdin } else if index == 1 { stdout } else { stderr } }
+}
+
+@cfg(any(target_os = "macos", target_os = "ios"))
+pub fn stream(index: i32) -> *mut c_void {
+  unsafe { if index == 0 { __stdinp } else if index == 1 { __stdoutp } else { __stderrp } }
+}
+
+@cfg(windows)
+pub fn stream(index: i32) -> *mut c_void {
+  unsafe { __acrt_iob_func(index as u32) }
+}
+
+/// The lock of a C stream, which each of its functions takes too, so that a series of writes
+/// holding it is not interleaved with other threads' (docs/adr/0096-streams-files-and-drop.md,
+/// Q660).
+@cfg(unix)
+extern "C" {
+  fn flockfile(stream: *mut c_void);
+  fn funlockfile(stream: *mut c_void);
+}
+
+@cfg(windows)
+extern "C" {
+  fn _lock_file(stream: *mut c_void);
+  fn _unlock_file(stream: *mut c_void);
+}
+
+@cfg(unix)
+pub fn lock_stream(index: i32) {
+  unsafe { flockfile(stream(index)); }
+}
+
+@cfg(unix)
+pub fn unlock_stream(index: i32) {
+  unsafe { funlockfile(stream(index)); }
+}
+
+@cfg(windows)
+pub fn lock_stream(index: i32) {
+  unsafe { _lock_file(stream(index)); }
+}
+
+@cfg(windows)
+pub fn unlock_stream(index: i32) {
+  unsafe { _unlock_file(stream(index)); }
+}
+
+@cfg(unix)
+extern "C" {
+  fn isatty(fd: c_int) -> c_int;
+}
+
+/// Whether the standard stream `index` is a terminal.
+@cfg(unix)
+pub fn is_terminal(index: i32) -> bool {
+  (unsafe { isatty(index) }) != 0
+}
+
+@cfg(windows)
+extern "C" {
+  fn GetStdHandle(which: u32) -> *mut c_void;
+  fn GetConsoleMode(console: *mut c_void, mode: *mut u32) -> c_int;
+}
+
+/// A console, which has a console mode: the C library's `_isatty` also says yes for `NUL` and
+/// other character devices.
+@cfg(windows)
+pub fn is_terminal(index: i32) -> bool {
+  // STD_INPUT_HANDLE, STD_OUTPUT_HANDLE and STD_ERROR_HANDLE are -10, -11 and -12.
+  const handle = unsafe { GetStdHandle((-10 - index) as u32) };
+  var mode = 0u32;
+
+  if handle.is_null() || handle as usize == 0xFFFF_FFFF_FFFF_FFFF {
+    return false;
+  }
+
+  (unsafe { GetConsoleMode(handle, &mut mode) }) != 0
+}
+
+// ---- Files and directories --------------------------------------------------------------------
+
+/// `errno` values that `std::fs` reports itself. They are the same on every supported system,
+/// except `ENOTEMPTY`.
+pub const ENOENT: i32 = 2;
+pub const ENOTDIR: i32 = 20;
+pub const EISDIR: i32 = 21;
+pub const EINVAL: i32 = 22;
+
+@cfg(any(target_os = "linux", target_os = "android"))
+pub const ENOTEMPTY: i32 = 39;
+@cfg(any(target_os = "macos", target_os = "ios"))
+pub const ENOTEMPTY: i32 = 66;
+@cfg(windows)
+pub const ENOTEMPTY: i32 = 41;
+
+/// What a path names, as `std::fs` asks it.
+pub const KIND_MISSING: i32 = 0;
+pub const KIND_FILE: i32 = 1;
+pub const KIND_DIR: i32 = 2;
+pub const KIND_OTHER: i32 = 3;
+
+@cfg(unix)
+const EEXIST: i32 = 17;
+@cfg(unix)
+const ERANGE: i32 = 34;
+
+@cfg(unix)
+extern "C" {
+  fn fopen(path: *const c_char, mode: *const c_char) -> *mut c_void;
+  fn fclose(file: *mut c_void) -> c_int;
+  fn mkdir(path: *const c_char, mode: u32) -> c_int;
+  fn rmdir(path: *const c_char) -> c_int;
+  fn unlink(path: *const c_char) -> c_int;
+  fn rename(from: *const c_char, to: *const c_char) -> c_int;
+  fn getcwd(buffer: *mut c_char, size: usize) -> *mut c_char;
+  fn opendir(path: *const c_char) -> *mut c_void;
+  fn readdir(dir: *mut c_void) -> *const u8;
+  fn closedir(dir: *mut c_void) -> c_int;
+  fn stat(path: *const c_char, info: *mut StatBuffer) -> c_int;
+}
+
+/// Room for C's `struct stat` on every system, read at the offset of its `st_mode`. On macOS for
+/// Intel, `stat` and `readdir` are the symbols of 32-bit inodes, which Apple still exports: the
+/// 64-bit ones are named `stat$INODE64` and `readdir$INODE64`, which C cannot name.
+@cfg(unix)
+@repr(C)
+struct StatBuffer {
+  pub words: [u64; 32];
+}
+
+/// Where `st_mode` is in `struct stat`, and how many bytes it has.
+@cfg(all(any(target_os = "linux", target_os = "android"), target_arch = "x86_64"))
+const MODE_OFFSET: usize = 24;
+@cfg(all(any(target_os = "linux", target_os = "android"), not(target_arch = "x86_64")))
+const MODE_OFFSET: usize = 16;
+@cfg(any(target_os = "ios", all(target_os = "macos", target_arch = "aarch64")))
+const MODE_OFFSET: usize = 4;
+@cfg(all(target_os = "macos", target_arch = "x86_64"))
+const MODE_OFFSET: usize = 8;
+
+@cfg(any(target_os = "linux", target_os = "android"))
+const MODE_BYTES: usize = 4;
+@cfg(any(target_os = "macos", target_os = "ios"))
+const MODE_BYTES: usize = 2;
+
+/// Where `d_name` is in `struct dirent`.
+@cfg(any(target_os = "linux", target_os = "android"))
+const NAME_OFFSET: usize = 19;
+@cfg(any(target_os = "ios", all(target_os = "macos", target_arch = "aarch64")))
+const NAME_OFFSET: usize = 21;
+@cfg(all(target_os = "macos", target_arch = "x86_64"))
+const NAME_OFFSET: usize = 8;
+
+/// `path` as a C string, or `None` if it holds a NUL.
+@cfg(unix)
+fn c_path(path: String) -> Option<CString> {
+  match CString::new(path) {
+    Ok(found) => Some(found),
+    Err(_) => None,
+  }
+}
+
+/// The code of the last failed call of the C library.
+@cfg(unix)
+fn failure() -> i32 {
+  super::last_error()
+}
+
+@cfg(unix)
+pub fn path_kind(path: String) -> i32 {
+  const name = match c_path(path) {
+    Some(found) => found,
+    None => return KIND_MISSING,
+  };
+  var info = StatBuffer { words: [0u64; 32] };
+
+  if unsafe { stat(name.as_ptr(), &mut info) } != 0 {
+    return KIND_MISSING;
+  }
+
+  const at = unsafe { (&raw const info as *const u8).add(MODE_OFFSET) };
+  const mode = if MODE_BYTES == 2 { (unsafe { *(at as *const u16) }) as u32 } else { unsafe { *(at as *const u32) } };
+  // `S_IFMT`, the type: `S_IFDIR` is 0o040000, `S_IFREG` 0o100000.
+  const file_type = (mode >> 12) & 0xF;
+
+  if file_type == 4 {
+    KIND_DIR
+  } else if file_type == 8 {
+    KIND_FILE
+  } else {
+    KIND_OTHER
+  }
+}
+
+/// The bytes of the file at `path`, or the code of the failure.
+@cfg(unix)
+pub fn read_file(path: String) -> Result<List<u8>, i32> {
+  const name = match c_path(path) {
+    Some(found) => found,
+    None => return Err(EINVAL),
+  };
+  const mode = CString::new("rb").unwrap();
+
+  clear_errno();
+
+  const file = unsafe { fopen(name.as_ptr(), mode.as_ptr()) };
+
+  if file.is_null() {
+    return Err(failure());
+  }
+
+  const data = new List<u8>();
+
+  loop {
+    const start = data.len();
+
+    data.resize(start + 4096, 0);
+
+    const read = unsafe { fread(data.as_mut_ptr().add(start) as *mut c_void, 1, 4096, file) };
+
+    data.resize(start + read, 0);
+
+    if read == 0 {
+      break;
+    }
+  }
+
+  const failed = unsafe { ferror(file) } != 0;
+  const code = if failed { failure() } else { 0 };
+
+  unsafe { fclose(file); }
+
+  if failed { Err(code) } else { Ok(data) }
+}
+
+/// Writes `len` bytes at `data` to the file at `path`, creating it, replacing it or appending.
+@cfg(unix)
+pub fn write_file(path: String, data: *const u8, len: usize, append: bool) -> i32 {
+  const name = match c_path(path) {
+    Some(found) => found,
+    None => return EINVAL,
+  };
+  const mode = CString::new(if append { "ab" } else { "wb" }).unwrap();
+
+  clear_errno();
+
+  const file = unsafe { fopen(name.as_ptr(), mode.as_ptr()) };
+
+  if file.is_null() {
+    return failure();
+  }
+
+  var code = 0;
+
+  if len > 0 && unsafe { fwrite(data as *const c_void, 1, len, file) } != len {
+    code = failure();
+  }
+
+  if unsafe { fclose(file) } != 0 && code == 0 {
+    code = failure();
+  }
+
+  code
+}
+
+@cfg(unix)
+pub fn create_dir(path: String) -> i32 {
+  const name = match c_path(path) {
+    Some(found) => found,
+    None => return EINVAL,
+  };
+
+  clear_errno();
+
+  // 0o777, less the umask.
+  if unsafe { mkdir(name.as_ptr(), 511) } == 0 { 0 } else { failure() }
+}
+
+@cfg(unix)
+pub fn remove_dir(path: String) -> i32 {
+  const name = match c_path(path) {
+    Some(found) => found,
+    None => return EINVAL,
+  };
+
+  clear_errno();
+
+  const code = if unsafe { rmdir(name.as_ptr()) } == 0 { 0 } else { failure() };
+
+  // Some systems report a directory that is not empty as `EEXIST`.
+  if code == EEXIST { ENOTEMPTY } else { code }
+}
+
+@cfg(unix)
+pub fn remove_file(path: String) -> i32 {
+  const name = match c_path(path) {
+    Some(found) => found,
+    None => return EINVAL,
+  };
+
+  clear_errno();
+
+  if unsafe { unlink(name.as_ptr()) } == 0 { 0 } else { failure() }
+}
+
+@cfg(unix)
+pub fn rename_path(from: String, to: String) -> i32 {
+  const source = match c_path(from) {
+    Some(found) => found,
+    None => return EINVAL,
+  };
+  const target = match c_path(to) {
+    Some(found) => found,
+    None => return EINVAL,
+  };
+
+  clear_errno();
+
+  if unsafe { rename(source.as_ptr(), target.as_ptr()) } == 0 { 0 } else { failure() }
+}
+
+/// Copies the bytes of the file `from` to `to`, which is created or replaced.
+@cfg(unix)
+pub fn copy_file(from: String, to: String) -> i32 {
+  match read_file(from) {
+    Ok(data) => write_file(to, data.as_ptr(), data.len(), false),
+    Err(code) => code,
+  }
+}
+
+/// The names in the directory `path`, without `.` and `..`; invalid UTF-8 becomes U+FFFD.
+@cfg(unix)
+pub fn read_dir(path: String) -> Result<List<String>, i32> {
+  const name = match c_path(path) {
+    Some(found) => found,
+    None => return Err(EINVAL),
+  };
+
+  clear_errno();
+
+  const dir = unsafe { opendir(name.as_ptr()) };
+
+  if dir.is_null() {
+    return Err(failure());
+  }
+
+  const names = new List<String>();
+
+  loop {
+    const entry = unsafe { readdir(dir) };
+
+    if entry.is_null() {
+      break;
+    }
+
+    const text = unsafe { string_from_c(entry.add(NAME_OFFSET) as *const c_char) };
+
+    if text != "." && text != ".." {
+      names.push(text);
+    }
+  }
+
+  unsafe { closedir(dir); }
+  Ok(names)
+}
+
+@cfg(unix)
+pub fn current_dir() -> Result<String, i32> {
+  var size = 256usize;
+
+  loop {
+    const buffer = new List<u8>();
+
+    buffer.resize(size, 0);
+    clear_errno();
+
+    const found = unsafe { getcwd(buffer.as_mut_ptr() as *mut c_char, size) };
+
+    if !found.is_null() {
+      return Ok(unsafe { string_from_c(found as *const c_char) });
+    }
+
+    if errno() != ERANGE {
+      return Err(failure());
+    }
+
+    size *= 2;
+  }
+}
+
+/// `WIN32_FIND_DATAW`.
+@cfg(windows)
+@repr(C)
+struct FindData {
+  pub attributes: u32;
+  pub created: FileTime;
+  pub accessed: FileTime;
+  pub written: FileTime;
+  pub size_high: u32;
+  pub size_low: u32;
+  pub reserved0: u32;
+  pub reserved1: u32;
+  pub name: [u16; 260];
+  pub alternate_name: [u16; 14];
+}
+
+@cfg(windows)
+extern "C" {
+  fn CreateFileW(name: *const u16, access: u32, share: u32, security: *mut c_void, disposition: u32, flags: u32, template_file: *mut c_void) -> *mut c_void;
+  fn ReadFile(file: *mut c_void, buffer: *mut u8, size: u32, read: *mut u32, overlapped: *mut c_void) -> c_int;
+  fn WriteFile(file: *mut c_void, buffer: *const u8, size: u32, written: *mut u32, overlapped: *mut c_void) -> c_int;
+  fn CloseHandle(handle: *mut c_void) -> c_int;
+  fn GetFileAttributesW(name: *const u16) -> u32;
+  fn CreateDirectoryW(name: *const u16, security: *mut c_void) -> c_int;
+  fn RemoveDirectoryW(name: *const u16) -> c_int;
+  fn DeleteFileW(name: *const u16) -> c_int;
+  fn MoveFileExW(from: *const u16, to: *const u16, flags: u32) -> c_int;
+  fn CopyFileW(from: *const u16, to: *const u16, fail_if_exists: c_int) -> c_int;
+  fn FindFirstFileW(pattern: *const u16, data: *mut FindData) -> *mut c_void;
+  fn FindNextFileW(find: *mut c_void, data: *mut FindData) -> c_int;
+  fn FindClose(find: *mut c_void) -> c_int;
+  fn GetCurrentDirectoryW(size: u32, buffer: *mut u16) -> u32;
+  fn GetLastError() -> u32;
+}
+
+/// `INVALID_HANDLE_VALUE`, -1.
+@cfg(windows)
+fn invalid(handle: *mut c_void) -> bool {
+  handle as usize == 0xFFFF_FFFF_FFFF_FFFF
+}
+
+/// The `errno` value of the last Windows error, so that kinds and messages match other systems.
+@cfg(windows)
+fn failure() -> i32 {
+  const error = unsafe { GetLastError() };
+
+  if error == 2 || error == 3 || error == 15 || error == 161 {
+    // ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, ERROR_INVALID_DRIVE, ERROR_BAD_PATHNAME.
+    ENOENT
+  } else if error == 5 || error == 32 || error == 33 {
+    // ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION: EACCES.
+    13
+  } else if error == 80 || error == 183 {
+    // ERROR_FILE_EXISTS, ERROR_ALREADY_EXISTS: EEXIST.
+    17
+  } else if error == 87 || error == 123 {
+    // ERROR_INVALID_PARAMETER, ERROR_INVALID_NAME.
+    EINVAL
+  } else if error == 145 {
+    // ERROR_DIR_NOT_EMPTY.
+    ENOTEMPTY
+  } else if error == 267 {
+    // ERROR_DIRECTORY.
+    ENOTDIR
+  } else if error == 8 || error == 14 {
+    // ERROR_NOT_ENOUGH_MEMORY, ERROR_OUTOFMEMORY: ENOMEM.
+    12
+  } else if error == 39 || error == 112 {
+    // ERROR_HANDLE_DISK_FULL, ERROR_DISK_FULL: ENOSPC.
+    28
+  } else if error == 109 || error == 232 {
+    // ERROR_BROKEN_PIPE, ERROR_NO_DATA: the other end of a pipe closed.
+    EPIPE
+  } else {
+    super::UNKNOWN
+  }
+}
+
+/// `path` as NUL-terminated UTF-16, or `None` if it holds a NUL.
+@cfg(windows)
+fn wide_path(path: String) -> Option<List<u16>> {
+  if path.contains("\0") { None } else { Some(to_utf16(path)) }
+}
+
+@cfg(windows)
+pub fn path_kind(path: String) -> i32 {
+  const name = match wide_path(path) {
+    Some(found) => found,
+    None => return KIND_MISSING,
+  };
+  const attributes = unsafe { GetFileAttributesW(name.as_ptr()) };
+
+  // INVALID_FILE_ATTRIBUTES, and FILE_ATTRIBUTE_DIRECTORY (0x10).
+  if attributes == 0xFFFF_FFFF {
+    KIND_MISSING
+  } else if attributes & 0x10 != 0 {
+    KIND_DIR
+  } else {
+    KIND_FILE
+  }
+}
+
+@cfg(windows)
+pub fn read_file(path: String) -> Result<List<u8>, i32> {
+  const name = match wide_path(path) {
+    Some(found) => found,
+    None => return Err(EINVAL),
+  };
+  // GENERIC_READ, sharing everything, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL.
+  const file = unsafe { CreateFileW(name.as_ptr(), 0x8000_0000, 7, 0 as *mut c_void, 3, 0x80, 0 as *mut c_void) };
+
+  if invalid(file) {
+    return Err(failure());
+  }
+
+  const data = new List<u8>();
+  var code = 0;
+
+  loop {
+    const start = data.len();
+    var read = 0u32;
+
+    data.resize(start + 4096, 0);
+
+    const done = unsafe { ReadFile(file, data.as_mut_ptr().add(start), 4096, &mut read, 0 as *mut c_void) } != 0;
+
+    data.resize(start + read as usize, 0);
+
+    if !done {
+      code = failure();
+      break;
+    }
+
+    if read == 0 {
+      break;
+    }
+  }
+
+  unsafe { CloseHandle(file); }
+
+  if code == 0 { Ok(data) } else { Err(code) }
+}
+
+@cfg(windows)
+pub fn write_file(path: String, data: *const u8, len: usize, append: bool) -> i32 {
+  const name = match wide_path(path) {
+    Some(found) => found,
+    None => return EINVAL,
+  };
+  // FILE_APPEND_DATA with OPEN_ALWAYS, or GENERIC_WRITE with CREATE_ALWAYS.
+  const access = if append { 0x4u32 } else { 0x4000_0000u32 };
+  const disposition = if append { 4u32 } else { 2u32 };
+  const file = unsafe { CreateFileW(name.as_ptr(), access, 7, 0 as *mut c_void, disposition, 0x80, 0 as *mut c_void) };
+
+  if invalid(file) {
+    return failure();
+  }
+
+  var code = 0;
+  var done = 0usize;
+
+  while done < len {
+    const left = len - done;
+    const size = if left > 0x4000_0000 { 0x4000_0000u32 } else { left as u32 };
+    var written = 0u32;
+
+    if unsafe { WriteFile(file, data.add(done), size, &mut written, 0 as *mut c_void) } == 0 {
+      code = failure();
+      break;
+    }
+
+    done += written as usize;
+  }
+
+  if unsafe { CloseHandle(file) } == 0 && code == 0 {
+    code = failure();
+  }
+
+  code
+}
+
+@cfg(windows)
+pub fn create_dir(path: String) -> i32 {
+  const name = match wide_path(path) {
+    Some(found) => found,
+    None => return EINVAL,
+  };
+
+  if unsafe { CreateDirectoryW(name.as_ptr(), 0 as *mut c_void) } != 0 { 0 } else { failure() }
+}
+
+@cfg(windows)
+pub fn remove_dir(path: String) -> i32 {
+  const name = match wide_path(path) {
+    Some(found) => found,
+    None => return EINVAL,
+  };
+
+  if unsafe { RemoveDirectoryW(name.as_ptr()) } != 0 { 0 } else { failure() }
+}
+
+@cfg(windows)
+pub fn remove_file(path: String) -> i32 {
+  const name = match wide_path(path) {
+    Some(found) => found,
+    None => return EINVAL,
+  };
+
+  if unsafe { DeleteFileW(name.as_ptr()) } != 0 { 0 } else { failure() }
+}
+
+/// Replaces the target, as POSIX does: MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED.
+@cfg(windows)
+pub fn rename_path(from: String, to: String) -> i32 {
+  const source = match wide_path(from) {
+    Some(found) => found,
+    None => return EINVAL,
+  };
+  const target = match wide_path(to) {
+    Some(found) => found,
+    None => return EINVAL,
+  };
+
+  if unsafe { MoveFileExW(source.as_ptr(), target.as_ptr(), 3) } != 0 { 0 } else { failure() }
+}
+
+@cfg(windows)
+pub fn copy_file(from: String, to: String) -> i32 {
+  const source = match wide_path(from) {
+    Some(found) => found,
+    None => return EINVAL,
+  };
+  const target = match wide_path(to) {
+    Some(found) => found,
+    None => return EINVAL,
+  };
+
+  if unsafe { CopyFileW(source.as_ptr(), target.as_ptr(), 0) } != 0 { 0 } else { failure() }
+}
+
+@cfg(windows)
+pub fn read_dir(path: String) -> Result<List<String>, i32> {
+  if path.is_empty() {
+    return Err(ENOENT);
+  }
+
+  // `path\*`, without doubling a trailing separator.
+  const pattern = if path.ends_with("\\") || path.ends_with("/") { path + "*" } else { path + "\\*" };
+  const name = match wide_path(pattern) {
+    Some(found) => found,
+    None => return Err(EINVAL),
+  };
+  var data = FindData {
+    attributes: 0,
+    created: FileTime { low: 0, high: 0 },
+    accessed: FileTime { low: 0, high: 0 },
+    written: FileTime { low: 0, high: 0 },
+    size_high: 0,
+    size_low: 0,
+    reserved0: 0,
+    reserved1: 0,
+    name: [0u16; 260],
+    alternate_name: [0u16; 14],
+  };
+  const find = unsafe { FindFirstFileW(name.as_ptr(), &mut data) };
+
+  if invalid(find) {
+    return Err(failure());
+  }
+
+  const names = new List<String>();
+
+  loop {
+    const units = new List<u16>();
+    var at = 0usize;
+
+    while at < 260 && data.name[at] != 0 {
+      units.push(data.name[at]);
+      at += 1;
+    }
+
+    const text = from_utf16_lossy(&units);
+
+    if text != "." && text != ".." {
+      names.push(text);
+    }
+
+    if unsafe { FindNextFileW(find, &mut data) } == 0 {
+      break;
+    }
+  }
+
+  unsafe { FindClose(find); }
+  Ok(names)
+}
+
+@cfg(windows)
+pub fn current_dir() -> Result<String, i32> {
+  // Without a buffer, the size it needs with its terminator.
+  const size = unsafe { GetCurrentDirectoryW(0, 0 as *mut u16) };
+
+  if size == 0 {
+    return Err(failure());
+  }
+
+  const buffer = new List<u16>();
+
+  buffer.resize(size as usize, 0);
+
+  const len = unsafe { GetCurrentDirectoryW(size, buffer.as_mut_ptr()) };
+
+  if len == 0 {
+    return Err(failure());
+  }
+
+  if len >= size {
+    return Err(super::UNKNOWN);
+  }
+
+  Ok(from_utf16_lossy(&buffer[0..len as usize]))
+}
+
+// ---- Running programs -------------------------------------------------------------------------
+
+// A started program has three streams, each this program's (`STREAM_INHERIT`), a pipe to this
+// program (`STREAM_PIPE`), nothing (`STREAM_NULL`), or a file (`STREAM_FILE`)
+// (docs/adr/0097-processes-and-environment.md, Q664).
+
+pub const STREAM_INHERIT: i32 = 0;
+pub const STREAM_PIPE: i32 = 1;
+pub const STREAM_NULL: i32 = 2;
+pub const STREAM_FILE: i32 = 3;
+
+/// A stream of a program to start: a `STREAM_*` mode, and the file of `STREAM_FILE`, which stays
+/// the caller's.
+pub struct Stream {
+  pub mode: i32;
+  pub handle: usize;
+}
+
+/// This program's end of a pipe to a started program, a file of `file_*` closed once: by `close`,
+/// by `exchange`, which takes it, or when the last reference goes.
+pub class Pipe impl Drop {
+  pub var handle: usize;
+  pub var is_open: bool;
+
+  pub fn new(self, handle: usize) {
+    self.handle = handle;
+    self.is_open = true;
+  }
+
+  pub fn read(self, buffer: *mut u8, len: usize) -> Result<usize, i32> {
+    if !self.is_open {
+      return Err(EBADF);
+    }
+
+    pipe_read(self.handle, buffer, len)
+  }
+
+  pub fn write(self, data: *const u8, len: usize) -> Result<usize, i32> {
+    if !self.is_open {
+      return Err(EBADF);
+    }
+
+    pipe_write(self.handle, data, len)
+  }
+
+  /// Closes the pipe: 0, or the code of the failure. Closing it again does nothing.
+  pub fn close(self) -> i32 {
+    if !self.is_open {
+      return 0;
+    }
+
+    self.is_open = false;
+    file_close(self.handle)
+  }
+
+  /// The handle, now the caller's to close, or `None` once closed.
+  pub fn release(self) -> Option<usize> {
+    if !self.is_open {
+      return None;
+    }
+
+    self.is_open = false;
+    Some(self.handle)
+  }
+
+  pub fn drop(self) {
+    self.close();
+  }
+}
+
+/// A started program: its process (the process ID on POSIX systems, a `HANDLE` on Windows), the
+/// identifier of the system, and this program's ends of its piped streams.
+pub struct Started {
+  pub process: usize;
+  pub id: u32;
+  pub stdin: Option<Pipe>;
+  pub stdout: Option<Pipe>;
+  pub stderr: Option<Pipe>;
+}
+
+/// The handle of `pipe`, now the caller's, or `None`.
+fn released(pipe: Option<Pipe>) -> Option<usize> {
+  match pipe {
+    Some(found) => found.release(),
+    None => None,
+  }
+}
+
+/// `struct pollfd`, the same on every Unix system.
+@cfg(unix)
+@repr(C)
+struct PollFd {
+  pub fd: c_int;
+  pub events: i16;
+  pub revents: i16;
+}
+
+@cfg(unix)
+const POLLIN: i16 = 1;
+@cfg(unix)
+const POLLOUT: i16 = 4;
+@cfg(unix)
+const SIGPIPE: c_int = 13;
+@cfg(unix)
+const X_OK: c_int = 1;
+/// `waitpid` returns at once for a program still running, on every Unix system.
+@cfg(unix)
+const WNOHANG: c_int = 1;
+@cfg(unix)
+const SIGKILL: c_int = 9;
+/// No such process.
+@cfg(unix)
+const ESRCH: i32 = 3;
+
+/// What one write to a pipe that `poll` found ready never blocks on: POSIX's least `PIPE_BUF`.
+@cfg(unix)
+const PIPE_BUF: usize = 512;
+
+@cfg(unix)
+extern "C" {
+  fn close(fd: c_int) -> c_int;
+  fn read(fd: c_int, buffer: *mut c_void, size: usize) -> isize;
+  fn write(fd: c_int, buffer: *const c_void, size: usize) -> isize;
+  fn access(path: *const c_char, mode: c_int) -> c_int;
+  fn waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_int;
+  fn kill(pid: c_int, signal: c_int) -> c_int;
+  fn signal(number: c_int, handler: Option<extern "C" fn(c_int)>) -> Option<extern "C" fn(c_int)>;
+}
+
+/// `nfds_t` is `unsigned long` in glibc and `unsigned int` in bionic and on Apple systems.
+@cfg(target_os = "linux")
+extern "C" {
+  fn poll(fds: *mut PollFd, count: usize, timeout: c_int) -> c_int;
+}
+
+@cfg(any(target_os = "android", target_os = "macos", target_os = "ios"))
+extern "C" {
+  fn poll(fds: *mut PollFd, count: u32, timeout: c_int) -> c_int;
+}
+
+/// Waits without a time limit until one of the `count` descriptors at `fds` is ready.
+@cfg(target_os = "linux")
+fn wait_ready(fds: *mut PollFd, count: usize) -> c_int {
+  unsafe { poll(fds, count, -1) }
+}
+
+@cfg(any(target_os = "android", target_os = "macos", target_os = "ios"))
+fn wait_ready(fds: *mut PollFd, count: usize) -> c_int {
+  unsafe { poll(fds, count as u32, -1) }
+}
+
+/// Linux and Android create pipes closed on `execve` in one call, and start programs with `fork`.
+@cfg(any(target_os = "linux", target_os = "android"))
+extern "C" {
+  fn pipe2(fds: *mut c_int, flags: c_int) -> c_int;
+  fn fork() -> c_int;
+  fn dup2(from: c_int, to: c_int) -> c_int;
+  fn execve(path: *const c_char, argv: *const *mut c_char, envp: *const *mut c_char) -> c_int;
+  fn _exit(code: c_int);
+  static environ: *const *mut c_char;
+}
+
+/// `O_CLOEXEC` on every architecture Sagitario supports.
+@cfg(any(target_os = "linux", target_os = "android"))
+const O_CLOEXEC: c_int = 0x80000;
+
+/// Apple systems start programs with `posix_spawn`, whose option types are pointers there:
+/// `POSIX_SPAWN_CLOEXEC_DEFAULT` closes every descriptor the child is not given.
+@cfg(any(target_os = "macos", target_os = "ios"))
+extern "C" {
+  fn pipe(fds: *mut c_int) -> c_int;
+  fn _NSGetEnviron() -> *const *const *mut c_char;
+  fn posix_spawn(pid: *mut c_int, path: *const c_char, actions: *const *mut c_void, attributes: *const *mut c_void, argv: *const *mut c_char, envp: *const *mut c_char) -> c_int;
+  fn posix_spawn_file_actions_init(actions: *mut *mut c_void) -> c_int;
+  fn posix_spawn_file_actions_destroy(actions: *mut *mut c_void) -> c_int;
+  fn posix_spawn_file_actions_adddup2(actions: *mut *mut c_void, from: c_int, to: c_int) -> c_int;
+  fn posix_spawn_file_actions_addinherit_np(actions: *mut *mut c_void, fd: c_int) -> c_int;
+  fn posix_spawn_file_actions_addchdir_np(actions: *mut *mut c_void, path: *const c_char) -> c_int;
+  fn posix_spawnattr_init(attributes: *mut *mut c_void) -> c_int;
+  fn posix_spawnattr_destroy(attributes: *mut *mut c_void) -> c_int;
+  fn posix_spawnattr_setflags(attributes: *mut *mut c_void, flags: i16) -> c_int;
+}
+
+@cfg(any(target_os = "macos", target_os = "ios"))
+const POSIX_SPAWN_CLOEXEC_DEFAULT: i16 = 0x4000;
+
+/// The environment of this program, as C's `environ`.
+@cfg(any(target_os = "linux", target_os = "android"))
+fn environment() -> *const *mut c_char {
+  unsafe { environ }
+}
+
+/// Shared libraries on Apple systems cannot refer to `environ` directly.
+@cfg(any(target_os = "macos", target_os = "ios"))
+fn environment() -> *const *mut c_char {
+  unsafe { *_NSGetEnviron() }
+}
+
+/// A pipe in `fds`, whose descriptors the child does not keep after `execve`.
+@cfg(any(target_os = "linux", target_os = "android"))
+fn open_pipe(fds: *mut c_int) -> bool {
+  (unsafe { pipe2(fds, O_CLOEXEC) }) == 0
+}
+
+/// `posix_spawn` closes them in the child.
+@cfg(any(target_os = "macos", target_os = "ios"))
+fn open_pipe(fds: *mut c_int) -> bool {
+  (unsafe { pipe(fds) }) == 0
+}
+
+@cfg(unix)
+fn close_fd(fd: c_int) {
+  if fd >= 0 {
+    unsafe { close(fd); }
+  }
+}
+
+/// The file `program` names: itself if it contains `/`, else the first executable file of that
+/// name in the directories of `PATH`, where an empty directory is the current one.
+@cfg(unix)
+fn find_program(program: String) -> Option<CString> {
+  if program.contains("/") {
+    return c_path(program);
+  }
+
+  const path = variable("PATH").unwrap_or("/usr/local/bin:/usr/bin:/bin");
+
+  for dir in path.split(":") {
+    const candidate = if dir.is_empty() { `./${program}` } else { `${dir}/${program}` };
+
+    if path_kind(candidate) == KIND_FILE {
+      const name = c_path(candidate)?;
+
+      if (unsafe { access(name.as_ptr(), X_OK) }) == 0 {
+        return Some(name);
+      }
+    }
+  }
+
+  None
+}
+
+/// Whether the `NAME=value` entry of the environment has the name of `entry`, another one.
+@cfg(unix)
+fn same_name(existing: *mut c_char, entry: String) -> bool {
+  const name = entry.as_ptr();
+  var at = 0usize;
+
+  loop {
+    const a = unsafe { *(existing as *const u8).add(at) };
+    const b = unsafe { *name.add(at) };
+
+    // `std::process` gives names that are not empty and have no `=`.
+    if b == 0x3D {
+      return a == 0x3D;
+    }
+
+    if a != b {
+      return false;
+    }
+
+    at += 1;
+  }
+}
+
+/// The child between `fork` and `execve`, where only async-signal-safe calls may be made: nothing
+/// here allocates, counts references or panics. A failure is reported as its `errno` on `report`.
+@cfg(any(target_os = "linux", target_os = "android"))
+fn child(program: *const c_char, argv: *const *mut c_char, envp: *const *mut c_char, dir: *const c_char, fds: *const c_int, report: c_int) {
+  var target = 0;
+
+  while target < 3 {
+    const fd = unsafe { *fds.add(target as usize) };
+
+    if fd >= 0 && (unsafe { dup2(fd, target) }) < 0 {
+      exit_child(report);
+    }
+
+    target += 1;
+  }
+
+  // Pipes close on `execve`; a file or the null device given as a stream is closed here.
+  target = 0;
+
+  while target < 3 {
+    const fd = unsafe { *fds.add(target as usize) };
+
+    if fd > 2 {
+      unsafe { close(fd); }
+    }
+
+    target += 1;
+  }
+
+  if !dir.is_null() && (unsafe { chdir(dir) }) != 0 {
+    exit_child(report);
+  }
+
+  unsafe { execve(program, argv, envp); }
+  exit_child(report);
+}
+
+@cfg(any(target_os = "linux", target_os = "android"))
+fn exit_child(report: c_int) {
+  const error = [errno()];
+
+  unsafe {
+    write(report, error.as_ptr() as *const c_void, 4);
+    _exit(127);
+  }
+}
+
+/// Starts `program` with the descriptors at `fds` as its stdin, stdout and stderr (a negative one
+/// is inherited), in `dir` unless it is null: the process, or the code of the failure.
+@cfg(any(target_os = "linux", target_os = "android"))
+fn spawn(program: *const c_char, argv: *const *mut c_char, envp: *const *mut c_char, dir: *const c_char, fds: *const c_int) -> Result<c_int, i32> {
+  // The child writes the `errno` of a failure to this pipe, which `execve` closes when it works.
+  var report = [-1; 2];
+
+  if !open_pipe(report.as_mut_ptr()) {
+    return Err(failure());
+  }
+
+  const pid = unsafe { fork() };
+
+  if pid == 0 {
+    child(program, argv, envp, dir, fds, report[1]);
+  }
+
+  const code = if pid < 0 { failure() } else { 0 };
+  var error = [0; 1];
+  var count = 0isize;
+
+  close_fd(report[1]);
+
+  if pid > 0 {
+    loop {
+      clear_errno();
+      count = unsafe { read(report[0], error.as_mut_ptr() as *mut c_void, 4) };
+
+      if count >= 0 || errno() != EINTR {
+        break;
+      }
+    }
+  }
+
+  close_fd(report[0]);
+
+  if pid < 0 {
+    return Err(code);
+  }
+
+  if count == 4 {
+    wait_child(pid);
+    return Err(error[0]);
+  }
+
+  Ok(pid)
+}
+
+@cfg(any(target_os = "macos", target_os = "ios"))
+fn spawn(program: *const c_char, argv: *const *mut c_char, envp: *const *mut c_char, dir: *const c_char, fds: *const c_int) -> Result<c_int, i32> {
+  var actions = 0 as *mut c_void;
+  var attributes = 0 as *mut c_void;
+  var pid = 0;
+  var code = unsafe { posix_spawn_file_actions_init(&raw mut actions) };
+
+  if code != 0 {
+    return Err(code);
+  }
+
+  code = unsafe { posix_spawnattr_init(&raw mut attributes) };
+
+  if code == 0 {
+    code = unsafe { posix_spawnattr_setflags(&raw mut attributes, POSIX_SPAWN_CLOEXEC_DEFAULT) };
+  }
+
+  var target = 0;
+
+  while target < 3 && code == 0 {
+    const fd = unsafe { *fds.add(target as usize) };
+
+    code = if fd >= 0 {
+      unsafe { posix_spawn_file_actions_adddup2(&raw mut actions, fd, target) }
+    } else {
+      unsafe { posix_spawn_file_actions_addinherit_np(&raw mut actions, target) }
+    };
+    target += 1;
+  }
+
+  if code == 0 && !dir.is_null() {
+    code = unsafe { posix_spawn_file_actions_addchdir_np(&raw mut actions, dir) };
+  }
+
+  if code == 0 {
+    code = unsafe { posix_spawn(&raw mut pid, program, &raw const actions, &raw const attributes, argv, envp) };
+  }
+
+  unsafe {
+    posix_spawn_file_actions_destroy(&raw mut actions);
+    posix_spawnattr_destroy(&raw mut attributes);
+  }
+
+  if code == 0 { Ok(pid) } else { Err(code) }
+}
+
+/// Waits for the process `pid` to end: its exit code, or `None` if a signal ended it.
+@cfg(unix)
+fn wait_child(pid: c_int) -> Option<i32> {
+  var status = [0; 1];
+
+  loop {
+    clear_errno();
+
+    if (unsafe { waitpid(pid, status.as_mut_ptr(), 0) }) >= 0 || errno() != EINTR {
+      break;
+    }
+  }
+
+  // `WIFEXITED`: no signal in the low 7 bits; `WEXITSTATUS`: the next 8 bits.
+  if status[0] & 0x7F == 0 { Some((status[0] >> 8) & 0xFF) } else { None }
+}
+
+/// Reads what is available from `fd` into `bytes`: `fd`, or -1 once it is closed at the end of
+/// the stream.
+@cfg(unix)
+fn drain(fd: c_int, bytes: List<u8>) -> c_int {
+  const start = bytes.len();
+
+  bytes.resize(start + 4096, 0);
+  clear_errno();
+
+  const count = unsafe { read(fd, bytes.as_mut_ptr().add(start) as *mut c_void, 4096) };
+  const interrupted = count < 0 && errno() == EINTR;
+
+  bytes.resize(start + if count > 0 { count as usize } else { 0 }, 0);
+
+  if count > 0 || interrupted {
+    fd
+  } else {
+    close_fd(fd);
+    -1
+  }
+}
+
+/// The C strings of `texts`, which `std::process` gives without NUL characters.
+@cfg(unix)
+fn c_strings(texts: List<String>) -> Result<List<CString>, i32> {
+  const strings = new List<CString>();
+
+  for text in texts {
+    match c_path(text) {
+      Some(found) => strings.push(found),
+      None => return Err(EINVAL),
+    }
+  }
+
+  Ok(strings)
+}
+
+/// A NULL-terminated array of the C strings `strings`, which must outlive it.
+@cfg(unix)
+fn pointers(strings: List<CString>) -> List<usize> {
+  const addresses = new List<usize>();
+
+  for text in strings {
+    addresses.push(text.as_ptr() as usize);
+  }
+
+  addresses.push(0);
+  addresses
+}
+
+/// Starts `argv[0]` with the arguments `argv`, the `NAME=value` entries of `vars` added to its
+/// environment, in `dir`, with `streams` as its stdin, stdout and stderr: the program, or the code
+/// of the failure to start it.
+@cfg(unix)
+pub fn start_process(argv: List<String>, vars: List<String>, dir: Option<String>, streams: List<Stream>) -> Result<Started, i32> {
+  const program = match find_program(argv[0]) {
+    Some(found) => found,
+    None => return Err(ENOENT),
+  };
+  const c_args = c_strings(argv)?;
+  const c_vars = c_strings(vars)?;
+  const arg_pointers = pointers(c_args);
+  const parent = environment();
+  const env_pointers = new List<usize>();
+
+  if !vars.is_empty() {
+    var index = 0usize;
+
+    while !parent.is_null() {
+      const existing = unsafe { *parent.add(index) };
+
+      if existing.is_null() {
+        break;
+      }
+
+      if !vars.iter().any((entry) => same_name(existing, entry)) {
+        env_pointers.push(existing as usize);
+      }
+
+      index += 1;
+    }
+
+    for entry in c_vars {
+      env_pointers.push(entry.as_ptr() as usize);
+    }
+
+    env_pointers.push(0);
+  }
+
+  const envp = if vars.is_empty() { parent } else { env_pointers.as_ptr() as *const *mut c_char };
+  const c_dir: Option<CString> = match dir {
+    Some(path) => match c_path(path) {
+      Some(found) => Some(found),
+      None => return Err(EINVAL),
+    },
+    None => None,
+  };
+  const dir_pointer = match c_dir {
+    Some(path) => path.as_ptr(),
+    None => 0 as *const c_char,
+  };
+  // This program's ends of the pipes, and the child's descriptors, which this function closes
+  // after the start when it opened them.
+  var ours = [-1; 3];
+  var theirs = [-1; 3];
+  var opened = [false; 3];
+  var code = 0;
+
+  for stream in 0..3usize {
+    const mode = streams[stream].mode;
+
+    if mode == STREAM_PIPE {
+      var ends = [-1; 2];
+
+      if !open_pipe(ends.as_mut_ptr()) {
+        code = failure();
+        break;
+      }
+
+      // The child reads its stdin from the first end, and writes the others to the second.
+      ours[stream] = if stream == 0 { ends[1] } else { ends[0] };
+      theirs[stream] = if stream == 0 { ends[0] } else { ends[1] };
+      opened[stream] = true;
+    } else if mode == STREAM_NULL {
+      match file_open("/dev/null", stream == 0, stream != 0, false, false, false, false) {
+        Ok(fd) => {
+          theirs[stream] = fd as c_int;
+          opened[stream] = true;
+        }
+        Err(failed) => {
+          code = failed;
+          break;
+        }
+      }
+    } else if mode == STREAM_FILE {
+      theirs[stream] = streams[stream].handle as c_int;
+    }
+  }
+
+  // The child shares stdout and stderr: what this program printed must come first.
+  unsafe { fflush(0 as *mut c_void); }
+
+  const started = if code == 0 {
+    spawn(program.as_ptr(), arg_pointers.as_ptr() as *const *mut c_char, envp, dir_pointer, theirs.as_ptr())
+  } else {
+    Err(code)
+  };
+
+  for stream in 0..3usize {
+    if opened[stream] {
+      close_fd(theirs[stream]);
+    }
+  }
+
+  const pid = match started {
+    Ok(found) => found,
+    Err(failed) => {
+      for stream in 0..3usize {
+        close_fd(ours[stream]);
+      }
+
+      return Err(failed);
+    }
+  };
+
+  Ok(Started { process: pid as usize, id: pid as u32, stdin: pipe_of(ours[0]), stdout: pipe_of(ours[1]), stderr: pipe_of(ours[2]) })
+}
+
+/// The pipe of the descriptor `fd`, or `None` for -1.
+@cfg(unix)
+fn pipe_of(fd: c_int) -> Option<Pipe> {
+  if fd < 0 { None } else { Some(new Pipe(fd as usize)) }
+}
+
+/// Writes `text` to the pipe `stdin` and reads the pipes `stdout` and `stderr` into `out` and
+/// `err`, all at once, until each one is closed, which it does; `None` is not a pipe.
+@cfg(unix)
+pub fn exchange(stdin: Option<Pipe>, text: String, stdout: Option<Pipe>, stderr: Option<Pipe>, out: List<u8>, err: List<u8>) {
+  var in_fd = descriptor(released(stdin));
+  var out_fd = descriptor(released(stdout));
+  var err_fd = descriptor(released(stderr));
+  var done = 0usize;
+
+  if in_fd >= 0 && text.is_empty() {
+    close_fd(in_fd);
+    in_fd = -1;
+  }
+
+  // A child that stops reading would end this program with SIGPIPE; SIG_IGN is 1.
+  const ignore = Some(unsafe { 1usize as extern "C" fn(c_int) });
+  const writes = in_fd >= 0;
+  const previous = if writes { unsafe { signal(SIGPIPE, ignore) } } else { None };
+  var ready = [PollFd { fd: -1, events: 0, revents: 0 }; 3];
+
+  // `poll` leaves out the slots of closed streams, whose descriptor is negative.
+  while in_fd >= 0 || out_fd >= 0 || err_fd >= 0 {
+    ready[0] = PollFd { fd: in_fd, events: POLLOUT, revents: 0 };
+    ready[1] = PollFd { fd: out_fd, events: POLLIN, revents: 0 };
+    ready[2] = PollFd { fd: err_fd, events: POLLIN, revents: 0 };
+    clear_errno();
+
+    if wait_ready(ready.as_mut_ptr(), 3) < 0 {
+      if errno() == EINTR {
+        continue;
+      }
+
+      break;
+    }
+
+    if in_fd >= 0 && ready[0].revents != 0 {
+      const left = text.len() - done;
+      const size = if left > PIPE_BUF { PIPE_BUF } else { left };
+
+      clear_errno();
+
+      const written = unsafe { write(in_fd, text.as_ptr().add(done) as *const c_void, size) };
+
+      if written > 0 {
+        done += written as usize;
+      }
+
+      // Once the child closes its stdin, the rest of the input is dropped.
+      if done == text.len() || (written < 0 && errno() != EINTR) {
+        close_fd(in_fd);
+        in_fd = -1;
+      }
+    }
+
+    if out_fd >= 0 && ready[1].revents != 0 {
+      out_fd = drain(out_fd, out);
+    }
+
+    if err_fd >= 0 && ready[2].revents != 0 {
+      err_fd = drain(err_fd, err);
+    }
+  }
+
+  if writes {
+    unsafe { signal(SIGPIPE, previous); }
+  }
+
+  close_fd(in_fd);
+  close_fd(out_fd);
+  close_fd(err_fd);
+}
+
+/// The descriptor of a released pipe, or -1.
+@cfg(unix)
+fn descriptor(handle: Option<usize>) -> c_int {
+  match handle {
+    Some(found) => found as c_int,
+    None => -1,
+  }
+}
+
+/// What `waitpid` with `options` found of `process`: its exit code, or `None` if a signal ended
+/// it; nothing yet, with `WNOHANG`, while it runs.
+@cfg(unix)
+fn reap(process: usize, options: c_int) -> Result<Option<Option<i32>>, i32> {
+  var status = [0; 1];
+
+  loop {
+    clear_errno();
+
+    const found = unsafe { waitpid(process as c_int, status.as_mut_ptr(), options) };
+
+    if found > 0 {
+      // `WIFEXITED`: no signal in the low 7 bits; `WEXITSTATUS`: the next 8 bits.
+      return Ok(Some(if status[0] & 0x7F == 0 { Some((status[0] >> 8) & 0xFF) } else { None }));
+    }
+
+    if found == 0 {
+      return Ok(None);
+    }
+
+    if errno() != EINTR {
+      return Err(failure());
+    }
+  }
+}
+
+/// Waits for `process` to end: its exit code, or `None` if a signal ended it.
+@cfg(unix)
+pub fn wait_process(process: usize) -> Result<Option<i32>, i32> {
+  Ok(reap(process, 0)?.flatten())
+}
+
+/// How `process` ended, or `None` while it runs.
+@cfg(unix)
+pub fn poll_process(process: usize) -> Result<Option<Option<i32>>, i32> {
+  reap(process, WNOHANG)
+}
+
+/// Ends `process` with `SIGKILL`: 0, or the code of the failure. One that ended and was waited for
+/// is not a failure.
+@cfg(unix)
+pub fn kill_process(process: usize) -> i32 {
+  clear_errno();
+
+  if (unsafe { kill(process as c_int, SIGKILL) }) == 0 {
+    return 0;
+  }
+
+  const code = failure();
+
+  if code == ESRCH { 0 } else { code }
+}
+
+/// A process ID holds nothing to release.
+@cfg(unix)
+pub fn release_process(_process: usize) {}
+
+@cfg(unix)
+fn pipe_read(pipe: usize, buffer: *mut u8, len: usize) -> Result<usize, i32> {
+  file_read(pipe, buffer, len)
+}
+
+/// A program that closed its stdin would end this one with `SIGPIPE`, which is ignored for the
+/// write, so that it fails with `EPIPE` instead; `SIG_IGN` is 1.
+@cfg(unix)
+fn pipe_write(pipe: usize, data: *const u8, len: usize) -> Result<usize, i32> {
+  const ignore = Some(unsafe { 1usize as extern "C" fn(c_int) });
+  const previous = unsafe { signal(SIGPIPE, ignore) };
+  const written = file_write(pipe, data, len);
+
+  unsafe { signal(SIGPIPE, previous); }
+  written
+}
+
+/// `SECURITY_ATTRIBUTES`.
+@cfg(windows)
+@repr(C)
+struct SecurityAttributes {
+  pub length: u32;
+  pub descriptor: *mut c_void;
+  pub inherit: c_int;
+}
+
+/// `STARTUPINFOW`.
+@cfg(windows)
+@repr(C)
+struct StartupInfo {
+  pub size: u32;
+  pub reserved: *mut u16;
+  pub desktop: *mut u16;
+  pub title: *mut u16;
+  pub x: u32;
+  pub y: u32;
+  pub x_size: u32;
+  pub y_size: u32;
+  pub x_count_chars: u32;
+  pub y_count_chars: u32;
+  pub fill_attribute: u32;
+  pub flags: u32;
+  pub show_window: u16;
+  pub reserved2_size: u16;
+  pub reserved2: *mut u8;
+  pub std_input: *mut c_void;
+  pub std_output: *mut c_void;
+  pub std_error: *mut c_void;
+}
+
+/// `PROCESS_INFORMATION`.
+@cfg(windows)
+@repr(C)
+struct ProcessInformation {
+  pub process: *mut c_void;
+  pub thread: *mut c_void;
+  pub process_id: u32;
+  pub thread_id: u32;
+}
+
+/// `OVERLAPPED`, for reading and writing several pipes at once without threads.
+@cfg(windows)
+@repr(C)
+struct Overlapped {
+  pub internal: usize;
+  pub internal_high: usize;
+  pub offset: u32;
+  pub offset_high: u32;
+  pub event: *mut c_void;
+}
+
+/// The two ends of a pipe to a child.
+@cfg(windows)
+struct PipeEnds {
+  /// This program's end, opened for overlapped I/O.
+  pub ours: *mut c_void;
+  /// The child's end, which it inherits.
+  pub theirs: *mut c_void;
+}
+
+@cfg(windows)
+extern "C" {
+  fn CreateNamedPipeW(name: *const u16, open_mode: u32, pipe_mode: u32, instances: u32, out_size: u32, in_size: u32, timeout: u32, security: *mut c_void) -> *mut c_void;
+  fn CreateEventW(security: *mut c_void, manual_reset: c_int, signaled: c_int, name: *const u16) -> *mut c_void;
+  fn GetOverlappedResult(file: *mut c_void, overlapped: *mut Overlapped, transferred: *mut u32, wait: c_int) -> c_int;
+  fn CancelIo(file: *mut c_void) -> c_int;
+  fn WaitForMultipleObjects(count: u32, handles: *const *mut c_void, wait_all: c_int, milliseconds: u32) -> u32;
+  fn WaitForSingleObject(handle: *mut c_void, milliseconds: u32) -> u32;
+  fn GetExitCodeProcess(process: *mut c_void, code: *mut u32) -> c_int;
+  fn CreateProcessW(application: *const u16, command_line: *mut u16, process_security: *mut c_void, thread_security: *mut c_void, inherit_handles: c_int, flags: u32, environment: *mut c_void, directory: *const u16, startup: *mut StartupInfo, information: *mut ProcessInformation) -> c_int;
+  fn GetEnvironmentStringsW() -> *mut u16;
+  fn FreeEnvironmentStringsW(block: *mut u16) -> c_int;
+  fn GetCurrentProcess() -> *mut c_void;
+  fn GetCurrentProcessId() -> u32;
+  fn GetCurrentThreadId() -> u32;
+  fn DuplicateHandle(source_process: *mut c_void, source: *mut c_void, target_process: *mut c_void, target: *mut *mut c_void, access: u32, inherit: c_int, options: u32) -> c_int;
+  fn TerminateProcess(process: *mut c_void, code: u32) -> c_int;
+}
+
+@cfg(windows)
+const INFINITE: u32 = 0xFFFF_FFFF;
+@cfg(windows)
+const ERROR_IO_PENDING: u32 = 997;
+@cfg(windows)
+const WAIT_TIMEOUT: u32 = 258;
+@cfg(windows)
+const WAIT_FAILED: u32 = 0xFFFF_FFFF;
+@cfg(windows)
+const EQUALS: u16 = 0x3D;
+
+/// The pipes this thread has created, which name the next one.
+@cfg(windows)
+@thread_local
+static var PIPES: u64 = 0;
+
+/// A pipe for a child: one it writes (its stdout or stderr) when `inbound`, else its stdin.
+/// Anonymous pipes cannot be overlapped, so it is a named pipe with a name of its own, as Rust's
+/// `std` does.
+@cfg(windows)
+fn child_pipe(inbound: bool) -> Result<PipeEnds, i32> {
+  const count = PIPES;
+
+  PIPES = count + 1;
+
+  const pid = unsafe { GetCurrentProcessId() };
+  const tid = unsafe { GetCurrentThreadId() };
+  const name = to_utf16(`\\\\.\\pipe\\sagitario-${pid}-${tid}-${count}`);
+  // PIPE_ACCESS_INBOUND (1) or PIPE_ACCESS_OUTBOUND (2), with FILE_FLAG_OVERLAPPED and
+  // FILE_FLAG_FIRST_PIPE_INSTANCE; a pipe of bytes that rejects remote clients.
+  const access = if inbound { 1u32 } else { 2u32 };
+  const ours = unsafe { CreateNamedPipeW(name.as_ptr(), access | 0x4000_0000 | 0x0008_0000, 8, 1, 4096, 4096, 0, 0 as *mut c_void) };
+
+  if invalid(ours) {
+    return Err(failure());
+  }
+
+  var inheritable = SecurityAttributes { length: mem::size_of<SecurityAttributes>() as u32, descriptor: 0 as *mut c_void, inherit: 1 };
+  // GENERIC_WRITE or GENERIC_READ, OPEN_EXISTING.
+  const theirs_access = if inbound { 0x4000_0000u32 } else { 0x8000_0000u32 };
+  const theirs = unsafe { CreateFileW(name.as_ptr(), theirs_access, 0, &raw mut inheritable as *mut c_void, 3, 0, 0 as *mut c_void) };
+
+  if invalid(theirs) {
+    const code = failure();
+
+    unsafe { CloseHandle(ours); }
+    return Err(code);
+  }
+
+  Ok(PipeEnds { ours: ours, theirs: theirs })
+}
+
+/// A copy of `handle` that a child inherits when `inherit`.
+@cfg(windows)
+fn duplicate(handle: *mut c_void, inherit: bool) -> Result<*mut c_void, i32> {
+  var copy = 0 as *mut c_void;
+
+  // DUPLICATE_SAME_ACCESS
+  if (unsafe { DuplicateHandle(GetCurrentProcess(), handle, GetCurrentProcess(), &raw mut copy, 0, if inherit { 1 } else { 0 }, 2) }) == 0 {
+    return Err(failure());
+  }
+
+  Ok(copy)
+}
+
+/// An inheritable copy of this program's standard stream `index`, or null if it has none.
+@cfg(windows)
+fn inherited(index: i32) -> *mut c_void {
+  const handle = unsafe { GetStdHandle((-10 - index) as u32) };
+
+  if handle.is_null() || invalid(handle) {
+    return 0 as *mut c_void;
+  }
+
+  duplicate(handle, true).unwrap_or(0 as *mut c_void)
+}
+
+/// The null device, inheritable, to read when `reading`, else to write.
+@cfg(windows)
+fn null_device(reading: bool) -> Result<*mut c_void, i32> {
+  const name = to_utf16("NUL");
+  var inheritable = SecurityAttributes { length: mem::size_of<SecurityAttributes>() as u32, descriptor: 0 as *mut c_void, inherit: 1 };
+  // GENERIC_READ or GENERIC_WRITE, sharing reads and writes, OPEN_EXISTING.
+  const access = if reading { 0x8000_0000u32 } else { 0x4000_0000u32 };
+  const device = unsafe { CreateFileW(name.as_ptr(), access, 3, &raw mut inheritable as *mut c_void, 3, 0, 0 as *mut c_void) };
+
+  if invalid(device) { Err(failure()) } else { Ok(device) }
+}
+
+/// Appends `arg` quoted so that the rules of Microsoft's C runtime (`args`) read it back.
+@cfg(windows)
+fn quote_arg(line: StringBuilder, arg: String) {
+  if !arg.is_empty() && !arg.contains(" ") && !arg.contains("\t") && !arg.contains("\"") {
+    line.append(arg);
+    return;
+  }
+
+  line.append("\"");
+
+  var slashes = 0usize;
+
+  for c in arg.chars() {
+    if c == '\\' {
+      slashes += 1;
+      continue;
+    }
+
+    // Backslashes before a quote are doubled, and the quote escaped.
+    line.append("\\".repeat(if c == '"' { slashes * 2 + 1 } else { slashes }));
+    line.append_char(c);
+    slashes = 0;
+  }
+
+  // Backslashes before the closing quote are doubled.
+  line.append("\\".repeat(slashes * 2));
+  line.append("\"");
+}
+
+/// The command line of `argv`, whose program name is only quoted, never escaped, when it holds
+/// spaces.
+@cfg(windows)
+fn command_line(argv: List<String>) -> String {
+  const line = new StringBuilder();
+  const program = argv[0];
+  const spaced = program.is_empty() || program.contains(" ") || program.contains("\t");
+
+  if spaced {
+    line.append("\"");
+  }
+
+  line.append(program);
+
+  if spaced {
+    line.append("\"");
+  }
+
+  for index in 1..argv.len() {
+    line.append(" ");
+    quote_arg(line, argv[index]);
+  }
+
+  line.to_string()
+}
+
+/// An ASCII letter of UTF-16 in upper case.
+@cfg(windows)
+fn upper(c: u16) -> u16 {
+  if c >= 0x61 && c <= 0x7A { c - 32 } else { c }
+}
+
+/// Whether the entry at `at` of an environment block has the name of `entry`, a `NAME=value` in
+/// UTF-16: Windows names ignore ASCII case.
+@cfg(windows)
+fn same_wide_name(block: *const u16, at: usize, entry: List<u16>) -> bool {
+  var index = 0usize;
+
+  loop {
+    const a = unit(block, at + index);
+    const b = entry[index];
+
+    if b == EQUALS {
+      return a == EQUALS;
+    }
+
+    if a == 0 || upper(a) != upper(b) {
+      return false;
+    }
+
+    index += 1;
+  }
+}
+
+/// The environment block of the child: this program's, with the `NAME=value` entries of `vars`
+/// replacing or adding variables. Entries starting with `=` are hidden variables of the shell.
+@cfg(windows)
+fn environment_block(vars: List<String>) -> List<u16> {
+  const block = new List<u16>();
+  const added = new List<List<u16>>();
+
+  for entry in vars {
+    added.push(to_utf16(entry));
+  }
+
+  const parent = unsafe { GetEnvironmentStringsW() };
+
+  if !parent.is_null() {
+    const units = parent as *const u16;
+    var at = 0usize;
+
+    while unit(units, at) != 0 {
+      var end = at;
+
+      while unit(units, end) != 0 {
+        end += 1;
+      }
+
+      const replaced = unit(units, at) != EQUALS && added.iter().any((entry) => same_wide_name(units, at, entry));
+
+      if !replaced {
+        for index in at..end + 1 {
+          block.push(unit(units, index));
+        }
+      }
+
+      at = end + 1;
+    }
+
+    unsafe { FreeEnvironmentStringsW(parent); }
+  }
+
+  for entry in added {
+    for c in entry {
+      block.push(c);
+    }
+  }
+
+  // The block ends with an empty entry.
+  block.push(0);
+  block
+}
+
+/// Writes `input` to the child's stdin `stdin` and reads its `stdout` and `stderr` into `out` and
+/// `err`, all at once with overlapped I/O, until each pipe is closed; a null handle is not a pipe.
+@cfg(windows)
+fn communicate(stdin: *mut c_void, stdout: *mut c_void, stderr: *mut c_void, input: String, out: List<u8>, err: List<u8>) {
+  var handles = [stdin, stdout, stderr];
+  var events = [0 as *mut c_void; 3];
+  var overlapped = [Overlapped { internal: 0, internal_high: 0, offset: 0, offset_high: 0, event: 0 as *mut c_void }; 3];
+  var pending = [false; 3];
+  // Room for a read of stdout, then for one of stderr.
+  var buffer = [0u8; 8192];
+  var done = 0usize;
+
+  if !handles[0].is_null() && input.is_empty() {
+    unsafe { CloseHandle(handles[0]); }
+    handles[0] = 0 as *mut c_void;
+  }
+
+  for stream in 0..3usize {
+    if !handles[stream].is_null() {
+      events[stream] = unsafe { CreateEventW(0 as *mut c_void, 1, 0, 0 as *const u16) };
+      overlapped[stream].event = events[stream];
+    }
+  }
+
+  loop {
+    // An operation on each open pipe without one.
+    for stream in 0..3usize {
+      if handles[stream].is_null() || pending[stream] {
+        continue;
+      }
+
+      const place = &raw mut overlapped[stream] as *mut c_void;
+      const started = if stream == 0 {
+        const left = input.len() - done;
+        const size = if left > 65536 { 65536u32 } else { left as u32 };
+
+        unsafe { WriteFile(handles[0], input.as_ptr().add(done), size, 0 as *mut u32, place) }
+      } else {
+        unsafe { ReadFile(handles[stream], &raw mut buffer[(stream - 1) * 4096], 4096, 0 as *mut u32, place) }
+      };
+
+      if started != 0 || (unsafe { GetLastError() }) == ERROR_IO_PENDING {
+        pending[stream] = true;
+      } else {
+        unsafe { CloseHandle(handles[stream]); }
+        handles[stream] = 0 as *mut c_void;
+      }
+    }
+
+    var waiting = [0 as *mut c_void; 3];
+    var streams = [0usize; 3];
+    var count = 0usize;
+
+    for stream in 0..3usize {
+      if pending[stream] {
+        waiting[count] = events[stream];
+        streams[count] = stream;
+        count += 1;
+      }
+    }
+
+    if count == 0 {
+      break;
+    }
+
+    const signaled = unsafe { WaitForMultipleObjects(count as u32, waiting.as_ptr(), 0, INFINITE) } as usize;
+
+    if signaled >= count {
+      // WAIT_FAILED: the operations are cancelled, and waited for before the buffers go.
+      for stream in 0..3usize {
+        if pending[stream] {
+          var ignored = 0u32;
+
+          unsafe {
+            CancelIo(handles[stream]);
+            GetOverlappedResult(handles[stream], &raw mut overlapped[stream], &raw mut ignored, 1);
+            CloseHandle(handles[stream]);
+          }
+          handles[stream] = 0 as *mut c_void;
+          pending[stream] = false;
+        }
+      }
+
+      break;
+    }
+
+    const stream = streams[signaled];
+    var transferred = 0u32;
+    const ok = (unsafe { GetOverlappedResult(handles[stream], &raw mut overlapped[stream], &raw mut transferred, 0) }) != 0;
+
+    pending[stream] = false;
+
+    var finished = !ok || transferred == 0;
+
+    if stream == 0 {
+      done += transferred as usize;
+      // Once the child closes its stdin, the rest of the input is dropped.
+      finished = !ok || done == input.len();
+    } else {
+      const bytes = if stream == 1 { out } else { err };
+      const base = (stream - 1) * 4096;
+
+      for index in 0..transferred as usize {
+        bytes.push(buffer[base + index]);
+      }
+    }
+
+    if finished {
+      unsafe { CloseHandle(handles[stream]); }
+      handles[stream] = 0 as *mut c_void;
+    }
+  }
+
+  for stream in 0..3usize {
+    if !events[stream].is_null() {
+      unsafe { CloseHandle(events[stream]); }
+    }
+  }
+}
+
+/// The file a program with a separator names, as UTF-16, with `.exe` when the name alone is not a
+/// file; `None` for a bare name, which `CreateProcessW` looks up in the directories of `PATH`. It
+/// gives the path to `CreateProcessW` itself, which otherwise reads it from the command line and
+/// finds no file in a relative path written with `/`.
+@cfg(windows)
+fn application_name(program: String) -> Option<List<u16>> {
+  if !program.contains("/") && !program.contains("\\") {
+    return None;
+  }
+
+  const native = program.replace("/", "\\");
+
+  if path_kind(native) == KIND_FILE || native.ends_with(".exe") {
+    return Some(to_utf16(native));
+  }
+
+  Some(to_utf16(native + ".exe"))
+}
+
+@cfg(windows)
+pub fn start_process(argv: List<String>, vars: List<String>, dir: Option<String>, streams: List<Stream>) -> Result<Started, i32> {
+  const line = to_utf16(command_line(argv));
+  const application = application_name(argv[0]);
+  const environment: Option<List<u16>> = if vars.is_empty() { None } else { Some(environment_block(vars)) };
+  const directory = match dir {
+    Some(path) => Some(to_utf16(path)),
+    None => None,
+  };
+  var ours = [0 as *mut c_void; 3];
+  var theirs = [0 as *mut c_void; 3];
+  var code = 0;
+
+  for stream in 0..3usize {
+    const mode = streams[stream].mode;
+    const given: Result<*mut c_void, i32> = if mode == STREAM_PIPE {
+      match child_pipe(stream != 0) {
+        Ok(ends) => {
+          ours[stream] = ends.ours;
+          Ok(ends.theirs)
+        }
+        Err(failed) => Err(failed),
+      }
+    } else if mode == STREAM_NULL {
+      null_device(stream == 0)
+    } else if mode == STREAM_FILE {
+      duplicate(handle_of(streams[stream].handle), true)
+    } else {
+      Ok(inherited(stream as i32))
+    };
+
+    match given {
+      Ok(handle) => {
+        theirs[stream] = handle;
+      }
+      Err(failed) => {
+        code = failed;
+        break;
+      }
+    }
+  }
+
+  // The child shares stdout and stderr: what this program printed must come first.
+  unsafe { fflush(0 as *mut c_void); }
+
+  var process = ProcessInformation { process: 0 as *mut c_void, thread: 0 as *mut c_void, process_id: 0, thread_id: 0 };
+
+  if code == 0 {
+    const none = 0 as *mut u16;
+    // STARTF_USESTDHANDLES
+    var startup = StartupInfo {
+      size: mem::size_of<StartupInfo>() as u32,
+      reserved: none,
+      desktop: none,
+      title: none,
+      x: 0,
+      y: 0,
+      x_size: 0,
+      y_size: 0,
+      x_count_chars: 0,
+      y_count_chars: 0,
+      fill_attribute: 0,
+      flags: 0x100,
+      show_window: 0,
+      reserved2_size: 0,
+      reserved2: 0 as *mut u8,
+      std_input: theirs[0],
+      std_output: theirs[1],
+      std_error: theirs[2],
+    };
+    const block = match environment {
+      Some(units) => units.as_ptr() as *mut c_void,
+      None => 0 as *mut c_void,
+    };
+    const cwd = match directory {
+      Some(units) => units.as_ptr(),
+      None => 0 as *const u16,
+    };
+
+    // CREATE_UNICODE_ENVIRONMENT
+    const program = match application {
+      Some(units) => units.as_ptr(),
+      None => 0 as *const u16,
+    };
+
+    if (unsafe { CreateProcessW(program, line.as_mut_ptr(), 0 as *mut c_void, 0 as *mut c_void, 1, 0x400, block, cwd, &mut startup, &mut process) }) == 0 {
+      code = failure();
+    }
+  }
+
+  // The child holds its own copies of its ends.
+  for stream in 0..3usize {
+    if !theirs[stream].is_null() {
+      unsafe { CloseHandle(theirs[stream]); }
+    }
+  }
+
+  if code != 0 {
+    for stream in 0..3usize {
+      if !ours[stream].is_null() {
+        unsafe { CloseHandle(ours[stream]); }
+      }
+    }
+
+    return Err(code);
+  }
+
+  unsafe { CloseHandle(process.thread); }
+  Ok(Started { process: process.process as usize, id: process.process_id, stdin: windows_pipe(ours[0]), stdout: windows_pipe(ours[1]), stderr: windows_pipe(ours[2]) })
+}
+
+/// The pipe of `handle`, or `None` for null.
+@cfg(windows)
+fn windows_pipe(handle: *mut c_void) -> Option<Pipe> {
+  if handle.is_null() { None } else { Some(new Pipe(handle as usize)) }
+}
+
+/// The handle of a released pipe, or null.
+@cfg(windows)
+fn handle_or_null(handle: Option<usize>) -> *mut c_void {
+  match handle {
+    Some(found) => handle_of(found),
+    None => 0 as *mut c_void,
+  }
+}
+
+@cfg(windows)
+pub fn exchange(stdin: Option<Pipe>, input: String, stdout: Option<Pipe>, stderr: Option<Pipe>, out: List<u8>, err: List<u8>) {
+  communicate(handle_or_null(released(stdin)), handle_or_null(released(stdout)), handle_or_null(released(stderr)), input, out, err);
+}
+
+@cfg(windows)
+fn exit_code_of(process: usize) -> Result<Option<i32>, i32> {
+  var exit = 0u32;
+
+  if (unsafe { GetExitCodeProcess(handle_of(process), &raw mut exit) }) == 0 {
+    return Err(failure());
+  }
+
+  Ok(Some(exit as i32))
+}
+
+@cfg(windows)
+pub fn wait_process(process: usize) -> Result<Option<i32>, i32> {
+  if (unsafe { WaitForSingleObject(handle_of(process), INFINITE) }) == WAIT_FAILED {
+    return Err(failure());
+  }
+
+  exit_code_of(process)
+}
+
+@cfg(windows)
+pub fn poll_process(process: usize) -> Result<Option<Option<i32>>, i32> {
+  const found = unsafe { WaitForSingleObject(handle_of(process), 0) };
+
+  if found == WAIT_TIMEOUT {
+    return Ok(None);
+  }
+
+  if found == WAIT_FAILED {
+    return Err(failure());
+  }
+
+  Ok(Some(exit_code_of(process)?))
+}
+
+/// Ends `process` with `TerminateProcess` and the exit code 1, as Rust's; one that ended already is
+/// not a failure.
+@cfg(windows)
+pub fn kill_process(process: usize) -> i32 {
+  if (unsafe { TerminateProcess(handle_of(process), 1) }) != 0 {
+    return 0;
+  }
+
+  const code = failure();
+
+  if (unsafe { WaitForSingleObject(handle_of(process), 0) }) == 0 { 0 } else { code }
+}
+
+@cfg(windows)
+pub fn release_process(process: usize) {
+  unsafe { CloseHandle(handle_of(process)); }
+}
+
+/// One read or write of a pipe opened for overlapped I/O, waited for: the bytes it moved.
+@cfg(windows)
+fn overlapped_io(pipe: usize, buffer: *mut u8, len: usize, writing: bool) -> Result<usize, i32> {
+  const size = if len > 0x4000_0000 { 0x4000_0000u32 } else { len as u32 };
+  const event = unsafe { CreateEventW(0 as *mut c_void, 1, 0, 0 as *const u16) };
+
+  if event.is_null() {
+    return Err(failure());
+  }
+
+  var overlapped = Overlapped { internal: 0, internal_high: 0, offset: 0, offset_high: 0, event: event };
+  const place = &raw mut overlapped as *mut c_void;
+  const started = if writing {
+    unsafe { WriteFile(handle_of(pipe), buffer as *const u8, size, 0 as *mut u32, place) }
+  } else {
+    unsafe { ReadFile(handle_of(pipe), buffer, size, 0 as *mut u32, place) }
+  };
+  var transferred = 0u32;
+  var code = 0;
+
+  if started == 0 && (unsafe { GetLastError() }) != ERROR_IO_PENDING {
+    code = failure();
+  } else if (unsafe { GetOverlappedResult(handle_of(pipe), &raw mut overlapped, &raw mut transferred, 1) }) == 0 {
+    code = failure();
+  }
+
+  unsafe { CloseHandle(event); }
+
+  // A read from a pipe whose other end closed is the end.
+  if code == EPIPE && !writing {
+    return Ok(0);
+  }
+
+  if code != 0 { Err(code) } else { Ok(transferred as usize) }
+}
+
+@cfg(windows)
+fn pipe_read(pipe: usize, buffer: *mut u8, len: usize) -> Result<usize, i32> {
+  overlapped_io(pipe, buffer, len, false)
+}
+
+@cfg(windows)
+fn pipe_write(pipe: usize, data: *const u8, len: usize) -> Result<usize, i32> {
+  overlapped_io(pipe, data as *mut u8, len, true)
+}
+
+// ---- Dynamic libraries ------------------------------------------------------------------------
+
+/// Why a library was not loaded, when its path cannot be a C string.
+const NUL_IN_PATH: String = "the path contains a NUL character";
+
+@cfg(unix)
+extern "C" {
+  fn dlopen(path: *const c_char, mode: c_int) -> *mut c_void;
+  fn dlerror() -> *const c_char;
+  fn dlsym(library: *mut c_void, name: *const c_char) -> *mut c_void;
+}
+
+/// `RTLD_NOW | RTLD_LOCAL`: the symbols are bound when the library loads, and stay its own.
+/// `RTLD_LOCAL` is 0 except on Apple systems, and 32-bit Android has `RTLD_NOW` 0.
+@cfg(any(target_os = "linux", all(target_os = "android", target_pointer_width = "64")))
+const LOAD_MODE: c_int = 2;
+@cfg(all(target_os = "android", target_pointer_width = "32"))
+const LOAD_MODE: c_int = 0;
+@cfg(any(target_os = "macos", target_os = "ios"))
+const LOAD_MODE: c_int = 6;
+
+/// Loads the library at `path`, or by its name as the system finds it: the library, or the
+/// system's reason.
+@cfg(unix)
+pub fn open_library(path: String) -> Result<*mut c_void, String> {
+  const name = match c_path(path) {
+    Some(found) => found,
+    None => return Err(NUL_IN_PATH),
+  };
+  const library = unsafe { dlopen(name.as_ptr(), LOAD_MODE) };
+
+  if !library.is_null() {
+    return Ok(library);
+  }
+
+  const reason = unsafe { dlerror() };
+
+  Err(if reason.is_null() { "unknown error" } else { unsafe { string_from_c(reason) } })
+}
+
+/// The function `name` of `library`, or `None`. POSIX guarantees that the data pointer `dlsym`
+/// gives holds a function's address.
+@cfg(unix)
+pub fn library_symbol(library: *mut c_void, name: String) -> Option<unsafe extern "C" fn()> {
+  const c_name = c_path(name)?;
+  const address = unsafe { dlsym(library, c_name.as_ptr()) };
+
+  if address.is_null() { None } else { Some(unsafe { address as unsafe extern "C" fn() }) }
+}
+
+@cfg(windows)
+extern "C" {
+  fn LoadLibraryW(name: *const u16) -> *mut c_void;
+  fn GetProcAddress(library: *mut c_void, name: *const c_char) -> Option<unsafe extern "C" fn()>;
+}
+
+@cfg(windows)
+pub fn open_library(path: String) -> Result<*mut c_void, String> {
+  const name = match wide_path(path) {
+    Some(found) => found,
+    None => return Err(NUL_IN_PATH),
+  };
+  const library = unsafe { LoadLibraryW(name.as_ptr()) };
+
+  if !library.is_null() {
+    return Ok(library);
+  }
+
+  const error = unsafe { GetLastError() };
+
+  Err(`Windows error ${error}`)
+}
+
+@cfg(windows)
+pub fn library_symbol(library: *mut c_void, name: String) -> Option<unsafe extern "C" fn()> {
+  const c_name = match CString::new(name) {
+    Ok(found) => found,
+    Err(_) => return None,
+  };
+
+  unsafe { GetProcAddress(library, c_name.as_ptr()) }
+}
+
+// ---- Locks ------------------------------------------------------------------------------------
+
+/// Room for `pthread_mutex_t` or `pthread_cond_t` of every supported C library: glibc's, bionic's
+/// and Apple's are at most 64 and 48 bytes, aligned to 8
+/// (docs/adr/0087-atomic-storage-and-std-sync.md, Q570).
+@cfg(unix)
+@repr(C)
+pub struct PthreadBuffer {
+  pub words: [u64; 8];
+}
+
+/// Room for `pthread_rwlock_t`: 56 bytes in glibc and 64-bit bionic, 40 in 32-bit bionic, 200 in
+/// Apple's C library (docs/adr/0098-locks-orderings-and-threads.md, Q673).
+@cfg(unix)
+@repr(C)
+pub struct RwLockBuffer {
+  pub words: [u64; 32];
+}
+
+@cfg(unix)
+extern "C" {
+  fn pthread_mutex_init(mutex: *mut PthreadBuffer, attributes: *const c_void) -> c_int;
+  fn pthread_mutex_lock(mutex: *mut PthreadBuffer) -> c_int;
+  fn pthread_mutex_trylock(mutex: *mut PthreadBuffer) -> c_int;
+  fn pthread_mutex_unlock(mutex: *mut PthreadBuffer) -> c_int;
+  fn pthread_cond_init(condition: *mut PthreadBuffer, attributes: *const c_void) -> c_int;
+  fn pthread_cond_wait(condition: *mut PthreadBuffer, mutex: *mut PthreadBuffer) -> c_int;
+  fn pthread_cond_timedwait(condition: *mut PthreadBuffer, mutex: *mut PthreadBuffer, deadline: *const Timespec) -> c_int;
+  fn pthread_cond_signal(condition: *mut PthreadBuffer) -> c_int;
+  fn pthread_cond_broadcast(condition: *mut PthreadBuffer) -> c_int;
+  fn pthread_rwlock_init(lock: *mut RwLockBuffer, attributes: *const c_void) -> c_int;
+  fn pthread_rwlock_rdlock(lock: *mut RwLockBuffer) -> c_int;
+  fn pthread_rwlock_tryrdlock(lock: *mut RwLockBuffer) -> c_int;
+  fn pthread_rwlock_wrlock(lock: *mut RwLockBuffer) -> c_int;
+  fn pthread_rwlock_trywrlock(lock: *mut RwLockBuffer) -> c_int;
+  fn pthread_rwlock_unlock(lock: *mut RwLockBuffer) -> c_int;
+  /// `pthread_t` is an integer or a pointer, of the size of a pointer, on every supported system.
+  fn pthread_self() -> usize;
+}
+
+/// A number for the calling thread, never 0.
+@cfg(unix)
+fn thread_id() -> usize {
+  unsafe { pthread_self() }
+}
+
+/// The ordering of `std::sync::Ordering::SeqCst` for an `Atomic`
+/// (docs/adr/0098-locks-orderings-and-threads.md, Q676).
+const SEQ_CST: i32 = 4;
+
+/// A condition variable, which a thread holding a `Lock` waits on. It waits with one lock only,
+/// the first it waits with (docs/adr/0098-locks-orderings-and-threads.md, Q672).
+@cfg(unix)
+pub class Condition {
+  prv const condition: PthreadBuffer;
+  /// The `id()` of the lock it waits with, or 0 before its first wait.
+  prv const bound: Atomic<usize>;
+
+  pub fn new(self) {
+    self.condition = PthreadBuffer { words: [0u64; 8] };
+    self.bound = Atomic::new(0);
+
+    if (unsafe { pthread_cond_init(self.place(), 0 as *const c_void) }) != 0 {
+      panic("failed to create a condition variable");
+    }
+  }
+
+  pub fn place(self) -> *mut PthreadBuffer {
+    &raw const self.condition as *mut PthreadBuffer
+  }
+
+  /// Wakes one thread waiting on it.
+  pub fn notify_one(self) {
+    unsafe { pthread_cond_signal(self.place()); }
+  }
+
+  /// Wakes every thread waiting on it.
+  pub fn notify_all(self) {
+    unsafe { pthread_cond_broadcast(self.place()); }
+  }
+
+  /// Panics if it waited with another lock, as Rust's `Condvar` may.
+  pub fn bind(self, lock: usize) {
+    if let Err(found) = self.bound.compare_exchange(0, lock, SEQ_CST, SEQ_CST) {
+      if found != lock {
+        panic("attempted to use a condition variable with two mutexes");
+      }
+    }
+  }
+}
+
+/// A lock with a condition, for `Mutex`, `Channel` and `Barrier`. C changes the memory of its
+/// fields, which the generated C never declares `const`. They are never destroyed: the default
+/// mutexes and conditions of these C libraries hold nothing to free.
+@cfg(unix)
+pub class Lock {
+  prv const mutex: PthreadBuffer;
+  prv const condition: Condition;
+  /// The thread holding the lock, or 0.
+  prv const owner: Atomic<usize>;
+
+  pub fn new(self) {
+    self.mutex = PthreadBuffer { words: [0u64; 8] };
+    self.condition = new Condition();
+    self.owner = Atomic::new(0);
+
+    if (unsafe { pthread_mutex_init(self.mutex_place(), 0 as *const c_void) }) != 0 {
+      panic("failed to create a mutex");
+    }
+  }
+
+  prv fn mutex_place(self) -> *mut PthreadBuffer {
+    &raw const self.mutex as *mut PthreadBuffer
+  }
+
+  /// Its address, which names it for `Condition::bind` while it lives, as Rust's `Condvar`
+  /// checks it.
+  pub fn id(self) -> usize {
+    self.mutex_place() as usize
+  }
+
+  /// Takes the lock, waiting for it; panics if this thread holds it already.
+  pub fn lock(self) {
+    const me = thread_id();
+
+    if self.owner.load(SEQ_CST) == me {
+      panic("a thread locked a `Mutex` it already holds, through a guard or the function given to `update`");
+    }
+
+    unsafe { pthread_mutex_lock(self.mutex_place()); }
+    self.owner.store(me, SEQ_CST);
+  }
+
+  /// Takes the lock if no thread holds it, this one included.
+  pub fn try_lock(self) -> bool {
+    const me = thread_id();
+
+    if self.owner.load(SEQ_CST) == me || (unsafe { pthread_mutex_trylock(self.mutex_place()) }) != 0 {
+      return false;
+    }
+
+    self.owner.store(me, SEQ_CST);
+    true
+  }
+
+  pub fn unlock(self) {
+    self.owner.store(0, SEQ_CST);
+    unsafe { pthread_mutex_unlock(self.mutex_place()); }
+  }
+
+  /// Releases the lock, which this thread holds, until another thread notifies its condition,
+  /// then takes it again. It may also return without a notification.
+  pub fn wait(self) {
+    self.wait_on(self.condition);
+  }
+
+  /// `wait` for at most `nanos` nanoseconds: whether they ran out.
+  pub fn wait_timeout(self, nanos: u64) -> bool {
+    self.wait_on_timeout(self.condition, nanos)
+  }
+
+  /// `wait`, on another condition.
+  pub fn wait_on(self, condition: Condition) {
+    condition.bind(self.id());
+    self.owner.store(0, SEQ_CST);
+    unsafe { pthread_cond_wait(condition.place(), self.mutex_place()); }
+    self.owner.store(thread_id(), SEQ_CST);
+  }
+
+  /// `wait_timeout`, on another condition. The condition waits until a time of the system clock,
+  /// which may change, so whether the time ran out is measured on the monotonic one.
+  pub fn wait_on_timeout(self, condition: Condition, nanos: u64) -> bool {
+    condition.bind(self.id());
+
+    const start = monotonic_nanos();
+    const now = system_nanos();
+    const deadline = if nanos > u64::MAX - now { u64::MAX } else { now + nanos };
+    const until = Timespec::of(deadline / 1_000_000_000, deadline % 1_000_000_000);
+
+    self.owner.store(0, SEQ_CST);
+    unsafe { pthread_cond_timedwait(condition.place(), self.mutex_place(), &until); }
+    self.owner.store(thread_id(), SEQ_CST);
+    monotonic_nanos() - start >= nanos
+  }
+
+  /// Wakes one thread waiting on the lock.
+  pub fn notify_one(self) {
+    self.condition.notify_one();
+  }
+
+  /// Wakes every thread waiting on the lock.
+  pub fn notify_all(self) {
+    self.condition.notify_all();
+  }
+}
+
+/// A lock that many threads hold to read, or one to write. The thread writing is kept, to panic
+/// when it takes the lock again.
+@cfg(unix)
+pub class RwLock {
+  prv const lock: RwLockBuffer;
+  prv const writer: Atomic<usize>;
+
+  pub fn new(self) {
+    self.lock = RwLockBuffer { words: [0u64; 32] };
+    self.writer = Atomic::new(0);
+
+    if (unsafe { pthread_rwlock_init(self.place(), 0 as *const c_void) }) != 0 {
+      panic("failed to create a read-write lock");
+    }
+  }
+
+  prv fn place(self) -> *mut RwLockBuffer {
+    &raw const self.lock as *mut RwLockBuffer
+  }
+
+  prv fn check(self) {
+    if self.writer.load(SEQ_CST) == thread_id() {
+      panic("a thread locked a `RwLock` it already holds for writing");
+    }
+  }
+
+  pub fn read(self) {
+    self.check();
+    unsafe { pthread_rwlock_rdlock(self.place()); }
+  }
+
+  pub fn try_read(self) -> bool {
+    self.writer.load(SEQ_CST) != thread_id() && (unsafe { pthread_rwlock_tryrdlock(self.place()) }) == 0
+  }
+
+  pub fn write(self) {
+    self.check();
+    unsafe { pthread_rwlock_wrlock(self.place()); }
+    self.writer.store(thread_id(), SEQ_CST);
+  }
+
+  pub fn try_write(self) -> bool {
+    if self.writer.load(SEQ_CST) == thread_id() || (unsafe { pthread_rwlock_trywrlock(self.place()) }) != 0 {
+      return false;
+    }
+
+    self.writer.store(thread_id(), SEQ_CST);
+    true
+  }
+
+  pub fn unlock_read(self) {
+    unsafe { pthread_rwlock_unlock(self.place()); }
+  }
+
+  pub fn unlock_write(self) {
+    self.writer.store(0, SEQ_CST);
+    unsafe { pthread_rwlock_unlock(self.place()); }
+  }
+}
+
+/// `SRWLOCK` and `CONDITION_VARIABLE`: one pointer each, which starts as zero.
+@cfg(windows)
+@repr(C)
+pub struct WinLockCell {
+  pub value: usize;
+}
+
+@cfg(windows)
+extern "C" {
+  fn AcquireSRWLockExclusive(lock: *mut WinLockCell);
+  fn TryAcquireSRWLockExclusive(lock: *mut WinLockCell) -> u8;
+  fn ReleaseSRWLockExclusive(lock: *mut WinLockCell);
+  fn AcquireSRWLockShared(lock: *mut WinLockCell);
+  fn TryAcquireSRWLockShared(lock: *mut WinLockCell) -> u8;
+  fn ReleaseSRWLockShared(lock: *mut WinLockCell);
+  fn SleepConditionVariableSRW(condition: *mut WinLockCell, lock: *mut WinLockCell, milliseconds: u32, flags: u32) -> c_int;
+  fn WakeConditionVariable(condition: *mut WinLockCell);
+  fn WakeAllConditionVariable(condition: *mut WinLockCell);
+}
+
+/// A number for the calling thread, never 0.
+@cfg(windows)
+fn thread_id() -> usize {
+  (unsafe { GetCurrentThreadId() }) as usize
+}
+
+/// A condition variable, which a thread holding a `Lock` waits on, with one lock only.
+/// `CONDITION_VARIABLE_INIT` is zero, and it is not destroyed.
+@cfg(windows)
+pub class Condition {
+  prv const condition: WinLockCell;
+  /// The `id()` of the lock it waits with, or 0 before its first wait.
+  prv const bound: Atomic<usize>;
+
+  pub fn new(self) {
+    self.condition = WinLockCell { value: 0 };
+    self.bound = Atomic::new(0);
+  }
+
+  pub fn place(self) -> *mut WinLockCell {
+    &raw const self.condition as *mut WinLockCell
+  }
+
+  pub fn notify_one(self) {
+    unsafe { WakeConditionVariable(self.place()); }
+  }
+
+  pub fn notify_all(self) {
+    unsafe { WakeAllConditionVariable(self.place()); }
+  }
+
+  /// Panics if it waited with another lock, as Rust's `Condvar` may.
+  pub fn bind(self, lock: usize) {
+    if let Err(found) = self.bound.compare_exchange(0, lock, SEQ_CST, SEQ_CST) {
+      if found != lock {
+        panic("attempted to use a condition variable with two mutexes");
+      }
+    }
+  }
+}
+
+/// A lock with a condition, for `Mutex`, `Channel` and `Barrier`. C changes the memory of its
+/// fields, which the generated C never declares `const`; `SRWLOCK_INIT` is zero, and it is not
+/// destroyed.
+@cfg(windows)
+pub class Lock {
+  prv const srw: WinLockCell;
+  prv const condition: Condition;
+  /// The thread holding the lock, or 0.
+  prv const owner: Atomic<usize>;
+
+  pub fn new(self) {
+    self.srw = WinLockCell { value: 0 };
+    self.condition = new Condition();
+    self.owner = Atomic::new(0);
+  }
+
+  prv fn srw_place(self) -> *mut WinLockCell {
+    &raw const self.srw as *mut WinLockCell
+  }
+
+  /// Its address, which names it for `Condition::bind` while it lives.
+  pub fn id(self) -> usize {
+    self.srw_place() as usize
+  }
+
+  /// Takes the lock, waiting for it; panics if this thread holds it already.
+  pub fn lock(self) {
+    const me = thread_id();
+
+    if self.owner.load(SEQ_CST) == me {
+      panic("a thread locked a `Mutex` it already holds, through a guard or the function given to `update`");
+    }
+
+    unsafe { AcquireSRWLockExclusive(self.srw_place()); }
+    self.owner.store(me, SEQ_CST);
+  }
+
+  /// Takes the lock if no thread holds it, this one included.
+  pub fn try_lock(self) -> bool {
+    const me = thread_id();
+
+    if self.owner.load(SEQ_CST) == me || (unsafe { TryAcquireSRWLockExclusive(self.srw_place()) }) == 0 {
+      return false;
+    }
+
+    self.owner.store(me, SEQ_CST);
+    true
+  }
+
+  pub fn unlock(self) {
+    self.owner.store(0, SEQ_CST);
+    unsafe { ReleaseSRWLockExclusive(self.srw_place()); }
+  }
+
+  /// Releases the lock, which this thread holds, until another thread notifies its condition,
+  /// then takes it again. It may also return without a notification.
+  pub fn wait(self) {
+    self.wait_on(self.condition);
+  }
+
+  /// `wait` for at most `nanos` nanoseconds: whether they ran out.
+  pub fn wait_timeout(self, nanos: u64) -> bool {
+    self.wait_on_timeout(self.condition, nanos)
+  }
+
+  /// `wait`, on another condition.
+  pub fn wait_on(self, condition: Condition) {
+    condition.bind(self.id());
+    self.owner.store(0, SEQ_CST);
+    unsafe { SleepConditionVariableSRW(condition.place(), self.srw_place(), INFINITE, 0); }
+    self.owner.store(thread_id(), SEQ_CST);
+  }
+
+  /// `wait_timeout`, on another condition, in whole milliseconds rounded up; a longer wait than
+  /// Windows takes returns early, which a wait may. It timed out when Windows says so, as Rust's
+  /// does: its timer may end a wait a little before the time measured, by its resolution.
+  pub fn wait_on_timeout(self, condition: Condition, nanos: u64) -> bool {
+    condition.bind(self.id());
+
+    const start = monotonic_nanos();
+    const millis = nanos / 1_000_000 + if nanos % 1_000_000 != 0 { 1 } else { 0 };
+    const bounded = if millis >= INFINITE as u64 { INFINITE - 1 } else { millis as u32 };
+
+    self.owner.store(0, SEQ_CST);
+
+    const woken = unsafe { SleepConditionVariableSRW(condition.place(), self.srw_place(), bounded, 0) };
+
+    self.owner.store(thread_id(), SEQ_CST);
+    woken == 0 || monotonic_nanos() - start >= nanos
+  }
+
+  /// Wakes one thread waiting on the lock.
+  pub fn notify_one(self) {
+    self.condition.notify_one();
+  }
+
+  /// Wakes every thread waiting on the lock.
+  pub fn notify_all(self) {
+    self.condition.notify_all();
+  }
+}
+
+/// A lock that many threads hold to read, or one to write: an `SRWLOCK`, taken shared or
+/// exclusive. The thread writing is kept, to panic when it takes the lock again.
+@cfg(windows)
+pub class RwLock {
+  prv const srw: WinLockCell;
+  prv const writer: Atomic<usize>;
+
+  pub fn new(self) {
+    self.srw = WinLockCell { value: 0 };
+    self.writer = Atomic::new(0);
+  }
+
+  prv fn place(self) -> *mut WinLockCell {
+    &raw const self.srw as *mut WinLockCell
+  }
+
+  prv fn check(self) {
+    if self.writer.load(SEQ_CST) == thread_id() {
+      panic("a thread locked a `RwLock` it already holds for writing");
+    }
+  }
+
+  pub fn read(self) {
+    self.check();
+    unsafe { AcquireSRWLockShared(self.place()); }
+  }
+
+  pub fn try_read(self) -> bool {
+    self.writer.load(SEQ_CST) != thread_id() && (unsafe { TryAcquireSRWLockShared(self.place()) }) != 0
+  }
+
+  pub fn write(self) {
+    self.check();
+    unsafe { AcquireSRWLockExclusive(self.place()); }
+    self.writer.store(thread_id(), SEQ_CST);
+  }
+
+  pub fn try_write(self) -> bool {
+    if self.writer.load(SEQ_CST) == thread_id() || (unsafe { TryAcquireSRWLockExclusive(self.place()) }) == 0 {
+      return false;
+    }
+
+    self.writer.store(thread_id(), SEQ_CST);
+    true
+  }
+
+  pub fn unlock_read(self) {
+    unsafe { ReleaseSRWLockShared(self.place()); }
+  }
+
+  pub fn unlock_write(self) {
+    self.writer.store(0, SEQ_CST);
+    unsafe { ReleaseSRWLockExclusive(self.place()); }
+  }
+}
+
+/// The lock and the value of a `Mutex`, which it shares with its guards.
+pub class Locked<T> {
+  pub const lock: Lock;
+  pub var value: T;
+
+  pub fn new(self, value: T) {
+    self.lock = new Lock();
+    self.value = value;
+  }
+}
+
+/// The lock and the value of an `RwLock`, which it shares with its guards.
+pub class ReadWriteLocked<T> {
+  pub const lock: RwLock;
+  pub var value: T;
+
+  pub fn new(self, value: T) {
+    self.lock = new RwLock();
+    self.value = value;
+  }
+}
+
+/// A `bool` that `std::sync` gives the results it makes, whose initializers programs cannot call.
+pub struct Flag {
+  pub value: bool;
+}
+
+/// A text that `std::net` gives the errors it makes, whose initializers programs cannot call
+/// (docs/adr/0100-networking.md, Q692).
+pub struct Message {
+  pub text: String;
+}
+
+// ---- Threads ----------------------------------------------------------------------------------
+
+/// What the runtime's core does for each thread, which stays C until S3
+/// (docs/adr/0087-atomic-storage-and-std-sync.md, Q571).
+extern "C" {
+  fn sag_thread_run(thread: *mut c_void);
+}
+
+/// The system's number of the main thread (`thread_id()`), which `set_args` keeps when the
+/// program starts, before any other thread (docs/adr/0098-locks-orderings-and-threads.md, Q679).
+/// A plain number, not an `Atomic`: an atomic static would make every program use threads.
+static var MAIN_THREAD: usize = 0;
+
+/// Whether the calling thread is the one that started the program.
+pub fn is_main_thread() -> bool {
+  thread_id() == unsafe { MAIN_THREAD }
+}
+
+/// `pthread_attr_t`, of at most 64 bytes on the supported systems.
+@cfg(unix)
+@repr(C)
+struct ThreadAttributes {
+  pub words: [u64; 16];
+}
+
+@cfg(unix)
+extern "C" {
+  fn pthread_create(thread: *mut usize, attributes: *const ThreadAttributes, start: extern "C" fn(*mut c_void) -> *mut c_void, argument: *mut c_void) -> c_int;
+  fn pthread_join(thread: usize, result: *mut *mut c_void) -> c_int;
+  fn pthread_attr_init(attributes: *mut ThreadAttributes) -> c_int;
+  fn pthread_attr_setstacksize(attributes: *mut ThreadAttributes, size: usize) -> c_int;
+  fn pthread_attr_destroy(attributes: *mut ThreadAttributes) -> c_int;
+  fn sched_yield() -> c_int;
+  fn sysconf(name: c_int) -> c_long;
+}
+
+@cfg(any(target_os = "linux", target_os = "android"))
+extern "C" {
+  fn pthread_setname_np(thread: usize, name: *const c_char) -> c_int;
+}
+
+/// Apple's names only the calling thread.
+@cfg(any(target_os = "macos", target_os = "ios"))
+extern "C" {
+  fn pthread_setname_np(name: *const c_char) -> c_int;
+}
+
+/// The bytes of a thread's name each system keeps, without its NUL.
+@cfg(any(target_os = "linux", target_os = "android"))
+const THREAD_NAME_BYTES: usize = 15;
+@cfg(any(target_os = "macos", target_os = "ios"))
+const THREAD_NAME_BYTES: usize = 63;
+
+/// `_SC_PAGESIZE` of each C library.
+@cfg(target_os = "linux")
+const PAGESIZE: c_int = 30;
+@cfg(target_os = "android")
+const PAGESIZE: c_int = 0x27;
+@cfg(any(target_os = "macos", target_os = "ios"))
+const PAGESIZE: c_int = 29;
+
+/// `_SC_NPROCESSORS_ONLN` of each C library.
+@cfg(target_os = "linux")
+const NPROCESSORS_ONLN: c_int = 84;
+@cfg(target_os = "android")
+const NPROCESSORS_ONLN: c_int = 0x61;
+@cfg(any(target_os = "macos", target_os = "ios"))
+const NPROCESSORS_ONLN: c_int = 58;
+
+/// The entry of a thread of `std::thread`: `thread` is the core's.
+@cfg(unix)
+extern "C" fn sag_thread_entry(thread: *mut c_void) -> *mut c_void {
+  unsafe { sag_thread_run(thread); }
+  0 as *mut c_void
+}
+
+/// Starts the core's `thread`, with a stack of at least `stack_size` bytes, or the system's
+/// default with 0: the system's thread, which `join_thread` waits for, or the `errno` value of why
+/// the system could not start one.
+@cfg(unix)
+pub fn start_thread(thread: *mut c_void, stack_size: usize) -> Result<usize, i32> {
+  var id = 0usize;
+
+  if stack_size == 0 {
+    const code = unsafe { pthread_create(&raw mut id, 0 as *const ThreadAttributes, sag_thread_entry, thread) };
+
+    return if code == 0 { Ok(id) } else { Err(code) };
+  }
+
+  var attributes = ThreadAttributes { words: [0u64; 16] };
+
+  unsafe { pthread_attr_init(&raw mut attributes); }
+
+  // A whole number of pages, which Apple's systems need; a size below the system's minimum
+  // keeps its default, which is larger.
+  const page = (unsafe { sysconf(PAGESIZE) }) as usize;
+  const size = if page == 0 || stack_size > usize::MAX - page { stack_size } else { (stack_size + page - 1) / page * page };
+
+  unsafe { pthread_attr_setstacksize(&raw mut attributes, size); }
+
+  const code = unsafe { pthread_create(&raw mut id, &raw const attributes, sag_thread_entry, thread) };
+
+  unsafe { pthread_attr_destroy(&raw mut attributes); }
+
+  if code == 0 { Ok(id) } else { Err(code) }
+}
+
+/// Gives the calling thread's name to the system, cut at a character to what it keeps. A system
+/// that refuses it leaves the thread without one.
+@cfg(any(target_os = "linux", target_os = "android"))
+pub fn set_thread_name(name: String) {
+  if let Ok(text) = CString::new(cut_name(name)) {
+    unsafe { pthread_setname_np(thread_id(), text.as_ptr()); }
+  }
+}
+
+@cfg(any(target_os = "macos", target_os = "ios"))
+pub fn set_thread_name(name: String) {
+  if let Ok(text) = CString::new(cut_name(name)) {
+    unsafe { pthread_setname_np(text.as_ptr()); }
+  }
+}
+
+/// The longest start of `name` that fits `THREAD_NAME_BYTES`, ending at a character.
+@cfg(unix)
+fn cut_name(name: String) -> String {
+  if name.len() <= THREAD_NAME_BYTES {
+    return name;
+  }
+
+  var end = 0usize;
+
+  for pair in name.char_indices() {
+    if pair.0 > THREAD_NAME_BYTES {
+      break;
+    }
+
+    end = pair.0;
+  }
+
+  name.substring(0, end)
+}
+
+/// Lets the system run another thread.
+@cfg(unix)
+pub fn yield_thread() {
+  unsafe { sched_yield(); }
+}
+
+@cfg(unix)
+pub fn join_thread(system: usize) {
+  unsafe { pthread_join(system, 0 as *mut *mut c_void); }
+}
+
+/// The number of logical processors, at least 1.
+@cfg(unix)
+pub fn processors() -> usize {
+  const count = unsafe { sysconf(NPROCESSORS_ONLN) };
+
+  if count > 0 { count as usize } else { 1 }
+}
+
+@cfg(windows)
+extern "C" {
+  fn CreateThread(security: *mut c_void, stack_size: usize, start: extern "C" fn(*mut c_void) -> u32, parameter: *mut c_void, flags: u32, thread_id: *mut u32) -> *mut c_void;
+  fn GetActiveProcessorCount(group: u16) -> u32;
+  fn GetCurrentThread() -> *mut c_void;
+  fn SetThreadDescription(thread: *mut c_void, description: *const u16) -> i32;
+  fn SwitchToThread() -> c_int;
+}
+
+/// `STACK_SIZE_PARAM_IS_A_RESERVATION`: the size reserves the stack instead of committing it, as
+/// Rust's `std` asks.
+@cfg(windows)
+const STACK_RESERVATION: u32 = 0x10000;
+
+@cfg(windows)
+extern "C" fn sag_thread_entry(thread: *mut c_void) -> u32 {
+  unsafe { sag_thread_run(thread); }
+  0
+}
+
+@cfg(windows)
+pub fn start_thread(thread: *mut c_void, stack_size: usize) -> Result<usize, i32> {
+  const flags = if stack_size == 0 { 0u32 } else { STACK_RESERVATION };
+  const handle = unsafe { CreateThread(0 as *mut c_void, stack_size, sag_thread_entry, thread, flags, 0 as *mut u32) };
+
+  if handle.is_null() { Err(failure()) } else { Ok(handle as usize) }
+}
+
+/// Gives the calling thread's name to the system, whole, as UTF-16. A system that refuses it
+/// leaves the thread without one.
+@cfg(windows)
+pub fn set_thread_name(name: String) {
+  const wide = to_utf16(name);
+
+  unsafe { SetThreadDescription(GetCurrentThread(), wide.as_ptr()); }
+}
+
+/// Lets the system run another thread.
+@cfg(windows)
+pub fn yield_thread() {
+  unsafe { SwitchToThread(); }
+}
+
+@cfg(windows)
+pub fn join_thread(system: usize) {
+  const handle = system as *mut c_void;
+
+  unsafe {
+    WaitForSingleObject(handle, INFINITE);
+    CloseHandle(handle);
+  }
+}
+
+/// The number of logical processors of every processor group, at least 1.
+@cfg(windows)
+pub fn processors() -> usize {
+  // ALL_PROCESSOR_GROUPS
+  const count = unsafe { GetActiveProcessorCount(0xFFFF) };
+
+  if count > 0 { count as usize } else { 1 }
+}
+
+/// What a `std::thread::Thread` holds: its number, its name, and the token of `park`, as Rust's
+/// (docs/adr/0098-locks-orderings-and-threads.md, Q679 and Q680). Threads share it.
+pub class ThreadData {
+  pub const id: u64;
+  pub const name: Option<String>;
+  prv const lock: Lock;
+  /// Whether an `unpark` came that no `park` has taken yet.
+  prv var token: bool;
+
+  pub fn new(self, id: u64, name: Option<String>) {
+    self.id = id;
+    self.name = name;
+    self.lock = new Lock();
+    self.token = false;
+  }
+
+  /// Waits until the token is there, then takes it; it may also return without one.
+  pub fn park(self) {
+    self.lock.lock();
+
+    if !self.token {
+      self.lock.wait();
+    }
+
+    self.token = false;
+    self.lock.unlock();
+  }
+
+  /// `park` for at most `nanos` nanoseconds.
+  pub fn park_timeout(self, nanos: u64) {
+    self.lock.lock();
+
+    if !self.token {
+      self.lock.wait_timeout(nanos);
+    }
+
+    self.token = false;
+    self.lock.unlock();
+  }
+
+  /// Leaves the token, waking the thread if it is parked.
+  pub fn unpark(self) {
+    self.lock.lock();
+    self.token = true;
+    self.lock.notify_one();
+    self.lock.unlock();
+  }
+}
+
+// ---- Open files (docs/adr/0096-streams-files-and-drop.md, Q657) --------------------------------
+//
+// A file is a number: a descriptor on POSIX, a `HANDLE` as an integer on Windows, so that the
+// `File` of `std::fs` has the same fields everywhere. `whence` of `file_seek` is 0 for the start,
+// 1 for the current position and 2 for the end.
+
+/// `EBADF`, the code of a file used after `close`.
+pub const EBADF: i32 = 9;
+/// `EPIPE`, the code of a write to a pipe whose other end closed.
+const EPIPE: i32 = 32;
+
+@cfg(unix)
+extern "C" {
+  fn fileno(file: *mut c_void) -> c_int;
+  fn dup(fd: c_int) -> c_int;
+  fn fsync(fd: c_int) -> c_int;
+}
+
+@cfg(all(unix, not(all(target_os = "android", target_pointer_width = "32"))))
+extern "C" {
+  fn lseek(fd: c_int, offset: i64, whence: c_int) -> i64;
+  fn ftruncate(fd: c_int, length: i64) -> c_int;
+}
+
+/// 32-bit Android has a 32-bit `off_t`; its `*64` functions take 64 bits.
+@cfg(all(target_os = "android", target_pointer_width = "32"))
+extern "C" {
+  fn lseek64(fd: c_int, offset: i64, whence: c_int) -> i64;
+  fn ftruncate64(fd: c_int, length: i64) -> c_int;
+}
+
+@cfg(all(unix, not(all(target_os = "android", target_pointer_width = "32"))))
+fn seek_fd(fd: c_int, offset: i64, whence: c_int) -> i64 {
+  unsafe { lseek(fd, offset, whence) }
+}
+
+@cfg(all(target_os = "android", target_pointer_width = "32"))
+fn seek_fd(fd: c_int, offset: i64, whence: c_int) -> i64 {
+  unsafe { lseek64(fd, offset, whence) }
+}
+
+@cfg(all(unix, not(all(target_os = "android", target_pointer_width = "32"))))
+fn truncate_fd(fd: c_int, length: i64) -> c_int {
+  unsafe { ftruncate(fd, length) }
+}
+
+@cfg(all(target_os = "android", target_pointer_width = "32"))
+fn truncate_fd(fd: c_int, length: i64) -> c_int {
+  unsafe { ftruncate64(fd, length) }
+}
+
+/// The `fopen` mode of a combination of options that `std::fs` checked: C has no `open` the FFI
+/// can declare, since it is variadic, and C11's modes, with `x` for a file that must be new, cover
+/// Rust's options but one, writing without truncating a file that may be new, which tries `r+`
+/// and then a new file.
+@cfg(unix)
+fn open_mode(read: bool, write: bool, append: bool, truncate: bool, create_new: bool) -> String {
+  if create_new {
+    return if read { "w+bx" } else { "wbx" };
+  }
+
+  if append {
+    return if read { "a+b" } else { "ab" };
+  }
+
+  if truncate {
+    return if read { "w+b" } else { "wb" };
+  }
+
+  if write { "r+b" } else { "rb" }
+}
+
+/// Opens `path` and gives a descriptor of its own, which `fclose` of the stream leaves open.
+@cfg(unix)
+fn open_stream(name: CString, mode: String) -> Result<usize, i32> {
+  const c_mode = CString::new(mode).unwrap();
+
+  clear_errno();
+
+  const stream = unsafe { fopen(name.as_ptr(), c_mode.as_ptr()) };
+
+  if stream.is_null() {
+    return Err(failure());
+  }
+
+  const fd = unsafe { dup(fileno(stream)) };
+  const code = if fd < 0 { failure() } else { 0 };
+
+  unsafe { fclose(stream); }
+
+  if fd < 0 { Err(code) } else { Ok(fd as usize) }
+}
+
+@cfg(unix)
+pub fn file_open(path: String, read: bool, write: bool, append: bool, truncate: bool, create: bool, create_new: bool) -> Result<usize, i32> {
+  const name = match c_path(path) {
+    Some(found) => found,
+    None => return Err(EINVAL),
+  };
+
+  // `a` and `w` create the file, which `create` must ask for.
+  if !create && !create_new && (append || truncate) && path_kind(path) == KIND_MISSING {
+    return Err(ENOENT);
+  }
+
+  const mode = open_mode(read, write, append, truncate, create_new);
+
+  match open_stream(name, mode) {
+    Ok(fd) => Ok(fd),
+    // Writing without truncating a file that may be new: a new one, unless another came first.
+    Err(code) => {
+      if code == ENOENT && create && mode == "r+b" {
+        match open_stream(c_path(path).unwrap(), "w+bx") {
+          Ok(fd) => return Ok(fd),
+          Err(again) => {
+            if again == EEXIST {
+              return open_stream(c_path(path).unwrap(), "r+b");
+            }
+
+            return Err(again);
+          }
+        }
+      }
+
+      Err(code)
+    }
+  }
+}
+
+@cfg(unix)
+pub fn file_read(file: usize, buffer: *mut u8, len: usize) -> Result<usize, i32> {
+  clear_errno();
+
+  const count = unsafe { read(file as c_int, buffer as *mut c_void, len) };
+
+  if count < 0 { Err(failure()) } else { Ok(count as usize) }
+}
+
+@cfg(unix)
+pub fn file_write(file: usize, data: *const u8, len: usize) -> Result<usize, i32> {
+  clear_errno();
+
+  const written = unsafe { write(file as c_int, data as *const c_void, len) };
+
+  if written < 0 { Err(failure()) } else { Ok(written as usize) }
+}
+
+@cfg(unix)
+pub fn file_seek(file: usize, offset: i64, whence: i32) -> Result<u64, i32> {
+  clear_errno();
+
+  const position = seek_fd(file as c_int, offset, whence as c_int);
+
+  if position < 0 { Err(failure()) } else { Ok(position as u64) }
+}
+
+@cfg(unix)
+pub fn file_sync(file: usize) -> i32 {
+  clear_errno();
+
+  if unsafe { fsync(file as c_int) } == 0 { 0 } else { failure() }
+}
+
+@cfg(unix)
+pub fn file_set_len(file: usize, len: u64) -> i32 {
+  clear_errno();
+
+  if truncate_fd(file as c_int, len as i64) == 0 { 0 } else { failure() }
+}
+
+@cfg(unix)
+pub fn file_duplicate(file: usize) -> Result<usize, i32> {
+  clear_errno();
+
+  const fd = unsafe { dup(file as c_int) };
+
+  if fd < 0 { Err(failure()) } else { Ok(fd as usize) }
+}
+
+@cfg(unix)
+pub fn file_close(file: usize) -> i32 {
+  clear_errno();
+
+  if unsafe { close(file as c_int) } == 0 { 0 } else { failure() }
+}
+
+@cfg(windows)
+extern "C" {
+  fn SetFilePointerEx(file: *mut c_void, distance: i64, position: *mut i64, method: u32) -> c_int;
+  fn FlushFileBuffers(file: *mut c_void) -> c_int;
+  fn SetEndOfFile(file: *mut c_void) -> c_int;
+}
+
+@cfg(windows)
+fn handle_of(file: usize) -> *mut c_void {
+  file as *mut c_void
+}
+
+@cfg(windows)
+pub fn file_open(path: String, read: bool, write: bool, append: bool, truncate: bool, create: bool, create_new: bool) -> Result<usize, i32> {
+  const name = match wide_path(path) {
+    Some(found) => found,
+    None => return Err(EINVAL),
+  };
+  // GENERIC_READ, GENERIC_WRITE, or FILE_APPEND_DATA, whose writes go at the end.
+  var access = 0u32;
+
+  if read {
+    access = access | 0x8000_0000;
+  }
+
+  if append {
+    access = access | 0x4;
+  } else if write {
+    access = access | 0x4000_0000;
+  }
+
+  // CREATE_NEW, CREATE_ALWAYS, OPEN_ALWAYS, TRUNCATE_EXISTING or OPEN_EXISTING.
+  const disposition = if create_new { 1u32 } else if create && truncate { 2u32 } else if create { 4u32 } else if truncate { 5u32 } else { 3u32 };
+  // Sharing everything, FILE_ATTRIBUTE_NORMAL.
+  const file = unsafe { CreateFileW(name.as_ptr(), access, 7, 0 as *mut c_void, disposition, 0x80, 0 as *mut c_void) };
+
+  if invalid(file) { Err(failure()) } else { Ok(file as usize) }
+}
+
+@cfg(windows)
+pub fn file_read(file: usize, buffer: *mut u8, len: usize) -> Result<usize, i32> {
+  const size = if len > 0x4000_0000 { 0x4000_0000u32 } else { len as u32 };
+  var read = 0u32;
+
+  if unsafe { ReadFile(handle_of(file), buffer, size, &mut read, 0 as *mut c_void) } == 0 {
+    // ERROR_BROKEN_PIPE: the other end closed, which is the end.
+    if unsafe { GetLastError() } == 109 {
+      return Ok(0);
+    }
+
+    return Err(failure());
+  }
+
+  Ok(read as usize)
+}
+
+@cfg(windows)
+pub fn file_write(file: usize, data: *const u8, len: usize) -> Result<usize, i32> {
+  const size = if len > 0x4000_0000 { 0x4000_0000u32 } else { len as u32 };
+  var written = 0u32;
+
+  if unsafe { WriteFile(handle_of(file), data, size, &mut written, 0 as *mut c_void) } == 0 {
+    return Err(failure());
+  }
+
+  Ok(written as usize)
+}
+
+@cfg(windows)
+pub fn file_seek(file: usize, offset: i64, whence: i32) -> Result<u64, i32> {
+  var position = 0i64;
+
+  // FILE_BEGIN, FILE_CURRENT and FILE_END are 0, 1 and 2, as `whence`.
+  if unsafe { SetFilePointerEx(handle_of(file), offset, &mut position, whence as u32) } == 0 {
+    return Err(failure());
+  }
+
+  Ok(position as u64)
+}
+
+@cfg(windows)
+pub fn file_sync(file: usize) -> i32 {
+  if unsafe { FlushFileBuffers(handle_of(file)) } != 0 { 0 } else { failure() }
+}
+
+/// Moves the end of the file to `len`, leaving the position where it was.
+@cfg(windows)
+pub fn file_set_len(file: usize, len: u64) -> i32 {
+  const position = match file_seek(file, 0, 1) {
+    Ok(found) => found,
+    Err(code) => return code,
+  };
+
+  if let Err(code) = file_seek(file, len as i64, 0) {
+    return code;
+  }
+
+  const code = if unsafe { SetEndOfFile(handle_of(file)) } != 0 { 0 } else { failure() };
+
+  match file_seek(file, position as i64, 0) {
+    Ok(_) => code,
+    Err(again) => if code == 0 { again } else { code },
+  }
+}
+
+@cfg(windows)
+pub fn file_duplicate(file: usize) -> Result<usize, i32> {
+  Ok(duplicate(handle_of(file), false)? as usize)
+}
+
+@cfg(windows)
+pub fn file_close(file: usize) -> i32 {
+  if unsafe { CloseHandle(handle_of(file)) } != 0 { 0 } else { failure() }
+}
+
+// ---- Metadata (docs/adr/0096-streams-files-and-drop.md, Q659) ------------------------------------
+
+/// What `std::fs` reads of a file: its kind (`KIND_*`), whether it is a symbolic link, its size,
+/// whether it is read-only, and its times in nanoseconds since the Unix epoch, where the system
+/// has them.
+pub struct FileInfo {
+  pub kind: i32;
+  pub symlink: bool;
+  pub size: u64;
+  pub readonly: bool;
+  pub accessed: Option<u64>;
+  pub modified: Option<u64>;
+  pub created: Option<u64>;
+}
+
+@cfg(unix)
+extern "C" {
+  fn lstat(path: *const c_char, info: *mut StatBuffer) -> c_int;
+  fn fstat(fd: c_int, info: *mut StatBuffer) -> c_int;
+  fn realpath(path: *const c_char, resolved: *mut c_char) -> *mut c_char;
+}
+
+/// Where `st_size`, `st_atim`, `st_mtim` and the time of birth are in `struct stat`, and how many
+/// bytes each part of its `struct timespec` has. Linux and Android have no time of birth in it.
+@cfg(any(target_os = "linux", target_os = "android"))
+const SIZE_OFFSET: usize = 48;
+@cfg(any(target_os = "ios", all(target_os = "macos", target_arch = "aarch64")))
+const SIZE_OFFSET: usize = 96;
+@cfg(all(target_os = "macos", target_arch = "x86_64"))
+const SIZE_OFFSET: usize = 72;
+
+@cfg(all(any(target_os = "linux", target_os = "android"), not(all(target_os = "android", target_pointer_width = "32"))))
+const ACCESS_OFFSET: usize = 72;
+@cfg(all(any(target_os = "linux", target_os = "android"), not(all(target_os = "android", target_pointer_width = "32"))))
+const MODIFY_OFFSET: usize = 88;
+@cfg(all(target_os = "android", target_pointer_width = "32"))
+const ACCESS_OFFSET: usize = 72;
+@cfg(all(target_os = "android", target_pointer_width = "32"))
+const MODIFY_OFFSET: usize = 80;
+@cfg(any(target_os = "ios", all(target_os = "macos", target_arch = "aarch64")))
+const ACCESS_OFFSET: usize = 32;
+@cfg(any(target_os = "ios", all(target_os = "macos", target_arch = "aarch64")))
+const MODIFY_OFFSET: usize = 48;
+@cfg(all(target_os = "macos", target_arch = "x86_64"))
+const ACCESS_OFFSET: usize = 24;
+@cfg(all(target_os = "macos", target_arch = "x86_64"))
+const MODIFY_OFFSET: usize = 40;
+
+/// The time of birth, which only the 64-bit `struct stat` of Apple's systems has; 0 for none.
+@cfg(any(target_os = "ios", all(target_os = "macos", target_arch = "aarch64")))
+const BIRTH_OFFSET: usize = 80;
+@cfg(any(target_os = "linux", target_os = "android", all(target_os = "macos", target_arch = "x86_64")))
+const BIRTH_OFFSET: usize = 0;
+
+@cfg(all(target_os = "android", target_pointer_width = "32"))
+const TIME_BYTES: usize = 4;
+@cfg(all(unix, not(all(target_os = "android", target_pointer_width = "32"))))
+const TIME_BYTES: usize = 8;
+
+/// The signed number of `bytes` bytes at `offset` of `info`.
+@cfg(unix)
+fn number_at(info: StatBuffer, offset: usize, bytes: usize) -> i64 {
+  const copy = info;
+  const at = unsafe { (&raw const copy as *const u8).add(offset) };
+
+  if bytes == 8 { unsafe { *(at as *const i64) } } else { (unsafe { *(at as *const i32) }) as i64 }
+}
+
+/// The `struct timespec` at `offset`, in nanoseconds since the epoch; `None` before it.
+@cfg(unix)
+fn time_at(info: StatBuffer, offset: usize) -> Option<u64> {
+  const seconds = number_at(info, offset, TIME_BYTES);
+  const nanos = number_at(info, offset + TIME_BYTES, TIME_BYTES);
+
+  if seconds < 0 { None } else { Some(seconds as u64 * 1_000_000_000 + nanos as u64) }
+}
+
+@cfg(unix)
+fn info_of(info: StatBuffer) -> FileInfo {
+  const at = unsafe { (&raw const info as *const u8).add(MODE_OFFSET) };
+  const mode = if MODE_BYTES == 2 { (unsafe { *(at as *const u16) }) as u32 } else { unsafe { *(at as *const u32) } };
+  // `S_IFMT`: `S_IFDIR` 0o040000, `S_IFREG` 0o100000, `S_IFLNK` 0o120000.
+  const file_type = (mode >> 12) & 0xF;
+  const kind = if file_type == 4 { KIND_DIR } else if file_type == 8 { KIND_FILE } else { KIND_OTHER };
+
+  FileInfo {
+    kind: kind,
+    symlink: file_type == 10,
+    size: number_at(info, SIZE_OFFSET, 8) as u64,
+    // No one may write it: the bits 0o222 are clear.
+    readonly: mode & 0o222 == 0,
+    accessed: time_at(info, ACCESS_OFFSET),
+    modified: time_at(info, MODIFY_OFFSET),
+    created: if BIRTH_OFFSET == 0 { None } else { time_at(info, BIRTH_OFFSET) },
+  }
+}
+
+/// What `path` names, following a symbolic link or not.
+@cfg(unix)
+pub fn metadata(path: String, follow: bool) -> Result<FileInfo, i32> {
+  const name = match c_path(path) {
+    Some(found) => found,
+    None => return Err(EINVAL),
+  };
+  var info = StatBuffer { words: [0u64; 32] };
+
+  clear_errno();
+
+  const code = if follow { unsafe { stat(name.as_ptr(), &mut info) } } else { unsafe { lstat(name.as_ptr(), &mut info) } };
+
+  if code != 0 { Err(failure()) } else { Ok(info_of(info)) }
+}
+
+@cfg(unix)
+pub fn file_metadata(file: usize) -> Result<FileInfo, i32> {
+  var info = StatBuffer { words: [0u64; 32] };
+
+  clear_errno();
+
+  if unsafe { fstat(file as c_int, &mut info) } != 0 { Err(failure()) } else { Ok(info_of(info)) }
+}
+
+/// The absolute path of `path`, without `.`, `..` or symbolic links. 4096 bytes is Linux's
+/// `PATH_MAX`, and more than Apple's.
+@cfg(unix)
+pub fn canonical(path: String) -> Result<String, i32> {
+  const name = match c_path(path) {
+    Some(found) => found,
+    None => return Err(EINVAL),
+  };
+  const buffer = new List<u8>();
+
+  buffer.resize(4096, 0);
+  clear_errno();
+
+  const found = unsafe { realpath(name.as_ptr(), buffer.as_mut_ptr() as *mut c_char) };
+
+  if found.is_null() { Err(failure()) } else { Ok(unsafe { string_from_c(found as *const c_char) }) }
+}
+
+/// `BY_HANDLE_FILE_INFORMATION`.
+@cfg(windows)
+@repr(C)
+struct HandleInfo {
+  pub attributes: u32;
+  pub created: FileTime;
+  pub accessed: FileTime;
+  pub written: FileTime;
+  pub volume: u32;
+  pub size_high: u32;
+  pub size_low: u32;
+  pub links: u32;
+  pub index_high: u32;
+  pub index_low: u32;
+}
+
+/// `WIN32_FILE_ATTRIBUTE_DATA`.
+@cfg(windows)
+@repr(C)
+struct AttributeData {
+  pub attributes: u32;
+  pub created: FileTime;
+  pub accessed: FileTime;
+  pub written: FileTime;
+  pub size_high: u32;
+  pub size_low: u32;
+}
+
+@cfg(windows)
+extern "C" {
+  fn GetFileInformationByHandle(file: *mut c_void, info: *mut HandleInfo) -> c_int;
+  fn GetFileAttributesExW(name: *const u16, level: c_int, data: *mut AttributeData) -> c_int;
+  fn GetFinalPathNameByHandleW(file: *mut c_void, path: *mut u16, size: u32, flags: u32) -> u32;
+}
+
+/// A `FILETIME`, 100 ns since 1601, in nanoseconds since the Unix epoch; `None` before it.
+@cfg(windows)
+fn nanos_of(time: FileTime) -> Option<u64> {
+  const intervals = time.high as u64 * 0x1_0000_0000 + time.low as u64;
+  const epoch = 116_444_736_000_000_000u64;
+
+  if intervals < epoch { None } else { Some((intervals - epoch) * 100) }
+}
+
+/// The attributes `FILE_ATTRIBUTE_READONLY` (1), `DIRECTORY` (0x10) and `REPARSE_POINT` (0x400),
+/// which a symbolic link has.
+@cfg(windows)
+fn info_from(attributes: u32, created: FileTime, accessed: FileTime, written: FileTime, size_high: u32, size_low: u32) -> FileInfo {
+  FileInfo {
+    kind: if attributes & 0x10 != 0 { KIND_DIR } else { KIND_FILE },
+    symlink: attributes & 0x400 != 0,
+    size: size_high as u64 * 0x1_0000_0000 + size_low as u64,
+    readonly: attributes & 1 != 0,
+    accessed: nanos_of(accessed),
+    modified: nanos_of(written),
+    created: nanos_of(created),
+  }
+}
+
+@cfg(windows)
+fn handle_info(file: *mut c_void) -> Result<FileInfo, i32> {
+  var info = HandleInfo {
+    attributes: 0,
+    created: FileTime { low: 0, high: 0 },
+    accessed: FileTime { low: 0, high: 0 },
+    written: FileTime { low: 0, high: 0 },
+    volume: 0,
+    size_high: 0,
+    size_low: 0,
+    links: 0,
+    index_high: 0,
+    index_low: 0,
+  };
+
+  if unsafe { GetFileInformationByHandle(file, &mut info) } == 0 {
+    return Err(failure());
+  }
+
+  Ok(info_from(info.attributes, info.created, info.accessed, info.written, info.size_high, info.size_low))
+}
+
+/// A handle that reads only the attributes of what `path` names, a directory too
+/// (`FILE_FLAG_BACKUP_SEMANTICS`), following a symbolic link.
+@cfg(windows)
+fn attribute_handle(path: String) -> Result<*mut c_void, i32> {
+  const name = match wide_path(path) {
+    Some(found) => found,
+    None => return Err(EINVAL),
+  };
+  // FILE_READ_ATTRIBUTES, sharing everything, OPEN_EXISTING.
+  const file = unsafe { CreateFileW(name.as_ptr(), 0x80, 7, 0 as *mut c_void, 3, 0x0200_0000, 0 as *mut c_void) };
+
+  if invalid(file) { Err(failure()) } else { Ok(file) }
+}
+
+@cfg(windows)
+pub fn metadata(path: String, follow: bool) -> Result<FileInfo, i32> {
+  if follow {
+    const file = attribute_handle(path)?;
+    const found = handle_info(file);
+
+    unsafe { CloseHandle(file); }
+
+    return found;
+  }
+
+  // The link itself: `GetFileAttributesExW` does not follow it.
+  const name = match wide_path(path) {
+    Some(found) => found,
+    None => return Err(EINVAL),
+  };
+  var data = AttributeData {
+    attributes: 0,
+    created: FileTime { low: 0, high: 0 },
+    accessed: FileTime { low: 0, high: 0 },
+    written: FileTime { low: 0, high: 0 },
+    size_high: 0,
+    size_low: 0,
+  };
+
+  // GetFileExInfoStandard.
+  if unsafe { GetFileAttributesExW(name.as_ptr(), 0, &mut data) } == 0 {
+    return Err(failure());
+  }
+
+  Ok(info_from(data.attributes, data.created, data.accessed, data.written, data.size_high, data.size_low))
+}
+
+@cfg(windows)
+pub fn file_metadata(file: usize) -> Result<FileInfo, i32> {
+  handle_info(handle_of(file))
+}
+
+/// The final path of what `path` names, as Rust's `canonicalize`: `\\?\` and the path, links
+/// followed.
+@cfg(windows)
+pub fn canonical(path: String) -> Result<String, i32> {
+  const file = attribute_handle(path)?;
+  var size = 260u32;
+
+  loop {
+    const buffer = new List<u16>();
+
+    buffer.resize(size as usize, 0);
+
+    const len = unsafe { GetFinalPathNameByHandleW(file, buffer.as_mut_ptr(), size, 0) };
+
+    if len == 0 {
+      const code = failure();
+
+      unsafe { CloseHandle(file); }
+
+      return Err(code);
+    }
+
+    // Without room, the size it needs with its terminator.
+    if len >= size {
+      size = len + 1;
+      continue;
+    }
+
+    unsafe { CloseHandle(file); }
+
+    return Ok(from_utf16_lossy(&buffer[0..len as usize]));
+  }
+}
+
+// ---- Sockets (docs/adr/0100-networking.md, Q694 and Q698) --------------------------------------
+//
+// A socket is a number, as a file: a descriptor on POSIX, a `SOCKET` on Windows. The addresses
+// cross as `RawAddr`, which `std::net` turns into its types, and the system's `sockaddr_in` and
+// `sockaddr_in6` are written byte by byte, every supported processor being little-endian. A
+// failure is an `errno` value; on Windows, the `WSA` codes with one become it, and the others stay
+// as they are, which `error_message` describes.
+
+/// A socket address as `std::net` and the system exchange it: an IPv4 address in the first four
+/// octets, the port, and the flow label and scope of an IPv6 address.
+pub struct RawAddr {
+  pub v6: bool;
+  pub octets: [u8; 16];
+  pub port: u16;
+  pub flowinfo: u32;
+  pub scope_id: u32;
+}
+
+/// `struct sockaddr_storage`, large enough for every address.
+@repr(C)
+struct SockaddrBuffer {
+  pub bytes: [u8; 128];
+}
+
+const AF_INET: u8 = 2;
+@cfg(any(target_os = "linux", target_os = "android"))
+const AF_INET6: u8 = 10;
+@cfg(any(target_os = "macos", target_os = "ios"))
+const AF_INET6: u8 = 30;
+@cfg(windows)
+const AF_INET6: u8 = 23;
+
+const SOCK_STREAM: c_int = 1;
+const SOCK_DGRAM: c_int = 2;
+/// `MSG_PEEK`, the same everywhere.
+pub const MSG_PEEK: i32 = 2;
+
+/// The length of the `sockaddr` of an address.
+fn sockaddr_len(v6: bool) -> u32 {
+  if v6 { 28 } else { 16 }
+}
+
+/// Apple's `sockaddr` starts with its length, then its family in one byte.
+@cfg(any(target_os = "macos", target_os = "ios"))
+fn put_family(buffer: SockaddrBuffer, v6: bool) -> SockaddrBuffer {
+  var result = buffer;
+
+  result.bytes[0] = sockaddr_len(v6) as u8;
+  result.bytes[1] = if v6 { AF_INET6 } else { AF_INET };
+  result
+}
+
+@cfg(any(target_os = "macos", target_os = "ios"))
+fn family_of(buffer: SockaddrBuffer) -> u8 {
+  buffer.bytes[1]
+}
+
+/// The other systems' starts with its family in two bytes.
+@cfg(not(any(target_os = "macos", target_os = "ios")))
+fn put_family(buffer: SockaddrBuffer, v6: bool) -> SockaddrBuffer {
+  var result = buffer;
+
+  result.bytes[0] = if v6 { AF_INET6 } else { AF_INET };
+  result.bytes[1] = 0;
+  result
+}
+
+@cfg(not(any(target_os = "macos", target_os = "ios")))
+fn family_of(buffer: SockaddrBuffer) -> u8 {
+  buffer.bytes[0]
+}
+
+/// The `sockaddr_in` or `sockaddr_in6` of `addr`: the port and the flow label in network order,
+/// the scope in the machine's.
+fn encode(addr: RawAddr) -> SockaddrBuffer {
+  var buffer = put_family(SockaddrBuffer { bytes: [0u8; 128] }, addr.v6);
+
+  buffer.bytes[2] = (addr.port >> 8) as u8;
+  buffer.bytes[3] = addr.port as u8;
+
+  if !addr.v6 {
+    for index in 0..4usize {
+      buffer.bytes[4 + index] = addr.octets[index];
+    }
+
+    return buffer;
+  }
+
+  buffer.bytes[4] = (addr.flowinfo >> 24) as u8;
+  buffer.bytes[5] = (addr.flowinfo >> 16) as u8;
+  buffer.bytes[6] = (addr.flowinfo >> 8) as u8;
+  buffer.bytes[7] = addr.flowinfo as u8;
+
+  for index in 0..16usize {
+    buffer.bytes[8 + index] = addr.octets[index];
+  }
+
+  buffer.bytes[24] = addr.scope_id as u8;
+  buffer.bytes[25] = (addr.scope_id >> 8) as u8;
+  buffer.bytes[26] = (addr.scope_id >> 16) as u8;
+  buffer.bytes[27] = (addr.scope_id >> 24) as u8;
+  buffer
+}
+
+/// The address a `sockaddr_in` or `sockaddr_in6` holds; `None` for another family.
+fn decode(buffer: SockaddrBuffer) -> Option<RawAddr> {
+  const family = family_of(buffer);
+  const port = (buffer.bytes[2] as u16) << 8 | buffer.bytes[3] as u16;
+  var octets = [0u8; 16];
+
+  if family == AF_INET {
+    for index in 0..4usize {
+      octets[index] = buffer.bytes[4 + index];
+    }
+
+    return Some(RawAddr { v6: false, octets: octets, port: port, flowinfo: 0, scope_id: 0 });
+  }
+
+  if family != AF_INET6 {
+    return None;
+  }
+
+  for index in 0..16usize {
+    octets[index] = buffer.bytes[8 + index];
+  }
+
+  const flowinfo = (buffer.bytes[4] as u32) << 24 | (buffer.bytes[5] as u32) << 16 | (buffer.bytes[6] as u32) << 8 | buffer.bytes[7] as u32;
+  const scope_id = (buffer.bytes[27] as u32) << 24 | (buffer.bytes[26] as u32) << 16 | (buffer.bytes[25] as u32) << 8 | buffer.bytes[24] as u32;
+
+  Some(RawAddr { v6: true, octets: octets, port: port, flowinfo: flowinfo, scope_id: scope_id })
+}
+
+/// What `getaddrinfo` returns, whose fields each C library orders its own way.
+@cfg(any(target_os = "linux", target_os = "android"))
+@repr(C)
+struct AddrInfo {
+  pub flags: c_int;
+  pub family: c_int;
+  pub socktype: c_int;
+  pub protocol: c_int;
+  pub addrlen: u32;
+  pub addr: *const u8;
+  pub canonname: *const c_char;
+  pub next: *const AddrInfo;
+}
+
+@cfg(any(target_os = "macos", target_os = "ios"))
+@repr(C)
+struct AddrInfo {
+  pub flags: c_int;
+  pub family: c_int;
+  pub socktype: c_int;
+  pub protocol: c_int;
+  pub addrlen: u32;
+  pub canonname: *const c_char;
+  pub addr: *const u8;
+  pub next: *const AddrInfo;
+}
+
+@cfg(windows)
+@repr(C)
+struct AddrInfo {
+  pub flags: c_int;
+  pub family: c_int;
+  pub socktype: c_int;
+  pub protocol: c_int;
+  pub addrlen: usize;
+  pub canonname: *const c_char;
+  pub addr: *const u8;
+  pub next: *const AddrInfo;
+}
+
+/// The hints of a lookup: streams, of either family, as Rust's.
+fn lookup_hints() -> AddrInfo {
+  AddrInfo {
+    flags: 0,
+    family: 0,
+    socktype: SOCK_STREAM,
+    protocol: 0,
+    addrlen: 0,
+    canonname: 0 as *const c_char,
+    addr: 0 as *const u8,
+    next: 0 as *const AddrInfo,
+  }
+}
+
+/// The addresses of the list `getaddrinfo` returned, with `port`.
+fn lookup_results(first: *const AddrInfo, port: u16) -> List<RawAddr> {
+  const found: List<RawAddr> = new List();
+  var node = first;
+
+  while !node.is_null() {
+    const info = unsafe { *node };
+
+    if !info.addr.is_null() {
+      var buffer = SockaddrBuffer { bytes: [0u8; 128] };
+      const len = if (info.addrlen as usize) < 128 { info.addrlen as usize } else { 128usize };
+
+      for index in 0..len {
+        buffer.bytes[index] = unsafe { *info.addr.add(index) };
+      }
+
+      if let Some(raw) = decode(buffer) {
+        var with_port = raw;
+
+        with_port.port = port;
+        found.push(with_port);
+      }
+    }
+
+    node = info.next;
+  }
+
+  found
+}
+
+@cfg(unix)
+extern "C" {
+  fn socket(domain: c_int, kind: c_int, protocol: c_int) -> c_int;
+  fn bind(socket: c_int, addr: *const SockaddrBuffer, len: u32) -> c_int;
+  fn listen(socket: c_int, backlog: c_int) -> c_int;
+  fn connect(socket: c_int, addr: *const SockaddrBuffer, len: u32) -> c_int;
+  fn recv(socket: c_int, buffer: *mut c_void, len: usize, flags: c_int) -> isize;
+  fn send(socket: c_int, data: *const c_void, len: usize, flags: c_int) -> isize;
+  fn shutdown(socket: c_int, how: c_int) -> c_int;
+  fn getsockname(socket: c_int, addr: *mut SockaddrBuffer, len: *mut u32) -> c_int;
+  fn getpeername(socket: c_int, addr: *mut SockaddrBuffer, len: *mut u32) -> c_int;
+  fn setsockopt(socket: c_int, level: c_int, name: c_int, value: *const c_void, len: u32) -> c_int;
+  fn getaddrinfo(node: *const c_char, service: *const c_char, hints: *const AddrInfo, result: *mut *const AddrInfo) -> c_int;
+  fn freeaddrinfo(info: *const AddrInfo);
+  fn gai_strerror(code: c_int) -> *const c_char;
+}
+
+@cfg(any(target_os = "linux", target_os = "android"))
+extern "C" {
+  fn accept4(socket: c_int, addr: *mut SockaddrBuffer, len: *mut u32, flags: c_int) -> c_int;
+}
+
+@cfg(any(target_os = "macos", target_os = "ios"))
+extern "C" {
+  fn accept(socket: c_int, addr: *mut SockaddrBuffer, len: *mut u32) -> c_int;
+}
+
+/// `fcntl`, variadic: its third argument depends on the command
+/// (docs/adr/0103-build-scripts-and-binding-generation.md, Q722).
+@cfg(unix)
+extern "C" {
+  fn fcntl(fd: c_int, command: c_int, ...) -> c_int;
+}
+
+@cfg(unix)
+const F_GETFL: c_int = 3;
+@cfg(unix)
+const F_SETFL: c_int = 4;
+@cfg(any(target_os = "linux", target_os = "android"))
+const O_NONBLOCK: c_int = 0x800;
+@cfg(any(target_os = "linux", target_os = "android"))
+const F_DUPFD_CLOEXEC: c_int = 1030;
+@cfg(any(target_os = "macos", target_os = "ios"))
+const O_NONBLOCK: c_int = 4;
+@cfg(any(target_os = "macos", target_os = "ios"))
+const F_DUPFD_CLOEXEC: c_int = 67;
+@cfg(any(target_os = "macos", target_os = "ios"))
+const F_SETFD: c_int = 2;
+@cfg(any(target_os = "macos", target_os = "ios"))
+const FD_CLOEXEC: c_int = 1;
+
+/// `SOCK_CLOEXEC`: the socket is closed in the programs this one starts.
+@cfg(any(target_os = "linux", target_os = "android"))
+const SOCK_CLOEXEC: c_int = 0x80000;
+/// `MSG_NOSIGNAL`: a write to a socket whose other end closed fails instead of raising `SIGPIPE`.
+@cfg(any(target_os = "linux", target_os = "android"))
+const SEND_FLAGS: c_int = 0x4000;
+@cfg(any(target_os = "macos", target_os = "ios"))
+const SEND_FLAGS: c_int = 0;
+
+@cfg(any(target_os = "linux", target_os = "android"))
+const SOL_SOCKET: c_int = 1;
+@cfg(any(target_os = "linux", target_os = "android"))
+const SO_REUSEADDR: c_int = 2;
+@cfg(any(target_os = "macos", target_os = "ios"))
+const SOL_SOCKET: c_int = 0xFFFF;
+@cfg(any(target_os = "macos", target_os = "ios"))
+const SO_REUSEADDR: c_int = 4;
+/// Apple's sockets do not raise `SIGPIPE` with it, as there is no `MSG_NOSIGNAL`.
+@cfg(any(target_os = "macos", target_os = "ios"))
+const SO_NOSIGPIPE: c_int = 0x1022;
+
+/// Sets an option of the type `int` to `value`.
+@cfg(unix)
+fn set_int_option(fd: c_int, level: c_int, name: c_int, value: c_int) -> Result<(), i32> {
+  const given = value;
+
+  if unsafe { setsockopt(fd, level, name, &raw const given as *const c_void, 4) } == 0 { Ok(()) } else { Err(failure()) }
+}
+
+/// The kind of socket to open; the descriptor is closed in the programs this one starts.
+@cfg(any(target_os = "linux", target_os = "android"))
+fn open_socket(v6: bool, kind: c_int) -> c_int {
+  const family = if v6 { AF_INET6 } else { AF_INET };
+
+  unsafe { socket(family as c_int, kind | SOCK_CLOEXEC, 0) }
+}
+
+/// Apple systems have no `SOCK_CLOEXEC`: the socket gets `FD_CLOEXEC` after it is opened, and it
+/// never raises `SIGPIPE`.
+@cfg(any(target_os = "macos", target_os = "ios"))
+fn open_socket(v6: bool, kind: c_int) -> c_int {
+  const family = if v6 { AF_INET6 } else { AF_INET };
+  const fd = unsafe { socket(family as c_int, kind, 0) };
+
+  if fd >= 0 {
+    if let Err(_) = apple_socket_options(fd) {
+      const code = errno();
+
+      unsafe { close(fd); }
+      unsafe { *errno_place() = code; }
+
+      return -1;
+    }
+  }
+
+  fd
+}
+
+/// What a socket of an Apple system needs that others get from flags: closed in the programs
+/// this one starts, and no `SIGPIPE`.
+@cfg(any(target_os = "macos", target_os = "ios"))
+fn apple_socket_options(fd: c_int) -> Result<(), i32> {
+  if unsafe { fcntl(fd, F_SETFD, FD_CLOEXEC) } != 0 {
+    return Err(failure());
+  }
+
+  set_int_option(fd, SOL_SOCKET, SO_NOSIGPIPE, 1)
+}
+
+/// A new socket of the family of `v6`, for streams or datagrams.
+@cfg(unix)
+pub fn socket_open(v6: bool, datagram: bool) -> Result<usize, i32> {
+  clear_errno();
+
+  const fd = open_socket(v6, if datagram { SOCK_DGRAM } else { SOCK_STREAM });
+
+  if fd < 0 { Err(failure()) } else { Ok(fd as usize) }
+}
+
+/// Lets a listener bind the address of one that closed while its connections wait to end, as
+/// Rust's `TcpListener::bind` does on Unix.
+@cfg(unix)
+pub fn socket_reuse_address(handle: usize) -> Result<(), i32> {
+  set_int_option(handle as c_int, SOL_SOCKET, SO_REUSEADDR, 1)
+}
+
+@cfg(unix)
+pub fn socket_bind(handle: usize, addr: RawAddr) -> Result<(), i32> {
+  const buffer = encode(addr);
+
+  if unsafe { bind(handle as c_int, &raw const buffer, sockaddr_len(addr.v6)) } == 0 { Ok(()) } else { Err(failure()) }
+}
+
+@cfg(unix)
+pub fn socket_listen(handle: usize, backlog: i32) -> Result<(), i32> {
+  if unsafe { listen(handle as c_int, backlog) } == 0 { Ok(()) } else { Err(failure()) }
+}
+
+/// Waits for a connection: its socket and the address of its other end. A signal does not
+/// interrupt it.
+@cfg(any(target_os = "linux", target_os = "android"))
+pub fn socket_accept(handle: usize) -> Result<(usize, RawAddr), i32> {
+  loop {
+    var buffer = SockaddrBuffer { bytes: [0u8; 128] };
+    var len = 128u32;
+    const fd = unsafe { accept4(handle as c_int, &raw mut buffer, &raw mut len, SOCK_CLOEXEC) };
+
+    if fd >= 0 {
+      return accepted(fd, buffer);
+    }
+
+    if errno() != EINTR {
+      return Err(failure());
+    }
+  }
+}
+
+@cfg(any(target_os = "macos", target_os = "ios"))
+pub fn socket_accept(handle: usize) -> Result<(usize, RawAddr), i32> {
+  loop {
+    var buffer = SockaddrBuffer { bytes: [0u8; 128] };
+    var len = 128u32;
+    const fd = unsafe { accept(handle as c_int, &raw mut buffer, &raw mut len) };
+
+    if fd >= 0 {
+      if let Err(code) = apple_socket_options(fd) {
+        unsafe { close(fd); }
+
+        return Err(code);
+      }
+
+      return accepted(fd, buffer);
+    }
+
+    if errno() != EINTR {
+      return Err(failure());
+    }
+  }
+}
+
+/// The accepted descriptor `fd` and the address of its other end.
+@cfg(unix)
+fn accepted(fd: c_int, buffer: SockaddrBuffer) -> Result<(usize, RawAddr), i32> {
+  match decode(buffer) {
+    Some(found) => Ok((fd as usize, found)),
+    None => {
+      unsafe { close(fd); }
+
+      Err(EINVAL)
+    }
+  }
+}
+
+/// Connects the socket, waiting until the other end accepts or refuses. A signal does not
+/// interrupt it.
+@cfg(unix)
+pub fn socket_connect(handle: usize, addr: RawAddr) -> Result<(), i32> {
+  const buffer = encode(addr);
+
+  loop {
+    if unsafe { connect(handle as c_int, &raw const buffer, sockaddr_len(addr.v6)) } == 0 {
+      return Ok(());
+    }
+
+    if errno() != EINTR {
+      return Err(failure());
+    }
+  }
+}
+
+/// Reads at most `len` bytes into `buffer`, or looks at them with `MSG_PEEK`: 0 once the other
+/// end closed. A signal does not interrupt it.
+@cfg(unix)
+pub fn socket_recv(handle: usize, buffer: *mut u8, len: usize, flags: i32) -> Result<usize, i32> {
+  loop {
+    const count = unsafe { recv(handle as c_int, buffer as *mut c_void, len, flags) };
+
+    if count >= 0 {
+      return Ok(count as usize);
+    }
+
+    if errno() != EINTR {
+      return Err(failure());
+    }
+  }
+}
+
+/// Writes at most `len` bytes of `data`: how many it took. A signal does not interrupt it.
+@cfg(unix)
+pub fn socket_send(handle: usize, data: *const u8, len: usize) -> Result<usize, i32> {
+  loop {
+    const count = unsafe { send(handle as c_int, data as *const c_void, len, SEND_FLAGS) };
+
+    if count >= 0 {
+      return Ok(count as usize);
+    }
+
+    if errno() != EINTR {
+      return Err(failure());
+    }
+  }
+}
+
+/// Closes the reading half (0), the writing half (1) or both (2).
+@cfg(unix)
+pub fn socket_shutdown(handle: usize, how: i32) -> Result<(), i32> {
+  if unsafe { shutdown(handle as c_int, how) } == 0 { Ok(()) } else { Err(failure()) }
+}
+
+@cfg(unix)
+pub fn socket_close(handle: usize) -> i32 {
+  if unsafe { close(handle as c_int) } == 0 { 0 } else { failure() }
+}
+
+/// The address of this end (`peer` false) or of the other.
+@cfg(unix)
+pub fn socket_address(handle: usize, peer: bool) -> Result<RawAddr, i32> {
+  var buffer = SockaddrBuffer { bytes: [0u8; 128] };
+  var len = 128u32;
+  const code = if peer { unsafe { getpeername(handle as c_int, &raw mut buffer, &raw mut len) } } else { unsafe { getsockname(handle as c_int, &raw mut buffer, &raw mut len) } };
+
+  if code != 0 {
+    return Err(failure());
+  }
+
+  match decode(buffer) {
+    Some(found) => Ok(found),
+    None => Err(EINVAL),
+  }
+}
+
+/// The addresses of `host` with `port`, from the system's resolver; the resolver's message if it
+/// cannot give them.
+@cfg(unix)
+pub fn resolve(host: String, port: u16) -> Result<List<RawAddr>, String> {
+  const name = match CString::new(host) {
+    Ok(found) => found,
+    Err(_) => return Err("the name holds a NUL"),
+  };
+  const hints = lookup_hints();
+  var first = 0 as *const AddrInfo;
+
+  clear_errno();
+
+  const code = unsafe { getaddrinfo(name.as_ptr(), 0 as *const c_char, &raw const hints, &raw mut first) };
+
+  if code != 0 {
+    // `EAI_SYSTEM`: the reason is in `errno`.
+    const reason = errno();
+
+    if reason != 0 && code == EAI_SYSTEM {
+      return Err(error_message(reason));
+    }
+
+    return Err(unsafe { string_from_c(gai_strerror(code)) });
+  }
+
+  const found = lookup_results(first, port);
+
+  unsafe { freeaddrinfo(first); }
+  Ok(found)
+}
+
+@cfg(any(target_os = "linux", target_os = "android"))
+const EAI_SYSTEM: c_int = -11;
+@cfg(any(target_os = "macos", target_os = "ios"))
+const EAI_SYSTEM: c_int = 11;
+
+/// `WSADATA`, which `WSAStartup` fills.
+@cfg(windows)
+@repr(C)
+struct WsaData {
+  pub words: [u64; 64];
+}
+
+@cfg(windows)
+extern "C" {
+  fn WSAStartup(version: u16, data: *mut WsaData) -> c_int;
+  fn WSAGetLastError() -> c_int;
+  fn WSASocketW(family: c_int, kind: c_int, protocol: c_int, info: *mut c_void, group: u32, flags: u32) -> usize;
+  fn bind(socket: usize, addr: *const SockaddrBuffer, len: c_int) -> c_int;
+  fn listen(socket: usize, backlog: c_int) -> c_int;
+  fn accept(socket: usize, addr: *mut SockaddrBuffer, len: *mut c_int) -> usize;
+  fn connect(socket: usize, addr: *const SockaddrBuffer, len: c_int) -> c_int;
+  fn recv(socket: usize, buffer: *mut u8, len: c_int, flags: c_int) -> c_int;
+  fn send(socket: usize, data: *const u8, len: c_int, flags: c_int) -> c_int;
+  fn shutdown(socket: usize, how: c_int) -> c_int;
+  fn closesocket(socket: usize) -> c_int;
+  fn getsockname(socket: usize, addr: *mut SockaddrBuffer, len: *mut c_int) -> c_int;
+  fn getpeername(socket: usize, addr: *mut SockaddrBuffer, len: *mut c_int) -> c_int;
+  fn getaddrinfo(node: *const c_char, service: *const c_char, hints: *const AddrInfo, result: *mut *const AddrInfo) -> c_int;
+  fn freeaddrinfo(info: *const AddrInfo);
+  fn SetHandleInformation(handle: *mut c_void, mask: u32, flags: u32) -> c_int;
+  fn FormatMessageW(flags: u32, source: *const c_void, id: u32, language: u32, buffer: *mut u16, size: u32, arguments: *mut c_void) -> u32;
+}
+
+/// `INVALID_SOCKET` and `SOCKET_ERROR`.
+@cfg(windows)
+const INVALID_SOCKET: usize = 0xFFFF_FFFF_FFFF_FFFF;
+@cfg(windows)
+const SOCKET_ERROR: c_int = -1;
+/// `WSA_FLAG_OVERLAPPED` and `WSA_FLAG_NO_HANDLE_INHERIT`, as Rust's.
+@cfg(windows)
+const SOCKET_FLAGS: u32 = 0x01 | 0x80;
+
+/// The `errno` value of a `WSA` code, so that kinds and messages match other systems; one without
+/// stays as it is, which `error_message` describes.
+@cfg(windows)
+fn wsa_errno(code: c_int) -> i32 {
+  if code == 10061 {
+    ECONNREFUSED
+  } else if code == 10054 {
+    ECONNRESET
+  } else if code == 10053 {
+    ECONNABORTED
+  } else if code == 10057 {
+    ENOTCONN
+  } else if code == 10048 {
+    EADDRINUSE
+  } else if code == 10049 {
+    EADDRNOTAVAIL
+  } else if code == 10035 {
+    EWOULDBLOCK
+  } else if code == 10060 {
+    ETIMEDOUT
+  } else if code == 10004 {
+    // WSAEINTR
+    4
+  } else if code == 10013 {
+    // WSAEACCES
+    13
+  } else if code == 10022 {
+    EINVAL
+  } else if code == 10036 {
+    EINPROGRESS
+  } else {
+    code
+  }
+}
+
+/// The `errno` value of the last failure of Winsock.
+@cfg(windows)
+fn wsa_failure() -> i32 {
+  wsa_errno(unsafe { WSAGetLastError() })
+}
+
+/// Winsock, started before each socket: `WSAStartup` counts its calls, and it is never stopped,
+/// as Rust's.
+@cfg(windows)
+fn start_winsock() -> Result<(), i32> {
+  var data = WsaData { words: [0u64; 64] };
+  const code = unsafe { WSAStartup(0x0202, &raw mut data) };
+
+  if code == 0 { Ok(()) } else { Err(wsa_errno(code)) }
+}
+
+@cfg(windows)
+pub fn socket_open(v6: bool, datagram: bool) -> Result<usize, i32> {
+  start_winsock()?;
+
+  const family = if v6 { AF_INET6 } else { AF_INET };
+  const handle = unsafe { WSASocketW(family as c_int, if datagram { SOCK_DGRAM } else { SOCK_STREAM }, 0, 0 as *mut c_void, 0, SOCKET_FLAGS) };
+
+  if handle == INVALID_SOCKET { Err(wsa_failure()) } else { Ok(handle) }
+}
+
+/// Windows lets another socket take a bound address with `SO_REUSEADDR`, so Rust does not set it.
+@cfg(windows)
+pub fn socket_reuse_address(_handle: usize) -> Result<(), i32> {
+  Ok(())
+}
+
+@cfg(windows)
+pub fn socket_bind(handle: usize, addr: RawAddr) -> Result<(), i32> {
+  const buffer = encode(addr);
+
+  if unsafe { bind(handle, &raw const buffer, sockaddr_len(addr.v6) as c_int) } != SOCKET_ERROR { Ok(()) } else { Err(wsa_failure()) }
+}
+
+@cfg(windows)
+pub fn socket_listen(handle: usize, backlog: i32) -> Result<(), i32> {
+  if unsafe { listen(handle, backlog) } != SOCKET_ERROR { Ok(()) } else { Err(wsa_failure()) }
+}
+
+@cfg(windows)
+pub fn socket_accept(handle: usize) -> Result<(usize, RawAddr), i32> {
+  var buffer = SockaddrBuffer { bytes: [0u8; 128] };
+  var len = 128 as c_int;
+  const accepted = unsafe { accept(handle, &raw mut buffer, &raw mut len) };
+
+  if accepted == INVALID_SOCKET {
+    return Err(wsa_failure());
+  }
+
+  // HANDLE_FLAG_INHERIT: child processes do not inherit it, as Rust's.
+  unsafe { SetHandleInformation(accepted as *mut c_void, 1, 0); }
+
+  match decode(buffer) {
+    Some(found) => Ok((accepted, found)),
+    None => {
+      unsafe { closesocket(accepted); }
+
+      Err(EINVAL)
+    }
+  }
+}
+
+@cfg(windows)
+pub fn socket_connect(handle: usize, addr: RawAddr) -> Result<(), i32> {
+  const buffer = encode(addr);
+
+  if unsafe { connect(handle, &raw const buffer, sockaddr_len(addr.v6) as c_int) } != SOCKET_ERROR { Ok(()) } else { Err(wsa_failure()) }
+}
+
+/// At most 2 GiB in one call, which `recv` and `send` count in an `int`.
+@cfg(windows)
+fn socket_chunk(len: usize) -> c_int {
+  if len > 0x7FFF_FFFF { 0x7FFF_FFFF } else { len as c_int }
+}
+
+@cfg(windows)
+pub fn socket_recv(handle: usize, buffer: *mut u8, len: usize, flags: i32) -> Result<usize, i32> {
+  const chunk = socket_chunk(len);
+  const count = unsafe { recv(handle, buffer, chunk, flags) };
+
+  if count != SOCKET_ERROR {
+    return Ok(count as usize);
+  }
+
+  // WSAESHUTDOWN: this end closed its reading half, which is the end, as on the other systems; a
+  // datagram longer than the buffer is cut to it.
+  const code = unsafe { WSAGetLastError() };
+
+  if code == 10058 {
+    Ok(0)
+  } else if code == WSAEMSGSIZE {
+    Ok(chunk as usize)
+  } else {
+    Err(wsa_errno(code))
+  }
+}
+
+@cfg(windows)
+pub fn socket_send(handle: usize, data: *const u8, len: usize) -> Result<usize, i32> {
+  const count = unsafe { send(handle, data, socket_chunk(len), 0) };
+
+  if count != SOCKET_ERROR { Ok(count as usize) } else { Err(wsa_failure()) }
+}
+
+@cfg(windows)
+pub fn socket_shutdown(handle: usize, how: i32) -> Result<(), i32> {
+  if unsafe { shutdown(handle, how) } != SOCKET_ERROR { Ok(()) } else { Err(wsa_failure()) }
+}
+
+@cfg(windows)
+pub fn socket_close(handle: usize) -> i32 {
+  if unsafe { closesocket(handle) } != SOCKET_ERROR { 0 } else { wsa_failure() }
+}
+
+@cfg(windows)
+pub fn socket_address(handle: usize, peer: bool) -> Result<RawAddr, i32> {
+  var buffer = SockaddrBuffer { bytes: [0u8; 128] };
+  var len = 128 as c_int;
+  const code = if peer { unsafe { getpeername(handle, &raw mut buffer, &raw mut len) } } else { unsafe { getsockname(handle, &raw mut buffer, &raw mut len) } };
+
+  if code == SOCKET_ERROR {
+    return Err(wsa_failure());
+  }
+
+  match decode(buffer) {
+    Some(found) => Ok(found),
+    None => Err(EINVAL),
+  }
+}
+
+@cfg(windows)
+pub fn resolve(host: String, port: u16) -> Result<List<RawAddr>, String> {
+  if let Err(code) = start_winsock() {
+    return Err(error_message(code));
+  }
+
+  const name = match CString::new(host) {
+    Ok(found) => found,
+    Err(_) => return Err("the name holds a NUL"),
+  };
+  const hints = lookup_hints();
+  var first = 0 as *const AddrInfo;
+  const code = unsafe { getaddrinfo(name.as_ptr(), 0 as *const c_char, &raw const hints, &raw mut first) };
+
+  if code != 0 {
+    return Err(windows_message(code as u32));
+  }
+
+  const found = lookup_results(first, port);
+
+  unsafe { freeaddrinfo(first); }
+  Ok(found)
+}
+
+/// Windows' description of an error code, without its line break.
+@cfg(windows)
+fn windows_message(code: u32) -> String {
+  const buffer = new List<u16>();
+
+  buffer.resize(512, 0);
+
+  // FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS
+  const len = unsafe { FormatMessageW(0x1000 | 0x200, 0 as *const c_void, code, 0, buffer.as_mut_ptr(), 512, 0 as *mut c_void) };
+
+  if len == 0 {
+    return `Windows error ${code}`;
+  }
+
+  from_utf16_lossy(&buffer[0..len as usize]).trim_end()
+}
+
+// ---- Datagrams (docs/adr/0100-networking.md, Q695) ---------------------------------------------
+
+@cfg(unix)
+extern "C" {
+  fn sendto(socket: c_int, data: *const c_void, len: usize, flags: c_int, addr: *const SockaddrBuffer, addr_len: u32) -> isize;
+  fn recvfrom(socket: c_int, buffer: *mut c_void, len: usize, flags: c_int, addr: *mut SockaddrBuffer, addr_len: *mut u32) -> isize;
+}
+
+/// Sends the datagram of `len` bytes of `data` to `addr`: how many bytes it took. A signal does not
+/// interrupt it.
+@cfg(unix)
+pub fn socket_send_to(handle: usize, data: *const u8, len: usize, addr: RawAddr) -> Result<usize, i32> {
+  const buffer = encode(addr);
+
+  loop {
+    const count = unsafe { sendto(handle as c_int, data as *const c_void, len, SEND_FLAGS, &raw const buffer, sockaddr_len(addr.v6)) };
+
+    if count >= 0 {
+      return Ok(count as usize);
+    }
+
+    if errno() != EINTR {
+      return Err(failure());
+    }
+  }
+}
+
+/// Waits for a datagram, cut to `len` bytes, or looks at it with `MSG_PEEK`: how many bytes, and
+/// who sent it. A signal does not interrupt it.
+@cfg(unix)
+pub fn socket_recv_from(handle: usize, buffer: *mut u8, len: usize, flags: i32) -> Result<(usize, RawAddr), i32> {
+  loop {
+    var from = SockaddrBuffer { bytes: [0u8; 128] };
+    var from_len = 128u32;
+    const count = unsafe { recvfrom(handle as c_int, buffer as *mut c_void, len, flags, &raw mut from, &raw mut from_len) };
+
+    if count >= 0 {
+      return match decode(from) {
+        Some(sender) => Ok((count as usize, sender)),
+        None => Err(EINVAL),
+      };
+    }
+
+    if errno() != EINTR {
+      return Err(failure());
+    }
+  }
+}
+
+@cfg(windows)
+extern "C" {
+  fn sendto(socket: usize, data: *const u8, len: c_int, flags: c_int, addr: *const SockaddrBuffer, addr_len: c_int) -> c_int;
+  fn recvfrom(socket: usize, buffer: *mut u8, len: c_int, flags: c_int, addr: *mut SockaddrBuffer, addr_len: *mut c_int) -> c_int;
+}
+
+/// `WSAEMSGSIZE`: the datagram was longer than the buffer, which holds its start.
+@cfg(windows)
+const WSAEMSGSIZE: c_int = 10040;
+
+@cfg(windows)
+pub fn socket_send_to(handle: usize, data: *const u8, len: usize, addr: RawAddr) -> Result<usize, i32> {
+  const buffer = encode(addr);
+  const count = unsafe { sendto(handle, data, socket_chunk(len), 0, &raw const buffer, sockaddr_len(addr.v6) as c_int) };
+
+  if count != SOCKET_ERROR { Ok(count as usize) } else { Err(wsa_failure()) }
+}
+
+/// A datagram longer than the buffer is cut to it, as on the other systems and in Rust.
+@cfg(windows)
+pub fn socket_recv_from(handle: usize, buffer: *mut u8, len: usize, flags: i32) -> Result<(usize, RawAddr), i32> {
+  var from = SockaddrBuffer { bytes: [0u8; 128] };
+  var from_len = 128 as c_int;
+  const chunk = socket_chunk(len);
+  const count = unsafe { recvfrom(handle, buffer, chunk, flags, &raw mut from, &raw mut from_len) };
+  var received = count as usize;
+
+  if count == SOCKET_ERROR {
+    const code = unsafe { WSAGetLastError() };
+
+    if code != WSAEMSGSIZE {
+      return Err(wsa_errno(code));
+    }
+
+    received = chunk as usize;
+  }
+
+  match decode(from) {
+    Some(sender) => Ok((received, sender)),
+    None => Err(EINVAL),
+  }
+}
+
+// ---- Options of sockets (docs/adr/0100-networking.md, Q696) -------------------------------------
+
+/// The options `socket_option` and `set_socket_option` read and write, each an `int`.
+pub const OPTION_TTL: i32 = 0;
+pub const OPTION_NODELAY: i32 = 1;
+pub const OPTION_BROADCAST: i32 = 2;
+pub const OPTION_ERROR: i32 = 3;
+
+const IPPROTO_IP: c_int = 0;
+const IPPROTO_TCP: c_int = 6;
+const TCP_NODELAY: c_int = 1;
+
+@cfg(any(target_os = "linux", target_os = "android"))
+const IP_TTL: c_int = 2;
+@cfg(any(target_os = "linux", target_os = "android"))
+const SO_ERROR: c_int = 4;
+@cfg(any(target_os = "linux", target_os = "android"))
+const SO_BROADCAST: c_int = 6;
+@cfg(any(target_os = "linux", target_os = "android"))
+const SO_RCVTIMEO: c_int = 20;
+@cfg(any(target_os = "linux", target_os = "android"))
+const SO_SNDTIMEO: c_int = 21;
+
+@cfg(any(target_os = "macos", target_os = "ios", windows))
+const IP_TTL: c_int = 4;
+@cfg(any(target_os = "macos", target_os = "ios", windows))
+const SO_ERROR: c_int = 0x1007;
+@cfg(any(target_os = "macos", target_os = "ios", windows))
+const SO_BROADCAST: c_int = 0x20;
+@cfg(any(target_os = "macos", target_os = "ios", windows))
+const SO_RCVTIMEO: c_int = 0x1006;
+@cfg(any(target_os = "macos", target_os = "ios", windows))
+const SO_SNDTIMEO: c_int = 0x1005;
+@cfg(windows)
+const SOL_SOCKET: c_int = 0xFFFF;
+
+/// The level and name of an option.
+fn option_place(option: i32) -> (c_int, c_int) {
+  if option == OPTION_TTL {
+    (IPPROTO_IP, IP_TTL)
+  } else if option == OPTION_NODELAY {
+    (IPPROTO_TCP, TCP_NODELAY)
+  } else if option == OPTION_BROADCAST {
+    (SOL_SOCKET, SO_BROADCAST)
+  } else {
+    (SOL_SOCKET, SO_ERROR)
+  }
+}
+
+/// A time out in nanoseconds as `struct timeval`: never 0, which is none, as Rust's.
+fn timeout_parts(nanos: u64) -> (u64, u64) {
+  const secs = nanos / 1_000_000_000;
+  var micros = (nanos % 1_000_000_000) / 1000;
+
+  if secs == 0 && micros == 0 {
+    micros = 1;
+  }
+
+  (secs, micros)
+}
+
+/// `struct timeval`, whose fields have 64 bits, except on 32-bit Android and for Apple's
+/// microseconds.
+@cfg(any(target_os = "linux", all(target_os = "android", target_pointer_width = "64")))
+@repr(C)
+struct Timeval {
+  pub tv_sec: i64;
+  pub tv_usec: i64;
+}
+
+@cfg(all(target_os = "android", target_pointer_width = "32"))
+@repr(C)
+struct Timeval {
+  pub tv_sec: i32;
+  pub tv_usec: i32;
+}
+
+@cfg(any(target_os = "macos", target_os = "ios"))
+@repr(C)
+struct Timeval {
+  pub tv_sec: i64;
+  pub tv_usec: i32;
+}
+
+@cfg(any(target_os = "linux", all(target_os = "android", target_pointer_width = "64")))
+fn timeval_of(nanos: u64) -> Timeval {
+  if nanos == 0 {
+    return Timeval { tv_sec: 0, tv_usec: 0 };
+  }
+
+  const parts = timeout_parts(nanos);
+  const secs = if parts.0 > 0x7FFF_FFFF_FFFF { 0x7FFF_FFFF_FFFFu64 } else { parts.0 };
+
+  Timeval { tv_sec: secs as i64, tv_usec: parts.1 as i64 }
+}
+
+@cfg(any(target_os = "macos", target_os = "ios"))
+fn timeval_of(nanos: u64) -> Timeval {
+  if nanos == 0 {
+    return Timeval { tv_sec: 0, tv_usec: 0 };
+  }
+
+  const parts = timeout_parts(nanos);
+  const secs = if parts.0 > 0x7FFF_FFFF_FFFF { 0x7FFF_FFFF_FFFFu64 } else { parts.0 };
+
+  Timeval { tv_sec: secs as i64, tv_usec: parts.1 as i32 }
+}
+
+@cfg(all(target_os = "android", target_pointer_width = "32"))
+fn timeval_of(nanos: u64) -> Timeval {
+  if nanos == 0 {
+    return Timeval { tv_sec: 0, tv_usec: 0 };
+  }
+
+  const parts = timeout_parts(nanos);
+  const secs = if parts.0 > 0x7FFF_FFFF { 0x7FFF_FFFFu64 } else { parts.0 };
+
+  Timeval { tv_sec: secs as i32, tv_usec: parts.1 as i32 }
+}
+
+/// The nanoseconds of a `struct timeval`, 0 for none.
+@cfg(unix)
+fn nanos_of(value: Timeval) -> u64 {
+  (value.tv_sec as u64) * 1_000_000_000 + (value.tv_usec as u64) * 1000
+}
+
+@cfg(unix)
+extern "C" {
+  fn getsockopt(socket: c_int, level: c_int, name: c_int, value: *mut c_void, len: *mut u32) -> c_int;
+}
+
+// `PollFd`, `poll` and `POLLOUT` are those of the pipes of `std::process`, above.
+@cfg(unix)
+const POLLERR: i16 = 8;
+@cfg(unix)
+const POLLHUP: i16 = 0x10;
+
+/// Waits at most `nanos` nanoseconds in a read (`write` false) or a write; 0 is no limit.
+@cfg(unix)
+pub fn socket_set_timeout(handle: usize, write: bool, nanos: u64) -> Result<(), i32> {
+  const value = timeval_of(nanos);
+  const name = if write { SO_SNDTIMEO } else { SO_RCVTIMEO };
+
+  if unsafe { setsockopt(handle as c_int, SOL_SOCKET, name, &raw const value as *const c_void, mem::size_of<Timeval>() as u32) } == 0 { Ok(()) } else { Err(failure()) }
+}
+
+@cfg(unix)
+pub fn socket_timeout(handle: usize, write: bool) -> Result<u64, i32> {
+  var value = Timeval { tv_sec: 0, tv_usec: 0 };
+  var len = mem::size_of<Timeval>() as u32;
+  const name = if write { SO_SNDTIMEO } else { SO_RCVTIMEO };
+
+  if unsafe { getsockopt(handle as c_int, SOL_SOCKET, name, &raw mut value as *mut c_void, &raw mut len) } == 0 { Ok(nanos_of(value)) } else { Err(failure()) }
+}
+
+/// Sets an option that is an `int`.
+@cfg(unix)
+pub fn set_socket_option(handle: usize, option: i32, value: i32) -> Result<(), i32> {
+  const place = option_place(option);
+
+  set_int_option(handle as c_int, place.0, place.1, value)
+}
+
+@cfg(unix)
+pub fn socket_option(handle: usize, option: i32) -> Result<i32, i32> {
+  const place = option_place(option);
+  var value = 0 as c_int;
+  var len = 4u32;
+
+  if unsafe { getsockopt(handle as c_int, place.0, place.1, &raw mut value as *mut c_void, &raw mut len) } == 0 { Ok(value) } else { Err(failure()) }
+}
+
+@cfg(unix)
+pub fn socket_set_nonblocking(handle: usize, on: bool) -> Result<(), i32> {
+  const flags = unsafe { fcntl(handle as c_int, F_GETFL) };
+
+  if flags < 0 {
+    return Err(failure());
+  }
+
+  const changed = if on { flags | O_NONBLOCK } else { flags & !O_NONBLOCK };
+
+  if unsafe { fcntl(handle as c_int, F_SETFL, changed) } == 0 { Ok(()) } else { Err(failure()) }
+}
+
+/// Another descriptor of the same socket, closed in the programs this one starts.
+@cfg(unix)
+pub fn socket_duplicate(handle: usize) -> Result<usize, i32> {
+  const fd = unsafe { fcntl(handle as c_int, F_DUPFD_CLOEXEC, 0 as c_int) };
+
+  if fd < 0 { Err(failure()) } else { Ok(fd as usize) }
+}
+
+/// Connects the socket, waiting at most `nanos` nanoseconds, as Rust's `connect_timeout`: a
+/// connection that does not come in time is `ETIMEDOUT`. The socket waits again afterwards.
+@cfg(unix)
+pub fn socket_connect_timeout(handle: usize, addr: RawAddr, nanos: u64) -> Result<(), i32> {
+  const buffer = encode(addr);
+
+  socket_set_nonblocking(handle, true)?;
+
+  const started = unsafe { connect(handle as c_int, &raw const buffer, sockaddr_len(addr.v6)) };
+
+  if started != 0 && errno() != EINPROGRESS {
+    const code = failure();
+
+    socket_set_nonblocking(handle, false)?;
+
+    return Err(code);
+  }
+
+  const start = monotonic_nanos();
+
+  while started != 0 {
+    const spent = monotonic_nanos() - start;
+
+    if spent >= nanos {
+      socket_set_nonblocking(handle, false)?;
+
+      return Err(ETIMEDOUT);
+    }
+
+    // In whole milliseconds, rounded up, which `poll` waits.
+    const left = nanos - spent;
+    const millis = left / 1_000_000 + if left % 1_000_000 != 0 { 1 } else { 0 };
+    var watched = PollFd { fd: handle as c_int, events: POLLOUT, revents: 0 };
+    const ready = unsafe { poll(&raw mut watched, 1, if millis > 0x7FFF_FFFF { 0x7FFF_FFFF } else { millis as c_int }) };
+
+    if ready < 0 {
+      if errno() == EINTR {
+        continue;
+      }
+
+      const code = failure();
+
+      socket_set_nonblocking(handle, false)?;
+
+      return Err(code);
+    }
+
+    if ready > 0 {
+      // The connection failed if the socket has an error: `poll` may also say so.
+      const pending = socket_option(handle, OPTION_ERROR)?;
+
+      if pending != 0 || watched.revents & (POLLERR | POLLHUP) != 0 {
+        socket_set_nonblocking(handle, false)?;
+
+        return Err(if pending != 0 { pending } else { ECONNREFUSED });
+      }
+
+      break;
+    }
+  }
+
+  socket_set_nonblocking(handle, false)
+}
+
+/// `FD_SET` of Winsock, for the one socket `select` watches.
+@cfg(windows)
+@repr(C)
+struct FdSet {
+  pub count: u32;
+  pub sockets: [usize; 64];
+}
+
+/// `struct timeval` of Winsock, whose `long` has 32 bits.
+@cfg(windows)
+@repr(C)
+struct WinTimeval {
+  pub tv_sec: i32;
+  pub tv_usec: i32;
+}
+
+/// `WSAPROTOCOL_INFOW`, which `WSADuplicateSocketW` fills.
+@cfg(windows)
+@repr(C)
+struct ProtocolInfo {
+  pub words: [u64; 96];
+}
+
+@cfg(windows)
+extern "C" {
+  fn setsockopt(socket: usize, level: c_int, name: c_int, value: *const c_void, len: c_int) -> c_int;
+  fn getsockopt(socket: usize, level: c_int, name: c_int, value: *mut c_void, len: *mut c_int) -> c_int;
+  fn ioctlsocket(socket: usize, command: i32, argument: *mut u32) -> c_int;
+  fn select(count: c_int, read: *mut FdSet, write: *mut FdSet, except: *mut FdSet, timeout: *const WinTimeval) -> c_int;
+  fn WSADuplicateSocketW(socket: usize, process: u32, info: *mut ProtocolInfo) -> c_int;
+}
+
+/// `FIONBIO`.
+@cfg(windows)
+const FIONBIO: u32 = 0x8004_667E;
+/// `FROM_PROTOCOL_INFO`: the socket is the one the protocol information describes.
+@cfg(windows)
+const FROM_PROTOCOL_INFO: c_int = -1;
+
+/// Windows takes a time out in whole milliseconds, as a `DWORD`: never 0, which is none.
+@cfg(windows)
+pub fn socket_set_timeout(handle: usize, write: bool, nanos: u64) -> Result<(), i32> {
+  var millis = nanos / 1_000_000;
+
+  if nanos != 0 && millis == 0 {
+    millis = 1;
+  }
+
+  const value = if millis > 0xFFFF_FFFE { 0xFFFF_FFFEu32 } else { millis as u32 };
+  const name = if write { SO_SNDTIMEO } else { SO_RCVTIMEO };
+
+  if unsafe { setsockopt(handle, SOL_SOCKET, name, &raw const value as *const c_void, 4) } != SOCKET_ERROR { Ok(()) } else { Err(wsa_failure()) }
+}
+
+@cfg(windows)
+pub fn socket_timeout(handle: usize, write: bool) -> Result<u64, i32> {
+  var value = 0u32;
+  var len = 4 as c_int;
+  const name = if write { SO_SNDTIMEO } else { SO_RCVTIMEO };
+
+  if unsafe { getsockopt(handle, SOL_SOCKET, name, &raw mut value as *mut c_void, &raw mut len) } != SOCKET_ERROR { Ok(value as u64 * 1_000_000) } else { Err(wsa_failure()) }
+}
+
+@cfg(windows)
+pub fn set_socket_option(handle: usize, option: i32, value: i32) -> Result<(), i32> {
+  const place = option_place(option);
+  const given = value;
+
+  if unsafe { setsockopt(handle, place.0, place.1, &raw const given as *const c_void, 4) } != SOCKET_ERROR { Ok(()) } else { Err(wsa_failure()) }
+}
+
+/// The value of an option; the pending error is a `WSA` code, which becomes an `errno` value.
+@cfg(windows)
+pub fn socket_option(handle: usize, option: i32) -> Result<i32, i32> {
+  const place = option_place(option);
+  var value = 0 as c_int;
+  var len = 4 as c_int;
+
+  if unsafe { getsockopt(handle, place.0, place.1, &raw mut value as *mut c_void, &raw mut len) } == SOCKET_ERROR {
+    return Err(wsa_failure());
+  }
+
+  if option == OPTION_ERROR && value != 0 { Ok(wsa_errno(value)) } else { Ok(value) }
+}
+
+@cfg(windows)
+pub fn socket_set_nonblocking(handle: usize, on: bool) -> Result<(), i32> {
+  var value = if on { 1u32 } else { 0u32 };
+
+  if unsafe { ioctlsocket(handle, FIONBIO as i32, &raw mut value) } != SOCKET_ERROR { Ok(()) } else { Err(wsa_failure()) }
+}
+
+/// Another `SOCKET` of the same socket, which child processes do not inherit, as Rust's.
+@cfg(windows)
+pub fn socket_duplicate(handle: usize) -> Result<usize, i32> {
+  var info = ProtocolInfo { words: [0u64; 96] };
+
+  if unsafe { WSADuplicateSocketW(handle, GetCurrentProcessId(), &raw mut info) } == SOCKET_ERROR {
+    return Err(wsa_failure());
+  }
+
+  const copy = unsafe { WSASocketW(FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, &raw mut info as *mut c_void, 0, SOCKET_FLAGS) };
+
+  if copy == INVALID_SOCKET { Err(wsa_failure()) } else { Ok(copy) }
+}
+
+/// `connect_timeout` with `select`, as Rust's on Windows: a failed connection is in the set of
+/// exceptions.
+@cfg(windows)
+pub fn socket_connect_timeout(handle: usize, addr: RawAddr, nanos: u64) -> Result<(), i32> {
+  const buffer = encode(addr);
+
+  socket_set_nonblocking(handle, true)?;
+
+  if unsafe { connect(handle, &raw const buffer, sockaddr_len(addr.v6) as c_int) } != SOCKET_ERROR {
+    return socket_set_nonblocking(handle, false);
+  }
+
+  const started = unsafe { WSAGetLastError() };
+
+  // WSAEWOULDBLOCK: the connection goes on.
+  if started != 10035 {
+    socket_set_nonblocking(handle, false)?;
+
+    return Err(wsa_errno(started));
+  }
+
+  const parts = timeout_parts(nanos);
+  const wait = WinTimeval { tv_sec: if parts.0 > 0x7FFF_FFFF { 0x7FFF_FFFF } else { parts.0 as i32 }, tv_usec: parts.1 as i32 };
+  var writable = FdSet { count: 1, sockets: [0usize; 64] };
+  var failed = FdSet { count: 1, sockets: [0usize; 64] };
+
+  writable.sockets[0] = handle;
+  failed.sockets[0] = handle;
+
+  const ready = unsafe { select(1, 0 as *mut FdSet, &raw mut writable, &raw mut failed, &raw const wait) };
+
+  if ready == SOCKET_ERROR {
+    const code = wsa_failure();
+
+    socket_set_nonblocking(handle, false)?;
+
+    return Err(code);
+  }
+
+  if ready == 0 {
+    socket_set_nonblocking(handle, false)?;
+
+    return Err(ETIMEDOUT);
+  }
+
+  if failed.count > 0 {
+    const pending = socket_option(handle, OPTION_ERROR)?;
+
+    socket_set_nonblocking(handle, false)?;
+
+    return Err(if pending != 0 { pending } else { ECONNREFUSED });
+  }
+
+  socket_set_nonblocking(handle, false)
+}

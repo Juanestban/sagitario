@@ -1,0 +1,27 @@
+// Where `@default` and `..base` are written (docs/adr/0094-conversions-and-defaults.md, Q636 and
+// Q643).
+
+@default //~ ERROR E0105
+class Shared {
+  pub fn new(self) {}
+}
+
+@default(all) //~ ERROR E0105
+struct Argued {
+  pub x: i32;
+}
+
+@default //~ ERROR E0105
+union Bits { //~ ERROR E0105
+  pub word: u32;
+}
+
+struct Point {
+  pub x: i32;
+  pub y: i32;
+}
+
+fn main() {
+  const origin = Point { x: 0, y: 0 };
+  const _moved = Point { x: 1, ..origin, }; //~ ERROR E0100
+}

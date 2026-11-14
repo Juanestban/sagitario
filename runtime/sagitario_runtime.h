@@ -25,8 +25,39 @@ _Noreturn void sag_panic_at(const char *message, const char *file, int line);
 #ifdef SAG_THREADS
 #include <stdatomic.h>
 typedef atomic_size_t sag_count;
+/* Inline, so a count costs no call: the C compiler sees through it and keeps the values around
+ * it in registers. The release ordering publishes a thread's writes to an object; the acquire
+ * ordering lets the thread that drops it see the writes of every other one. */
+#define SAG_COUNT_INC(count) ((void)atomic_fetch_add_explicit((count), 1, memory_order_relaxed))
+#define SAG_COUNT_DEC(count) (atomic_fetch_sub_explicit((count), 1, memory_order_acq_rel) - 1)
+/* The operations of `std::sys::Atomic`, with an ordering of `std::sync::Ordering` as a number:
+ * 0 `Relaxed`, 1 `Release`, 2 `Acquire`, 3 `AcqRel`, 4 `SeqCst`; `std::sync` rejects those an
+ * operation does not allow (docs/adr/0098-locks-orderings-and-threads.md, Q676). */
+#define SAG_MEMORY_ORDER(order)                                                                \
+  ((order) == 0   ? memory_order_relaxed                                                       \
+   : (order) == 1 ? memory_order_release                                                       \
+   : (order) == 2 ? memory_order_acquire                                                       \
+   : (order) == 3 ? memory_order_acq_rel                                                       \
+                  : memory_order_seq_cst)
+#define sag_atomic_load(object, order) atomic_load_explicit((object), SAG_MEMORY_ORDER(order))
+#define sag_atomic_store(object, value, order) atomic_store_explicit((object), (value), SAG_MEMORY_ORDER(order))
+#define sag_atomic_exchange(object, value, order) atomic_exchange_explicit((object), (value), SAG_MEMORY_ORDER(order))
+#define sag_atomic_fetch_add(object, value, order) atomic_fetch_add_explicit((object), (value), SAG_MEMORY_ORDER(order))
+#define sag_atomic_fetch_sub(object, value, order) atomic_fetch_sub_explicit((object), (value), SAG_MEMORY_ORDER(order))
+#define sag_atomic_fetch_and(object, value, order) atomic_fetch_and_explicit((object), (value), SAG_MEMORY_ORDER(order))
+#define sag_atomic_fetch_or(object, value, order) atomic_fetch_or_explicit((object), (value), SAG_MEMORY_ORDER(order))
+#define sag_atomic_fetch_xor(object, value, order) atomic_fetch_xor_explicit((object), (value), SAG_MEMORY_ORDER(order))
+#define sag_atomic_compare_exchange_strong(object, expected, desired, success, failure)             \
+  atomic_compare_exchange_strong_explicit((object), (expected), (desired), SAG_MEMORY_ORDER(success), \
+                                          SAG_MEMORY_ORDER(failure))
+#define sag_atomic_compare_exchange_weak(object, expected, desired, success, failure)               \
+  atomic_compare_exchange_weak_explicit((object), (expected), (desired), SAG_MEMORY_ORDER(success),   \
+                                        SAG_MEMORY_ORDER(failure))
+#define sag_atomic_thread_fence(order) atomic_thread_fence(SAG_MEMORY_ORDER(order))
 #else
 typedef size_t sag_count;
+#define SAG_COUNT_INC(count) ((void)++*(count))
+#define SAG_COUNT_DEC(count) (--*(count))
 #endif
 
 /* ---- Strings (ARC) --------------------------------------------------------------------- */
@@ -63,6 +94,20 @@ void sag_sb_push_f64(sag_sb *sb, double value);
 void sag_sb_push_f32(sag_sb *sb, float value);
 void sag_sb_push_bool(sag_sb *sb, bool value);
 void sag_sb_push_char(sag_sb *sb, uint32_t c);
+
+/* The debug form of values, `{x:?}` (docs/adr/0089-display-debug-and-format-specifiers.md, Q588):
+ * the C of each type calls these. A string or character between quotes with Rust's escapes; an
+ * address in hexadecimal; before an element, a separator, or a line indented by `indent` levels
+ * of four spaces when `pretty` (`{x:#?}`), `spaced` putting a space after an opening brace; after
+ * the last one, the closing text. `sag_debug_enter` returns false for an object whose form is
+ * being written already, a cycle, and `sag_debug_leave` ends the last one entered. */
+void sag_sb_push_debug_str(sag_sb *sb, sag_string s);
+void sag_sb_push_debug_char(sag_sb *sb, uint32_t c);
+void sag_sb_push_address(sag_sb *sb, const void *address);
+void sag_debug_next(sag_sb *sb, bool first, int32_t indent, bool pretty, bool spaced);
+void sag_debug_end(sag_sb *sb, bool any, int32_t indent, bool pretty, bool spaced, const char *close);
+bool sag_debug_enter(const void *object);
+void sag_debug_leave(void);
 sag_string sag_sb_finish(sag_sb *sb);
 
 /* ---- Printing (prelude) ---------------------------------------------------------------- */
@@ -159,6 +204,13 @@ size_t sag_builder_len(sag_builder builder);
 bool sag_builder_is_empty(sag_builder builder);
 void sag_builder_clear(sag_builder builder);
 sag_string sag_builder_to_string(sag_builder builder);
+/* `insert`, `truncate`, `pop`, `capacity` and `reserve` (docs/adr/0093-everyday-methods.md, Q620):
+ * an index inside a character panics, as Rust's; `pop` gives 0x110000 when the text is empty. */
+void sag_builder_insert_at(sag_builder builder, size_t index, sag_string text, const char *file, int line);
+void sag_builder_truncate_at(sag_builder builder, size_t len, const char *file, int line);
+uint32_t sag_builder_pop(sag_builder builder);
+size_t sag_builder_capacity(sag_builder builder);
+void sag_builder_reserve(sag_builder builder, size_t additional);
 
 /* ---- Class instances (ARC, docs/spec/03-memory.md) ---------------------------------------- */
 
@@ -182,10 +234,28 @@ void *sag_object_alloc(size_t size);
 /* Gives a new object one reference, its drop function and its vtable. */
 void sag_object_init(sag_object *object, void (*drop)(sag_object *object), const sag_method *vtable);
 /* Both take a pointer to an object (whose first member is its `sag_object`), or NULL. */
-void sag_object_retain(void *object);
-/* Objects whose last reference goes away while another is being destroyed are destroyed after
- * it, in a loop, so long chains of objects do not exhaust the stack. */
-void sag_object_release(void *object);
+/* Destroys an object whose last strong reference went away (`sag_object_release`). Objects whose
+ * last reference goes away while another is being destroyed are destroyed after it, in a loop,
+ * so long chains of objects do not exhaust the stack. */
+void sag_object_destroy(sag_object *object);
+/* Around the `drop` of a class implementing `Drop`, while its object is destroyed
+ * (docs/adr/0096-streams-files-and-drop.md, Q655): the object has one strong reference while it
+ * runs, so a copy of `self` taken and released there does not destroy it again; when it returns,
+ * a reference left besides that one is `self` kept alive, and panics. */
+bool sag_object_drop_begin(sag_object *object);
+void sag_object_drop_end(sag_object *object, bool dropping);
+
+static inline void sag_object_retain(void *object) {
+  if (object != NULL) {
+    SAG_COUNT_INC(&((sag_object *)object)->strong);
+  }
+}
+
+static inline void sag_object_release(void *object) {
+  if (object != NULL && SAG_COUNT_DEC(&((sag_object *)object)->strong) == 0) {
+    sag_object_destroy((sag_object *)object);
+  }
+}
 /* Weak references: they keep the memory of an object, not the object, alive. */
 void sag_object_weak_release(sag_object *object);
 /* Makes `*slot` refer weakly to `object` (or NULL), dropping its previous weak reference. */
@@ -200,6 +270,9 @@ sag_object *sag_object_upgrade(sag_object *object);
 typedef struct sag_itable {
   const struct sag_itable *const *parents;
   const sag_method *methods;
+  /* Writes the debug form of the object's value, of the itable's type, or NULL when the program
+   * writes no interface value with `{:?}` (docs/adr/0101-the-rest-of-s2.md, Q712). */
+  void (*debug)(sag_sb *sb, sag_object *object, int32_t indent, bool pretty);
 } sag_itable;
 
 /* A value of an interface type: a reference to an object (an instance, or a box holding a
@@ -387,6 +460,274 @@ SAG_UNSIGNED_OPS(u16, uint16_t, UINT16_MAX)
 SAG_UNSIGNED_OPS(u32, uint32_t, UINT32_MAX)
 SAG_UNSIGNED_OPS(u64, uint64_t, UINT64_MAX)
 SAG_UNSIGNED_OPS(usize, size_t, SIZE_MAX)
+
+/* Shifts (docs/adr/0088-bitwise-operators-and-integer-methods.md, Q577): an amount of the width
+ * or more panics in debug builds and is reduced modulo the width in release ones. They compute
+ * through `uint64_t`, so a negative number shifted left, or a bit shifted into the sign, is never
+ * undefined behavior; `>>` of a negative number flips it twice, so its sign bits come in. */
+#define SAG_SIGNED_SHIFTS(NAME, T, UT)                                                                      static inline T sag_shl_##NAME##_at(T a, uint64_t n, const char *file, int line) {                        if (n >= sizeof(T) * 8u) {                                                                                sag_overflow("attempt to shift left with overflow", file, line);                                        n %= sizeof(T) * 8u;                                                                                  }                                                                                                       return (T)(UT)((uint64_t)(UT)a << n);                                                                 }                                                                                                       static inline T sag_shr_##NAME##_at(T a, uint64_t n, const char *file, int line) {                        if (n >= sizeof(T) * 8u) {                                                                                sag_overflow("attempt to shift right with overflow", file, line);                                       n %= sizeof(T) * 8u;                                                                                  }                                                                                                       if (a < 0) {                                                                                              return (T)~(T)((T)~a >> n);                                                                           }                                                                                                       return (T)(a >> n);                                                                                   }
+
+#define SAG_UNSIGNED_SHIFTS(NAME, T)                                                                        static inline T sag_shl_##NAME##_at(T a, uint64_t n, const char *file, int line) {                        if (n >= sizeof(T) * 8u) {                                                                                sag_overflow("attempt to shift left with overflow", file, line);                                        n %= sizeof(T) * 8u;                                                                                  }                                                                                                       return (T)((uint64_t)a << n);                                                                         }                                                                                                       static inline T sag_shr_##NAME##_at(T a, uint64_t n, const char *file, int line) {                        if (n >= sizeof(T) * 8u) {                                                                                sag_overflow("attempt to shift right with overflow", file, line);                                       n %= sizeof(T) * 8u;                                                                                  }                                                                                                       return (T)((uint64_t)a >> n);                                                                         }
+
+SAG_SIGNED_SHIFTS(i8, int8_t, uint8_t)
+SAG_SIGNED_SHIFTS(i16, int16_t, uint16_t)
+SAG_SIGNED_SHIFTS(i32, int32_t, uint32_t)
+SAG_SIGNED_SHIFTS(i64, int64_t, uint64_t)
+SAG_SIGNED_SHIFTS(isize, intptr_t, uintptr_t)
+SAG_UNSIGNED_SHIFTS(u8, uint8_t)
+SAG_UNSIGNED_SHIFTS(u16, uint16_t)
+SAG_UNSIGNED_SHIFTS(u32, uint32_t)
+SAG_UNSIGNED_SHIFTS(u64, uint64_t)
+SAG_UNSIGNED_SHIFTS(usize, size_t)
+
+/* ---- Integer methods that never panic, and bits ------------------------------------------
+ * `wrapping_*`, `checked_*`, `saturating_*`, the counts of bits, rotations and byte swaps
+ * (docs/adr/0088-bitwise-operators-and-integer-methods.md, Q580). As above, values are computed
+ * through `uint64_t` and the unsigned type `UT` of the same width; a `checked_*` function writes
+ * its result to `*out` and returns whether there is one. */
+
+#define SAG_INT_BITS(NAME, T, UT)                                                                         \
+  static inline T sag_wrapping_add_##NAME(T a, T b) {                                                   \
+    return (T)(UT)((uint64_t)a + (uint64_t)b);                                                          \
+  }                                                                                                     \
+  static inline T sag_wrapping_sub_##NAME(T a, T b) {                                                   \
+    return (T)(UT)((uint64_t)a - (uint64_t)b);                                                          \
+  }                                                                                                     \
+  static inline T sag_wrapping_mul_##NAME(T a, T b) {                                                   \
+    return (T)(UT)((uint64_t)a * (uint64_t)b);                                                          \
+  }                                                                                                     \
+  static inline T sag_wrapping_shl_##NAME(T a, uint32_t n) {                                            \
+    return (T)(UT)((uint64_t)(UT)a << (n % (sizeof(T) * 8u)));                                          \
+  }                                                                                                     \
+  static inline bool sag_checked_shl_##NAME(T a, uint32_t n, T *out) {                                  \
+    if (n >= sizeof(T) * 8u) {                                                                          \
+      return false;                                                                                     \
+    }                                                                                                   \
+    *out = (T)(UT)((uint64_t)(UT)a << n);                                                               \
+    return true;                                                                                        \
+  }                                                                                                     \
+  static inline uint32_t sag_count_ones_##NAME(T a) {                                                   \
+    uint64_t x = (UT)a;                                                                                 \
+    uint32_t count = 0;                                                                                 \
+    while (x != 0) {                                                                                    \
+      count += (uint32_t)(x & 1u);                                                                      \
+      x >>= 1;                                                                                          \
+    }                                                                                                   \
+    return count;                                                                                       \
+  }                                                                                                     \
+  static inline uint32_t sag_count_zeros_##NAME(T a) {                                                  \
+    return (uint32_t)(sizeof(T) * 8u) - sag_count_ones_##NAME(a);                                       \
+  }                                                                                                     \
+  static inline uint32_t sag_leading_zeros_##NAME(T a) {                                                \
+    uint64_t x = (UT)a;                                                                                 \
+    uint32_t count = 0;                                                                                 \
+    for (uint32_t bit = (uint32_t)(sizeof(T) * 8u); bit > 0 && ((x >> (bit - 1)) & 1u) == 0; bit--) {   \
+      count++;                                                                                          \
+    }                                                                                                   \
+    return count;                                                                                       \
+  }                                                                                                     \
+  static inline uint32_t sag_trailing_zeros_##NAME(T a) {                                               \
+    uint64_t x = (UT)a;                                                                                 \
+    uint32_t count = 0;                                                                                 \
+    if (x == 0) {                                                                                       \
+      return (uint32_t)(sizeof(T) * 8u);                                                                \
+    }                                                                                                   \
+    while ((x & 1u) == 0) {                                                                             \
+      x >>= 1;                                                                                          \
+      count++;                                                                                          \
+    }                                                                                                   \
+    return count;                                                                                       \
+  }                                                                                                     \
+  static inline T sag_rotate_left_##NAME(T a, uint32_t n) {                                             \
+    uint32_t bits = (uint32_t)(sizeof(T) * 8u);                                                         \
+    uint64_t x = (UT)a;                                                                                 \
+    n %= bits;                                                                                          \
+    if (n == 0) {                                                                                       \
+      return a;                                                                                         \
+    }                                                                                                   \
+    return (T)(UT)((x << n) | (x >> (bits - n)));                                                       \
+  }                                                                                                     \
+  static inline T sag_rotate_right_##NAME(T a, uint32_t n) {                                            \
+    uint32_t bits = (uint32_t)(sizeof(T) * 8u);                                                         \
+    uint64_t x = (UT)a;                                                                                 \
+    n %= bits;                                                                                          \
+    if (n == 0) {                                                                                       \
+      return a;                                                                                         \
+    }                                                                                                   \
+    return (T)(UT)((x >> n) | (x << (bits - n)));                                                       \
+  }                                                                                                     \
+  static inline T sag_swap_bytes_##NAME(T a) {                                                          \
+    uint64_t x = (UT)a;                                                                                 \
+    uint64_t swapped = 0;                                                                               \
+    for (size_t byte = 0; byte < sizeof(T); byte++) {                                                   \
+      swapped = (swapped << 8) | (x & 0xFFu);                                                           \
+      x >>= 8;                                                                                          \
+    }                                                                                                   \
+    return (T)(UT)swapped;                                                                              \
+  }
+
+#define SAG_SIGNED_EXTRAS(NAME, T, UT, MIN, MAX)                                                          \
+  SAG_INT_BITS(NAME, T, UT)                                                                             \
+  static inline bool sag_add_overflows_##NAME(T a, T b) {                                               \
+    return (b > 0 && a > (T)(MAX - b)) || (b < 0 && a < (T)(MIN - b));                                   \
+  }                                                                                                     \
+  static inline bool sag_sub_overflows_##NAME(T a, T b) {                                               \
+    return (b < 0 && a > (T)(MAX + b)) || (b > 0 && a < (T)(MIN + b));                                   \
+  }                                                                                                     \
+  static inline bool sag_mul_overflows_##NAME(T a, T b) {                                               \
+    if (a > 0) {                                                                                        \
+      return b > 0 ? a > (T)(MAX / b) : b < (T)(MIN / a);                                               \
+    }                                                                                                   \
+    if (a < 0) {                                                                                        \
+      return b > 0 ? a < (T)(MIN / b) : (b != 0 && b < (T)(MAX / a));                                   \
+    }                                                                                                   \
+    return false;                                                                                       \
+  }                                                                                                     \
+  static inline T sag_wrapping_neg_##NAME(T a) {                                                        \
+    return (T)(UT)(UINT64_C(0) - (uint64_t)a);                                                          \
+  }                                                                                                     \
+  static inline T sag_wrapping_shr_##NAME(T a, uint32_t n) {                                            \
+    n %= (uint32_t)(sizeof(T) * 8u);                                                                    \
+    return a < 0 ? (T)~(T)((T)~a >> n) : (T)(a >> n);                                                   \
+  }                                                                                                     \
+  static inline bool sag_checked_add_##NAME(T a, T b, T *out) {                                         \
+    if (sag_add_overflows_##NAME(a, b)) {                                                               \
+      return false;                                                                                     \
+    }                                                                                                   \
+    *out = sag_wrapping_add_##NAME(a, b);                                                               \
+    return true;                                                                                        \
+  }                                                                                                     \
+  static inline bool sag_checked_sub_##NAME(T a, T b, T *out) {                                         \
+    if (sag_sub_overflows_##NAME(a, b)) {                                                               \
+      return false;                                                                                     \
+    }                                                                                                   \
+    *out = sag_wrapping_sub_##NAME(a, b);                                                               \
+    return true;                                                                                        \
+  }                                                                                                     \
+  static inline bool sag_checked_mul_##NAME(T a, T b, T *out) {                                         \
+    if (sag_mul_overflows_##NAME(a, b)) {                                                               \
+      return false;                                                                                     \
+    }                                                                                                   \
+    *out = sag_wrapping_mul_##NAME(a, b);                                                               \
+    return true;                                                                                        \
+  }                                                                                                     \
+  static inline bool sag_checked_div_##NAME(T a, T b, T *out) {                                         \
+    if (b == 0 || (a == MIN && b == -1)) {                                                              \
+      return false;                                                                                     \
+    }                                                                                                   \
+    *out = (T)(a / b);                                                                                  \
+    return true;                                                                                        \
+  }                                                                                                     \
+  static inline bool sag_checked_rem_##NAME(T a, T b, T *out) {                                         \
+    if (b == 0 || (a == MIN && b == -1)) {                                                              \
+      return false;                                                                                     \
+    }                                                                                                   \
+    *out = (T)(a % b);                                                                                  \
+    return true;                                                                                        \
+  }                                                                                                     \
+  static inline bool sag_checked_neg_##NAME(T a, T *out) {                                              \
+    if (a == MIN) {                                                                                     \
+      return false;                                                                                     \
+    }                                                                                                   \
+    *out = (T)(-a);                                                                                     \
+    return true;                                                                                        \
+  }                                                                                                     \
+  static inline bool sag_checked_shr_##NAME(T a, uint32_t n, T *out) {                                  \
+    if (n >= sizeof(T) * 8u) {                                                                          \
+      return false;                                                                                     \
+    }                                                                                                   \
+    *out = sag_wrapping_shr_##NAME(a, n);                                                               \
+    return true;                                                                                        \
+  }                                                                                                     \
+  static inline T sag_saturating_add_##NAME(T a, T b) {                                                 \
+    if (sag_add_overflows_##NAME(a, b)) {                                                               \
+      return b > 0 ? MAX : MIN;                                                                         \
+    }                                                                                                   \
+    return sag_wrapping_add_##NAME(a, b);                                                               \
+  }                                                                                                     \
+  static inline T sag_saturating_sub_##NAME(T a, T b) {                                                 \
+    if (sag_sub_overflows_##NAME(a, b)) {                                                               \
+      return b < 0 ? MAX : MIN;                                                                         \
+    }                                                                                                   \
+    return sag_wrapping_sub_##NAME(a, b);                                                               \
+  }                                                                                                     \
+  static inline T sag_saturating_mul_##NAME(T a, T b) {                                                 \
+    if (sag_mul_overflows_##NAME(a, b)) {                                                               \
+      return (a < 0) != (b < 0) ? MIN : MAX;                                                            \
+    }                                                                                                   \
+    return sag_wrapping_mul_##NAME(a, b);                                                               \
+  }
+
+#define SAG_UNSIGNED_EXTRAS(NAME, T, MAX)                                                                 \
+  SAG_INT_BITS(NAME, T, T)                                                                              \
+  static inline T sag_wrapping_shr_##NAME(T a, uint32_t n) {                                            \
+    return (T)((uint64_t)a >> (n % (sizeof(T) * 8u)));                                                  \
+  }                                                                                                     \
+  static inline bool sag_checked_add_##NAME(T a, T b, T *out) {                                         \
+    if (a > (T)(MAX - b)) {                                                                             \
+      return false;                                                                                     \
+    }                                                                                                   \
+    *out = (T)(a + b);                                                                                  \
+    return true;                                                                                        \
+  }                                                                                                     \
+  static inline bool sag_checked_sub_##NAME(T a, T b, T *out) {                                         \
+    if (a < b) {                                                                                        \
+      return false;                                                                                     \
+    }                                                                                                   \
+    *out = (T)(a - b);                                                                                  \
+    return true;                                                                                        \
+  }                                                                                                     \
+  static inline bool sag_checked_mul_##NAME(T a, T b, T *out) {                                         \
+    if (b != 0 && a > (T)(MAX / b)) {                                                                   \
+      return false;                                                                                     \
+    }                                                                                                   \
+    *out = sag_wrapping_mul_##NAME(a, b);                                                               \
+    return true;                                                                                        \
+  }                                                                                                     \
+  static inline bool sag_checked_div_##NAME(T a, T b, T *out) {                                         \
+    if (b == 0) {                                                                                       \
+      return false;                                                                                     \
+    }                                                                                                   \
+    *out = (T)(a / b);                                                                                  \
+    return true;                                                                                        \
+  }                                                                                                     \
+  static inline bool sag_checked_rem_##NAME(T a, T b, T *out) {                                         \
+    if (b == 0) {                                                                                       \
+      return false;                                                                                     \
+    }                                                                                                   \
+    *out = (T)(a % b);                                                                                  \
+    return true;                                                                                        \
+  }                                                                                                     \
+  static inline bool sag_checked_shr_##NAME(T a, uint32_t n, T *out) {                                  \
+    if (n >= sizeof(T) * 8u) {                                                                          \
+      return false;                                                                                     \
+    }                                                                                                   \
+    *out = (T)((uint64_t)a >> n);                                                                       \
+    return true;                                                                                        \
+  }                                                                                                     \
+  static inline T sag_saturating_add_##NAME(T a, T b) {                                                 \
+    return a > (T)(MAX - b) ? MAX : (T)(a + b);                                                         \
+  }                                                                                                     \
+  static inline T sag_saturating_sub_##NAME(T a, T b) {                                                 \
+    return a < b ? (T)0 : (T)(a - b);                                                                   \
+  }                                                                                                     \
+  static inline T sag_saturating_mul_##NAME(T a, T b) {                                                 \
+    return b != 0 && a > (T)(MAX / b) ? MAX : sag_wrapping_mul_##NAME(a, b);                            \
+  }                                                                                                     \
+  static inline bool sag_is_power_of_two_##NAME(T a) {                                                  \
+    return a != 0 && (a & (T)(a - 1u)) == 0;                                                            \
+  }
+
+SAG_SIGNED_EXTRAS(i8, int8_t, uint8_t, INT8_MIN, INT8_MAX)
+SAG_SIGNED_EXTRAS(i16, int16_t, uint16_t, INT16_MIN, INT16_MAX)
+SAG_SIGNED_EXTRAS(i32, int32_t, uint32_t, INT32_MIN, INT32_MAX)
+SAG_SIGNED_EXTRAS(i64, int64_t, uint64_t, INT64_MIN, INT64_MAX)
+SAG_SIGNED_EXTRAS(isize, intptr_t, uintptr_t, INTPTR_MIN, INTPTR_MAX)
+SAG_UNSIGNED_EXTRAS(u8, uint8_t, UINT8_MAX)
+SAG_UNSIGNED_EXTRAS(u16, uint16_t, UINT16_MAX)
+SAG_UNSIGNED_EXTRAS(u32, uint32_t, UINT32_MAX)
+SAG_UNSIGNED_EXTRAS(u64, uint64_t, UINT64_MAX)
+SAG_UNSIGNED_EXTRAS(usize, size_t, SIZE_MAX)
 
 /* ---- Methods of numbers (docs/adr/0076-std-math-and-methods-of-numbers.md) ---------------
  * `pow` multiplies through the checked helpers above, so it panics (debug) or wraps (release)
@@ -679,8 +1020,24 @@ static inline void *sag_list_at(sag_object *list, size_t index, const char *file
   return self->data + sag_index_at(index, self->len, file, line) * self->size;
 }
 
-/* The slot of a new last element, which the caller fills. */
-void *sag_list_push(sag_object *list);
+/* The same for a list whose elements have `size` bytes, a constant of the generated C: the
+ * address costs no multiplication by a field read at run time, so the C compiler can optimize
+ * the loops around it. */
+static inline void *sag_list_at_sized(sag_object *list, size_t index, size_t size, const char *file, int line) {
+  sag_list *self = (sag_list *)list;
+  return self->data + sag_index_at(index, self->len, file, line) * size;
+}
+
+/* The slot of a new last element, which the caller fills. Inline while the list has room and
+ * lends no slice; `sag_list_push_slow` grows it or panics. */
+void *sag_list_push_slow(sag_object *list);
+static inline void *sag_list_push(sag_object *object) {
+  sag_list *list = (sag_list *)object;
+  if (list->len < list->cap && list->lent == 0) {
+    return list->data + list->len++ * list->size;
+  }
+  return sag_list_push_slow(object);
+}
 /* The slot of a new element at `index` (after moving the following ones), which the caller
  * fills; panics if `index` is past the end. */
 void *sag_list_insert(sag_object *list, size_t index, const char *file, int line);
@@ -691,6 +1048,10 @@ void *sag_list_pop(sag_object *list);
 void *sag_list_remove(sag_object *list, size_t index, const char *file, int line);
 void sag_list_clear(sag_object *list);
 void sag_list_reverse(sag_object *list);
+/* `capacity()` and `reserve(additional)` (docs/adr/0093-everyday-methods.md, Q622): room for at
+ * least `additional` more elements, which a lent list cannot make, since its elements would move. */
+size_t sag_list_capacity(sag_object *list);
+void sag_list_reserve_more(sag_object *list, size_t additional);
 
 /* ---- Slices (docs/adr/0079-references-and-borrowing.md, Q494) ----------------------------- */
 
@@ -729,7 +1090,14 @@ static inline void *sag_slice_at(sag_slice slice, size_t index, size_t size, con
 
 /* ---- Hashing and order (docs/spec/05-interfaces-generics.md) ------------------------------ */
 
-uint64_t sag_hash_u64(uint64_t value);
+/* SplitMix64's finalizer; inline, so the hash of an integer key costs no call (`Map`,
+ * docs/adr/0090-benchmarks.md). */
+static inline uint64_t sag_hash_u64(uint64_t value) {
+  value += UINT64_C(0x9e3779b97f4a7c15);
+  value = (value ^ (value >> 30)) * UINT64_C(0xbf58476d1ce4e5b9);
+  value = (value ^ (value >> 27)) * UINT64_C(0x94d049bb133111eb);
+  return value ^ (value >> 31);
+}
 uint64_t sag_string_hash(sag_string text);
 /* -1, 0 or 1 by the IEEE 754 total order: -NaN < -inf < ... < -0 < +0 < ... < inf < NaN. */
 int32_t sag_f32_total_compare(float a, float b);
@@ -753,125 +1121,43 @@ SAG_FROM_UINTMAX(u32, uint32_t)
 SAG_FROM_UINTMAX(u64, uint64_t)
 SAG_FROM_UINTMAX(usize, size_t)
 
-/* ---- Standard library: std::env, std::io, std::process --------------------------------- *
+/* ---- Standard library: std::env, std::process ------------------------------------------- *
  * Declared in Sagitario by the standard library modules (docs/spec/11-standard-library.md).
  * They borrow their string arguments and return new references. */
 
-/* Codes of I/O errors: `errno` values are positive, the runtime's own are negative. */
-#define SAG_IO_INVALID_DATA (-2)
-#define SAG_IO_UNKNOWN (-3)
-/* The input ended before the bytes `read_exact` asked for. */
-#define SAG_IO_UNEXPECTED_EOF (-4)
-/* The status of a read at the end of the input. */
-#define SAG_IO_END (-1)
-/* Indices of the variants of `std::io::ErrorKind`. */
-#define SAG_IO_KIND_NOT_FOUND 0
-#define SAG_IO_KIND_PERMISSION_DENIED 1
-#define SAG_IO_KIND_ALREADY_EXISTS 2
-#define SAG_IO_KIND_INVALID_INPUT 3
-#define SAG_IO_KIND_INVALID_DATA 4
-#define SAG_IO_KIND_UNEXPECTED_EOF 5
-#define SAG_IO_KIND_OTHER 6
-
-size_t sag_env_arg_count(void);
-/* Arguments and variables that are not valid UTF-8 get each bad sequence replaced by U+FFFD. */
-sag_string sag_env_arg(size_t index);
-sag_string sag_env_var(sag_string name, bool *found);
-/* Writes to stdout (stream 1) or stderr (2); returns 0 or an error code. */
-int32_t sag_io_write(int32_t stream, sag_string text, bool newline);
-int32_t sag_io_flush(void);
-/* `*status` becomes 0, SAG_IO_END or an error code. */
-sag_string sag_io_read_line(int32_t *status);
-sag_string sag_io_read_all(int32_t *status);
-sag_string sag_io_read_exact(size_t count, int32_t *status);
-/* Whether stdin (0), stdout (1) or stderr (2) is a terminal. */
-bool sag_io_is_terminal(int32_t stream);
-int32_t sag_io_error_kind(int32_t code);
-sag_string sag_io_error_message(int32_t code);
+/* The digits of `|value|` for a format specifier (docs/adr/0089-display-debug-and-format-specifiers.md):
+ * with `precision` decimals (all that read back as the same value when it is negative), or in
+ * scientific notation as Rust writes it (`1.5e3`, `E` when `upper`); `NaN` and `inf` as they are.
+ * `std` adds the sign. */
+sag_string sag_float_format(double value, int32_t precision, bool scientific, bool upper, bool is_f32);
+/* `std::hint::black_box`: the value at `value` escapes into C that the program's translation unit
+ * cannot see, so the C compiler assumes it read and may change it (docs/adr/0090-benchmarks.md). */
+void sag_black_box(const void *value);
+/* Gives `std::env`, written in Sagitario, what C's `main` received: the arguments on Unix
+ * (docs/adr/0085-conditional-compilation-and-std-time.md, Q552). */
+void sag_env_init(int argc, const char *const *argv);
 /* Flushes output and ends the program without running pending releases. */
 _Noreturn void sag_process_exit(int32_t code);
+/* Ends the program at once, as C's `abort`. */
+_Noreturn void sag_process_abort(void);
 
-/* What a path names, for std::fs; errors count as missing. */
-#define SAG_FS_MISSING 0
-#define SAG_FS_FILE 1
-#define SAG_FS_DIR 2
-#define SAG_FS_OTHER 3
-
-/* Each returns 0 or an error code, or sets `*status` to one. Paths with NUL are EINVAL. */
-int32_t sag_fs_kind(sag_string path);
-sag_string sag_fs_read(sag_string path, int32_t *status);
-sag_string sag_fs_read_bytes(sag_string path, int32_t *status);
-
-/* Dynamic libraries (docs/adr/0078-ffi-without-c-shims.md): a library, never unloaded, or NULL
- * with the reason in `sag_library_error`; and one of its functions, or NULL. */
-typedef void (*sag_symbol)(void);
-void *sag_library_open(sag_string path);
-sag_string sag_library_error(void);
-sag_symbol sag_library_symbol(void *library, sag_string name);
-int32_t sag_fs_write(sag_string path, sag_string text, bool append);
-/* `len` bytes at `data`, which may be NULL when `len` is 0. */
-int32_t sag_fs_write_bytes(sag_string path, const uint8_t *data, size_t len);
-int32_t sag_fs_create_dir(sag_string path);
-int32_t sag_fs_remove_dir(sag_string path);
-int32_t sag_fs_remove_file(sag_string path);
-/* Replaces the target if it exists, on every system. */
-int32_t sag_fs_rename(sag_string from, sag_string to);
-int32_t sag_fs_copy(sag_string from, sag_string to);
-/* The names in a directory, without `.` and `..`, separated by NUL characters. */
-sag_string sag_fs_read_dir(sag_string path, int32_t *status);
-sag_string sag_fs_current_dir(int32_t *status);
-/* Nanoseconds of a monotonic clock, and since the Unix epoch (0 before it). */
+/* Nanoseconds of a monotonic clock, and sleeping at least `nanos` nanoseconds: written in
+ * Sagitario in `std::time`, which every program compiles, for the timers of the core
+ * (docs/adr/0085-conditional-compilation-and-std-time.md, Q552). */
 uint64_t sag_time_monotonic(void);
-uint64_t sag_time_system(void);
-/* Sleeps at least `nanos` nanoseconds. */
 void sag_time_sleep(uint64_t nanos);
 
-/* Runs the program `argv` (`argc` parts separated by NUL, the program first) with the
- * `NAME=value` entries of `env` added to the environment, in `cwd` unless it is empty, with
- * `input` as stdin if `has_input`, capturing stdout and stderr if `capture`. Sets results[0] to
- * an error code or 0, results[1] to the exit code and results[2] to whether there is one, and
- * returns stdout followed by stderr, `*split` being the length of stdout. */
-sag_string sag_process_run(sag_string argv, size_t argc, sag_string env, size_t env_count, sag_string cwd, sag_string input, bool has_input,
-                           bool capture, int32_t *results, size_t *split);
+/* ---- Threads (compiled with SAG_THREADS) ------------------------------------------------ */
 
-/* Whether paths follow Windows rules (`\` separators and drive letters). */
-bool sag_path_windows(void);
-
-/* ---- Standard library: std::thread (compiled with SAG_THREADS) ------------------------- */
-
-/* Runs `body` in a new thread, which holds a reference to it, and returns the thread; panics if
- * the system cannot start one. */
-void *sag_thread_start(sag_fnval body);
-/* Waits for a thread to finish and frees it. */
-void sag_thread_join(void *thread);
-/* The number of logical processors, at least 1. */
-size_t sag_thread_available_parallelism(void);
-
-/* ---- Standard library: std::sync (compiled with SAG_THREADS) --------------------------- */
-
-/* Locks and atomic cells are runtime objects that `std::sync` holds as the environment of a
- * `fn()` value, so that ARC frees them; calling that function panics. */
-sag_fnval sag_sync_mutex_new(void);
-/* Panics if this thread holds the lock already. */
-void sag_sync_mutex_lock(sag_fnval mutex);
-void sag_sync_mutex_unlock(sag_fnval mutex);
-/* Releases the lock, which this thread holds, until another thread calls
- * `sag_sync_mutex_notify_all`, then takes it again. It may also return without one. */
-void sag_sync_mutex_wait(sag_fnval mutex);
-/* Wakes every thread waiting on the mutex. */
-void sag_sync_mutex_notify_all(sag_fnval mutex);
-/* A cell holds an integer of `bits` bits (0 for the width of `size_t`), signed or not, always
- * in the canonical form `std::sync` writes: sign-extended or zero-extended to 64 bits. */
-sag_fnval sag_sync_atomic_new(uint64_t value);
-uint64_t sag_sync_atomic_load(sag_fnval cell);
-void sag_sync_atomic_store(sag_fnval cell, uint64_t value);
-uint64_t sag_sync_atomic_swap(sag_fnval cell, uint64_t value);
-/* Adds or subtracts `delta`, wrapping around at the limits of the cell's type, and returns the
- * previous value. */
-uint64_t sag_sync_atomic_add(sag_fnval cell, uint64_t delta, bool subtract, uint32_t bits, bool is_signed);
-/* Stores `desired` if the value is `expected` and returns true; otherwise writes the value to
- * `*actual` and returns false. */
-bool sag_sync_atomic_compare_exchange(sag_fnval cell, uint64_t expected, uint64_t desired, uint64_t *actual);
+/* What the core does for each thread of `std::thread`, which `std::sys` starts and joins with the
+ * system (docs/adr/0087-atomic-storage-and-std-sync.md, Q571): a thread that will run `body`,
+ * holding a reference to it; running it, which the thread's entry does; and freeing it once
+ * joined. */
+void *sag_thread_prepare(sag_fnval body);
+void sag_thread_run(void *thread);
+void sag_thread_finish(void *thread);
+/* Frees a thread the system could not start, which never ran `body`. */
+void sag_thread_abandon(void *thread);
 
 /* ---- Tasks (docs/spec/12-async.md) ----------------------------------------------------- */
 
@@ -898,6 +1184,39 @@ void sag_task_shutdown(void);
 /* Runs `body` on a new thread and then, once that thread is joined, `done` on the executor of the
  * calling thread (docs/adr/0073-spawn-blocking.md). Both are retained. Needs SAG_THREADS. */
 void sag_task_spawn_blocking(sag_fnval body, sag_fnval done);
+
+/* ---- Statics (docs/adr/0083-global-state.md) ------------------------------------------ */
+
+/* Where the computation of the value of a `static` stands: 0 before it, 1 while a thread computes
+ * it, 2 once it is stored. Zero-initialized, as the storage of statics is. */
+typedef struct sag_static_state {
+#ifdef SAG_THREADS
+  atomic_int stage;
+  /* The marker of the thread computing it. */
+  atomic_uintptr_t owner;
+#else
+  int stage;
+#endif
+} sag_static_state;
+
+/* Whether the value of the static is stored. */
+static inline bool sag_static_ready(sag_static_state *state) {
+#ifdef SAG_THREADS
+  return atomic_load_explicit(&state->stage, memory_order_acquire) == 2;
+#else
+  return state->stage == 2;
+#endif
+}
+
+/* Whether the calling thread must compute the value of the static `name`, used at `file:line`.
+ * It waits while another thread computes it, and panics if this thread already is. */
+bool sag_static_begin(sag_static_state *state, const char *name, const char *file, int line);
+/* Marks the value stored; `release`, if not NULL, releases it at exit for the leak check. */
+void sag_static_end(sag_static_state *state, void (*release)(void));
+/* The same for a `@thread_local static var`, whose `stage` belongs to the calling thread: no
+ * other thread waits, and `release`, if not NULL, releases this thread's value when it ends. */
+bool sag_static_local_begin(int *stage, const char *name, const char *file, int line);
+void sag_static_local_end(int *stage, void (*release)(void));
 
 /* ---- Program lifecycle ----------------------------------------------------------------- */
 

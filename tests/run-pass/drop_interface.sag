@@ -1,0 +1,153 @@
+// `Drop`: `drop` runs once when the last strong reference to an instance goes, before its fields
+// are released, at the end of a scope, on reassignment, for the elements of a list, through a
+// subclass calling its parent's, with copies of `self` inside it, and once a cycle is broken
+// (docs/adr/0096-streams-files-and-drop.md, Q655).
+// expect-stdout: start
+// expect-stdout: drop a
+// expect-stdout: after a
+// expect-stdout: drop b
+// expect-stdout: after b
+// expect-stdout: drop list 1
+// expect-stdout: drop list 2
+// expect-stdout: after list
+// expect-stdout: drop outer
+// expect-stdout: drop inner
+// expect-stdout: drop child special
+// expect-stdout: drop special
+// expect-stdout: copies 2
+// expect-stdout: drop copied
+// expect-stdout: shared kept
+// expect-stdout: drop shared
+// expect-stdout: drop node
+// expect-stdout: drop d
+// expect-stdout: end
+// expect-stdout: drop e
+// expect-stdout: drop f
+// expect-stdout: drop last
+
+class Noisy impl Drop {
+  pub const name: String;
+
+  pub fn new(self, name: String) {
+    self.name = name;
+  }
+
+  pub fn drop(self) {
+    println(f"drop {self.name}");
+  }
+}
+
+class Outer impl Drop {
+  pub const inner: Noisy;
+
+  pub fn new(self) {
+    self.inner = new Noisy("inner");
+  }
+
+  pub fn drop(self) {
+    println("drop outer");
+  }
+}
+
+class Child extends Noisy {
+  pub fn new(self, name: String) {
+    zod.new(name);
+  }
+
+  pub override fn drop(self) {
+    println(f"drop child {self.name}");
+    zod.drop();
+  }
+}
+
+/// Copies of `self` taken inside `drop` are released there without destroying it twice.
+class Copier impl Drop {
+  pub var copies: List<Copier>;
+
+  pub fn new(self) {
+    self.copies = new List();
+  }
+
+  pub fn drop(self) {
+    const me = self;
+    const again = me;
+
+    println(f"copies {List::from([me, again]).len()}");
+    println("drop copied");
+  }
+}
+
+/// A node of a cycle without `weak`: freed, and dropped, once the cycle is broken.
+class Node impl Drop {
+  pub var next: Option<Node>;
+
+  pub fn new(self) {
+    self.next = None;
+  }
+
+  pub fn drop(self) {
+    println("drop node");
+  }
+}
+
+fn make(name: String) -> Noisy {
+  new Noisy(name)
+}
+
+fn main() {
+  const _last = new Noisy("last");
+
+  println("start");
+
+  {
+    const _a = new Noisy("a");
+  }
+
+  println("after a");
+
+  var _b = make("b");
+
+  _b = make("d");
+  println("after b");
+
+  {
+    const _list = List::from([new Noisy("list 1"), new Noisy("list 2")]);
+  }
+
+  println("after list");
+
+  {
+    const _outer = new Outer();
+  }
+
+  {
+    const _child = new Child("special");
+  }
+
+  {
+    const _copier = new Copier();
+  }
+
+  {
+    const shared = new Noisy("shared");
+    const holder = List::from([shared]);
+
+    {
+      const _again = shared;
+    }
+
+    println("shared kept");
+    holder.clear();
+  }
+
+  {
+    const node = new Node();
+
+    node.next = Some(node);
+    node.next = None;
+  }
+
+  _b = make("e");
+  println("end");
+  _b = make("f");
+}

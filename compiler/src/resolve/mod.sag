@@ -5,8 +5,8 @@
 //! `u32` indices; maps by node id are `Map<u32, ...>`.
 
 use pkg::ast::{
-  Block, ClassDecl, ConstDecl, EnumDecl, Expr, ExprKind, ExternFn, FnDecl, GenericParam, Ident, ImplBlock, InterfaceDecl, Item, LambdaParam, Module, Package,
-  Path, Pattern, PatternKind, Stmt, StructDecl, TemplatePart, TypeExpr, TypeExprKind, VariantFields, Visibility,
+  Block, ClassDecl, ConstDecl, StaticDecl, EnumDecl, Expr, ExprKind, ExternFn, FnDecl, GenericParam, Ident, ImplBlock, InterfaceDecl, Item, LambdaParam, Module, Package,
+  Path, Pattern, PatternKind, Stmt, StructDecl, TypeExpr, TypeExprKind, VariantFields, Visibility,
 };
 use pkg::diagnostics;
 use pkg::diagnostics::{Diagnostic, Diagnostics};
@@ -17,10 +17,12 @@ use pkg::span::Span;
 /// The builtins a single name can refer to, besides `Error`, `List::from`, `CString::new`,
 /// `string_from_c`, `exit` and `char::from_u32`.
 fn builtin_from_name(name: String) -> Option<String> {
-  if name == "print" || name == "println" || name == "eprintln" || name == "panic" || name == "include_str" { Some(name) } else { None }
+  if BUILTIN_NAMES.split(" ").contains(name) { Some(name) } else { None }
 }
 
-const BUILTIN_NAMES: String = "print println eprintln panic include_str";
+/// The assertions are builtins, so that they panic at the line of their call
+/// (docs/adr/0093-everyday-methods.md, Q618).
+const BUILTIN_NAMES: String = "print println eprintln panic assert assert_eq assert_ne unreachable todo";
 
 /// The C types of `std::ffi`, by name.
 const C_TYPES: String = "c_char c_schar c_uchar c_short c_ushort c_int c_uint c_long c_ulong c_longlong c_ulonglong c_float c_double c_void";
@@ -38,8 +40,15 @@ pub enum StdItem {
   CString,
   StringFromC,
   Exit,
+  /// `abort` of `std::process` (docs/adr/0097-processes-and-environment.md, Q667).
+  Abort,
   /// `size_of`, `align_of` or `zeroed` of `std::mem`, by name.
   Mem(String),
+  /// `black_box` of `std::hint` (docs/adr/0090-benchmarks.md, Q596).
+  BlackBox,
+  /// `std::sys::Atomic`, the atomic storage of the standard library
+  /// (docs/adr/0087-atomic-storage-and-std-sync.md, Q565).
+  Atomic,
 }
 
 /// A type declared by the program, which can have functions.
@@ -151,8 +160,15 @@ pub enum Res {
   Struct(u32),
   Variant(VariantRef),
   Const(u32),
+  /// A module-level `static` (docs/adr/0083-global-state.md).
+  Static(u32),
   /// `Name::from_raw` of the enum `Name`, which has an integer representation.
   FromRaw(u32),
+  /// A static function of an interface called through a type: `T::default()` for a type
+  /// parameter, `Self::from(x)` inside an interface (`Builtin`), or `Type::from(x)` for one the
+  /// type does not declare itself. The checker finds the interface
+  /// (docs/adr/0094-conversions-and-defaults.md, Q631).
+  InterfaceFn { target: TypeRes, name: String },
 }
 
 /// The declaration a type parameter belongs to.
@@ -168,6 +184,7 @@ pub enum TypeRes {
   Builtin,
   CType(String),
   CString,
+  Atomic,
   Error,
 }
 
@@ -176,6 +193,7 @@ pub enum ItemRef {
   Fn(u32),
   Extern(u32),
   Const(u32),
+  Static(u32),
   Type(TypeItem),
   Module(u32),
   Std(StdItem),
@@ -253,6 +271,17 @@ pub struct BlockInfo {
 pub struct ConstInfo {
   pub module: usize;
   pub item: usize;
+  /// A constant of a type: its position among the type's constants, and the type
+  /// (docs/adr/0099-associated-and-composite-constants.md, Q683).
+  pub member: Option<usize>;
+  pub owner: Option<TypeItem>;
+}
+
+/// A `static` and the function computing its value.
+pub struct StaticInfo {
+  pub module: usize;
+  pub item: usize;
+  pub init: u32;
 }
 
 pub struct ExternInfo {
@@ -265,6 +294,8 @@ pub struct TypeInfo {
   pub module: usize;
   pub item: usize;
   pub functions: List<u32>;
+  /// Its constants (Q683).
+  pub consts: List<u32>;
 }
 
 /// The item at `item` of the module at `module`.
@@ -283,6 +314,7 @@ pub class Resolution {
   pub const interfaces: List<TypeInfo>;
   pub const blocks: List<BlockInfo>;
   pub const consts: List<ConstInfo>;
+  pub const statics: List<StaticInfo>;
   pub var prelude: Option<u32>;
   pub var std_root: Option<u32>;
   pub const package_roots: List<u32>;
@@ -305,6 +337,7 @@ pub class Resolution {
     self.interfaces = new List();
     self.blocks = new List();
     self.consts = new List();
+    self.statics = new List();
     self.prelude = None;
     self.std_root = None;
     self.package_roots = new List();
@@ -326,6 +359,7 @@ pub class Resolution {
     match info.member {
       None => match item {
         Item::Fn(decl) => Some(decl),
+        Item::Static(decl) => Some(decl.init),
         _ => None,
       },
       Some(member) => match item {
@@ -380,11 +414,60 @@ pub class Resolution {
 
   pub fn const_decl(self, package: Package, id: u32) -> Option<ConstDecl> {
     const info = self.consts.get(id as usize)?;
+    const item = item_at(package, info.module, info.item)?;
+
+    match info.member {
+      None => match item {
+        Item::Const(decl) => Some(decl),
+        _ => None,
+      },
+      Some(member) => match item {
+        Item::Struct(decl) => decl.consts.get(member),
+        Item::Enum(decl) => decl.consts.get(member),
+        Item::Class(decl) => decl.consts.get(member),
+        _ => None,
+      },
+    }
+  }
+
+  /// A type's constant by name (Q683); a subclass does not inherit its class's.
+  pub fn type_const(self, package: Package, item: TypeItem, name: String) -> Option<u32> {
+    const info = match item {
+      TypeItem::Struct(id) => self.structs.get(id as usize),
+      TypeItem::Enum(id) => self.enums.get(id as usize),
+      TypeItem::Class(id) => self.classes.get(id as usize),
+      TypeItem::Interface(id) => self.interfaces.get(id as usize),
+    }?;
+
+    for id in info.consts {
+      if let Some(decl) = self.const_decl(package, id) {
+        if decl.name.name == name {
+          return Some(id);
+        }
+      }
+    }
+
+    None
+  }
+
+  pub fn static_decl(self, package: Package, id: u32) -> Option<StaticDecl> {
+    const info = self.statics.get(id as usize)?;
 
     match item_at(package, info.module, info.item)? {
-      Item::Const(decl) => Some(decl),
+      Item::Static(decl) => Some(decl),
       _ => None,
     }
+  }
+
+  /// The static whose value function `id` computes, if any.
+  pub fn static_of(self, id: u32) -> Option<u32> {
+    for index in 0..self.statics.len() {
+      if self.statics[index].init == id {
+        return Some(index as u32);
+      }
+    }
+
+    None
   }
 
   pub fn struct_decl(self, package: Package, id: u32) -> Option<StructDecl> {
@@ -501,6 +584,21 @@ pub class Resolution {
     functions.unwrap_or(new List())
   }
 
+  /// The constants of a type (Q683).
+  pub fn type_consts(self, item: TypeItem) -> List<u32> {
+    const info = match item {
+      TypeItem::Struct(id) => self.structs.get(id as usize),
+      TypeItem::Enum(id) => self.enums.get(id as usize),
+      TypeItem::Class(id) => self.classes.get(id as usize),
+      TypeItem::Interface(id) => self.interfaces.get(id as usize),
+    };
+
+    match info {
+      Some(found) => found.consts,
+      None => new List(),
+    }
+  }
+
   /// A type's function (method or static) by name.
   pub fn type_function(self, package: Package, item: TypeItem, name: String) -> Option<u32> {
     const info = match item {
@@ -576,6 +674,23 @@ pub class Resolution {
       Some(ItemRef::Fn(id)) => Some(id),
       _ => None,
     }
+  }
+
+  /// The function `name` of the module `std::module`, public or not, if the program uses it.
+  pub fn std_fn(self, module: String, name: String) -> Option<u32> {
+    for info in self.modules {
+      if info.in_std && info.path.len() == 2 && info.path[0] == "std" && info.path[1] == module {
+        return match info.items.get(name) {
+          Some(declared) => match declared.item {
+            ItemRef::Fn(id) => Some(id),
+            _ => None,
+          },
+          None => None,
+        };
+      }
+    }
+
+    None
   }
 
   /// The local bindings of a function.
@@ -719,7 +834,7 @@ fn is_reserved_name(name: String) -> bool {
 }
 
 /// The modules of the standard library (docs/spec/11-standard-library.md).
-pub const STD_MODULES: String = "env ffi fs io math mem path process sync task thread time";
+pub const STD_MODULES: String = "env ffi fs hint io math mem path process sync task thread time";
 
 fn is_numeric_type(name: String) -> bool {
   NUMERIC_TYPES.split(" ").contains(name)
@@ -730,6 +845,8 @@ const NUMERIC_TYPES: String = "i8 i16 i32 i64 i128 isize u8 u16 u32 u64 u128 usi
 
 /// Prelude and primitive type names that program types can shadow.
 const PRELUDE_TYPES: String = "bool char String StringBuilder Option Result List";
+/// The integer types, whose `MIN` and `MAX` a path names (`i32::MAX`).
+const INT_TYPE_NAMES: String = "i8 i16 i32 i64 isize u8 u16 u32 u64 usize";
 
 pub fn resolve(package: Package, diagnostics: Diagnostics) -> Resolution {
   const resolution = new Resolution();
@@ -941,7 +1058,8 @@ pub fn resolve(package: Package, diagnostics: Diagnostics) -> Resolution {
       Some(decl) => decl,
       None => continue,
     };
-    const resolver = new Resolver(package, resolution, module_of(module_ids, resolution.consts[index].module), None, diagnostics);
+    // A constant of a type is resolved inside it, where `Self` and its private members are seen.
+    const resolver = new Resolver(package, resolution, module_of(module_ids, resolution.consts[index].module), resolution.consts[index].owner, diagnostics);
 
     resolver.type_expr(decl.ty);
     resolver.expr(decl.value);
@@ -1123,13 +1241,18 @@ fn declare_items(resolution: Resolution, source: usize, node: u32, module: Modul
       Item::Struct(decl) => {
         const owner = TypeItem::Struct(resolution.structs.len() as u32);
         const functions = register_functions(resolution, source, index, decl.functions.len(), owner);
+        const consts = register_consts(resolution, source, index, decl.consts.len(), owner);
 
-        resolution.structs.push(TypeInfo { module: source, item: index, functions: functions });
+        resolution.structs.push(TypeInfo { module: source, item: index, functions: functions, consts: consts });
 
         const members: List<Ident> = new List();
 
         for field in decl.fields {
           members.push(field.name);
+        }
+
+        for found in decl.consts {
+          members.push(found.name);
         }
 
         for function in decl.functions {
@@ -1142,13 +1265,18 @@ fn declare_items(resolution: Resolution, source: usize, node: u32, module: Modul
       Item::Class(decl) => {
         const owner = TypeItem::Class(resolution.classes.len() as u32);
         const functions = register_functions(resolution, source, index, decl.functions.len(), owner);
+        const consts = register_consts(resolution, source, index, decl.consts.len(), owner);
 
-        resolution.classes.push(TypeInfo { module: source, item: index, functions: functions });
+        resolution.classes.push(TypeInfo { module: source, item: index, functions: functions, consts: consts });
 
         const members: List<Ident> = new List();
 
         for field in decl.fields {
           members.push(field.name);
+        }
+
+        for found in decl.consts {
+          members.push(found.name);
         }
 
         for function in decl.functions {
@@ -1162,7 +1290,7 @@ fn declare_items(resolution: Resolution, source: usize, node: u32, module: Modul
         const owner = TypeItem::Interface(resolution.interfaces.len() as u32);
         const functions = register_functions(resolution, source, index, decl.functions.len(), owner);
 
-        resolution.interfaces.push(TypeInfo { module: source, item: index, functions: functions });
+        resolution.interfaces.push(TypeInfo { module: source, item: index, functions: functions, consts: new List() });
 
         const members: List<Ident> = new List();
 
@@ -1180,13 +1308,18 @@ fn declare_items(resolution: Resolution, source: usize, node: u32, module: Modul
       Item::Enum(decl) => {
         const owner = TypeItem::Enum(resolution.enums.len() as u32);
         const functions = register_functions(resolution, source, index, decl.functions.len(), owner);
+        const consts = register_consts(resolution, source, index, decl.consts.len(), owner);
 
-        resolution.enums.push(TypeInfo { module: source, item: index, functions: functions });
+        resolution.enums.push(TypeInfo { module: source, item: index, functions: functions, consts: consts });
 
         const members: List<Ident> = new List();
 
         for variant in decl.variants {
           members.push(variant.name);
+        }
+
+        for found in decl.consts {
+          members.push(found.name);
         }
 
         for function in decl.functions {
@@ -1212,8 +1345,17 @@ fn declare_items(resolution: Resolution, source: usize, node: u32, module: Modul
       Item::Const(decl) => {
         const id = resolution.consts.len() as u32;
 
-        resolution.consts.push(ConstInfo { module: source, item: index });
+        resolution.consts.push(ConstInfo { module: source, item: index, member: None, owner: None });
         names.push(Named { name: decl.name, item: ItemRef::Const(id), visibility: decl.visibility });
+      }
+      Item::Static(decl) => {
+        const id = resolution.statics.len() as u32;
+        // Its value is computed by a function of its own, which has no name to call it by.
+        const init = resolution.functions.len() as u32;
+
+        resolution.functions.push(FnInfo { module: source, item: index, member: None, owner: None, block: None });
+        resolution.statics.push(StaticInfo { module: source, item: index, init: init });
+        names.push(Named { name: decl.name, item: ItemRef::Static(id), visibility: decl.visibility });
       }
       // Declared below, once the module's types are.
       Item::Impl(_) => {}
@@ -1336,6 +1478,18 @@ fn declare_item(resolution: Resolution, node: u32, name: Ident, item: ItemRef, v
   }
 }
 
+/// The constants of a type, numbered with those of the modules (Q683).
+fn register_consts(resolution: Resolution, source: usize, item: usize, count: usize, owner: TypeItem) -> List<u32> {
+  const consts: List<u32> = new List();
+
+  for member in 0..count {
+    consts.push(resolution.consts.len() as u32);
+    resolution.consts.push(ConstInfo { module: source, item: item, member: Some(member), owner: Some(owner) });
+  }
+
+  consts
+}
+
 fn register_functions(resolution: Resolution, source: usize, item: usize, count: usize, owner: TypeItem) -> List<u32> {
   const functions: List<u32> = new List();
 
@@ -1378,8 +1532,15 @@ pub enum Start {
   Prelude(EnumKind),
   /// The prelude's `List`, with the static function `from`.
   List,
-  /// The primitive `char`, with the static function `from_u32`.
+  /// The primitive `char`, with the static functions `from_u32` and `from_digit`.
   Char,
+  /// `String`, with the static functions `from_utf8`, `from_utf8_lossy` and `from_utf16`.
+  Text,
+  /// An integer type, by name, with the constants `MIN` and `MAX`
+  /// (docs/adr/0088-bitwise-operators-and-integer-methods.md, Q580).
+  Int(String),
+  /// `f32` or `f64`, with the static function `from` (docs/adr/0094-conversions-and-defaults.md).
+  Float(String),
 }
 
 /// What a qualified path names so far, the last segment consumed and the segments left.
@@ -1714,7 +1875,7 @@ pub class Resolver {
         self.expr(base);
         self.expr(index);
       }
-      ExprKind::StructLit { path, fields } => {
+      ExprKind::StructLit { path, fields, base } => {
         self.type_args(path);
 
         if let Some(res) = self.struct_literal_path(path) {
@@ -1724,8 +1885,12 @@ pub class Resolver {
         for field in fields {
           self.expr(field.value);
         }
+
+        if let Some(found) = base {
+          self.expr(found);
+        }
       }
-      ExprKind::ArrayLit(elems) => self.exprs(elems),
+      ExprKind::ArrayLit(elems) | ExprKind::Tuple(elems) => self.exprs(elems),
       ExprKind::ArrayRepeat { value, .. } => self.expr(value),
       ExprKind::Try(inner) | ExprKind::Await(inner) => self.expr(inner),
       ExprKind::New { path, args } => {
@@ -1750,7 +1915,7 @@ pub class Resolver {
       }
       ExprKind::Template(parts) => {
         for part in parts {
-          if let TemplatePart::Expr(inner) = part {
+          for inner in part.exprs() {
             self.expr(inner);
           }
         }
@@ -1901,6 +2066,11 @@ pub class Resolver {
 
         for field in fields {
           self.pattern(field.pattern, binds, reuse);
+        }
+      }
+      PatternKind::Elements { elems, .. } => {
+        for elem in elems {
+          self.pattern(elem, binds, reuse);
         }
       }
       PatternKind::Or(alternatives) => {
@@ -2058,6 +2228,13 @@ pub class Resolver {
       return self.value_name(segment.name, segment.span);
     }
 
+    // `T::name`: a static function of an interface bounding the type parameter `T`.
+    if path.segments.len() == 2 {
+      if let Some(generic) = self.lookup_generic(path.segments[0].name) {
+        return Some(Res::InterfaceFn { target: TypeRes::Param { owner: generic.owner, index: generic.index }, name: path.segments[1].name });
+      }
+    }
+
     const qualified = self.qualified(path.segments)?;
     const last = qualified.last;
     const rest = qualified.rest;
@@ -2068,9 +2245,12 @@ pub class Resolver {
           ItemRef::Fn(id) => return Some(Res::Fn(id)),
           ItemRef::Extern(id) => return Some(Res::Extern(id)),
           ItemRef::Const(id) => return Some(Res::Const(id)),
+          ItemRef::Static(id) => return Some(Res::Static(id)),
           ItemRef::Std(StdItem::StringFromC) => return Some(Res::Builtin("string_from_c")),
           ItemRef::Std(StdItem::Exit) => return Some(Res::Builtin("exit")),
+          ItemRef::Std(StdItem::Abort) => return Some(Res::Builtin("abort")),
           ItemRef::Std(StdItem::Mem(name)) => return Some(Res::Builtin("mem::" + name)),
+          ItemRef::Std(StdItem::BlackBox) => return Some(Res::Builtin("hint::black_box")),
           ItemRef::Type(type_item) => {
             self.not_a_value(last.name, last.span, type_item);
 
@@ -2098,7 +2278,17 @@ pub class Resolver {
           return None;
         }
         Start::Char => {
-          self.error(last.span, "`char` has one static function, `char::from_u32`");
+          self.error(last.span, "`char` has the static functions `char::from_u32`, `char::from_digit`, `char::from` and `char::try_from`");
+
+          return None;
+        }
+        Start::Text => {
+          self.error(last.span, "`String` is a type, not a value");
+
+          return None;
+        }
+        Start::Int(_) | Start::Float(_) => {
+          self.error(last.span, "`" + last.name + "` is a type, not a value");
 
           return None;
         }
@@ -2118,21 +2308,67 @@ pub class Resolver {
 
           return None;
         }
-        Start::List => {
-          if member.name == "from" {
-            return Some(Res::Builtin("List::from"));
+        Start::Item(ItemRef::Std(StdItem::Atomic)) => {
+          if member.name == "new" {
+            return Some(Res::Builtin("Atomic::new"));
           }
 
-          self.error(member.span, "no function `" + member.name + "` in `List`");
+          if member.name == "fence" {
+            return Some(Res::Builtin("Atomic::fence"));
+          }
+
+          self.error(member.span, "no function `" + member.name + "` in `Atomic`");
+
+          return None;
+        }
+        Start::List => {
+          if member.name == "from" || member.name == "with_capacity" {
+            return Some(Res::Builtin("List::" + member.name));
+          }
+
+          self.error(member.span, "no function `" + member.name + "` in `List`; it has `List::from` and `List::with_capacity`");
 
           return None;
         }
         Start::Char => {
-          if member.name == "from_u32" {
-            return Some(Res::Builtin("char::from_u32"));
+          if member.name == "from_u32" || member.name == "from_digit" || member.name == "from" || member.name == "try_from" || member.name == "default" {
+            return Some(Res::Builtin("char::" + member.name));
           }
 
-          self.error(last.span, "`char` has one static function, `char::from_u32`");
+          self.error(last.span, "`char` has the static functions `char::from_u32`, `char::from_digit`, `char::from` and `char::try_from`");
+
+          return None;
+        }
+        Start::Text => {
+          if member.name == "from_utf8" || member.name == "from_utf8_lossy" || member.name == "from_utf16" || member.name == "from" || member.name == "default" {
+            return Some(Res::Builtin("String::" + member.name));
+          }
+
+          self.error(member.span, "`String` has the static functions `String::from`, `String::from_utf8`, `String::from_utf8_lossy` and `String::from_utf16`");
+
+          return None;
+        }
+        Start::Int(int_name) => {
+          // Conversions (docs/adr/0094-conversions-and-defaults.md, Q632 and Q634).
+          if member.name == "MIN" || member.name == "MAX" || member.name == "from" || member.name == "try_from" || member.name == "default" {
+            return Some(Res::Builtin(int_name + "::" + member.name));
+          }
+
+          // Bytes and parsing in a radix (docs/adr/0101-the-rest-of-s2.md, Q702 and Q703).
+          if List::from(["from_le_bytes", "from_be_bytes", "from_ne_bytes", "from_str_radix"]).contains(member.name) {
+            return Some(Res::Builtin(int_name + "::" + member.name));
+          }
+
+          self.error(member.span, "no constant or function `" + member.name + "` in `" + int_name + "`; integer types have `MIN`, `MAX`, `from`, `try_from`, `from_le_bytes`, `from_be_bytes`, `from_ne_bytes` and `from_str_radix`");
+
+          return None;
+        }
+        Start::Float(float_name) => {
+          if member.name == "from" || member.name == "default" {
+            return Some(Res::Builtin(float_name + "::" + member.name));
+          }
+
+          self.error(member.span, "no function `" + member.name + "` in `" + float_name + "`; float types have `from` and `default`");
 
           return None;
         }
@@ -2158,6 +2394,18 @@ pub class Resolver {
                   return Some(Res::FromRaw(id));
                 }
               }
+            }
+          }
+
+          // A constant of the type (Q683).
+          if let Some(id) = self.resolution.type_const(self.package, item, member.name) {
+            return self.type_const(item, id, member.span);
+          }
+
+          // `Self::name` inside an interface: a static function of the type implementing it.
+          if let TypeItem::Interface(_) = item {
+            if last.name == "Self" {
+              return Some(Res::InterfaceFn { target: TypeRes::Builtin, name: member.name });
             }
           }
 
@@ -2237,10 +2485,13 @@ pub class Resolver {
         ItemRef::Fn(id) => return Some(Res::Fn(id)),
         ItemRef::Extern(id) => return Some(Res::Extern(id)),
         ItemRef::Const(id) => return Some(Res::Const(id)),
+        ItemRef::Static(id) => return Some(Res::Static(id)),
         ItemRef::Std(StdItem::StringFromC) => return Some(Res::Builtin("string_from_c")),
         ItemRef::Std(StdItem::Exit) => return Some(Res::Builtin("exit")),
+        ItemRef::Std(StdItem::Abort) => return Some(Res::Builtin("abort")),
         ItemRef::Std(StdItem::Mem(found)) => return Some(Res::Builtin("mem::" + found)),
-        ItemRef::Std(StdItem::CType(_)) | ItemRef::Std(StdItem::CString) => {
+        ItemRef::Std(StdItem::BlackBox) => return Some(Res::Builtin("hint::black_box")),
+        ItemRef::Std(StdItem::CType(_)) | ItemRef::Std(StdItem::CString) | ItemRef::Std(StdItem::Atomic) => {
           self.error(span, "`" + name + "` is a type, not a value");
 
           return None;
@@ -2337,6 +2588,12 @@ pub class Resolver {
             start = Start::List;
           } else if name == "char" {
             start = Start::Char;
+          } else if name == "String" {
+            start = Start::Text;
+          } else if INT_TYPE_NAMES.split(" ").contains(name) {
+            start = Start::Int(name);
+          } else if name == "f32" || name == "f64" {
+            start = Start::Float(name);
           } else if name == "std" {
             start = Start::Item(ItemRef::Std(StdItem::Root));
           } else if let Some(root) = self.resolution.dependency_root(self.package, self.module, name) {
@@ -2410,10 +2667,19 @@ pub class Resolver {
         return Some(ItemRef::Std(StdItem::Ffi));
       }
 
+      // `std::sys` is the standard library's own (docs/adr/0085-conditional-compilation-and-std-time.md, Q551).
+      var visible = name != "sys" && name != "unicode";
+
+      if let Some(current) = self.resolution.module(self.module) {
+        visible = visible || current.in_std;
+      }
+
       if let Some(root) = self.resolution.std_root {
         if let Some(info) = self.resolution.module(root) {
           if let Some(child) = info.children.get(name) {
-            return Some(ItemRef::Module(child));
+            if visible {
+              return Some(ItemRef::Module(child));
+            }
           }
         }
       }
@@ -2511,16 +2777,31 @@ pub class Resolver {
     const info = self.resolution.module(module)?;
     const name = segment.name;
 
-    // `exit` never returns, which no function written in Sagitario can declare.
-    if info.in_std && info.path.len() == 2 && info.path[0] == "std" && info.path[1] == "process" && name == "exit" {
-      return Some(ItemRef::Std(StdItem::Exit));
+    // `exit` and `abort` never return, which no function written in Sagitario can declare.
+    if info.in_std && info.path.len() == 2 && info.path[0] == "std" && info.path[1] == "process" {
+      if name == "exit" {
+        return Some(ItemRef::Std(StdItem::Exit));
+      }
+
+      if name == "abort" {
+        return Some(ItemRef::Std(StdItem::Abort));
+      }
     }
 
     // They take their type as an argument, which no function written in Sagitario can do.
+    if info.in_std && info.path.len() == 2 && info.path[0] == "std" && info.path[1] == "hint" && name == "black_box" {
+      return Some(ItemRef::Std(StdItem::BlackBox));
+    }
+
     if info.in_std && info.path.len() == 2 && info.path[0] == "std" && info.path[1] == "mem" {
       if name == "size_of" || name == "align_of" || name == "zeroed" {
         return Some(ItemRef::Std(StdItem::Mem(name)));
       }
+    }
+
+    // An intrinsic type, which no Sagitario code can declare (docs/adr/0087-atomic-storage-and-std-sync.md).
+    if info.in_std && info.path.len() == 2 && info.path[0] == "std" && info.path[1] == "sys" && name == "Atomic" {
+      return Some(ItemRef::Std(StdItem::Atomic));
     }
 
     if let Some(declared) = info.items.get(name) {
@@ -2634,18 +2915,98 @@ pub class Resolver {
   }
 
   /// `Type::function`: a static function of a struct, enum or class.
+  /// The nearest class above the class `item` that declares the constant `name`.
+  prv fn const_ancestor(self, item: TypeItem, name: String) -> Option<u32> {
+    var current = item;
+
+    // A cycle of `extends` is reported elsewhere; the depth bounds the walk.
+    for _ in 0..64 {
+      const id = match current {
+        TypeItem::Class(found) => found,
+        _ => return None,
+      };
+      const parent = self.resolution.class_decl(self.package, id)?.parent?;
+      const parent_id = match parent.kind {
+        TypeExprKind::Path(path) => match self.resolution.type_paths.get(path.id) {
+          Some(TypeRes::Item(TypeItem::Class(found))) => found,
+          _ => return None,
+        },
+        _ => return None,
+      };
+
+      if self.resolution.type_const(self.package, TypeItem::Class(parent_id), name).is_some() {
+        return Some(parent_id);
+      }
+
+      current = TypeItem::Class(parent_id);
+    }
+
+    None
+  }
+
+  /// `Type::NAME`: a `prv` constant is reached only inside its type.
+  prv fn type_const(self, item: TypeItem, id: u32, span: Span) -> Option<Res> {
+    const decl = self.resolution.const_decl(self.package, id)?;
+    const own = match self.owner {
+      Some(owner) => same_type_item(owner, item),
+      None => false,
+    };
+
+    if let Visibility::Private = decl.visibility {
+      if !own {
+        const type_name = self.resolution.type_name(self.package, item);
+
+        self.diagnostics.push(
+          Diagnostic::error(codes::PRIVATE_MEMBER, span, "the constant `" + decl.name.name + "` of `" + type_name + "` is private").with_label(decl.name.span, "declared `prv` here"),
+        );
+      }
+    }
+
+    Some(Res::Const(id))
+  }
+
   prv fn type_function(self, item: TypeItem, name: String, span: Span) -> Option<Res> {
     const type_name = self.resolution.type_name(self.package, item);
+
+    // A static function of an interface has no value to choose its implementation by.
+    if let TypeItem::Interface(_) = item {
+      if self.is_interface_static(item, name) {
+        self.diagnostics.push(
+          Diagnostic::error(codes::WRONG_CALL_FORM, span, "the static function `" + name + "` of `" + type_name + "` is called through a type")
+            .with_help("name a type that implements `" + type_name + "`: `Type::" + name + "(...)`"),
+        );
+
+        return None;
+      }
+    }
+
+    // A function of the type that a block declares too, as `from` of two instantiations of
+    // `From`: the checker chooses by the arguments.
+    if self.resolution.type_function(self.package, item, name).is_some() && self.in_block(item, name) {
+      return Some(Res::InterfaceFn { target: TypeRes::Item(item), name: name });
+    }
+
     const function = match self.resolution.type_function(self.package, item, name) {
       Some(function) => function,
       None => {
+        if self.from_interface(item, name) {
+          return Some(Res::InterfaceFn { target: TypeRes::Item(item), name: name });
+        }
+
         const candidates: List<String> = new List();
 
         for function in self.resolution.type_functions(self.package, item) {
           candidates.push(function.name.name);
         }
 
-        var what = "function";
+        for id in self.resolution.type_consts(item) {
+          if let Some(decl) = self.resolution.const_decl(self.package, id) {
+            candidates.push(decl.name.name);
+          }
+        }
+
+        const has_consts = !self.resolution.type_consts(item).is_empty();
+        var what = if has_consts { "function or constant" } else { "function" };
 
         if let TypeItem::Enum(id) = item {
           if let Some(decl) = self.resolution.enum_decl(self.package, id) {
@@ -2654,13 +3015,23 @@ pub class Resolver {
             }
           }
 
-          what = "variant or function";
+          what = if has_consts { "variant, function or constant" } else { "variant or function" };
         }
 
         var diagnostic = Diagnostic::error(codes::UNRESOLVED_NAME, span, "no " + what + " `" + name + "` in `" + type_name + "`");
 
         if let Some(similar) = diagnostics::closest_match(name, candidates) {
           diagnostic = diagnostic.with_help("a " + what + " with a similar name exists: `" + similar + "`");
+        }
+
+        // A subclass does not inherit the constants of its classes
+        // (docs/adr/0099-associated-and-composite-constants.md, Q683).
+        if let Some(ancestor) = self.const_ancestor(item, name) {
+          const ancestor_name = self.resolution.type_name(self.package, TypeItem::Class(ancestor));
+
+          diagnostic = diagnostic
+            .with_note("constants are not inherited: `" + name + "` is a constant of `" + ancestor_name + "`")
+            .with_help("name it through that class: `" + ancestor_name + "::" + name + "`");
         }
 
         self.diagnostics.push(diagnostic);
@@ -2708,10 +3079,66 @@ pub class Resolver {
     Some(Res::Fn(function))
   }
 
+  /// Whether the interface `item` declares a function `name` without `self`.
+  prv fn is_interface_static(self, item: TypeItem, name: String) -> bool {
+    if let TypeItem::Interface(id) = item {
+      if let Some(info) = self.resolution.interfaces.get(id as usize) {
+        for function in info.functions {
+          if let Some(decl) = self.resolution.fn_decl(self.package, function) {
+            if decl.name.name == name && decl.self_param.is_none() {
+              return true;
+            }
+          }
+        }
+      }
+    }
+
+    false
+  }
+
+  /// Whether an `impl ... for` block of `item` declares a function `name` without `self`.
+  prv fn in_block(self, item: TypeItem, name: String) -> bool {
+    for block in self.resolution.blocks {
+      if same_type_item(block.target, item) {
+        for function in block.functions {
+          if let Some(decl) = self.resolution.fn_decl(self.package, function) {
+            if decl.name.name == name && decl.self_param.is_none() {
+              return true;
+            }
+          }
+        }
+      }
+    }
+
+    false
+  }
+
+  /// Whether a static function `name` that `item` does not declare may come from an interface:
+  /// an `impl ... for` block of `item` or an interface declares one (Q631). The checker tells
+  /// whether `item` implements it.
+  prv fn from_interface(self, item: TypeItem, name: String) -> bool {
+    if self.in_block(item, name) {
+      return true;
+    }
+
+    for index in 0..self.resolution.interfaces.len() {
+      if self.is_interface_static(TypeItem::Interface(index as u32), name) {
+        return true;
+      }
+    }
+
+    false
+  }
+
   /// The types named in a type expression.
   pub fn type_expr(self, ty: TypeExpr) {
     match ty.kind {
       TypeExprKind::Unit => {}
+      TypeExprKind::Tuple(elems) => {
+        for elem in elems {
+          self.type_expr(elem);
+        }
+      }
       TypeExprKind::Path(path) => self.type_path(path),
       TypeExprKind::Fn { params, ret } => {
         for param in params {
@@ -2777,6 +3204,9 @@ pub class Resolver {
           Some(ItemRef::Std(StdItem::CString)) => {
             res = TypeRes::CString;
           }
+          Some(ItemRef::Std(StdItem::Atomic)) => {
+            res = TypeRes::Atomic;
+          }
           Some(item) => {
             self.not_a_type(segment.name, segment.span, item);
           }
@@ -2820,6 +3250,9 @@ pub class Resolver {
               Start::Item(ItemRef::Std(StdItem::CString)) => {
                 res = TypeRes::CString;
               }
+              Start::Item(ItemRef::Std(StdItem::Atomic)) => {
+                res = TypeRes::Atomic;
+              }
               Start::Item(item) => self.not_a_type(qualified.last.name, qualified.last.span, item),
               _ => self.error(path.span, "`" + qualified.last.name + "` does not contain types"),
             }
@@ -2836,10 +3269,11 @@ pub class Resolver {
 
   prv fn not_a_type(self, name: String, span: Span, item: ItemRef) {
     const what = match item {
-      ItemRef::Fn(_) | ItemRef::Extern(_) | ItemRef::Std(StdItem::StringFromC) | ItemRef::Std(StdItem::Exit) | ItemRef::Std(StdItem::Mem(_)) => "a function",
+      ItemRef::Fn(_) | ItemRef::Extern(_) | ItemRef::Std(StdItem::StringFromC) | ItemRef::Std(StdItem::Exit) | ItemRef::Std(StdItem::Abort) | ItemRef::Std(StdItem::Mem(_)) | ItemRef::Std(StdItem::BlackBox) => "a function",
       ItemRef::Module(_) | ItemRef::Std(StdItem::Root) | ItemRef::Std(StdItem::Ffi) => "a module",
       ItemRef::Type(_) | ItemRef::Std(_) => "a type",
       ItemRef::Const(_) => "a constant",
+      ItemRef::Static(_) => "a static",
     };
 
     self.error(span, "`" + name + "` is " + what + ", not a type");

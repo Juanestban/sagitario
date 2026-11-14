@@ -1,0 +1,66 @@
+// Static functions of interfaces (docs/adr/0094-conversions-and-defaults.md, Q631).
+
+interface Zero {
+  fn zero() -> Self;
+}
+
+interface Empty {
+  fn zero() -> Self;
+}
+
+interface Named {
+  fn name() -> String;
+}
+
+struct Missing impl Zero { //~ ERROR E0329
+  pub x: i32;
+}
+
+struct AsMethod impl Zero { //~ ERROR E0329
+  pub x: i32;
+
+  pub fn zero(self) -> AsMethod { self }
+}
+
+struct Private impl Zero {
+  pub x: i32;
+
+  prv fn zero() -> Private { Private { x: 0 } } //~ ERROR E0329
+}
+
+struct Tag impl Named {
+  pub x: i32;
+
+  pub fn name() -> String { "tag" }
+}
+
+class Base impl Zero {
+  pub fn new(self) {}
+  pub fn zero() -> Base { new Base() }
+}
+
+class Derived extends Base { //~ ERROR E0329
+  pub fn new(self) { zod.new(); }
+}
+
+fn as_type(_value: Named) {} //~ ERROR E0329
+
+fn unbounded<T>() -> T {
+  T::zero() //~ ERROR E0200
+}
+
+fn ambiguous<T: Zero + Empty>() -> T {
+  T::zero() //~ ERROR E0344
+}
+
+fn as_value<T: Named>() {
+  const _f = T::name; //~ ERROR E0314
+}
+
+fn main() {
+  const _a = Zero::zero(); //~ ERROR E0314
+  const _b: Named = Tag { x: 1 }; //~ ERROR E0329
+  const base = Base::zero();
+  const _c = base.zero(); //~ ERROR E0314
+  const _d = Base::nothing(); //~ ERROR E0200
+}

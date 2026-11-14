@@ -1,6 +1,6 @@
 # 0049. The self-hosting plan, module-level constants, `include_str`, `if let` and `while let`
 
-- Status: Accepted
+- Status: Accepted (Q222 superseded by [ADR-0104](0104-include-str-as-a-macro.md))
 - Date: 2026-10-25
 - Refines: [ADR-0007](0007-mutability-const-var.md) (module-level `const`; `let` only in
   `if let`/`while let`), [ADR-0014](0014-mvp-scope.md) (F5)

@@ -41,8 +41,9 @@ Programs use libraries through [dependencies](#dependencies), and C uses them th
 | `nova build` | Compiles the package into `target/debug/<name>` |
 | `nova run [-- args]` | Compiles and runs the program with `args`; Nova exits with the program's exit code |
 | `nova check` | Checks the package without generating code |
-| `nova clean` | Removes `target/` |
+| `nova clean` | Removes `target/`, the outputs of [build scripts](#build-scripts) with it |
 | `nova update self` | Updates Sagitario (`sag` and `nova`) to the latest release ([updating](#updating)) |
+| `nova bindgen <header>` | Writes the Sagitario declarations of a C header once, to standard output or `--output <file>` ([bindings](#bindings-from-c-headers)); it needs no package |
 | `nova help`, `nova version` | Usage and version |
 
 `build`, `run`, `check` and `clean` work in the package's directory or any directory below it:
@@ -205,6 +206,143 @@ sources = ["c/helpers.c"]         # compiled as C11 and linked
 - The C functions are then declared in `extern "C"` blocks ([FFI](spec/10-ffi.md)).
 - A source that does not compile, or a library the linker cannot find, is an error of the
   package, shown with the C compiler's or the linker's message.
+
+## Build scripts
+
+Rationale: [ADR-0103](adr/0103-build-scripts-and-binding-generation.md) (Q727-Q730), as Cargo's
+`build.rs`.
+
+```sag
+// build.sag, next to Nova.toml
+use std::env;
+use std::fs;
+
+fn main() {
+  const out = env::variable("OUT_DIR").unwrap();
+
+  fs::write(out + "/version.sag", "pub const BUILT_FOR: String = \"" + env::variable("TARGET").unwrap() + "\";\n").unwrap();
+  println("nova::link-lib=SDL3");
+  println("nova::rerun-if-changed=build.sag");
+}
+```
+
+```sag
+// src/main.sag
+include!(concat!(env!("OUT_DIR"), "/version.sag"));
+```
+
+- A package with `build.sag` next to its `Nova.toml` has a build script: a program Nova compiles
+  for this machine, with the build's `--release` and `--cc`, and runs in the package's directory
+  before compiling the package, also for `nova check`. It sees the standard library, not the
+  package's dependencies. The scripts of the dependencies run first.
+- Its environment has `OUT_DIR` (`target/<profile>/build/<package>/out`, kept between runs),
+  `TARGET` (the `--target` of the build, or this machine's), `HOST` (this machine's triple, as
+  `x86_64-pc-windows-msvc`, `aarch64-apple-darwin` or `x86_64-unknown-linux-gnu`), `PROFILE`
+  (`debug` or `release`), `NOVA_MANIFEST_DIR` (the package's directory, absolute),
+  `NOVA_PKG_NAME`, `NOVA_PKG_VERSION`, and `SAG_CC` (the C compiler of the build). Paths are
+  absolute. In the package, `env!("OUT_DIR")` is the directory of its own script.
+- Lines of its output starting with `nova::` are directives; the rest is only kept in
+  `target/<profile>/build/<package>/output`:
+
+  | Directive | Effect |
+  |---|---|
+  | `nova::link-lib=NAME` | Links the library, as `libraries` of `[link]` |
+  | `nova::link-search=PATH` | A directory for libraries, as `search_paths` |
+  | `nova::link-source=PATH` | Compiles and links a C source, as `sources` |
+  | `nova::rerun-if-changed=PATH` | Runs it again when the file, or a file below the directory, changes |
+  | `nova::rerun-if-env-changed=NAME` | Runs it again when the variable changes |
+  | `nova::warning=MESSAGE` | Shows `warning: package@version: MESSAGE` |
+
+  Relative paths start from the package's directory. Any other `nova::` line is an error.
+- It runs again when the script, the `Nova.toml` or the C compiler change, or with the paths and
+  variables of its `rerun-if-*` directives; without them, when any file of the package outside
+  `target/` changes. Otherwise Nova reuses what its last run asked for. `nova clean` removes its
+  outputs.
+- A script that does not compile, panics, exits with another code than 0 or prints an unknown
+  directive fails the build, with what it printed. It runs with the user's permissions, as a
+  package's code does.
+
+## Bindings from C headers
+
+Rationale: [ADR-0103](adr/0103-build-scripts-and-binding-generation.md) (Q731-Q737), as Rust's
+`bindgen`.
+
+```sag
+// build.sag
+use std::env;
+
+fn main() {
+  new bindgen::Builder()
+    .header("vendor/include/SDL3/SDL.h")
+    .include_path("vendor/include")
+    .allow_prefix("SDL_")
+    .generate()
+    .expect("the bindings of SDL")
+    .write_to_file(env::variable("OUT_DIR").unwrap() + "/sdl.sag")
+    .unwrap();
+
+  println("nova::link-lib=SDL3");
+}
+```
+
+```sag
+// src/main.sag
+include!(concat!(env!("OUT_DIR"), "/sdl.sag"));
+```
+
+A build script sees the library `bindgen` as a package of that name, which Nova writes to
+`target/<profile>/build/.bindgen/`. It runs the C compiler of the build (`SAG_CC` when it is clang
+or gcc, else `clang`) as `-E` on the headers, for the build's `TARGET` when it is not `HOST`, and
+reads the declarations of the result.
+
+| `bindgen::Builder` | |
+|---|---|
+| `new bindgen::Builder()` | No headers yet |
+| `header(file)` | A header to translate; several may be given |
+| `allow_prefix(prefix)`, `allow_file(file)` | Only the declarations whose names start with `prefix`, or of that header, and the types they use |
+| `block(name)` | Leaves `name` out |
+| `include_path(dir)`, `define(name, value)`, `clang_arg(arg)` | `-Idir`, `-Dname=value`, and any argument of the C compiler |
+| `target(triple)` | The target the headers are read for |
+| `generate() -> Result<Bindings, bindgen::Error>` | Preprocesses and translates |
+
+`Bindings` has `write_to_file(file) -> Result<(), bindgen::Error>` and `to_string()`;
+`bindgen::Error` has `message()` and `to_string()`.
+
+Without `allow_*`, the declarations of the headers' directories are written, not those of the
+system's headers they include. What C declares becomes:
+
+| C | Sagitario |
+|---|---|
+| `int f(const char *s, ...);` | `pub fn f(s: *const std::ffi::c_char, ...) -> std::ffi::c_int;` in an `extern "C"` block |
+| `extern int counter;`, `extern const char *const name;` | `pub static var counter: std::ffi::c_int;`, `pub static name: *const std::ffi::c_char;` |
+| `struct`, `union` | `@repr(C) pub struct` and `pub union` with `pub` fields; an anonymous one inside is `Outer__bindgen_ty_1`, held by a field `__bindgen_anon_1` when it has no name |
+| `typedef struct Window Window;` without a definition, or used only behind pointers and not allowed | an [opaque type](spec/10-ffi.md#opaque-types) |
+| `enum`, also anonymous | integer constants of its type: `int`, else `unsigned int`, as clang gives it (`int` with MSVC), and that type where the enum is used |
+| `void (*)(int)` | `Option<unsafe extern "C" fn(std::ffi::c_int)>` |
+| `T name[N]` | `[T; N]`; a parameter, `*mut T` |
+| `char`, `int`, `unsigned long`... | `std::ffi::c_char`, `c_int`, `c_ulong`...; `float` and `double` are `f32` and `f64`, `bool` is `bool` |
+| `int32_t`, `uint8_t`..., `size_t`, `ptrdiff_t` | `i32`, `u8`..., `usize`, `isize` |
+| a `typedef` | the type it names; a `typedef` of a struct names the struct |
+| `#define MASK 0xFFu`, `#define NAME "text"`, `#define RATIO 2.5`, `#define LETTER 'x'` | `pub const MASK: u32 = 255;` (`u32` or `i32` when the value fits, else `u64` or `i64`), `pub const NAME: String = "text";`, `pub const RATIO: f64 = 2.5;`, `pub const LETTER: u8 = 120;` |
+
+A macro's value may use other macros, enumeration constants, casts and C's operators; macros
+with parameters, and those whose bodies are no constants, are left out, as bindgen does. A macro
+is chosen as any declaration: by the header that defines it, or by its name with `allow_prefix`.
+A name that is a keyword of Sagitario gets `_` (`type_`). The bindings are written with paths such
+as `std::ffi::c_int`, so they import nothing. Left out, with a comment saying why: bitfields and
+packed structs (the struct is opaque), `static inline` functions and functions defined in the
+headers, `long double`, `_Complex` and `__int128`, flexible array members, and symbols Sagitario
+reserves (`__name`, `_Name`, `name_t`).
+
+`nova bindgen` does the same once, from the command line, as `bindgen-cli`:
+
+```sh
+nova bindgen include/SDL3/SDL.h --include-path include --allow-prefix SDL_ --output src/sdl.sag
+```
+
+Its options are `--output <file>` (standard output without it), `--allow-prefix <prefix>`,
+`--allow-file <header>`, `--block <name>`, `--include-path <dir>`, `--define <name>=<value>` and
+`--target <target>`, each as the method of the same name, and they may repeat.
 
 ## Targets
 

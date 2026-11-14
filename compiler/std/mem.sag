@@ -5,3 +5,27 @@
 //! in bytes, and `zeroed<T>() -> T`, inside `unsafe`, a value of a C type with every byte zero.
 //! They take their type as an argument, which no function written in Sagitario can do, so the
 //! compiler provides them.
+//!
+//! `replace`, `take` and `swap` change the place a `&mut` lends, as Rust's
+//! (docs/adr/0094-conversions-and-defaults.md, Q637).
+
+/// Puts `value` in `place` and gives what was there.
+pub fn replace<T>(place: &mut T, value: T) -> T {
+  const old = *place;
+
+  *place = value;
+  old
+}
+
+/// Gives what is in `place` and leaves the default of its type there.
+pub fn take<T: Default>(place: &mut T) -> T {
+  replace(place, T::default())
+}
+
+/// Exchanges the values of two places.
+pub fn swap<T>(a: &mut T, b: &mut T) {
+  const first = *a;
+
+  *a = *b;
+  *b = first;
+}

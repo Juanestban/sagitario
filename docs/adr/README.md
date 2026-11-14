@@ -35,11 +35,11 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0024](0024-modules-imports-and-visibility.md) | Modules, imports, visibility and the entry point | Accepted (amended by 0025; refined by 0037; files of modules superseded by 0065) |
 | [0025](0025-single-pub-visibility.md) | A single `pub` visibility, without `pub(pkg)` | Accepted |
 | [0026](0026-ffi-details.md) | FFI details: pointers, `unsafe`, `std::ffi` and exports | Accepted (refined by 0043) |
-| [0027](0027-classes-and-arc.md) | Classes, construction, ARC objects and `weak` references | Accepted (refined by 0030, 0035) |
+| [0027](0027-classes-and-arc.md) | Classes, construction, ARC objects and `weak` references | Accepted (refined by 0030, 0035, 0096) |
 | [0028](0028-inferred-self-mutation.md) | `self` without `var`: methods that modify `self` are inferred | Accepted |
 | [0029](0029-inheritance.md) | Inheritance: construction, overriding, subtyping and dispatch | Accepted |
 | [0030](0030-weak-references.md) | Weak references: initialization, scope and runtime | Accepted |
-| [0031](0031-interfaces.md) | Interfaces: fields, implementation, interface values and `Error` | Accepted (completed by 0032) |
+| [0031](0031-interfaces.md) | Interfaces: fields, implementation, interface values and `Error` | Accepted (completed by 0032; refined by 0094) |
 | [0032](0032-generics.md) | Generics: type arguments, inference, bounds and monomorphization | Accepted (refined by 0034) |
 | [0033](0033-closures-details.md) | Closures: arrow functions, function values and their representation | Accepted |
 | [0034](0034-collections-and-iterators.md) | Collections, iterators, and equality, order and hashing | Accepted |
@@ -57,7 +57,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0046](0046-mutex-and-atomics.md) | `std::sync`: `Mutex` and atomics | Accepted |
 | [0047](0047-channels-and-thread-utilities.md) | Channels and thread utilities | Accepted |
 | [0048](0048-async-await.md) | `async`/`await`, for phase F6 | Accepted (not implemented; moved to F7 by 0057, to F8 by 0063) |
-| [0049](0049-self-hosting-plan-and-language-prerequisites.md) | The self-hosting plan, module-level constants, `include_str`, `if let` and `while let` | Accepted (refined by 0050 and 0076; Q214 superseded by 0067) |
+| [0049](0049-self-hosting-plan-and-language-prerequisites.md) | The self-hosting plan, module-level constants, `include_str`, `if let` and `while let` | Accepted (refined by 0050 and 0076; Q214 superseded by 0067, Q222 by 0104) |
 | [0050](0050-lexer-port-and-token-dumps.md) | The lexer port, token dumps and `char::from_u32` | Accepted (refined by 0051) |
 | [0051](0051-parser-port-and-ast-dumps.md) | The parser port and AST dumps | Accepted (refined by 0052) |
 | [0052](0052-resolver-port-and-resolution-dumps.md) | The resolver port and resolution dumps | Accepted (refined by 0053) |
@@ -71,11 +71,11 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0060](0060-driver-parity-for-nova.md) | The pivot without Rust, and the driver for Nova | Accepted (refined by 0064, 0066, 0067) |
 | [0061](0061-terminals.md) | Terminals: `io::is_terminal` and colored diagnostics in `sagc` | Accepted |
 | [0062](0062-language-server-std-sources-and-lone-files.md) | The language server on the standard library and on lone files | Accepted (Q338 refined by 0067) |
-| [0063](0063-distribution-phase-and-roadmap-v2.md) | Distribution as phase F7, and the roadmap v2 of a game engine | Accepted (refined by 0068 and 0076) |
+| [0063](0063-distribution-phase-and-roadmap-v2.md) | Distribution as phase F7, and the roadmap v2 of a game engine | Accepted (refined by 0068 and 0076; Q342 superseded by 0084) |
 | [0064](0064-nova-in-sagitario.md) | Nova in Sagitario | Accepted (refined by 0066) |
 | [0065](0065-module-directories.md) | Modules with submodules in `mod.sag` | Accepted |
 | [0066](0066-test-harness-in-sagitario.md) | The test harness in Sagitario | Accepted |
-| [0067](0067-bootstrap-from-the-seed.md) | The bootstrap from the seed, and retiring Rust | Accepted |
+| [0067](0067-bootstrap-from-the-seed.md) | The bootstrap from the seed, and retiring Rust | Accepted (Q363, Q364 and Q371 superseded by 0107) |
 | [0068](0068-releases-and-distribution.md) | Releases and distribution | Accepted (completed by 0069 and 0071; Q387 refined by 0070) |
 | [0069](0069-installers.md) | Installers | Accepted |
 | [0070](0070-nova-update-self.md) | `nova update self` | Accepted |
@@ -89,8 +89,32 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0078](0078-ffi-without-c-shims.md) | A complete FFI: C libraries without C shims | Accepted |
 | [0079](0079-references-and-borrowing.md) | References and borrowing in parameters | Accepted |
 | [0080](0080-std-math-trigonometry.md) | Trigonometry in `std::math` | Accepted |
-| [0081](0081-operator-overloading.md) | Operator overloading through interfaces | Accepted |
+| [0081](0081-operator-overloading.md) | Operator overloading through interfaces | Accepted (refined by 0094) |
 | [0082](0082-format-strings.md) | Format strings `f"..."` | Accepted |
+| [0083](0083-global-state.md) | Global state: `static`, `static var` and `@thread_local` | Accepted |
+| [0084](0084-a-complete-language-and-the-engine-apart.md) | Roadmap v2: a complete language, with the game engine as a project apart | Accepted (Q545 superseded by 0102) |
+| [0085](0085-conditional-compilation-and-std-time.md) | Conditional compilation with `@cfg`, and `std::time` in Sagitario (S1) | Accepted |
+| [0086](0086-c-globals-and-std-io.md) | C's global variables in the FFI, and `std::io` in Sagitario (S1) | Accepted |
+| [0087](0087-atomic-storage-and-std-sync.md) | Atomic storage for the standard library, and `std::sync` and `std::thread` in Sagitario (S1) | Accepted |
+| [0088](0088-bitwise-operators-and-integer-methods.md) | Bitwise operators, shifts and the integer methods of spec 2 (S2) | Accepted |
+| [0089](0089-display-debug-and-format-specifiers.md) | `Display`, the debug form of values, and format specifiers (S2) | Accepted |
+| [0090](0090-benchmarks.md) | A suite of benchmarks against other languages, and `std::hint::black_box` (S2) | Accepted |
+| [0091](0091-fewer-reference-counts.md) | Fewer reference counts: an optimization pass over SIR (S2) | Accepted |
+| [0092](0092-tuples.md) | Tuples: types, values, patterns and their interfaces (S2) | Accepted |
+| [0093](0093-everyday-methods.md) | The everyday methods of the standard library (S2) | Accepted (refined by 0097) |
+| [0094](0094-conversions-and-defaults.md) | Conversions, defaults, generic `min` and `max`, and indexing (S2) | Accepted |
+| [0095](0095-collections.md) | The collections of Rust's std, `Iterable` and `FromIterator` (S2) | Accepted |
+| [0096](0096-streams-files-and-drop.md) | Streams, files and `Drop` (S2) | Accepted |
+| [0097](0097-processes-and-environment.md) | Processes and the environment (S2) | Accepted |
+| [0098](0098-locks-orderings-and-threads.md) | Lock guards, condition variables, atomic orderings and threads (S2) | Accepted |
+| [0099](0099-associated-and-composite-constants.md) | Associated constants and composite constants (S2) | Accepted |
+| [0100](0100-networking.md) | Networking: addresses, TCP and UDP sockets (S2) | Accepted |
+| [0101](0101-the-rest-of-s2.md) | The rest of S2: numbers, ranges, pointers, paths, hashing, operators and formats | Accepted |
+| [0102](0102-binding-generation-before-the-core.md) | Binding generation before the core in Sagitario | Accepted |
+| [0103](0103-build-scripts-and-binding-generation.md) | Build scripts and binding generation (S4) | Accepted |
+| [0104](0104-include-str-as-a-macro.md) | `include_str!` instead of `include_str` | Accepted |
+| [0105](0105-c-types-at-the-ffi-boundary.md) | C's own types at the FFI boundary, for callbacks | Accepted |
+| [0107](0107-a-seed-per-host.md) | A seed for each host | Accepted |
 
 ## Template
 

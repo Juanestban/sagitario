@@ -11,6 +11,8 @@ use pkg::types::typed::TypedModule;
 /// values (only a `_` covers all of those).
 pub enum Ctor {
   Variant(u32),
+  /// The one constructor of a tuple type, whose fields are its elements.
+  Tuple,
   Bool(bool),
   Int(String),
   Char(char),
@@ -21,6 +23,10 @@ pub fn same_ctor(a: Ctor, b: Ctor) -> bool {
   match a {
     Ctor::Variant(x) => match b {
       Ctor::Variant(y) => x == y,
+      _ => false,
+    },
+    Ctor::Tuple => match b {
+      Ctor::Tuple => true,
       _ => false,
     },
     Ctor::Bool(x) => match b {
@@ -133,6 +139,10 @@ fn ctors(typed: TypedModule, ty: Type) -> Option<List<CtorFields>> {
     return Some(List::from([CtorFields { ctor: Ctor::Bool(false), fields: new List() }, CtorFields { ctor: Ctor::Bool(true), fields: new List() }]));
   }
 
+  if let TypeKind::Tuple(elems) = ty.kind {
+    return Some(List::from([CtorFields { ctor: Ctor::Tuple, fields: elems }]));
+  }
+
   const variants = typed.variants(ty)?;
   const result: List<CtorFields> = new List();
 
@@ -152,6 +162,12 @@ fn fields(typed: TypedModule, ty: Type, ctor: Ctor, arity: usize) -> List<Type> 
       if let Some(variant) = variants.get(index as usize) {
         found = variant.field_types();
       }
+    }
+  }
+
+  if let Ctor::Tuple = ctor {
+    if let TypeKind::Tuple(elems) = ty.kind {
+      found = elems;
     }
   }
 

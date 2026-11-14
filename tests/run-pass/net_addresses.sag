@@ -1,0 +1,148 @@
+// IP and socket addresses, their texts, their parsing and their order, as Rust's `std::net`
+// (docs/adr/0100-networking.md, Q690–Q692).
+// expect-stdout: v4: 127.0.0.1 0.0.0.0 255.255.255.255 | 192.168.1.20 [192, 168, 1, 20] 3232235796 10.0.0.1
+// expect-stdout: v4 kinds: true true true true true true true | false false false
+// expect-stdout: v6: :: ::1 2001:db8::1 1:0:0:2::3 1::2:0:0:3:4 1:0:2:3:4:5:6:7 ::ffff:192.0.2.1 ::102:304
+// expect-stdout: v6 kinds: true true true true true | Some(Ipv4Addr { bytes: [192, 0, 2, 1] }) None Some(Ipv4Addr { bytes: [0, 0, 0, 1] }) | [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]
+// expect-stdout: ip: 127.0.0.1 ::1 true false true true | true
+// expect-stdout: socket: 127.0.0.1:80 [::1]:443 [fe80::1%2]:8080 | 127.0.0.1 80 true | 127.0.0.1:81 [::1]:81
+// expect-stdout: parsed: 10.0.0.1 :: ::1 1:: 2001:db8::ff00:42:8329 ::ffff:10.0.0.1 1:2:3:4:5:6:102:304 fe80::1
+// expect-stdout: parsed sockets: [::1]:80 [fe80::1%2]:8080 127.0.0.1:0 10.0.0.1 ::1
+// expect-stdout: invalid IPv4 address syntax: 256.0.0.1 01.2.3.4 1.2.3 1.2.3.4.5 <empty> valid 1.2.3.4
+// expect-stdout: invalid IPv6 address syntax: 1:::2 1:2:3:4:5:6:7:8:9 ::1:: 12345:: ::1.2.3 1.2.3.4
+// expect-stdout: invalid socket address syntax: [::1] [::1]:65536 1.2.3.4: ::1:80 x
+// expect-stdout: invalid IP address syntax: 1.2.3.4:80 | invalid IPv4 socket address syntax | invalid IPv6 socket address syntax
+// expect-stdout: order: [1.2.3.4, 10.0.0.1, ::1, 2001:db8::1] true true | 3 distinct
+// expect-stdout: debug: Ipv4Addr { bytes: [127, 0, 0, 1] } V4(SocketAddrV4 { address: Ipv4Addr { bytes: [1, 2, 3, 4] }, number: 5 })
+
+use std::net::{AddrParseError, IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
+
+fn invalid(texts: List<String>, parse: fn(String) -> Result<String, AddrParseError>) -> String {
+  const shown: List<String> = new List();
+  var message = "";
+
+  for text in texts {
+    match parse(text) {
+      Ok(found) => shown.push(f"valid {found}"),
+      Err(error) => {
+        message = error.message();
+        shown.push(if text.is_empty() { "<empty>" } else { text });
+      }
+    }
+  }
+
+  message + ": " + shown.join(" ")
+}
+
+fn main() {
+  // IPv4.
+  const home = Ipv4Addr::new(192, 168, 1, 20);
+
+  print(f"v4: {Ipv4Addr::LOCALHOST} {Ipv4Addr::UNSPECIFIED} {Ipv4Addr::BROADCAST} | ");
+  println(f"{home} {home.octets():?} {home.to_bits()} {Ipv4Addr::from_bits(0x0A000001)}");
+  print(f"v4 kinds: {Ipv4Addr::LOCALHOST.is_loopback()} {Ipv4Addr::UNSPECIFIED.is_unspecified()} {home.is_private()} ");
+  print(f"{Ipv4Addr::new(169, 254, 0, 1).is_link_local()} {Ipv4Addr::new(224, 0, 0, 1).is_multicast()} ");
+  print(f"{Ipv4Addr::BROADCAST.is_broadcast()} {Ipv4Addr::new(203, 0, 113, 9).is_documentation()} | ");
+  println(f"{Ipv4Addr::new(172, 32, 0, 1).is_private()} {Ipv4Addr::new(128, 0, 0, 1).is_loopback()} {home.is_multicast()}");
+
+  // IPv6, as RFC 5952 writes it.
+  print(f"v6: {Ipv6Addr::UNSPECIFIED} {Ipv6Addr::LOCALHOST} {Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)} ");
+  print(f"{Ipv6Addr::new(1, 0, 0, 2, 0, 0, 0, 3)} {Ipv6Addr::new(1, 0, 0, 2, 0, 0, 3, 4)} {Ipv6Addr::new(1, 0, 2, 3, 4, 5, 6, 7)} ");
+  println(f"{Ipv4Addr::new(192, 0, 2, 1).to_ipv6_mapped()} {Ipv4Addr::new(1, 2, 3, 4).to_ipv6_compatible()}");
+
+  const mapped = Ipv4Addr::new(192, 0, 2, 1).to_ipv6_mapped();
+
+  print(f"v6 kinds: {Ipv6Addr::LOCALHOST.is_loopback()} {Ipv6Addr::UNSPECIFIED.is_unspecified()} {Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1).is_multicast()} ");
+  print(f"{Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1).is_unique_local()} {Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1).is_unicast_link_local()} | ");
+  print(f"{mapped.to_ipv4_mapped():?} {Ipv6Addr::LOCALHOST.to_ipv4_mapped():?} {Ipv6Addr::LOCALHOST.to_ipv4():?} | ");
+  println(f"{Ipv6Addr::LOCALHOST.octets():?}");
+
+  // Either.
+  const v4: IpAddr = IpAddr::from(Ipv4Addr::LOCALHOST);
+  const v6: IpAddr = Ipv6Addr::LOCALHOST.into();
+
+  print(f"ip: {v4} {v6} {v4.is_ipv4()} {v4.is_ipv6()} {v6.is_loopback()} {v6.is_ipv6()} | ");
+  println(f"{IpAddr::V4(Ipv4Addr::UNSPECIFIED).is_unspecified()}");
+
+  // Socket addresses.
+  var socket = SocketAddr::new(v4, 80);
+  const scoped = SocketAddrV6::new(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1), 8080, 0, 2);
+  const local6 = SocketAddr::from(SocketAddrV6::new(Ipv6Addr::LOCALHOST, 443, 0, 0));
+
+  print(f"socket: {socket} {local6} {scoped} | {socket.ip()} {socket.port()} {socket.is_ipv4()} | ");
+  socket.set_port(81);
+  print(f"{socket} ");
+  socket.set_ip(v6);
+  println(f"{socket}");
+
+  // Parsing.
+  const texts = List::from(["10.0.0.1", "::", "::1", "1::", "2001:db8::ff00:42:8329", "::ffff:10.0.0.1", "1:2:3:4:5:6:1.2.3.4", "fe80::1"]);
+  const parsed: List<String> = new List();
+
+  for text in texts {
+    parsed.push(IpAddr::try_from(text).unwrap().to_string());
+  }
+
+  println("parsed: " + parsed.join(" "));
+
+  const sockets: List<String> = new List();
+
+  for text in List::from(["[::1]:80", "[fe80::1%2]:8080", "127.0.0.1:0"]) {
+    const found: Result<SocketAddr, AddrParseError> = text.try_into();
+
+    sockets.push(found.unwrap().to_string());
+  }
+
+  print("parsed sockets: " + sockets.join(" "));
+  println(f" {Ipv4Addr::try_from("10.0.0.1").unwrap()} {Ipv6Addr::try_from("0:0:0:0:0:0:0:1").unwrap()}");
+
+  println(invalid(List::from(["256.0.0.1", "01.2.3.4", "1.2.3", "1.2.3.4.5", "", "1.2.3.4"]), (text) => match Ipv4Addr::try_from(text) {
+    Ok(found) => Ok(found.to_string()),
+    Err(error) => Err(error),
+  }));
+  println(invalid(List::from(["1:::2", "1:2:3:4:5:6:7:8:9", "::1::", "12345::", "::1.2.3", "1.2.3.4"]), (text) => match Ipv6Addr::try_from(text) {
+    Ok(found) => Ok(found.to_string()),
+    Err(error) => Err(error),
+  }));
+  println(invalid(List::from(["[::1]", "[::1]:65536", "1.2.3.4:", "::1:80", "x"]), (text) => match SocketAddr::try_from(text) {
+    Ok(found) => Ok(found.to_string()),
+    Err(error) => Err(error),
+  }));
+  print(invalid(List::from(["1.2.3.4:80"]), (text) => match IpAddr::try_from(text) {
+    Ok(found) => Ok(found.to_string()),
+    Err(error) => Err(error),
+  }));
+
+  const v4_error = match SocketAddrV4::try_from("[::1]:80") {
+    Ok(_) => "",
+    Err(error) => error.to_string(),
+  };
+  const v6_error = match SocketAddrV6::try_from("1.2.3.4:80") {
+    Ok(_) => "",
+    Err(error) => f"{error}",
+  };
+
+  println(f" | {v4_error} | {v6_error}");
+
+  // Order: IPv4 before IPv6; equality and hashing.
+  const ips = List::from([IpAddr::try_from("2001:db8::1").unwrap(), IpAddr::try_from("10.0.0.1").unwrap(), v6, IpAddr::try_from("1.2.3.4").unwrap()]);
+
+  ips.sort();
+
+  const shown: List<String> = new List();
+
+  for ip in ips {
+    shown.push(ip.to_string());
+  }
+
+  const set: HashSet<SocketAddr> = new HashSet();
+
+  set.insert(SocketAddr::new(v4, 1));
+  set.insert(SocketAddr::try_from("127.0.0.1:1").unwrap());
+  set.insert(SocketAddr::new(v4, 2));
+  set.insert(local6);
+
+  print(f"order: [{shown.join(", ")}] {v4 < v6} {Ipv4Addr::new(10, 0, 0, 1) == Ipv4Addr::try_from("10.0.0.1").unwrap()} | ");
+  println(f"{set.len()} distinct");
+  println(f"debug: {Ipv4Addr::LOCALHOST:?} {SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(1, 2, 3, 4), 5)):?}");
+}

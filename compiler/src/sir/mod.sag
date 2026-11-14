@@ -6,10 +6,12 @@
 //! Places are values: a place derived from another copies its projections, since lists are
 //! references in Sagitario and SIR already emitted must not change.
 
-use pkg::ast::{BinaryOp, Block, Expr, ExprKind, FieldInit, FnDecl, Ident, Package, Stmt as AstStmt, TemplatePart, UnaryOp};
+use pkg::ast::{BinaryOp, Block, Expr, ExprKind, FieldInit, FnDecl, FormatSpec, Ident, Package, Stmt as AstStmt, TemplatePart, UnaryOp};
 use pkg::diagnostics::{Diagnostic, Diagnostics};
-use pkg::resolve::{ParamOwner, Res, Resolution, TypeItem};
+use pkg::diagnostics::codes;
+use pkg::resolve::{ItemRef, ParamOwner, Res, Resolution, TypeItem};
 use pkg::span::{SourceMap, Span};
+use pkg::sir::arc;
 use pkg::sir::closures;
 use pkg::sir::collections;
 use pkg::sir::interfaces;
@@ -20,7 +22,9 @@ use pkg::sir::tasks;
 use pkg::types::{FloatTy, IntTy, NamedRef, Receiver, Subst, Type, TypeKind};
 use pkg::types;
 use pkg::types::consts::ConstValue;
-use pkg::types::typed::{BuiltinMethod, TypedModule};
+use pkg::types::numbers;
+use pkg::types::typed::{BuiltinMethod, TypedModule, item_key};
+use std::env;
 
 pub struct Program {
   /// Indexed by function id: the program's functions (templates are placeholders), then the
@@ -45,6 +49,70 @@ pub struct Program {
   pub boxes: List<Type>;
   /// How to get the message of an `Err` returned by `main`, when its error is not a `String`.
   pub main_error: Option<MainError>;
+  /// The `static`s, by id (docs/adr/0083-global-state.md).
+  pub statics: List<StaticDef>;
+  /// The types written by `{x:?}`: the C gives each one `sag_debug_string_N`, `N` its index
+  /// (docs/adr/0089-display-debug-and-format-specifiers.md, Q588).
+  pub debug_types: List<Type>;
+  /// The prelude's `Map`, whose debug form is that of its entries.
+  pub map_class: Option<u32>;
+  /// `HashSet`, whose debug form is that of its elements (docs/adr/0095-collections.md, Q652).
+  pub hash_set_class: Option<u32>;
+  /// `std::collections::VecDeque`, written as a list of its elements.
+  pub vec_deque_class: Option<u32>;
+  /// `std::collections::BTreeMap` and `BTreeSet`, written as a map and a set of their entries.
+  pub btree_map_class: Option<u32>;
+  pub btree_set_class: Option<u32>;
+  /// `std::collections::BinaryHeap`, written as the list of its heap.
+  pub binary_heap_class: Option<u32>;
+}
+
+/// A `static`: its storage, reached through `sag_static_N(file, line)`, which gives its address.
+/// The function `init` computes the value on the first use, unless the compiler computed it
+/// (`value`): then the storage starts with it and keeps no state, except in a `static var` of a
+/// reference-counted type, whose later values the program releases at exit. A `thread_local`
+/// one has storage and state per thread, and each thread releases its value when it ends.
+pub struct StaticDef {
+  pub name: String;
+  pub ty: Type;
+  pub init: u32;
+  pub mutable: bool;
+  pub thread_local: bool;
+  pub value: Option<Const>;
+  /// A global variable of C, `name`, whose address the FFI unit gives
+  /// (docs/adr/0086-c-globals-and-std-io.md, Q562).
+  pub extern_c: bool;
+  /// Of the standard library, as `ExternDecl::in_std`.
+  pub in_std: bool;
+}
+
+/// The function of the FFI unit giving the address of the C global of the static `id`.
+pub fn extern_static_getter(id: u32) -> String {
+  `sag_ffi_static_${id}`
+}
+
+/// The value of a module-level constant, or of a static computed from constants, of type `ty`.
+pub fn const_of(value: ConstValue, ty: Type) -> Result<Const, String> {
+  match value {
+    ConstValue::Bool(found) => Ok(Const::Bool(found)),
+    ConstValue::Char(found) => Ok(Const::Char(found)),
+    ConstValue::Str(found) => Ok(Const::Str(found)),
+    ConstValue::Int(found) => match ty.kind {
+      TypeKind::Int(int_ty) => Ok(Const::Int { magnitude: found.magnitude, negative: found.negative, ty: int_ty }),
+      _ => Err("integer constant typed as " + types::text(ty)),
+    },
+    // `Display` writes the shortest text that reads back as the same value (ADR-0054).
+    ConstValue::Float(found) => match ty.kind {
+      TypeKind::Float(float_ty) => Ok(Const::Float { text: `${found}`, ty: float_ty }),
+      _ => Err("float constant typed as " + types::text(ty)),
+    },
+    ConstValue::Aggregate(_) | ConstValue::Repeat { .. } | ConstValue::Variant { .. } => Err("composite constant typed as " + types::text(ty)),
+  }
+}
+
+/// The C function giving the address of the static `id`.
+pub fn static_getter(id: u32) -> String {
+  `sag_static_${id}`
 }
 
 /// The message of `main`'s error: converted to `Error` with `itable` if its type is concrete,
@@ -62,6 +130,13 @@ pub struct ExternDecl {
   pub ret: Type;
   /// A function of the runtime, declared by its header and called directly.
   pub runtime: bool;
+  /// Declared by the standard library, whose C declarations go to a unit of their own, so that
+  /// they never meet the program's of the same function (docs/adr/0086-c-globals-and-std-io.md).
+  pub in_std: bool;
+  /// For a variadic C function, the number of its own parameters: `params` then has the types of
+  /// the extra arguments of one call after them, and C sees `...` there
+  /// (docs/adr/0103-build-scripts-and-binding-generation.md, Q720).
+  pub fixed: Option<usize>;
 }
 
 /// The fields of the program's structs and enums, with type parameters in generic ones.
@@ -77,6 +152,15 @@ pub struct Layouts {
       // A slice of a list holds the list, and counts in its loans.
       TypeKind::Slice { .. } => true,
       TypeKind::Array { elem, .. } => self.is_managed(elem),
+      TypeKind::Tuple(elems) => {
+        for elem in elems {
+          if self.is_managed(elem) {
+            return true;
+          }
+        }
+
+        false
+      }
       TypeKind::Struct(named) => {
         for field in self.struct_fields(named) {
           if self.is_managed(field) {
@@ -91,6 +175,50 @@ pub struct Layouts {
           for fields in variants {
             for field in fields {
               if self.is_managed(field) {
+                return true;
+              }
+            }
+          }
+        }
+
+        false
+      }
+      _ => false,
+    }
+  }
+
+  /// Whether values of `ty` hold a value of an opaque C type, which only exists in C
+  /// (docs/adr/0103-build-scripts-and-binding-generation.md, Q721).
+  pub fn holds_opaque(self, ty: Type) -> bool {
+    match ty.kind {
+      TypeKind::Array { elem, .. } => self.holds_opaque(elem),
+      TypeKind::Tuple(elems) => {
+        for elem in elems {
+          if self.holds_opaque(elem) {
+            return true;
+          }
+        }
+
+        false
+      }
+      TypeKind::Struct(named) => {
+        if self.is_opaque(ty) {
+          return true;
+        }
+
+        for field in self.struct_fields(named) {
+          if self.holds_opaque(field) {
+            return true;
+          }
+        }
+
+        false
+      }
+      TypeKind::Enum(_) | TypeKind::Option(_) | TypeKind::Result { .. } => {
+        if let Some(variants) = self.variants(ty) {
+          for fields in variants {
+            for field in fields {
+              if self.holds_opaque(field) {
                 return true;
               }
             }
@@ -126,6 +254,17 @@ pub struct Layouts {
       TypeKind::Option(value) => Some(List::from([new List<Type>(), List::from([value])])),
       TypeKind::Result { value, error } => Some(List::from([List::from([value]), List::from([error])])),
       _ => None,
+    }
+  }
+
+  /// Whether `ty` is an opaque C type.
+  pub fn is_opaque(self, ty: Type) -> bool {
+    match ty.kind {
+      TypeKind::Struct(named) => match self.structs.get(named.id as usize) {
+        Some(layout) => layout.opaque,
+        None => false,
+      },
+      _ => false,
     }
   }
 
@@ -167,6 +306,9 @@ pub struct EnumLayout {
   pub name: String;
   /// The field types of each variant.
   pub variants: List<List<Type>>;
+  /// The name of each variant, and of its fields when they are named (empty when positional).
+  pub variant_names: List<String>;
+  pub field_names: List<List<String>>;
   /// The integer type of an enum with an integer representation, which its values are.
   pub repr: Option<IntTy>;
   /// With a representation, the value of each variant.
@@ -176,8 +318,15 @@ pub struct EnumLayout {
 pub struct StructLayout {
   pub name: String;
   pub fields: List<Type>;
+  pub field_names: List<String>;
   /// A union: its fields share their memory.
   pub is_union: bool;
+  /// An opaque C type, which C declares but does not define here
+  /// (docs/adr/0103-build-scripts-and-binding-generation.md, Q721).
+  pub opaque: bool;
+  /// `@repr(C)`, which the C of the FFI names with a tag of C
+  /// (docs/adr/0105-c-types-at-the-ffi-boundary.md, Q743).
+  pub repr_c: bool;
 }
 
 pub struct Function {
@@ -252,6 +401,45 @@ fn project_one(place: Place, projection: Projection, ty: Type) -> Place {
 }
 
 /// A local as a place.
+/// The width in bits of an integer type.
+fn int_bits(int_ty: IntTy, pointer_width: u32) -> u64 {
+  match int_ty {
+    IntTy::I8 | IntTy::U8 => 8,
+    IntTy::I16 | IntTy::U16 => 16,
+    IntTy::I32 | IntTy::U32 => 32,
+    IntTy::I64 | IntTy::U64 => 64,
+    IntTy::Isize | IntTy::Usize => pointer_width as u64,
+  }
+}
+
+fn is_comparison(op: BinaryOp) -> bool {
+  op == BinaryOp::Eq || op == BinaryOp::Ne || op == BinaryOp::Lt || op == BinaryOp::Le || op == BinaryOp::Gt || op == BinaryOp::Ge
+}
+
+/// An id no expression has.
+const NO_EXPR: u32 = 4294967295;
+
+/// The type of an interpolated piece: a value that is not a number, `bool`, `char` or `String` is
+/// interpolated as the `String` of its `to_string()`.
+fn string_or(ty: Type) -> Type {
+  match ty.kind {
+    TypeKind::Int(_) | TypeKind::Float(_) | TypeKind::Bool | TypeKind::Char | TypeKind::String | TypeKind::Never | TypeKind::Error => ty,
+    _ => types::string(),
+  }
+}
+
+fn is_shift_assignment(op: Option<BinaryOp>) -> bool {
+  match op {
+    Some(found) => found == BinaryOp::Shl || found == BinaryOp::Shr,
+    None => false,
+  }
+}
+
+/// A C11 operation of `<stdatomic.h>`, a generic macro the runtime does not declare.
+fn c_operation(function: String) -> Callee {
+  Callee::Runtime { function: function, located: false }
+}
+
 pub fn local_place(local: u32, ty: Type) -> Place {
   Place { local: local, projections: new List(), ty: ty }
 }
@@ -498,6 +686,7 @@ pub fn type_key(ty: Type) -> String {
     TypeKind::Function { params, ret } => "fn" + args_key(params) + ">" + type_key(ret),
     TypeKind::CFn { is_unsafe, params, ret } => (if is_unsafe { "ucfn" } else { "cfn" }) + args_key(params) + ">" + type_key(ret),
     TypeKind::Array { elem, len } => "[" + type_key(elem) + `;${len}]`,
+    TypeKind::Tuple(elems) => "T" + args_key(elems),
     TypeKind::List(elem) => "L(" + type_key(elem) + ")",
     TypeKind::Option(value) => "O(" + type_key(value) + ")",
     TypeKind::Result { value, error } => "R(" + type_key(value) + "," + type_key(error) + ")",
@@ -543,12 +732,19 @@ pub class ClassInstance {
   pub var fields: List<Type>;
   /// Which of those fields are `weak`.
   pub var weak_fields: List<bool>;
+  /// Their names, for the debug form.
+  pub var field_names: List<String>;
   /// The methods called through the vtable, by slot.
   pub var vtable: List<u32>;
+  /// The `drop` of `Drop` that runs before its fields are released, when the class implements it
+  /// (docs/adr/0096-streams-files-and-drop.md, Q655).
+  pub var user_drop: Option<u32>;
 
-  pub fn new(self, class_ref: NamedRef, fields: List<Type>, weak_fields: List<bool>) {
+  pub fn new(self, class_ref: NamedRef, fields: List<Type>, weak_fields: List<bool>, field_names: List<String>) {
     self.class_ref = class_ref;
     self.parent = None;
+    self.user_drop = None;
+    self.field_names = field_names;
     self.fields = fields;
     self.weak_fields = weak_fields;
     self.vtable = new List();
@@ -628,6 +824,16 @@ pub class Registry {
   pub var wrapped: List<u32>;
   /// For `async fn main`, the function the C `main` calls instead.
   pub var async_main: Option<u32>;
+  pub var debug_types: List<Type>;
+  /// The types whose debug form is reached, by `type_key`.
+  pub var debug_seen: Map<String, bool>;
+  /// Where each instance was first needed, for the errors found in its code.
+  pub var instance_spans: Map<usize, Span>;
+  /// The calls of variadic C functions, one per function and types of the arguments: the C
+  /// function `externs + N`, after those of the `extern` blocks, is the `N`th.
+  pub var variadic_calls: List<ExternDecl>;
+  /// By extern id and `type_key` of the arguments.
+  pub var variadic_index: Map<String, usize>;
 
   pub fn new(self, first_instance: u32) {
     self.itables = new List();
@@ -646,6 +852,11 @@ pub class Registry {
     self.envs = new List();
     self.wrapped = new List();
     self.async_main = None;
+    self.debug_types = new List();
+    self.debug_seen = new Map<String, bool>();
+    self.instance_spans = new Map<usize, Span>();
+    self.variadic_calls = new List();
+    self.variadic_index = new Map<String, usize>();
   }
 }
 
@@ -672,21 +883,45 @@ pub fn lower(package: Package, resolution: Resolution, typed: TypedModule, sourc
 
   for def in typed.structs {
     const fields: List<Type> = new List();
+    const field_names: List<String> = new List();
 
     for field in def.fields {
       fields.push(field.ty);
+      field_names.push(field.name);
     }
 
-    structs.push(StructLayout { name: def.name, fields: fields, is_union: def.is_union });
+    const opaque = match resolution.struct_decl(package, structs.len() as u32) {
+      Some(decl) => decl.is_opaque(),
+      None => false,
+    };
+    const repr_c = match resolution.struct_decl(package, structs.len() as u32) {
+      Some(decl) => decl.repr_c,
+      None => false,
+    };
+
+    structs.push(StructLayout { name: def.name, fields: fields, field_names: field_names, is_union: def.is_union, opaque: opaque, repr_c: repr_c });
   }
 
   const enums: List<EnumLayout> = new List();
 
   for def in typed.enums {
     const variants: List<List<Type>> = new List();
+    const variant_names: List<String> = new List();
+    const field_names: List<List<String>> = new List();
 
     for variant in def.variants {
       variants.push(variant.field_types());
+      variant_names.push(variant.name);
+
+      const names: List<String> = new List();
+
+      if variant.named {
+        for field in variant.fields {
+          names.push(field.name.unwrap_or(""));
+        }
+      }
+
+      field_names.push(names);
     }
 
     const values: List<Const> = new List();
@@ -697,7 +932,7 @@ pub fn lower(package: Package, resolution: Resolution, typed: TypedModule, sourc
       }
     }
 
-    enums.push(EnumLayout { name: def.name, variants: variants, repr: def.repr, values: values });
+    enums.push(EnumLayout { name: def.name, variants: variants, variant_names: variant_names, field_names: field_names, repr: def.repr, values: values });
   }
 
   const layouts = Layouts { structs: structs, enums: enums };
@@ -737,6 +972,36 @@ pub fn lower(package: Package, resolution: Resolution, typed: TypedModule, sourc
   };
   const instances: List<Option<Function>> = new List();
 
+  // The functions of the standard library are instances made where they are called; those C
+  // calls, which the runtime's core does through their `@export` names, are made here.
+  for index in 0..resolution.functions.len() {
+    const id = index as u32;
+
+    if !resolution.in_library(id) || resolution.in_prelude(id) {
+      continue;
+    }
+
+    if let Some(decl) = resolution.fn_decl(package, id) {
+      if decl.extern_c && decl.export.is_some() {
+        mono::require(registry, id);
+      }
+    }
+  }
+
+  // The function computing the value of a `static` of the standard library, which the getter of
+  // the static calls; a value the checker computed needs none.
+  for index in 0..resolution.statics.len() {
+    const init = resolution.statics[index].init;
+    const computed = match typed.static_values.get(index) {
+      Some(Some(_)) => true,
+      _ => false,
+    };
+
+    if resolution.in_library(init) && !computed {
+      mono::require(registry, init);
+    }
+  }
+
   // Lowering an instance may need more instances.
   while let Some(index) = registry.pending.pop() {
     const instance = match registry.instances.get(index) {
@@ -748,6 +1013,20 @@ pub fn lower(package: Package, resolution: Resolution, typed: TypedModule, sourc
       None => continue,
     };
     const function = lower_function(instance.template, decl, instance.subst, cx)?;
+
+    // Generic code given an opaque C type as a type argument, which it holds by value (Q721).
+    if let Some(span) = registry.instance_spans.get(index) {
+      for ty in function.locals {
+        if layouts.holds_opaque(ty) {
+          diagnostics.push(
+            Diagnostic::error(codes::NOT_FFI_SAFE, span, "this generic code holds a value of type `" + types::text(ty) + "`, an opaque C type or one holding it")
+              .with_note("the values of an opaque C type only exist in C, behind pointers")
+              .with_help("pass the pointer to the C functions that use it instead"),
+          );
+          break;
+        }
+      }
+    }
 
     while instances.len() <= index {
       instances.push(None);
@@ -806,7 +1085,58 @@ pub fn lower(package: Package, resolution: Resolution, typed: TypedModule, sourc
       None => return Err("no signature for the C function `" + decl.name.name + "`"),
     };
 
-    externs.push(ExternDecl { symbol: decl.name.name, params: sig.params, ret: sig.ret, runtime: resolution.is_runtime_extern(package, id) });
+    const in_std = match resolution.externs.get(id as usize) {
+      Some(info) => resolution.is_std_source(info.module),
+      None => false,
+    };
+
+    const fixed: Option<usize> = if decl.variadic { Some(sig.params.len()) } else { None };
+
+    externs.push(ExternDecl { symbol: decl.name.name, params: sig.params, ret: sig.ret, runtime: resolution.is_runtime_extern(package, id), in_std: in_std, fixed: fixed });
+  }
+
+  for call in registry.variadic_calls {
+    externs.push(call);
+  }
+
+  const statics: List<StaticDef> = new List();
+
+  for index in 0..resolution.statics.len() {
+    const id = index as u32;
+    const decl = match resolution.static_decl(package, id) {
+      Some(decl) => decl,
+      None => continue,
+    };
+    const ty = match typed.static_type(resolution, id) {
+      Some(found) => found,
+      None => return Err("no type for the static `" + decl.name.name + "`"),
+    };
+    var value: Option<Const> = None;
+
+    if let Some(Some(found)) = typed.static_values.get(index) {
+      value = Some(const_of(found, ty)?);
+    }
+
+    // The instance of the function of a static of the standard library (above).
+    var init = resolution.statics[index].init;
+
+    if let Some(position) = registry.instance_index.get(`${init}:` + subst_key(Subst::empty())) {
+      if resolution.in_library(init) {
+        init = registry.first_instance + position as u32;
+      }
+    }
+
+    statics.push(StaticDef { name: decl.name.name, ty: ty, init: init, mutable: decl.mutable, thread_local: decl.thread_local, value: value, extern_c: decl.extern_c, in_std: resolution.is_std_source(resolution.statics[index].module) });
+  }
+
+  // Fewer reference counts (docs/adr/0091-fewer-reference-counts.md); `SAG_NO_ARC_PASS` turns
+  // the pass off, for the tests that compare both.
+  if env::variable("SAG_NO_ARC_PASS").is_none() {
+    for function in functions {
+      if !function.template {
+        arc::optimize(function);
+      }
+    }
   }
 
   Ok(Program {
@@ -821,8 +1151,17 @@ pub fn lower(package: Package, resolution: Resolution, typed: TypedModule, sourc
     itables: registry.itables,
     boxes: registry.boxes,
     main_error: main_error,
+    statics: statics,
+    debug_types: registry.debug_types,
+    map_class: typed.prelude.map,
+    hash_set_class: typed.prelude.hash_set,
+    vec_deque_class: typed.prelude.vec_deque,
+    btree_map_class: typed.prelude.btree_map,
+    btree_set_class: typed.prelude.btree_set,
+    binary_heap_class: typed.prelude.binary_heap,
   })
 }
+
 
 /// How the C `main` gets the message of an error that `main` returns, when it is not a `String`.
 fn main_error_of(entry: u32, cx: Context) -> Option<MainError> {
@@ -1042,6 +1381,9 @@ pub class Lowering {
   pub var pending: List<u32>;
   pub var loops: List<LoopCx>;
   pub var vtable_after: Option<VtableAfter>;
+  /// The places that stand for indexes of types implementing `Index` while an assignment
+  /// through them runs: the copy `index` gave (docs/adr/0094-conversions-and-defaults.md, Q639).
+  pub var index_places: Map<u32, Place>;
   /// The type arguments of the instance being lowered; empty outside generic code.
   pub var subst: Subst;
   /// Where the code being lowered is, for errors found while instantiating.
@@ -1069,6 +1411,7 @@ pub class Lowering {
     self.pending = new List();
     self.loops = new List();
     self.vtable_after = None;
+    self.index_places = new Map<u32, Place>();
     self.subst = subst;
     self.span = span;
     self.source_fn = 0;
@@ -1317,6 +1660,10 @@ pub class Lowering {
   }
 
   prv fn assign(self, target: Expr, op: Option<BinaryOp>, value: Expr) -> Result<(), String> {
+    if self.assign_indexed(target, op, value)? {
+      return Ok(());
+    }
+
     if self.is_interface_field(target) {
       const base = match target.kind {
         ExprKind::Field { base, .. } => base,
@@ -1358,6 +1705,11 @@ pub class Lowering {
     const is_place = match target.kind {
       ExprKind::Field { .. } | ExprKind::Index { .. } => true,
       ExprKind::Unary { op: unary_op, .. } => unary_op == UnaryOp::Deref,
+      // A `static var` (docs/adr/0083-global-state.md, Q528).
+      ExprKind::Path(_) => match self.resolution.paths.get(target.id) {
+        Some(Res::Static(_)) => true,
+        _ => false,
+      },
       _ => false,
     };
 
@@ -1383,7 +1735,15 @@ pub class Lowering {
       const stored = self.expr(value)?;
       const place = self.place(target)?;
       const ty = place.ty;
-      const converted = interfaces::convert(self, stored, value_ty, ty);
+
+      // The field of an `Atomic` is initialized once, by `Atomic::new` (docs/adr/0087-atomic-storage-and-std-sync.md).
+      if let TypeKind::Atomic(_) = ty.kind {
+        self.emit(Stmt::Eval(Rvalue::Call { callee: Callee::Runtime { function: "atomic_init", located: false }, args: List::from([Operand::Ref(place), stored]) }));
+
+        return Ok(());
+      }
+
+      const converted = if is_shift_assignment(op) { self.cast_amount(stored, value_ty) } else { interfaces::convert(self, stored, value_ty, ty) };
       // `text += more` is `text = text + more`.
       const combined = self.combine(op, ty, Operand::Place(place), converted);
 
@@ -1425,7 +1785,7 @@ pub class Lowering {
       return Ok(());
     }
 
-    const stored = self.operand_as(value, ty)?;
+    const stored = if is_shift_assignment(op) { self.shift_amount(value)? } else { self.operand_as(value, ty)? };
     const combined = self.combine(op, ty, Operand::Local(local), stored);
 
     match combined.op {
@@ -1446,7 +1806,185 @@ pub class Lowering {
     Ok(())
   }
 
+  /// `place.take()` or `place.replace(value)`: the value of the place, now this expression's, and
+  /// `None` or `Some(value)` stored in it, as an assignment stores (docs/adr/0097-processes-and-environment.md,
+  /// Q663). The argument runs first, then the place, once.
+  prv fn option_take(self, receiver: Expr, args: List<Expr>, ty: Type, replace: bool) -> Result<Operand, String> {
+    const inner = match ty.kind {
+      TypeKind::Option(found) => found,
+      _ => return Err("`take` of a value that is not an `Option`"),
+    };
+    var stored = unit_operand();
+
+    if replace {
+      if args.len() != 1 {
+        return Err("`replace` without one argument");
+      }
+
+      const replacement = self.operand_as(args[0], inner)?;
+
+      stored = matching::variant(self, ty, 1, List::from([replacement]));
+    } else {
+      stored = matching::variant(self, ty, 0, new List());
+    }
+
+    const place = self.place(receiver)?;
+    // Read now, before the place changes: a copy this expression owns.
+    const old = self.new_value(ty, Rvalue::Use(Operand::Place(place)));
+
+    if self.managed(ty) {
+      // Retain first: the new value may share with the old one.
+      self.emit(Stmt::Retain(old));
+      self.emit(Stmt::Retain(stored));
+      self.emit(Stmt::ReleasePlace(place));
+    }
+
+    self.emit(Stmt::AssignPlace { dest: place, value: Rvalue::Use(stored) });
+
+    Ok(old)
+  }
+
+  /// An assignment through `base[index]` of a type implementing `IndexMut`: the index nearest the
+  /// root of the place is read with `index` into a copy, the rest of the assignment changes the
+  /// copy, and `index_set` writes it back; `base[index] = value` only calls `index_set`. The base
+  /// and the index are evaluated once (docs/adr/0094-conversions-and-defaults.md, Q639).
+  prv fn assign_indexed(self, target: Expr, op: Option<BinaryOp>, value: Expr) -> Result<bool, String> {
+    var indexed: Option<Expr> = None;
+    var current = target;
+
+    while true {
+      if self.index_places.contains_key(current.id) {
+        break;
+      }
+
+      match current.kind {
+        ExprKind::Field { base, .. } => {
+          current = base;
+        }
+        ExprKind::Index { base, .. } => {
+          if self.typed.index_calls.contains_key(current.id) {
+            indexed = Some(current);
+          }
+
+          current = base;
+        }
+        _ => break,
+      }
+    }
+
+    const node = match indexed {
+      Some(found) => found,
+      None => return Ok(false),
+    };
+    const call = match self.typed.index_calls.get(node.id) {
+      Some(found) => found,
+      None => return Err("an index without its call"),
+    };
+    const set = match call.set {
+      Some(found) => found,
+      None => return Err("an assigned index without `index_set`"),
+    };
+    const parts = match node.kind {
+      ExprKind::Index { base, index } => List::from([base, index]),
+      _ => return Err("an index of another kind"),
+    };
+    const base = parts[0];
+    const position_expr = parts[1];
+    const args: List<Type> = new List();
+
+    for arg in call.args {
+      args.push(types::substitute(arg, self.subst));
+    }
+
+    const base_place = self.base_place(base)?;
+    const position = self.owned_copy(args[0], self.operand_as(position_expr, args[0])?);
+
+    if node.id == target.id && op.is_none() {
+      const stored = self.operand_as(value, args[1])?;
+
+      self.interface_method_call(set, args, base_place, List::from([position, stored]), types::unit())?;
+
+      return Ok(true);
+    }
+
+    const copy = self.interface_method_call(call.index, args, base_place, List::from([position]), args[1])?;
+    const copy_place = self.operand_place(copy, args[1])?;
+
+    self.index_places.insert(node.id, copy_place);
+
+    const assigned = self.assign(target, op, value);
+
+    self.index_places.remove(node.id);
+    assigned?;
+    self.interface_method_call(set, args, base_place, List::from([position, Operand::Place(copy_place)]), types::unit())?;
+
+    Ok(true)
+  }
+
+  /// A call of the interface method `function` (of its interface with `args`, such as `index` of
+  /// `Index`) on the value in `base_place`, through its type's implementation, or the itable of
+  /// an interface value.
+  pub fn interface_method_call(self, function: u32, args: List<Type>, base_place: Place, operands: List<Operand>, ret: Type) -> Result<Operand, String> {
+    const receiver_ty = base_place.ty;
+    const owner = match self.resolution.owner(function) {
+      Some(found) => found,
+      None => return Err("an index function without its interface"),
+    };
+    var callee = Callee::Fn(function);
+    var by_ref = false;
+
+    match receiver_ty.kind {
+      TypeKind::Interface(interface_ref) => {
+        callee = interfaces::dyn_method(self, interface_ref, function)?;
+      }
+      _ => {
+        const subst = Subst::of(ParamOwner::Item(owner), args).with_self(receiver_ty);
+        const target = interfaces::method_for(self, function, receiver_ty, subst, new List());
+
+        callee = match target.slot {
+          Some(slot) => Callee::Virtual { slot: slot, function: target.function },
+          None => Callee::Fn(target.function),
+        };
+        by_ref = match self.typed.sig(interfaces::template_of(self, target.function)) {
+          Some(sig) => match sig.receiver {
+            Some(receiver) => receiver == Receiver::Var,
+            None => false,
+          },
+          None => false,
+        };
+      }
+    }
+
+    const all = List::from([if by_ref { Operand::Ref(base_place) } else { Operand::Place(base_place) }]);
+
+    // The operands are an `Idx` and an `Out`, the arguments of the interface; a method that
+    // modifies its base must not see them borrow from it.
+    for index in 0..operands.len() {
+      all.push(if by_ref { self.owned_copy(args.get(index).unwrap_or(types::error()), operands[index]) } else { operands[index] });
+    }
+
+    Ok(self.call(callee, all, ret))
+  }
+
   /// `text += more` becomes `text = text + more`; other operators stay.
+  /// The amount of a shift, as a `u64`, which keeps a negative amount out of range.
+  prv fn shift_amount(self, amount: Expr) -> Result<Operand, String> {
+    const amount_ty = self.type_of(amount)?;
+    const value = self.expr(amount)?;
+
+    Ok(self.cast_amount(value, amount_ty))
+  }
+
+  prv fn cast_amount(self, value: Operand, from: Type) -> Operand {
+    const wide = types::int(IntTy::U64);
+
+    if types::same_type(from, wide) {
+      return value;
+    }
+
+    self.new_value(wide, Rvalue::Cast { from: from, to: wide, operand: value })
+  }
+
   prv fn combine(self, op: Option<BinaryOp>, ty: Type, current: Operand, value: Operand) -> Combined {
     if let Some(compound) = op {
       if compound == BinaryOp::Add && types::is_string(ty) {
@@ -1483,6 +2021,22 @@ pub class Lowering {
 
           Ok(local_place(local, ty))
         }
+        // The storage of a static, through its address.
+        Some(Res::Static(id)) => {
+          const reference = types::of(TypeKind::Ref { mutable: true, pointee: ty });
+          const address = self.call(Callee::Runtime { function: static_getter(id), located: true }, new List(), reference);
+
+          match address {
+            Operand::Local(local) => Ok(referred_place(local, reference)),
+            _ => Err("the address of a static is not a local"),
+          }
+        }
+        // A composite constant, built in a temporary whose parts are read (Q686).
+        Some(Res::Const(id)) => {
+          const built = self.const_operand(id, ty)?;
+
+          self.operand_place(built, ty)
+        }
         _ => Err("place of unsupported path"),
       },
       ExprKind::Field { base, name } => {
@@ -1512,6 +2066,25 @@ pub class Lowering {
         Ok(place)
       }
       ExprKind::Index { base, index } => {
+        // The copy an assignment through `IndexMut` changes, or the value `index` gives (Q639).
+        if let Some(found) = self.index_places.get(value.id) {
+          return Ok(found);
+        }
+
+        if let Some(call) = self.typed.index_calls.get(value.id) {
+          const args: List<Type> = new List();
+
+          for arg in call.args {
+            args.push(types::substitute(arg, self.subst));
+          }
+
+          const base_place = self.base_place(base)?;
+          const position = self.operand_as(index, args[0])?;
+          const read = self.interface_method_call(call.index, args, base_place, List::from([position]), ty)?;
+
+          return self.operand_place(read, ty);
+        }
+
         const base_ty = self.type_of(base)?;
 
         if let TypeKind::List(_) = base_ty.kind {
@@ -1606,7 +2179,7 @@ pub class Lowering {
 
   /// A slice `ty` of an array, a list or a slice, or of a range of one (`&list[a..b]`): a new
   /// value, which keeps a list it views alive and lent until it is released.
-  prv fn slice(self, operand: Expr, ty: Type) -> Result<Operand, String> {
+  pub fn slice(self, operand: Expr, ty: Type) -> Result<Operand, String> {
     const elem = match ty.kind {
       TypeKind::Slice { elem, .. } => elem,
       _ => return Err("slice of another type"),
@@ -1737,6 +2310,10 @@ pub class Lowering {
         Some(index) => Ok(Projection::Field(index)),
         None => Err("unknown field `" + name + "`"),
       },
+      TypeKind::Tuple(elems) => match types::tuple_index(name, elems.len()) {
+        Some(index) => Ok(Projection::Field(index)),
+        None => Err("unknown element `" + name + "`"),
+      },
       TypeKind::Class(owner) => match self.typed.class_field_type(owner, name) {
         Some(found) => Ok(Projection::ClassField { class_id: mono::class_instance(self, found.ancestor), index: found.index }),
         None => Err("unknown field `" + name + "`"),
@@ -1763,6 +2340,11 @@ pub class Lowering {
     match base_ty.kind {
       TypeKind::Struct(owner) => {
         if let Some(index) = self.typed.field_index(owner.id, name) {
+          projection = Some(Projection::Field(index));
+        }
+      }
+      TypeKind::Tuple(elems) => {
+        if let Some(index) = types::tuple_index(name, elems.len()) {
           projection = Some(Projection::Field(index));
         }
       }
@@ -1793,6 +2375,13 @@ pub class Lowering {
     }
 
     Ok(project(place, chosen, ty))
+  }
+
+  pub fn static_is_mutable(self, id: u32) -> bool {
+    match self.resolution.static_decl(self.package, id) {
+      Some(decl) => decl.mutable,
+      None => false,
+    }
   }
 
   pub fn base_place(self, base: Expr) -> Result<Place, String> {
@@ -1831,19 +2420,43 @@ pub class Lowering {
       _ => return Err(`constant ${id} without a value`),
     };
 
+    self.const_value(value, ty)
+  }
+
+  /// A constant's value: a struct, an enum, an array or a tuple is built from its parts at each
+  /// use, as a literal of them (docs/adr/0099-associated-and-composite-constants.md, Q686).
+  prv fn const_value(self, value: ConstValue, ty: Type) -> Result<Operand, String> {
     match value {
-      ConstValue::Bool(found) => Ok(Operand::Const(Const::Bool(found))),
-      ConstValue::Char(found) => Ok(Operand::Const(Const::Char(found))),
-      ConstValue::Str(found) => Ok(Operand::Const(Const::Str(found))),
-      ConstValue::Int(found) => match ty.kind {
-        TypeKind::Int(int_ty) => Ok(int_operand(found.magnitude, found.negative, int_ty)),
-        _ => Err("integer constant typed as " + types::text(ty)),
-      },
-      // `Display` writes the shortest text that reads back as the same value (ADR-0054).
-      ConstValue::Float(found) => match ty.kind {
-        TypeKind::Float(float_ty) => Ok(Operand::Const(Const::Float { text: `${found}`, ty: float_ty })),
-        _ => Err("float constant typed as " + types::text(ty)),
-      },
+      ConstValue::Aggregate(parts) => {
+        const operands: List<Operand> = new List();
+        const part_types: List<Type> = new List();
+
+        for part in parts {
+          operands.push(self.const_value(part.value, part.ty)?);
+          part_types.push(part.ty);
+        }
+
+        Ok(self.aggregate(ty, operands, part_types))
+      }
+      ConstValue::Repeat { part, .. } => {
+        const repeated = match part.first() {
+          Some(found) => found,
+          None => return Err("repeated constant without its part"),
+        };
+        const element = self.const_value(repeated.value, repeated.ty)?;
+
+        Ok(self.new_value(ty, Rvalue::Repeat(element)))
+      }
+      ConstValue::Variant { index, fields } => {
+        const operands: List<Operand> = new List();
+
+        for field in fields {
+          operands.push(self.const_value(field.value, field.ty)?);
+        }
+
+        Ok(matching::variant(self, ty, index, operands))
+      }
+      _ => Ok(Operand::Const(const_of(value, ty)?)),
     }
   }
 
@@ -1901,9 +2514,39 @@ pub class Lowering {
         Some(Res::Extern(id)) => Ok(self.new_value(ty, Rvalue::ExternFnValue(id))),
         Some(Res::Variant(variant)) => Ok(matching::variant(self, ty, variant.index, new List())),
         Some(Res::Const(id)) => self.const_operand(id, ty),
+        // `i32::MAX` (docs/adr/0088-bitwise-operators-and-integer-methods.md).
+        Some(Res::Builtin(name)) if numbers::int_limit(name).is_some() => match numbers::int_limit(name) {
+          Some(limit) => {
+            const max = types::int_max(limit.ty, self.package.target.pointer_width);
+
+            if limit.max {
+              Ok(int_operand(max, false, limit.ty))
+            } else if types::is_signed(limit.ty) {
+              Ok(int_operand(max + 1, true, limit.ty))
+            } else {
+              Ok(int_operand(0, false, limit.ty))
+            }
+          }
+          None => Err("an integer limit without its type"),
+        },
+        Some(Res::Static(id)) => {
+          const place = self.place(value)?;
+
+          if !self.static_is_mutable(id) {
+            // It never changes: read in place, as a `const` binding.
+            return Ok(Operand::Place(place));
+          }
+
+          // Another thread, or C, may change it during the statement.
+          if self.managed(ty) {
+            return Ok(self.owned_copy(ty, Operand::Place(place)));
+          }
+
+          Ok(self.new_value(ty, Rvalue::Use(Operand::Place(place))))
+        }
         _ => Err("unsupported path operand"),
       },
-      ExprKind::Try(inner) => matching::try_expr(self, inner),
+      ExprKind::Try(inner) => matching::try_expr(self, value, inner),
       ExprKind::Await(inner) => tasks::await_expr(self, inner, ty),
       ExprKind::New { args, .. } => self.new_expr(ty, args),
       ExprKind::Match { scrutinee, arms } => matching::match_expr(self, ty, scrutinee, arms),
@@ -1924,8 +2567,9 @@ pub class Lowering {
         self.call_expr(value, callee, args, ty)
       }
       ExprKind::MethodCall { receiver, method, args } => self.method_call_expr(value, ty, receiver, method, args),
-      ExprKind::StructLit { fields, .. } => self.struct_lit(value, ty, fields),
+      ExprKind::StructLit { fields, base, .. } => self.struct_lit(value, ty, fields, base),
       ExprKind::ArrayLit(elems) => self.array_lit(ty, elems),
+      ExprKind::Tuple(elems) => self.tuple_lit(ty, elems),
       ExprKind::ArrayRepeat { value: repeated, .. } => self.array_repeat(ty, repeated),
       ExprKind::Unary { op, operand } => self.unary(value, ty, op, operand),
       ExprKind::Binary { op, lhs, rhs } => self.binary(value, ty, op, lhs, rhs),
@@ -1971,6 +2615,103 @@ pub class Lowering {
     }
   }
 
+  /// Whether `function` is `default` of the prelude's `Default`.
+  prv fn is_default_fn(self, function: u32) -> bool {
+    match self.typed.prelude.default {
+      Some(id) => match self.typed.interface_def(id) {
+        Some(def) => match def.methods.first() {
+          Some(found) => found == function,
+          None => false,
+        },
+        None => false,
+      },
+      None => false,
+    }
+  }
+
+  /// The default of a type of the instance: zero, `false`, `' '`, empty text and collections,
+  /// `None`, the default of each part of a tuple or array or of each field of a struct written
+  /// after `@default`, the variant an enum marks, or the `default` a type implements (Q636).
+  pub fn default_value(self, ty: Type) -> Result<Operand, String> {
+    match ty.kind {
+      TypeKind::Int(int_ty) => return Ok(int_operand(0, false, int_ty)),
+      TypeKind::Float(float_ty) => return Ok(Operand::Const(Const::Float { text: "0.0", ty: float_ty })),
+      TypeKind::Bool => return Ok(bool_operand(false)),
+      TypeKind::Char => return Ok(Operand::Const(Const::Char(0u8 as char))),
+      TypeKind::String => return Ok(Operand::Const(Const::Str(""))),
+      TypeKind::StringBuilder => return Ok(strings::new_string_builder(self)),
+      TypeKind::List(_) => return Ok(self.new_value(ty, Rvalue::ListNew)),
+      TypeKind::Option(_) => return Ok(matching::variant(self, ty, 0, new List())),
+      TypeKind::Tuple(elems) => {
+        const parts: List<Operand> = new List();
+
+        for elem in elems {
+          parts.push(self.default_value(elem)?);
+        }
+
+        return Ok(self.aggregate(ty, parts, elems));
+      }
+      TypeKind::Array { elem, len } => {
+        if !self.managed(elem) {
+          const element = self.default_value(elem)?;
+
+          return Ok(self.new_value(ty, Rvalue::Repeat(element)));
+        }
+
+        const parts: List<Operand> = new List();
+        const part_types: List<Type> = new List();
+
+        for _ in 0..len {
+          parts.push(self.default_value(elem)?);
+          part_types.push(elem);
+        }
+
+        return Ok(self.aggregate(ty, parts, part_types));
+      }
+      TypeKind::Struct(named) => {
+        if self.typed.derived_defaults.contains_key(item_key(TypeItem::Struct(named.id))) {
+          const field_types = self.layouts.struct_fields(named);
+          const parts: List<Operand> = new List();
+
+          for field_ty in field_types {
+            parts.push(self.default_value(field_ty)?);
+          }
+
+          return Ok(self.aggregate(ty, parts, field_types));
+        }
+      }
+      TypeKind::Enum(named) => {
+        if let Some(index) = self.typed.default_variants.get(named.id) {
+          return Ok(matching::variant(self, ty, index, new List()));
+        }
+      }
+      TypeKind::Class(named) => {
+        if let Some(map) = self.typed.prelude.map {
+          if map == named.id {
+            return self.new_instance(ty, new List());
+          }
+        }
+      }
+      _ => {}
+    }
+
+    // The `default` the type implements.
+    const default_id = match self.typed.prelude.default {
+      Some(found) => found,
+      None => return Err("`Default` without the prelude"),
+    };
+    const function = match self.typed.interface_def(default_id) {
+      Some(def) => match def.methods.first() {
+        Some(found) => found,
+        None => return Err("`Default` without `default`"),
+      },
+      None => return Err("`Default` without the prelude"),
+    };
+    const target = interfaces::static_for(self, function, ty, Subst::empty().with_self(ty), new List());
+
+    Ok(self.call(Callee::Fn(target), new List(), ty))
+  }
+
   prv fn new_expr(self, ty: Type, args: List<Expr>) -> Result<Operand, String> {
     match ty.kind {
       TypeKind::StringBuilder => return Ok(strings::new_string_builder(self)),
@@ -2001,6 +2742,201 @@ pub class Lowering {
     Ok(self.new_value(ty, Rvalue::Use(Operand::Place(place))))
   }
 
+  /// A value to interpolate: itself when the C can write it, else its `to_string()` of `Display`
+  /// (docs/adr/0089-display-debug-and-format-specifiers.md, Q583).
+  prv fn display(self, value: Operand, ty: Type) -> Result<Operand, String> {
+    match ty.kind {
+      TypeKind::Int(_) | TypeKind::Float(_) | TypeKind::Bool | TypeKind::Char | TypeKind::String | TypeKind::Never | TypeKind::Error => return Ok(value),
+      _ => {}
+    }
+
+    const function = match self.typed.display_method() {
+      Some(found) => found,
+      None => return Err("an interpolated value without `Display`"),
+    };
+    const callee = match ty.kind {
+      TypeKind::Interface(interface_ref) => interfaces::dyn_method(self, interface_ref, function)?,
+      // No expression has this id, so the call has no type arguments of its own.
+      _ => interfaces::concrete_interface_call(self, NO_EXPR, function, ty).callee,
+    };
+
+    Ok(self.call(callee, List::from([value]), types::string()))
+  }
+
+  /// The index of `ty` among the types written by `{x:?}`, with the class instances its debug
+  /// form reaches registered (docs/adr/0089-display-debug-and-format-specifiers.md, Q588).
+  prv fn debug_index(self, ty: Type) -> usize {
+    for index in 0..self.registry.debug_types.len() {
+      if types::same_type(self.registry.debug_types[index], ty) {
+        return index;
+      }
+    }
+
+    self.registry.debug_types.push(ty);
+    self.reach_debug(ty);
+    self.registry.debug_types.len() - 1
+  }
+
+  prv fn reach_debug(self, ty: Type) {
+    const key = type_key(ty);
+
+    if self.registry.debug_seen.contains_key(key) {
+      return;
+    }
+
+    self.registry.debug_seen.insert(key, true);
+    mono::register_types(self, ty);
+
+    match ty.kind {
+      TypeKind::Class(class_ref) => {
+        mono::class_instance(self, class_ref);
+
+        for field in self.typed.class_field_types(class_ref) {
+          self.reach_debug(field);
+        }
+
+        if let Some(parent) = self.typed.class_parent(class_ref) {
+          self.reach_debug(types::of(TypeKind::Class(parent)));
+        }
+      }
+      TypeKind::Struct(named) => {
+        for field in self.typed.struct_field_types(named) {
+          self.reach_debug(field);
+        }
+      }
+      TypeKind::Enum(_) | TypeKind::Option(_) | TypeKind::Result { .. } => {
+        if let Some(variants) = self.typed.variants(ty) {
+          for variant in variants {
+            for field in variant.field_types() {
+              self.reach_debug(field);
+            }
+          }
+        }
+      }
+      TypeKind::Array { elem, .. } | TypeKind::List(elem) | TypeKind::Slice { elem, .. } => self.reach_debug(elem),
+      TypeKind::Tuple(elems) => {
+        for elem in elems {
+          self.reach_debug(elem);
+        }
+      }
+      TypeKind::Atomic(inner) => self.reach_debug(inner),
+      _ => {}
+    }
+  }
+
+  /// A function of the root of `std`, which every program loads, as an instance.
+  prv fn std_function(self, name: String) -> Result<u32, String> {
+    const root = match self.resolution.std_root {
+      Some(found) => found,
+      None => return Err("the standard library is not loaded"),
+    };
+    const info = match self.resolution.module(root) {
+      Some(found) => found,
+      None => return Err("the standard library is not loaded"),
+    };
+
+    match info.items.get(name) {
+      Some(declared) => match declared.item {
+        ItemRef::Fn(id) => Ok(mono::instance(self, id, Subst::empty())),
+        _ => Err("`std::" + name + "` is not a function"),
+      },
+      None => Err("`std::" + name + "` is missing"),
+    }
+  }
+
+  /// `{value:spec}`: the text the functions of `std` give it
+  /// (docs/adr/0089-display-debug-and-format-specifiers.md, Q585–Q587).
+  prv fn formatted(self, value: Operand, ty: Type, spec: FormatSpec) -> Result<Operand, String> {
+    // A width or a precision written as a number, or read from a binding after the value
+    // (docs/adr/0101-the-rest-of-s2.md, Q711).
+    const usize_ty = types::int(IntTy::Usize);
+    const width = match spec.width_expr {
+      Some(found) => self.operand_as(found, usize_ty)?,
+      None => int_operand(spec.width.unwrap_or(0), false, IntTy::Usize),
+    };
+    const precision = match spec.precision_expr {
+      Some(found) => {
+        const read = self.operand_as(found, usize_ty)?;
+
+        self.new_value(types::int(IntTy::I64), Rvalue::Cast { from: usize_ty, to: types::int(IntTy::I64), operand: read })
+      }
+      None => match spec.precision {
+        Some(given) => int_operand(given, false, IntTy::I64),
+        None => int_operand(1, true, IntTy::I64),
+      },
+    };
+
+    // The debug form, whose C the backend writes for each type, then the width of any text.
+    if spec.kind == "?" {
+      const index = self.debug_index(ty);
+      const callee = Callee::Runtime { function: `sag_debug_string_${index}`, located: false };
+      const text = self.call(callee, List::from([value, Operand::Const(Const::Bool(spec.alternate))]), types::string());
+
+      if spec.width.is_none() && spec.width_expr.is_none() {
+        return Ok(text);
+      }
+
+      const function = self.std_function("format_text")?;
+      const padding = List::from([text, Operand::Const(Const::Char(spec.fill)), int_operand(spec.align as u64, false, IntTy::U32), width, int_operand(1, true, IntTy::I64)]);
+
+      return Ok(self.call(Callee::Fn(function), padding, types::string()));
+    }
+
+    var flags = 0u64;
+
+    if spec.plus {
+      flags += 1;
+    }
+
+    if spec.alternate {
+      flags += 2;
+    }
+
+    if spec.zero {
+      flags += 4;
+    }
+
+    const kind = if spec.kind.is_empty() { ' ' } else { spec.kind.chars().collect()[0] };
+    const fill = Operand::Const(Const::Char(spec.fill));
+    const align = int_operand(spec.align as u64, false, IntTy::U32);
+    const flag_bits = int_operand(flags, false, IntTy::U32);
+    const kind_char = Operand::Const(Const::Char(kind));
+    const string = types::string();
+
+    match ty.kind {
+      TypeKind::Int(int_ty) => {
+        if types::is_signed(int_ty) {
+          const wide = types::int(IntTy::I64);
+          const signed = if types::same_type(ty, wide) { value } else { self.new_value(wide, Rvalue::Cast { from: ty, to: wide, operand: value }) };
+          const width_bits = int_operand(int_bits(int_ty, self.package.target.pointer_width), false, IntTy::U32);
+          const function = self.std_function("format_signed")?;
+
+          return Ok(self.call(Callee::Fn(function), List::from([signed, width_bits, fill, align, flag_bits, width, kind_char]), string));
+        }
+
+        const wide = types::int(IntTy::U64);
+        const unsigned = if types::same_type(ty, wide) { value } else { self.new_value(wide, Rvalue::Cast { from: ty, to: wide, operand: value }) };
+        const function = self.std_function("format_unsigned")?;
+
+        Ok(self.call(Callee::Fn(function), List::from([unsigned, fill, align, flag_bits, width, kind_char]), string))
+      }
+      TypeKind::Float(float_ty) => {
+        const wide = types::of(TypeKind::Float(FloatTy::F64));
+        const double = if float_ty == FloatTy::F64 { value } else { self.new_value(wide, Rvalue::Cast { from: ty, to: wide, operand: value }) };
+        const function = self.std_function("format_float")?;
+        const is_f32 = Operand::Const(Const::Bool(float_ty == FloatTy::F32));
+
+        Ok(self.call(Callee::Fn(function), List::from([double, is_f32, fill, align, flag_bits, width, precision, kind_char]), string))
+      }
+      _ => {
+        const text = self.display(value, ty)?;
+        const function = self.std_function("format_text")?;
+
+        Ok(self.call(Callee::Fn(function), List::from([text, fill, align, width, precision]), string))
+      }
+    }
+  }
+
   prv fn template(self, ty: Type, parts: List<TemplatePart>) -> Result<Operand, String> {
     const pieces: List<TemplatePiece> = new List();
 
@@ -2011,7 +2947,13 @@ pub class Lowering {
           const part_ty = self.type_of(inner)?;
           const part_value = self.expr(inner)?;
 
-          pieces.push(TemplatePiece::Value { ty: part_ty, value: part_value });
+          pieces.push(TemplatePiece::Value { ty: string_or(part_ty), value: self.display(part_value, part_ty)? });
+        }
+        TemplatePart::Formatted { expr: inner, spec } => {
+          const part_ty = self.type_of(inner)?;
+          const part_value = self.expr(inner)?;
+
+          pieces.push(TemplatePiece::Value { ty: types::string(), value: self.formatted(part_value, part_ty, spec)? });
         }
       }
     }
@@ -2019,12 +2961,104 @@ pub class Lowering {
     Ok(self.new_value(ty, Rvalue::Template(pieces)))
   }
 
+  /// A method of `Atomic<T>`, one of C11's operations on the field with the orderings its last
+  /// arguments give (docs/adr/0087-atomic-storage-and-std-sync.md, Q568;
+  /// docs/adr/0098-locks-orderings-and-threads.md, Q676), through the runtime's macros.
+  prv fn atomic_method(self, name: String, ty: Type, receiver: Expr, args: List<Expr>) -> Result<Operand, String> {
+    const place = self.place(receiver)?;
+    const inner = match place.ty.kind {
+      TypeKind::Atomic(found) => found,
+      _ => return Err("an atomic method on a value that is not atomic"),
+    };
+    const exchange = name == "compare_exchange" || name == "compare_exchange_weak";
+    const orders = if exchange { 2usize } else { 1usize };
+
+    if args.len() < orders {
+      return Err("an atomic method without its orderings");
+    }
+
+    const values: List<Operand> = List::from([Operand::Ref(place)]);
+
+    for index in 0..args.len() {
+      const expected = if index < args.len() - orders { inner } else { types::int(IntTy::I32) };
+
+      values.push(self.operand_as(args[index], expected)?);
+    }
+
+    if name == "store" {
+      self.emit(Stmt::Eval(Rvalue::Call { callee: c_operation("sag_atomic_store"), args: values }));
+
+      return Ok(unit_operand());
+    }
+
+    if exchange {
+      if values.len() != 5 {
+        return Err("`compare_exchange` without four arguments");
+      }
+
+      // C writes the value it found into `expected` when it differs.
+      const expected = values[1];
+      const found = self.temp(inner);
+
+      self.emit(Stmt::Assign { dest: found, value: Rvalue::Use(expected) });
+
+      const call_args = List::from([values[0], Operand::Ref(local_place(found, inner)), values[2], values[3], values[4]]);
+      const function = if name == "compare_exchange" { "sag_atomic_compare_exchange_strong" } else { "sag_atomic_compare_exchange_weak" };
+      const exchanged = self.new_value(types::of(TypeKind::Bool), Rvalue::Call { callee: c_operation(function), args: call_args });
+      const dest = self.temp(ty);
+      const then_body = List::from([Stmt::Assign { dest: dest, value: Rvalue::Variant { index: 0, fields: List::from([expected]) } }]);
+      const else_body = List::from([Stmt::Assign { dest: dest, value: Rvalue::Variant { index: 1, fields: List::from([Operand::Local(found)]) } }]);
+
+      self.emit(Stmt::If { cond: exchanged, then_body: then_body, else_body: else_body });
+
+      return Ok(Operand::Local(dest));
+    }
+
+    const function = if name == "load" {
+      "sag_atomic_load"
+    } else if name == "swap" {
+      "sag_atomic_exchange"
+    } else if name == "fetch_add" || name == "fetch_sub" || name == "fetch_and" || name == "fetch_or" || name == "fetch_xor" {
+      "sag_atomic_" + name
+    } else {
+      return Err("an unknown atomic method `" + name + "`");
+    };
+
+    Ok(self.new_value(ty, Rvalue::Call { callee: c_operation(function), args: values }))
+  }
+
   prv fn method_call_expr(self, value: Expr, ty: Type, receiver: Expr, method: Ident, args: List<Expr>) -> Result<Operand, String> {
     if self.typed.field_calls.contains_key(value.id) {
       return closures::field_call(self, receiver, method.name, args);
     }
 
+    // `collect()` into a type implementing `FromIterator` (docs/adr/0095-collections.md, Q646).
+    if let Some(call) = self.typed.collect_calls.get(value.id) {
+      const receiver_ty = self.type_of(receiver)?;
+      const elem = self.typed.iter_elem(receiver_ty).unwrap_or(types::error());
+      const iter = self.expr(receiver)?;
+
+      return interfaces::from_iter_value(self, iter, elem, types::substitute(call.self_ty, self.subst), call.function);
+    }
+
+    // `into` and `try_into` (docs/adr/0094-conversions-and-defaults.md, Q633 and Q634).
+    if let Some(conversion) = self.typed.conversions.get(value.id) {
+      const operand = self.operand_as(receiver, types::substitute(conversion.from, self.subst))?;
+
+      return interfaces::convert_value(self, operand, conversion);
+    }
+
     if let Some(builtin) = self.typed.builtin_methods.get(value.id) {
+      if let BuiltinMethod::Atomic(name) = builtin {
+        return self.atomic_method(name, ty, receiver, args);
+      }
+
+      match builtin {
+        BuiltinMethod::Take => return self.option_take(receiver, args, ty, false),
+        BuiltinMethod::Replace => return self.option_take(receiver, args, ty, true),
+        _ => {}
+      }
+
       return match builtin {
         BuiltinMethod::Map | BuiltinMethod::MapErr | BuiltinMethod::AndThen | BuiltinMethod::UnwrapOrElse | BuiltinMethod::Filter => {
           closures::closure_method(self, builtin, ty, receiver, args)
@@ -2033,7 +3067,10 @@ pub class Lowering {
         BuiltinMethod::Prelude(function) => collections::prelude_method(self, value, function, ty, receiver, args),
         BuiltinMethod::TotalCompare => collections::total_compare(self, ty, receiver, args),
         BuiltinMethod::RangeRev => collections::range_iter(self, receiver, true, ty),
-        BuiltinMethod::Runtime { .. } | BuiltinMethod::Find | BuiltinMethod::ToDigit | BuiltinMethod::Parse(_) => {
+        BuiltinMethod::RangeContains => collections::range_test(self, receiver, args.first()),
+        BuiltinMethod::RangeIsEmpty => collections::range_test(self, receiver, None),
+        BuiltinMethod::Runtime { .. } | BuiltinMethod::Find | BuiltinMethod::ToDigit | BuiltinMethod::Parse(_) | BuiltinMethod::Checked(_)
+          | BuiltinMethod::BuilderPop => {
           strings::text_method(self, builtin, ty, receiver, args)
         }
         _ => matching::builtin_method(self, builtin, ty, receiver, args),
@@ -2043,7 +3080,7 @@ pub class Lowering {
     self.method_call(value, receiver, args, ty)
   }
 
-  prv fn struct_lit(self, value: Expr, ty: Type, fields: List<FieldInit>) -> Result<Operand, String> {
+  prv fn struct_lit(self, value: Expr, ty: Type, fields: List<FieldInit>, base: Option<Expr>) -> Result<Operand, String> {
     if let TypeKind::Enum(_) = ty.kind {
       const variant = match self.resolution.paths.get(value.id) {
         Some(Res::Variant(found)) => found,
@@ -2135,6 +3172,19 @@ pub class Lowering {
       operands[index] = Some(stored);
     }
 
+    // The fields not written are read from the base, which runs after them
+    // (docs/adr/0094-conversions-and-defaults.md, Q643).
+    if let Some(found) = base {
+      const base_value = self.operand_as(found, ty)?;
+      const base_place = self.operand_place(base_value, ty)?;
+
+      for index in 0..operands.len() {
+        if operands[index].is_none() {
+          operands[index] = Some(Operand::Place(project(base_place, Projection::Field(index), field_types.get(index).unwrap_or(types::error()))));
+        }
+      }
+    }
+
     const complete: List<Operand> = new List();
 
     for operand in operands {
@@ -2145,6 +3195,21 @@ pub class Lowering {
     }
 
     Ok(self.aggregate(ty, complete, field_types))
+  }
+
+  /// `(a, b, ...)`: its elements, in order, as the fields of a struct (docs/adr/0092-tuples.md).
+  prv fn tuple_lit(self, ty: Type, elems: List<Expr>) -> Result<Operand, String> {
+    const elem_types = match ty.kind {
+      TypeKind::Tuple(found) => found,
+      _ => return Err("tuple literal without a tuple type"),
+    };
+    const operands: List<Operand> = new List();
+
+    for index in 0..elems.len() {
+      operands.push(self.operand_as(elems[index], elem_types.get(index).unwrap_or(types::error()))?);
+    }
+
+    Ok(self.aggregate(ty, operands, elem_types))
   }
 
   prv fn array_lit(self, ty: Type, elems: List<Expr>) -> Result<Operand, String> {
@@ -2186,7 +3251,7 @@ pub class Lowering {
       return Ok(self.new_value(ty, Rvalue::Use(Operand::Place(place))));
     }
 
-    if op == UnaryOp::Neg && self.typed.method_calls.contains_key(value.id) {
+    if (op == UnaryOp::Neg || op == UnaryOp::Not) && self.typed.method_calls.contains_key(value.id) {
       return self.method_call_with(value, operand, new List(), ty, None, true);
     }
 
@@ -2216,9 +3281,63 @@ pub class Lowering {
     Ok(self.new_value(ty, Rvalue::Unary { op: op, ty: operand_ty, operand: operand_value }))
   }
 
+  /// `a == b`, `a < b`... on tuples: `Eq` and `Ord` of their elements.
+  prv fn tuple_comparison(self, op: BinaryOp, ty: Type, operand_ty: Type, lhs: Expr, rhs: Expr) -> Result<Operand, String> {
+    const left = self.expr(lhs)?;
+    const right = self.expr(rhs)?;
+
+    if op == BinaryOp::Eq || op == BinaryOp::Ne {
+      const equal = collections::values_equal(self, operand_ty, left, right)?;
+
+      if op == BinaryOp::Eq {
+        return Ok(equal);
+      }
+
+      return Ok(self.new_value(ty, Rvalue::Unary { op: UnaryOp::Not, ty: ty, operand: equal }));
+    }
+
+    // `a < b` is `Less`, `a <= b` is not `Greater`.
+    const ordering_ty = self.typed.ordering_type();
+    const order = collections::values_order(self, ordering_ty, operand_ty, left, right)?;
+    const place = self.operand_place(order, ordering_ty)?;
+    const variant = if op == BinaryOp::Lt || op == BinaryOp::Ge { 0u32 } else { 2u32 };
+    const found = matching::tag_is(self, place, variant)?;
+
+    if op == BinaryOp::Lt || op == BinaryOp::Gt {
+      return Ok(found);
+    }
+
+    Ok(self.new_value(ty, Rvalue::Unary { op: UnaryOp::Not, ty: ty, operand: found }))
+  }
+
   prv fn binary(self, value: Expr, ty: Type, op: BinaryOp, lhs: Expr, rhs: Expr) -> Result<Operand, String> {
+    // A comparison through `Eq` or `Ord` of a type parameter that this instance makes an integer,
+    // `bool`, `char` or `String` is C's own comparison: `compare` and its `Ordering` would cost a
+    // call and a branch per comparison (docs/adr/0090-benchmarks.md).
+    const primitive_comparison = is_comparison(op) && match self.type_of(lhs)?.kind {
+      TypeKind::Int(_) | TypeKind::Bool | TypeKind::Char | TypeKind::String => true,
+      _ => false,
+    };
+
+    // Tuples compare element by element (docs/adr/0092-tuples.md, Q611).
+    if is_comparison(op) {
+      const operand_ty = self.type_of(lhs)?;
+
+      match operand_ty.kind {
+        TypeKind::Tuple(_) | TypeKind::Option(_) | TypeKind::Result { .. } | TypeKind::List(_) | TypeKind::Array { .. } => {
+          return self.tuple_comparison(op, ty, operand_ty, lhs, rhs);
+        }
+        TypeKind::Class(named) => {
+          if collections::compared_by_compiler(self, named) {
+            return self.tuple_comparison(op, ty, operand_ty, lhs, rhs);
+          }
+        }
+        _ => {}
+      }
+    }
+
     // An operator implemented by the type of `lhs` (docs/adr/0081-operator-overloading.md).
-    if self.typed.method_calls.contains_key(value.id) {
+    if self.typed.method_calls.contains_key(value.id) && !primitive_comparison {
       if op == BinaryOp::Eq || op == BinaryOp::Ne {
         const equal = self.method_call_with(value, lhs, List::from([rhs]), ty, None, true)?;
 
@@ -2268,6 +3387,15 @@ pub class Lowering {
 
     const operand_ty = self.type_of(lhs)?;
     const left = self.expr(lhs)?;
+
+    // The amount of a shift has a type of its own; the C takes it as a `u64`
+    // (docs/adr/0088-bitwise-operators-and-integer-methods.md, Q576).
+    if op == BinaryOp::Shl || op == BinaryOp::Shr {
+      const amount = self.shift_amount(rhs)?;
+
+      return Ok(strings::binary(self, op, operand_ty, left, amount));
+    }
+
     const right = self.expr(rhs)?;
 
     if let TypeKind::Enum(_) = operand_ty.kind {
@@ -2492,6 +3620,33 @@ pub class Lowering {
   prv fn call_expr(self, value: Expr, callee: Expr, args: List<Expr>, ty: Type) -> Result<Operand, String> {
     var target: Option<Callee> = None;
 
+    // `U::from(x)` and `U::try_from(x)` (docs/adr/0094-conversions-and-defaults.md, Q632 and Q634).
+    if let Some(conversion) = self.typed.conversions.get(value.id) {
+      if args.len() != 1 {
+        return Err("a conversion without one argument");
+      }
+
+      const operand = self.operand_as(args[0], types::substitute(conversion.from, self.subst))?;
+
+      return interfaces::convert_value(self, operand, conversion);
+    }
+
+    // `Type::default()` and `T::default()` (docs/adr/0094-conversions-and-defaults.md, Q636).
+    if let Some(call) = self.typed.static_calls.get(value.id) {
+      if self.is_default_fn(call.function) {
+        return self.default_value(types::substitute(call.self_ty, self.subst));
+      }
+
+      // `T::from_iter(iter)`, which the prelude's collections answer too (docs/adr/0095-collections.md, Q646).
+      if interfaces::is_from_iter(self, call.function) && args.len() == 1 {
+        const iter_ty = self.type_of(args[0])?;
+        const elem = self.typed.iter_elem(iter_ty).unwrap_or(types::error());
+        const iter = self.expr(args[0])?;
+
+        return interfaces::from_iter_value(self, iter, elem, types::substitute(call.self_ty, self.subst), call.function);
+      }
+    }
+
     match self.resolution.paths.get(callee.id) {
       Some(Res::Fn(id)) => {
         const subst = mono::call_subst(self, value.id, id, None);
@@ -2500,6 +3655,31 @@ pub class Lowering {
           None => new List(),
         };
         const function = mono::instance(self, id, subst);
+        const operands: List<Operand> = new List();
+        var index = 0usize;
+
+        while index < args.len() && index < params.len() {
+          operands.push(self.operand_as(args[index], params[index])?);
+          index += 1;
+        }
+
+        return Ok(self.call(Callee::Fn(function), operands, ty));
+      }
+      // The implementation of the type the call names, known once monomorphized
+      // (docs/adr/0094-conversions-and-defaults.md, Q631).
+      Some(Res::InterfaceFn { .. }) => {
+        const recorded = match self.typed.static_calls.get(value.id) {
+          Some(found) => found,
+          None => return Err("a static function of an interface without its type"),
+        };
+        const concrete = types::substitute(recorded.self_ty, self.subst);
+        const subst = mono::call_subst(self, value.id, recorded.function, Some(concrete));
+        const own = subst.args_of(ParamOwner::Fn(recorded.function)).unwrap_or(new List());
+        const params = match self.typed.sig(recorded.function) {
+          Some(sig) => types::substitute_sig(sig, subst).params,
+          None => new List(),
+        };
+        const function = interfaces::static_for(self, recorded.function, concrete, subst, own);
         const operands: List<Operand> = new List();
         var index = 0usize;
 
@@ -2553,6 +3733,73 @@ pub class Lowering {
           return interfaces::message_error(self, text);
         }
 
+        // At the line of the call (docs/adr/0093-everyday-methods.md, Q618).
+        if name == "assert" {
+          if args.len() != 1 {
+            return Err("`assert` without one argument");
+          }
+
+          const holds = self.operand_as(args[0], types::of(TypeKind::Bool))?;
+
+          self.emit(Stmt::If { cond: holds, then_body: new List(), else_body: List::from([Stmt::Panic(PanicMessage::Static("assertion failed"))]) });
+
+          return Ok(unit_operand());
+        }
+
+        if name == "unreachable" || name == "todo" {
+          self.emit(Stmt::Panic(PanicMessage::Static(if name == "todo" { "not yet implemented" } else { "entered unreachable code" })));
+
+          return Ok(unit_operand());
+        }
+
+        if name == "assert_eq" || name == "assert_ne" {
+          const function = match self.typed.builtin_methods.get(value.id) {
+            Some(BuiltinMethod::Prelude(found)) => found,
+            _ => return Err("an assertion without its prelude function"),
+          };
+          const subst = mono::call_subst(self, value.id, function, None);
+          const params = match self.typed.sig(function) {
+            Some(sig) => types::substitute_sig(sig, subst).params,
+            None => new List(),
+          };
+
+          if args.len() != 2 || params.len() != 2 {
+            return Err("an assertion without two arguments");
+          }
+
+          const operands = List::from([self.operand_as(args[0], params[0])?, self.operand_as(args[1], params[1])?]);
+          const message_ty = types::option(types::string());
+          const failure = self.call(Callee::Fn(mono::instance(self, function, subst)), operands, message_ty);
+          const place = self.operand_place(failure, message_ty)?;
+          const failed = matching::tag_is(self, place, 1)?;
+          const message = Operand::Place(project(place, Projection::VariantField { variant: 1, field: 0 }, types::string()));
+
+          self.emit(Stmt::If { cond: failed, then_body: List::from([Stmt::Panic(PanicMessage::Value(message))]), else_body: new List() });
+
+          return Ok(unit_operand());
+        }
+
+        // Functions of the root of `std` (docs/adr/0093-everyday-methods.md, Q620 and Q621), and
+        // of the prelude for integers (docs/adr/0101-the-rest-of-s2.md, Q702 and Q703).
+        if name == "char::from_digit" || name.starts_with("String::from_") || name == "List::with_capacity" || numbers::int_static(name).is_some() {
+          const function = match self.typed.builtin_methods.get(value.id) {
+            Some(BuiltinMethod::Prelude(found)) => found,
+            _ => return Err("`" + name + "` without its function"),
+          };
+          const subst = mono::call_subst(self, value.id, function, None);
+          const params = match self.typed.sig(function) {
+            Some(sig) => types::substitute_sig(sig, subst).params,
+            None => new List(),
+          };
+          const operands: List<Operand> = new List();
+
+          for index in 0..args.len() {
+            operands.push(self.operand_as(args[index], params.get(index).unwrap_or(types::error()))?);
+          }
+
+          return Ok(self.call(Callee::Fn(mono::instance(self, function, subst)), operands, ty));
+        }
+
         if name == "char::from_u32" {
           if args.len() != 1 {
             return Err("`char::from_u32` without one argument");
@@ -2573,6 +3820,34 @@ pub class Lowering {
           const rvalue = if name == "mem::size_of" { Rvalue::SizeOf(measured) } else if name == "mem::align_of" { Rvalue::AlignOf(measured) } else { Rvalue::Zeroed };
 
           return Ok(self.new_value(ty, rvalue));
+        }
+
+        // The value goes through a local whose address the runtime's core receives
+        // (docs/adr/0090-benchmarks.md, Q596).
+        if name == "hint::black_box" {
+          if args.len() != 1 {
+            return Err("`black_box` without one argument");
+          }
+
+          const given = self.operand_as(args[0], ty)?;
+          const local = self.temp(ty);
+
+          self.store(local, given);
+          self.emit(Stmt::Eval(Rvalue::Call { callee: Callee::Runtime { function: "sag_black_box", located: false }, args: List::from([Operand::Ref(local_place(local, ty))]) }));
+
+          return Ok(self.owned_result(Some(local)));
+        }
+
+        // Its value is the `T`, which initializes the field (docs/adr/0087-atomic-storage-and-std-sync.md).
+        if name == "Atomic::new" {
+          if args.len() != 1 {
+            return Err("`Atomic::new` without one argument");
+          }
+
+          return match ty.kind {
+            TypeKind::Atomic(inner) => self.operand_as(args[0], inner),
+            _ => Err("`Atomic::new` without an atomic type"),
+          };
         }
 
         if name == "CString::new" {
@@ -2607,6 +3882,14 @@ pub class Lowering {
       Some(chosen) => chosen,
       None => return Err("call without a callee"),
     };
+
+    if let Callee::Extern(id) = chosen {
+      if let Some(decl) = self.resolution.extern_decl(self.package, id) {
+        if decl.variadic && args.len() > decl.params.len() {
+          return self.variadic_call(id, args, ty);
+        }
+      }
+    }
     const params = match chosen {
       Callee::Extern(id) => match self.typed.extern_sig(id) {
         Some(sig) => sig.params,
@@ -2624,6 +3907,47 @@ pub class Lowering {
     }
 
     Ok(self.call(chosen, operands, ty))
+  }
+
+  /// A call of a variadic C function: its arguments past the parameters keep their own types, and
+  /// the call goes to the wrapper of the C function for those types (Q720).
+  prv fn variadic_call(self, id: u32, args: List<Expr>, ty: Type) -> Result<Operand, String> {
+    const sig = match self.typed.extern_sig(id) {
+      Some(sig) => sig,
+      None => return Err("a variadic C function without a signature"),
+    };
+    const decl = match self.resolution.extern_decl(self.package, id) {
+      Some(decl) => decl,
+      None => return Err("a variadic C function without a declaration"),
+    };
+    const operands: List<Operand> = new List();
+    const params: List<Type> = new List();
+    const keys: List<String> = new List();
+
+    for index in 0..args.len() {
+      const param = if index < sig.params.len() { sig.params[index] } else { self.type_of(args[index])? };
+
+      operands.push(self.operand_as(args[index], param)?);
+      params.push(param);
+      keys.push(type_key(param));
+    }
+
+    const key = `${id}:` + keys.join(",");
+    const position = match self.registry.variadic_index.get(key) {
+      Some(found) => found,
+      None => {
+        const in_std = match self.resolution.externs.get(id as usize) {
+          Some(info) => self.resolution.is_std_source(info.module),
+          None => false,
+        };
+
+        self.registry.variadic_calls.push(ExternDecl { symbol: decl.name.name, params: params, ret: sig.ret, runtime: false, in_std: in_std, fixed: Some(sig.params.len()) });
+        self.registry.variadic_index.insert(key, self.registry.variadic_calls.len() - 1);
+        self.registry.variadic_calls.len() - 1
+      }
+    };
+
+    Ok(self.call(Callee::Extern((self.resolution.externs.len() + position) as u32), operands, ty))
   }
 
   prv fn method_call(self, value: Expr, receiver: Expr, args: List<Expr>, ty: Type) -> Result<Operand, String> {

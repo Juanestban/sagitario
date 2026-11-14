@@ -1,0 +1,31 @@
+// `Option` and `Result` compare, order and hash by variant, then by the values they hold, when
+// those do (docs/adr/0093-everyday-methods.md, Q619).
+// expect-stdout: true true true true Less true
+// expect-stdout: true true true false
+// expect-stdout: [None, Some("a"), Some("b")] true
+// expect-stdout: Some(1) Some(2) true
+
+fn main() {
+  const a: Option<i32> = Some(1);
+  const none: Option<i32> = None;
+
+  println(f"{a == Some(1)} {a != none} {none < a} {Some(2) > a} {a.compare(Some(5)):?} {none == None}");
+
+  const ok: Result<i32, String> = Ok(3);
+  const err: Result<i32, String> = Err("x");
+
+  println(f"{ok == Ok(3)} {err == Err("x")} {ok < err} {err == Err("y")}");
+
+  const items = List::from([Some("b"), None, Some("a")]);
+
+  items.sort();
+  println(f"{items:?} {items.contains(None)}");
+
+  const seen = new Map<Option<String>, i32>();
+
+  seen.insert(Some("k"), 1);
+  seen.insert(None, 2);
+  println(f"{seen.get(Some("k")):?} {seen.get(None):?} {Some((1, "t")) == Some((1, "t"))}");
+  assert_eq(Some(3).ok_or("none"), Ok(3));
+  assert_eq(seen.get(None), Some(2));
+}

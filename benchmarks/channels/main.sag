@@ -1,0 +1,28 @@
+// channels: a producer thread sends `0..n` through a channel and the main thread receives and adds
+// them. A channel, its lock and its waits. The argument is `n`.
+use std::env;
+use std::sync::Channel;
+use std::thread;
+
+fn main() {
+  const args = env::args();
+  const n = if args.len() > 1 { args[1].parse_u64().unwrap_or(1000) } else { 1000 };
+  const channel = new Channel<u64>();
+  const producer = thread::spawn(() => {
+    for i in 0..n {
+      channel.send(i);
+    }
+
+    channel.close();
+  });
+  var count = 0u64;
+  var sum = 0u64;
+
+  for value in channel.iter() {
+    count += 1;
+    sum += value;
+  }
+
+  producer.join();
+  println(f"received {count} sum {sum}");
+}

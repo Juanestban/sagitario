@@ -1,0 +1,27 @@
+// sort: sorts the argument's number of integers from the generator MINSTD
+// (`x = x * 48271 % 2147483647`), the same in every language, with the standard sort of each.
+use std::env;
+
+fn main() {
+  const args = env::args();
+  const count = if args.len() > 1 { args[1].parse_u64().unwrap_or(1000) as usize } else { 1000 };
+  const values: List<u64> = new List();
+  var seed = 42u64;
+
+  for _ in 0..count {
+    seed = seed * 48271 % 2147483647;
+    values.push(seed);
+  }
+
+  values.sort();
+
+  var checksum = 0u64;
+  var index = 0usize;
+
+  while index < count {
+    checksum += values[index];
+    index += 1000;
+  }
+
+  println(f"min {values[0]} max {values[count - 1]} checksum {checksum}");
+}

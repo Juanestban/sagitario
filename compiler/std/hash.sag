@@ -1,0 +1,144 @@
+//! `std::hash`: a `Hasher` that combines bytes into one `u64`, and `DefaultHasher`, Rust's
+//! SipHash-1-3 (docs/spec/11-standard-library.md#stdhash, docs/adr/0101-the-rest-of-s2.md, Q708).
+//! `Hash` stays `fn hash(self) -> u64`: a type combines the hashes of its fields with a hasher.
+
+/// What combines bytes into a hash, as Rust's `Hasher`: `write` takes bytes, `finish` gives the
+/// hash of all of them so far, and the other methods write a value's bytes, in the order of the
+/// target, as Rust's.
+pub interface Hasher {
+  fn write(self, bytes: &[u8]);
+  fn finish(self) -> u64;
+
+  fn write_u8(self, value: u8) {
+    const bytes = [value];
+
+    self.write(&bytes);
+  }
+
+  fn write_u16(self, value: u16) {
+    const bytes = value.to_ne_bytes();
+
+    self.write(&bytes);
+  }
+
+  fn write_u32(self, value: u32) {
+    const bytes = value.to_ne_bytes();
+
+    self.write(&bytes);
+  }
+
+  fn write_u64(self, value: u64) {
+    const bytes = value.to_ne_bytes();
+
+    self.write(&bytes);
+  }
+
+  fn write_usize(self, value: usize) {
+    const bytes = value.to_ne_bytes();
+
+    self.write(&bytes);
+  }
+
+  fn write_i8(self, value: i8) {
+    self.write_u8(value as u8);
+  }
+
+  fn write_i16(self, value: i16) {
+    self.write_u16(value as u16);
+  }
+
+  fn write_i32(self, value: i32) {
+    self.write_u32(value as u32);
+  }
+
+  fn write_i64(self, value: i64) {
+    self.write_u64(value as u64);
+  }
+
+  fn write_isize(self, value: isize) {
+    self.write_usize(value as usize);
+  }
+
+  /// The bytes of `text`, then `0xFF`, as Rust's, so that `"ab", "c"` and `"a", "bc"` differ.
+  fn write_str(self, text: String) {
+    const bytes: List<u8> = text.bytes().collect();
+
+    self.write(&bytes);
+    self.write_u8(0xFF);
+  }
+}
+
+/// The four words of SipHash.
+struct SipState {
+  pub v0: u64;
+  pub v1: u64;
+  pub v2: u64;
+  pub v3: u64;
+
+  /// One round of SipHash.
+  pub fn round(self) {
+    self.v0 = self.v0.wrapping_add(self.v1);
+    self.v1 = self.v1.rotate_left(13) ^ self.v0;
+    self.v0 = self.v0.rotate_left(32);
+    self.v2 = self.v2.wrapping_add(self.v3);
+    self.v3 = self.v3.rotate_left(16) ^ self.v2;
+    self.v0 = self.v0.wrapping_add(self.v3);
+    self.v3 = self.v3.rotate_left(21) ^ self.v0;
+    self.v2 = self.v2.wrapping_add(self.v1);
+    self.v1 = self.v1.rotate_left(17) ^ self.v2;
+    self.v2 = self.v2.rotate_left(32);
+  }
+
+  /// A word of the message, with one compression round: SipHash-1-3.
+  pub fn absorb(self, word: u64) {
+    self.v3 = self.v3 ^ word;
+    self.round();
+    self.v0 = self.v0 ^ word;
+  }
+}
+
+/// Rust's `DefaultHasher`: SipHash-1-3 with zero keys, so that its hashes are those of Rust's
+/// `DefaultHasher::new()` for the same bytes.
+pub class DefaultHasher impl Hasher {
+  prv var state: SipState;
+  /// The bytes not yet absorbed, the first lowest, and how many.
+  prv var tail: u64;
+  prv var waiting: u32;
+  /// The bytes written in all.
+  prv var length: u64;
+
+  pub fn new(self) {
+    self.state = SipState { v0: 0x736F_6D65_7073_6575, v1: 0x646F_7261_6E64_6F6D, v2: 0x6C79_6765_6E65_7261, v3: 0x7465_6462_7974_6573 };
+    self.tail = 0;
+    self.waiting = 0;
+    self.length = 0;
+  }
+
+  pub fn write(self, bytes: &[u8]) {
+    for index in 0..bytes.len() {
+      self.tail = self.tail | (bytes[index] as u64) << (8 * self.waiting);
+      self.waiting += 1;
+
+      if self.waiting == 8 {
+        self.state.absorb(self.tail);
+        self.tail = 0;
+        self.waiting = 0;
+      }
+    }
+
+    self.length = self.length.wrapping_add(bytes.len() as u64);
+  }
+
+  /// The hash of the bytes written so far; writing more after it goes on from them.
+  pub fn finish(self) -> u64 {
+    var state = self.state;
+    const last = (self.length & 0xFF) << 56 | self.tail;
+
+    state.absorb(last);
+    state.v2 = state.v2 ^ 0xFF;
+    state.round();
+    state.round();
+    state.round();
+    state.v0 ^ state.v1 ^ state.v2 ^ state.v3
+  }
+}

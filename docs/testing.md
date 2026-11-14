@@ -73,6 +73,10 @@ fn main() { ... }
   UBSan, with any undefined behavior aborting the program, so a report fails the test. Toolchains
   without sanitizers (MinGW) build without them. `SAG_TEST_SANITIZE=0` turns them off for faster
   local runs ([ADR-0036](adr/0036-sanitizers-and-the-reference-zoo.md)).
+- `SAG_NO_ARC_PASS=1` makes the compiler skip the pass that removes reference counts
+  (`sir/arc.sag`), to tell a fault of the pass from one elsewhere;
+  `cli::the_arc_pass_keeps_what_programs_do` compares programs built with and without it
+  ([ADR-0091](adr/0091-fewer-reference-counts.md)).
 - `tests/run-pass/reference_zoo/` is the reference program of the F2 acceptance criteria.
 - `tests/run-pass/reference_wordcount/` is the reference program of the F4 acceptance
   criteria, run with ThreadSanitizer ([ADR-0048](adr/0048-async-await.md)).
@@ -123,12 +127,16 @@ reviewed with the change.
 ## The bootstrap from the seed
 
 `bootstrap/build.sh` (Linux, macOS) and `bootstrap/build.ps1` (Windows) build the compiler from
-`bootstrap/sag.c` with a C compiler alone ([ADR-0067](adr/0067-bootstrap-from-the-seed.md)): the
+the seed of their host, `bootstrap/seed/<host>/sag.c`, with a C compiler alone
+([ADR-0067](adr/0067-bootstrap-from-the-seed.md), [ADR-0107](adr/0107-a-seed-per-host.md)): the
 seed is stage 0, which builds stage 1, which builds stage 2. They check that stages 1 and 2
-generate the same C for the compiler, and that `sag check` reports nothing for the compiler, Nova
-and the harness, then build Nova; the result is `build/bin/sag` and `build/bin/nova`. `--debug`
-builds the stages in debug, `--update-seed` writes the C of stage 2 and the runtime to
-`bootstrap/`, and `--install` copies `sag` and `nova` to `~/.sagitario/bin` and adds it to `PATH`.
+generate the same C for the compiler, and that `--seed-host` of the host generates it too, so that
+a seed made on another machine is this host's; then that `sag check` reports nothing for the
+compiler, Nova and the harness, and build Nova; the result is `build/bin/sag` and
+`build/bin/nova`. `--debug` builds the stages in debug, `--update-seed` writes the seed of every
+host (`windows-x86_64`, `linux-x86_64`, `linux-aarch64`, `macos-aarch64`, `macos-x86_64`) and the
+runtime to `bootstrap/`, and `--install` copies `sag` and `nova` to `~/.sagitario/bin` and adds it
+to `PATH`.
 
 ## CI
 
@@ -137,7 +145,7 @@ GitHub Actions, with a `bootstrap` job per system and C compiler: on Windows wit
 clang (where C's `char` is unsigned), and on macOS with clang. Each builds the compiler from the
 seed with the script of its system, in debug, and runs the harness with stage 2 and its Nova. The
 Ubuntu jobs on x86-64 require the Android NDK (`SAG_REQUIRE_NDK=1`). The `same-c` job
-checks that the C stage 2 generates for the compiler is the same in all of them, and the `vscode`
+checks that the C stage 2 generates for the compiler is the same in all the jobs of each host, and the `vscode`
 job packages the VS Code extension; the harness checks that its version is that of Sagitario.
 
 A tag `vX.Y.Z` runs the release workflow instead (`.github/workflows/release.yml`,

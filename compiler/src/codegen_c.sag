@@ -7,7 +7,7 @@ use pkg::ast::{BinaryOp, UnaryOp};
 use pkg::ast;
 use pkg::sir::{
   Callee, ClassInstance, Const, ExternDecl, FieldAt, Function, ItableEntry, Layouts, Operand, PanicMessage, Place, Program, Projection, Rvalue, SliceSource, Stmt,
-  TemplatePiece, type_key,
+  TemplatePiece, extern_static_getter, static_getter, type_key,
 };
 use pkg::types::{FloatTy, IntTy, NamedRef, Type, TypeKind};
 use pkg::types;
@@ -20,8 +20,14 @@ pub struct GeneratedC {
   pub program: String;
   /// The calls into C and the exported functions, compiled apart; `None` without FFI.
   pub ffi: Option<String>;
+  /// The calls into C of the standard library, compiled apart from the program's, whose
+  /// declarations of the same C functions may have other types; `None` without them.
+  pub std_ffi: Option<String>;
   /// Whether the program uses `std::thread` or `std::sync`.
   pub threads: bool;
+  /// Whether the program uses the sockets of `std::net`, which Windows has in Winsock
+  /// (docs/adr/0100-networking.md, Q698).
+  pub sockets: bool;
 }
 
 /// The longest string literal every C11 compiler accepts (5.2.4.1).
@@ -31,11 +37,16 @@ pub fn generate(program: Program) -> GeneratedC {
   const generator = new Generator(program);
   const order = generator.aggregate_order(program);
   var threads = false;
+  var sockets = false;
 
   for index in 0..program.externs.len() {
     const decl = program.externs[index];
 
-    if decl.runtime && (decl.symbol == "sag_thread_start" || decl.symbol.starts_with("sag_sync_")) {
+    if decl.in_std && decl.symbol == "WSAStartup" && calls_extern(program, index as u32) {
+      sockets = true;
+    }
+
+    if decl.runtime && decl.symbol == "sag_thread_prepare" {
       threads = true;
     }
 
@@ -49,6 +60,20 @@ pub fn generate(program: Program) -> GeneratedC {
   // C may call an `extern "C" fn` of the program on a thread of its own
   // (docs/adr/0078-ffi-without-c-shims.md, Q475).
   if passes_c_callbacks(program) {
+    threads = true;
+  }
+
+  // `_Atomic` fields and fences need `<stdatomic.h>`, which the runtime includes for threads
+  // (docs/adr/0087-atomic-storage-and-std-sync.md, Q569).
+  for instance in program.classes {
+    for field in instance.fields {
+      if let TypeKind::Atomic(_) = field.kind {
+        threads = true;
+      }
+    }
+  }
+
+  if calls_builtin(program, "Atomic::fence") {
     threads = true;
   }
 
@@ -73,7 +98,7 @@ pub fn generate(program: Program) -> GeneratedC {
     const function = program.functions[index];
 
     if !function.template {
-      generator.out.append(linkage(function) + generator.signature(index as u32, function) + ";\n");
+      generator.out.append(generator.linkage(index as u32, function) + generator.signature(index as u32, function) + ";\n");
     }
   }
 
@@ -85,8 +110,11 @@ pub fn generate(program: Program) -> GeneratedC {
   generator.out = new StringBuilder();
   generator.list_support();
   generator.class_support(order);
+  generator.debug_closure(program);
   generator.interface_support(program);
   generator.closure_support(program);
+  generator.statics(program);
+  generator.debug_support(program);
 
   for index in 0..program.functions.len() {
     const function = program.functions[index];
@@ -98,14 +126,208 @@ pub fn generate(program: Program) -> GeneratedC {
 
   generator.entry_point(program);
 
-  const text = head + generator.long_string_definitions() + generator.fn_pointer_conversions() + generator.zeroed_definitions() + generator.out.to_string();
+  const text = head + generator.bridge_prototypes(program) + generator.long_string_definitions() + generator.fn_pointer_conversions() + generator.zeroed_definitions() + generator.out.to_string();
 
-  GeneratedC { program: text, ffi: generator.ffi_unit(program), threads: threads }
+  GeneratedC { program: text, ffi: generator.ffi_unit(program, false), std_ffi: generator.ffi_unit(program, true), threads: threads, sockets: sockets }
 }
 
-/// Exported functions are called from the FFI translation unit; the others stay private.
-fn linkage(function: Function) -> String {
-  if function.export.is_some() { "" } else { "static " }
+/// A field of a class, with how the C reads it from `v`.
+struct DebugField {
+  pub name: String;
+  pub ty: Type;
+  pub access: String;
+  pub is_weak: bool;
+}
+
+/// What a struct, a variant or a class writes: a field with its label (none when positional), or
+/// `(weak)` for a weak field, whose `access` is empty.
+struct DebugItem {
+  pub label: String;
+  pub ty: Type;
+  pub access: String;
+}
+
+fn debug_position(all: List<Type>, ty: Type) -> Option<usize> {
+  for index in 0..all.len() {
+    if types::same_type(all[index], ty) {
+      return Some(index);
+    }
+  }
+
+  None
+}
+
+fn is_map(program: Program, class_ref: NamedRef) -> bool {
+  match program.map_class {
+    Some(id) => id == class_ref.id,
+    None => false,
+  }
+}
+
+fn is_hash_set(program: Program, class_ref: NamedRef) -> bool {
+  match program.hash_set_class {
+    Some(id) => id == class_ref.id,
+    None => false,
+  }
+}
+
+fn is_vec_deque(program: Program, class_ref: NamedRef) -> bool {
+  match program.vec_deque_class {
+    Some(id) => id == class_ref.id,
+    None => false,
+  }
+}
+
+fn is_btree_map(program: Program, class_ref: NamedRef) -> bool {
+  match program.btree_map_class {
+    Some(id) => id == class_ref.id,
+    None => false,
+  }
+}
+
+fn is_btree_set(program: Program, class_ref: NamedRef) -> bool {
+  match program.btree_set_class {
+    Some(id) => id == class_ref.id,
+    None => false,
+  }
+}
+
+fn is_binary_heap(program: Program, class_ref: NamedRef) -> bool {
+  match program.binary_heap_class {
+    Some(id) => id == class_ref.id,
+    None => false,
+  }
+}
+
+/// `sag_sb_push_bytes` of a text without quotes or backslashes.
+fn push_text(text: String) -> String {
+  "  sag_sb_push_bytes(sb, " + c_string_literal(text) + `, ${text.len()});`
+}
+
+/// One element of a list or array, the first when `first` holds.
+fn debug_element(elem: Type, access: String, first: String, all: List<Type>) -> String {
+  const index = debug_position(all, elem).unwrap_or(0);
+
+  `    sag_debug_next(sb, ${first}, indent + 1, pretty, false);\n    sag_debug_${index}(sb, ${access}, indent + 1, pretty);\n    if (pretty) {\n      sag_sb_push_bytes(sb, ",", 1);\n    }`
+}
+
+/// The fields of `items`, after the separator, each followed by a comma when `pretty`.
+fn debug_items(body: List<String>, items: List<DebugItem>, all: List<Type>, pad: String, spaced: bool) {
+  for index in 0..items.len() {
+    const item = items[index];
+
+    body.push(pad + `sag_debug_next(sb, ${index == 0}, indent + 1, pretty, ${spaced});`);
+
+    if !item.label.is_empty() {
+      const label = item.label + ": ";
+
+      body.push(pad + "sag_sb_push_bytes(sb, " + c_string_literal(label) + `, ${label.len()});`);
+    }
+
+    if item.access.is_empty() {
+      body.push(pad + "sag_sb_push_bytes(sb, \"(weak)\", 6);");
+    } else {
+      body.push(pad + `sag_debug_${debug_position(all, item.ty).unwrap_or(0)}(sb, ${item.access}, indent + 1, pretty);`);
+    }
+
+    body.push(pad + "if (pretty) {");
+    body.push(pad + "  sag_sb_push_bytes(sb, \",\", 1);");
+    body.push(pad + "}");
+  }
+}
+
+/// `Name { a: 1, b: 2 }`, or `Name` without fields.
+fn debug_named(body: List<String>, name: String, items: List<DebugItem>, all: List<Type>, pad: String) {
+  body.push(pad + "sag_sb_push_bytes(sb, " + c_string_literal(name) + `, ${name.len()});`);
+
+  if items.is_empty() {
+    return;
+  }
+
+  body.push(pad + "sag_sb_push_bytes(sb, \" {\", 2);");
+  debug_items(body, items, all, pad, true);
+  body.push(pad + "sag_debug_end(sb, true, indent, pretty, true, \"}\");");
+}
+
+/// `Name(a, b)`.
+fn debug_tuple(body: List<String>, name: String, items: List<DebugItem>, all: List<Type>, pad: String) {
+  const open = name + "(";
+
+  body.push(pad + "sag_sb_push_bytes(sb, " + c_string_literal(open) + `, ${open.len()});`);
+  debug_items(body, items, all, pad, false);
+  body.push(pad + "sag_debug_end(sb, true, indent, pretty, false, \")\");");
+}
+
+/// The `extern "C" fn`s used as values, which the trampolines of the FFI unit call.
+fn collect_c_callbacks(body: List<Stmt>, out: List<u32>) {
+  for statement in body {
+    match statement {
+      Stmt::Assign { value, .. } | Stmt::AssignPlace { value, .. } | Stmt::Eval(value) => {
+        if let Rvalue::CFnValue(function) = value {
+          if !out.contains(function) {
+            out.push(function);
+          }
+        }
+      }
+      Stmt::If { then_body, else_body, .. } => {
+        collect_c_callbacks(then_body, out);
+        collect_c_callbacks(else_body, out);
+      }
+      Stmt::Loop(inner) | Stmt::ForRange { body: inner, .. } | Stmt::ForArray { body: inner, .. } | Stmt::ForText { body: inner, .. } => collect_c_callbacks(inner, out),
+      _ => {}
+    }
+  }
+}
+
+/// Words that cannot be the tags or the members of C's structs.
+const C_KEYWORDS: String = " auto break case char const continue default do double else enum extern float for goto if inline int long register restrict return short signed sizeof static struct switch typedef union unsigned void volatile while _Alignas _Alignof _Atomic _Bool _Complex _Generic _Imaginary _Noreturn _Static_assert _Thread_local bool true false alignas alignof static_assert thread_local typeof nullptr ";
+
+/// Whether `name` can be a tag or a member of C: an identifier of C that is no keyword, no name C
+/// reserves (`__x`, `_X`) and none of the runtime's.
+fn c_identifier(name: String) -> bool {
+  if name.is_empty() || C_KEYWORDS.contains(" " + name + " ") || name.starts_with("__") || name.starts_with("sag_") || name.starts_with("SAG_") {
+    return false;
+  }
+
+  var first = true;
+  var second_upper = false;
+  var position = 0usize;
+
+  for c in name.chars() {
+    if first && !(c.is_ascii_alphabetic() || c == '_') {
+      return false;
+    }
+
+    if !(c.is_ascii_alphanumeric() || c == '_') {
+      return false;
+    }
+
+    if position == 1 {
+      second_upper = c.is_ascii_uppercase();
+    }
+
+    first = false;
+    position += 1;
+  }
+
+  !(name.starts_with("_") && second_upper)
+}
+
+/// The tags of the `@repr(C)` types: their names, the first type of a name taking it (Q745).
+fn c_tags(layouts: Layouts) -> Map<u32, String> {
+  const tags = new Map<u32, String>();
+  const taken = new Map<String, bool>();
+
+  for index in 0..layouts.structs.len() {
+    const layout = layouts.structs[index];
+
+    if (layout.repr_c || layout.opaque) && c_identifier(layout.name) && !taken.contains_key(layout.name) {
+      taken.insert(layout.name, true);
+      tags.insert(index as u32, layout.name);
+    }
+  }
+
+  tags
 }
 
 /// A C struct to define: a struct, an enum, the objects of a class instance, or an array,
@@ -140,6 +362,24 @@ fn fn_name(id: u32) -> String {
 /// `index`.
 fn ffi_name(index: usize) -> String {
   `sag_ffi_${index}`
+}
+
+/// The types of a function's parameters.
+fn param_types(function: Function) -> List<Type> {
+  const params: List<Type> = new List();
+
+  for index in 0..function.param_count {
+    if let Some(ty) = function.locals.get(index) {
+      params.push(ty);
+    }
+  }
+
+  params
+}
+
+/// The C function pointer type of a C function of an `extern` block.
+fn c_fn_type(decl: ExternDecl) -> Type {
+  types::of(TypeKind::CFn { is_unsafe: true, params: decl.params, ret: decl.ret })
 }
 
 fn local_name(local: u32) -> String {
@@ -216,6 +456,28 @@ class Generator {
   /// The C types `mem::zeroed` makes, which get helpers.
   pub const zeroed_types: List<String>;
   pub const zeroed_keys: Map<String, usize>;
+  /// Every type whose debug form the program writes, those `{x:?}` names first, then those inside
+  /// them; with an interface among them, the types of every itable too
+  /// (docs/adr/0101-the-rest-of-s2.md, Q712).
+  pub var debug_all: List<Type>;
+  /// Whether an interface value is written with `{x:?}`: every itable then has a debug thunk.
+  pub var dyn_debug: bool;
+  /// The C tag of each `@repr(C)` type that has one, by struct id
+  /// (docs/adr/0105-c-types-at-the-ffi-boundary.md, Q743 and Q745).
+  pub const c_tags: Map<u32, String>;
+  /// The `extern "C" fn`s used as values, which C reaches through trampolines (Q744).
+  pub var c_callbacks: List<u32>;
+  /// The C function pointer types Sagitario calls through, each with a helper of the FFI unit.
+  pub const pointer_calls: List<Type>;
+  pub const pointer_call_keys: Map<String, usize>;
+  /// The C functions of `extern` blocks used as values, by index.
+  pub const extern_pointers: List<usize>;
+  /// In the FFI unit being written: the function pointer types of C's spelling (`sag_cpN`), the
+  /// tags it names, and those it defines, in order.
+  pub var c_fn_pointers: List<String>;
+  pub var c_fn_pointer_keys: Map<String, usize>;
+  pub var used_tags: List<u32>;
+  pub var tag_definitions: List<u32>;
 
   pub fn new(self, program: Program) {
     self.layouts = program.layouts;
@@ -269,6 +531,24 @@ class Generator {
     self.converted_fn_pointers = new List();
     self.zeroed_types = new List();
     self.zeroed_keys = new Map<String, usize>();
+    self.debug_all = new List();
+    self.dyn_debug = false;
+    self.c_tags = c_tags(program.layouts);
+    self.c_callbacks = new List();
+
+    for function in program.functions {
+      if !function.template {
+        collect_c_callbacks(function.body, self.c_callbacks);
+      }
+    }
+
+    self.pointer_calls = new List();
+    self.pointer_call_keys = new Map<String, usize>();
+    self.extern_pointers = new List();
+    self.c_fn_pointers = new List();
+    self.c_fn_pointer_keys = new Map<String, usize>();
+    self.used_tags = new List();
+    self.tag_definitions = new List();
   }
 
   /// Every aggregate type, each after the ones it contains, as C requires.
@@ -422,7 +702,7 @@ class Generator {
 
         return self.visit_instance(ty, done, order);
       }
-      TypeKind::Array { .. } | TypeKind::Result { .. } => return self.visit_instance(ty, done, order),
+      TypeKind::Array { .. } | TypeKind::Result { .. } | TypeKind::Tuple(_) => return self.visit_instance(ty, done, order),
       TypeKind::Ptr { pointee, .. } | TypeKind::Ref { pointee, .. } | TypeKind::Slice { elem: pointee, .. } => {
         self.pointees.push(pointee);
 
@@ -502,6 +782,7 @@ class Generator {
         None => List::from([new List<Type>()]),
       },
       TypeKind::Array { elem, .. } => List::from([List::from([elem])]),
+      TypeKind::Tuple(elems) => List::from([elems]),
       _ => self.layouts.variants(ty).unwrap_or(new List()),
     }
   }
@@ -659,6 +940,10 @@ class Generator {
 
     for index in 0..program.itables.len() {
       self.out.append(`static const sag_itable sag_it_${index};\n`);
+
+      if self.dyn_debug {
+        self.out.append(`static void sag_itd_${index}(sag_sb *sb, sag_object *object, int32_t indent, bool pretty);\n`);
+      }
     }
 
     for index in 0..program.itables.len() {
@@ -691,7 +976,9 @@ class Generator {
         parents_name = `sag_itp_${index}`;
       }
 
-      self.out.append(`static const sag_itable sag_it_${index} = { ` + parents_name + ", " + methods_name + " };\n");
+      const debug_name = if self.dyn_debug { `sag_itd_${index}` } else { "NULL" };
+
+      self.out.append(`static const sag_itable sag_it_${index} = { ` + parents_name + ", " + methods_name + ", " + debug_name + " };\n");
 
       const value_ty = self.c_type(itable.concrete);
 
@@ -942,10 +1229,27 @@ class Generator {
     const vtable = self.vtable(index);
 
     self.out.append("}\n");
+
+    // The `drop` of `Drop` runs first, with the object held by one reference while it does
+    // (docs/adr/0096-streams-files-and-drop.md, Q655).
+    var destroy = `sag_drop_c${index}`;
+
+    if let Some(instance) = self.classes.get(index) {
+      if let Some(function) = instance.user_drop {
+        destroy = `sag_destroy_c${index}`;
+        self.out.append(`static void sag_destroy_c${index}(sag_object *object) {\n`);
+        self.out.append("  bool dropping = sag_object_drop_begin(object);\n");
+        self.out.append("  " + fn_name(function) + "(object);\n");
+        self.out.append("  sag_object_drop_end(object, dropping);\n");
+        self.out.append(`  sag_drop_c${index}(object);\n`);
+        self.out.append("}\n");
+      }
+    }
+
     self.out.append(`static sag_object *sag_new_c${index}(void) {\n`);
     self.out.append("  " + name + " *value = sag_object_alloc(sizeof(" + name + "));\n");
     self.out.append("  *value = (" + name + "){0};\n");
-    self.out.append(`  sag_object_init((sag_object *)value, sag_drop_c${index}, ` + vtable + ");\n");
+    self.out.append("  sag_object_init((sag_object *)value, " + destroy + ", " + vtable + ");\n");
     self.out.append("  return (sag_object *)value;\n}\n");
   }
 
@@ -953,6 +1257,11 @@ class Generator {
   prv fn definition(self, ty: Type) -> String {
     const name = self.struct_name(ty);
     var members = "";
+
+    // C defines an opaque type; its `typedef` names an incomplete struct (Q721).
+    if self.layouts.is_opaque(ty) {
+      return "";
+    }
 
     match ty.kind {
       TypeKind::Class(class_ref) => {
@@ -982,7 +1291,7 @@ class Generator {
 
         members = base + text.to_string();
       }
-      TypeKind::Struct(_) => {
+      TypeKind::Struct(_) | TypeKind::Tuple(_) => {
         const fields = self.flat_parts(ty);
         const parts: List<String> = new List();
 
@@ -1052,7 +1361,7 @@ class Generator {
       const body: List<String> = new List();
 
       match ty.kind {
-        TypeKind::Struct(_) => {
+        TypeKind::Struct(_) | TypeKind::Tuple(_) => {
           const fields = self.flat_parts(ty);
 
           for index in 0..fields.len() {
@@ -1248,13 +1557,695 @@ class Generator {
       },
       TypeKind::Class(_) | TypeKind::List(_) => "sag_object *",
       TypeKind::Option(inner) => if pkg::sir::is_nullable_pointer(ty) { self.c_type(inner) } else { `sag_t${self.instance_index(ty)}` },
-      TypeKind::Array { .. } | TypeKind::Result { .. } => `sag_t${self.instance_index(ty)}`,
+      TypeKind::Array { .. } | TypeKind::Result { .. } | TypeKind::Tuple(_) => `sag_t${self.instance_index(ty)}`,
       TypeKind::CFn { .. } => `sag_p${self.fn_pointer_index(ty)}`,
       TypeKind::CString => "sag_cstring",
       TypeKind::CVoid => "void",
       TypeKind::Ptr { mutable, pointee } | TypeKind::Ref { mutable, pointee } => self.c_type(pointee) + (if mutable { "" } else { " const" }) + "*",
       TypeKind::Slice { .. } => "sag_slice",
+      TypeKind::Atomic(inner) => "_Atomic(" + self.c_type(inner) + ")",
     }
+  }
+
+  // ---- The debug form of values (docs/adr/0089-display-debug-and-format-specifiers.md, Q588) ----
+
+  /// `sag_debug_N(sb, value, indent, pretty)` for each type `{x:?}` writes and those inside it, and
+  /// `sag_debug_string_N(value, pretty)` for the ones the program writes, which SIR calls.
+  pub fn debug_support(self, program: Program) {
+    if program.debug_types.is_empty() {
+      return;
+    }
+
+    const all = self.debug_all;
+
+    for index in 0..all.len() {
+      self.out.append(`static void sag_debug_${index}(sag_sb *sb, ` + self.c_type(all[index]) + " v, int32_t indent, bool pretty);\n");
+    }
+
+    for index in 0..program.debug_types.len() {
+      self.out.append(`static sag_string sag_debug_string_${index}(` + self.c_type(all[index]) + " v, bool pretty) {\n");
+      self.out.append(`  sag_sb sb;\n  sag_sb_init(&sb);\n  sag_debug_${index}(&sb, v, 0, pretty);\n  return sag_sb_finish(&sb);\n}\n`);
+    }
+
+    for index in 0..all.len() {
+      const body: List<String> = new List();
+
+      self.debug_body(all[index], all, program, body);
+      self.out.append(`static void sag_debug_${index}(sag_sb *sb, ` + self.c_type(all[index]) + " v, int32_t indent, bool pretty) {\n");
+      self.out.append("  (void)indent;\n  (void)pretty;\n");
+      self.out.append(body.join("\n") + "\n}\n");
+    }
+
+    // The debug thunk of each itable writes the value of its type, unboxed (Q712).
+    if self.dyn_debug {
+      for index in 0..program.itables.len() {
+        const concrete = program.itables[index].concrete;
+        const position = debug_position(all, concrete).unwrap_or(0);
+        const value = match self.box_index(program, concrete) {
+          Some(box_index) => `((sag_b${box_index} *)object)->value`,
+          None => "(" + self.c_type(concrete) + ")object",
+        };
+
+        self.out.append(`static void sag_itd_${index}(sag_sb *sb, sag_object *object, int32_t indent, bool pretty) {\n`);
+        self.out.append(`  sag_debug_${position}(sb, ` + value + ", indent, pretty);\n}\n");
+      }
+    }
+
+    self.out.append("\n");
+  }
+
+  /// The types whose debug form the program writes, and whether an interface is among them, before
+  /// the itables are written.
+  pub fn debug_closure(self, program: Program) {
+    const all: List<Type> = new List();
+
+    for ty in program.debug_types {
+      all.push(ty);
+    }
+
+    var next = 0usize;
+
+    while next < all.len() {
+      if let TypeKind::Interface(_) = all[next].kind {
+        self.dyn_debug = true;
+      }
+
+      for child in self.debug_children(all[next], program) {
+        if debug_position(all, child).is_none() {
+          all.push(child);
+        }
+      }
+
+      next += 1;
+    }
+
+    self.debug_all = all;
+  }
+
+  /// The types whose debug form that of `ty` writes.
+  prv fn debug_children(self, ty: Type, program: Program) -> List<Type> {
+    const result: List<Type> = new List();
+
+    match ty.kind {
+      TypeKind::Struct(named) => {
+        if !self.layouts.is_union(ty) {
+          for field in self.layouts.struct_fields(named) {
+            result.push(field);
+          }
+        }
+      }
+      TypeKind::Enum(_) | TypeKind::Option(_) | TypeKind::Result { .. } => {
+        if self.layouts.enum_repr(ty).is_none() {
+          for part in self.flat_parts(ty) {
+            result.push(part);
+          }
+        }
+      }
+      TypeKind::Array { elem, .. } | TypeKind::List(elem) | TypeKind::Slice { elem, .. } => result.push(elem),
+      TypeKind::Tuple(elems) => {
+        for elem in elems {
+          result.push(elem);
+        }
+      }
+      // An interface value may hold a value of the type of any itable.
+      TypeKind::Interface(_) => {
+        for itable in program.itables {
+          result.push(itable.concrete);
+        }
+      }
+      TypeKind::Class(class_ref) => {
+        if is_map(program, class_ref) || is_hash_set(program, class_ref) || is_vec_deque(program, class_ref) || is_btree_map(program, class_ref) || is_btree_set(program, class_ref)
+          || is_binary_heap(program, class_ref) {
+          for arg in class_ref.args {
+            result.push(arg);
+          }
+        } else {
+          for field in self.debug_fields(class_ref) {
+            if !field.is_weak {
+              result.push(field.ty);
+            }
+          }
+        }
+      }
+      _ => {}
+    }
+
+    result
+  }
+
+  /// Every field of a class instance, those of its ancestors first.
+  prv fn debug_fields(self, class_ref: NamedRef) -> List<DebugField> {
+    const chain: List<usize> = new List();
+    var current: Option<usize> = Some(self.class_index(class_ref));
+
+    while let Some(index) = current {
+      chain.insert(0, index);
+      current = match self.classes.get(index) {
+        Some(instance) => instance.parent,
+        None => None,
+      };
+    }
+
+    const fields: List<DebugField> = new List();
+
+    for index in chain {
+      if let Some(instance) = self.classes.get(index) {
+        for field in 0..instance.fields.len() {
+          var ty = instance.fields[field];
+          var access = `((sag_c${index} *)v)->f${field}`;
+
+          // An atomic is read as one (docs/adr/0087-atomic-storage-and-std-sync.md).
+          if let TypeKind::Atomic(inner) = ty.kind {
+            ty = inner;
+            access = "atomic_load(&" + access + ")";
+          }
+
+          fields.push(DebugField {
+            name: instance.field_names.get(field).unwrap_or(""),
+            ty: ty,
+            access: access,
+            is_weak: instance.weak_fields.get(field).unwrap_or(false),
+          });
+        }
+      }
+    }
+
+    fields
+  }
+
+  /// The C that writes the debug form of `v`, of type `ty`.
+  prv fn debug_body(self, ty: Type, all: List<Type>, program: Program, body: List<String>) {
+    match ty.kind {
+      TypeKind::Unit => body.push(push_text("()")),
+      TypeKind::Bool => body.push("  sag_sb_push_bool(sb, v);"),
+      TypeKind::Char => body.push("  sag_sb_push_debug_char(sb, v);"),
+      TypeKind::String => body.push("  sag_sb_push_debug_str(sb, v);"),
+      TypeKind::Int(int_ty) => body.push(if types::is_signed(int_ty) { "  sag_sb_push_i64(sb, (int64_t)v);" } else { "  sag_sb_push_u64(sb, (uint64_t)v);" }),
+      TypeKind::Float(FloatTy::F32) => body.push("  sag_sb_push_f32(sb, v);"),
+      TypeKind::Float(FloatTy::F64) => body.push("  sag_sb_push_f64(sb, v);"),
+      TypeKind::Ptr { .. } | TypeKind::Ref { .. } => body.push("  sag_sb_push_address(sb, (const void *)v);"),
+      TypeKind::Function { .. } | TypeKind::CFn { .. } => body.push(push_text("fn")),
+      TypeKind::StringBuilder => body.push(push_text("StringBuilder")),
+      TypeKind::CString => body.push(push_text("CString")),
+      // The value's own form, through its itable (Q712).
+      TypeKind::Interface(_) => body.push("  v.itable->debug(sb, v.object, indent, pretty);"),
+      TypeKind::Struct(named) => {
+        const layout = self.layouts.structs.get(named.id as usize);
+        const name = match layout {
+          Some(found) => found.name,
+          None => "",
+        };
+
+        if self.layouts.is_union(ty) {
+          body.push(push_text(name + " { .. }"));
+          return;
+        }
+
+        const names = match layout {
+          Some(found) => found.field_names,
+          None => new List<String>(),
+        };
+        const fields = self.layouts.struct_fields(named);
+        const items: List<DebugItem> = new List();
+
+        for index in 0..fields.len() {
+          items.push(DebugItem { label: names.get(index).unwrap_or(""), ty: fields[index], access: `v.f${index}` });
+        }
+
+        debug_named(body, name, items, all, "  ");
+      }
+      // `(1, "a")` (docs/adr/0092-tuples.md, Q611).
+      TypeKind::Tuple(elems) => {
+        const items: List<DebugItem> = new List();
+
+        for index in 0..elems.len() {
+          items.push(DebugItem { label: "", ty: elems[index], access: `v.f${index}` });
+        }
+
+        debug_tuple(body, "", items, all, "  ");
+      }
+      TypeKind::Array { elem, len } => {
+        body.push("  sag_sb_push_bytes(sb, \"[\", 1);");
+        body.push(`  for (size_t sag_k = 0; sag_k < ${len}u; sag_k++) {`);
+        body.push(debug_element(elem, "v.data[sag_k]", "sag_k == 0", all));
+        body.push("  }");
+        body.push(`  sag_debug_end(sb, ${len}u > 0, indent, pretty, false, "]");`);
+      }
+      TypeKind::List(elem) => {
+        const elem_type = self.c_type(elem);
+
+        body.push("  size_t sag_n = sag_list_len(v);");
+        body.push("  sag_sb_push_bytes(sb, \"[\", 1);");
+        body.push("  for (size_t sag_k = 0; sag_k < sag_n; sag_k++) {");
+        body.push(debug_element(elem, "(*(" + elem_type + " *)sag_list_at(v, sag_k, __FILE__, __LINE__))", "sag_k == 0", all));
+        body.push("  }");
+        body.push("  sag_debug_end(sb, sag_n > 0, indent, pretty, false, \"]\");");
+      }
+      TypeKind::Slice { elem, .. } => {
+        const elem_type = self.c_type(elem);
+
+        body.push("  sag_sb_push_bytes(sb, \"[\", 1);");
+        body.push("  for (size_t sag_k = 0; sag_k < v.len; sag_k++) {");
+        body.push(debug_element(elem, "((" + elem_type + " *)v.data)[sag_k]", "sag_k == 0", all));
+        body.push("  }");
+        body.push("  sag_debug_end(sb, v.len > 0, indent, pretty, false, \"]\");");
+      }
+      TypeKind::Option(inner) => {
+        if pkg::sir::is_nullable_pointer(ty) {
+          body.push("  if (v == NULL) {");
+          body.push("  " + push_text("None"));
+          body.push("    return;");
+          body.push("  }");
+          debug_tuple(body, "Some", List::from([DebugItem { label: "", ty: inner, access: "v" }]), all, "  ");
+        } else {
+          body.push("  if (v.tag == 0u) {");
+          body.push("  " + push_text("None"));
+          body.push("    return;");
+          body.push("  }");
+          debug_tuple(body, "Some", List::from([DebugItem { label: "", ty: inner, access: "v.u.v1.f0" }]), all, "  ");
+        }
+      }
+      TypeKind::Result { value, error } => {
+        body.push("  if (v.tag == 0u) {");
+        debug_tuple(body, "Ok", List::from([DebugItem { label: "", ty: value, access: "v.u.v0.f0" }]), all, "    ");
+        body.push("    return;");
+        body.push("  }");
+        debug_tuple(body, "Err", List::from([DebugItem { label: "", ty: error, access: "v.u.v1.f0" }]), all, "  ");
+      }
+      TypeKind::Enum(named) => {
+        const layout = match self.layouts.enums.get(named.id as usize) {
+          Some(found) => found,
+          None => return,
+        };
+
+        // An enum with an integer representation is its value (docs/spec/10-ffi.md).
+        if layout.repr.is_some() {
+          for index in 0..layout.values.len() {
+            body.push("  if (v == " + constant(layout.values[index]) + ") {");
+            body.push("  " + push_text(layout.variant_names.get(index).unwrap_or("")));
+            body.push("    return;");
+            body.push("  }");
+          }
+
+          body.push("  sag_sb_push_i64(sb, (int64_t)v);");
+          return;
+        }
+
+        const groups = self.parts(ty);
+
+        body.push("  switch (v.tag) {");
+
+        for variant in 0..groups.len() {
+          const name = layout.variant_names.get(variant).unwrap_or("");
+          const labels = layout.field_names.get(variant).unwrap_or(new List<String>());
+          const fields = groups[variant];
+          const items: List<DebugItem> = new List();
+
+          for index in 0..fields.len() {
+            items.push(DebugItem { label: labels.get(index).unwrap_or(""), ty: fields[index], access: `v.u.v${variant}.f${index}` });
+          }
+
+          body.push(`  case ${variant}u: {`);
+
+          if fields.is_empty() {
+            body.push("  " + push_text(name));
+          } else if labels.is_empty() {
+            debug_tuple(body, name, items, all, "    ");
+          } else {
+            debug_named(body, name, items, all, "    ");
+          }
+
+          body.push("    break;");
+          body.push("  }");
+        }
+
+        body.push("  default:");
+        body.push("    break;");
+        body.push("  }");
+      }
+      TypeKind::Class(class_ref) => {
+        if is_map(program, class_ref) {
+          self.debug_map(class_ref, all, body);
+          return;
+        }
+
+        if is_hash_set(program, class_ref) {
+          self.debug_set(program, class_ref, all, body);
+          return;
+        }
+
+        if is_vec_deque(program, class_ref) {
+          self.debug_deque(class_ref, all, body);
+          return;
+        }
+
+        if is_btree_map(program, class_ref) {
+          self.debug_btree(class_ref, "v", true, all, body);
+          return;
+        }
+
+        if is_binary_heap(program, class_ref) {
+          self.debug_heap(class_ref, all, body);
+          return;
+        }
+
+        // A `BTreeSet` is written as the keys of its map.
+        if is_btree_set(program, class_ref) {
+          const set_index = self.class_index(class_ref);
+
+          if let Some(set) = self.classes.get(set_index) {
+            for field in 0..set.field_names.len() {
+              if set.field_names[field] == "map" {
+                if let Some(map_ty) = set.fields.get(field) {
+                  if let TypeKind::Class(map_ref) = map_ty.kind {
+                    self.debug_btree(map_ref, `((sag_c${set_index} *)v)->f${field}`, false, all, body);
+                  }
+                }
+              }
+            }
+          }
+
+          return;
+        }
+
+        // A cycle writes the class again without its fields.
+        body.push("  if (!sag_debug_enter(v)) {");
+        body.push("  " + push_text(class_ref.name + " { .. }"));
+        body.push("    return;");
+        body.push("  }");
+
+        const items: List<DebugItem> = new List();
+
+        for field in self.debug_fields(class_ref) {
+          if field.is_weak {
+            items.push(DebugItem { label: field.name, ty: types::unit(), access: "" });
+          } else {
+            items.push(DebugItem { label: field.name, ty: field.ty, access: field.access });
+          }
+        }
+
+        debug_named(body, class_ref.name, items, all, "  ");
+        body.push("  sag_debug_leave();");
+      }
+      _ => body.push(push_text("?")),
+    }
+  }
+
+  /// The prelude's `Map`: its entries in order, `{key: value, ...}`.
+  prv fn debug_map(self, class_ref: NamedRef, all: List<Type>, body: List<String>) {
+    const index = self.class_index(class_ref);
+    const instance = match self.classes.get(index) {
+      Some(found) => found,
+      None => return,
+    };
+    var items_field = 0usize;
+
+    for field in 0..instance.field_names.len() {
+      if instance.field_names[field] == "items" {
+        items_field = field;
+      }
+    }
+
+    const items_ty = instance.fields.get(items_field).unwrap_or(types::unit());
+    const entry_ty = match items_ty.kind {
+      TypeKind::List(elem) => elem,
+      _ => return,
+    };
+    const key_ty = class_ref.args.get(0).unwrap_or(types::unit());
+    const value_ty = class_ref.args.get(1).unwrap_or(types::unit());
+    const entry_type = self.c_type(entry_ty);
+
+    body.push(`  sag_object *sag_items = ((sag_c${index} *)v)->f${items_field};`);
+    body.push("  size_t sag_n = sag_list_len(sag_items);");
+    body.push("  bool sag_any = false;");
+    body.push("  sag_sb_push_bytes(sb, \"{\", 1);");
+    body.push("  for (size_t sag_k = 0; sag_k < sag_n; sag_k++) {");
+    body.push("    " + entry_type + " sag_e = *(" + entry_type + " *)sag_list_at(sag_items, sag_k, __FILE__, __LINE__);");
+    body.push("    if (sag_e.tag != 1u) {");
+    body.push("      continue;");
+    body.push("    }");
+    body.push("    sag_debug_next(sb, !sag_any, indent + 1, pretty, false);");
+    body.push("    sag_any = true;");
+    body.push(`    sag_debug_${debug_position(all, key_ty).unwrap_or(0)}(sb, sag_e.u.v1.f0.f0, indent + 1, pretty);`);
+    body.push("    sag_sb_push_bytes(sb, \": \", 2);");
+    body.push(`    sag_debug_${debug_position(all, value_ty).unwrap_or(0)}(sb, sag_e.u.v1.f0.f1, indent + 1, pretty);`);
+    body.push("    if (pretty) {");
+    body.push("      sag_sb_push_bytes(sb, \",\", 1);");
+    body.push("    }");
+    body.push("  }");
+    body.push("  sag_debug_end(sb, sag_any, indent, pretty, false, \"}\");");
+  }
+
+  /// `{1, 2}`: the keys of the map of a `HashSet`, in order, as Rust's derived `Debug` writes a set
+  /// (docs/adr/0095-collections.md, Q652).
+  prv fn debug_set(self, program: Program, class_ref: NamedRef, all: List<Type>, body: List<String>) {
+    const set_index = self.class_index(class_ref);
+    const set = match self.classes.get(set_index) {
+      Some(found) => found,
+      None => return,
+    };
+    var map_field = 0usize;
+
+    for field in 0..set.field_names.len() {
+      if set.field_names[field] == "map" {
+        map_field = field;
+      }
+    }
+
+    const map_ref = match set.fields.get(map_field) {
+      Some(found) => match found.kind {
+        TypeKind::Class(named) => named,
+        _ => return,
+      },
+      None => return,
+    };
+
+    if !is_map(program, map_ref) {
+      return;
+    }
+
+    const map_index = self.class_index(map_ref);
+    const map = match self.classes.get(map_index) {
+      Some(found) => found,
+      None => return,
+    };
+    var items_field = 0usize;
+
+    for field in 0..map.field_names.len() {
+      if map.field_names[field] == "items" {
+        items_field = field;
+      }
+    }
+
+    const entry_ty = match map.fields.get(items_field) {
+      Some(found) => match found.kind {
+        TypeKind::List(elem) => elem,
+        _ => return,
+      },
+      None => return,
+    };
+    const elem_ty = class_ref.args.get(0).unwrap_or(types::unit());
+    const entry_type = self.c_type(entry_ty);
+
+    body.push(`  sag_object *sag_map = ((sag_c${set_index} *)v)->f${map_field};`);
+    body.push(`  sag_object *sag_items = ((sag_c${map_index} *)sag_map)->f${items_field};`);
+    body.push("  size_t sag_n = sag_list_len(sag_items);");
+    body.push("  bool sag_any = false;");
+    body.push("  sag_sb_push_bytes(sb, \"{\", 1);");
+    body.push("  for (size_t sag_k = 0; sag_k < sag_n; sag_k++) {");
+    body.push("    " + entry_type + " sag_e = *(" + entry_type + " *)sag_list_at(sag_items, sag_k, __FILE__, __LINE__);");
+    body.push("    if (sag_e.tag != 1u) {");
+    body.push("      continue;");
+    body.push("    }");
+    body.push("    sag_debug_next(sb, !sag_any, indent + 1, pretty, false);");
+    body.push("    sag_any = true;");
+    body.push(`    sag_debug_${debug_position(all, elem_ty).unwrap_or(0)}(sb, sag_e.u.v1.f0.f0, indent + 1, pretty);`);
+    body.push("    if (pretty) {");
+    body.push("      sag_sb_push_bytes(sb, \",\", 1);");
+    body.push("    }");
+    body.push("  }");
+    body.push("  sag_debug_end(sb, sag_any, indent, pretty, false, \"}\");");
+  }
+
+  /// `[1, 2]`: the elements of a `VecDeque` from the front, which start at the slot `head` of its
+  /// ring and wrap around its end (docs/adr/0095-collections.md, Q652).
+  prv fn debug_deque(self, class_ref: NamedRef, all: List<Type>, body: List<String>) {
+    const index = self.class_index(class_ref);
+    const instance = match self.classes.get(index) {
+      Some(found) => found,
+      None => return,
+    };
+    var buffer_field = 0usize;
+    var head_field = 0usize;
+    var count_field = 0usize;
+
+    for field in 0..instance.field_names.len() {
+      const name = instance.field_names[field];
+
+      if name == "buffer" {
+        buffer_field = field;
+      } else if name == "head" {
+        head_field = field;
+      } else if name == "count" {
+        count_field = field;
+      }
+    }
+
+    const slot_ty = match instance.fields.get(buffer_field) {
+      Some(found) => match found.kind {
+        TypeKind::List(elem) => elem,
+        _ => return,
+      },
+      None => return,
+    };
+    const elem_ty = class_ref.args.get(0).unwrap_or(types::unit());
+    const slot_type = self.c_type(slot_ty);
+    // An `Option` of a C function pointer is the pointer itself.
+    const element = if pkg::sir::is_nullable_pointer(slot_ty) { "sag_e" } else { "sag_e.u.v1.f0" };
+
+    body.push(`  sag_object *sag_buffer = ((sag_c${index} *)v)->f${buffer_field};`);
+    body.push(`  size_t sag_head = ((sag_c${index} *)v)->f${head_field};`);
+    body.push(`  size_t sag_n = ((sag_c${index} *)v)->f${count_field};`);
+    body.push("  size_t sag_cap = sag_list_len(sag_buffer);");
+    body.push("  sag_sb_push_bytes(sb, \"[\", 1);");
+    body.push("  for (size_t sag_k = 0; sag_k < sag_n; sag_k++) {");
+    body.push("    " + slot_type + " sag_e = *(" + slot_type + " *)sag_list_at(sag_buffer, (sag_head + sag_k) % sag_cap, __FILE__, __LINE__);");
+    body.push("    sag_debug_next(sb, sag_k == 0, indent + 1, pretty, false);");
+    body.push(`    sag_debug_${debug_position(all, elem_ty).unwrap_or(0)}(sb, ${element}, indent + 1, pretty);`);
+    body.push("    if (pretty) {");
+    body.push("      sag_sb_push_bytes(sb, \",\", 1);");
+    body.push("    }");
+    body.push("  }");
+    body.push("  sag_debug_end(sb, sag_n > 0, indent, pretty, false, \"]\");");
+  }
+
+  /// `{1: 2}`, or `{1, 2}` without the values: the entries of the `BTreeMap` that `map` (C code)
+  /// points to, in order, by a walk of its tree with a stack, whose steps alternate between the
+  /// children and the keys of a node (docs/adr/0095-collections.md, Q652). A B-tree of nodes of 5
+  /// keys at least never needs 64 levels.
+  prv fn debug_btree(self, map_ref: NamedRef, map: String, with_values: bool, all: List<Type>, body: List<String>) {
+    const map_index = self.class_index(map_ref);
+    const instance = match self.classes.get(map_index) {
+      Some(found) => found,
+      None => return,
+    };
+    var root_field = 0usize;
+
+    for field in 0..instance.field_names.len() {
+      if instance.field_names[field] == "root" {
+        root_field = field;
+      }
+    }
+
+    const node_ref = match instance.fields.get(root_field) {
+      Some(found) => match found.kind {
+        TypeKind::Class(named) => named,
+        _ => return,
+      },
+      None => return,
+    };
+    const node_index = self.class_index(node_ref);
+    const node = match self.classes.get(node_index) {
+      Some(found) => found,
+      None => return,
+    };
+    var keys_field = 0usize;
+    var values_field = 0usize;
+    var children_field = 0usize;
+
+    for field in 0..node.field_names.len() {
+      const name = node.field_names[field];
+
+      if name == "keys" {
+        keys_field = field;
+      } else if name == "values" {
+        values_field = field;
+      } else if name == "children" {
+        children_field = field;
+      }
+    }
+
+    const key_ty = map_ref.args.get(0).unwrap_or(types::unit());
+    const value_ty = map_ref.args.get(1).unwrap_or(types::unit());
+    const key_type = self.c_type(key_ty);
+    const value_type = self.c_type(value_ty);
+    const child_type = self.c_type(types::of(TypeKind::Class(node_ref)));
+    const at = `((sag_c${node_index} *)sag_node)`;
+
+    body.push(`  sag_object *sag_stack[64];`);
+    body.push(`  size_t sag_step[64];`);
+    body.push(`  int sag_depth = 0;`);
+    body.push(`  bool sag_any = false;`);
+    body.push(`  sag_stack[0] = ((sag_c${map_index} *)${map})->f${root_field};`);
+    body.push(`  sag_step[0] = 0;`);
+    body.push("  sag_sb_push_bytes(sb, \"{\", 1);");
+    body.push("  while (sag_depth >= 0) {");
+    body.push("    sag_object *sag_node = sag_stack[sag_depth];");
+    body.push("    size_t sag_s = sag_step[sag_depth]++;");
+    body.push(`    sag_object *sag_keys = ${at}->f${keys_field};`);
+    body.push(`    sag_object *sag_children = ${at}->f${children_field};`);
+    body.push("    size_t sag_nk = sag_list_len(sag_keys);");
+    body.push("    if (sag_s > 2 * sag_nk) {");
+    body.push("      sag_depth--;");
+    body.push("      continue;");
+    body.push("    }");
+    body.push("    if (sag_s % 2 == 0) {");
+    body.push("      if (sag_list_len(sag_children) > 0 && sag_depth < 63) {");
+    body.push("        sag_depth++;");
+    body.push("        sag_stack[sag_depth] = *(" + child_type + " *)sag_list_at(sag_children, sag_s / 2, __FILE__, __LINE__);");
+    body.push("        sag_step[sag_depth] = 0;");
+    body.push("      }");
+    body.push("      continue;");
+    body.push("    }");
+    body.push("    " + key_type + " sag_key = *(" + key_type + " *)sag_list_at(sag_keys, sag_s / 2, __FILE__, __LINE__);");
+    body.push("    sag_debug_next(sb, !sag_any, indent + 1, pretty, false);");
+    body.push("    sag_any = true;");
+    body.push(`    sag_debug_${debug_position(all, key_ty).unwrap_or(0)}(sb, sag_key, indent + 1, pretty);`);
+
+    if with_values {
+      body.push(`    ${value_type} sag_value = *(${value_type} *)sag_list_at(${at}->f${values_field}, sag_s / 2, __FILE__, __LINE__);`);
+      body.push("    sag_sb_push_bytes(sb, \": \", 2);");
+      body.push(`    sag_debug_${debug_position(all, value_ty).unwrap_or(0)}(sb, sag_value, indent + 1, pretty);`);
+    }
+
+    body.push("    if (pretty) {");
+    body.push("      sag_sb_push_bytes(sb, \",\", 1);");
+    body.push("    }");
+    body.push("  }");
+    body.push("  sag_debug_end(sb, sag_any, indent, pretty, false, \"}\");");
+  }
+
+  /// `[9, 4, 2]`: the elements of a `BinaryHeap` in the order of its list, as Rust's derived
+  /// `Debug` writes it (docs/adr/0095-collections.md, Q652).
+  prv fn debug_heap(self, class_ref: NamedRef, all: List<Type>, body: List<String>) {
+    const index = self.class_index(class_ref);
+    const instance = match self.classes.get(index) {
+      Some(found) => found,
+      None => return,
+    };
+    var items_field = 0usize;
+
+    for field in 0..instance.field_names.len() {
+      if instance.field_names[field] == "items" {
+        items_field = field;
+      }
+    }
+
+    const elem_ty = class_ref.args.get(0).unwrap_or(types::unit());
+    const elem_type = self.c_type(elem_ty);
+
+    body.push(`  sag_object *sag_items = ((sag_c${index} *)v)->f${items_field};`);
+    body.push("  size_t sag_n = sag_list_len(sag_items);");
+    body.push("  sag_sb_push_bytes(sb, \"[\", 1);");
+    body.push("  for (size_t sag_k = 0; sag_k < sag_n; sag_k++) {");
+    body.push("    " + elem_type + " sag_e = *(" + elem_type + " *)sag_list_at(sag_items, sag_k, __FILE__, __LINE__);");
+    body.push("    sag_debug_next(sb, sag_k == 0, indent + 1, pretty, false);");
+    body.push(`    sag_debug_${debug_position(all, elem_ty).unwrap_or(0)}(sb, sag_e, indent + 1, pretty);`);
+    body.push("    if (pretty) {");
+    body.push("      sag_sb_push_bytes(sb, \",\", 1);");
+    body.push("    }");
+    body.push("  }");
+    body.push("  sag_debug_end(sb, sag_n > 0, indent, pretty, false, \"]\");");
   }
 
   /// The C `main`, which calls the program's `main`; a library has none.
@@ -1331,6 +2322,338 @@ class Generator {
     self.out.append("}\n");
   }
 
+  /// The storage of each `static` and `sag_static_N(file, line)`, which gives its address after
+  /// computing its value on the first use (docs/adr/0083-global-state.md, Q527); a value the
+  /// compiler computed is the start of the storage. The values are released at exit for the leak
+  /// check only (Q532).
+  pub fn statics(self, program: Program) {
+    for index in 0..program.statics.len() {
+      const def = program.statics[index];
+      const ty = self.c_type(def.ty);
+      const value = `sag_static_value_${index}`;
+      const head = "static " + ty + " *" + static_getter(index as u32) + "(const char *file, int line) {\n";
+      const managed = self.layouts.is_managed(def.ty);
+      // One storage per thread (Q529).
+      const storage = if def.thread_local { "static _Thread_local " } else { "static " };
+
+      // C's own storage (docs/adr/0086-c-globals-and-std-io.md, Q562).
+      if def.extern_c {
+        const address = extern_static_getter(index as u32);
+
+        self.out.append(ty + " *" + address + "(void);\n");
+        self.out.append(head + "  (void)file;\n  (void)line;\n  return " + address + "();\n}\n\n");
+        continue;
+      }
+
+      if let Some(start) = def.value {
+        // Its later values must be released at exit, which needs the state.
+        if !(def.mutable && managed) {
+          self.out.append(storage + ty + " " + value + " = " + static_initializer(start) + ";\n");
+          self.out.append(head + "  (void)file;\n  (void)line;\n  return &" + value + ";\n}\n\n");
+          continue;
+        }
+      }
+
+      const state = `sag_static_state_${index}`;
+      var release = "NULL";
+
+      self.out.append(storage + ty + " " + value + ";\n");
+
+      if managed {
+        release = `sag_static_release_${index}`;
+        self.out.append("static void " + release + "(void) {\n  " + self.arc_call("release", def.ty, value) + ";\n}\n");
+      }
+
+      // Only its thread computes it: a stage alone, without locks.
+      if def.thread_local {
+        self.out.append("static _Thread_local int " + state + ";\n" + head);
+        self.out.append("  if (" + state + " != 2 && sag_static_local_begin(&" + state + ", " + c_string_literal(def.name) + ", file, line)) {\n");
+        self.out.append("    " + value + " = " + fn_name(def.init) + "();\n");
+        self.out.append("    sag_static_local_end(&" + state + ", " + release + ");\n");
+        self.out.append("  }\n");
+        self.out.append("  return &" + value + ";\n}\n\n");
+        continue;
+      }
+
+      self.out.append("static sag_static_state " + state + ";\n");
+      self.out.append(head);
+      self.out.append("  if (!sag_static_ready(&" + state + ") && sag_static_begin(&" + state + ", " + c_string_literal(def.name) + ", file, line)) {\n");
+      self.out.append("    " + value + " = " + fn_name(def.init) + "();\n");
+      self.out.append("    sag_static_end(&" + state + ", " + release + ");\n");
+      self.out.append("  }\n");
+      self.out.append("  return &" + value + ";\n}\n\n");
+    }
+  }
+
+  /// Exported functions and those C calls back are called from the FFI translation unit; the others
+  /// stay private.
+  pub fn linkage(self, id: u32, function: Function) -> String {
+    if function.export.is_some() || self.c_callbacks.contains(id) { "" } else { "static " }
+  }
+
+  /// A key of a type that tells the names of `std::ffi` apart, which C spells differently.
+  prv fn c_key(self, ty: Type) -> String {
+    match ty.kind {
+      TypeKind::Int(_) | TypeKind::Float(_) => type_key(ty) + ":" + ty.c_name,
+      TypeKind::Ptr { mutable, pointee } | TypeKind::Ref { mutable, pointee } => (if mutable { "*m" } else { "*c" }) + self.c_key(pointee),
+      TypeKind::Option(inner) => "?" + self.c_key(inner),
+      TypeKind::CFn { params, ret, .. } => {
+        const parts: List<String> = new List();
+
+        for param in params {
+          parts.push(self.c_key(param));
+        }
+
+        "cfn(" + parts.join(",") + ")" + self.c_key(ret)
+      }
+      _ => type_key(ty),
+    }
+  }
+
+  /// The helper of the FFI unit that calls through a C function pointer of `ty`: the call is C's,
+  /// with C's types (Q744).
+  prv fn pointer_call(self, ty: Type) -> usize {
+    const key = self.c_key(ty);
+
+    if let Some(index) = self.pointer_call_keys.get(key) {
+      return index;
+    }
+
+    self.pointer_calls.push(ty);
+    self.pointer_call_keys.insert(key, self.pointer_calls.len() - 1);
+    self.pointer_calls.len() - 1
+  }
+
+  /// The prototypes, in the program's unit, of what the FFI unit defines for function pointers:
+  /// the trampolines, the helpers calling through pointers, and the getters of C functions.
+  pub fn bridge_prototypes(self, program: Program) -> String {
+    const out = new StringBuilder();
+
+    for id in self.c_callbacks {
+      if let Some(function) = program.functions.get(id as usize) {
+        out.append(self.return_type(function.ret) + ` sag_cb_${id}(` + self.c_params(param_types(function)) + ");\n");
+      }
+    }
+
+    for index in 0..self.pointer_calls.len() {
+      out.append(self.pointer_call_signature(index, false) + ";\n");
+    }
+
+    for index in self.extern_pointers {
+      if let Some(decl) = program.externs.get(index) {
+        out.append(self.c_type(c_fn_type(decl)) + ` sag_ffi_${index}_pointer(void);\n`);
+      }
+    }
+
+    if !out.is_empty() {
+      out.append("\n");
+    }
+
+    out.to_string()
+  }
+
+  /// `ret sag_call_N(sag_pM f, params)`, with the program's types or, when `c` and the parameter
+  /// list is spelled for the definition, the same.
+  prv fn pointer_call_signature(self, index: usize, named: bool) -> String {
+    const ty = self.pointer_calls[index];
+    const params = match ty.kind {
+      TypeKind::CFn { params, .. } => params,
+      _ => new List<Type>(),
+    };
+    const ret = match ty.kind {
+      TypeKind::CFn { ret, .. } => ret,
+      _ => types::unit(),
+    };
+    const parts = List::from([self.c_type(ty) + (if named { " f" } else { "" })]);
+
+    for position in 0..params.len() {
+      parts.push(self.c_type(params[position]) + (if named { ` a${position}` } else { "" }));
+    }
+
+    self.return_type(ret) + ` sag_call_${index}(` + parts.join(", ") + ")"
+  }
+
+  // ---- C's spelling in the FFI unit (docs/adr/0105-c-types-at-the-ffi-boundary.md) -----------
+
+  /// The type of `ty` as C names it in the FFI unit: the names of `std::ffi` as C's (Q742), and
+  /// the `@repr(C)` types by their tags (Q743).
+  prv fn spelled(self, ty: Type) -> String {
+    match ty.kind {
+      TypeKind::Int(_) | TypeKind::Float(_) => if ty.c_name.is_empty() { self.c_type(ty) } else { ty.c_name },
+      TypeKind::Ptr { mutable, pointee } | TypeKind::Ref { mutable, pointee } => self.spelled(pointee) + (if mutable { "" } else { " const" }) + "*",
+      TypeKind::CFn { .. } => self.c_fn_pointer(ty),
+      TypeKind::Option(inner) => if pkg::sir::is_nullable_pointer(ty) { self.spelled(inner) } else { self.c_type(ty) },
+      TypeKind::Struct(named) => match self.tag_of(ty) {
+        Some(tag) => {
+          if !self.used_tags.contains(named.id) {
+            self.used_tags.push(named.id);
+          }
+
+          (if self.layouts.is_union(ty) { "union " } else { "struct " }) + tag
+        }
+        None => self.c_type(ty),
+      },
+      _ => self.c_type(ty),
+    }
+  }
+
+  /// The tag of a non-generic `@repr(C)` type that has one.
+  prv fn tag_of(self, ty: Type) -> Option<String> {
+    match ty.kind {
+      TypeKind::Struct(named) => if named.args.is_empty() { self.c_tags.get(named.id) } else { None },
+      _ => None,
+    }
+  }
+
+  /// `sag_cpN`, the C function pointer type of `ty` with C's spelling.
+  prv fn c_fn_pointer(self, ty: Type) -> String {
+    const params = match ty.kind {
+      TypeKind::CFn { params, .. } => params,
+      _ => new List<Type>(),
+    };
+    const ret = match ty.kind {
+      TypeKind::CFn { ret, .. } => ret,
+      _ => types::unit(),
+    };
+    const parts: List<String> = new List();
+
+    for param in params {
+      parts.push(self.spelled(param));
+    }
+
+    const text = self.spelled_return(ret) + " (*NAME)(" + (if parts.is_empty() { "void" } else { parts.join(", ") }) + ")";
+
+    if let Some(index) = self.c_fn_pointer_keys.get(text) {
+      return `sag_cp${index}`;
+    }
+
+    self.c_fn_pointers.push(text);
+    self.c_fn_pointer_keys.insert(text, self.c_fn_pointers.len() - 1);
+    `sag_cp${self.c_fn_pointers.len() - 1}`
+  }
+
+  prv fn spelled_return(self, ty: Type) -> String {
+    match ty.kind {
+      TypeKind::Unit | TypeKind::Never => "void",
+      _ => self.spelled(ty),
+    }
+  }
+
+  /// `T a0, U a1` with C's spelling, or `void`.
+  prv fn spelled_params(self, params: List<Type>) -> String {
+    if params.is_empty() {
+      return "void";
+    }
+
+    const parts: List<String> = new List();
+
+    for index in 0..params.len() {
+      parts.push(self.spelled(params[index]) + ` a${index}`);
+    }
+
+    parts.join(", ")
+  }
+
+  /// Marks the definition of a tagged type the FFI unit needs, after those it holds by value.
+  prv fn need_definition(self, ty: Type) {
+    match ty.kind {
+      TypeKind::Array { elem, .. } => self.need_definition(elem),
+      TypeKind::Struct(named) => {
+        if self.tag_of(ty).is_none() || self.tag_definitions.contains(named.id) || self.layouts.is_opaque(ty) {
+          return;
+        }
+
+        for field in self.flat_parts(ty) {
+          self.need_definition(field);
+        }
+
+        if !self.tag_definitions.contains(named.id) {
+          self.tag_definitions.push(named.id);
+        }
+      }
+      _ => {}
+    }
+  }
+
+  /// `struct Tag { members };` with C's spelling and the fields' names.
+  prv fn tag_definition(self, id: u32) -> String {
+    const layout = self.layouts.structs[id as usize];
+    const ty = types::of(TypeKind::Struct(NamedRef { id: id, name: layout.name, args: new List() }));
+    const members: List<String> = new List();
+
+    for index in 0..layout.fields.len() {
+      const name = if c_identifier(layout.field_names[index]) { layout.field_names[index] } else { `f${index}` };
+
+      members.push(self.member(layout.fields[index], name) + ";");
+    }
+
+    self.spelled(ty) + " { " + members.join(" ") + " };\n"
+  }
+
+  /// A member `T name`, `T name[N]` for an array.
+  prv fn member(self, ty: Type, name: String) -> String {
+    var elem = ty;
+    var dims = "";
+
+    while let TypeKind::Array { elem: inner, len } = elem.kind {
+      dims = dims + `[${len}]`;
+      elem = inner;
+    }
+
+    self.spelled(elem) + " " + name + dims
+  }
+
+  /// `value`, a value of `ty` in one spelling, in the other: a struct with a tag through a union of
+  /// both, a pointer through a cast, a number as it is. `setup` gets the statements it needs.
+  prv fn converted(self, ty: Type, value: String, to_c: bool, setup: List<String>) -> String {
+    if self.tag_of(ty).is_some() {
+      const name = `sag_u${setup.len()}`;
+
+      self.need_definition(ty);
+      setup.push("union { " + self.c_type(ty) + " s; " + self.spelled(ty) + " c; } " + name + ";");
+      setup.push(name + (if to_c { ".s" } else { ".c" }) + " = " + value + ";");
+
+      return name + (if to_c { ".c" } else { ".s" });
+    }
+
+    match ty.kind {
+      TypeKind::Ptr { .. } | TypeKind::Ref { .. } | TypeKind::CFn { .. } | TypeKind::Option(_) => "(" + (if to_c { self.spelled(ty) } else { self.c_type(ty) }) + ")" + value,
+      _ => value,
+    }
+  }
+
+  /// The body of a function of the FFI unit that calls `callee` with `args` of `params`: converted
+  /// to C's spelling when `to_c`, and the result `ret` back.
+  prv fn bridge_body(self, callee: String, params: List<Type>, args: List<String>, ret: Type, to_c: bool) -> String {
+    const setup: List<String> = new List();
+    const passed: List<String> = new List();
+
+    for index in 0..args.len() {
+      const ty = params.get(index).unwrap_or(types::unit());
+
+      passed.push(self.converted(ty, args[index], to_c, setup));
+    }
+
+    const call = callee + "(" + passed.join(", ") + ")";
+
+    match ret.kind {
+      TypeKind::Unit | TypeKind::Never => setup.push(call + ";"),
+      _ => {
+        const result = self.converted(ret, call, !to_c, setup);
+
+        setup.push("return " + result + ";");
+      }
+    }
+
+    const lines: List<String> = new List();
+
+    for line in setup {
+      lines.push("  " + line);
+    }
+
+    "{\n" + lines.join("\n") + "\n}\n"
+  }
+
   /// `ret sag_ffi_N(params)`, the wrapper calling a C function.
   pub fn extern_prototype(self, index: usize, decl: ExternDecl) -> String {
     self.return_type(decl.ret) + " " + ffi_name(index) + "(" + self.c_params(decl.params) + ")"
@@ -1358,28 +2681,75 @@ class Generator {
     parts.join(", ")
   }
 
-  /// The FFI translation unit: a wrapper per C function the program calls, and a function with
-  /// the exported symbol per `extern "C" fn`.
-  pub fn ffi_unit(self, program: Program) -> Option<String> {
+  /// The parameters C declares a function of an `extern` block with, in C's spelling: a variadic
+  /// one's own, then `...` (docs/adr/0103-build-scripts-and-binding-generation.md, Q720).
+  prv fn c_declared_params(self, decl: ExternDecl) -> String {
+    match decl.fixed {
+      Some(count) => {
+        const own: List<Type> = new List();
+
+        for index in 0..count {
+          own.push(decl.params[index]);
+        }
+
+        self.spelled_params(own) + ", ..."
+      }
+      None => self.spelled_params(decl.params),
+    }
+  }
+
+  /// A FFI translation unit: a wrapper per C function called and a getter per C global, of the
+  /// standard library (`std`) or of the program, which also has a function with the exported
+  /// symbol per `extern "C" fn`.
+  pub fn ffi_unit(self, program: Program, std: bool) -> Option<String> {
     const exports: List<u32> = new List();
 
-    for index in 0..program.functions.len() {
-      if program.functions[index].export.is_some() {
-        exports.push(index as u32);
+    if !std {
+      for index in 0..program.functions.len() {
+        if program.functions[index].export.is_some() {
+          exports.push(index as u32);
+        }
       }
     }
 
     const externs: List<usize> = new List();
+    // `std::sys` declares the C API of the system, but a program only links what it calls: a
+    // program without threads never needs `-pthread`, and one for iOS never asks for the
+    // functions of `Command` (docs/adr/0087-atomic-storage-and-std-sync.md).
+    const used = if std { used_externs(program) } else { new List<bool>() };
 
     for index in 0..program.externs.len() {
-      if !program.externs[index].runtime {
+      if !program.externs[index].runtime && program.externs[index].in_std == std && (!std || used[index]) {
         externs.push(index);
       }
     }
 
-    if externs.is_empty() && exports.is_empty() {
+    const globals: List<usize> = new List();
+
+    for index in 0..program.statics.len() {
+      if program.statics[index].extern_c && program.statics[index].in_std == std {
+        globals.push(index);
+      }
+    }
+
+    const callbacks: List<u32> = if std { new List() } else { self.c_callbacks };
+    const calls = if std { 0usize } else { self.pointer_calls.len() };
+    const pointers: List<usize> = new List();
+
+    for index in self.extern_pointers {
+      if program.externs[index].in_std == std {
+        pointers.push(index);
+      }
+    }
+
+    if externs.is_empty() && exports.is_empty() && globals.is_empty() && callbacks.is_empty() && calls == 0 && pointers.is_empty() {
       return None;
     }
+
+    self.c_fn_pointers = new List();
+    self.c_fn_pointer_keys = new Map<String, usize>();
+    self.used_tags = new List();
+    self.tag_definitions = new List();
 
     const declared: List<String> = new List();
     const defined: List<Type> = new List();
@@ -1404,6 +2774,30 @@ class Generator {
       }
 
       self.ffi_types(function.ret, true, declared, defined);
+    }
+
+    for index in globals {
+      self.ffi_types(program.statics[index].ty, true, declared, defined);
+    }
+
+    for id in callbacks {
+      const function = program.functions[id as usize];
+
+      for ty in param_types(function) {
+        self.ffi_types(ty, true, declared, defined);
+      }
+
+      self.ffi_types(function.ret, true, declared, defined);
+    }
+
+    for index in 0..calls {
+      if let TypeKind::CFn { params, ret, .. } = self.pointer_calls[index].kind {
+        for ty in params {
+          self.ffi_types(ty, true, declared, defined);
+        }
+
+        self.ffi_types(ret, true, declared, defined);
+      }
     }
 
     const out = new StringBuilder();
@@ -1440,47 +2834,141 @@ class Generator {
       out.append(self.definition(ty));
     }
 
+    // The functions, with C's spelling where C sees them (docs/adr/0105-c-types-at-the-ffi-boundary.md).
+    const body = new StringBuilder();
+    const declared_symbols: List<String> = new List();
+
     for index in externs {
       const decl = program.externs[index];
       const args: List<String> = new List();
 
       for arg in 0..decl.params.len() {
         args.push(`a${arg}`);
+        self.need_definition(decl.params[arg]);
       }
 
-      const call = decl.symbol + "(" + args.join(", ") + ")";
-      const body = match decl.ret.kind {
-        TypeKind::Unit | TypeKind::Never => call + ";",
-        _ => "return " + call + ";",
-      };
+      self.need_definition(decl.ret);
 
-      out.append("\nextern " + self.return_type(decl.ret) + " " + decl.symbol + "(" + self.c_params(decl.params) + ");\n");
-      out.append(self.extern_prototype(index, decl) + " { " + body + " }\n");
+      const prototype = "extern " + self.spelled_return(decl.ret) + " " + decl.symbol + "(" + self.c_declared_params(decl) + ");\n";
+
+      // A variadic function is declared once for its calls of other types.
+      if !declared_symbols.contains(prototype) {
+        declared_symbols.push(prototype);
+        body.append("\n" + prototype);
+      }
+
+      body.append(self.extern_prototype(index, decl) + " " + self.bridge_body(decl.symbol, decl.params, args, decl.ret, true));
+    }
+
+    for index in pointers {
+      const decl = program.externs[index];
+      const pointer = self.c_type(c_fn_type(decl));
+
+      body.append(pointer + ` sag_ffi_${index}_pointer(void) {\n  return (` + pointer + ")" + decl.symbol + ";\n}\n");
+    }
+
+    // The exported symbols and the trampolines C calls back: C's types, then the function.
+    const entries: List<u32> = new List();
+
+    for id in exports {
+      entries.push(id);
+    }
+
+    for id in callbacks {
+      if !entries.contains(id) {
+        entries.push(id);
+      }
+    }
+
+    for id in entries {
+      body.append("\n" + self.signature(id, program.functions[id as usize]) + ";\n");
     }
 
     for id in exports {
-      const function = program.functions[id as usize];
-      const params: List<Type> = new List();
-      const args: List<String> = new List();
-
-      for index in 0..function.param_count {
-        if let Some(ty) = function.locals.get(index) {
-          params.push(ty);
-          args.push(`a${index}`);
-        }
-      }
-
-      const call = fn_name(id) + "(" + args.join(", ") + ")";
-      const body = match function.ret.kind {
-        TypeKind::Unit | TypeKind::Never => call + ";",
-        _ => "return " + call + ";",
-      };
-
-      out.append("\n" + self.signature(id, function) + ";\n");
-      out.append(self.return_type(function.ret) + " " + function.export.unwrap_or("") + "(" + self.c_params(params) + ") { " + body + " }\n");
+      body.append(self.entry_bridge(id, program.functions[id as usize], program.functions[id as usize].export.unwrap_or("")));
     }
 
+    for id in callbacks {
+      body.append(self.entry_bridge(id, program.functions[id as usize], `sag_cb_${id}`));
+    }
+
+    for index in 0..calls {
+      const ty = self.pointer_calls[index];
+      const params = match ty.kind {
+        TypeKind::CFn { params, .. } => params,
+        _ => new List<Type>(),
+      };
+      const ret = match ty.kind {
+        TypeKind::CFn { ret, .. } => ret,
+        _ => types::unit(),
+      };
+      const args: List<String> = new List();
+
+      for position in 0..params.len() {
+        args.push(`a${position}`);
+        self.need_definition(params[position]);
+      }
+
+      self.need_definition(ret);
+      body.append(self.pointer_call_signature(index, true) + " " + self.bridge_body("((" + self.c_fn_pointer(ty) + ")f)", params, args, ret, true));
+    }
+
+    for index in globals {
+      const def = program.statics[index];
+      const ty = self.c_type(def.ty);
+
+      body.append("\nextern " + self.spelled(def.ty) + " " + def.name + ";\n");
+      body.append(ty + " *" + extern_static_getter(index as u32) + "(void) { return (" + ty + " *)&" + def.name + "; }\n");
+    }
+
+    // What C's spelling needs before the functions: the tags, the function pointer types, and
+    // the definitions of the types passed by value; each may add to the next.
+    const definitions = new StringBuilder();
+    var written = 0usize;
+
+    while written < self.tag_definitions.len() {
+      definitions.append(self.tag_definition(self.tag_definitions[written]));
+      written += 1;
+    }
+
+    const typedefs = new StringBuilder();
+
+    for index in 0..self.c_fn_pointers.len() {
+      typedefs.append("typedef " + self.c_fn_pointers[index].replace("(*NAME)", `(*sag_cp${index})`) + ";\n");
+    }
+
+    const tags = new StringBuilder();
+
+    for id in self.used_tags {
+      const layout = self.layouts.structs[id as usize];
+
+      tags.append((if layout.is_union { "union " } else { "struct " }) + self.c_tags.get(id).unwrap_or("") + ";\n");
+    }
+
+    if !tags.is_empty() {
+      out.append(tags.to_string());
+    }
+
+    out.append(typedefs.to_string());
+    out.append(definitions.to_string());
+    out.append(body.to_string());
+
     Some(out.to_string())
+  }
+
+  /// The function C calls with C's types, `name`, which calls the program's function `id`: an
+  /// exported symbol or a trampoline (Q744).
+  prv fn entry_bridge(self, id: u32, function: Function, name: String) -> String {
+    const params = param_types(function);
+    const args: List<String> = new List();
+
+    for index in 0..params.len() {
+      args.push(`a${index}`);
+      self.need_definition(params[index]);
+    }
+
+    self.need_definition(function.ret);
+    self.spelled_return(function.ret) + " " + name + "(" + self.spelled_params(params) + ") " + self.bridge_body(fn_name(id), params, args, function.ret, false)
   }
 
   /// Collects the aggregate types the FFI unit needs: declared when behind a pointer, also defined
@@ -1591,14 +3079,14 @@ class Generator {
       return self.frame_function(id, env, function, signature);
     }
 
-    self.out.append(linkage(function) + signature + " {\n");
+    self.out.append(self.linkage(id, function) + signature + " {\n");
     self.indent = 1;
 
     for index in function.param_count..function.locals.len() {
       const ty = function.locals[index];
       const init = match ty.kind {
         TypeKind::String | TypeKind::Interface(_) | TypeKind::Function { .. } | TypeKind::Struct(_) | TypeKind::Enum(_) | TypeKind::Array { .. } | TypeKind::Option(_)
-          | TypeKind::Result { .. } | TypeKind::Slice { .. } => "{0}",
+          | TypeKind::Result { .. } | TypeKind::Slice { .. } | TypeKind::Tuple(_) => "{0}",
         _ => "0",
       };
 
@@ -1635,7 +3123,7 @@ class Generator {
     }
 
     self.out.append("  default:\n    break;\n  }\n}\n\n");
-    self.out.append(linkage(function) + signature + " {\n");
+    self.out.append(self.linkage(id, function) + signature + " {\n");
     self.indent = 1;
     self.line(`sag_env${env} *sag_f = (sag_env${env} *)l0;`);
     self.line("sag_task_enter();");
@@ -1729,7 +3217,9 @@ class Generator {
           out = out + ".data[sag_index_at(" + self.operand(index) + `, ${len}, __FILE__, __LINE__)]`;
         }
         Projection::ListElem { index, elem } => {
-          out = "(*(" + self.c_type(elem) + " *)sag_list_at(" + out + ", " + self.operand(index) + ", __FILE__, __LINE__))";
+          const elem_type = self.c_type(elem);
+
+          out = "(*(" + elem_type + " *)sag_list_at_sized(" + out + ", " + self.operand(index) + ", sizeof(" + elem_type + "), __FILE__, __LINE__))";
         }
         Projection::Tag => {
           out = out + ".tag";
@@ -2093,7 +3583,11 @@ class Generator {
     match value {
       Rvalue::Use(operand) => self.operand(operand),
       Rvalue::Unary { op, ty: operand_ty, operand } => match op {
-        UnaryOp::Not => "(!" + self.operand(operand) + ")",
+        // On an integer, every bit flipped (docs/adr/0088-bitwise-operators-and-integer-methods.md).
+        UnaryOp::Not => match operand_ty.kind {
+          TypeKind::Int(int_ty) => "((" + int_c_type(int_ty) + ")~" + self.operand(operand) + ")",
+          _ => "(!" + self.operand(operand) + ")",
+        },
         UnaryOp::Neg => match operand_ty.kind {
           TypeKind::Int(int_ty) => "sag_neg_" + types::int_name(int_ty) + "_at(" + self.operand(operand) + ", __FILE__, __LINE__)",
           _ => "(-" + self.operand(operand) + ")",
@@ -2152,7 +3646,8 @@ class Generator {
       Rvalue::Call { callee, args } => self.call(callee, args),
       Rvalue::Closure { function, .. } => "(sag_fnval){(sag_method)" + fn_name(function) + ", NULL}",
       Rvalue::FnValue(function) => `(sag_fnval){(sag_method)sag_wrap_${function}, NULL}`,
-      Rvalue::CFnValue(function) => fn_name(function),
+      // C reaches it through its trampoline (docs/adr/0105-c-types-at-the-ffi-boundary.md, Q744).
+      Rvalue::CFnValue(function) => `sag_cb_${function}`,
       Rvalue::SizeOf(measured) => "sizeof(" + self.c_type(measured) + ")",
       Rvalue::AlignOf(measured) => "_Alignof(" + self.c_type(measured) + ")",
       Rvalue::Zeroed => self.zeroed(ty),
@@ -2171,7 +3666,14 @@ class Generator {
           SliceSource::Slice(slice) => "sag_slice_sub(" + self.operand(slice) + ", " + size + ", " + bounds + ", __FILE__, __LINE__)",
         }
       }
-      Rvalue::ExternFnValue(index) => ffi_name(index as usize),
+      // The C function itself, from the FFI unit.
+      Rvalue::ExternFnValue(index) => {
+        if !self.extern_pointers.contains(index as usize) {
+          self.extern_pointers.push(index as usize);
+        }
+
+        `sag_ffi_${index}_pointer()`
+      }
       Rvalue::Aggregate(parts) => {
         const texts = self.operands(parts);
         const joined = if texts.is_empty() { "0" } else { texts.join(", ") };
@@ -2256,15 +3758,11 @@ class Generator {
 
         "((" + self.method_pointer(function) + ")(" + receiver + `->vtable[${slot}]))(` + texts.join(", ") + ")"
       }
-      Callee::Pointer { .. } => {
-        const pointer = texts.first().unwrap_or("");
-        const rest: List<String> = new List();
+      // A call through a C function pointer is C's, in the FFI unit (Q744).
+      Callee::Pointer { params, ret } => {
+        const index = self.pointer_call(types::of(TypeKind::CFn { is_unsafe: false, params: params, ret: ret }));
 
-        for index in 1..texts.len() {
-          rest.push(texts[index]);
-        }
-
-        "(" + pointer + ")(" + rest.join(", ") + ")"
+        `sag_call_${index}(` + texts.join(", ") + ")"
       }
       _ => {
         // Runtime functions that can panic report the source location.
@@ -2344,6 +3842,18 @@ fn binary(op: BinaryOp, ty: Type, lhs: String, rhs: String) -> String {
     helper = "div";
   } else if op == BinaryOp::Rem {
     helper = "rem";
+  } else if op == BinaryOp::Shl {
+    helper = "shl";
+  } else if op == BinaryOp::Shr {
+    helper = "shr";
+  } else if op == BinaryOp::BitAnd || op == BinaryOp::BitOr || op == BinaryOp::BitXor {
+    // Defined on every value; the cast undoes C's promotion to `int`.
+    const c_ty = match ty.kind {
+      TypeKind::Int(int_ty) => int_c_type(int_ty),
+      _ => "bool",
+    };
+
+    return "((" + c_ty + ")(" + lhs + " " + ast::binary_symbol(op) + " " + rhs + "))";
   } else {
     // Comparisons are defined for every operand value; `&&`/`||` never reach here.
     return "(" + lhs + " " + ast::binary_symbol(op) + " " + rhs + ")";
@@ -2416,6 +3926,10 @@ fn callee_name(callee: Callee) -> String {
         "sag_panic_str_at"
       } else if name == "exit" {
         "sag_process_exit"
+      } else if name == "abort" {
+        "sag_process_abort"
+      } else if name == "Atomic::fence" {
+        "sag_atomic_thread_fence"
       } else if name == "string_from_c" {
         "sag_string_from_c_at"
       } else if name == "CString::new" {
@@ -2506,6 +4020,14 @@ fn constant(value: Const) -> String {
 
 /// A C string literal holding exactly the bytes of `text`. Anything outside printable ASCII
 /// becomes a three-digit octal escape; `?` is escaped to avoid trigraphs.
+/// A constant as the initializer of C storage: a string is a literal, which is never released.
+fn static_initializer(value: Const) -> String {
+  match value {
+    Const::Str(text) => "{(const uint8_t *)" + c_string_literal(text) + `, ${text.len()}, NULL}`,
+    _ => constant(value),
+  }
+}
+
 fn c_string_literal(text: String) -> String {
   const out = new StringBuilder();
 
@@ -2627,9 +4149,50 @@ fn body_passes_c_callbacks(body: List<Stmt>) -> bool {
   false
 }
 
+/// Which C functions of the `extern` blocks the program's functions call or take as values.
+fn used_externs(program: Program) -> List<bool> {
+  const used: List<bool> = new List();
+
+  for _ in 0..program.externs.len() {
+    used.push(false);
+  }
+
+  for function in program.functions {
+    if !function.template {
+      mark_externs(function.body, used);
+    }
+  }
+
+  used
+}
+
+fn mark_externs(body: List<Stmt>, used: List<bool>) {
+  for statement in body {
+    match statement {
+      Stmt::Assign { value, .. } | Stmt::AssignPlace { value, .. } | Stmt::Eval(value) => match value {
+        Rvalue::Call { callee: Callee::Extern(id), .. } | Rvalue::ExternFnValue(id) => {
+          if (id as usize) < used.len() {
+            used[id as usize] = true;
+          }
+        }
+        _ => {}
+      },
+      Stmt::If { then_body, else_body, .. } => {
+        mark_externs(then_body, used);
+        mark_externs(else_body, used);
+      }
+      Stmt::Loop(inner) | Stmt::ForRange { body: inner, .. } | Stmt::ForArray { body: inner, .. } | Stmt::ForText { body: inner, .. } => mark_externs(inner, used),
+      _ => {}
+    }
+  }
+}
+
 fn calls_extern(program: Program, extern_id: u32) -> bool {
   for function in program.functions {
-    if !function.template && body_calls_extern(function.body, extern_id) {
+    if !function.template && body_calls(function.body, (callee) => match callee {
+      Callee::Extern(id) => id == extern_id,
+      _ => false,
+    }) {
       return true;
     }
   }
@@ -2637,15 +4200,29 @@ fn calls_extern(program: Program, extern_id: u32) -> bool {
   false
 }
 
-fn body_calls_extern(body: List<Stmt>, extern_id: u32) -> bool {
+/// Whether a function the program keeps calls the builtin `name`.
+fn calls_builtin(program: Program, name: String) -> bool {
+  for function in program.functions {
+    if !function.template && body_calls(function.body, (callee) => match callee {
+      Callee::Builtin(found) => found == name,
+      _ => false,
+    }) {
+      return true;
+    }
+  }
+
+  false
+}
+
+fn body_calls(body: List<Stmt>, wanted: fn(Callee) -> bool) -> bool {
   for statement in body {
     const found = match statement {
       Stmt::Assign { value, .. } | Stmt::AssignPlace { value, .. } | Stmt::Eval(value) => match value {
-        Rvalue::Call { callee: Callee::Extern(id), .. } => id == extern_id,
+        Rvalue::Call { callee, .. } => wanted(callee),
         _ => false,
       },
-      Stmt::If { then_body, else_body, .. } => body_calls_extern(then_body, extern_id) || body_calls_extern(else_body, extern_id),
-      Stmt::Loop(inner) | Stmt::ForRange { body: inner, .. } | Stmt::ForArray { body: inner, .. } | Stmt::ForText { body: inner, .. } => body_calls_extern(inner, extern_id),
+      Stmt::If { then_body, else_body, .. } => body_calls(then_body, wanted) || body_calls(else_body, wanted),
+      Stmt::Loop(inner) | Stmt::ForRange { body: inner, .. } | Stmt::ForArray { body: inner, .. } | Stmt::ForText { body: inner, .. } => body_calls(inner, wanted),
       _ => false,
     };
 

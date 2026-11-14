@@ -4,20 +4,22 @@
 //! analysis of the document that reached the type checker.
 
 use pkg::ast::Module;
+use pkg::cfg;
 use pkg::lsp::analysis::Analysis;
 use pkg::lsp::json;
 use pkg::lsp::json::{Json, member};
 use pkg::lsp::query;
-use pkg::resolve::{ItemRef, ModuleInfo, Resolution, StdItem, TypeItem};
+use pkg::resolve::{ItemRef, ModuleInfo, ParamOwner, Resolution, StdItem, TypeItem};
 use pkg::types;
 use pkg::types::numbers;
-use pkg::types::{Type, TypeKind};
+use pkg::types::{NamedRef, Type, TypeKind};
 use pkg::types::typed::TypedModule;
 
 /// Kinds of completion items (LSP's `CompletionItemKind`).
 const METHOD: i64 = 2;
 const FUNCTION: i64 = 3;
 const FIELD: i64 = 5;
+const PROPERTY: i64 = 10;
 const VARIABLE: i64 = 6;
 const CLASS: i64 = 7;
 const INTERFACE: i64 = 8;
@@ -28,30 +30,33 @@ const ENUM_MEMBER: i64 = 20;
 const CONSTANT: i64 = 21;
 const STRUCT: i64 = 22;
 
-const KEYWORDS: String = "abstract as async await break class const continue else enum extends extern false fn for if impl in interface let loop match new override pkg prv pub return self Self struct super true union unsafe use var weak where while zod";
+const KEYWORDS: String = "abstract as async await break class const continue else enum extends extern false fn for if impl in interface let loop match new override pkg prv pub return self Self static struct super true union unsafe use var weak where while zod";
 
-const BUILTINS: String = "print println eprintln panic include_str";
+const BUILTINS: String = "print println eprintln panic assert assert_eq assert_ne unreachable todo";
 
 /// The types the language provides (docs/spec/02-types.md).
 const BUILTIN_TYPES: String = "i8 i16 i32 i64 isize u8 u16 u32 u64 usize f32 f64 bool char String StringBuilder List Option Result";
 
-const STD_MODULES: String = "env ffi fs io math mem path process sync task thread time";
+const STD_MODULES: String = "collections env ffi fs hash hint io math mem net path process ptr sync task thread time";
 
 /// The methods of the types the compiler provides (docs/spec/02-types.md).
-const STRING_METHODS: String = "len is_empty contains starts_with ends_with find trim trim_start trim_end to_ascii_uppercase to_ascii_lowercase replace repeat substring chars bytes split lines parse_i8 parse_i16 parse_i32 parse_i64 parse_isize parse_u8 parse_u16 parse_u32 parse_u64 parse_usize parse_f32 parse_f64";
-const LIST_METHODS: String = "len is_empty push pop get first last insert remove clear reverse contains index_of sort sort_by join iter resize as_ptr as_mut_ptr";
-const ARRAY_METHODS: String = "len iter map filter take skip step_by collect count fold for_each any all find as_ptr as_mut_ptr";
-const SLICE_METHODS: String = "len is_empty iter as_ptr as_mut_ptr";
+const STRING_METHODS: String = "len is_empty contains starts_with ends_with find trim trim_start trim_end to_ascii_uppercase to_ascii_lowercase replace repeat substring chars bytes split lines parse_i8 parse_i16 parse_i32 parse_i64 parse_isize parse_u8 parse_u16 parse_u32 parse_u64 parse_usize parse_f32 parse_f64 rfind split_once rsplit_once strip_prefix strip_suffix split_whitespace splitn rsplit matches replacen char_indices to_uppercase to_lowercase";
+const LIST_METHODS: String = "len is_empty push pop get first last insert remove clear reverse contains index_of sort sort_by join iter resize as_ptr as_mut_ptr extend append truncate retain dedup split_off drain binary_search binary_search_by sort_by_key min max fill swap windows chunks concat capacity reserve";
+const ARRAY_METHODS: String = "len iter map filter take skip step_by collect count fold for_each any all find as_ptr as_mut_ptr contains index_of binary_search binary_search_by min max sort sort_by sort_by_key reverse fill swap copy_from_slice";
+const SLICE_METHODS: String = "len is_empty iter as_ptr as_mut_ptr contains index_of binary_search binary_search_by min max sort sort_by sort_by_key reverse fill swap copy_from_slice";
 const POINTER_METHODS: String = "is_null add";
-const OPTION_METHODS: String = "is_some is_none unwrap expect unwrap_or map and_then unwrap_or_else filter";
-const RESULT_METHODS: String = "is_ok is_err unwrap expect unwrap_or unwrap_err map map_err and_then unwrap_or_else";
-const BUILDER_METHODS: String = "append append_char len is_empty clear to_string";
+/// The methods of iterators the compiler gives by the kind of their values.
+const ITER_COMPILER_METHODS: String = "sum product min max unzip flatten";
+
+const OPTION_METHODS: String = "is_some is_none unwrap expect unwrap_or map and_then unwrap_or_else filter ok_or ok_or_else or or_else and xor map_or map_or_else is_some_and is_none_or zip flatten iter unwrap_or_default take replace";
+const RESULT_METHODS: String = "is_ok is_err unwrap expect unwrap_or unwrap_err map map_err and_then unwrap_or_else expect_err ok err and or or_else map_or map_or_else is_ok_and is_err_and iter unwrap_or_default";
+const BUILDER_METHODS: String = "append append_char len is_empty clear to_string insert truncate pop capacity reserve";
 /// The attributes (docs/spec/01-lexical.md#attributes-f1), with what they are written as.
-const ATTRIBUTES: String = "export repr";
+const ATTRIBUTES: String = "cfg default export repr thread_local";
 /// The representations of `@repr(...)`: `C` for structs, unions and enums, an integer type for
 /// enums.
 const REPRESENTATIONS: String = "C i8 i16 i32 i64 isize u8 u16 u32 u64 usize";
-const CHAR_METHODS: String = "is_ascii_digit is_ascii_alphabetic is_ascii_alphanumeric is_ascii_whitespace is_ascii_uppercase is_ascii_lowercase to_ascii_uppercase to_ascii_lowercase to_digit";
+const CHAR_METHODS: String = "is_ascii_digit is_ascii_alphabetic is_ascii_alphanumeric is_ascii_whitespace is_ascii_uppercase is_ascii_lowercase to_ascii_uppercase to_ascii_lowercase to_digit is_alphabetic is_numeric is_alphanumeric is_whitespace is_uppercase is_lowercase is_control to_uppercase to_lowercase len_utf8 len_utf16";
 
 /// The completion items, without repeated labels.
 class Items {
@@ -231,6 +236,11 @@ pub fn complete(analysis: Option<Analysis>, module: Option<Module>, module_index
     return Json::Array(items.list);
   }
 
+  if (separator == '(' || separator == ',' || separator == ' ') && in_cfg(chars, start) {
+    cfg_conditions(items);
+    return Json::Array(items.list);
+  }
+
   // `(` asks only for the argument of an attribute: in a call, the names would cover the code.
   if let Some(character) = trigger {
     if character == "(" || character == "@" {
@@ -245,7 +255,7 @@ pub fn complete(analysis: Option<Analysis>, module: Option<Module>, module_index
     }
 
     if double_colon {
-      path_members(items, found, module_index, path_chain(chars, start - 2));
+      path_members(items, found, module, module_index, path_chain(chars, start - 2), offset);
       return Json::Array(items.list);
     }
 
@@ -255,19 +265,83 @@ pub fn complete(analysis: Option<Analysis>, module: Option<Module>, module_index
   items.add_words(BUILTIN_TYPES, STRUCT);
   items.add_words(KEYWORDS, KEYWORD);
   items.add_words(BUILTINS, FUNCTION);
+  macros(items);
   Json::Array(items.list)
+}
+
+/// The built-in macros, as Rust's (docs/adr/0103-build-scripts-and-binding-generation.md, Q723).
+fn macros(items: Items) {
+  items.add_snippet("include!", FUNCTION, "include!(\"file.sag\"): puts the items of a file in the module", "include!(\"${1:file.sag}\");");
+  items.add_snippet("include_str!", FUNCTION, "include_str!(\"file\"): the text of a file, read when the program is compiled", "include_str!(\"${1:file}\")");
+  items.add_snippet("include_bytes!", FUNCTION, "include_bytes!(\"file\"): the bytes of a file, as a `[u8; N]`", "include_bytes!(\"${1:file}\")");
+  items.add_snippet("concat!", FUNCTION, "concat!(a, b, ...): literals joined into one string literal", "concat!(${1})");
+  items.add_snippet("env!", FUNCTION, "env!(\"NAME\"): an environment variable of the compiler, read when the program is compiled", "env!(\"${1:NAME}\")");
 }
 
 // ---- Attributes -------------------------------------------------------------------------------
 
 fn attributes(items: Items) {
   for name in ATTRIBUTES.split(" ") {
-    if name == "export" {
+    if name == "cfg" {
+      items.add_snippet(name, KEYWORD, "@cfg(condition): keeps the item only on the systems where the condition holds", "cfg(${1:windows})");
+    } else if name == "export" {
       items.add_snippet(name, KEYWORD, "@export(\"symbol\"): the C symbol of an `extern \"C\"` function", "export(\"${1:symbol}\")");
-    } else {
+    } else if name == "default" {
+      items.add_snippet(name, KEYWORD, "@default on a struct or enum, and before the default variant: implements `Default`", "default");
+    } else if name == "repr" {
       items.add_snippet(name, KEYWORD, "@repr(C) on structs, unions and enums, or an integer type on enums", "repr(${1:C})");
+    } else {
+      items.add_snippet(name, KEYWORD, "@thread_local on a `static var`: one value per thread", "thread_local");
     }
   }
+}
+
+/// The conditions of `@cfg(...)` (docs/adr/0085-conditional-compilation-and-std-time.md): the
+/// names, the names with a value, whose values are a choice, and the combinations.
+fn cfg_conditions(items: Items) {
+  items.add_words(cfg::NAMES, ENUM_MEMBER);
+
+  for key in cfg::KEYS.split(" ") {
+    const choice = cfg::values(key).split(" ").join(",");
+
+    items.add_snippet(key, PROPERTY, key + " = \"...\": one of " + cfg::values(key).split(" ").join(", "), key + " = \"${1|" + choice + "|}\"");
+  }
+
+  for combinator in cfg::COMBINATORS.split(" ") {
+    const what = if combinator == "all" { "every condition holds" } else if combinator == "any" { "one condition holds" } else { "the condition does not hold" };
+
+    items.add_snippet(combinator, FUNCTION, combinator + "(...): " + what, combinator + "(${1})");
+  }
+}
+
+/// Whether `start`, on its line, is inside the parentheses of an `@cfg(`.
+fn in_cfg(chars: List<char>, start: usize) -> bool {
+  var index = start;
+  var depth = 0i32;
+
+  while index > 0 {
+    const previous = chars.get(index - 1).unwrap_or(' ');
+
+    if previous == '\n' {
+      return false;
+    }
+
+    if previous == ')' {
+      depth += 1;
+    } else if previous == '(' {
+      if depth == 0 && attribute_before(chars, index - 1) == "cfg" {
+        return true;
+      }
+
+      if depth > 0 {
+        depth -= 1;
+      }
+    }
+
+    index -= 1;
+  }
+
+  false
 }
 
 /// The name of the attribute written as `@name` right before the `(` at `paren`, or `""`.
@@ -298,6 +372,7 @@ fn item_kind(item: ItemRef) -> i64 {
     ItemRef::Fn(_) => FUNCTION,
     ItemRef::Extern(_) => FUNCTION,
     ItemRef::Const(_) => CONSTANT,
+    ItemRef::Static(_) => VARIABLE,
     ItemRef::Type(TypeItem::Struct(_)) => STRUCT,
     ItemRef::Type(TypeItem::Enum(_)) => ENUM,
     ItemRef::Type(TypeItem::Class(_)) => CLASS,
@@ -313,7 +388,7 @@ fn item_detail(analysis: Analysis, item: ItemRef) -> String {
   match item {
     ItemRef::Fn(id) => query::signature(analysis, id).unwrap_or(""),
     // Module-level constants, the globals of a program, with their types.
-    ItemRef::Const(_) => query::item_text(analysis, item).unwrap_or(""),
+    ItemRef::Const(_) | ItemRef::Static(_) => query::item_text(analysis, item).unwrap_or(""),
     _ => "",
   }
 }
@@ -404,7 +479,7 @@ fn names(items: Items, analysis: Analysis, module: Option<Module>, module_index:
 // ---- Paths ------------------------------------------------------------------------------------
 
 /// The items after `a::b::`.
-fn path_members(items: Items, analysis: Analysis, module_index: Option<usize>, chain: List<String>) {
+fn path_members(items: Items, analysis: Analysis, module: Option<Module>, module_index: Option<usize>, chain: List<String>, offset: u32) {
   const resolution = match analysis.resolution {
     Some(found) => found,
     None => return,
@@ -417,6 +492,52 @@ fn path_members(items: Items, analysis: Analysis, module_index: Option<usize>, c
   if first == "std" && chain.len() == 1 {
     items.add_words(STD_MODULES, MODULE);
     return;
+  }
+
+  // `i32::MAX` (docs/adr/0088-bitwise-operators-and-integer-methods.md, Q581).
+  if chain.len() == 1 && types::int_from_name(first).is_some() {
+    items.add_words("MIN MAX", CONSTANT);
+    items.add_words("default from try_from " + numbers::INT_STATICS, FUNCTION);
+    return;
+  }
+
+  // The conversions of the prelude (docs/adr/0094-conversions-and-defaults.md, Q632 and Q634).
+  if chain.len() == 1 && (first == "f32" || first == "f64") {
+    items.add_words("default from", FUNCTION);
+    return;
+  }
+
+  if chain.len() == 1 && first == "String" {
+    items.add_words("default from from_utf8 from_utf8_lossy from_utf16", FUNCTION);
+    return;
+  }
+
+  if chain.len() == 1 && first == "char" {
+    items.add_words("default from from_digit from_u32 try_from", FUNCTION);
+    return;
+  }
+
+  // `Self::`: what `Type::` names, for the type whose function holds the cursor
+  // (docs/adr/0099-associated-and-composite-constants.md, Q687).
+  if chain.len() == 1 && first == "Self" {
+    if let Some(found_module) = module {
+      if let Some(function) = query::enclosing_function(analysis, found_module, offset) {
+        if let Some(item) = resolution.owner(function) {
+          type_functions(items, analysis, item);
+        }
+      }
+    }
+
+    return;
+  }
+
+  // `T::`: the static functions of the interfaces bounding a type parameter in scope
+  // (docs/adr/0094-conversions-and-defaults.md, Q631).
+  if chain.len() == 1 {
+    if let Some(ty) = param_in_scope(analysis, module, first, offset) {
+      interface_statics(items, analysis, ty);
+      return;
+    }
   }
 
   // The module the path starts from.
@@ -476,6 +597,18 @@ fn path_members(items: Items, analysis: Analysis, module_index: Option<usize>, c
         };
 
         add_module_items(items, analysis, info, !own);
+
+        // The functions the compiler provides to modules of `std`.
+        if info.in_std && info.path.len() == 2 {
+          if info.path[1] == "mem" {
+            items.add_words("size_of align_of zeroed", FUNCTION);
+          } else if info.path[1] == "hint" {
+            items.add("black_box", FUNCTION, "fn black_box<T>(value: T) -> T");
+          } else if info.path[1] == "process" {
+            items.add("exit", FUNCTION, "fn exit(code: i32)");
+            items.add("abort", FUNCTION, "fn abort()");
+          }
+        }
       }
     }
     Some(ItemRef::Type(item)) => type_functions(items, analysis, item),
@@ -483,7 +616,8 @@ fn path_members(items: Items, analysis: Analysis, module_index: Option<usize>, c
   }
 }
 
-/// The functions of a type without `self`, and an enum's variants: what `Type::` names.
+/// The functions of a type without `self`, its constants, and an enum's variants: what `Type::`
+/// names.
 fn type_functions(items: Items, analysis: Analysis, item: TypeItem) {
   const package = match analysis.package {
     Some(found) => found,
@@ -502,10 +636,102 @@ fn type_functions(items: Items, analysis: Analysis, item: TypeItem) {
     }
   }
 
-  for function in functions_of(resolution, item) {
+  // Its constants (docs/adr/0099-associated-and-composite-constants.md, Q687).
+  for id in resolution.type_consts(item) {
+    if let Some(decl) = resolution.const_decl(package, id) {
+      const detail = match analysis.typed {
+        Some(typed) => match typed.const_types.get(id as usize) {
+          Some(ty) => "const " + decl.name.name + ": " + types::text(ty),
+          None => "",
+        },
+        None => "",
+      };
+
+      items.add(decl.name.name, CONSTANT, detail);
+    }
+  }
+
+  // An interface's static functions are called through the types implementing it.
+  if let TypeItem::Interface(_) = item {
+    return;
+  }
+
+  const found = functions_of(resolution, item);
+
+  add_block_functions(found, resolution, item);
+
+  for function in found {
     if let Some(decl) = resolution.fn_decl(package, function) {
       if decl.self_param.is_none() {
         items.add(decl.name.name, FUNCTION, query::signature(analysis, function).unwrap_or(""));
+      }
+    }
+  }
+
+  // The defaults of the static functions of its interfaces.
+  if let Some(typed) = analysis.typed {
+    const name = resolution.type_name(package, item);
+    const args = typed.identity_args(ParamOwner::Item(item));
+    const ty = match item {
+      TypeItem::Struct(id) => types::of(TypeKind::Struct(NamedRef { id: id, name: name, args: args })),
+      TypeItem::Enum(id) => types::of(TypeKind::Enum(NamedRef { id: id, name: name, args: args })),
+      TypeItem::Class(id) => types::of(TypeKind::Class(NamedRef { id: id, name: name, args: args })),
+      TypeItem::Interface(_) => return,
+    };
+
+    interface_statics(items, analysis, ty);
+  }
+}
+
+/// The type parameter `name` of the function around `offset` or of its type.
+fn param_in_scope(analysis: Analysis, module: Option<Module>, name: String, offset: u32) -> Option<Type> {
+  const typed = analysis.typed?;
+  const resolution = analysis.resolution?;
+  const function = query::enclosing_function(analysis, module?, offset)?;
+  const owners = List::from([ParamOwner::Fn(function)]);
+
+  if let Some(item) = resolution.owner(function) {
+    owners.push(ParamOwner::Item(item));
+  }
+
+  for owner in owners {
+    if let Some(params) = typed.generic_params(owner) {
+      for index in 0..params.len() {
+        if params[index].name == name {
+          return typed.identity_args(owner).get(index);
+        }
+      }
+    }
+  }
+
+  None
+}
+
+/// The static functions of the interfaces `ty` implements or is bounded by, and their ancestors.
+fn interface_statics(items: Items, analysis: Analysis, ty: Type) {
+  const typed = match analysis.typed {
+    Some(found) => found,
+    None => return,
+  };
+  const resolution = match analysis.resolution {
+    Some(found) => found,
+    None => return,
+  };
+  const package = match analysis.package {
+    Some(found) => found,
+    None => return,
+  };
+
+  for implemented in typed.implemented_refs(ty) {
+    for interface_ref in typed.interface_ancestor_refs(implemented) {
+      if let Some(def) = typed.interface_def(interface_ref.id) {
+        for method in def.methods {
+          if let Some(decl) = resolution.fn_decl(package, method) {
+            if decl.self_param.is_none() {
+              items.add(decl.name.name, FUNCTION, query::signature(analysis, method).unwrap_or(""));
+            }
+          }
+        }
       }
     }
   }
@@ -643,6 +869,12 @@ fn fields_of(typed: TypedModule, ty: Type) -> List<FieldItem> {
         }
       }
     }
+    // The elements of a tuple, by their indices (docs/adr/0092-tuples.md, Q615).
+    TypeKind::Tuple(elems) => {
+      for index in 0..elems.len() {
+        found.push(FieldItem { name: `${index}`, ty: elems[index] });
+      }
+    }
     _ => {}
   }
 
@@ -737,6 +969,31 @@ fn members(items: Items, analysis: Analysis, reference: Type) {
 
   for found in numbers::methods_of(ty) {
     items.add(found.name, METHOD, numbers::signature(found));
+  }
+
+  // The conversions to bytes, written in the prelude (docs/adr/0101-the-rest-of-s2.md, Q702).
+  if let TypeKind::Int(int_ty) = ty.kind {
+    for name in numbers::BYTE_METHODS.split(" ") {
+      if let Some(function) = resolution.prelude_fn("int_" + name + "_" + types::int_name(int_ty)) {
+        items.add(name, METHOD, query::signature(analysis, function).unwrap_or("").replace("value: " + types::int_name(int_ty), "self"));
+      }
+    }
+  }
+
+  // The methods of iterators the compiler gives by the kind of their values
+  // (docs/adr/0093-everyday-methods.md, Q626).
+  if typed.iter_elem(ty).is_some() {
+    items.add_words(ITER_COMPILER_METHODS, METHOD);
+  }
+
+  // `Into` and `TryInto`, which every value has (docs/adr/0094-conversions-and-defaults.md, Q633).
+  items.add("into", METHOD, "fn into(self) -> U");
+  items.add("try_into", METHOD, "fn try_into(self) -> Result<U, E>");
+
+  // `Display` of numbers, `bool`, `char` and `String` (docs/adr/0089-display-debug-and-format-specifiers.md).
+  match ty.kind {
+    TypeKind::Int(_) | TypeKind::Float(_) | TypeKind::Bool | TypeKind::Char | TypeKind::String => items.add("to_string", METHOD, "fn to_string(self) -> String"),
+    _ => {}
   }
 
   const builtin = match ty.kind {

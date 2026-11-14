@@ -1,0 +1,13 @@
+// A static that needs its own value to be computed panics, naming it
+// (docs/adr/0083-global-state.md, Q527).
+// expect-panic: the static `FIRST` was used while its value was being computed
+static FIRST: i32 = SECOND + 1;
+static SECOND: i32 = twice_first();
+
+fn twice_first() -> i32 {
+  FIRST * 2
+}
+
+fn main() {
+  println(f"{FIRST}");
+}

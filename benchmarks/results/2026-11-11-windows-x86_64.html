@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sagitario benchmarks</title>
+<style>
+:root { --bg: #0f1420; --fg: #e8ecf4; --muted: #8b93a7; --track: #1d2433; }
+@media (prefers-color-scheme: light) { :root { --bg: #f6f7fb; --fg: #161a24; --muted: #5b6275; --track: #e3e6ee; } }
+body { margin: 0; padding: 24px 16px; background: var(--bg); color: var(--fg); font: 15px/1.4 system-ui, sans-serif; }
+main { max-width: 860px; margin: 0 auto; } h1 { font-size: 22px; margin: 0 0 4px; } p { color: var(--muted); margin: 0 0 20px; }
+section { margin: 0 0 28px; } h2 { font-size: 17px; margin: 0 0 10px; }
+.row { display: grid; grid-template-columns: 96px 1fr 92px; gap: 10px; align-items: center; margin: 6px 0; }
+.track { background: var(--track); border-radius: 6px; height: 18px; overflow: hidden; } .bar { height: 100%; width: 0; border-radius: 6px; }
+.time { font-variant-numeric: tabular-nums; color: var(--muted); text-align: right; } button { font: inherit; padding: 6px 14px; border-radius: 6px; border: 1px solid var(--muted); background: transparent; color: var(--fg); cursor: pointer; }
+</style>
+</head>
+<body>
+<main>
+<h1>The race of the languages</h1>
+<p>2026-11-11-windows-x86_64.json: the median time of each program. The fastest arrives in 1 s, the others in proportion; the race stops at 8 s.</p>
+<p><button id="replay">Replay</button></p>
+<div id="heats"></div>
+</main>
+<script>
+const END = 8.0;
+const heats = [
+  {"name": "map-count", "runners": [{"name": "Sagitario", "color": "#8b5cf6", "median": 0.181646, "arrival": 3.2184, "label": "181.6 ms"}, {"name": "Rust", "color": "#dea584", "median": 0.056529, "arrival": 1.0016, "label": "56.5 ms"}, {"name": "C", "color": "#5c7cfa", "median": 0.056439, "arrival": 1.0000, "label": "56.4 ms"}]},
+  {"name": "word-count", "runners": [{"name": "Sagitario", "color": "#8b5cf6", "median": 0.337448, "arrival": 5.0049, "label": "337.4 ms"}, {"name": "Rust", "color": "#dea584", "median": 0.067424, "arrival": 1.0000, "label": "67.4 ms"}, {"name": "C", "color": "#5c7cfa", "median": 0.111404, "arrival": 1.6523, "label": "111.4 ms"}]}
+];
+const root = document.getElementById('heats');
+const rows = [];
+for (const heat of heats) {
+  const section = document.createElement('section');
+  const title = document.createElement('h2');
+  title.textContent = heat.name;
+  section.append(title);
+  for (const runner of heat.runners) {
+    const row = document.createElement('div');
+    row.className = 'row';
+    const name = document.createElement('div');
+    name.textContent = runner.name;
+    const track = document.createElement('div');
+    track.className = 'track';
+    const bar = document.createElement('div');
+    bar.className = 'bar';
+    bar.style.background = runner.color;
+    track.append(bar);
+    const time = document.createElement('div');
+    time.className = 'time';
+    row.append(name, track, time);
+    section.append(row);
+    rows.push({ runner, bar, time });
+  }
+  root.append(section);
+}
+let start = 0;
+function frame(now) {
+  const t = (now - start) / 1000;
+  for (const { runner, bar, time } of rows) {
+    const done = Math.min(t / runner.arrival, 1);
+    bar.style.width = (done * 100) + '%';
+    if (t >= runner.arrival) { time.textContent = runner.label; }
+    else if (t >= END) { time.textContent = runner.label + ' (' + (runner.arrival / 1).toFixed(0) + 'x)'; }
+    else { time.textContent = ''; }
+  }
+  if (t < END) { requestAnimationFrame(frame); }
+}
+function play() { start = performance.now(); requestAnimationFrame(frame); }
+document.getElementById('replay').addEventListener('click', play);
+play();
+</script>
+</body>
+</html>

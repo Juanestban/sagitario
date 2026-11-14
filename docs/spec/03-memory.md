@@ -10,7 +10,8 @@
 | Identity | None | Yes (`==` is identity) |
 | Inheritance | No (may implement interfaces) | Single inheritance |
 
-`new` is only valid with classes, so `new` always means "ARC heap allocation".
+`new` is only valid with classes, so `new` always means "ARC heap allocation". Enums, tuples
+and arrays are value types too ([types](02-types.md#tuples-s2)).
 
 ## Automatic Reference Counting (F2)
 
@@ -20,9 +21,9 @@
   tracing garbage collector and no pauses.
 - Reference cycles are not collected. `weak` references break cycles; a `weak` reference
   does not keep its target alive (see [classes](04-classes.md#weak-references)).
-- When the last reference to an instance goes away, its fields are released; there are no
-  destructors in the MVP. Chains of instances (a long linked list) are destroyed iteratively,
-  without exhausting the stack.
+- When the last reference to an instance goes away, its fields are released, after its
+  [`drop`](04-classes.md#drop) when the class implements `Drop`. Chains of instances (a long
+  linked list) are destroyed iteratively, without exhausting the stack.
 - Class instances are compared with `==`/`!=` by identity (the same instance).
 - Reference counting is **non-atomic**, except in programs using `std::thread` (F4), where
   every count is atomic ([ADR-0045](../adr/0045-threads-and-send.md)).
@@ -40,6 +41,10 @@ total += x;
 - There is no `mut`, and `let` only appears in `if let` and `while let`
   ([control flow](06-control-flow.md#if-let-and-while-let)).
 - The type annotation is optional: `const x: i64 = 5;` or `const x = 5;`.
+- A tuple pattern declares a binding for each name in it, `const (q, r) = divmod(a, b);`, with
+  `_` and `..` for elements left unnamed; its parts must always match (names, `_`, `..` and
+  tuple patterns of them), and an annotation, if any, is the type of the whole:
+  `var (low, high): (i32, i32) = (0, 9);` ([ADR-0092](../adr/0092-tuples.md)).
 - A binding may be declared without a value (`var x: i32;`) if the compiler can prove it is
   assigned before every use (*definite assignment*); a `const` declared this way must be
   assigned exactly once. Reading a possibly unassigned binding is an error.
@@ -52,29 +57,179 @@ total += x;
 
 ## Module-level constants
 
-Rationale: [ADR-0049](../adr/0049-self-hosting-plan-and-language-prerequisites.md).
+Rationale: [ADR-0049](../adr/0049-self-hosting-plan-and-language-prerequisites.md),
+[ADR-0104](../adr/0104-include-str-as-a-macro.md).
 
 ```sag
 pub const MAX_USERS: i32 = 100;
 const TIMEOUT_MS: u64 = 60 * 1_000;
 const LIMIT: i64 = MAX_USERS as i64 * 2;
 const GREETING: String = "hello, " + "world";
-const RUNTIME: String = include_str("../runtime/runtime.c");
+const RUNTIME: String = include_str!("../runtime/runtime.c");
 ```
 
 - A constant is an item: `pub` exports it, `use` imports it, and `limits::MAX_USERS` names it
-  in full. Its type is always written, and is an integer, a float, `bool`, `char` or `String`.
+  in full. Its type is always written, and is an integer, a float, `bool`, `char` or `String`,
+  or a struct, an enum, an array or a tuple of such types ([below](#composite-constants)).
 - The compiler computes its value from literals, other constants, unary `-` and `!`, the
-  arithmetic operators (`+` also joins strings), comparisons, `&&`, `||`, `as` between primitive
-  types and `include_str`. A constant cannot need its own value.
+  arithmetic operators (`+` also joins strings), the bitwise operators and shifts, comparisons,
+  `&&`, `||` and `as` between primitive types. The [built-in macros](09-modules.md#built-in-macros-s4)
+  are literals by then (`include_str!`, `concat!`, `env!`). A constant cannot need its own value.
+  A constant shifted by its width or more is an error.
 - A value outside its type, an integer division by zero, a float literal too large for its type
   (`1e39` as `f32`), or any other expression (a call, a lambda, `new`) is an error.
 - Float arithmetic follows IEEE-754: a constant may be infinite or NaN (`1.0 / 0.0`, `0.0 / 0.0`),
   and every comparison with NaN is false except `!=`
   ([ADR-0076](../adr/0076-std-math-and-methods-of-numbers.md)).
-- `include_str("path")` is the text of a file, as a `String`. It is only valid in the value of
-  a module-level constant; the path is a string literal relative to the directory of the
-  source file, and the file must be UTF-8. The file is read when the program is compiled.
+
+### Composite constants
+
+Rationale: [ADR-0099](../adr/0099-associated-and-composite-constants.md), Q685 and Q686, as Rust's
+`const` items without `const fn`.
+
+```sag
+struct Point {
+  pub x: i32;
+  pub y: i32;
+}
+
+const ORIGIN: Point = Point { x: 0, y: 0 };
+const PRIMES: [u32; 4] = [2, 3, 5, 7];
+const FALLBACK: (Option<i32>, String) = (None, "none");
+const LAST: u32 = PRIMES[3] * 2;              // 14
+```
+
+- A constant may be a struct, an enum, `Option`, `Result`, an array or a tuple whose parts are
+  constants, written as literals: a struct literal naming every field (without `..base`), a
+  variant with or without fields (`Shape::Circle(2.5)`, `Some(3)`, `Shape::Rect { w: 1, h: 2 }`),
+  `[a, b]` and `[value; count]`, and `(a, b)`. Its value is checked as any expression of its type
+  (the fields, their privacy, the type arguments of a generic struct), outside any type: a
+  literal of a struct with a private field is an error (`E0205`).
+- A part of a constant is a constant: `ORIGIN.x`, `FALLBACK.0`, and `PRIMES[3]` with a constant
+  index; an index outside the array is an error (`index out of bounds`).
+- Classes, `List`, `Map`, slices, references, raw pointers and function values cannot be parts of
+  a constant (`E0334`): `new` creates them, or they point to memory. There are no calls.
+  Operators apply to the primitive parts only: `ORIGIN == ORIGIN` is an error.
+- Each use of a composite constant is a copy of its value, as any value of a struct.
+
+### Constants of types
+
+Rationale: [ADR-0099](../adr/0099-associated-and-composite-constants.md), Q683 and Q684, as Rust's
+associated constants.
+
+```sag
+pub struct Ipv4Addr {
+  prv bytes: [u8; 4];
+
+  pub const LOCALHOST: Ipv4Addr = Ipv4Addr { bytes: [127, 0, 0, 1] };
+  pub const UNSPECIFIED: Self = Self { bytes: [0; 4] };
+}
+
+class Server {
+  pub const name: String;                 // a field: no value
+  pub const DEFAULT_PORT: u16 = 8080;     // a constant of the class
+
+  pub fn new(self, name: String) {
+    self.name = name;
+  }
+}
+
+const ip = Ipv4Addr::LOCALHOST;
+```
+
+- `pub const NAME: Type = value;` or `prv const NAME: Type = value;` in the body of a struct, an
+  enum or a class declares a constant of the type, with the rules of the constants above. Its
+  value is what tells it from a field of a class, which never has one; any other member with a
+  value (`pub var count: i32 = 0;`, a field of a struct) is an error (`E0100`).
+- It is named through its type, `Ipv4Addr::LOCALHOST`, or `Self::LOCALHOST` inside it, and
+  from another module as any item of the type (`net::Ipv4Addr::LOCALHOST`). Through a value
+  (`ip.LOCALHOST`) it is an error (`E0316`). A `prv` one is reached only inside the type
+  (`E0205`), and its value, checked inside the type, may build the type's private fields.
+- It shares the namespace of the type's fields, functions and variants (`E0201`). A subclass
+  does not inherit the constants of its classes: `Derived::SIZE` is an error that names the class
+  declaring it.
+- A generic type and an interface cannot declare constants yet (`E0900`).
+
+## Global state (G1)
+
+Rationale: [ADR-0083](../adr/0083-global-state.md).
+
+```sag
+use std::sync::{AtomicI64, Mutex, Ordering};
+
+pub static WIDTH: i32 = 640;
+static FRAMES: AtomicI64 = new AtomicI64(0);
+static NAMES: Mutex<String> = new Mutex(load_names());
+
+fn frame() {
+  FRAMES.fetch_add(1, Ordering::Relaxed);
+  NAMES.update((names) => names + ",");
+}
+```
+
+- `static NAME: Type = value;` at module level declares one value for the whole program, as
+  Rust's `static`. Like a constant it is an item: `pub` exports it, `use` imports it, and
+  `config::WIDTH` names it in full. Its type is always written.
+- Every thread can read a static, so its type must be `Send`
+  ([`Send`](05-interfaces-generics.md#send-f4)): primitives, `String`, structs and enums of `Send`
+  values, classes whose fields are all `const` and `Send`, `Mutex<T>`, the atomics and `Channel<T>`.
+  A `List`, a `Map` or a class with `var` fields is an error (`E0332`).
+- A static cannot be assigned (`E0307`), nor its fields, nor can a method that modifies `self`
+  be called on it (`E0312`, `E0313`). Its value changes only through its own methods, such as
+  those of an atomic or a `Mutex`: `FRAMES.fetch_add(1, Ordering::Relaxed)`.
+- The value is any expression, computed **on the first use** of the static, exactly once even
+  when several threads reach it at once: the others wait for it. A static that needs its own value
+  while it is being computed, directly or through other statics or functions, panics naming it. A
+  static computed from literals and constants, of a primitive type or `String`, keeps no state.
+- Reading a static gives its value, as reading a `const` binding does: a struct is copied, and a
+  class instance or `Mutex` is the same object every time. `&NAME` lends it, and `&raw const NAME`
+  gives its address, which is the same for the whole program.
+- Its value lives until the program ends and is never released while it runs.
+- A static is not a constant: a module-level `const` cannot use one (`E0334`).
+- `static var NAME: Type = value;` is a mutable global, as Rust's `static mut`: every thread
+  and C can reach it at once, and the compiler cannot tell, so reading it, assigning it
+  (`NAME = value`, `NAME += 1`) and changing its parts or calling its methods happen only inside
+  `unsafe` (`E0323`). Its type needs not be `Send`. Its value is computed as a static's.
+- As in Rust 2024, `&NAME` and `&mut NAME` of a `static var`, or of a part of one, are errors
+  (`E0340`): it could change while lent. Copy its value in `unsafe`, or take its address with
+  `&raw const NAME` or `&raw mut NAME`, which is safe; using the pointer is not
+  ([raw pointers](10-ffi.md#raw-pointers)).
+
+```sag
+use std::ffi::c_int;
+
+static var COMPARISONS: i32 = 0;
+
+/// Called by C's `qsort`, which passes no context.
+extern "C" fn by_value(a: &i32, b: &i32) -> c_int {
+  unsafe { COMPARISONS += 1; }
+  *a - *b
+}
+```
+
+- `@thread_local static var NAME: Type = value;` gives each thread its own value, as Rust's
+  `thread_local!`: it is computed on the first use in each thread, as a static's is in the
+  program, and read, assigned and changed without `unsafe`, since no other thread sees it. Its
+  type needs not be `Send`. A `var` takes the role of Rust's `Cell` and `RefCell`.
+- A thread's value is released when the thread ends, and the main thread's when the program
+  ends. A thread that C started, outside `std::thread`, does not release its values.
+- `&NAME` and `&mut NAME` of a `@thread_local static var`, or of a part of one, are errors
+  (`E0340`): any function the thread calls could change it while lent. Its methods are called
+  on it in place: `SCRATCH.push(x)`. `&raw const NAME` gives the address of the calling thread's
+  value.
+- `@thread_local` applies only to `static var` (`E0105`): a `static` never changes, so one
+  value serves every thread.
+
+```sag
+/// One per thread, used without locks.
+@thread_local
+static var SCRATCH: List<f32> = new List();
+
+fn frame() {
+  SCRATCH.clear();
+  SCRATCH.push(0.5);
+}
+```
 
 ## Struct mutability (F1)
 
@@ -121,8 +276,10 @@ struct Point impl Display {
   `pub` or `prv`, as in classes. `prv` means visible only inside the struct.
 - A struct literal `Point { ... }` is only valid where **all** its fields are accessible.
   Structs with `prv` fields are built from outside through a static function.
-- A struct literal initializes every field exactly once, in any order; there are no default
-  values and no `..base` syntax. `Point { x, y }` is shorthand for `Point { x: x, y: y }`.
+- A struct literal initializes every field exactly once, in any order, or takes the fields it
+  does not write from a base, `..base` ([struct update](05-interfaces-generics.md#defaults));
+  fields have no default values of their own. `Point { x, y }` is shorthand for
+  `Point { x: x, y: y }`.
 - Fields and functions of a struct share one namespace: a field and a method cannot have the
   same name.
 - Structs are copied when assigned, passed or returned; copying retains the `String`s they
@@ -137,7 +294,8 @@ struct Point impl Display {
 ## Static functions (F1)
 
 - A function declared inside a `struct`, `enum` or `class` without a `self` parameter is
-  **static** and is called as `Type::name(...)`. There is no `static` keyword.
+  **static** and is called as `Type::name(...)`. The keyword `static` declares module-level
+  [statics](#global-state-g1), not members of types.
 - Methods are called on a value, `p.len()`; static functions only through the type,
   `Point::origin()`. Calling a static function as `p.origin()` or a method as `Point::len(p)`
   is an error.
@@ -147,8 +305,7 @@ struct Point impl Display {
 - In classes, `new` is the special initializer, declared `fn new(self, ...)` (see
   [classes](04-classes.md#construction)), and can only be invoked through
   `new ClassName(...)`, never as `ClassName::new(...)`.
-- There are no static fields and no mutable global variables in the MVP; use module-level
-  `const`.
+- Types have no static fields: a module holds [statics](#global-state-g1) instead, as in Rust.
 
 ## Class field mutability (F2)
 

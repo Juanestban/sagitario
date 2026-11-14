@@ -1,0 +1,130 @@
+// Bounded channels, `try_send`, `try_receive` and `receive_timeout`
+// (docs/adr/0098-locks-orderings-and-threads.md, Q675). The harness runs it with ThreadSanitizer
+// where the C compiler has it, and fails it on any leak.
+// sanitize: thread
+// expect-stdout: bounded: Ok Ok Full(3) | 1 Ok | 2 4
+// expect-stdout: empty: Empty | closed: Closed(9) 5 Closed
+// expect-stdout: timeout: Timeout | 7 | Closed
+// expect-stdout: one at a time: 1000 values adding up to 500500, in order: true
+// expect-stdout: rendezvous: Full(5) | taken: Empty | handed: 5 | 100 values adding up to 5050
+
+use std::sync::{Channel, ReceiveTimeoutError, TryReceiveError, TrySendError};
+use std::thread;
+use std::time::Duration;
+
+fn sent(result: Result<(), TrySendError<i32>>) -> String {
+  match result {
+    Ok(_) => "Ok",
+    Err(error) => f"{error:?}",
+  }
+}
+
+fn received(result: Result<i32, TryReceiveError>) -> String {
+  match result {
+    Ok(value) => f"{value}",
+    Err(error) => f"{error:?}",
+  }
+}
+
+fn waited(result: Result<i32, ReceiveTimeoutError>) -> String {
+  match result {
+    Ok(value) => f"{value}",
+    Err(error) => f"{error:?}",
+  }
+}
+
+fn main() {
+  // A channel holding two values at most gives the third back.
+  const pair: Channel<i32> = Channel::bounded(2);
+
+  print(f"bounded: {sent(pair.try_send(1))} {sent(pair.try_send(2))} {sent(pair.try_send(3))} | ");
+  print(f"{received(pair.try_receive())} {sent(pair.try_send(4))} | ");
+  println(f"{received(pair.try_receive())} {received(pair.try_receive())}");
+
+  // Nothing to receive yet, then closed: what was sent before is still received.
+  const once: Channel<i32> = new Channel();
+
+  print(f"empty: {received(once.try_receive())} | ");
+  once.send(5);
+  once.close();
+  println(f"closed: {sent(once.try_send(9))} {received(once.try_receive())} {received(once.try_receive())}");
+
+  // Nobody sends in time; then a value comes from another thread; then the channel is closed.
+  const late: Channel<i32> = new Channel();
+
+  print(f"timeout: {waited(late.receive_timeout(Duration::from_millis(20)))} | ");
+
+  const sender = thread::spawn(() => {
+    thread::sleep(Duration::from_millis(5));
+    late.send(7);
+  });
+
+  print(f"{waited(late.receive_timeout(Duration::from_secs(10)))} | ");
+  sender.join();
+  late.close();
+  println(waited(late.receive_timeout(Duration::from_secs(10))));
+
+  // A producer that waits for room after each value.
+  const narrow: Channel<i64> = Channel::bounded(1);
+  const producer = thread::spawn(() => {
+    for value in 1i64..=1000 {
+      narrow.send(value);
+    }
+
+    narrow.close();
+  });
+  var count = 0;
+  var sum = 0i64;
+  var ordered = true;
+
+  for value in narrow.iter() {
+    count += 1;
+    sum += value;
+    ordered = ordered && value == count as i64;
+  }
+
+  producer.join();
+  println(f"one at a time: {count} values adding up to {sum}, in order: {ordered}");
+
+  // With capacity 0, a value is handed over: `try_send` needs a receiver waiting, and `send`
+  // returns once a receiver took the value.
+  const hand: Channel<i32> = Channel::bounded(0);
+
+  print(f"rendezvous: {sent(hand.try_send(5))} | ");
+
+  const taker = thread::spawn(() => hand.receive());
+
+  hand.send(1);
+  print(f"taken: {received(hand.try_receive())} | ");
+  taker.join();
+
+  const waiter = thread::spawn(() => hand.receive());
+
+  while hand.try_send(5).is_err() {
+    thread::sleep(Duration::from_millis(1));
+  }
+
+  print(f"handed: {waiter.join().unwrap()} | ");
+
+  const consumer = thread::spawn(() => {
+    var total = 0;
+    var values = 0;
+
+    for value in hand.iter() {
+      total += value;
+      values += 1;
+    }
+
+    (values, total)
+  });
+
+  for value in 1..=100 {
+    hand.send(value);
+  }
+
+  hand.close();
+
+  const result = consumer.join();
+
+  println(f"{result.0} values adding up to {result.1}");
+}

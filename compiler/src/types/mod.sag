@@ -4,7 +4,7 @@
 //! modules of `types` the checks of one area each, as functions taking the checker
 //! (docs/adr/0053-type-checker-port-and-type-dumps.md).
 
-use pkg::ast::{ArrayLen, EnumDecl, FieldDecl, FnDecl, Package, TargetInfo, TypeExpr, TypeExprKind, VariantFields, Visibility};
+use pkg::ast::{ArrayLen, EnumDecl, Expr, FieldDecl, FnDecl, Package, TargetInfo, TypeExpr, TypeExprKind, VariantFields, Visibility};
 use pkg::diagnostics;
 use pkg::diagnostics::{Diagnostic, Diagnostics};
 use pkg::diagnostics::codes;
@@ -71,6 +71,33 @@ pub fn int_from_name(name: String) -> Option<IntTy> {
 
 pub fn is_signed(ty: IntTy) -> bool {
   ty == IntTy::I8 || ty == IntTy::I16 || ty == IntTy::I32 || ty == IntTy::I64 || ty == IntTy::Isize
+}
+
+pub fn int_bits(ty: IntTy) -> u32 {
+  match ty {
+    IntTy::I8 | IntTy::U8 => 8,
+    IntTy::I16 | IntTy::U16 => 16,
+    IntTy::I32 | IntTy::U32 => 32,
+    IntTy::I64 | IntTy::U64 | IntTy::Isize | IntTy::Usize => 64,
+  }
+}
+
+/// Whether every value of `from` is a value of `to` on every target, as Rust's `From` between
+/// integers (docs/adr/0094-conversions-and-defaults.md, Q632): `isize` and `usize` take only the
+/// types of 8 and 16 bits, and give no other type.
+pub fn int_widens(to: IntTy, from: IntTy) -> bool {
+  const sized = to == IntTy::Isize || to == IntTy::Usize;
+
+  if from == IntTy::Isize || from == IntTy::Usize {
+    return false;
+  }
+
+  if is_signed(to) == is_signed(from) {
+    return if sized { int_bits(from) <= 16 } else { int_bits(from) < int_bits(to) };
+  }
+
+  // Signed from unsigned, which needs a bit more.
+  is_signed(to) && if sized { int_bits(from) < 16 } else { int_bits(from) < int_bits(to) }
 }
 
 /// The largest value of the type on a target whose pointers have `pointer_width` bits.
@@ -149,6 +176,8 @@ pub enum TypeKind {
   /// `extern "C" fn(A) -> R`, or `unsafe extern "C" fn(A) -> R`: a C function pointer, never null.
   CFn { is_unsafe: bool, params: List<Type>, ret: Type },
   Array { elem: Type, len: u64 },
+  /// `(A, B, ...)`, with two or more elements: a value, as a struct (docs/adr/0092-tuples.md).
+  Tuple(List<Type>),
   List(Type),
   Option(Type),
   Result { value: Type, error: Type },
@@ -160,6 +189,9 @@ pub enum TypeKind {
   Slice { mutable: bool, elem: Type },
   CVoid,
   CString,
+  /// `std::sys::Atomic<T>`: a `bool` or an integer that threads read and change at once, only the
+  /// type of a `const` field of a class (docs/adr/0087-atomic-storage-and-std-sync.md).
+  Atomic(Type),
   /// The type of expressions that never produce a value.
   Never,
   /// The type of an expression that already produced an error.
@@ -169,9 +201,13 @@ pub enum TypeKind {
 /// A type. A class, since types contain types (`Box<Type>` in Rust).
 pub class Type {
   pub const kind: TypeKind;
+  /// For the types of `std::ffi`, C's own name of the type (`char`, `long`), which the C of the
+  /// FFI writes (docs/adr/0105-c-types-at-the-ffi-boundary.md, Q742); empty otherwise.
+  pub var c_name: String;
 
   pub fn new(self, kind: TypeKind) {
     self.kind = kind;
+    self.c_name = "";
   }
 }
 
@@ -197,6 +233,10 @@ pub fn string() -> Type {
 
 pub fn option(value: Type) -> Type {
   new Type(TypeKind::Option(value))
+}
+
+pub fn result(value: Type, error: Type) -> Type {
+  new Type(TypeKind::Result { value: value, error: error })
 }
 
 pub fn class_type(id: u32, name: String, args: List<Type>) -> Type {
@@ -322,6 +362,10 @@ pub fn same_type(a: Type, b: Type) -> bool {
       TypeKind::Array { elem: other_elem, len: other_len } => len == other_len && same_type(elem, other_elem),
       _ => false,
     },
+    TypeKind::Tuple(elems) => match b.kind {
+      TypeKind::Tuple(other_elems) => same_types(elems, other_elems),
+      _ => false,
+    },
     TypeKind::List(x) => match b.kind {
       TypeKind::List(y) => same_type(x, y),
       _ => false,
@@ -344,6 +388,10 @@ pub fn same_type(a: Type, b: Type) -> bool {
     },
     TypeKind::Slice { mutable, elem } => match b.kind {
       TypeKind::Slice { mutable: other_mutable, elem: other_elem } => mutable == other_mutable && same_type(elem, other_elem),
+      _ => false,
+    },
+    TypeKind::Atomic(x) => match b.kind {
+      TypeKind::Atomic(y) => same_type(x, y),
       _ => false,
     },
     _ => tag(a) == tag(b),
@@ -434,6 +482,36 @@ pub fn texts(types: List<Type>) -> List<String> {
   parts
 }
 
+/// The position in a tuple of `len` elements that the name of an element gives: `0`, `1`... from
+/// the start, or `-1`, `-2`... from the end, as the elements after `..` of a pattern are read
+/// (docs/adr/0092-tuples.md).
+pub fn tuple_index(name: String, len: usize) -> Option<usize> {
+  if name.starts_with("-") {
+    const back = match name.substring(1, name.len()).parse_u64() {
+      Ok(found) => found,
+      Err(_) => return None,
+    };
+
+    return if back >= 1 && back <= len as u64 { Some(len - back as usize) } else { None };
+  }
+
+  const position = match name.parse_u64() {
+    Ok(found) => found,
+    Err(_) => return None,
+  };
+
+  if position < len as u64 { Some(position as usize) } else { None }
+}
+
+/// The position in a tuple of `len` elements of the element `index` of a pattern with `count`
+/// elements and `..` at `rest`: those after `..` count from the end.
+pub fn pattern_position(index: usize, count: usize, rest: Option<usize>, len: usize) -> usize {
+  match rest {
+    Some(position) => if index < position { index } else { len - (count - index) },
+    None => index,
+  }
+}
+
 /// The type as messages write it (Rust's `Display` for `Type`).
 pub fn text(ty: Type) -> String {
   match ty.kind {
@@ -459,6 +537,7 @@ pub fn text(ty: Type) -> String {
       if is_unit(ret) { head } else { head + " -> " + text(ret) }
     }
     TypeKind::Array { elem, len } => `[${text(elem)}; ${len}]`,
+    TypeKind::Tuple(elems) => "(" + texts(elems).join(", ") + ")",
     TypeKind::List(elem) => "List<" + text(elem) + ">",
     TypeKind::Option(value) => "Option<" + text(value) + ">",
     TypeKind::Result { value, error } => "Result<" + text(value) + ", " + text(error) + ">",
@@ -468,6 +547,7 @@ pub fn text(ty: Type) -> String {
     TypeKind::Slice { mutable, elem } => (if mutable { "&mut [" } else { "&[" }) + text(elem) + "]",
     TypeKind::CVoid => "c_void",
     TypeKind::CString => "CString",
+    TypeKind::Atomic(value) => "Atomic<" + text(value) + ">",
     TypeKind::Never => "never",
     TypeKind::Error => "{error}",
   }
@@ -614,6 +694,7 @@ pub fn substitute(ty: Type, subst: Subst) -> Type {
     TypeKind::Class(named) => of(TypeKind::Class(substitute_ref(named, subst))),
     TypeKind::Interface(named) => of(TypeKind::Interface(substitute_ref(named, subst))),
     TypeKind::Array { elem, len } => of(TypeKind::Array { elem: substitute(elem, subst), len: len }),
+    TypeKind::Tuple(elems) => of(TypeKind::Tuple(substitute_all(elems, subst))),
     TypeKind::List(elem) => of(TypeKind::List(substitute(elem, subst))),
     TypeKind::Option(value) => of(TypeKind::Option(substitute(value, subst))),
     TypeKind::Result { value, error } => of(TypeKind::Result { value: substitute(value, subst), error: substitute(error, subst) }),
@@ -622,6 +703,8 @@ pub fn substitute(ty: Type, subst: Subst) -> Type {
     TypeKind::Slice { mutable, elem } => of(TypeKind::Slice { mutable: mutable, elem: substitute(elem, subst) }),
     TypeKind::Function { params, ret } => of(TypeKind::Function { params: substitute_all(params, subst), ret: substitute(ret, subst) }),
     TypeKind::CFn { is_unsafe, params, ret } => of(TypeKind::CFn { is_unsafe: is_unsafe, params: substitute_all(params, subst), ret: substitute(ret, subst) }),
+    // A pointer to a parameter (docs/adr/0098-locks-orderings-and-threads.md, Q677).
+    TypeKind::Atomic(value) => of(TypeKind::Atomic(substitute(value, subst))),
     _ => ty,
   }
 }
@@ -638,9 +721,10 @@ pub fn depth(ty: Type) -> usize {
     TypeKind::Class(named) => 1 + max_depth(named.args),
     TypeKind::Interface(named) => 1 + max_depth(named.args),
     TypeKind::Array { elem, .. } => 1 + depth(elem),
+    TypeKind::Tuple(elems) => 1 + max_depth(elems),
     TypeKind::List(elem) => 1 + depth(elem),
     TypeKind::Option(elem) => 1 + depth(elem),
-    TypeKind::Ptr { pointee, .. } | TypeKind::Ref { pointee, .. } | TypeKind::Slice { elem: pointee, .. } => 1 + depth(pointee),
+    TypeKind::Ptr { pointee, .. } | TypeKind::Ref { pointee, .. } | TypeKind::Slice { elem: pointee, .. } | TypeKind::Atomic(pointee) => 1 + depth(pointee),
     TypeKind::Result { value, error } => {
       const a = depth(value);
       const b = depth(error);
@@ -686,6 +770,7 @@ pub fn has_self(ty: Type) -> bool {
     TypeKind::Class(named) => any_has_self(named.args),
     TypeKind::Interface(named) => any_has_self(named.args),
     TypeKind::Array { elem, .. } => has_self(elem),
+    TypeKind::Tuple(elems) => any_has_self(elems),
     TypeKind::List(elem) => has_self(elem),
     TypeKind::Option(elem) => has_self(elem),
     TypeKind::Ptr { pointee, .. } | TypeKind::Ref { pointee, .. } | TypeKind::Slice { elem: pointee, .. } => has_self(pointee),
@@ -921,6 +1006,7 @@ pub fn check_until(package: Package, resolution: Resolution, diagnostics: Diagno
 
   collections::prelude_items(checker);
   send::sync_classes(checker);
+  send::net_items(checker);
   checker.struct_defs();
   checker.enum_defs();
   classes::class_defs(checker);
@@ -949,6 +1035,8 @@ pub fn check_until(package: Package, resolution: Resolution, diagnostics: Diagno
     checker.typed.sigs.push(sig);
   }
 
+  consts::static_values(checker);
+  ffi::check_extern_statics(checker);
   ffi::check_symbols(checker);
   classes::check_classes(checker);
   interfaces::check_interfaces(checker);
@@ -973,7 +1061,9 @@ pub fn check_until(package: Package, resolution: Resolution, diagnostics: Diagno
   classes::infer_mutating_methods(checker);
   // The bounds of the types written inside function bodies.
   generic::check_type_bounds(checker);
-  send::check_send_types(checker);
+  // The interfaces written as types inside function bodies, which are checked after them.
+  interfaces::check_used_interfaces(checker);
+  send::check_statics(checker);
 
   // The borrow checker needs the types and which methods modify `self`; after type errors, it
   // would only repeat them.
@@ -1102,6 +1192,11 @@ pub class Checker {
   pub var in_async: bool;
   pub var self_calls: List<SelfCall>;
   pub var receiver_checks: List<ReceiverCheck>;
+  /// Whether the next type lowered is that of a `const` field of a class, where `Atomic` may be.
+  pub var atomic_field: bool;
+  /// The expressions of an `Atomic` type not yet used through a method or as the value of its
+  /// field: those left when a function ends are errors (docs/adr/0087-atomic-storage-and-std-sync.md).
+  pub var atomic_uses: List<Expr>;
 
   pub fn new(self, package: Package, resolution: Resolution, diagnostics: Diagnostics) {
     self.package = package;
@@ -1133,6 +1228,8 @@ pub class Checker {
     self.in_async = false;
     self.self_calls = new List();
     self.receiver_checks = new List();
+    self.atomic_field = false;
+    self.atomic_uses = new List();
   }
 
   pub fn error(self, code: String, span: Span, message: String) {
@@ -1410,6 +1507,15 @@ pub class Checker {
 
     match ty.kind {
       TypeKind::Array { elem, .. } => return self.contains_item(elem, target, visited),
+      TypeKind::Tuple(elems) => {
+        for elem in elems {
+          if self.contains_item(elem, target, visited) {
+            return true;
+          }
+        }
+
+        return false;
+      }
       TypeKind::Option(elem) => return self.contains_item(elem, target, visited),
       TypeKind::Result { value, error } => return self.contains_item(value, target, visited) || self.contains_item(error, target, visited),
       TypeKind::Struct(named) => {
@@ -1557,8 +1663,45 @@ pub class Checker {
     self.type_expr_at(ty, false)
   }
 
+  /// `Atomic<T>`, of a `bool`, an integer or a raw pointer, in the one place it may be
+  /// (docs/adr/0087-atomic-storage-and-std-sync.md, Q565 and Q566;
+  /// docs/adr/0098-locks-orderings-and-threads.md, Q677).
+  prv fn atomic_type(self, span: Span, args: List<TypeExpr>, allowed: bool) -> Type {
+    if args.len() != 1 {
+      self.error(codes::WRONG_TYPE_ARGUMENTS, span, `\`Atomic\` takes 1 type argument but ${args.len()} were supplied`);
+
+      return error();
+    }
+
+    const value = self.type_expr(args[0]);
+    const atomic_value = match value.kind {
+      TypeKind::Bool | TypeKind::Int(_) | TypeKind::Ptr { .. } => true,
+      TypeKind::Error => return error(),
+      _ => false,
+    };
+
+    if !atomic_value {
+      self.error(codes::WRONG_TYPE_ARGUMENTS, span, "`Atomic` holds a `bool`, an integer or a raw pointer, not `" + text(value) + "`");
+
+      return error();
+    }
+
+    if !allowed {
+      self.error(codes::INVALID_REFERENCE, span, "`Atomic<" + text(value) + ">` can only be the type of a `const` field of a class");
+
+      return error();
+    }
+
+    of(TypeKind::Atomic(value))
+  }
+
   /// A type, possibly behind a pointer, the only place `c_void` can appear.
   pub fn type_expr_at(self, ty: TypeExpr, behind_pointer: bool) -> Type {
+    // Only the type itself may be atomic, not the types inside it.
+    const atomic_allowed = self.atomic_field;
+
+    self.atomic_field = false;
+
     match ty.kind {
       TypeExprKind::Ptr { mutable, pointee } => ffi::pointer_type(self, mutable, pointee),
       TypeExprKind::Ref { mutable, pointee } => match pointee.kind {
@@ -1596,6 +1739,15 @@ pub class Checker {
         of(TypeKind::CFn { is_unsafe: is_unsafe, params: types, ret: result })
       }
       TypeExprKind::Unit => unit(),
+      TypeExprKind::Tuple(elems) => {
+        const types: List<Type> = new List();
+
+        for elem in elems {
+          types.push(self.type_expr(elem));
+        }
+
+        of(TypeKind::Tuple(types))
+      }
       TypeExprKind::Array { elem, len } => {
         const elem_ty = self.type_expr(elem);
 
@@ -1631,6 +1783,10 @@ pub class Checker {
           self.type_bounds.push(SpanType { span: ty.span, ty: result });
 
           return result;
+        }
+
+        if let Some(TypeRes::Atomic) = self.resolution.type_paths.get(path.id) {
+          return self.atomic_type(ty.span, args, atomic_allowed);
         }
 
         const name = match path.segments.last() {
@@ -1712,6 +1868,12 @@ pub class Checker {
               self.interface_types.push(SpanInterface { span: path.span, id: id });
             }
 
+            if let TypeItem::Struct(id) = item {
+              if !behind_pointer && ffi::is_opaque(self, id) {
+                return ffi::bare_opaque(self, path.span, id);
+              }
+            }
+
             return self.type_ref(item);
           }
           Some(TypeRes::Param { owner, index }) => {
@@ -1730,6 +1892,11 @@ pub class Checker {
             return ffi::c_type(c, self.target);
           }
           Some(TypeRes::CString) => return of(TypeKind::CString),
+          Some(TypeRes::Atomic) => {
+            self.error(codes::WRONG_TYPE_ARGUMENTS, path.span, "`Atomic` needs a type argument: `Atomic<T>`");
+
+            return error();
+          }
           Some(TypeRes::Error) => return error(),
           _ => {}
         }

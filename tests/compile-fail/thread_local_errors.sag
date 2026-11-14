@@ -1,0 +1,22 @@
+// The value of a `@thread_local static var` is never lent, since the code it is lent to could
+// change it (docs/adr/0083-global-state.md, Q529).
+
+@thread_local
+static var SCRATCH: List<i32> = new List();
+
+@thread_local
+static var COUNT: i32 = 0;
+
+fn read(value: &i32) -> i32 {
+  *value
+}
+
+fn fill(items: &mut List<i32>) {
+  items.push(1);
+}
+
+fn main() {
+  COUNT += 1;
+  fill(&mut SCRATCH); //~ ERROR E0340
+  println(f"{read(&COUNT)}"); //~ ERROR E0340
+}

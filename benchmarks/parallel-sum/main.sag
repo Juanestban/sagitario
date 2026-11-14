@@ -1,0 +1,38 @@
+// parallel-sum: four threads add `i * i % 1000` over their quarter of `0..n`, and the main thread
+// adds their results. Threads and joins. The argument is `n`.
+use std::env;
+use std::thread;
+
+const THREADS: u64 = 4;
+
+fn partial(start: u64, end: u64) -> u64 {
+  var sum = 0u64;
+
+  for i in start..end {
+    sum += i * i % 1000;
+  }
+
+  sum
+}
+
+fn main() {
+  const args = env::args();
+  const n = if args.len() > 1 { args[1].parse_u64().unwrap_or(1000) } else { 1000 };
+  const chunk = n / THREADS;
+  const handles: List<thread::JoinHandle<u64>> = new List();
+
+  for index in 0..THREADS {
+    const start = index * chunk;
+    const end = if index == THREADS - 1 { n } else { start + chunk };
+
+    handles.push(thread::spawn(() => partial(start, end)));
+  }
+
+  var total = 0u64;
+
+  for handle in handles {
+    total += handle.join();
+  }
+
+  println(f"{total}");
+}

@@ -1,0 +1,141 @@
+//! Conditional compilation (docs/adr/0085-conditional-compilation-and-std-time.md): the
+//! conditions of `@cfg(...)`, which the parser reads, checks and evaluates for the target, so that
+//! an item whose condition does not hold never reaches the resolver.
+
+use pkg::ast::TargetInfo;
+use pkg::diagnostics::{Diagnostic, Diagnostics};
+use pkg::diagnostics::codes;
+use pkg::span::Span;
+
+/// The names a condition can be.
+pub const NAMES: String = "windows unix";
+/// The names written with a value, `name = "value"`.
+pub const KEYS: String = "target_os target_arch target_pointer_width";
+/// The names that combine conditions: `all(...)`, `any(...)` and `not(...)`.
+pub const COMBINATORS: String = "all any not";
+
+/// The values of each name of `KEYS`.
+pub fn values(key: String) -> String {
+  if key == "target_os" {
+    "windows linux macos android ios"
+  } else if key == "target_arch" {
+    "x86_64 aarch64 arm"
+  } else {
+    "32 64"
+  }
+}
+
+/// A condition of `@cfg(...)`.
+pub class Cfg {
+  pub const kind: CfgKind;
+  pub const span: Span;
+
+  pub fn new(self, kind: CfgKind, span: Span) {
+    self.kind = kind;
+    self.span = span;
+  }
+}
+
+pub enum CfgKind {
+  /// `windows` or `unix`.
+  Name(String),
+  /// `target_os = "linux"`.
+  Value { key: String, value: String },
+  All(List<Cfg>),
+  Any(List<Cfg>),
+  Not(Cfg),
+}
+
+/// Checks the names and values of `cfg`, reporting each wrong one (`E0105`); whether all are right.
+pub fn check(cfg: Cfg, diagnostics: Diagnostics) -> bool {
+  match cfg.kind {
+    CfgKind::Name(name) => {
+      if NAMES.split(" ").contains(name) {
+        return true;
+      }
+
+      var help = "the conditions are `windows`, `unix`, `target_os = \"...\"`, `target_arch = \"...\"`, `target_pointer_width = \"...\"`, and `all`, `any` and `not` to combine them";
+
+      if values("target_os").split(" ").contains(name) {
+        help = "write `target_os = \"" + name + "\"`";
+      } else if values("target_arch").split(" ").contains(name) {
+        help = "write `target_arch = \"" + name + "\"`";
+      } else if KEYS.split(" ").contains(name) {
+        help = "give it a value: `" + name + " = \"" + values(name).split(" ").first().unwrap_or("") + "\"`";
+      }
+
+      diagnostics.push(Diagnostic::error(codes::INVALID_ATTRIBUTE, cfg.span, "unknown condition `" + name + "` in `@cfg`").with_help(help));
+      false
+    }
+    CfgKind::Value { key, value } => {
+      if !KEYS.split(" ").contains(key) {
+        diagnostics.push(
+          Diagnostic::error(codes::INVALID_ATTRIBUTE, cfg.span, "unknown condition `" + key + "` in `@cfg`")
+            .with_help("the conditions with a value are `target_os`, `target_arch` and `target_pointer_width`"),
+        );
+
+        return false;
+      }
+
+      if values(key).split(" ").contains(value) {
+        return true;
+      }
+
+      const valid: List<String> = new List();
+
+      for found in values(key).split(" ") {
+        valid.push("`\"" + found + "\"`");
+      }
+
+      diagnostics.push(
+        Diagnostic::error(codes::INVALID_ATTRIBUTE, cfg.span, "unknown value `\"" + value + "\"` of `" + key + "`").with_help("the values are " + valid.join(", ")),
+      );
+      false
+    }
+    CfgKind::All(conditions) | CfgKind::Any(conditions) => {
+      var right = true;
+
+      for condition in conditions {
+        right = check(condition, diagnostics) && right;
+      }
+
+      right
+    }
+    CfgKind::Not(condition) => check(condition, diagnostics),
+  }
+}
+
+/// Whether `cfg` holds for `target`.
+pub fn holds(cfg: Cfg, target: TargetInfo) -> bool {
+  match cfg.kind {
+    CfgKind::Name(name) => if name == "windows" { target.os == "windows" } else { target.os != "windows" },
+    CfgKind::Value { key, value } => {
+      if key == "target_os" {
+        target.os == value
+      } else if key == "target_arch" {
+        target.arch == value
+      } else {
+        `${target.pointer_width}` == value
+      }
+    }
+    CfgKind::All(conditions) => {
+      for condition in conditions {
+        if !holds(condition, target) {
+          return false;
+        }
+      }
+
+      true
+    }
+    CfgKind::Any(conditions) => {
+      for condition in conditions {
+        if holds(condition, target) {
+          return true;
+        }
+      }
+
+      false
+    }
+    CfgKind::Not(condition) => !holds(condition, target),
+  }
+}

@@ -9,7 +9,7 @@
 // expect-stdout: words: hola mundo
 // expect-stdout: parallelism at least 1: true
 
-use std::sync::{AtomicI64, Channel};
+use std::sync::{AtomicI64, Channel, Ordering};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -23,8 +23,8 @@ pub fn main() {
   for _ in 0..4 {
     consumers.push(thread::spawn(() => {
       for job in jobs.iter() {
-        sum.fetch_add(job);
-        count.fetch_add(1);
+        sum.fetch_add(job, Ordering::SeqCst);
+        count.fetch_add(1, Ordering::SeqCst);
       }
     }));
   }
@@ -43,7 +43,7 @@ pub fn main() {
     consumer.join();
   }
 
-  println(`received ${count.load()} values adding up to ${sum.load()}`);
+  println(`received ${count.load(Ordering::SeqCst)} values adding up to ${sum.load(Ordering::SeqCst)}`);
 
   const letters: Channel<String> = new Channel();
 

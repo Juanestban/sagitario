@@ -1,0 +1,61 @@
+// `Default`, `@default` and `..base` (docs/adr/0094-conversions-and-defaults.md, Q636, Q637, Q643).
+use std::mem;
+
+struct Plain {
+  pub x: i32;
+}
+
+@default
+struct Missing {
+  pub plain: Plain; //~ ERROR E0330
+  pub count: i32;
+}
+
+@default //~ ERROR E0342
+struct Twice impl Default {
+  pub x: i32;
+
+  pub fn default() -> Twice { Twice { x: 1 } }
+}
+
+@default //~ ERROR E0105
+enum Unmarked { A, B }
+
+enum Stray {
+  @default //~ ERROR E0105
+  A,
+  B,
+}
+
+@default
+enum WithFields {
+  @default //~ ERROR E0105
+  A(i32),
+  B,
+}
+
+@default
+enum Two {
+  @default
+  A,
+  @default //~ ERROR E0105
+  B,
+}
+
+enum Shape {
+  Square { side: f64 },
+}
+
+fn unbounded<T>() -> T {
+  T::default() //~ ERROR E0200
+}
+
+fn main() {
+  const base = Plain { x: 1 };
+  const _a = Plain { ..Missing { plain: base, count: 1 } }; //~ ERROR E0345
+  const _b = Shape::Square { ..base }; //~ ERROR E0315, ERROR E0345
+  var plain = Plain { x: 2 };
+  const _c = mem::take(&mut plain); //~ ERROR E0330
+  const none: Option<Plain> = None;
+  const _d = none.unwrap_or_default(); //~ ERROR E0330
+}

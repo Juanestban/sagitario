@@ -1,0 +1,15 @@
+// The bindings of the system's C library: a few functions of `<string.h>` and `<time.h>`, the
+// struct `tm` they use, and the macro `CLOCKS_PER_SEC`, on every system.
+use std::env;
+
+fn main() {
+  const out = env::variable("OUT_DIR").unwrap();
+  const builder = new bindgen::Builder().header("c/libc.h");
+
+  for name in List::from(["strlen", "strcmp", "memcmp", "strftime", "clock", "CLOCKS_PER_SEC", "tm"]) {
+    builder.allow_prefix(name);
+  }
+
+  builder.generate().expect("the bindings of the C library").write_to_file(out + "/libc.sag").unwrap();
+  println("nova::rerun-if-changed=c");
+}

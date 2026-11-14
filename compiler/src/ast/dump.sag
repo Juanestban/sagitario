@@ -225,6 +225,21 @@ class Dumper {
         self.expr("value", decl.value);
         self.depth -= 1;
       }
+      Item::Static(decl) => {
+        const mutable_text = if decl.mutable { " var" } else { "" };
+        const thread_local_text = if decl.thread_local { " thread_local" } else { "" };
+        const extern_text = if decl.extern_c { " extern" } else { "" };
+
+        self.line("item", "Static", Some(decl.span), None, ident(decl.name) + " " + visibility(decl.visibility) + mutable_text + thread_local_text + extern_text);
+        self.depth += 1;
+        self.type_expr("ty", decl.ty);
+
+        if let Some(value) = decl.value() {
+          self.expr("value", value);
+        }
+
+        self.depth -= 1;
+      }
       Item::Impl(block) => {
         self.line("item", "Impl", Some(block.span), None, "");
         self.depth += 1;
@@ -328,6 +343,12 @@ class Dumper {
   pub fn type_expr(self, label: String, ty: TypeExpr) {
     match ty.kind {
       TypeExprKind::Unit => self.line(label, "UnitType", Some(ty.span), None, ""),
+      TypeExprKind::Tuple(elems) => {
+        self.line(label, "TupleType", Some(ty.span), None, "");
+        self.depth += 1;
+        self.types("elem", elems);
+        self.depth -= 1;
+      }
       TypeExprKind::Path(path) => {
         self.line(label, "PathType", Some(ty.span), None, "");
         self.depth += 1;
@@ -464,6 +485,20 @@ class Dumper {
           match part {
             TemplatePart::Text(text) => self.line("part", "Text", None, None, lexer::quote(text)),
             TemplatePart::Expr(inner) => self.expr("part", inner),
+            TemplatePart::Formatted { expr, spec } => {
+              self.expr("part", expr);
+              const precision = match spec.precision {
+                Some(found) => `${found}`,
+                None => "none",
+              };
+              const width = match spec.width {
+                Some(found) => `${found}`,
+                None => "none",
+              };
+              const values = `fill=${lexer::quote(`${spec.fill}`)} align=${spec.align} plus=${spec.plus} alternate=${spec.alternate} zero=${spec.zero} width=${width} precision=${precision} kind=${lexer::quote(spec.kind)}`;
+
+              self.line("spec", "FormatSpec", Some(spec.span), None, values);
+            }
           }
         }
 
@@ -503,7 +538,7 @@ class Dumper {
         self.expr("index", index);
         self.depth -= 1;
       }
-      ExprKind::StructLit { path, fields } => {
+      ExprKind::StructLit { path, fields, base } => {
         self.node(label, expr, "StructLit", "");
         self.depth += 1;
         self.path("path", path);
@@ -515,10 +550,20 @@ class Dumper {
           self.depth -= 1;
         }
 
+        if let Some(found) = base {
+          self.expr("base", found);
+        }
+
         self.depth -= 1;
       }
       ExprKind::ArrayLit(elems) => {
         self.node(label, expr, "ArrayLit", "");
+        self.depth += 1;
+        self.exprs("elem", elems);
+        self.depth -= 1;
+      }
+      ExprKind::Tuple(elems) => {
+        self.node(label, expr, "Tuple", "");
         self.depth += 1;
         self.exprs("elem", elems);
         self.depth -= 1;
@@ -733,6 +778,21 @@ class Dumper {
           self.depth += 1;
           self.pattern("pattern", field.pattern);
           self.depth -= 1;
+        }
+
+        self.depth -= 1;
+      }
+      PatternKind::Elements { elems, rest } => {
+        const shown = match rest {
+          Some(position) => `rest=${position}`,
+          None => "",
+        };
+
+        self.line(label, "ElementsPattern", Some(pattern.span), Some(pattern.id), shown);
+        self.depth += 1;
+
+        for elem in elems {
+          self.pattern("elem", elem);
         }
 
         self.depth -= 1;

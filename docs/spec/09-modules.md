@@ -93,6 +93,12 @@ Every module implicitly sees these names, without `use`:
 | Functions | `print(s: String)`, `println(s: String)`, `eprintln(s: String)`, `panic(message: String)` | F1 |
 | Types | `Error` (an interface) and `Error(message)` | F2 |
 | Types | `List`, `Map`, `Iter`, `Entry`, `Ordering`; the interfaces `Eq`, `Ord`, `Hash` | F2 |
+| Types | `HashSet` ([sets](02-types.md#sets-s2)) | S2 |
+| Types | The interface `Drop` ([classes](04-classes.md#drop)) | S2 |
+| Types | The interfaces `Iterable` and `FromIterator` ([iteration](05-interfaces-generics.md#iteration-and-collection)) | S2 |
+| Functions | `min<T: Ord>(a, b)`, `max<T: Ord>(a, b)` ([order](05-interfaces-generics.md#equality-order-and-hashing-f2)) | S2 |
+| Types | The interface `Display` ([format strings](02-types.md#string-f1)) | S2 |
+| Types | The interfaces `From`, `Into`, `TryFrom`, `TryInto` ([conversions](05-interfaces-generics.md#conversions)) and `Default` ([defaults](05-interfaces-generics.md#defaults)) | S2 |
 | Types | `Task` ([`async` and `await`](12-async.md)) | F8 |
 
 - `print` and `println` write to stdout, `eprintln` to stderr (`println`/`eprintln` add a
@@ -127,3 +133,85 @@ fn main() {
   only inside its struct); enum variants have their enum's visibility. Class members follow
   [classes](04-classes.md).
 - A `pub` item whose signature or fields mention a private type gets a warning: code elsewhere could receive values of a type it cannot name.
+
+## Conditional compilation (S1)
+
+Rationale: [ADR-0085](../adr/0085-conditional-compilation-and-std-time.md).
+
+```sag
+@cfg(windows)
+extern "C" {
+  fn GetCurrentProcessId() -> u32;
+}
+
+@cfg(unix)
+extern "C" {
+  fn getpid() -> c_int;
+}
+
+@cfg(any(target_os = "linux", target_os = "android"))
+const CLOCK_MONOTONIC: c_int = 1;
+@cfg(any(target_os = "macos", target_os = "ios"))
+const CLOCK_MONOTONIC: c_int = 6;
+```
+
+- `@cfg(condition)`, as Rust's `#[cfg(...)]`, keeps an item only when its condition holds for
+  the target being compiled: the one of `--target`, or the machine running the compiler.
+- The conditions are a closed set (`E0105` lists them):
+
+  | Condition | Holds on |
+  |---|---|
+  | `windows` | Windows |
+  | `unix` | Linux, macOS, Android and iOS |
+  | `target_os = "..."` | `"windows"`, `"linux"`, `"macos"`, `"android"` or `"ios"` |
+  | `target_arch = "..."` | `"x86_64"`, `"aarch64"` or `"arm"` (32-bit ARM) |
+  | `target_pointer_width = "..."` | `"32"` or `"64"` |
+  | `all(c, ...)`, `any(c, ...)`, `not(c)` | every, one, or not the condition; `all()` holds and `any()` does not |
+
+- It applies to module-level items: functions, structs, enums, unions, classes, interfaces,
+  constants, statics, `use` declarations, `impl` blocks and `extern "C"` blocks, and to each
+  function inside an `extern "C"` block. On a field or a method it is an error (`E0105`).
+- An item has at most one `@cfg`; `all(...)` combines conditions.
+- An item whose condition does not hold is parsed and left out before names are resolved: its
+  syntax errors are reported, but its names and types are not checked, and a `use` left out
+  loads no module. Two items may have the same name if their conditions exclude each other; if
+  both hold, the name is repeated (`E0201`).
+- `sag check --target` checks the program as that target sees it.
+
+## Built-in macros (S4)
+
+Rationale: [ADR-0103](../adr/0103-build-scripts-and-binding-generation.md) (Q723-Q726),
+[ADR-0104](../adr/0104-include-str-as-a-macro.md).
+
+```sag
+include!(concat!(env!("OUT_DIR"), "/sdl.sag"));
+
+const SHADER: String = include_str!("shaders/sprite.glsl");
+const ICON: [u8; 1150] = include_bytes!("assets/icon.ico");
+
+fn main() {
+  println(concat!("built for ", env!("TARGET"), " with SDL ", 3));
+}
+```
+
+Sagitario has Rust's built-in macros that read files and the environment when the program is
+compiled. Each one is called as `name!(...)`, and its name has no path. Programs cannot define
+macros, and any other `name!(...)` is an error (`E0346`).
+
+- `include!(path);` is written where a module-level item may be, also after `@cfg`. It puts the
+  items and imports of the file in the current module, as if written there; their errors are
+  reported in that file. The file cannot call `include!` itself (`E0346`). Written as an
+  expression, it is an error (`E0346`).
+- `include_str!(path)` is a string literal with the text of the file, which must be UTF-8, and
+  `include_bytes!(path)` an array literal `[u8; N]` with its bytes. Both are expressions, valid
+  anywhere a literal is, also in constants.
+- `concat!(a, b, ...)` is a string literal joining literals: strings, integers, floats (also
+  negative), characters and `bool`s, and the macros among them. Anything else is `E0346`.
+- `env!("NAME")` is a string literal with the value of the environment variable `NAME` of the
+  compiler. A variable that is not set is an error (`E0346`); `env!("NAME", "message")` reports
+  `message` instead.
+- A path is a string literal, or a `concat!` and `env!` of them. A relative path starts from the
+  directory of the source file that calls the macro; an embedded module of the standard library
+  has none (`E0346`). A file that cannot be read is `E0335`, with the reason.
+- The macros are expanded while the file is parsed, before names are resolved: what they give
+  is a literal, or the items of a file.

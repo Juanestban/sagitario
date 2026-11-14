@@ -57,7 +57,12 @@ pub fn dump(resolution: Resolution) -> String {
   for index in 0..resolution.consts.len() {
     const info = resolution.consts[index];
 
-    out.append(`const ${index} module=${info.module} item=${info.item}\n`);
+    const member = match info.member {
+      Some(found) => ` member=${found}`,
+      None => "",
+    };
+
+    out.append(`const ${index} module=${info.module} item=${info.item}` + member + "\n");
   }
 
   for index in 0..resolution.externs.len() {
@@ -183,6 +188,7 @@ fn item_ref(item: ItemRef) -> String {
     ItemRef::Fn(id) => `fn ${id}`,
     ItemRef::Extern(id) => `extern ${id}`,
     ItemRef::Const(id) => `const ${id}`,
+    ItemRef::Static(id) => `static ${id}`,
     ItemRef::Type(found) => type_item(found),
     ItemRef::Module(id) => `module ${id}`,
     ItemRef::Std(std_item) => match std_item {
@@ -192,7 +198,10 @@ fn item_ref(item: ItemRef) -> String {
       StdItem::CString => "std CString",
       StdItem::StringFromC => "std string_from_c",
       StdItem::Exit => "std exit",
+      StdItem::Abort => "std abort",
       StdItem::Mem(name) => "std mem::" + name,
+      StdItem::BlackBox => "std hint::black_box",
+      StdItem::Atomic => "std Atomic",
     },
   }
 }
@@ -203,8 +212,10 @@ fn resolved(res: Res) -> String {
     Res::Extern(id) => `extern ${id}`,
     Res::Builtin(name) => "builtin " + name,
     Res::Local(id) => `local ${id}`,
+    Res::Static(id) => `static ${id}`,
     Res::Struct(id) => `struct ${id}`,
     Res::FromRaw(id) => `from_raw of enum ${id}`,
+    Res::InterfaceFn { name, .. } => "interface fn " + name,
     Res::Variant(variant) => {
       const owner = match variant.owner {
         EnumKind::User(id) => `enum ${id}`,
@@ -228,6 +239,7 @@ fn type_res(res: TypeRes) -> String {
     TypeRes::Builtin => "builtin",
     TypeRes::CType(name) => "ctype " + name,
     TypeRes::CString => "CString",
+    TypeRes::Atomic => "Atomic",
     TypeRes::Error => "error",
   }
 }

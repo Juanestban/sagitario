@@ -1,0 +1,137 @@
+// UDP sockets on the loopback addresses: datagrams to an address and from one, a datagram cut to
+// the buffer, connected sockets and a socket shared with a thread (docs/adr/0100-networking.md,
+// Q695). The harness runs it with ThreadSanitizer where the C compiler has it, and fails it on
+// any leak.
+// sanitize: thread
+// expect-stdout: to: ping true | tuple: tuple | text: text
+// expect-stdout: cut: 4 abcd | next: next
+// expect-stdout: connected: hello back true | ignored: from b
+// expect-stdout: not connected: NotConnected
+// expect-stdout: thread: 3 datagrams, 12 bytes
+// expect-stdout: ipv6: ok
+
+use std::io::ErrorKind;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
+use std::thread;
+
+/// A buffer of `size` bytes.
+fn buffer(size: usize) -> List<u8> {
+  const bytes: List<u8> = new List();
+
+  bytes.resize(size, 0);
+  bytes
+}
+
+/// The text of the first `count` bytes of `bytes`.
+fn text(bytes: List<u8>, count: usize) -> String {
+  bytes.truncate(count);
+  String::from_utf8_lossy(bytes)
+}
+
+/// The next datagram `socket` receives, as text.
+fn receive(socket: UdpSocket) -> String {
+  const bytes = buffer(64);
+  const count = socket.recv_from(&mut bytes).unwrap().0;
+
+  text(bytes, count)
+}
+
+/// The bytes of `value`.
+fn bytes_of(value: String) -> List<u8> {
+  value.bytes().collect()
+}
+
+fn main() {
+  const a = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+  const b = UdpSocket::bind("127.0.0.1:0").unwrap();
+  const a_addr = a.local_addr().unwrap();
+  const b_addr = b.local_addr().unwrap();
+
+  // To an address, which the receiver learns the sender's from.
+  a.send_to(&bytes_of("ping"), b_addr).unwrap();
+
+  const pinged = buffer(64);
+  const from = b.recv_from(&mut pinged).unwrap();
+
+  print(f"to: {text(pinged, from.0)} {from.1 == a_addr} | ");
+  a.send_to(&bytes_of("tuple"), (Ipv4Addr::LOCALHOST, b_addr.port())).unwrap();
+  print(f"tuple: {receive(b)} | ");
+  a.send_to(&bytes_of("text"), f"127.0.0.1:{b_addr.port()}").unwrap();
+  println(f"text: {receive(b)}");
+
+  // A datagram longer than the buffer is cut to it; the rest of it is lost.
+  a.send_to(&bytes_of("abcdefghij"), b_addr).unwrap();
+  a.send_to(&bytes_of("next"), b_addr).unwrap();
+
+  const small = buffer(4);
+  const cut = b.recv_from(&mut small).unwrap().0;
+
+  println(f"cut: {cut} {text(small, cut)} | next: {receive(b)}");
+
+  // Connected: `send` and `recv` use the one address, and others are ignored.
+  a.connect(b_addr).unwrap();
+  b.connect(a_addr).unwrap();
+  a.send(&bytes_of("hello")).unwrap();
+
+  const hello = buffer(64);
+  const hello_count = b.recv(&mut hello).unwrap();
+
+  b.send(&bytes_of(text(hello, hello_count) + " back")).unwrap();
+
+  const back = buffer(64);
+  const back_count = a.recv(&mut back).unwrap();
+
+  print(f"connected: {text(back, back_count)} {a.peer_addr().unwrap() == b_addr} | ");
+
+  const stranger = UdpSocket::bind("127.0.0.1:0").unwrap();
+
+  stranger.send_to(&bytes_of("from a stranger"), a_addr).unwrap();
+  b.send(&bytes_of("from b")).unwrap();
+
+  const kept = buffer(64);
+  const kept_count = a.recv(&mut kept).unwrap();
+
+  println(f"ignored: {text(kept, kept_count)}");
+
+  const loose = UdpSocket::bind("127.0.0.1:0").unwrap();
+  const not_connected = match loose.peer_addr() {
+    Ok(_) => "connected",
+    Err(error) => f"{error.kind():?}",
+  };
+
+  println(f"not connected: {not_connected}");
+
+  // A socket shared with a thread that waits for datagrams.
+  const server = UdpSocket::bind("127.0.0.1:0").unwrap();
+  const server_addr: SocketAddr = server.local_addr().unwrap();
+  const receiver = thread::spawn(() => {
+    var total = 0usize;
+
+    for _ in 0..3 {
+      const bytes = buffer(64);
+
+      total += server.recv_from(&mut bytes).unwrap().0;
+    }
+
+    total
+  });
+
+  for _ in 0..3 {
+    loose.send_to(&bytes_of("four"), server_addr).unwrap();
+  }
+
+  println(f"thread: 3 datagrams, {receiver.join()} bytes");
+
+  // IPv6, where the system has it.
+  const ipv6 = match UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)) {
+    Ok(six) => {
+      const other = UdpSocket::bind("[::1]:0").unwrap();
+
+      other.send_to(&bytes_of("six"), six.local_addr().unwrap()).unwrap();
+      if receive(six) == "six" { "ok" } else { "wrong" }
+    }
+    Err(error) => if error.kind() == ErrorKind::AddrNotAvailable { "ok" } else { error.message() },
+  };
+
+  println(f"ipv6: {ipv6}");
+}

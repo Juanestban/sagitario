@@ -42,6 +42,12 @@ pub const EMPTY_DECLARATION: String = "E0104";
 /// An unknown, repeated or misplaced attribute, or one with the wrong arguments.
 pub const INVALID_ATTRIBUTE: String = "E0105";
 
+/// A tuple type or value of one element, `(T,)`: tuples have two or more.
+pub const ONE_ELEMENT_TUPLE: String = "E0106";
+
+/// A pattern that might not match where every value must match it: in `const`, `var` and `for`.
+pub const REFUTABLE_PATTERN: String = "E0107";
+
 /// A name that does not refer to anything in scope.
 pub const UNRESOLVED_NAME: String = "E0200";
 
@@ -184,12 +190,17 @@ pub const INVALID_SPAWN: String = "E0333";
 /// that needs itself.
 pub const NOT_CONSTANT: String = "E0334";
 
-/// `include_str` outside a constant, with a path that is not a string literal, or naming a file
-/// that cannot be read.
+/// `include_str!`, `include_bytes!` or `include!` naming a file that cannot be read
+/// (docs/adr/0103-build-scripts-and-binding-generation.md, Q724 and Q725).
 pub const INVALID_INCLUDE: String = "E0335";
 
 /// `await` outside an `async fn`, or inside a lambda written in one.
 pub const AWAIT_OUTSIDE_ASYNC: String = "E0336";
+
+/// A built-in macro that does not exist, given arguments it does not take, written where it does
+/// not go, or `env!` of a variable that is not set
+/// (docs/adr/0103-build-scripts-and-binding-generation.md, Q723).
+pub const INVALID_MACRO: String = "E0346";
 
 /// An `async fn` that cannot be one: `extern "C"`, `@export` or an initializer.
 pub const INVALID_ASYNC: String = "E0337";
@@ -219,6 +230,10 @@ pub const INVALID_IMPL_BLOCK: String = "E0343";
 
 /// A method called by a name that several of the type's methods have, in `impl` blocks (Q509).
 pub const AMBIGUOUS_METHOD: String = "E0344";
+
+/// `..base` in a literal of an enum variant, or a base of another type than the struct's
+/// (docs/adr/0094-conversions-and-defaults.md, Q643).
+pub const INVALID_STRUCT_BASE: String = "E0345";
 
 /// A language feature that is specified but not implemented yet.
 pub const NOT_IMPLEMENTED: String = "E0900";

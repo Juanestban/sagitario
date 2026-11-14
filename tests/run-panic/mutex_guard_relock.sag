@@ -1,0 +1,11 @@
+// A thread holding a guard locks the same mutex: a panic instead of a deadlock
+// (docs/adr/0098-locks-orderings-and-threads.md, Q671).
+// expect-panic: a thread locked a `Mutex` it already holds, through a guard
+use std::sync::Mutex;
+
+fn main() {
+  const total = new Mutex(1);
+  const guard = total.lock();
+
+  guard.set(total.get() + 1);
+}

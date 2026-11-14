@@ -36,6 +36,7 @@ compiler/           the compiler and Nova, written in Sagitario (compiler/Nova.t
   src/lexer.sag           hand-written lexer: text → tokens (unicode.sag: the Unicode data it uses)
   src/ast/                AST definitions and their dump
   src/parser.sag          recursive descent + Pratt parsing for expressions: tokens → AST
+  src/cfg.sag             the conditions of `@cfg`, which the parser checks and evaluates
   src/loader.sag          reads the entry file and the modules, dependencies and std it reaches
   src/resolve/            module tree, `use`, name resolution, visibility
   src/types/              type checking, local inference, generics, inheritance, interfaces,
@@ -47,9 +48,10 @@ compiler/           the compiler and Nova, written in Sagitario (compiler/Nova.t
                           library headers (header.sag) and targets (targets.sag)
   src/lsp/                `sag lsp`, the language server
   src/nova_main.sag       `nova`: the package manager (docs/nova.md), with src/nova/
-  std/                    the prelude and the standard library written in Sagitario
+  std/                    the prelude and the standard library written in Sagitario; unicode.sag
+                          holds the tables of `char` that tools/unicode.rs generates
 runtime/            minimal C runtime (ARC, panic, String, allocation, I/O and the OS calls of std)
-bootstrap/          the seed (the C of the compiler, with its runtime) and the scripts that build
+bootstrap/          the seed of each host (the C of the compiler, in seed/<host>/, with its runtime) and the scripts that build
                     the compiler from it with a C compiler alone (see testing.md)
 tests/              end-to-end suites, and their harness in Sagitario in tests/harness/ (see testing.md)
 install/            the installers of a release: install.sh (Linux, macOS) and install.ps1 (Windows)
@@ -58,8 +60,14 @@ editors/vscode/     the VS Code extension
 
 The compiler is written in plain Sagitario, and its C is strict C11 like any program's. Each pass
 reads the result of the previous ones; none depends on a later pass, except that the loader,
-which runs the lexer and the parser, is shared by the driver, the type checker (for
-`include_str`) and the language server.
+which runs the lexer and the parser, is shared by the driver and the language server.
+
+The parser expands the built-in macros ([ADR-0103](adr/0103-build-scripts-and-binding-generation.md),
+Q723-Q726) as it reads them, so no later pass sees them: `concat!`, `env!` and `include_str!`
+become string literals, and `include_bytes!` an array literal of `u8`s, reading files relative
+to the file being parsed (`Parser.location`). `include!(path);` is kept in `Module.includes`, and
+the loader lexes and parses each file it names and adds its imports and items to the module,
+with the spans of that file (`Loader::expand_includes`).
 
 ## SIR
 
@@ -108,7 +116,9 @@ list's length panic while `lent` is not zero. `Projection::SliceElem` reads an e
 `sag_slice_at`.
 
 SIR is the place for ARC optimizations and the boundary behind which other backends (LLVM)
-could be added.
+could be added. After lowering, `sir/arc.sag` deletes the retain and the release of a temporary
+moved into a binding or a place, and a retain followed by a release of the same local
+([ADR-0091](adr/0091-fewer-reference-counts.md)); `SAG_NO_ARC_PASS` turns it off.
 
 An `async fn` (`sir/tasks.sag`, [ADR-0072](adr/0072-async-await-increments.md)) becomes two
 functions. The one callers call creates the `Task` (a class of the prelude) and a frame, the
@@ -192,6 +202,18 @@ runs the executor until the task of `main` finishes.
   `Callee::Closure` calls a value, casting the pointer to the exact signature and passing the
   environment first. Named functions used as values (`Rvalue::FnValue`) are called through
   wrappers `sag_wrap_N` that ignore the environment.
+- A `static` ([ADR-0083](adr/0083-global-state.md)) carries a function without parameters that
+  computes its value (`StaticDecl::init`), registered in `Resolution::functions` without a name,
+  so the resolver, the type checker and SIR treat it as any function; `Resolution::statics` and
+  `TypedModule::static_type` give its type. Its place is its storage, reached through the address
+  `sag_static_N(file, line)` returns (`Callee::Runtime`, then `Projection::Borrowed`), which
+  `Generator::statics` writes with the storage and state of the static: it computes the value on
+  the first use (`sag_static_begin` and `sag_static_end` in the runtime, which make other threads
+  wait). A static the compiler computes from constants (`TypedModule::static_values`) starts its
+  storage with the value. The runtime releases the values at exit for the leak check. A
+  `@thread_local` one (`StaticDef::thread_local`) has `_Thread_local` storage and stage, computed
+  without locks (`sag_static_local_begin`, `sag_static_local_end`); each thread releases its
+  values when it ends (`sag_thread_run`), and the main thread at exit.
 - A program can span several packages (`Package::packages`): the one being compiled, then its
   dependencies, each with its own module tree (`Module::package`, `Resolution::package_roots`).
   The driver loads each dependency's root module and the modules its paths reach
@@ -217,15 +239,16 @@ runs the executor until the task of `main` finishes.
   (`Resolution::is_runtime_extern`: names starting with `sag_`, which may take and return
   `String`); the C backend calls those directly, without an FFI wrapper. `std::process::exit`
   is `Builtin::Exit`, typed `Never` like `panic`.
-- The runtime's operating system calls are standard C where possible. `std::fs` needs POSIX on
-  Linux and macOS (`_POSIX_C_SOURCE`) and the UTF-16 functions of kernel32 on Windows, which
-  the runtime declares itself instead of including `<windows.h>`; Windows error codes are
-  translated to `errno` values so that error kinds and messages match on every system.
-- `Command` runs programs with `fork` and `execve` on POSIX systems (a close-on-exec pipe
-  reports a failed `execve`, and `poll` reads stdout and stderr while writing stdin) and with
-  `CreateProcessW` on Windows, where a runtime thread reads each captured pipe. Those threads
-  only copy bytes and never touch ARC objects. Lists cross into the runtime as strings joined
-  by NUL characters.
+- The standard library calls the system through `std::sys` (S1,
+  [ADR-0085](adr/0085-conditional-compilation-and-std-time.md)): the C library and POSIX on
+  Unix, and the UTF-16 functions of kernel32 on Windows, declared in `extern "C"` blocks chosen
+  with `@cfg`; Windows error codes become `errno` values, so that error kinds and messages match
+  on every system. `Command` runs programs with `fork` and `execve` on Linux and Android, with
+  `posix_spawn` on Apple systems, and with `CreateProcessW` and overlapped pipes on Windows. The
+  atomics of `std::sync` are fields of the compiler's `std::sys::Atomic`, and its locks are the
+  system's ([ADR-0087](adr/0087-atomic-storage-and-std-sync.md)). The runtime's core keeps what
+  each thread does when it starts and ends (`sag_thread_prepare`, `sag_thread_run`,
+  `sag_thread_finish`) and its own threads for `task::spawn_blocking`, until S3.
 - A `List<T>` is a `sag_object *` to a `sag_list`: the elements in a buffer with one spare slot,
   and a function releasing one element (`sag_elem_release_N`) when they are managed. An element
   is a place behind the list (`Projection::ListElem`, bounds-checked by `sag_list_at`); like a
@@ -247,6 +270,26 @@ runs the executor until the task of `main` finishes.
   defines a wrapper `sag_ffi_N` for it, plus a function with each exported symbol that calls
   the Sagitario function; exported functions are the only non-`static` ones. A dereference
   goes through `SAG_CHECK_PTR`, which panics on a null pointer.
+- A variadic C function ([ADR-0103](adr/0103-build-scripts-and-binding-generation.md), Q720) is
+  declared in `sag_ffi.c` with `...` after its parameters. A wrapper cannot forward extra
+  arguments, so each call with other types of extra arguments gets a wrapper of its own: lowering
+  registers it in `Registry.variadic_calls`, an `ExternDecl` with `fixed` set whose parameters
+  are those types, and the call's `Callee::Extern` is its index after the externs of the blocks.
+- C's own types at the boundary ([ADR-0105](adr/0105-c-types-at-the-ffi-boundary.md)): the FFI
+  unit writes the types of `std::ffi` as C's (`Type.c_name`, kept from the name the program
+  wrote) and each `@repr(C)` type with a tag of its name (`Generator.c_tags`, the first type of a
+  name taking it; `StructLayout.repr_c`), with members of C's types and the fields' names. Its
+  wrappers take the program's types and call C with C's, converting pointers with casts and
+  structs passed by value through a union of both. An `extern "C" fn` used as a value is the
+  trampoline `sag_cb_N` of the FFI unit, which calls the function (no longer `static`); a C
+  function of an `extern` block used as a value is the function itself
+  (`sag_ffi_N_pointer()`); and a call through a C function pointer goes to `sag_call_N` of the
+  FFI unit, which calls through C's type (`sag_cpN`). The program's unit keeps its own names,
+  since its header includes the tags of the system's headers.
+- An opaque C type (Q721) is only declared, `typedef struct sag_sN sag_sN;`, and never defined
+  (`StructLayout.opaque`). The checker rejects its values; generic code given one as a type
+  argument is checked when its instance is lowered, since a local of that type would be a C
+  value of an incomplete type (`Layouts::holds_opaque`).
 - C function pointer types (`extern "C" fn(..)`, [ADR-0078](adr/0078-ffi-without-c-shims.md))
   become one `typedef R (*sag_pN)(A, B);` per signature, shared by safe and unsafe ones and
   emitted in both translation units after the declarations of the aggregates. An `extern "C" fn`
@@ -269,7 +312,7 @@ runs the executor until the task of `main` finishes.
 
 ## Runtime
 
-Minimal C, embedded in the `sag` binary (`include_str` in `compiler/src/driver/mod.sag`) and
+Minimal C, embedded in the `sag` binary (`include_str!` in `compiler/src/driver/mod.sag`) and
 compiled with every program:
 
 - ARC object header and retain/release, through `sag_count`: atomic when the program uses
@@ -284,7 +327,7 @@ compiled with every program:
 - panic (message, file, line, exit code 101), including the array bounds check
   `sag_index_at`,
 - `String` storage and UTF-8 helpers, allocation,
-- basic I/O used by `std`,
+- the printing of the prelude (`print`, `println`), through C's streams as `std::io`,
 - overflow-checked integer helpers (`sag_add_i32_at`, ...) that panic in debug and wrap when
   compiled with `-DSAG_RELEASE` (`sag build --release`), saturating float-to-integer casts,
 - a string builder used by template strings, with shortest round-trip float formatting,
@@ -292,8 +335,8 @@ compiled with every program:
   parsing (`sag_parse_*`), ASCII `char` helpers and the ARC `StringBuilder` (`sag_builder_*`),
 - FFI support: the ARC `CString` (`sag_cstring_*`), `sag_string_from_c_at` (lossy UTF-8),
   `sag_c_char` (C's `char`), the raw pointer macros (`SAG_PTR_ADD`, `SAG_CHECK_PTR`,
-  `SAG_LIST_PTR`, ...), and the dynamic libraries of `std::ffi::Library` (`sag_library_*`, with
-  `LoadLibraryW` or `dlopen`, linked with `-ldl` on Linux and Android),
+  `SAG_LIST_PTR`, ...); the dynamic libraries of `std::ffi::Library` are written in `std::sys`
+  (`dlopen`, linked with `-ldl` on Linux and Android, or `LoadLibraryW`),
 - a live-object counter checked at exit when `SAG_LEAK_CHECK` is set (exit code 102),
 - the executor of tasks of each thread (`sag_task_*`, [ADR-0072](adr/0072-async-await-increments.md)):
   the functions ready to resume tasks, first in first out, the timers of `task::sleep`, by
@@ -339,7 +382,19 @@ Anything expressible in Sagitario belongs in `compiler/std/` instead.
 - Cross-compilation (`driver/targets.sag`): a target gives the C compiler with the arguments every call
   needs (`CCompiler::args`: `--target=<triple>`, and `-isysroot` for iOS) and the facts the type
   checker needs (`TargetInfo` in `Package::target`: pointer width, size of C's `long`, sign of
-  C's `char`). Without `--target` they are those of the machine running the compiler.
+  C's `char`, and the system and processor of `@cfg`). Without `--target` they are those of the
+  machine running the compiler (`TargetInfo::host`).
+- Conditional compilation ([ADR-0085](adr/0085-conditional-compilation-and-std-time.md)): the
+  loader gives the parser the target (`Loader::target`), and the parser leaves out each item, `use`
+  or function of an `extern` block whose `@cfg` does not hold (`Parser::cfg_holds`, `cfg::holds`),
+  after parsing it, so that the resolver never sees it.
+- The standard library on the system (S1, [ADR-0084](adr/0084-a-complete-language-and-the-engine-apart.md)):
+  `compiler/std/sys.sag` (`std::sys`, which only `std` can name) declares the C API of each system
+  with `@cfg`, and the modules of `std` call it instead of functions of the runtime. A function
+  that the runtime's core still calls keeps its C name with `@export`. Its module is in
+  `loader::CORE_STD`, which every program loads, and `mono::require` makes its instance. The C
+  declarations of the standard library are compiled in `sag_std_ffi.c`, apart from the program's
+  `sag_ffi.c`, so that both may declare the same C function with other types.
 
 ## Language server
 

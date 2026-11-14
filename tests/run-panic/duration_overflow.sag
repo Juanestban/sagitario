@@ -1,0 +1,8 @@
+// The operators of `Duration` panic beyond the longest duration in every build, as Rust's
+// (docs/adr/0101-the-rest-of-s2.md, Q704).
+// expect-panic: overflow when adding durations
+use std::time::Duration;
+
+fn main() {
+  const _sum = Duration::from_nanos(u64::MAX) + Duration::from_nanos(1);
+}

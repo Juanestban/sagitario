@@ -3,25 +3,658 @@
 
 use std::io;
 use std::io::ErrorKind;
+use std::sys;
+use std::unicode;
 
 extern "C" {
-  fn sag_io_error_kind(code: i32) -> i32;
-  fn sag_io_error_message(code: i32) -> String;
+  fn sag_float_format(value: f64, precision: i32, scientific: bool, upper: bool, is_f32: bool) -> String;
 }
 
-/// The error with this runtime code (an `errno` value, or one of the runtime's own codes),
-/// described as `context: system message`, or by the system message alone without a context.
+/// The codes of failures that have no `errno` value, which are negative.
+const INVALID_DATA: i32 = -2;
+const UNKNOWN: i32 = -3;
+const UNEXPECTED_EOF: i32 = -4;
+
+/// The code of the last failed call to the C library: its `errno`, or an unknown error.
+fn last_error() -> i32 {
+  const code = sys::errno();
+
+  if code > 0 { code } else { UNKNOWN }
+}
+
+/// The error with this code (an `errno` value, or one of the codes above), described as
+/// `context: system message`, or by the system message alone without a context. The values of
+/// `errno` are the same on every supported system.
 fn os_error(code: i32, context: String) -> io::Error {
-  const kind = match unsafe { sag_io_error_kind(code) } {
-    0 => ErrorKind::NotFound,
-    1 => ErrorKind::PermissionDenied,
-    2 => ErrorKind::AlreadyExists,
-    3 => ErrorKind::InvalidInput,
-    4 => ErrorKind::InvalidData,
-    5 => ErrorKind::UnexpectedEof,
-    _ => ErrorKind::Other,
+  const kind = if code == INVALID_DATA {
+    ErrorKind::InvalidData
+  } else if code == UNEXPECTED_EOF {
+    ErrorKind::UnexpectedEof
+  } else if code == 2 {
+    // ENOENT
+    ErrorKind::NotFound
+  } else if code == 1 || code == 13 {
+    // EPERM, EACCES
+    ErrorKind::PermissionDenied
+  } else if code == 17 {
+    // EEXIST
+    ErrorKind::AlreadyExists
+  } else if code == 22 {
+    // EINVAL
+    ErrorKind::InvalidInput
+  } else if code == 4 {
+    // EINTR
+    ErrorKind::Interrupted
+  } else if code == 32 {
+    // EPIPE
+    ErrorKind::BrokenPipe
+  } else if code == sys::ECONNREFUSED {
+    ErrorKind::ConnectionRefused
+  } else if code == sys::ECONNRESET {
+    ErrorKind::ConnectionReset
+  } else if code == sys::ECONNABORTED {
+    ErrorKind::ConnectionAborted
+  } else if code == sys::ENOTCONN {
+    ErrorKind::NotConnected
+  } else if code == sys::EADDRINUSE {
+    ErrorKind::AddrInUse
+  } else if code == sys::EADDRNOTAVAIL {
+    ErrorKind::AddrNotAvailable
+  } else if code == sys::EAGAIN || code == sys::EWOULDBLOCK {
+    ErrorKind::WouldBlock
+  } else if code == sys::ETIMEDOUT {
+    ErrorKind::TimedOut
+  } else {
+    ErrorKind::Other
   };
-  const message = unsafe { sag_io_error_message(code) };
+  const message = if code == INVALID_DATA {
+    "stream did not contain valid UTF-8"
+  } else if code == UNEXPECTED_EOF {
+    "failed to fill whole buffer"
+  } else if code > 0 {
+    sys::error_message(code)
+  } else {
+    "input/output error"
+  };
 
   if context.is_empty() { new io::Error(kind, message) } else { new io::Error(kind, `${context}: ${message}`) }
+}
+
+/// The length of the UTF-8 sequence at `bytes[at]`: positive for a whole character, or minus the
+/// length of the maximal ill-formed prefix that one U+FFFD replaces, as Rust's
+/// `String::from_utf8_lossy` does. Overlong forms, surrogates and code points past U+10FFFF are
+/// ill-formed.
+fn sequence(bytes: &[u8], at: usize) -> isize {
+  const first = bytes[at];
+  var low = 0x80u8;
+  var high = 0xBFu8;
+  var need = 0usize;
+
+  if first < 0x80 {
+    return 1;
+  } else if first >= 0xC2 && first <= 0xDF {
+    need = 1;
+  } else if first == 0xE0 {
+    need = 2;
+    low = 0xA0;
+  } else if first == 0xED {
+    need = 2;
+    high = 0x9F;
+  } else if first >= 0xE1 && first <= 0xEF {
+    need = 2;
+  } else if first == 0xF0 {
+    need = 3;
+    low = 0x90;
+  } else if first == 0xF4 {
+    need = 3;
+    high = 0x8F;
+  } else if first >= 0xF1 && first <= 0xF3 {
+    need = 3;
+  } else {
+    return -1;
+  }
+
+  for offset in 1..need + 1 {
+    const least = if offset == 1 { low } else { 0x80u8 };
+    const most = if offset == 1 { high } else { 0xBFu8 };
+
+    if at + offset >= bytes.len() || bytes[at + offset] < least || bytes[at + offset] > most {
+      return -(offset as isize);
+    }
+  }
+
+  (need + 1) as isize
+}
+
+/// The character of the whole sequence of `count` bytes at `bytes[at]`.
+fn decode(bytes: &[u8], at: usize, count: usize) -> char {
+  const first = bytes[at] as u32;
+  // The bits of the first byte after its marker, then six of each continuation byte.
+  var code = if count == 1 { first } else if count == 2 { first & 0x1F } else if count == 3 { first & 0x0F } else { first & 0x07 };
+
+  for offset in 1..count {
+    code = (code << 6) | (bytes[at + offset] as u32 & 0x3F);
+  }
+
+  char::from_u32(code).unwrap_or('?')
+}
+
+/// The text of `bytes`, or `None` if they are not valid UTF-8.
+fn utf8(bytes: &[u8]) -> Option<String> {
+  const text = new StringBuilder();
+  var index = 0usize;
+
+  while index < bytes.len() {
+    const count = sequence(bytes, index);
+
+    if count < 0 {
+      return None;
+    }
+
+    text.append_char(decode(bytes, index, count as usize));
+    index += count as usize;
+  }
+
+  Some(text.to_string())
+}
+
+/// The text of `bytes`, with each ill-formed sequence replaced by U+FFFD.
+fn utf8_lossy(bytes: &[u8]) -> String {
+  const text = new StringBuilder();
+  var index = 0usize;
+
+  while index < bytes.len() {
+    const count = sequence(bytes, index);
+
+    if count < 0 {
+      text.append_char(char::from_u32(0xFFFD).unwrap_or('?'));
+      index += (-count) as usize;
+    } else {
+      text.append_char(decode(bytes, index, count as usize));
+      index += count as usize;
+    }
+  }
+
+  text.to_string()
+}
+
+// ---- The methods of `String`, `char` and `StringBuilder` written in Sagitario ------------------
+//
+// The compiler calls `text_<name>`, `char_<name>` and `builder_<name>` for a method of a value of
+// those types (docs/adr/0093-everyday-methods.md, Q620 and Q621); the Unicode data is that of
+// `std::unicode`.
+
+/// `text.rfind(pattern)`: the byte index of the last match.
+fn text_rfind(text: String, pattern: String) -> Option<usize> {
+  if pattern.is_empty() {
+    return Some(text.len());
+  }
+
+  // A match starts at a character: the next search starts after that character.
+  const step = char_len_utf8(pattern.chars().next().unwrap_or(' '));
+  var found: Option<usize> = None;
+  var from = 0usize;
+
+  while from <= text.len() {
+    match text.substring(from, text.len()).find(pattern) {
+      Some(at) => {
+        found = Some(from + at);
+        from = from + at + step;
+      }
+      None => break,
+    }
+  }
+
+  found
+}
+
+/// The pieces of `text` between runs of Unicode white space, without empty ones.
+fn text_split_whitespace(text: String) -> List<String> {
+  const pieces = new List<String>();
+  var start: Option<usize> = None;
+  var index = 0usize;
+
+  for c in text.chars() {
+    if unicode::is_whitespace(c) {
+      if let Some(from) = start {
+        pieces.push(text.substring(from, index));
+        start = None;
+      }
+    } else if start.is_none() {
+      start = Some(index);
+    }
+
+    index += char_len_utf8(c);
+  }
+
+  if let Some(from) = start {
+    pieces.push(text.substring(from, text.len()));
+  }
+
+  pieces
+}
+
+/// `text.splitn(count, separator)`: at most `count` pieces, the last holding the rest.
+fn text_splitn(text: String, count: usize, separator: String) -> List<String> {
+  const pieces = new List<String>();
+
+  if count == 0 {
+    return pieces;
+  }
+
+  var rest = text;
+
+  while pieces.len() + 1 < count {
+    match rest.find(separator) {
+      Some(at) => {
+        if separator.is_empty() && at == 0 && !pieces.is_empty() {
+          break;
+        }
+
+        pieces.push(rest.substring(0, at));
+        rest = rest.substring(at + separator.len(), rest.len());
+      }
+      None => break,
+    }
+  }
+
+  pieces.push(rest);
+  pieces
+}
+
+/// `text.rsplit(separator)`: the pieces of `split`, from the last one.
+fn text_rsplit(text: String, separator: String) -> List<String> {
+  const pieces = text.split(separator);
+
+  pieces.reverse();
+  pieces
+}
+
+fn text_split_once(text: String, separator: String) -> Option<(String, String)> {
+  const at = text.find(separator)?;
+
+  Some((text.substring(0, at), text.substring(at + separator.len(), text.len())))
+}
+
+fn text_rsplit_once(text: String, separator: String) -> Option<(String, String)> {
+  const at = text_rfind(text, separator)?;
+
+  Some((text.substring(0, at), text.substring(at + separator.len(), text.len())))
+}
+
+fn text_strip_prefix(text: String, prefix: String) -> Option<String> {
+  if text.starts_with(prefix) { Some(text.substring(prefix.len(), text.len())) } else { None }
+}
+
+fn text_strip_suffix(text: String, suffix: String) -> Option<String> {
+  if text.ends_with(suffix) { Some(text.substring(0, text.len() - suffix.len())) } else { None }
+}
+
+/// Each character of `text` with the byte index where it starts.
+fn text_char_indices(text: String) -> DoubleEndedIter<(usize, char)> {
+  const pairs = new List<(usize, char)>();
+  var at = 0usize;
+
+  for c in text.chars() {
+    pairs.push((at, c));
+    at += char_len_utf8(c);
+  }
+
+  pairs.iter()
+}
+
+/// The matches of `pattern` in `text`, from the first, without overlapping.
+fn text_matches(text: String, pattern: String) -> List<String> {
+  const found = new List<String>();
+
+  if pattern.is_empty() {
+    for _ in 0..text.chars().count() + 1 {
+      found.push("");
+    }
+
+    return found;
+  }
+
+  var rest = text;
+
+  while let Some(at) = rest.find(pattern) {
+    found.push(pattern);
+    rest = rest.substring(at + pattern.len(), rest.len());
+  }
+
+  found
+}
+
+/// `text.replacen(from, to, count)`: the first `count` matches replaced.
+fn text_replacen(text: String, from: String, to: String, count: usize) -> String {
+  const out = new StringBuilder();
+  var rest = text;
+  var replaced = 0usize;
+
+  while replaced < count {
+    match rest.find(from) {
+      Some(at) => {
+        out.append(rest.substring(0, at));
+        out.append(to);
+
+        if from.is_empty() {
+          // An empty pattern matches before each character.
+          match rest.chars().next() {
+            Some(c) => {
+              out.append_char(c);
+              rest = rest.substring(char_len_utf8(c), rest.len());
+            }
+            None => {
+              rest = "";
+              replaced = count;
+            }
+          }
+        } else {
+          rest = rest.substring(at + from.len(), rest.len());
+        }
+
+        replaced += 1;
+      }
+      None => break,
+    }
+  }
+
+  out.append(rest);
+  out.to_string()
+}
+
+fn text_to_uppercase(text: String) -> String {
+  const out = new StringBuilder();
+
+  for c in text.chars() {
+    if (c as u32) < 0x80 {
+      out.append_char(c.to_ascii_uppercase());
+    } else {
+      unicode::push_uppercase(c, out);
+    }
+  }
+
+  out.to_string()
+}
+
+/// Whether `c` has a case: its uppercase or its lowercase differs from it, or it is one.
+fn is_cased(c: char) -> bool {
+  unicode::is_uppercase(c) || unicode::is_lowercase(c)
+}
+
+/// As Rust's, a capital sigma at the end of a word becomes the final `ς`: one with a cased
+/// character before it and none after it.
+fn text_to_lowercase(text: String) -> String {
+  const out = new StringBuilder();
+  const chars = text.chars().collect();
+
+  for index in 0..chars.len() {
+    const c = chars[index];
+
+    if (c as u32) < 0x80 {
+      out.append_char(c.to_ascii_lowercase());
+    } else if (c as u32) == 0x3A3 {
+      const after_cased = index > 0 && is_cased(chars[index - 1]);
+      const before_cased = index + 1 < chars.len() && is_cased(chars[index + 1]);
+
+      out.append_char(char::from_u32(if after_cased && !before_cased { 0x3C2 } else { 0x3C3 }).unwrap_or(c));
+    } else {
+      unicode::push_lowercase(c, out);
+    }
+  }
+
+  out.to_string()
+}
+
+/// `String::from_utf8(bytes)`: the text, or where the first ill-formed sequence starts.
+fn text_from_utf8(bytes: List<u8>) -> Result<String, String> {
+  var index = 0usize;
+
+  while index < bytes.len() {
+    const count = sequence(&bytes[0..bytes.len()], index);
+
+    if count < 0 {
+      return Err(`invalid utf-8 sequence of ${-count} bytes from index ${index}`);
+    }
+
+    index += count as usize;
+  }
+
+  Ok(utf8(&bytes[0..bytes.len()]).unwrap_or(""))
+}
+
+fn text_from_utf8_lossy(bytes: List<u8>) -> String {
+  utf8_lossy(&bytes[0..bytes.len()])
+}
+
+/// `String::from_utf16(units)`: the text, or an error for a surrogate without its pair.
+fn text_from_utf16(units: List<u16>) -> Result<String, String> {
+  const out = new StringBuilder();
+  var index = 0usize;
+
+  while index < units.len() {
+    const unit = units[index] as u32;
+
+    if unit >= 0xD800 && unit <= 0xDBFF && index + 1 < units.len() && units[index + 1] as u32 >= 0xDC00 && units[index + 1] as u32 <= 0xDFFF {
+      const low = units[index + 1] as u32;
+
+      out.append_char(char::from_u32(0x10000 + ((unit - 0xD800) << 10) + (low - 0xDC00)).unwrap_or('?'));
+      index += 2;
+    } else if unit >= 0xD800 && unit <= 0xDFFF {
+      return Err("invalid utf-16: lone surrogate found");
+    } else {
+      out.append_char(char::from_u32(unit).unwrap_or('?'));
+      index += 1;
+    }
+  }
+
+  Ok(out.to_string())
+}
+
+fn char_is_alphabetic(c: char) -> bool {
+  unicode::is_alphabetic(c)
+}
+
+fn char_is_numeric(c: char) -> bool {
+  unicode::is_numeric(c)
+}
+
+fn char_is_alphanumeric(c: char) -> bool {
+  unicode::is_alphabetic(c) || unicode::is_numeric(c)
+}
+
+fn char_is_whitespace(c: char) -> bool {
+  unicode::is_whitespace(c)
+}
+
+fn char_is_uppercase(c: char) -> bool {
+  unicode::is_uppercase(c)
+}
+
+fn char_is_lowercase(c: char) -> bool {
+  unicode::is_lowercase(c)
+}
+
+/// The general category `Cc`, as Rust's `char::is_control`.
+fn char_is_control(c: char) -> bool {
+  const code = c as u32;
+
+  code < 0x20 || (code >= 0x7F && code < 0xA0)
+}
+
+/// The uppercase of `c`: one to three characters, as Rust's iterator gives them.
+fn char_to_uppercase(c: char) -> String {
+  const out = new StringBuilder();
+
+  unicode::push_uppercase(c, out);
+  out.to_string()
+}
+
+fn char_to_lowercase(c: char) -> String {
+  const out = new StringBuilder();
+
+  unicode::push_lowercase(c, out);
+  out.to_string()
+}
+
+fn char_len_utf8(c: char) -> usize {
+  const code = c as u32;
+
+  if code < 0x80 { 1 } else if code < 0x800 { 2 } else if code < 0x10000 { 3 } else { 4 }
+}
+
+fn char_len_utf16(c: char) -> usize {
+  if (c as u32) < 0x10000 { 1 } else { 2 }
+}
+
+/// `char::from_digit(digit, radix)`: the character of a digit, in lowercase past 9; a radix
+/// outside 2 to 36 panics, as Rust's.
+fn char_from_digit(digit: u32, radix: u32) -> Option<char> {
+  if radix < 2 || radix > 36 {
+    panic("from_digit: radix is too high (maximum 36)");
+  }
+
+  if digit >= radix {
+    return None;
+  }
+
+  char::from_u32(if digit < 10 { 48 + digit } else { 87 + digit })
+}
+
+// ---- Format specifiers (docs/adr/0089-display-debug-and-format-specifiers.md) -----------------
+//
+// The C a format string compiles to calls these for each `{expr:spec}`, with the parts of the
+// specifier: `align` is 0 without one, 1 for `<`, 2 for `^` and 3 for `>`; `flags` holds `+`
+// (1), `#` (2) and `0` (4); `precision` is -1 without one; `kind` is `' '` without a type.
+
+const PLUS: u32 = 1;
+const ALTERNATE: u32 = 2;
+const ZERO: u32 = 4;
+
+/// `text` filled with `fill` to `width` characters, on the side `align` says.
+fn pad(text: String, fill: char, align: u32, width: usize) -> String {
+  const count = text.chars().count();
+
+  if count >= width {
+    return text;
+  }
+
+  const missing = width - count;
+  const before = if align == 1 { 0usize } else if align == 2 { missing / 2 } else { missing };
+  const out = new StringBuilder();
+
+  for _ in 0..before {
+    out.append_char(fill);
+  }
+
+  out.append(text);
+
+  for _ in 0..missing - before {
+    out.append_char(fill);
+  }
+
+  out.to_string()
+}
+
+/// The digits of `value` in `base`.
+fn digits(value: u64, base: u64, upper: bool) -> String {
+  if value == 0 {
+    return "0";
+  }
+
+  const symbols = (if upper { "0123456789ABCDEF" } else { "0123456789abcdef" }).bytes().collect();
+  const found: List<u8> = new List();
+  var rest = value;
+
+  while rest > 0 {
+    found.push(symbols[(rest % base) as usize]);
+    rest = rest / base;
+  }
+
+  const out = new StringBuilder();
+  var index = found.len();
+
+  while index > 0 {
+    index -= 1;
+    out.append_char(found[index] as char);
+  }
+
+  out.to_string()
+}
+
+/// A number from its digits: its sign and prefix, zeros after them with `0`, then the fill.
+fn pad_number(text: String, negative: bool, prefix: String, fill: char, align: u32, flags: u32, width: usize) -> String {
+  const sign = if negative { "-" } else if flags & PLUS != 0 { "+" } else { "" };
+  const body = sign + prefix + text;
+
+  if flags & ZERO != 0 && align == 0 {
+    const count = body.chars().count();
+
+    if count < width {
+      return sign + prefix + "0".repeat(width - count) + text;
+    }
+
+    return body;
+  }
+
+  pad(body, fill, if align == 0 { 3 } else { align }, width)
+}
+
+/// An unsigned integer, or the bits of a signed one, in the base of `kind`.
+fn format_unsigned(value: u64, fill: char, align: u32, flags: u32, width: usize, kind: char) -> String {
+  const base = if kind == 'x' || kind == 'X' { 16u64 } else if kind == 'o' { 8u64 } else if kind == 'b' { 2u64 } else { 10u64 };
+  var prefix = "";
+
+  if flags & ALTERNATE != 0 {
+    prefix = if base == 16 { "0x" } else if base == 8 { "0o" } else if base == 2 { "0b" } else { "" };
+  }
+
+  pad_number(digits(value, base, kind == 'X'), false, prefix, fill, align, flags, width)
+}
+
+/// A signed integer of `bits` bits: in decimal with its sign, or its two's complement bits in
+/// another base, as Rust writes them.
+fn format_signed(value: i64, bits: u32, fill: char, align: u32, flags: u32, width: usize, kind: char) -> String {
+  if kind == ' ' {
+    const negative = value < 0;
+    const magnitude = if negative { ((-(value + 1)) as u64) + 1 } else { value as u64 };
+
+    return pad_number(digits(magnitude, 10, false), negative, "", fill, align, flags, width);
+  }
+
+  const mask = if bits >= 64 { u64::MAX } else { (1u64 << bits) - 1 };
+
+  format_unsigned((value as u64) & mask, fill, align, flags, width, kind)
+}
+
+/// A float: its digits from the runtime's core, with `precision` decimals or in scientific
+/// notation for `e` and `E`.
+fn format_float(value: f64, is_f32: bool, fill: char, align: u32, flags: u32, width: usize, precision: i64, kind: char) -> String {
+  const nan = value != value;
+  const negative = !nan && 1.0.copysign(value) < 0.0;
+  const text = unsafe { sag_float_format(value, precision as i32, kind == 'e' || kind == 'E', kind == 'E', is_f32) };
+
+  pad_number(text, negative, "", fill, align, flags, width)
+}
+
+/// Any other text, cut after `precision` characters.
+fn format_text(text: String, fill: char, align: u32, width: usize, precision: i64) -> String {
+  var shown = text;
+
+  if precision >= 0 && text.chars().count() > precision as usize {
+    const out = new StringBuilder();
+    var count = 0usize;
+
+    for c in text.chars() {
+      if count < precision as usize {
+        out.append_char(c);
+      }
+
+      count += 1;
+    }
+
+    shown = out.to_string();
+  }
+
+  pad(shown, fill, if align == 0 { 1 } else { align }, width)
 }

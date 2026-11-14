@@ -1,0 +1,39 @@
+// `Iterable` and `FromIterator` (docs/adr/0095-collections.md, Q645 and Q646).
+
+struct Plain {
+  pub x: i32;
+}
+
+struct Missing impl Iterable<i32> { //~ ERROR E0329
+  pub x: i32;
+}
+
+struct Built impl FromIterator<i32> {
+  pub x: i32;
+
+  pub fn from_iter(iter: Iter<i32>) -> Built {
+    Built { x: iter.count() as i32 }
+  }
+}
+
+fn total<T: Iterable<i32>>(values: T) -> i32 {
+  var sum = 0;
+
+  for value in values {
+    sum += value;
+  }
+
+  sum
+}
+
+fn source(_value: FromIterator<i32>) {} //~ ERROR E0329
+
+fn main() {
+  for _x in (Plain { x: 1 }) { //~ ERROR E0310
+  }
+
+  const _a = total(Plain { x: 1 }); //~ ERROR E0330
+  const _b = total(List::from(["a"])); //~ ERROR E0330
+  const _c: Plain = (0..3).collect(); //~ ERROR E0300
+  const _d: Built = List::from(["a"]).iter().collect(); //~ ERROR E0300
+}

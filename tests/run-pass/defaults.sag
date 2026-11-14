@@ -1,0 +1,88 @@
+// `Default`: `@default` on structs, enums and generic structs, implemented by hand, of the
+// prelude's types, through a type parameter, with `..base`, `unwrap_or_default` and `std::mem`
+// (docs/adr/0094-conversions-and-defaults.md, Q636, Q637, Q643).
+// expect-stdout: Config { name: "", retries: 0, verbose: false, ratio: 0, tags: [], limit: None, pair: (0, '\0'), level: Normal, port: Port { number: 8080 } }
+// expect-stdout: 3 true copy 3 copy 8080
+// expect-stdout: 0 0 1 0 Wrap { value: "", grid: [0, 0, 0] } 0 0 true 0
+// expect-stdout: 0 4 0 (0, false)
+// expect-stdout: hello [] world there 2 1
+
+use std::mem;
+
+@default
+struct Config {
+  pub name: String;
+  pub retries: u32;
+  pub verbose: bool;
+  pub ratio: f64;
+  pub tags: List<String>;
+  pub limit: Option<i32>;
+  pub pair: (i32, char);
+  pub level: Level;
+  pub port: Port;
+}
+
+@default
+enum Level {
+  Quiet,
+  @default
+  Normal,
+  Loud,
+}
+
+struct Port impl Default {
+  pub number: u16;
+
+  pub fn default() -> Port { Port { number: 8080 } }
+}
+
+class Counter {
+  pub var count: i32;
+
+  pub fn new(self, count: i32) { self.count = count; }
+}
+
+impl Default for Counter {
+  fn default() -> Counter { new Counter(1) }
+}
+
+@default
+struct Wrap<T: Default> {
+  pub value: T;
+  pub grid: [i32; 3];
+}
+
+fn fresh<T: Default>() -> T {
+  T::default()
+}
+
+fn main() {
+  const config = Config::default();
+  const custom = Config { verbose: true, retries: 3, ..Config::default() };
+  const copy = Config { name: "copy", ..custom };
+  const all = Config { ..copy };
+  const n: i32 = fresh();
+  const s: String = fresh();
+  const counter: Counter = fresh();
+  const map: Map<String, i32> = fresh();
+  const wrap: Wrap<String> = Wrap::default();
+
+  println(f"{config:?}");
+  println(f"{custom.retries} {custom.verbose} {copy.name} {copy.retries} {all.name} {all.port.number}");
+  println(f"{n} {s.len()} {counter.count} {map.len()} {wrap:?} {i64::default()} {f64::default()} {String::default().is_empty()} {char::default() as u32}");
+
+  const none: Option<i32> = None;
+  const failed: Result<String, i32> = Err(1);
+
+  println(f"{none.unwrap_or_default()} {Some(4).unwrap_or_default()} {failed.unwrap_or_default().len()} {fresh<(u8, bool)>():?}");
+
+  var text = "hello";
+  var other = "world";
+  const taken = mem::take(&mut text);
+  const old = mem::replace(&mut other, "there");
+  var a = 1;
+  var b = 2;
+
+  mem::swap(&mut a, &mut b);
+  println(f"{taken} [{text}] {old} {other} {a} {b}");
+}

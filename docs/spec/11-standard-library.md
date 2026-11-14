@@ -20,6 +20,7 @@ functions it uses.
 | `std::env` | Command-line arguments and environment variables | F3 |
 | `std::io` | Standard input and output with errors as values; `io::Error` | F3 |
 | `std::fs` | Files and directories | F3 |
+| `std::hint` | `black_box`, for benchmarks | S2 |
 | `std::math` | Constants of `f64`, and the methods of floats as functions | G1 |
 | `std::mem` | Sizes and alignments of types, and zeroed values for C | G1 |
 | `std::path` | Joining paths and taking them apart | F3 |
@@ -42,18 +43,134 @@ fn main() -> Result<(), io::Error> {
 }
 ```
 
+## `std::collections`
+
+Rust's collections beyond the prelude's `List`, `Map` and `HashSet`
+([ADR-0095](../adr/0095-collections.md)), written in Sagitario: `VecDeque`, `BTreeMap`,
+`BTreeSet` and `BinaryHeap`.
+
+```sag
+use std::collections::VecDeque;
+
+const queue = VecDeque::from(List::from([1, 2, 3]));
+
+queue.push_front(0);
+queue[1] = 10;
+println(f"{queue.pop_back():?} {queue:?}");   // Some(3) [0, 10, 2]
+```
+
+**`VecDeque<T>`** (Q648), a queue with two ends in a ring buffer:
+
+| Method | Result |
+|---|---|
+| `new VecDeque<T>()`, `VecDeque::with_capacity(n)`, `VecDeque::from(list)` | A queue, the first element of the list at the front |
+| `push_back(v)`, `push_front(v)` | `()` |
+| `pop_back()`, `pop_front()`, `front()`, `back()`, `get(i)` | `Option<T>` |
+| `len()`, `is_empty()`, `capacity()`, `clear()` | |
+| `iter()` | `DoubleEndedIter<T>`, from the front; `rev()` from the back |
+| `extend(iter)`, `retain(keep)`, `truncate(len)` | `()` |
+| `swap(i, j)`, `rotate_left(n)`, `rotate_right(n)` | `()`; panic outside the queue, with Rust's messages |
+| `deque[i]`, `deque[i] = v` | through `Index` and `IndexMut`; outside the queue they panic (`Out of bounds access`) |
+
+- It implements `Iterable`, `FromIterator` and `Default`, and, when its elements do, `Eq`, `Ord`
+  and `Hash`, compared, ordered and hashed as a list of its elements, which the compiler gives as
+  for `Map`. Its debug form is `[1, 2]`.
+- Rust's `contains` needs `T: Eq` on the method alone, which Sagitario cannot write:
+  `deque.iter().any((x) => x == value)` stands for it. `make_contiguous` is not needed, since the
+  ring is never lent.
+
+```sag
+use std::collections::{BTreeMap, BTreeSet};
+
+const scores = BTreeMap::from(List::from([("bob", 3), ("ada", 5)]));
+
+for (name, score) in scores {
+  println(f"{name} {score}");                    // ada 5, then bob 3
+}
+
+println(f"{scores.range_from("b").collect():?} {BTreeSet::from(List::from([3, 1, 2])):?}");   // [("bob", 3)] {1, 2, 3}
+```
+
+**`BTreeMap<K: Ord, V>`** (Q649), a map ordered by its keys, in a B-tree of nodes of 5 to 11 keys:
+
+- The methods of `Map`, in the order of the keys: `new`, `BTreeMap::from(pairs)`, `insert(k, v) ->
+  Option<V>`, `get`, `get_key_value`, `contains_key`, `remove`, `remove_entry`, `update`, `upsert`,
+  `get_or_insert`, `retain`, `extend`, `len`, `is_empty`, `clear`, `iter()`, `keys()` and
+  `values()` (each a `DoubleEndedIter`), and `map[key]` through `Index`, which panics without the
+  key (`no entry found for key`).
+- The ordered ones: `first_key_value()` and `last_key_value()` (`Option<(K, V)>`), `pop_first()`
+  and `pop_last()`, and, since ranges are not values, `range(low, high)` (`low` included, `high`
+  not), `range_from(low)` and `range_to(high)`, each a `DoubleEndedIter<(K, V)>`.
+- `for (key, value) in map` goes over its pairs, as Rust's, since it implements
+  `Iterable<(K, V)>`; it implements `FromIterator<(K, V)>` and `Default` too. Its iterators go over
+  the entries a walk of the tree gathers when they are made, not lazily as Rust's.
+
+**`BTreeSet<T: Ord>`** (Q650), a set ordered by its values, on a `BTreeMap`: the methods of
+`HashSet`, in order (`union` and `symmetric_difference` give their values in order too), with
+`first`, `last`, `pop_first`, `pop_last`, `range`, `range_from` and `range_to`.
+
+Both compare, order and hash as a list of their entries when these allow it, as the compiler
+gives `VecDeque`, and their debug forms are `{"a": 1}` and `{1, 2}`.
+
+**`BinaryHeap<T: Ord>`** (Q651), a priority queue in a binary heap, the largest first:
+
+| Method | Result |
+|---|---|
+| `new BinaryHeap<T>()`, `BinaryHeap::with_capacity(n)`, `BinaryHeap::from(list)` | A heap ordered by `Ord`; `from` builds it in linear time |
+| `BinaryHeap::with_compare(compare)` | A heap ordered by `compare: fn(T, T) -> Ordering`, the largest by it first: `(a, b) => b.compare(a)` gives the smallest first, which Rust's `Reverse` does |
+| `push(v)`, `pop() -> Option<T>`, `peek() -> Option<T>` | The largest is popped and peeked at |
+| `len()`, `is_empty()`, `clear()`, `extend(iter)`, `retain(keep)` | |
+| `iter()` | The elements in the order of the heap, which is no order |
+| `into_list()`, `into_sorted_list()` | A list of the elements in the order of the heap, or from the smallest, as Rust's `into_vec` and `into_sorted_vec`; the heap stays, since nothing moves |
+
+- It implements `Iterable`, `FromIterator` and `Default`, and is not compared by value: `==`
+  compares instances, as of any class. Its debug form is the list of its heap, `[9, 2, 4]`.
+
 ## `std::env`
 
 | Function | Result |
 |---|---|
 | `args() -> List<String>` | The command-line arguments, starting with the program as the operating system started it (usually its path) |
 | `variable(name: String) -> Option<String>` | The value of an environment variable, or `None` if it is not set |
+| `vars() -> List<(String, String)>` | Every environment variable, as its name and its value, in the order of the environment |
+| `unsafe set_var(name: String, value: String)` | Sets a variable, for this program and the programs it starts |
+| `unsafe remove_var(name: String)` | Removes a variable; one that is not set is no error |
+| `set_current_dir(path: String) -> Result<(), io::Error>` | Changes the current working directory, which [`fs::current_dir`](#stdfs) gives |
+| `current_exe() -> Result<String, io::Error>` | The full path of this program's file |
+| `temp_dir() -> String` | The directory for temporary files |
+| `home_dir() -> Option<String>` | The home directory of the user, or `None` if the system has none |
 
 - Arguments and values that are not valid UTF-8 have each ill-formed sequence replaced by
   U+FFFD. On Windows they are read as UTF-16, so any Unicode text arrives intact.
 - A variable name that is empty or contains `=` or a NUL character is never set: `variable`
   returns `None`.
 - Arguments are not part of `main`'s signature ([errors](07-errors.md#program-entry-point-and-exit-codes)).
+- `set_var` and `remove_var` are `unsafe`, as in Rust 2024: another thread, or C code, may read
+  the environment at the same time, which systems other than Windows do not make safe. A name
+  that is empty or contains `=` or a NUL, a value that contains a NUL, or a change the system
+  refuses panics, as Rust's (`failed to set environment variable "A=B": Invalid argument`)
+  ([ADR-0097](../adr/0097-processes-and-environment.md), Q668).
+- `vars` gives a name that starts with `=` as it is, as Rust's: Windows keeps hidden variables of
+  the shell such as `=C:`.
+- `current_exe` reads `/proc/self/exe` on Linux and Android, asks `_NSGetExecutablePath` on Apple's
+  systems and makes it absolute without links, and asks `GetModuleFileNameW` on Windows.
+- `temp_dir` is `TMPDIR`, else `/tmp` (`/data/local/tmp` on Android); on Windows, what
+  `GetTempPathW` gives, ending in `\` (`TMP`, `TEMP` or `USERPROFILE`, else the directory of
+  Windows). It does not check that the directory exists.
+- `home_dir` is `HOME` unless it is empty, else the one of the system's database of users
+  (`getpwuid_r`), as Rust's; on Windows, `USERPROFILE` unless it is empty, else `None`.
+
+The constants of the target the program was compiled for, as Rust's `std::env::consts`, are
+written `env::OS`, since a module of `std` is one file:
+
+| Constant | Values |
+|---|---|
+| `OS: String` | `"linux"`, `"macos"`, `"windows"`, `"android"`, `"ios"` |
+| `ARCH: String` | `"x86_64"`, `"aarch64"`, `"arm"` |
+| `FAMILY: String` | `"unix"`, `"windows"` |
+
+They hold what [`@cfg`](09-modules.md#conditional-compilation-s1) tests, for code that prints or
+compares them (`println(f"{env::OS} on {env::ARCH}")`).
 
 ## `std::io`
 
@@ -85,9 +202,20 @@ fn main() -> Result<(), io::Error> {
 pub enum ErrorKind {
   NotFound,
   PermissionDenied,
+  ConnectionRefused,
+  ConnectionReset,
+  ConnectionAborted,
+  NotConnected,
+  AddrInUse,
+  AddrNotAvailable,
+  BrokenPipe,
   AlreadyExists,
+  WouldBlock,
   InvalidInput,
   InvalidData,
+  TimedOut,
+  Interrupted,
+  Unsupported,
   UnexpectedEof,
   Other,
 }
@@ -98,8 +226,87 @@ pub enum ErrorKind {
 - `new io::Error(kind, message)` creates one, for code that reports its own I/O failures.
 - Like any type implementing `Error`, it converts to `Error` with `?`
   ([errors](07-errors.md#the--operator)), and `main` may return `Result<(), io::Error>`.
-- The kinds are the same on every operating system. Failures without a more precise kind are
-  `Other`.
+- The kinds are the same on every operating system, in the order of Rust's, which has more.
+  Failures without a more precise kind are `Other`. The kinds of the network
+  ([ADR-0100](../adr/0100-networking.md), Q697) come from the `errno` value of each C library, and
+  from the `WSA` codes of Windows; a pipe or a socket whose other end closed is `BrokenPipe`. A
+  `match` on `ErrorKind` needs a `_` arm to keep compiling when kinds are added.
+
+### Streams
+
+Rationale: [ADR-0096](../adr/0096-streams-files-and-drop.md), Q656. Two interfaces, as Rust's,
+let code read and write any source and destination of bytes, a [file](#stdfs) among them:
+
+```sag
+interface Read {
+  fn read(self, buffer: &mut [u8]) -> Result<usize, Error>;
+  // read_to_end, read_to_string and read_exact, with defaults
+}
+
+interface Write {
+  fn write(self, bytes: &[u8]) -> Result<usize, Error>;
+  fn flush(self) -> Result<(), Error>;
+  // write_all and write_str, with defaults
+}
+
+fn copy<R: Read, W: Write>(from: R, to: W) -> Result<(), io::Error> {
+  to.write_all(&from.read_to_end()?)
+}
+```
+
+| Method | Result |
+|---|---|
+| `read(buffer: &mut [u8])` | `Result<usize, Error>`: the bytes put at the start of `buffer`; `0` at the end |
+| `read_to_end()` | `Result<List<u8>, Error>`: every byte left |
+| `read_to_string()` | `Result<String, Error>`: every byte left, as text; invalid UTF-8 is an error of kind `InvalidData` |
+| `read_exact(buffer: &mut [u8])` | Exactly as many bytes as `buffer` holds; an end before is an error of kind `UnexpectedEof` |
+| `write(bytes: &[u8])` | `Result<usize, Error>`: the bytes taken from the start of `bytes` |
+| `flush()` | Writes out what a buffer holds |
+| `write_all(bytes: &[u8])` | Every byte, in as many writes as it takes |
+| `write_str(text: String)` | The bytes of `text`, which Rust writes with `write!` |
+
+`SeekFrom`, an enum of `std::io`, says where [`seek`](#stdfs) moves: `Start(u64)`, `End(i64)` or
+`Current(i64)`.
+
+### Buffers and the standard streams
+
+Rationale: [ADR-0096](../adr/0096-streams-files-and-drop.md), Q658 and Q660.
+
+```sag
+use std::fs::File;
+use std::io;
+use std::io::{BufReader, BufWriter, Write};
+
+for line in new BufReader(File::open("input.txt")?).lines() {
+  println(line?);
+}
+
+const out = new BufWriter(File::create("output.txt")?);
+
+out.write_str("written when the buffer fills, on flush, or on its drop")?;
+
+const lock = io::stdout().lock();   // stdout is this thread's until `lock` goes
+```
+
+- `BufRead`, an interface extending `Read`, has `read_line() -> Result<Option<String>, Error>`
+  (the next line without its `\n` or `\r\n`, `None` at the end; bytes that are not UTF-8 are an
+  error of kind `InvalidData`) and `lines() -> Iter<Result<String, Error>>`. Rust's `fill_buf`
+  lends the buffer, which Sagitario cannot.
+- `new BufReader(inner)` reads any `Read` through a buffer of 8 KiB, and
+  `BufReader::with_capacity(n, inner)` through one of `n` bytes; it implements `Read` and
+  `BufRead`, and a read as large as its buffer, when it holds nothing, goes straight to `inner`.
+- `new BufWriter(inner)` and `BufWriter::with_capacity(n, inner)` write to any `Write` through a
+  buffer, which reaches `inner` when it is full, on `flush()`, and on the writer's `drop`, which,
+  as Rust's, loses an error there; bytes as many as the buffer holds go straight to `inner`. Its
+  `drop` runs before its fields are released, so a `File` inside it is closed after.
+- Both have `get_ref()`, the inner reader or writer, and `capacity()`.
+- `io::stdin()` gives a `Stdin`, a `Read` and `BufRead` on the stream `io::read_line` reads, so
+  the two can be mixed; its `read` gives what is available up to the end of a line, so a terminal
+  is not waited on for more. `io::stdout()` and `io::stderr()` give a `Stdout` and a `Stderr`,
+  `Write`s of bytes on the streams `print` writes.
+- `Stdout::lock()` gives a `StdoutLock`, a `Write` holding the lock of stdout until its `drop`:
+  every write of stdout takes that lock too, so other threads' `print` waits, and a series of
+  writes through it is not interleaved.
 
 ## `std::fs`
 
@@ -135,8 +342,108 @@ current directory unless they have a root. The functions with a `Result` fail wi
 - Names that are not valid UTF-8 are listed by `read_dir` with each ill-formed sequence replaced
   by U+FFFD. On Windows, paths are passed to the system as UTF-16, so any Unicode name works.
 - A path containing a NUL character is an error of kind `InvalidInput`.
-- Not yet: file metadata (size, times, permissions), removing a
-  directory tree, and changing the current directory (F4, since it is process-wide state).
+- Not yet: changing the current directory (F4, since it is process-wide state), symbolic links
+  to make, and permissions to set.
+
+### Metadata
+
+Rationale: [ADR-0096](../adr/0096-streams-files-and-drop.md), Q659.
+
+| Function or method | Result |
+|---|---|
+| `metadata(path) -> Result<Metadata, io::Error>` | What `path` names, following a symbolic link |
+| `symlink_metadata(path) -> Result<Metadata, io::Error>` | The same, of a symbolic link itself |
+| `File::metadata()` | The same, of an open file |
+| `remove_dir_all(path)` | Removes a directory with everything in it; a symbolic link is removed itself, not what it names; a path naming a file is an error |
+| `canonicalize(path) -> Result<String, io::Error>` | The absolute path, with `.`, `..` and symbolic links resolved; on Windows it starts with `\\?\`, as Rust's |
+
+`Metadata` has `len() -> u64`, `is_file()`, `is_dir()`, `is_symlink()` (which only
+`symlink_metadata` can see), `readonly()` (no one may write it: Rust's
+`permissions().readonly()`), and `modified()`, `accessed()` and `created()`, each a
+`Result<SystemTime, io::Error>`: Linux and Android keep no creation time, and Intel Macs none in
+the `stat` they use, so `created()` there is an error of kind `Unsupported`.
+
+### `File` and `OpenOptions`
+
+Rationale: [ADR-0096](../adr/0096-streams-files-and-drop.md), Q657. A `File` is an open file,
+which reads and writes where its position is:
+
+```sag
+use std::fs::{File, OpenOptions};
+use std::io::{Read, SeekFrom, Write};
+
+const file = File::create("notes.txt")?;
+
+file.write_str("hello world")?;
+file.seek(SeekFrom::Start(6))?;
+
+const log = OpenOptions::new().append(true).create(true).open("log.txt")?;
+```
+
+| Function or method | Result |
+|---|---|
+| `File::open(path)` | `Result<File, io::Error>`: the file, to read it |
+| `File::create(path)` | The file, to write it, created or emptied |
+| `OpenOptions::new()` | No option set; `read(b)`, `write(b)`, `append(b)`, `truncate(b)`, `create(b)` and `create_new(b)` each give the options with one set, and `open(path)` opens with them |
+| `read`, `read_to_end`, `read_to_string`, `read_exact`, `write`, `write_all`, `write_str`, `flush` | Those of [`Read` and `Write`](#streams); `flush` does nothing, since a file has no buffer of its own |
+| `seek(position: SeekFrom)` | `Result<u64, io::Error>`: the new position, from the start |
+| `set_len(size: u64)` | Cuts the file to `size` bytes or adds zeros; the position stays |
+| `sync_all()` | Waits until the system has stored what was written |
+| `close()` | Closes the file now, reporting what the system says; closing it again does nothing |
+| `unsafe File::from_raw_handle(handle: usize, path)` | The file of a descriptor (POSIX) or `HANDLE` (Windows) that nothing else will close, as Rust's `from_raw_fd` |
+| `as_raw_handle() -> usize` | Its descriptor or `HANDLE`, which stays the file's, as Rust's `as_raw_fd`; after `close` it names nothing |
+| `try_clone()` | `Result<File, io::Error>`: another `File` of the same open file, sharing its position, as Rust's ([ADR-0097](../adr/0097-processes-and-environment.md), Q664) |
+
+- A `File` implements `Read`, `Write` and [`Drop`](04-classes.md#drop): it closes when its last
+  reference goes, and an error there is lost, which `close()` reports. Reading, writing or seeking
+  after `close` is an error (`Bad file descriptor`, of kind `Other`).
+- As Rust's, `OpenOptions` asks for options that go together, or `open` is an error of kind
+  `InvalidInput`: reading or writing, `truncate` with `write` and without `append`, and `create`
+  or `create_new` with `write` or `append`. `append` writes every write at the end; `create_new`
+  fails, of kind `AlreadyExists`, when the file exists; a file that does not exist without
+  `create` is of kind `NotFound`.
+- `OpenOptions` is a struct: each method gives a copy with one option set, so the calls chain as
+  Rust's do.
+
+
+## `std::hash`
+
+Rationale: [ADR-0101](../adr/0101-the-rest-of-s2.md), Q708. `Hash` stays `fn hash(self) -> u64`
+([interfaces](05-interfaces-generics.md#equality-order-and-hashing-f2)); a `Hasher` combines the
+hashes or bytes of a type's fields into one, as Rust's.
+
+```sag
+use std::hash::DefaultHasher;
+
+struct Point impl Hash {
+  pub x: i32;
+  pub y: i32;
+
+  pub fn equals(self, other: Point) -> bool { self.x == other.x && self.y == other.y }
+
+  pub fn hash(self) -> u64 {
+    const hasher = new DefaultHasher();
+
+    hasher.write_i32(self.x);
+    hasher.write_i32(self.y);
+    hasher.finish()
+  }
+}
+```
+
+| Item | Meaning |
+|---|---|
+| `interface Hasher { fn write(self, bytes: &[u8]); fn finish(self) -> u64; }` | Combines bytes into a hash; `finish` gives the hash of those written so far, and can be called again |
+| `write_u8` to `write_u64`, `write_usize`, `write_i8` to `write_i64`, `write_isize` | Writes the bytes of a value, in the order of the target; default methods of `Hasher` |
+| `write_str(text)` | The bytes of `text`, then `0xFF`, as Rust's |
+| `new DefaultHasher()` | Rust's `DefaultHasher`: SipHash-1-3 with zero keys, whose hashes are Rust's for the same bytes |
+
+## `std::hint`
+
+`black_box<T>(value: T) -> T` returns its argument, but the compiler and the C compiler must
+assume it was read and may have changed, so a benchmark keeps the work it measures:
+`sum = sum.wrapping_add(hint::black_box(i) * 3)`. It takes any type. As Rust's, it is a best
+effort, not a guarantee ([ADR-0090](../adr/0090-benchmarks.md)).
 
 ## `std::math`
 
@@ -181,12 +488,189 @@ var properties: PhysicalDeviceProperties = unsafe { mem::zeroed() };
 | `size_of<T>() -> usize` | The size of `T` in bytes, as C's `sizeof` on the target |
 | `align_of<T>() -> usize` | The alignment of `T` in bytes, as C's `_Alignof` |
 | `zeroed<T>() -> T` | A value with every byte zero; needs `unsafe` |
+| `replace<T>(place: &mut T, value: T) -> T` | Puts `value` in the place and gives what was there |
+| `take<T: Default>(place: &mut T) -> T` | Gives what is in the place and leaves its [default](05-interfaces-generics.md#defaults) there |
+| `swap<T>(a: &mut T, b: &mut T)` | Exchanges the values of two places |
 
 - `size_of` and `align_of` take any type, written as a type argument.
 - `zeroed` takes its type as a type argument or from the expected type. It only makes types valid
   with every byte zero: numbers, `bool`, raw pointers, `Option` of C function pointers, enums with
   a variant of value `0`, and `@repr(C)` structs, unions and arrays of them. Other types, such as
   a C function pointer (never null) or a struct without `@repr(C)`, are errors.
+
+## `std::net`
+
+Rationale: [ADR-0100](../adr/0100-networking.md), Q690–Q692. IP and socket addresses, as Rust's
+`std::net`.
+
+```sag
+use std::net::{AddrParseError, IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+
+const local = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080);
+const parsed: Result<SocketAddr, AddrParseError> = "[::1]:443".try_into();
+
+println(f"{local} {parsed.unwrap().port()} {Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)}");
+// 127.0.0.1:8080 443 2001:db8::1
+```
+
+| Item | Meaning |
+|---|---|
+| `Ipv4Addr::new(a, b, c, d)`, `octets() -> [u8; 4]`, `to_bits() -> u32`, `Ipv4Addr::from_bits(bits)` | An IPv4 address: its octets, and as a number with the first octet highest |
+| `Ipv4Addr::LOCALHOST`, `UNSPECIFIED`, `BROADCAST` | `127.0.0.1`, `0.0.0.0`, `255.255.255.255` |
+| `is_loopback`, `is_unspecified`, `is_private`, `is_link_local`, `is_multicast`, `is_broadcast`, `is_documentation` | Rust's ranges: `127.0.0.0/8`; `0.0.0.0`; `10/8`, `172.16/12`, `192.168/16`; `169.254/16`; `224/4`; `255.255.255.255`; `192.0.2/24`, `198.51.100/24`, `203.0.113/24` |
+| `to_ipv6_compatible()`, `to_ipv6_mapped()` | `::a.b.c.d`, `::ffff:a.b.c.d` |
+| `Ipv6Addr::new(a, b, c, d, e, f, g, h)`, `segments() -> [u16; 8]`, `octets() -> [u8; 16]` | An IPv6 address of eight segments |
+| `Ipv6Addr::LOCALHOST`, `UNSPECIFIED` | `::1`, `::` |
+| `is_loopback`, `is_unspecified`, `is_multicast`, `is_unique_local`, `is_unicast_link_local` | `::1`; `::`; `ff00::/8`; `fc00::/7`; `fe80::/10` |
+| `to_ipv4_mapped() -> Option<Ipv4Addr>`, `to_ipv4()` | The IPv4 address of `::ffff:a.b.c.d`; of that or of `::a.b.c.d` |
+| `IpAddr::V4(ip)`, `IpAddr::V6(ip)`, `IpAddr::from(ip)` | Either; `is_ipv4`, `is_ipv6`, `is_loopback`, `is_unspecified`, `is_multicast` |
+| `SocketAddrV4::new(ip, port)`, `SocketAddrV6::new(ip, port, flowinfo, scope_id)` | An address and a port; `ip()`, `port()`, `flowinfo()`, `scope_id()`, and `set_` each |
+| `SocketAddr::V4(a)`, `SocketAddr::V6(a)`, `SocketAddr::new(ip: IpAddr, port)`, `SocketAddr::from(a)` | Either; `ip()`, `port()`, `set_ip`, `set_port`, `is_ipv4`, `is_ipv6` |
+| `Type::try_from(text) -> Result<Type, AddrParseError>`, `text.try_into()` | The address a text writes, for every type above |
+| `AddrParseError` | Why a text is not an address: `message()` and its text, as Rust's (`invalid IPv4 address syntax`) |
+
+- The text of an address (`Display`) is Rust's: `127.0.0.1`, IPv6 as RFC 5952 writes it (lowercase
+  segments without zeros before a digit, the longest run of two or more zero segments as `::`,
+  the first of equal ones, and `::ffff:192.0.2.1` for a mapped address), `127.0.0.1:80`,
+  `[::1]:80` and `[fe80::1%2]:80` with a scope. The debug form is that of the structs and enums
+  (`Ipv4Addr { bytes: [127, 0, 0, 1] }`).
+- Parsing accepts Rust's forms: four decimal octets without a zero before a digit (`01.2.3.4`
+  is not an address); one to four hexadecimal digits per segment, one `::`, and an IPv4
+  address in the last two segments (`::ffff:10.0.0.1`); a port after `:`, and an IPv6 socket
+  address in brackets with an optional decimal scope after `%`. `IpAddr` and `SocketAddr` try
+  IPv4 first.
+- Every address implements `Eq`, `Ord` and `Hash`: an IPv4 address before any IPv6 one, then by
+  their parts in order (address, port, flow label and scope).
+- An address is a value: `set_port` and the others change a `var`.
+- The fields of the addresses are private, and `AddrParseError` is made only by `std::net`.
+
+### TCP
+
+Rationale: [ADR-0100](../adr/0100-networking.md), Q693, Q694 and Q698. Blocking sockets, as Rust's;
+a server gives each connection a thread.
+
+```sag
+use std::net::{Ipv4Addr, TcpListener, TcpStream};
+use std::thread;
+
+const listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();   // port 0: a free one
+const port = listener.local_addr().unwrap().port();
+const server = thread::spawn(() => {
+  for stream in listener.incoming() {
+    const connection = stream.unwrap();
+
+    thread::spawn(() => connection.write_str("hello").unwrap());
+  }
+});
+
+println(TcpStream::connect(f"localhost:{port}").unwrap().read_to_string().unwrap());   // hello
+```
+
+| Item | Meaning |
+|---|---|
+| `ToSocketAddrs`, `to_socket_addrs() -> Result<Iter<SocketAddr>, io::Error>` | What can be the address of a socket: `SocketAddr`, `SocketAddrV4` and `SocketAddrV6`, and, as the compiler implements it, `String` (`"host:port"`), `(String, u16)`, `(IpAddr, u16)`, `(Ipv4Addr, u16)` and `(Ipv6Addr, u16)` |
+| `TcpListener::bind(addr) -> Result<TcpListener, io::Error>` | A socket listening on the first address of `addr` it can bind |
+| `listener.accept() -> Result<(TcpStream, SocketAddr), io::Error>` | Waits for a connection: its stream and the address of its other end |
+| `listener.incoming() -> Iter<Result<TcpStream, io::Error>>` | One `accept` per value; it never ends |
+| `TcpStream::connect(addr) -> Result<TcpStream, io::Error>` | A connection to the first address of `addr` that accepts one |
+| `read`, `write` and the methods of `Read` and `Write` | The bytes of the connection; `read` gives 0 once the other end closed its writing half, and `flush` does nothing |
+| `peer_addr()`, `local_addr()` | The address of the other end, of this one (`TcpListener` has `local_addr`) |
+| `stream.shutdown(how: Shutdown)` | Closes `Shutdown::Read`, `Write` or `Both` halves of the connection |
+| `as_raw_handle()`, `unsafe from_raw_handle(handle)` | The descriptor or `SOCKET` of the system, as `File`'s |
+
+- A text is an address as it is (`"127.0.0.1:80"`, `"[::1]:80"`), or a name and a port, whose name
+  the system's resolver looks up (`getaddrinfo`): `"localhost:8080"`. A text without a port is
+  `InvalidInput` (`invalid socket address`), a port that is not a `u16` too
+  (`invalid port value`), and a name the resolver does not know `Other`
+  (`failed to lookup address information: ...`). `(String, u16)` takes the name or address and
+  the port apart. A pair written for `addr` has a `u16` port: `bind((ip, 80))`.
+- `bind` and `connect` try each address in order and give the first that works, else the error
+  of the last, or `InvalidInput` (`could not resolve to any addresses`) when there is none, as
+  Rust's.
+- `TcpListener` and `TcpStream` are `Send`, as Rust's: threads share them, and the system orders
+  what they do on one socket. Each closes its socket when its last reference goes (`Drop`); a
+  listener bound on Unix lets another bind its address while its connections end
+  (`SO_REUSEADDR`), as Rust's.
+- Writing to a connection whose other end closed is an error, `BrokenPipe` or `ConnectionReset`,
+  never the `SIGPIPE` signal that would end the program. A signal interrupting `accept`,
+  `connect`, a read or a write is not an error: it is tried again.
+- Sockets are not inherited by the programs `std::process` starts. On Windows, a program using
+  sockets is linked with Winsock (`ws2_32`), which `std::net` starts before its first socket.
+
+### UDP
+
+Rationale: [ADR-0100](../adr/0100-networking.md), Q695.
+
+```sag
+use std::net::UdpSocket;
+
+const socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+const bytes: List<u8> = "ping".bytes().collect();
+const buffer: List<u8> = new List();
+
+buffer.resize(1500, 0);
+socket.send_to(&bytes, socket.local_addr().unwrap()).unwrap();
+
+const received = socket.recv_from(&mut buffer).unwrap();   // (4, the socket's own address)
+```
+
+| Item | Meaning |
+|---|---|
+| `UdpSocket::bind(addr) -> Result<UdpSocket, io::Error>` | A socket bound to the first address of `addr` it can bind |
+| `socket.send_to(bytes: &[u8], addr) -> Result<usize, io::Error>` | Sends one datagram to the first address of `addr` |
+| `socket.recv_from(buffer: &mut [u8]) -> Result<(usize, SocketAddr), io::Error>` | Waits for a datagram: how many of its bytes `buffer` holds, and who sent it |
+| `socket.connect(addr)`, `send(bytes)`, `recv(buffer)` | Sends and receives with one address only; datagrams from others are dropped |
+| `peer_addr()`, `local_addr()` | The address it is connected to (`NotConnected` if none), the one it is bound to |
+| `as_raw_handle()`, `unsafe from_raw_handle(handle)` | The descriptor or `SOCKET` of the system |
+
+- A datagram longer than the buffer is cut to it, and the rest of it is lost, as in Rust, on
+  every system.
+- `UdpSocket` is `Send`, and closes its socket when its last reference goes, as `TcpStream`.
+- A `send_to` to an address without a listening socket may make a later `recv_from` fail, on the
+  systems that report it (`ConnectionReset` on Windows), as Rust's.
+
+### Options of sockets
+
+Rationale: [ADR-0100](../adr/0100-networking.md), Q696, as Rust's.
+
+| Item | Of | Meaning |
+|---|---|---|
+| `set_read_timeout(Option<Duration>)`, `set_write_timeout`, `read_timeout()`, `write_timeout()` | `TcpStream`, `UdpSocket` | Waits at most that long in a read or a write, or forever with `None` |
+| `set_nonblocking(bool)` | all three | An operation that would wait is the error `WouldBlock` instead |
+| `set_ttl(u32)`, `ttl()` | all three | The time to live of its IP packets |
+| `take_error() -> Result<Option<io::Error>, io::Error>` | all three | The error the socket holds (`SO_ERROR`), which it forgets |
+| `try_clone() -> Result<Self, io::Error>` | all three | Another socket value of the same socket, sharing its options |
+| `TcpStream::connect_timeout(addr: SocketAddr, timeout)` | `TcpStream` | A connection waiting at most `timeout`: `TimedOut` if it does not come |
+| `set_nodelay(bool)`, `nodelay()`, `peek(buffer)` | `TcpStream` | Small writes sent at once (`TCP_NODELAY`); the bytes `read` would give, left to read |
+| `set_broadcast(bool)`, `broadcast()`, `peek_from(buffer)`, `peek(buffer)` | `UdpSocket` | Sending to broadcast addresses; the datagram `recv_from` or `recv` would give, left to receive |
+
+- A zero duration given to a time out, or to `connect_timeout`, is `InvalidInput`
+  (`cannot set a 0 duration timeout`). A time out is kept to the microsecond, and to the
+  millisecond on Windows, rounded so that it is never zero.
+- A read or a write whose time runs out is an error of kind `WouldBlock` on POSIX systems and
+  `TimedOut` on Windows, as the system gives it and as in Rust.
+
+## `std::ptr`
+
+Rationale: [ADR-0101](../adr/0101-the-rest-of-s2.md), Q706. Null pointers and raw memory, as Rust's
+`std::ptr`, for code that works with C ([FFI](10-ffi.md#raw-pointers)).
+
+| Function | Result |
+|---|---|
+| `null<T>() -> *const T`, `null_mut<T>() -> *mut T` | The null pointer; `T` comes from the type expected |
+| `unsafe read(src: *const T) -> T`, `unsafe write(dst: *mut T, value: T)` | `*src`; `*dst = value` |
+| `unsafe copy(src, dst, count)` | Copies `count` values of `T`; the regions may overlap (`memmove`) |
+| `unsafe copy_nonoverlapping(src, dst, count)` | The same for regions that do not overlap (`memcpy`) |
+| `unsafe write_bytes(dst, byte: u8, count)` | Sets every byte of `count` values of `T` to `byte` (`memset`) |
+
+```sag
+use std::ptr;
+
+const from: List<u8> = List::from([1, 2, 3]);
+const to: List<u8> = List::from([0, 0, 0]);
+
+unsafe { ptr::copy_nonoverlapping(from.as_ptr(), to.as_mut_ptr(), 3); }
+```
 
 ## `std::path`
 
@@ -201,8 +685,18 @@ root of a path is its leading separators, after the drive on Windows.
 | `parent(path) -> Option<String>` | The path without its last component; `Some("")` for a single relative component, `None` for `""` or a root |
 | `extension(path) -> Option<String>` | The text after the last `.` of the file name; `None` without a `.` or when the name only starts with one (`.bashrc`) |
 | `stem(path) -> Option<String>` | The file name without its extension |
+| `components(path) -> List<Component>` | Its parts, as Rust's `Component`: `Prefix(drive)` on Windows, `RootDir`, `CurDir` (a `.` that starts a relative path), `ParentDir` and `Normal(name)` |
+| `has_root(path)`, `is_absolute(path)`, `is_relative(path)` | Whether it starts with a root; whether it does not depend on the current directory: a root, and a drive too on Windows (`C:\a`) |
+| `with_extension(path, extension)`, `with_file_name(path, name)` | The path with its extension (removed when empty) or its file name replaced; a path without a file name has `name` joined to it |
+| `strip_prefix(path, base) -> Option<String>` | The rest of `path` after the components of `base`, with the separators of `path` |
+| `starts_with(path, base)`, `ends_with(path, child)` | Whether its components start with those of `base`, or end with those of `child` |
 
 - Trailing separators are ignored: `file_name("a/b/")` is `Some("b")`.
+- The functions from `components` on are Rust's ([ADR-0101](../adr/0101-the-rest-of-s2.md),
+  Q707): they compare components, not text, so `starts_with("a/bc", "a/b")` is `false`. A path is
+  a `String`, so there is no `PathBuf`; normalizing one against the file system is
+  `fs::canonicalize`. `Component` implements `Eq` and `Display`, whose text of `RootDir` is the
+  separator of the system.
 - `join` separates with `/`, or with `\` on Windows when `base` uses only `\`.
 
 ```sag
@@ -224,6 +718,15 @@ it can stand where any value is expected (`const n = if ok { 1 } else { process:
   the leak check of the test harness does not report the objects still alive.
 - Exit codes outside 0–255 depend on the operating system; POSIX systems keep the low 8 bits.
 
+`abort()` ends the program at once, as Rust's: it never returns either, and writes out nothing,
+so output still in a buffer may be lost ([ADR-0097](../adr/0097-processes-and-environment.md),
+Q667). It is C's `abort`: on POSIX systems the signal `SIGABRT` ends the program, so its
+`ExitStatus` has no code; on Windows, Microsoft's C runtime ends it with the status `0xC0000409`,
+as Rust's does, and MinGW's with the exit code 3.
+
+`id() -> u32` is the identifier the system gave this program, the one a `Child` started from it
+has as its `id()`.
+
 ### Running programs
 
 ```sag
@@ -243,12 +746,18 @@ if output.status.success() {
 | `arg(text)`, `args(list)` | Adds arguments, passed exactly as given |
 | `env(name, value)` | Sets an environment variable for the program; the others are inherited |
 | `current_dir(path)` | The program's working directory |
-| `input(text)` | Text written to the program's stdin, which is then closed; without it the program reads this program's stdin |
+| `input(text)` | Text that `output` and `status` write to the program's stdin, which they then close; it replaces `stdin(...)` |
+| `stdin(stdio)`, `stdout(stdio)`, `stderr(stdio)` | What a stream of the program is (a [`Stdio`](#streams-of-a-program)); `stdin` replaces `input(...)` |
 
 | Method | Result |
 |---|---|
 | `output() -> Result<Output, io::Error>` | Runs the program to its end, capturing its stdout and stderr |
 | `status() -> Result<ExitStatus, io::Error>` | Runs the program to its end, printing to this program's stdout and stderr |
+| `spawn() -> Result<Child, io::Error>` | Starts the program, which [runs while this one goes on](#started-programs) |
+
+Unless `stdin`, `stdout` or `stderr` set them, `output()` pipes stdout and stderr to capture them,
+and `status()` and `spawn()` give the program this program's three streams; the stdin of
+`output()` and `status()` is a pipe with `input(text)`, else this program's.
 
 ```sag
 pub struct ExitStatus {
@@ -271,53 +780,230 @@ pub struct Output {
 - Captured output that is not valid UTF-8 has each ill-formed sequence replaced by U+FFFD.
 - This program's buffered output is written out before the child starts, so what both print
   appears in order.
-- Not yet: running a program in the background (`spawn`, `wait`, `kill`), redirecting to
-  files, removing or clearing inherited variables, and connecting programs with pipes.
+- Not yet: removing or clearing inherited variables, and connecting one program's stdout to
+  another's stdin.
+
+### Streams of a program
+
+Rationale: [ADR-0097](../adr/0097-processes-and-environment.md), Q664. A `Stdio`, a class, is what
+a stream of a program to run is, as Rust's:
+
+| Function | The stream |
+|---|---|
+| `Stdio::inherit()` | This program's |
+| `Stdio::piped()` | A pipe to this program: for `spawn`, the `stdin`, `stdout` or `stderr` of the `Child` |
+| `Stdio::null()` | Nothing: reading it gives the end at once, and what is written to it goes nowhere |
+| `Stdio::from(file)`, `file.into()` | The `File` `file`, through a copy of its handle (`try_clone`), so that `file` stays this program's; it implements `From<File>` |
+
+- A `Stdio::from(file)` of a closed file makes `spawn`, `output` and `status` fail with that
+  error.
+
+### Started programs
+
+Rationale: [ADR-0097](../adr/0097-processes-and-environment.md), Q665 and Q666.
+
+```sag
+use std::io::BufReader;
+use std::process::{Command, Stdio};
+
+const child = new Command("sort").stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()?;
+
+{
+  const input = child.stdin.take().unwrap();
+
+  input.write_str("pear\napple\n")?;
+}                                    // closed: `sort` sees the end of its input
+
+for line in new BufReader(child.stdout.take().unwrap()).lines() {
+  println(line?);                    // apple, then pear
+}
+
+println(child.wait()?.success());
+```
+
+A `Child` has the fields `pub var stdin: Option<ChildStdin>`, `stdout: Option<ChildStdout>` and
+`stderr: Option<ChildStderr>`, `Some` for a stream set to `Stdio::piped()`, which
+[`take()`](02-types.md#optiont-and-resultt-e-f1) takes out. `ChildStdin` implements `io::Write`,
+the other two `io::Read`, and the three `Drop`, which closes the pipe.
+
+| Method | Result |
+|---|---|
+| `id() -> u32` | The identifier the system gave the program |
+| `wait() -> Result<ExitStatus, io::Error>` | Closes `stdin`, unless it was taken, then waits for the program to end |
+| `try_wait() -> Result<Option<ExitStatus>, io::Error>` | How the program ended, or `None` while it runs |
+| `kill() -> Result<(), io::Error>` | Ends the program at once: `SIGKILL`, or `TerminateProcess` with the exit code 1 on Windows; one that ended already is not an error |
+| `wait_with_output() -> Result<Output, io::Error>` | Closes `stdin`, reads the piped `stdout` and `stderr` still in the `Child` to their end, both at once, and waits |
+
+- A status found is kept: waiting again gives it, and `kill` after it does nothing.
+- `spawn` with `input(text)` set is an error of kind `InvalidInput`: the stdin of a started
+  program is written through its pipe.
+- A write to a `ChildStdin` whose program closed its stdin is an error (`Broken pipe`, of kind
+  `Other`), not a signal that ends this program.
+- The `drop` of a `Child` closes its handle and the pipes still in it, and neither waits for the
+  program nor kills it, as Rust's: the program goes on, and on POSIX systems it stays a zombie
+  until this program ends unless it was waited for.
 
 ## `std::sync`
 
 Rationale: [ADR-0046](../adr/0046-mutex-and-atomics.md),
-[ADR-0047](../adr/0047-channels-and-thread-utilities.md).
+[ADR-0047](../adr/0047-channels-and-thread-utilities.md),
+[ADR-0098](../adr/0098-locks-orderings-and-threads.md).
 
 ```sag
-use std::sync::{AtomicI64, Mutex};
+use std::sync::{AtomicI64, Mutex, Ordering};
 use std::thread;
 
 const hits = new AtomicI64(0);
 const names = new Mutex("");
 const worker = thread::spawn(() => {
-  hits.fetch_add(1);
+  hits.fetch_add(1, Ordering::Relaxed);
   names.update((text) => `${text}a`);
 });
 
 worker.join();
-println(`${hits.load()} ${names.get()}`);
+println(`${hits.load(Ordering::Relaxed)} ${names.get()}`);
 ```
+
+A [static](03-memory.md#global-state-g1) holds a `Mutex` or an atomic that every thread
+reaches without passing it: `static HITS: AtomicI64 = new AtomicI64(0);`.
 
 | Item | Meaning |
 |---|---|
 | `Mutex<T: Send>` | A value that threads share, changed by one thread at a time |
 | `new Mutex(value)`, `m.get() -> T`, `m.set(value)` | Creates it, copies the value out, replaces it |
 | `m.update(f: fn(T) -> T) -> T` | Replaces the value with `f(value)` while no other thread can use the mutex, and returns the new value |
-| `AtomicBool`, `AtomicI32`, `AtomicI64`, `AtomicU32`, `AtomicU64`, `AtomicUsize` | A value of that type that threads read and change at once |
-| `new AtomicI64(value)`, `a.load()`, `a.store(value)` | Creates it, reads it, writes it |
-| `a.swap(value)` | Writes `value` and returns the previous value |
-| `a.compare_exchange(expected, desired) -> Result<T, T>` | Writes `desired` if the value is `expected`: `Ok(expected)` if it did, `Err(actual)` if not |
-| `a.fetch_add(n)`, `a.fetch_sub(n)` | Integers only: adds or subtracts `n` and returns the previous value; the result wraps around at the type's limits, also in debug builds |
-| `Channel<T: Send>` | A queue of values that threads send to each other, without a limit |
+| `m.lock() -> MutexGuard<T>`, `m.try_lock()` | Holds the lock until the guard goes ([locks](#lock-guards-and-conditions)) |
+| `Condvar`, `RwLock<T: Send>`, `Barrier` | A condition to wait on, a lock for many readers or one writer, a meeting point of threads |
+| `AtomicBool`, `AtomicI8`, `AtomicI16`, `AtomicI32`, `AtomicI64`, `AtomicIsize`, `AtomicU8`, `AtomicU16`, `AtomicU32`, `AtomicU64`, `AtomicUsize` | A value of that type that threads read and change at once ([atomics](#atomics)) |
+| `AtomicPtr<T>` | A `*mut T` that threads read and change at once |
+| `Channel<T: Send>` | A queue of values that threads send to each other, without a limit or with one |
 | `new Channel<T>()`, `c.send(value)` | Creates it; adds `value` at the end. Sending on a closed channel panics |
+| `Channel::bounded(capacity) -> Channel<T>` | A channel whose `send` waits while it holds `capacity` values; with 0, `send` waits until a receiver takes the value, as Rust's `sync_channel` |
+| `c.try_send(value) -> Result<(), TrySendError<T>>` | Sends without waiting, or gives the value back: `Full(value)` when the channel holds as many as it can (with capacity 0, when no receiver waits), `Closed(value)` when it is closed |
 | `c.receive() -> Option<T>` | The value at the front, waiting until there is one; `None` once the channel is closed and empty |
+| `c.try_receive() -> Result<T, TryReceiveError>` | The value at the front if there is one; else `Err(Empty)`, or `Err(Closed)` once it is closed and empty |
+| `c.receive_timeout(duration) -> Result<T, ReceiveTimeoutError>` | `receive` for at most `duration`; else `Err(Timeout)`, or `Err(Closed)` once it is closed and empty |
 | `c.close()` | No more values can be sent; those sent are still received. Closing again does nothing |
 | `c.iter() -> Iter<T>` | The values received one by one, until the channel is closed and empty |
 
 - `Mutex<T>` and the atomics are `Send` (a `Mutex<T>` when `T` is), so threads can capture
   them. Since `T` must be `Send`, a mutex cannot hold a `List` or a class with `var` fields.
-- There are no lock guards: every method takes and releases the lock itself. A thread using a
-  mutex inside the function it gave to `update` of the same mutex panics instead of waiting
+- `get`, `set` and `update` take and release the lock themselves. A thread locking a mutex it
+  holds, through a guard or inside the function it gave to `update`, panics instead of waiting
   forever.
-- Atomic operations are sequentially consistent: every thread sees them in one order.
 - Any thread holding a channel may send, receive or close it. Several receivers share the
   values: each value goes to one of them.
+- A `send` waiting for room panics if the channel is closed meanwhile, since its value was never
+  sent; one on a channel of capacity 0 whose value is waiting for a receiver returns when the
+  channel is closed, and the value is still received. The errors are Rust's `TrySendError`,
+  `TryRecvError` and `RecvTimeoutError`, with `Closed` for `Disconnected`, since a channel is
+  closed rather than left by its last sender
+  ([ADR-0098](../adr/0098-locks-orderings-and-threads.md), Q675).
+
+### Lock guards and conditions
+
+Rationale: [ADR-0098](../adr/0098-locks-orderings-and-threads.md), Q671–Q674. As Rust's, without
+poisoning: a panic ends the whole program, so no lock is left held by a thread that failed.
+
+```sag
+use std::sync::{Condvar, Mutex};
+
+const queue = new Mutex(0);
+const changed = new Condvar();
+const worker = thread::spawn(() => {
+  const guard = queue.lock();            // held until the end of this scope
+
+  guard.set(guard.get() + 1);
+  changed.notify_one();
+});
+const guard = changed.wait_while(queue.lock(), (count) => count == 0);
+```
+
+| Item | Meaning |
+|---|---|
+| `m.lock() -> MutexGuard<T>` | Waits for the lock of the `Mutex` and holds it until the guard goes |
+| `m.try_lock() -> Result<MutexGuard<T>, TryLockError>` | The guard if no thread holds the lock, this one included; else `Err(TryLockError::WouldBlock)` |
+| `guard.get() -> T`, `guard.set(value)` | A copy of the value; replaces it |
+| `new Condvar()` | A condition that threads holding a `MutexGuard` wait on |
+| `c.wait(guard) -> MutexGuard<T>` | Releases the lock until the condition is notified, then takes it again; it may also return without a notification |
+| `c.wait_while(guard, condition: fn(T) -> bool) -> MutexGuard<T>` | Waits while `condition` holds for the value |
+| `c.wait_timeout(guard, duration)`, `c.wait_timeout_while(guard, duration, condition)` | The same for at most `duration`: `(MutexGuard<T>, WaitTimeoutResult)`, whose `timed_out()` says whether the time ran out (while `condition` still held) |
+| `c.notify_one()`, `c.notify_all()` | Wakes one, or every, thread waiting on it |
+| `new RwLock(value)` | A value that many threads read at once, or one writes |
+| `r.read() -> RwLockReadGuard<T>`, `r.write() -> RwLockWriteGuard<T>` | Holds the lock to read (`get`) or to write (`get`, `set`) until the guard goes |
+| `r.try_read()`, `r.try_write()` | The guard, or `Err(TryLockError::WouldBlock)` if another thread writes, or reads or writes |
+| `r.get()`, `r.set(value)`, `r.update(f)` | As `Mutex`'s; `get` reads while others read too |
+| `new Barrier(count)`, `b.wait() -> BarrierWaitResult` | Waits until `count` threads have called it (0 is as 1), then lets them go together; `is_leader()` is true for one of them. It can be used again |
+
+- A guard is released when its last reference goes: a guard in a local at the end of its scope, a
+  temporary at the end of its statement, as in Rust. So `m.lock().get() + m.get()` locks the
+  mutex twice in one statement, and panics. A guard kept in a field or a list holds the lock until
+  it goes.
+- The guards are not `Send` (`E0330`, `E0332`): the thread that took a lock releases it. The
+  mutex, the condition, the `RwLock` and the barrier are, and threads share them.
+- A `Condvar` waits with one mutex: waiting with another panics
+  (`attempted to use a condition variable with two mutexes`), as Rust's may.
+- A thread writing an `RwLock` that takes it again panics; one reading it that reads again may
+  wait forever if a writer waits in between, as Rust's says.
+- `MutexGuard::new`, `RwLockReadGuard::new`, `RwLockWriteGuard::new`, `WaitTimeoutResult::new` and
+  `BarrierWaitResult::new` take types of `std::sys`, which programs cannot name: only the lock or
+  the condition makes them.
+
+### Atomics
+
+Rationale: [ADR-0087](../adr/0087-atomic-storage-and-std-sync.md),
+[ADR-0098](../adr/0098-locks-orderings-and-threads.md), Q676 and Q677. Every operation of an
+atomic takes how it orders the memory operations around it, an `Ordering`, as Rust's
+`std::sync::atomic`:
+
+| `Ordering` | Meaning |
+|---|---|
+| `Relaxed` | Only the operation itself is atomic |
+| `Release` | The writes before it are seen by a thread that reads its value with `Acquire` |
+| `Acquire` | It sees the writes made before a `Release` whose value it reads |
+| `AcqRel` | Both, for an operation that reads and writes |
+| `SeqCst` | `AcqRel`, and every thread sees all `SeqCst` operations in one order |
+
+| Method | Result |
+|---|---|
+| `new AtomicI64(value)` | The atomic |
+| `load(order) -> T`, `store(value, order)` | Reads the value, writes it |
+| `swap(value, order) -> T` | Writes `value` and returns the previous value |
+| `compare_exchange(current, desired, success, failure) -> Result<T, T>` | Writes `desired` if the value is `current`: `Ok(current)` if it did, `Err(actual)` if not; `success` orders the exchange, `failure` the read of a value that differs |
+| `compare_exchange_weak(current, desired, success, failure)` | The same, but it may fail although the value is `current`; faster in a loop on some processors |
+| `fetch_update(set_order, fetch_order, f: fn(T) -> Option<T>) -> Result<T, T>` | Writes what `f` returns for the value while it returns `Some`, trying again if another thread changed it: `Ok(previous)`, or `Err(previous)` once `f` gives `None` |
+| `fetch_add`, `fetch_sub`, `fetch_and`, `fetch_or`, `fetch_xor`, `fetch_nand`, `fetch_max`, `fetch_min` `(value, order) -> T` | Integers: writes the sum, difference, `&`, `\|`, `^`, `!(a & b)`, larger or smaller of the value and `value`, and returns the previous value; the sum and difference wrap around at the type's limits, also in debug builds |
+| `fetch_and`, `fetch_or`, `fetch_xor`, `fetch_nand` `(value, order)`, `fetch_not(order)` | `AtomicBool`: the same with `&&`, `\|\|`, `!=` and `!(a && b)`, and the opposite |
+
+`AtomicPtr<T>` has `load`, `store`, `swap`, `compare_exchange`, `compare_exchange_weak` and
+`fetch_update`; what its pointer points to is read and written through `unsafe`, as any raw
+pointer's ([FFI](10-ffi.md)). `sync::fence(order)` orders the memory operations around it
+without an atomic of its own, as Rust's `atomic::fence`.
+
+```sag
+use std::sync::{AtomicBool, AtomicI64, Ordering};
+use std::thread;
+
+const data = new AtomicI64(0);
+const ready = new AtomicBool(false);
+const reader = thread::spawn(() => {
+  while !ready.load(Ordering::Acquire) {}
+
+  data.load(Ordering::Relaxed)               // 42: `Acquire` sees what came before `Release`
+});
+
+data.store(42, Ordering::Relaxed);
+ready.store(true, Ordering::Release);
+```
+
+- The orderings Rust rejects panic, as Rust's: `load` with `Release` or `AcqRel`
+  (`there is no such thing as a release load`), `store` with `Acquire` or `AcqRel`, a `failure`
+  ordering of `Release` or `AcqRel`, and a `Relaxed` fence. A `failure` ordering stronger than
+  `success` is allowed, as in Rust.
+- `Ordering` is written `sync::Ordering`, or imported with `use std::sync::Ordering`, which hides
+  the prelude's `Ordering` of comparisons in that file; a mismatch between the two notes that
+  they are different types with the same name.
+- The atomics are `Send`, and a [static](03-memory.md#global-state-g1) can hold one.
 
 ```sag
 const jobs: Channel<i64> = new Channel();
@@ -351,6 +1037,12 @@ println(handle.join());
 | `handle.join() -> T` | Waits for the thread to finish and returns what `body` returned; again, the same value |
 | `sleep(duration: Duration)` | Pauses the running thread for at least `duration`; the same as `time::sleep` |
 | `available_parallelism() -> usize` | The number of logical processors, at least 1 |
+| `new Builder()`, `b.name(name) -> Builder`, `b.stack_size(bytes) -> Builder` | How to start a thread: with a name, or a stack of at least `bytes` bytes (0 keeps the system's default) |
+| `b.spawn(body: fn() -> T) -> Result<JoinHandle<T>, io::Error>` | Runs `body` in a new thread, or the error of the system if it cannot start one |
+| `current() -> Thread`, `handle.thread() -> Thread` | The calling thread; the thread a handle started |
+| `t.id() -> ThreadId`, `t.name() -> Option<String>` | Its number; `Some("main")` for the main thread, the name given to the builder, or `None` |
+| `park()`, `park_timeout(duration)`, `t.unpark()` | Waits until another thread unparks this one, for at most `duration`; wakes `t` |
+| `yield_now()` | Lets the system run another thread |
 
 - The argument of `spawn` is a lambda or the name of a function, not another function value.
   Every binding the lambda captures must be `Send`
@@ -363,7 +1055,33 @@ println(handle.join());
   waiting for the threads still running; the leak check of the test harness only runs when none
   is.
 - `JoinHandle::spawn(body)` is the same as `thread::spawn(body)`, which calls it.
-  `new JoinHandle<T>()` makes a handle without a thread, whose `join` panics.
+  `new JoinHandle<T>()` makes a handle without a thread, whose `join` and `thread` panic.
+
+Rationale for the rest: [ADR-0098](../adr/0098-locks-orderings-and-threads.md), Q678–Q680, as
+Rust's `std::thread`.
+
+```sag
+use std::thread;
+use std::thread::Builder;
+
+const worker = new Builder().name("worker").spawn(() => thread::current().name()).unwrap();
+
+println(f"{worker.join():?} {thread::current().id()}");   // Some("worker") ThreadId(1)
+```
+
+- The `body` of `Builder::spawn` is checked as `spawn`'s (`E0332`, `E0333`). A name holding a NUL
+  panics when the thread is spawned (`thread name may not contain interior null bytes`). The
+  system gets the name too, for debuggers, cut at a character to what it keeps (15 bytes on Linux
+  and Android, 63 on Apple's systems); `name()` gives it whole. A stack size is rounded up to
+  whole pages; a size below the system's minimum keeps its default.
+- A `ThreadId` is unique among the threads of the program and never used again; the main thread's
+  is 1. It is compared with `==` and hashed, and its text is `ThreadId(1)`; its debug form is that
+  of a struct, `ThreadId { value: 1 }`. A thread that C started gets one, without a name, when it
+  first calls `current()`.
+- A `Thread` is `Send`, so another thread can `unpark` it. `park` has Rust's token: an `unpark`
+  before it makes it return at once, and it may also return without one, so it is called in a
+  loop that checks a condition. `Thread` and `ThreadId` are made only by `std::thread`: their
+  initializers take types of `std::sys`.
 
 ## `std::time`
 
@@ -382,20 +1100,29 @@ Rationale: [ADR-0039](../adr/0039-time-and-commands.md).
 | `d.as_secs()`, `as_millis()`, `as_micros()`, `as_nanos()` | The whole units, as `u64` |
 | `d.as_secs_f64()` | The seconds with their fraction |
 | `d.plus(e)`, `d.minus(e)`, `d.times(n: u64)` | Arithmetic; `minus` panics if `e` is longer, also in release builds |
+| `d + e`, `d - e`, `d * n`, `d / n` (`n: u32`) | The operators of Rust's `Duration`, which panic beyond the longest duration, below zero or dividing by zero, in every build |
+| `checked_add(e)`, `checked_sub(e)`, `checked_mul(n)`, `checked_div(n)` | `Option<Duration>`: `None` where the operator would panic |
+| `saturating_add(e)`, `saturating_sub(e)`, `saturating_mul(n)` | The longest duration, or zero, where the operator would panic |
+| `d.as_secs_f32()`, `Duration::from_secs_f64(s)`, `from_secs_f32(s)` | The seconds as a float; the duration of a number of seconds, truncated to the nanosecond, which panics if it is negative, too large or NaN |
+| `d.mul_f64(x)`, `div_f64(x)`, `mul_f32(x)`, `div_f32(x)` | The duration times or divided by a float, through its seconds |
 | `Instant::now()`, `i.elapsed()` | The current instant, and the time since `i` |
 | `i.duration_since(earlier)` | The time from `earlier` to `i`; zero if `earlier` is later |
 | `SystemTime::now()`, `t.since_unix_epoch()` | The current time, and the time since 1970-01-01 00:00:00 UTC (zero before it) |
+| `UNIX_EPOCH`, `t + d` | 1970-01-01 00:00:00 UTC, a `static`, and a `SystemTime` moved later by a `Duration`, as Rust's; `SystemTime::default()` is the epoch ([ADR-0096](../adr/0096-streams-files-and-drop.md), Q659) |
 
 - The three types implement `Ord` (and so `Eq`): `a.compare(b)`, and lists of them can be
-  sorted. Their arithmetic and comparisons are methods.
-- Creating or adding durations beyond the range of `u64` nanoseconds follows integer overflow
-  rules: a panic in debug builds.
+  sorted. `Duration` implements `Add`, `Sub`, `Mul<u32, Duration>` and `Div<u32, Duration>`
+  ([ADR-0101](../adr/0101-the-rest-of-s2.md), Q704).
+- Creating durations beyond the range of `u64` nanoseconds with `from_secs` and the like, or
+  with `plus` and `times`, follows integer overflow rules: a panic in debug builds. The
+  operators, `checked_` and `saturating_` check it in every build, as Rust's.
+- `Duration` has no `Display`, as in Rust; its debug form is that of a struct.
 - Calendar dates, time zones and formatting are not part of `std::time`.
 
 ## Implementation rules
 
 The modules of `std`, except `std::ffi`, are written in Sagitario and embedded in the compiler.
-They follow the rules of every module, with three exceptions that only the standard library has:
+They follow the rules of every module, with four exceptions that only the standard library has:
 
 - It may declare functions of the runtime in `extern "C"` blocks: names starting with `sag_`,
   which may also take and return `String` and take `fn()` values (borrowed arguments, new
@@ -404,9 +1131,30 @@ They follow the rules of every module, with three exceptions that only the stand
   types of the same name (`io::Error` implements `Error`).
 - It may use the `prv` members of the prelude's types: `std::task` implements `sleep` and
   `block_on` on those of `Task` ([ADR-0072](../adr/0072-async-await-increments.md)).
+- It may use C symbols that programs cannot: the reserved names of the system's C library
+  (`__errno_location`), and the runtime's own names starting with `sag_` for its
+  `@export` functions. The runtime's core calls these functions, such as
+  `sag_time_monotonic` in `std::time`, so every program compiles their modules, and they are
+  generated although no Sagitario code calls them. They are not exported by a library a program
+  builds ([ADR-0085](../adr/0085-conditional-compilation-and-std-time.md), Q552).
 
 `std` itself has a file of private helpers, which its modules call as `super::name`: like any
 module's private items, only its submodules see them.
+
+`std::sys` holds the C API of each system that the standard library is written on, and the code
+that differs by system, chosen with [`@cfg`](09-modules.md#conditional-compilation-s1): its
+functions, constants and structs, and the reading of `errno`. Only the modules of `std` can name
+it; for a program it does not exist (`E0200`)
+([ADR-0085](../adr/0085-conditional-compilation-and-std-time.md), Q551).
+
+`std::sys::Atomic<T>`, provided by the compiler, holds a `bool` or an integer that threads read
+and change at once; the atomics of `std::sync` are written on it. It is only the type of a
+`const` field of a class, set once in the class's initializer with `Atomic::new(value)` and then
+used through its methods: `load`, `store`, `swap`, `compare_exchange` and, on integers,
+`fetch_add` and `fetch_sub`, all sequentially consistent and wrapping around at the type's
+limits. Another `T` is an error (`E0318`), and so is any other place or use (`E0339`). Its C is an
+`_Atomic` field, and a program holding one is compiled as one using threads
+([ADR-0087](../adr/0087-atomic-storage-and-std-sync.md)).
 
 `std::process::exit` is provided by the compiler, since no function written in Sagitario can
 declare that it never returns. The compiler also checks the arguments of `thread::spawn`,

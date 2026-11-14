@@ -1,0 +1,11 @@
+// A thread writing an `RwLock` takes it again: a panic instead of a deadlock
+// (docs/adr/0098-locks-orderings-and-threads.md, Q673).
+// expect-panic: a thread locked a `RwLock` it already holds for writing
+use std::sync::RwLock;
+
+fn main() {
+  const shared = new RwLock(1);
+  const writer = shared.write();
+
+  writer.set(shared.get() + 1);
+}

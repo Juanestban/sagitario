@@ -1,0 +1,11 @@
+// The orderings Rust rejects panic, as Rust's: a load cannot release
+// (docs/adr/0098-locks-orderings-and-threads.md, Q676).
+// expect-panic: there is no such thing as a release load
+
+use std::sync::{AtomicI32, Ordering};
+
+fn main() {
+  const value = new AtomicI32(1);
+
+  println(f"{value.load(Ordering::Release)}");
+}

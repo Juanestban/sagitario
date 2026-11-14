@@ -1,0 +1,85 @@
+// `take` and `replace` of an `Option` place: a `var` binding, a `var` field of a class reached
+// through `const`, a field of a struct in a `var`, an element of a list, with values holding
+// references, the place evaluated once (docs/adr/0097-processes-and-environment.md, Q663).
+// expect-stdout: Some(1) None | Some("a") Some("b")
+// expect-stdout: Some("pipe") false closed
+// expect-stdout: Some(3) Some(7) | [None, Some(2)]
+// expect-stdout: closed
+// expect-stdout: closed
+// expect-stdout: true 1
+
+class Pipe impl Drop {
+  pub const name: String;
+
+  pub fn new(self, name: String) {
+    self.name = name;
+  }
+
+  pub fn drop(self) {
+    println("closed");
+  }
+}
+
+class Child {
+  pub var stdin: Option<Pipe>;
+
+  pub fn new(self) {
+    self.stdin = Some(new Pipe("pipe"));
+  }
+}
+
+struct Slot {
+  pub value: Option<i32>;
+}
+
+class Counter {
+  pub var calls: i32;
+
+  pub fn new(self) {
+    self.calls = 0;
+  }
+}
+
+fn holder(counter: Counter, child: Child) -> Child {
+  counter.calls += 1;
+  child
+}
+
+fn main() {
+  var number = Some(1);
+  const taken = number.take();
+  var text = Some("a");
+  const previous = text.replace("b");
+
+  println(f"{taken:?} {number:?} | {previous:?} {text:?}");
+
+  // `child.stdin.take()`, as Rust's: the pipe leaves the child, and its `drop` closes it.
+  const child = new Child();
+
+  {
+    const pipe = child.stdin.take();
+
+    print(f"{pipe.map((found) => found.name):?} {child.stdin.is_some():?} ");
+  }
+
+  var slot = Slot { value: Some(3) };
+  const from_slot = slot.value.take();
+
+  slot.value.replace(7);
+
+  const values = List::from([Some(1), Some(2)]);
+
+  values[0].take();
+  println(f"{from_slot:?} {slot.value:?} | {values:?}");
+
+  // The place is evaluated once.
+  const counter = new Counter();
+  const other = new Child();
+
+  other.stdin = None;
+
+  const old = holder(counter, other).stdin.replace(new Pipe("next"));
+
+  other.stdin = None;
+  println(f"{old.is_none()} {counter.calls}");
+}

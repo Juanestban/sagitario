@@ -1,0 +1,74 @@
+// `HashSet`: insertion and removal, the operations between sets, order of first insertion,
+// equality by value, its debug form, `for`, `collect`, `Default` and bounds
+// (docs/adr/0095-collections.md, Q647 and Q652).
+// expect-stdout: true true false 2 true false
+// expect-stdout: {"a", "b"} {"b", "c"} {} {1, 2, 3}
+// expect-stdout: ["a", "b", "c"] ["b"] ["a"] ["a", "c"]
+// expect-stdout: false true true false true
+// expect-stdout: true false true false
+// expect-stdout: Some("b") Some("b") None 1 [2, 4] 3
+// expect-stdout: ab {1, 3, 2} 6 0
+// expect-stdout: {
+// expect-stdout:     "x",
+// expect-stdout: }
+
+struct Point impl Hash {
+  pub x: i32;
+  pub y: i32;
+
+  pub fn equals(self, other: Point) -> bool { self.x == other.x && self.y == other.y }
+  pub fn hash(self) -> u64 { (self.x * 31 + self.y) as u64 }
+}
+
+fn total<T: Iterable<i32>>(values: T) -> i32 {
+  var sum = 0;
+
+  for value in values {
+    sum += value;
+  }
+
+  sum
+}
+
+fn main() {
+  const set = new HashSet<String>();
+
+  println(f"{set.insert("a")} {set.insert("b")} {set.insert("a")} {set.len()} {set.contains("a")} {set.contains("z")}");
+
+  const other = HashSet::from(List::from(["b", "c", "b"]));
+  const empty: HashSet<String> = HashSet::default();
+  const numbers: HashSet<i32> = List::from([1, 2, 3, 2]).iter().collect();
+
+  println(f"{set:?} {other:?} {empty:?} {numbers:?}");
+  println(f"{set.union(other).collect():?} {set.intersection(other).collect():?} {set.difference(other).collect():?} {set.symmetric_difference(other).collect():?}");
+
+  const ab = HashSet::from(List::from(["a", "b"]));
+  const ba = HashSet::from(List::from(["b", "a"]));
+
+  println(f"{set.is_subset(other)} {ab.is_subset(set)} {set.is_superset(ab)} {set.is_disjoint(other)} {set.is_disjoint(empty)}");
+  println(f"{set == ba} {set == other} {List::from([ab]) == List::from([ba])} {ab != ba}");
+
+  const points = HashSet::from(List::from([Point { x: 1, y: 2 }]));
+  const taken = other.take("b");
+
+  println(f"{set.get("b"):?} {taken:?} {other.get("b"):?} {points.len()} {List::from([1, 2, 3, 4]).iter().filter((n) => n % 2 == 0).collect():?} {other.len() + set.len()}");
+
+  const kept = HashSet::from(List::from([1, 2, 3, 4]));
+
+  kept.retain((n) => n != 4);
+  kept.remove(2);
+  kept.insert(2);
+
+  for word in set {
+    print(word);
+  }
+
+  const cleared = HashSet::from(List::from([5]));
+
+  cleared.clear();
+  println(f" {kept:?} {total(kept)} {cleared.len()}");
+
+  const one = HashSet::from(List::from(["x"]));
+
+  println(f"{one:#?}");
+}

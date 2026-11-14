@@ -1,0 +1,1089 @@
+//! `std::collections`: the collections of Rust's std beyond the prelude's `List`, `Map` and
+//! `HashSet` (docs/spec/11-standard-library.md#stdcollections, docs/adr/0095-collections.md).
+
+/// A position an iterator moves, which its closures share.
+class Position {
+  pub var value: usize;
+
+  pub fn new(self, value: usize) {
+    self.value = value;
+  }
+}
+
+/// A queue with two ends, as Rust's `VecDeque`: a ring buffer in a list, whose elements start at
+/// `head` and wrap around its end (docs/adr/0095-collections.md, Q648). The compiler compares,
+/// orders and hashes it by its elements, as a list, when they allow it.
+pub class VecDeque<T> impl Iterable<T>, FromIterator<T>, Default {
+  /// The slots of the ring; `None` outside the elements.
+  prv var buffer: List<Option<T>>;
+  /// The slot of the first element.
+  prv var head: usize;
+  /// The number of elements.
+  prv var count: usize;
+
+  pub fn new(self) {
+    self.buffer = new List<Option<T>>();
+    self.head = 0;
+    self.count = 0;
+  }
+
+  /// An empty queue with room for `capacity` elements before it grows.
+  pub fn with_capacity(capacity: usize) -> VecDeque<T> {
+    const deque = new VecDeque<T>();
+
+    deque.grow_to(capacity);
+    deque
+  }
+
+  /// The queue of the elements of a list, the first at the front.
+  pub fn from(values: List<T>) -> VecDeque<T> {
+    VecDeque::from_iter(values.iter())
+  }
+
+  pub fn from_iter(iter: Iter<T>) -> VecDeque<T> {
+    const deque = new VecDeque<T>();
+
+    deque.extend(iter);
+    deque
+  }
+
+  pub fn default() -> VecDeque<T> {
+    new VecDeque<T>()
+  }
+
+  pub fn len(self) -> usize {
+    self.count
+  }
+
+  pub fn is_empty(self) -> bool {
+    self.count == 0
+  }
+
+  /// The elements it holds without growing.
+  pub fn capacity(self) -> usize {
+    self.buffer.len()
+  }
+
+  /// The slot of the element at `index` from the front.
+  prv fn slot(self, index: usize) -> usize {
+    (self.head + index) % self.buffer.len()
+  }
+
+  /// Room for one more element.
+  prv fn grow(self) {
+    if self.count == self.buffer.len() {
+      self.grow_to(max(4, self.buffer.len() * 2));
+    }
+  }
+
+  /// A ring of `capacity` slots at least, its elements from the first slot.
+  prv fn grow_to(self, capacity: usize) {
+    if capacity <= self.buffer.len() {
+      return;
+    }
+
+    const slots = new List<Option<T>>();
+
+    for index in 0..capacity {
+      slots.push(if index < self.count { self.buffer[self.slot(index)] } else { None });
+    }
+
+    self.buffer = slots;
+    self.head = 0;
+  }
+
+  pub fn push_back(self, value: T) {
+    self.grow();
+    self.buffer[self.slot(self.count)] = Some(value);
+    self.count += 1;
+  }
+
+  pub fn push_front(self, value: T) {
+    self.grow();
+    self.head = (self.head + self.buffer.len() - 1) % self.buffer.len();
+    self.buffer[self.head] = Some(value);
+    self.count += 1;
+  }
+
+  pub fn pop_front(self) -> Option<T> {
+    if self.count == 0 {
+      return None;
+    }
+
+    const value = self.buffer[self.head];
+
+    self.buffer[self.head] = None;
+    self.head = (self.head + 1) % self.buffer.len();
+    self.count -= 1;
+    value
+  }
+
+  pub fn pop_back(self) -> Option<T> {
+    if self.count == 0 {
+      return None;
+    }
+
+    const last = self.slot(self.count - 1);
+    const value = self.buffer[last];
+
+    self.buffer[last] = None;
+    self.count -= 1;
+    value
+  }
+
+  pub fn front(self) -> Option<T> {
+    self.get(0)
+  }
+
+  pub fn back(self) -> Option<T> {
+    if self.count == 0 { None } else { self.get(self.count - 1) }
+  }
+
+  /// The element at `index` from the front.
+  pub fn get(self, index: usize) -> Option<T> {
+    if index >= self.count { None } else { self.buffer[self.slot(index)] }
+  }
+
+  pub fn clear(self) {
+    self.buffer = new List<Option<T>>();
+    self.head = 0;
+    self.count = 0;
+  }
+
+  /// The elements from the front to the back, and from the back with `rev()`.
+  pub fn iter(self) -> DoubleEndedIter<T> {
+    const deque = self;
+    const front = new Position(0);
+    const back = new Position(self.count);
+    const forward: fn() -> Option<T> = () => {
+      if front.value >= back.value {
+        return None;
+      }
+
+      const value = deque.get(front.value);
+
+      front.value += 1;
+      value
+    };
+    const backward: fn() -> Option<T> = () => {
+      if front.value >= back.value {
+        return None;
+      }
+
+      back.value -= 1;
+      deque.get(back.value)
+    };
+
+    new DoubleEndedIter<T>(forward, backward)
+  }
+
+  pub fn extend(self, values: Iter<T>) {
+    for value in values {
+      self.push_back(value);
+    }
+  }
+
+  /// Keeps the elements for which `keep` holds, in order.
+  pub fn retain(self, keep: fn(T) -> bool) {
+    const kept = new List<T>();
+
+    for value in self.iter() {
+      if keep(value) {
+        kept.push(value);
+      }
+    }
+
+    self.clear();
+    self.extend(kept.iter());
+  }
+
+  /// Keeps the first `len` elements.
+  pub fn truncate(self, len: usize) {
+    while self.count > len {
+      self.pop_back();
+    }
+  }
+
+  /// Exchanges the elements at `i` and `j`, which must be in the queue.
+  pub fn swap(self, i: usize, j: usize) {
+    if i >= self.count {
+      panic("assertion failed: i < self.len()");
+    }
+
+    if j >= self.count {
+      panic("assertion failed: j < self.len()");
+    }
+
+    const first = self.buffer[self.slot(i)];
+
+    self.buffer[self.slot(i)] = self.buffer[self.slot(j)];
+    self.buffer[self.slot(j)] = first;
+  }
+
+  /// Moves the first `n` elements to the back.
+  pub fn rotate_left(self, n: usize) {
+    if n > self.count {
+      panic("assertion failed: n <= self.len()");
+    }
+
+    for _ in 0..n {
+      if let Some(value) = self.pop_front() {
+        self.push_back(value);
+      }
+    }
+  }
+
+  /// Moves the last `n` elements to the front.
+  pub fn rotate_right(self, n: usize) {
+    if n > self.count {
+      panic("assertion failed: n <= self.len()");
+    }
+
+    for _ in 0..n {
+      if let Some(value) = self.pop_back() {
+        self.push_front(value);
+      }
+    }
+  }
+}
+
+/// `deque[i]`, which panics outside the queue, as Rust's.
+impl<T> Index<usize, T> for VecDeque<T> {
+  fn index(self, at: usize) -> T {
+    match self.get(at) {
+      Some(value) => value,
+      None => panic("Out of bounds access"),
+    }
+  }
+}
+
+/// `deque[i] = value`.
+impl<T> IndexMut<usize, T> for VecDeque<T> {
+  fn index_set(self, at: usize, value: T) {
+    if at >= self.count {
+      panic("Out of bounds access");
+    }
+
+    self.buffer[self.slot(at)] = Some(value);
+  }
+}
+
+/// Half the most children a node of a `BTreeMap` has: every node but the root holds from
+/// `MIN_DEGREE - 1` to `2 * MIN_DEGREE - 1` keys, 5 to 11, as Rust's (Q649).
+const MIN_DEGREE: usize = 6;
+
+/// A node of a `BTreeMap`: its keys in order, their values, and, unless it is a leaf, one child
+/// more than keys, the keys of child `i` lying between keys `i - 1` and `i`.
+class BNode<K, V> {
+  pub var keys: List<K>;
+  pub var values: List<V>;
+  pub var children: List<BNode<K, V>>;
+
+  pub fn new(self) {
+    self.keys = new List<K>();
+    self.values = new List<V>();
+    self.children = new List<BNode<K, V>>();
+  }
+
+  pub fn is_leaf(self) -> bool {
+    self.children.is_empty()
+  }
+}
+
+/// A map ordered by its keys, as Rust's `BTreeMap`: a B-tree of nodes of 5 to 11 keys
+/// (docs/adr/0095-collections.md, Q649). Its iterators go over the entries a walk of the tree
+/// gathers. The compiler compares, orders and hashes it as a list of its pairs, when they allow it.
+pub class BTreeMap<K: Ord, V> impl Iterable<(K, V)>, FromIterator<(K, V)>, Default {
+  prv var root: BNode<K, V>;
+  prv var count: usize;
+
+  pub fn new(self) {
+    self.root = new BNode<K, V>();
+    self.count = 0;
+  }
+
+  /// The map of a list of pairs; a later pair of a key replaces an earlier one.
+  pub fn from(pairs: List<(K, V)>) -> BTreeMap<K, V> {
+    BTreeMap::from_iter(pairs.iter())
+  }
+
+  pub fn from_iter(iter: Iter<(K, V)>) -> BTreeMap<K, V> {
+    const map = new BTreeMap<K, V>();
+
+    map.extend(iter);
+    map
+  }
+
+  pub fn default() -> BTreeMap<K, V> {
+    new BTreeMap<K, V>()
+  }
+
+  pub fn len(self) -> usize {
+    self.count
+  }
+
+  pub fn is_empty(self) -> bool {
+    self.count == 0
+  }
+
+  pub fn clear(self) {
+    self.root = new BNode<K, V>();
+    self.count = 0;
+  }
+
+  /// The first position of `node` whose key is not below `key`, and whether its key is `key`.
+  prv fn position(self, node: BNode<K, V>, key: K) -> (usize, bool) {
+    var low = 0usize;
+    var high = node.keys.len();
+
+    while low < high {
+      const middle = (low + high) / 2;
+
+      if node.keys[middle] < key {
+        low = middle + 1;
+      } else {
+        high = middle;
+      }
+    }
+
+    (low, low < node.keys.len() && node.keys[low] == key)
+  }
+
+  /// The node holding `key`, with its position there.
+  prv fn find(self, key: K) -> Option<(BNode<K, V>, usize)> {
+    var node = self.root;
+
+    while true {
+      const (index, found) = self.position(node, key);
+
+      if found {
+        return Some((node, index));
+      }
+
+      if node.is_leaf() {
+        return None;
+      }
+
+      node = node.children[index];
+    }
+
+    None
+  }
+
+  /// A copy of the value of `key`.
+  pub fn get(self, key: K) -> Option<V> {
+    self.find(key).map((at) => at.0.values[at.1])
+  }
+
+  /// The key the map holds that is equal to `key`, with its value.
+  pub fn get_key_value(self, key: K) -> Option<(K, V)> {
+    self.find(key).map((at) => (at.0.keys[at.1], at.0.values[at.1]))
+  }
+
+  pub fn contains_key(self, key: K) -> bool {
+    self.find(key).is_some()
+  }
+
+  /// Sets the value of `key`, and returns its previous value.
+  pub fn insert(self, key: K, value: V) -> Option<V> {
+    if let Some(at) = self.find(key) {
+      const previous = at.0.values[at.1];
+
+      at.0.values[at.1] = value;
+
+      return Some(previous);
+    }
+
+    // A full root splits first, so the tree grows at its top.
+    if self.root.keys.len() == 2 * MIN_DEGREE - 1 {
+      const top = new BNode<K, V>();
+
+      top.children.push(self.root);
+      self.split_child(top, 0);
+      self.root = top;
+    }
+
+    self.insert_below(self.root, key, value);
+    self.count += 1;
+    None
+  }
+
+  /// Splits the full child `index` of `parent` around its middle key, which moves up.
+  prv fn split_child(self, parent: BNode<K, V>, index: usize) {
+    const child = parent.children[index];
+    const sibling = new BNode<K, V>();
+
+    sibling.keys = child.keys.split_off(MIN_DEGREE);
+    sibling.values = child.values.split_off(MIN_DEGREE);
+
+    if !child.is_leaf() {
+      sibling.children = child.children.split_off(MIN_DEGREE);
+    }
+
+    const middle_key = child.keys.pop().unwrap();
+    const middle_value = child.values.pop().unwrap();
+
+    parent.keys.insert(index, middle_key);
+    parent.values.insert(index, middle_value);
+    parent.children.insert(index + 1, sibling);
+  }
+
+  /// Inserts a key absent from the tree below `start`, which is not full, splitting the full
+  /// nodes on the way down.
+  prv fn insert_below(self, start: BNode<K, V>, key: K, value: V) {
+    var node = start;
+
+    while true {
+      var index = self.position(node, key).0;
+
+      if node.is_leaf() {
+        node.keys.insert(index, key);
+        node.values.insert(index, value);
+
+        return;
+      }
+
+      if node.children[index].keys.len() == 2 * MIN_DEGREE - 1 {
+        self.split_child(node, index);
+
+        if node.keys[index] < key {
+          index += 1;
+        }
+      }
+
+      node = node.children[index];
+    }
+  }
+
+  /// Removes `key`, and returns its value.
+  pub fn remove(self, key: K) -> Option<V> {
+    self.remove_entry(key).map((pair) => pair.1)
+  }
+
+  /// Removes `key`, and returns the key the map held with its value.
+  pub fn remove_entry(self, key: K) -> Option<(K, V)> {
+    const found = self.get_key_value(key);
+
+    if found.is_none() {
+      return None;
+    }
+
+    self.remove_below(self.root, key);
+    self.count -= 1;
+
+    // An empty root that is not a leaf gives way to its one child.
+    if self.root.keys.is_empty() && !self.root.is_leaf() {
+      self.root = self.root.children[0];
+    }
+
+    found
+  }
+
+  /// Removes a key present below `start`, making sure each node it descends into has a key more
+  /// than the least, by borrowing from a sibling or merging with one.
+  prv fn remove_below(self, start: BNode<K, V>, key: K) {
+    var node = start;
+
+    while true {
+      const (index, found) = self.position(node, key);
+
+      if found && node.is_leaf() {
+        node.keys.remove(index);
+        node.values.remove(index);
+
+        return;
+      }
+
+      if found {
+        const left = node.children[index];
+        const right = node.children[index + 1];
+
+        if left.keys.len() >= MIN_DEGREE {
+          // The largest key before it takes its place.
+          const (previous_key, previous_value) = self.last_of(left);
+
+          node.keys[index] = previous_key;
+          node.values[index] = previous_value;
+          self.remove_below(left, previous_key);
+
+          return;
+        }
+
+        if right.keys.len() >= MIN_DEGREE {
+          const (next_key, next_value) = self.first_of(right);
+
+          node.keys[index] = next_key;
+          node.values[index] = next_value;
+          self.remove_below(right, next_key);
+
+          return;
+        }
+
+        self.merge(node, index);
+        node = left;
+        continue;
+      }
+
+      var child_index = index;
+
+      if node.children[child_index].keys.len() == MIN_DEGREE - 1 {
+        if child_index > 0 && node.children[child_index - 1].keys.len() >= MIN_DEGREE {
+          self.borrow_from_left(node, child_index);
+        } else if child_index < node.keys.len() && node.children[child_index + 1].keys.len() >= MIN_DEGREE {
+          self.borrow_from_right(node, child_index);
+        } else if child_index < node.keys.len() {
+          self.merge(node, child_index);
+        } else {
+          self.merge(node, child_index - 1);
+          child_index -= 1;
+        }
+      }
+
+      node = node.children[child_index];
+    }
+  }
+
+  /// The child `index` of `node` takes the key before it, which its left sibling's last replaces.
+  prv fn borrow_from_left(self, node: BNode<K, V>, index: usize) {
+    const child = node.children[index];
+    const left = node.children[index - 1];
+
+    child.keys.insert(0, node.keys[index - 1]);
+    child.values.insert(0, node.values[index - 1]);
+    node.keys[index - 1] = left.keys.pop().unwrap();
+    node.values[index - 1] = left.values.pop().unwrap();
+
+    if !left.is_leaf() {
+      child.children.insert(0, left.children.pop().unwrap());
+    }
+  }
+
+  /// The child `index` of `node` takes the key after it, which its right sibling's first replaces.
+  prv fn borrow_from_right(self, node: BNode<K, V>, index: usize) {
+    const child = node.children[index];
+    const right = node.children[index + 1];
+
+    child.keys.push(node.keys[index]);
+    child.values.push(node.values[index]);
+    node.keys[index] = right.keys.remove(0);
+    node.values[index] = right.values.remove(0);
+
+    if !right.is_leaf() {
+      child.children.push(right.children.remove(0));
+    }
+  }
+
+  /// Joins the children `index` and `index + 1` of `node` around the key between them.
+  prv fn merge(self, node: BNode<K, V>, index: usize) {
+    const left = node.children[index];
+    const right = node.children[index + 1];
+
+    left.keys.push(node.keys.remove(index));
+    left.values.push(node.values.remove(index));
+    left.keys.append(right.keys);
+    left.values.append(right.values);
+    left.children.append(right.children);
+    node.children.remove(index + 1);
+  }
+
+  /// The smallest key below `start`, with its value.
+  prv fn first_of(self, start: BNode<K, V>) -> (K, V) {
+    var node = start;
+
+    while !node.is_leaf() {
+      node = node.children[0];
+    }
+
+    (node.keys[0], node.values[0])
+  }
+
+  /// The largest key below `start`, with its value.
+  prv fn last_of(self, start: BNode<K, V>) -> (K, V) {
+    var node = start;
+
+    while !node.is_leaf() {
+      node = node.children[node.children.len() - 1];
+    }
+
+    (node.keys[node.keys.len() - 1], node.values[node.values.len() - 1])
+  }
+
+  pub fn first_key_value(self) -> Option<(K, V)> {
+    if self.count == 0 { None } else { Some(self.first_of(self.root)) }
+  }
+
+  pub fn last_key_value(self) -> Option<(K, V)> {
+    if self.count == 0 { None } else { Some(self.last_of(self.root)) }
+  }
+
+  /// Removes the smallest key, and returns it with its value.
+  pub fn pop_first(self) -> Option<(K, V)> {
+    const first = self.first_key_value()?;
+
+    self.remove_entry(first.0)
+  }
+
+  /// Removes the largest key, and returns it with its value.
+  pub fn pop_last(self) -> Option<(K, V)> {
+    const last = self.last_key_value()?;
+
+    self.remove_entry(last.0)
+  }
+
+  /// The entries below `node` from `low` (included) to `high` (not included), in order.
+  prv fn gather(self, node: BNode<K, V>, low: Option<K>, high: Option<K>, into: List<(K, V)>) {
+    const count = node.keys.len();
+
+    for index in 0..count + 1 {
+      // Child `index` holds the keys between keys `index - 1` and `index`.
+      if !node.is_leaf() {
+        const before_low = match low {
+          Some(bound) => index < count && node.keys[index] < bound,
+          None => false,
+        };
+        const after_high = match high {
+          Some(bound) => index > 0 && !(node.keys[index - 1] < bound),
+          None => false,
+        };
+
+        if !before_low && !after_high {
+          self.gather(node.children[index], low, high, into);
+        }
+      }
+
+      if index < count {
+        const key = node.keys[index];
+        const above_low = match low {
+          Some(bound) => !(key < bound),
+          None => true,
+        };
+        const below_high = match high {
+          Some(bound) => key < bound,
+          None => true,
+        };
+
+        if above_low && below_high {
+          into.push((key, node.values[index]));
+        }
+      }
+    }
+  }
+
+  prv fn entries_between(self, low: Option<K>, high: Option<K>) -> List<(K, V)> {
+    const found = new List<(K, V)>();
+
+    self.gather(self.root, low, high, found);
+    found
+  }
+
+  /// The entries in the order of their keys, and from the last with `rev()`.
+  pub fn iter(self) -> DoubleEndedIter<(K, V)> {
+    self.entries_between(None, None).iter()
+  }
+
+  pub fn keys(self) -> DoubleEndedIter<K> {
+    self.iter().map((pair) => pair.0)
+  }
+
+  pub fn values(self) -> DoubleEndedIter<V> {
+    self.iter().map((pair) => pair.1)
+  }
+
+  /// The entries from `low`, included, to `high`, not included, as Rust's `range(low..high)`.
+  pub fn range(self, low: K, high: K) -> DoubleEndedIter<(K, V)> {
+    self.entries_between(Some(low), Some(high)).iter()
+  }
+
+  /// The entries from `low`, included: Rust's `range(low..)`.
+  pub fn range_from(self, low: K) -> DoubleEndedIter<(K, V)> {
+    self.entries_between(Some(low), None).iter()
+  }
+
+  /// The entries before `high`, not included: Rust's `range(..high)`.
+  pub fn range_to(self, high: K) -> DoubleEndedIter<(K, V)> {
+    self.entries_between(None, Some(high)).iter()
+  }
+
+  /// Changes the value of a key that is present to `f(value)`; whether it was present.
+  pub fn update(self, key: K, f: fn(V) -> V) -> bool {
+    match self.find(key) {
+      Some(at) => {
+        at.0.values[at.1] = f(at.0.values[at.1]);
+        true
+      }
+      None => false,
+    }
+  }
+
+  /// Inserts `default`, or changes the value present with `f`.
+  pub fn upsert(self, key: K, default: V, f: fn(V) -> V) {
+    if !self.update(key, f) {
+      self.insert(key, default);
+    }
+  }
+
+  /// The value present, or `value`, inserted.
+  pub fn get_or_insert(self, key: K, value: V) -> V {
+    match self.get(key) {
+      Some(found) => found,
+      None => {
+        self.insert(key, value);
+        value
+      }
+    }
+  }
+
+  /// Keeps the entries for which `keep(key, value)` holds.
+  pub fn retain(self, keep: fn(K, V) -> bool) {
+    for pair in self.iter() {
+      if !keep(pair.0, pair.1) {
+        self.remove(pair.0);
+      }
+    }
+  }
+
+  pub fn extend(self, pairs: Iter<(K, V)>) {
+    for pair in pairs {
+      self.insert(pair.0, pair.1);
+    }
+  }
+}
+
+/// `map[key]`, which panics without the key, as Rust's.
+impl<K, V> Index<K, V> for BTreeMap<K, V> {
+  fn index(self, key: K) -> V {
+    match self.get(key) {
+      Some(value) => value,
+      None => panic("no entry found for key"),
+    }
+  }
+}
+
+/// A set ordered by its values, as Rust's `BTreeSet`, on a `BTreeMap` of them (Q650). The
+/// operations between two sets give their values in order.
+pub class BTreeSet<T: Ord> impl Iterable<T>, FromIterator<T>, Default {
+  prv const map: BTreeMap<T, ()>;
+
+  pub fn new(self) {
+    self.map = new BTreeMap<T, ()>();
+  }
+
+  pub fn from(values: List<T>) -> BTreeSet<T> {
+    BTreeSet::from_iter(values.iter())
+  }
+
+  pub fn from_iter(iter: Iter<T>) -> BTreeSet<T> {
+    const set = new BTreeSet<T>();
+
+    set.extend(iter);
+    set
+  }
+
+  pub fn default() -> BTreeSet<T> {
+    new BTreeSet<T>()
+  }
+
+  pub fn len(self) -> usize {
+    self.map.len()
+  }
+
+  pub fn is_empty(self) -> bool {
+    self.map.is_empty()
+  }
+
+  pub fn clear(self) {
+    self.map.clear();
+  }
+
+  /// Adds `value`, unless an equal one is in the set; whether it was added.
+  pub fn insert(self, value: T) -> bool {
+    if self.map.contains_key(value) {
+      return false;
+    }
+
+    self.map.insert(value, ());
+    true
+  }
+
+  pub fn remove(self, value: T) -> bool {
+    self.map.remove(value).is_some()
+  }
+
+  pub fn contains(self, value: T) -> bool {
+    self.map.contains_key(value)
+  }
+
+  /// The value of the set equal to `value`.
+  pub fn get(self, value: T) -> Option<T> {
+    self.map.get_key_value(value).map((pair) => pair.0)
+  }
+
+  /// Removes the value of the set equal to `value`, and gives it.
+  pub fn take(self, value: T) -> Option<T> {
+    self.map.remove_entry(value).map((pair) => pair.0)
+  }
+
+  /// The values in order, and from the last with `rev()`.
+  pub fn iter(self) -> DoubleEndedIter<T> {
+    self.map.keys()
+  }
+
+  pub fn first(self) -> Option<T> {
+    self.map.first_key_value().map((pair) => pair.0)
+  }
+
+  pub fn last(self) -> Option<T> {
+    self.map.last_key_value().map((pair) => pair.0)
+  }
+
+  pub fn pop_first(self) -> Option<T> {
+    self.map.pop_first().map((pair) => pair.0)
+  }
+
+  pub fn pop_last(self) -> Option<T> {
+    self.map.pop_last().map((pair) => pair.0)
+  }
+
+  /// The values from `low`, included, to `high`, not included.
+  pub fn range(self, low: T, high: T) -> DoubleEndedIter<T> {
+    self.map.range(low, high).map((pair) => pair.0)
+  }
+
+  pub fn range_from(self, low: T) -> DoubleEndedIter<T> {
+    self.map.range_from(low).map((pair) => pair.0)
+  }
+
+  pub fn range_to(self, high: T) -> DoubleEndedIter<T> {
+    self.map.range_to(high).map((pair) => pair.0)
+  }
+
+  pub fn retain(self, keep: fn(T) -> bool) {
+    self.map.retain((value, _unit) => keep(value));
+  }
+
+  pub fn extend(self, values: Iter<T>) {
+    for value in values {
+      self.insert(value);
+    }
+  }
+
+  /// The values of both sets, in order.
+  pub fn union(self, other: BTreeSet<T>) -> Iter<T> {
+    BTreeSet::from_iter(self.iter().chain(other.iter())).iter()
+  }
+
+  /// The values of this set that `other` has too, in order.
+  pub fn intersection(self, other: BTreeSet<T>) -> Iter<T> {
+    self.iter().filter((value) => other.contains(value))
+  }
+
+  /// The values of this set that `other` lacks, in order.
+  pub fn difference(self, other: BTreeSet<T>) -> Iter<T> {
+    self.iter().filter((value) => !other.contains(value))
+  }
+
+  /// The values that only one of the two sets has, in order.
+  pub fn symmetric_difference(self, other: BTreeSet<T>) -> Iter<T> {
+    BTreeSet::from_iter(self.difference(other).chain(other.difference(self))).iter()
+  }
+
+  pub fn is_subset(self, other: BTreeSet<T>) -> bool {
+    self.len() <= other.len() && self.iter().all((value) => other.contains(value))
+  }
+
+  pub fn is_superset(self, other: BTreeSet<T>) -> bool {
+    other.is_subset(self)
+  }
+
+  pub fn is_disjoint(self, other: BTreeSet<T>) -> bool {
+    self.iter().all((value) => !other.contains(value))
+  }
+}
+
+/// A priority queue, as Rust's `BinaryHeap`: a binary heap in a list, the largest element first
+/// (docs/adr/0095-collections.md, Q651). `with_compare` orders it by another comparison, the
+/// largest by it first, which stands for Rust's `Reverse`.
+pub class BinaryHeap<T: Ord> impl Iterable<T>, FromIterator<T>, Default {
+  /// The elements, each one not smaller than its children at `2i + 1` and `2i + 2`.
+  prv var items: List<T>;
+  prv var compare: fn(T, T) -> Ordering;
+
+  pub fn new(self) {
+    self.items = new List<T>();
+    self.compare = (a: T, b: T) => a.compare(b);
+  }
+
+  /// An empty heap with room for `capacity` elements before it grows.
+  pub fn with_capacity(capacity: usize) -> BinaryHeap<T> {
+    const heap = new BinaryHeap<T>();
+
+    heap.items = List::with_capacity(capacity);
+    heap
+  }
+
+  /// An empty heap ordered by `compare`: `with_compare((a, b) => b.compare(a))` gives the
+  /// smallest first.
+  pub fn with_compare(compare: fn(T, T) -> Ordering) -> BinaryHeap<T> {
+    const heap = new BinaryHeap<T>();
+
+    heap.compare = compare;
+    heap
+  }
+
+  /// The heap of the elements of a list, built in linear time.
+  pub fn from(values: List<T>) -> BinaryHeap<T> {
+    const heap = new BinaryHeap<T>();
+
+    heap.items = values.iter().collect();
+    heap.rebuild();
+    heap
+  }
+
+  pub fn from_iter(iter: Iter<T>) -> BinaryHeap<T> {
+    const heap = new BinaryHeap<T>();
+
+    heap.extend(iter);
+    heap
+  }
+
+  pub fn default() -> BinaryHeap<T> {
+    new BinaryHeap<T>()
+  }
+
+  pub fn len(self) -> usize {
+    self.items.len()
+  }
+
+  pub fn is_empty(self) -> bool {
+    self.items.is_empty()
+  }
+
+  pub fn clear(self) {
+    self.items.clear();
+  }
+
+  /// Whether the element at `a` goes before the one at `b`.
+  prv fn above(self, a: usize, b: usize) -> bool {
+    (self.compare)(self.items[a], self.items[b]) == Ordering::Greater
+  }
+
+  /// Moves the element at `index` up while it goes before its parent.
+  prv fn sift_up(self, index: usize) {
+    var at = index;
+
+    while at > 0 {
+      const parent = (at - 1) / 2;
+
+      if !self.above(at, parent) {
+        return;
+      }
+
+      self.items.swap(at, parent);
+      at = parent;
+    }
+  }
+
+  /// Moves the element at `index` down while a child goes before it.
+  prv fn sift_down(self, index: usize) {
+    var at = index;
+    const count = self.items.len();
+
+    while true {
+      const left = 2 * at + 1;
+      const right = left + 1;
+      var largest = at;
+
+      if left < count && self.above(left, largest) {
+        largest = left;
+      }
+
+      if right < count && self.above(right, largest) {
+        largest = right;
+      }
+
+      if largest == at {
+        return;
+      }
+
+      self.items.swap(at, largest);
+      at = largest;
+    }
+  }
+
+  /// Makes the whole list a heap again, from its last parent up.
+  prv fn rebuild(self) {
+    var index = self.items.len() / 2;
+
+    while index > 0 {
+      index -= 1;
+      self.sift_down(index);
+    }
+  }
+
+  pub fn push(self, value: T) {
+    self.items.push(value);
+    self.sift_up(self.items.len() - 1);
+  }
+
+  /// Removes the largest element, and gives it.
+  pub fn pop(self) -> Option<T> {
+    if self.items.is_empty() {
+      return None;
+    }
+
+    const last = self.items.len() - 1;
+
+    self.items.swap(0, last);
+
+    const top = self.items.pop();
+
+    if !self.items.is_empty() {
+      self.sift_down(0);
+    }
+
+    top
+  }
+
+  /// The largest element.
+  pub fn peek(self) -> Option<T> {
+    self.items.first()
+  }
+
+  /// The elements in the order of the heap, which is no order.
+  pub fn iter(self) -> DoubleEndedIter<T> {
+    self.items.iter()
+  }
+
+  pub fn extend(self, values: Iter<T>) {
+    for value in values {
+      self.push(value);
+    }
+  }
+
+  /// Keeps the elements for which `keep` holds.
+  pub fn retain(self, keep: fn(T) -> bool) {
+    self.items.retain(keep);
+    self.rebuild();
+  }
+
+  /// A list of the elements in the order of the heap; the heap stays.
+  pub fn into_list(self) -> List<T> {
+    self.items.iter().collect()
+  }
+
+  /// A list of the elements from the smallest, as Rust's `into_sorted_vec`; the heap stays.
+  pub fn into_sorted_list(self) -> List<T> {
+    const copy = BinaryHeap::with_compare(self.compare);
+
+    copy.items = self.items.iter().collect();
+
+    const sorted = new List<T>();
+
+    while let Some(value) = copy.pop() {
+      sorted.push(value);
+    }
+
+    sorted.reverse();
+    sorted
+  }
+}

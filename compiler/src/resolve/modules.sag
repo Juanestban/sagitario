@@ -3,7 +3,7 @@
 //! `sagitario_resolve::modules`.
 
 use pkg::ast::{
-  Block, Expr, ExprKind, FnDecl, Ident, Item, Module, Package, Path, Pattern, PatternKind, Stmt, TemplatePart, TypeExpr, TypeExprKind, UseTree,
+  Block, ConstDecl, Expr, ExprKind, FnDecl, Ident, Item, Module, Package, Path, Pattern, PatternKind, Stmt, TypeExpr, TypeExprKind, UseTree,
   UseTreeKind, VariantFields, Visibility,
 };
 use pkg::diagnostics::{Diagnostic, Diagnostics};
@@ -238,7 +238,7 @@ pub fn resolve_imports(resolution: Resolution, package: Package, node: u32, modu
 
     if item.is_none() {
       const of_type = match qualified.start {
-        Start::Item(ItemRef::Type(_)) | Start::Item(ItemRef::Std(StdItem::CString)) | Start::Prelude(_) => true,
+        Start::Item(ItemRef::Type(_)) | Start::Item(ItemRef::Std(StdItem::CString)) | Start::Item(ItemRef::Std(StdItem::Atomic)) | Start::Prelude(_) => true,
         _ => false,
       };
 
@@ -446,6 +446,11 @@ pub fn report_private_interfaces(resolution: Resolution, package: Package, diagn
             }
           }
         }
+        Item::Static(decl) => {
+          if is_public(decl.visibility) {
+            checks.push(Check { owner: decl.name.name, types: List::from([decl.ty]) });
+          }
+        }
         Item::Const(_) | Item::Impl(_) => {}
       }
 
@@ -526,6 +531,11 @@ fn signature_types(decl: FnDecl) -> List<TypeExpr> {
 fn type_paths(ty: TypeExpr, out: List<Path>) {
   match ty.kind {
     TypeExprKind::Unit => {}
+    TypeExprKind::Tuple(elems) => {
+      for elem in elems {
+        type_paths(elem, out);
+      }
+    }
     TypeExprKind::Path(path) => out.push(path),
     TypeExprKind::Generic { path, args } => {
       out.push(path);
@@ -750,6 +760,8 @@ fn item_paths(module: Module) -> List<Path> {
           type_paths(field.ty, paths);
         }
 
+        const_paths(decl.consts, paths);
+
         for function in decl.functions {
           fn_paths(function, paths);
         }
@@ -766,6 +778,8 @@ fn item_paths(module: Module) -> List<Path> {
         for field in decl.fields {
           type_paths(field.ty, paths);
         }
+
+        const_paths(decl.consts, paths);
 
         for function in decl.functions {
           fn_paths(function, paths);
@@ -805,6 +819,8 @@ fn item_paths(module: Module) -> List<Path> {
           }
         }
 
+        const_paths(decl.consts, paths);
+
         for function in decl.functions {
           fn_paths(function, paths);
         }
@@ -824,6 +840,7 @@ fn item_paths(module: Module) -> List<Path> {
         type_paths(decl.ty, paths);
         expr_paths(decl.value, paths);
       }
+      Item::Static(decl) => fn_paths(decl.init, paths),
       Item::Impl(block) => {
         for param in block.generics {
           for bound in param.bounds {
@@ -906,6 +923,15 @@ fn expr_path(path: Path, out: List<Path>) {
   }
 }
 
+/// The paths of the constants of a type
+/// (docs/adr/0099-associated-and-composite-constants.md, Q683).
+fn const_paths(consts: List<ConstDecl>, out: List<Path>) {
+  for decl in consts {
+    type_paths(decl.ty, out);
+    expr_paths(decl.value, out);
+  }
+}
+
 fn fn_paths(decl: FnDecl, out: List<Path>) {
   for ty in signature_types(decl) {
     type_paths(ty, out);
@@ -976,14 +1002,18 @@ fn expr_paths(expr: Expr, out: List<Path>) {
       expr_paths(base, out);
       expr_paths(index, out);
     }
-    ExprKind::StructLit { path, fields } => {
+    ExprKind::StructLit { path, fields, base } => {
       expr_path(path, out);
 
       for field in fields {
         expr_paths(field.value, out);
       }
+
+      if let Some(found) = base {
+        expr_paths(found, out);
+      }
     }
-    ExprKind::ArrayLit(elems) => exprs_paths(elems, out),
+    ExprKind::ArrayLit(elems) | ExprKind::Tuple(elems) => exprs_paths(elems, out),
     ExprKind::ArrayRepeat { value, .. } => expr_paths(value, out),
     ExprKind::Try(value) | ExprKind::Await(value) => expr_paths(value, out),
     ExprKind::Unary { operand, .. } => expr_paths(operand, out),
@@ -1007,7 +1037,7 @@ fn expr_paths(expr: Expr, out: List<Path>) {
     }
     ExprKind::Template(parts) => {
       for part in parts {
-        if let TemplatePart::Expr(inner) = part {
+        for inner in part.exprs() {
           expr_paths(inner, out);
         }
       }
@@ -1077,7 +1107,7 @@ fn pattern_paths(pattern: Pattern, out: List<Path>) {
         pattern_paths(field.pattern, out);
       }
     }
-    PatternKind::Or(alternatives) => {
+    PatternKind::Or(alternatives) | PatternKind::Elements { elems: alternatives, .. } => {
       for alternative in alternatives {
         pattern_paths(alternative, out);
       }

@@ -14,47 +14,71 @@ use pkg::parser::Ids;
 use pkg::resolve::modules;
 use pkg::resolve::modules::ModuleRef;
 use pkg::span::{SourceMap, Span};
+use std::env;
 use std::fs;
+use std::io;
 use std::path;
+use std::process::Command;
 
 /// The part of the prelude written in Sagitario.
-const PRELUDE: String = include_str("../std/prelude.sag");
+const PRELUDE: String = include_str!("../std/prelude.sag");
 
 /// The file of `std` itself: helpers shared by its modules, which programs cannot name.
-const STD_ROOT: String = include_str("../std/mod.sag");
+const STD_ROOT: String = include_str!("../std/mod.sag");
 
-const STD_ENV: String = include_str("../std/env.sag");
-const STD_FFI: String = include_str("../std/ffi.sag");
-const STD_FS: String = include_str("../std/fs.sag");
-const STD_IO: String = include_str("../std/io.sag");
-const STD_MATH: String = include_str("../std/math.sag");
-const STD_MEM: String = include_str("../std/mem.sag");
-const STD_PATH: String = include_str("../std/path.sag");
-const STD_PROCESS: String = include_str("../std/process.sag");
-const STD_SYNC: String = include_str("../std/sync.sag");
-const STD_TASK: String = include_str("../std/task.sag");
-const STD_THREAD: String = include_str("../std/thread.sag");
-const STD_TIME: String = include_str("../std/time.sag");
+const STD_COLLECTIONS: String = include_str!("../std/collections.sag");
+const STD_ENV: String = include_str!("../std/env.sag");
+const STD_FFI: String = include_str!("../std/ffi.sag");
+const STD_FS: String = include_str!("../std/fs.sag");
+const STD_HASH: String = include_str!("../std/hash.sag");
+const STD_HINT: String = include_str!("../std/hint.sag");
+const STD_IO: String = include_str!("../std/io.sag");
+const STD_MATH: String = include_str!("../std/math.sag");
+const STD_MEM: String = include_str!("../std/mem.sag");
+const STD_NET: String = include_str!("../std/net.sag");
+const STD_PATH: String = include_str!("../std/path.sag");
+const STD_PROCESS: String = include_str!("../std/process.sag");
+const STD_PTR: String = include_str!("../std/ptr.sag");
+const STD_SYNC: String = include_str!("../std/sync.sag");
+const STD_TASK: String = include_str!("../std/task.sag");
+const STD_THREAD: String = include_str!("../std/thread.sag");
+const STD_TIME: String = include_str!("../std/time.sag");
+const STD_SYS: String = include_str!("../std/sys.sag");
+const STD_UNICODE: String = include_str!("../std/unicode.sag");
+
+/// The modules of `std` whose functions the runtime's core calls, which every program compiles
+/// (docs/adr/0085-conditional-compilation-and-std-time.md, Q552).
+const CORE_STD: String = "env time";
 
 /// The source of the standard library module `std::name` written in Sagitario.
 fn std_source(name: String) -> Option<String> {
   // Change this and use match for improve the design
-  if name == "env" {
+  if name == "collections" {
+    Some(STD_COLLECTIONS)
+  } else if name == "env" {
     Some(STD_ENV)
   } else if name == "ffi" {
     Some(STD_FFI)
   } else if name == "fs" {
     Some(STD_FS)
+  } else if name == "hash" {
+    Some(STD_HASH)
+  } else if name == "hint" {
+    Some(STD_HINT)
   } else if name == "io" {
     Some(STD_IO)
   } else if name == "math" {
     Some(STD_MATH)
   } else if name == "mem" {
     Some(STD_MEM)
+  } else if name == "net" {
+    Some(STD_NET)
   } else if name == "path" {
     Some(STD_PATH)
   } else if name == "process" {
     Some(STD_PROCESS)
+  } else if name == "ptr" {
+    Some(STD_PTR)
   } else if name == "sync" {
     Some(STD_SYNC)
   } else if name == "task" {
@@ -63,6 +87,10 @@ fn std_source(name: String) -> Option<String> {
     Some(STD_THREAD)
   } else if name == "time" {
     Some(STD_TIME)
+  } else if name == "sys" {
+    Some(STD_SYS)
+  } else if name == "unicode" {
+    Some(STD_UNICODE)
   } else {
     None
   }
@@ -77,53 +105,215 @@ const INT_TYPES: String = "i8 i16 i32 i64 isize u8 u16 u32 u64 usize";
 fn range_template() -> String {
   const lines = List::from([
     "",
-    "fn range_TYPE(start: TYPE, end: TYPE, inclusive: bool, reverse: bool) -> Iter<TYPE> {",
-    "  const cursor = new Cell<TYPE>(if reverse { end } else { start });",
-    "  const done = new Cell<bool>(false);",
+    "fn range_TYPE(start: TYPE, end: TYPE, inclusive: bool, reverse: bool) -> DoubleEndedIter<TYPE> {",
+    "  // The values left are `low` to `high`, both included, while `left` holds.",
+    "  const low = new Cell<TYPE>(start);",
+    "  const high = new Cell<TYPE>(end);",
+    "  const left = new Cell<bool>(if inclusive { start <= end } else { start < end });",
     "",
-    "  new Iter<TYPE>(() => {",
-    "    if done.value {",
+    "  if !inclusive && start < end {",
+    "    high.value = end - 1;",
+    "  }",
+    "",
+    "  const front: fn() -> Option<TYPE> = () => {",
+    "    if !left.value {",
     "      return None;",
     "    }",
     "",
-    "    const value = cursor.value;",
+    "    const value = low.value;",
     "",
-    "    if reverse {",
-    "      if inclusive {",
-    "        if value < start {",
-    "          done.value = true;",
-    "          return None;",
-    "        }",
-    "",
-    "        if value == start { done.value = true; } else { cursor.value = value - 1; }",
-    "        Some(value)",
-    "      } else {",
-    "        if value <= start {",
-    "          done.value = true;",
-    "          return None;",
-    "        }",
-    "",
-    "        cursor.value = value - 1;",
-    "        Some(value - 1)",
-    "      }",
-    "    } else if inclusive {",
-    "      if value > end {",
-    "        done.value = true;",
-    "        return None;",
-    "      }",
-    "",
-    "      if value == end { done.value = true; } else { cursor.value = value + 1; }",
-    "      Some(value)",
-    "    } else {",
-    "      if value >= end {",
-    "        done.value = true;",
-    "        return None;",
-    "      }",
-    "",
-    "      cursor.value = value + 1;",
-    "      Some(value)",
+    "    if value == high.value { left.value = false; } else { low.value = value + 1; }",
+    "    Some(value)",
+    "  };",
+    "  const back: fn() -> Option<TYPE> = () => {",
+    "    if !left.value {",
+    "      return None;",
     "    }",
-    "  })",
+    "",
+    "    const value = high.value;",
+    "",
+    "    if value == low.value { left.value = false; } else { high.value = value - 1; }",
+    "    Some(value)",
+    "  };",
+    "",
+    "  if reverse { new DoubleEndedIter<TYPE>(back, front) } else { new DoubleEndedIter<TYPE>(front, back) }",
+    "}",
+    "",
+  ]);
+
+  lines.join("\n")
+}
+
+/// `sum` and `product` of an iterator of numbers of type `TYPE`, whose zero and one are `ZERO`
+/// and `ONE` (docs/adr/0093-everyday-methods.md, Q626). As Rust's, an overflow panics in debug
+/// builds.
+fn sum_template() -> String {
+  const lines = List::from([
+    "",
+    "fn iter_sum_TYPE(iter: Iter<TYPE>) -> TYPE {",
+    "  var total: TYPE = ZERO;",
+    "",
+    "  for value in iter {",
+    "    total += value;",
+    "  }",
+    "",
+    "  total",
+    "}",
+    "",
+    "fn iter_product_TYPE(iter: Iter<TYPE>) -> TYPE {",
+    "  var total: TYPE = ONE;",
+    "",
+    "  for value in iter {",
+    "    total *= value;",
+    "  }",
+    "",
+    "  total",
+    "}",
+    "",
+  ]);
+
+  lines.join("\n")
+}
+
+/// `TO::try_from(value)` of an integer of type `FROM`, with Rust's message
+/// (docs/adr/0094-conversions-and-defaults.md, Q634): the value fits when converting it back gives
+/// it again and, between signed and unsigned types, keeps its sign (`SIGN`).
+fn try_from_template() -> String {
+  const lines = List::from([
+    "",
+    "fn int_try_from_TO_FROM(value: FROM) -> Result<TO, String> {",
+    "  const converted = value as TO;",
+    "",
+    "  if converted as FROM != value SIGN {",
+    "    return Err(\"out of range integral type conversion attempted\");",
+    "  }",
+    "",
+    "  Ok(converted)",
+    "}",
+    "",
+  ]);
+
+  lines.join("\n")
+}
+
+/// `to_le_bytes`, `to_be_bytes`, `to_ne_bytes` and the `from_` functions of an integer of type `TYPE`
+/// and `SIZE` bytes, as Rust's (docs/adr/0101-the-rest-of-s2.md, Q702), each after `CFG`, which
+/// chooses the size of `isize` and `usize`. The native order is little-endian on every supported
+/// system.
+fn bytes_template() -> String {
+  const lines = List::from([
+    "",
+    "CFG",
+    "fn int_to_le_bytes_TYPE(value: TYPE) -> [u8; SIZE] {",
+    "  const bits = value as u64;",
+    "  var bytes = [0u8; SIZE];",
+    "",
+    "  for index in 0..SIZEusize {",
+    "    bytes[index] = (bits >> ((8 * index) as u32)) as u8;",
+    "  }",
+    "",
+    "  bytes",
+    "}",
+    "",
+    "CFG",
+    "fn int_to_be_bytes_TYPE(value: TYPE) -> [u8; SIZE] {",
+    "  const bits = value as u64;",
+    "  var bytes = [0u8; SIZE];",
+    "",
+    "  for index in 0..SIZEusize {",
+    "    bytes[SIZEusize - 1 - index] = (bits >> ((8 * index) as u32)) as u8;",
+    "  }",
+    "",
+    "  bytes",
+    "}",
+    "",
+    "CFG",
+    "fn int_to_ne_bytes_TYPE(value: TYPE) -> [u8; SIZE] {",
+    "  int_to_le_bytes_TYPE(value)",
+    "}",
+    "",
+    "CFG",
+    "fn int_from_le_bytes_TYPE(bytes: [u8; SIZE]) -> TYPE {",
+    "  var bits = 0u64;",
+    "",
+    "  for index in 0..SIZEusize {",
+    "    bits = bits | (bytes[index] as u64) << ((8 * index) as u32);",
+    "  }",
+    "",
+    "  bits as TYPE",
+    "}",
+    "",
+    "CFG",
+    "fn int_from_be_bytes_TYPE(bytes: [u8; SIZE]) -> TYPE {",
+    "  var bits = 0u64;",
+    "",
+    "  for index in 0..SIZEusize {",
+    "    bits = bits | (bytes[SIZEusize - 1 - index] as u64) << ((8 * index) as u32);",
+    "  }",
+    "",
+    "  bits as TYPE",
+    "}",
+    "",
+    "CFG",
+    "fn int_from_ne_bytes_TYPE(bytes: [u8; SIZE]) -> TYPE {",
+    "  int_from_le_bytes_TYPE(bytes)",
+    "}",
+    "",
+  ]);
+
+  lines.join("\n")
+}
+
+/// `TYPE::from_str_radix(text, radix)`, with Rust's messages (Q703): a `+` or, when `SIGNED`, a `-`,
+/// then the digits of the radix.
+fn radix_template() -> String {
+  const lines = List::from([
+    "",
+    "fn int_from_str_radix_TYPE(text: String, radix: u32) -> Result<TYPE, String> {",
+    "  if radix < 2 || radix > 36 {",
+    "    panic(\"from_str_radix_int: must lie in the range `[2, 36]` - found \" + radix.to_string());",
+    "  }",
+    "",
+    "  if text.is_empty() {",
+    "    return Err(\"cannot parse integer from empty string\");",
+    "  }",
+    "",
+    "  var negative = false;",
+    "  var digits = text;",
+    "",
+    "  if text.starts_with(\"+\") {",
+    "    digits = text.substring(1, text.len());",
+    "  } else if SIGNED && text.starts_with(\"-\") {",
+    "    negative = true;",
+    "    digits = text.substring(1, text.len());",
+    "  }",
+    "",
+    "  if digits.is_empty() {",
+    "    return Err(\"invalid digit found in string\");",
+    "  }",
+    "",
+    "  const base = radix as TYPE;",
+    "  const overflow = if negative { \"number too small to fit in target type\" } else { \"number too large to fit in target type\" };",
+    "  var value: TYPE = 0;",
+    "",
+    "  for c in digits.chars() {",
+    "    const digit = match c.to_digit(radix) {",
+    "      Some(found) => found as TYPE,",
+    "      None => return Err(\"invalid digit found in string\"),",
+    "    };",
+    "    const scaled = match value.checked_mul(base) {",
+    "      Some(found) => found,",
+    "      None => return Err(overflow),",
+    "    };",
+    "    const next = if negative { scaled.checked_sub(digit) } else { scaled.checked_add(digit) };",
+    "",
+    "    value = match next {",
+    "      Some(found) => found,",
+    "      None => return Err(overflow),",
+    "    };",
+    "  }",
+    "",
+    "  Ok(value)",
     "}",
     "",
   ]);
@@ -132,7 +322,7 @@ fn range_template() -> String {
 }
 
 /// The prelude's source: `prelude.sag` (or the text given in its place) followed by the range
-/// functions.
+/// functions, `sum` and `product`, and the conversions between integers.
 fn prelude_source(prelude: String) -> String {
   const source = new StringBuilder();
   const template = range_template();
@@ -141,6 +331,40 @@ fn prelude_source(prelude: String) -> String {
 
   for ty in INT_TYPES.split(" ") {
     source.append(template.replace("TYPE", ty));
+    source.append(sum_template().replace("TYPE", ty).replace("ZERO", "0").replace("ONE", "1"));
+  }
+
+  for ty in List::from(["f32", "f64"]) {
+    source.append(sum_template().replace("TYPE", ty).replace("ZERO", "0.0").replace("ONE", "1.0"));
+  }
+
+  const bytes = bytes_template();
+  const radix = radix_template();
+
+  for ty in INT_TYPES.split(" ") {
+    const signed = ty.starts_with("i");
+
+    source.append(radix.replace("TYPE", ty).replace("SIGNED", if signed { "true" } else { "false" }));
+
+    if ty == "isize" || ty == "usize" {
+      source.append(bytes.replace("TYPE", ty).replace("SIZE", "8").replace("CFG", "@cfg(target_pointer_width = \"64\")"));
+      source.append(bytes.replace("TYPE", ty).replace("SIZE", "4").replace("CFG", "@cfg(target_pointer_width = \"32\")"));
+    } else {
+      const size = if ty == "i8" || ty == "u8" { "1" } else if ty == "i16" || ty == "u16" { "2" } else if ty == "i32" || ty == "u32" { "4" } else { "8" };
+
+      source.append(bytes.replace("TYPE", ty).replace("SIZE", size).replace("CFG", ""));
+    }
+  }
+
+  for to in INT_TYPES.split(" ") {
+    for from in INT_TYPES.split(" ") {
+      if to != from {
+        // Only a signed value can be below zero.
+        const sign = if to.starts_with("i") == from.starts_with("i") { "" } else if to.starts_with("i") { "|| converted < 0" } else { "|| value < 0" };
+
+        source.append(try_from_template().replace("TO", to).replace("FROM", from).replace("SIGN", sign));
+      }
+    }
   }
 
   source.to_string()
@@ -150,6 +374,43 @@ fn prelude_source(prelude: String) -> String {
 /// there does `std::path` treat `\` as a separator.
 pub fn windows() -> bool {
   path::join("x\\", "y") == "x\\y"
+}
+
+/// The system running the compiler, as `target_os` of `@cfg` names it: macOS has this file and no
+/// other system has.
+pub fn host_os() -> String {
+  if windows() {
+    "windows"
+  } else if fs::is_file("/System/Library/CoreServices/SystemVersion.plist") {
+    "macos"
+  } else {
+    "linux"
+  }
+}
+
+/// The processor running the compiler, as `target_arch` of `@cfg` names it. `sag` runs on 64-bit
+/// hosts only.
+pub fn host_arch() -> String {
+  if windows() {
+    return match env::variable("PROCESSOR_ARCHITECTURE") {
+      Some(name) if name == "ARM64" => "aarch64",
+      _ => "x86_64",
+    };
+  }
+
+  if linux_on_arm() {
+    return "aarch64";
+  }
+
+  if host_os() == "macos" {
+    if let Ok(output) = new Command("uname").arg("-m").output() {
+      if output.stdout.trim() == "arm64" {
+        return "aarch64";
+      }
+    }
+  }
+
+  "x86_64"
 }
 
 /// Whether the compiler runs on Linux for ARM, where C's `char` is unsigned: only the kernel of
@@ -206,12 +467,15 @@ pub class LoadedPackage {
   pub const entry: String;
   /// Indices in `Loader::packages` of its dependencies.
   pub const dependencies: List<usize>;
+  /// The variables `env!` reads in its files first (`--env`, `--dependency-env`).
+  pub const env: Map<String, String>;
 
   pub fn new(self, name: String, entry: String, dependencies: List<usize>) {
     self.name = name;
     self.root = path::parent(entry).unwrap_or("");
     self.entry = entry;
     self.dependencies = dependencies;
+    self.env = new Map<String, String>();
   }
 }
 
@@ -226,6 +490,8 @@ enum ModuleFile {
 pub class Loader {
   /// The input's package first, then its dependencies.
   pub const packages: List<LoadedPackage>;
+  /// What the conditions of `@cfg` are evaluated for.
+  pub const target: TargetInfo;
   /// Keeps node ids unique across modules.
   prv const ids: Ids;
   pub const modules: List<Module>;
@@ -239,7 +505,8 @@ pub class Loader {
 
   /// A loader for the program whose root module is `entry`, without dependencies until
   /// `add_dependency`.
-  pub fn new(self, entry: String) {
+  pub fn new(self, entry: String, target: TargetInfo) {
+    self.target = target;
     self.packages = List::from([new LoadedPackage("", entry, new List())]);
     self.ids = new Ids(0);
     self.modules = new List();
@@ -258,6 +525,21 @@ pub class Loader {
     }
 
     self.packages.push(new LoadedPackage(name, entry, packages));
+  }
+
+  /// Gives `env!` in the files of package `package` (0 is the input's) the variable `name`.
+  pub fn set_env(self, package: usize, name: String, value: String) {
+    if let Some(found) = self.packages.get(package) {
+      found.env.insert(name, value);
+    }
+  }
+
+  /// The variables of the package `package` for `env!`.
+  prv fn package_env(self, package: usize) -> Map<String, String> {
+    match self.packages.get(package) {
+      Some(found) => found.env,
+      None => new Map<String, String>(),
+    }
   }
 
   /// Sets the direct dependencies of the input's package, by their index among the dependencies.
@@ -300,15 +582,66 @@ pub class Loader {
     const tokens = lexer::lex(id, text, diagnostics);
 
     if diagnostics.error_count() == errors {
-      var module = parser::parse_module_from(id, tokens, self.ids, diagnostics);
+      var module = parser::parse_module_from(id, tokens, self.ids, self.target, diagnostics, Some(file), self.package_env(package));
 
+      self.expand_includes(module, package, sources, diagnostics);
       module.path = module_path;
       module.package = package;
-      module.location = Some(file);
       self.modules.push(module);
     }
 
     true
+  }
+
+  /// Puts the items of the files `include!` names in their module, as if written there; their
+  /// spans are the file's (docs/adr/0103-build-scripts-and-binding-generation.md, Q724).
+  prv fn expand_includes(self, module: Module, package: usize, sources: SourceMap, diagnostics: Diagnostics) {
+    for include in module.includes {
+      const text = match self.overrides.get(path_key(include.path)) {
+        Some(found) => found,
+        None => match fs::read_to_string(include.path) {
+          Ok(found) => found,
+          Err(problem) => {
+            const reason = match problem.kind() {
+              io::ErrorKind::NotFound => "the file does not exist",
+              io::ErrorKind::PermissionDenied => "permission denied",
+              io::ErrorKind::InvalidData => "the file is not UTF-8",
+              _ => "the file cannot be read",
+            };
+
+            diagnostics.push(
+              Diagnostic::error(codes::INVALID_INCLUDE, include.span, "cannot read `" + include.path + "`: " + reason)
+                .with_note("a relative path starts from the directory of this source file"),
+            );
+            continue;
+          }
+        },
+      };
+      const id = sources.add(include.path, text);
+      const errors = diagnostics.error_count();
+      const tokens = lexer::lex(id, text, diagnostics);
+
+      if diagnostics.error_count() != errors {
+        continue;
+      }
+
+      const included = parser::parse_module_from(id, tokens, self.ids, self.target, diagnostics, Some(include.path), self.package_env(package));
+
+      for nested in included.includes {
+        diagnostics.push(
+          Diagnostic::error(codes::INVALID_MACRO, nested.span, "a file put in a module by `include!` cannot call `include!` itself")
+            .with_help("include both files from the module"),
+        );
+      }
+
+      for decl in included.uses {
+        module.uses.push(decl);
+      }
+
+      for item in included.items {
+        module.items.push(item);
+      }
+    }
   }
 
   /// Loads the modules the loaded ones refer to that exist as files, and the standard library
@@ -317,6 +650,14 @@ pub class Loader {
     const attempted = new Map<String, bool>();
     const attempted_std = new Map<String, bool>();
     var index = 0usize;
+
+    for name in CORE_STD.split(" ") {
+      attempted_std.insert(name, true);
+
+      if let Some(text) = std_source(name) {
+        self.load_std(name, self.std_overrides.get(name).unwrap_or(text), sources, diagnostics);
+      }
+    }
 
     while index < self.modules.len() {
       const module = self.modules[index];
@@ -356,7 +697,8 @@ pub class Loader {
       }
 
       for name in modules::std_references(module) {
-        if attempted_std.contains_key(name) {
+        // `std::sys` and `std::unicode` are the standard library's own (Q551).
+        if attempted_std.contains_key(name) || ((name == "sys" || name == "unicode") && !self.std.contains(index)) {
           continue;
         }
 
@@ -392,7 +734,7 @@ pub class Loader {
   prv fn load_embedded(self, file: String, text: String, module_path: List<String>, sources: SourceMap, diagnostics: Diagnostics) -> usize {
     const id = sources.add(file, text);
     const tokens = lexer::lex(id, text, diagnostics);
-    var module = parser::parse_module_from(id, tokens, self.ids, diagnostics);
+    var module = parser::parse_module_from(id, tokens, self.ids, self.target, diagnostics, None, new Map<String, String>());
 
     module.path = module_path;
     self.modules.push(module);
@@ -514,7 +856,9 @@ pub class Loader {
 
   /// The package of the program, compiled for `target`: its modules, the prelude and the
   /// standard library modules.
-  pub fn package(self, prelude: usize, target: TargetInfo) -> Package {
+  pub fn package(self, prelude: usize) -> Package {
+    const target = self.target;
+
     const infos: List<PackageInfo> = new List();
 
     for loaded in self.packages {

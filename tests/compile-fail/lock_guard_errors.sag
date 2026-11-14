@@ -1,0 +1,25 @@
+// The guards of `std::sync` stay with the thread that took the lock, and only the lock makes
+// them (docs/adr/0098-locks-orderings-and-threads.md, Q671–Q674).
+use std::sync::{Barrier, Condvar, Mutex, MutexGuard, RwLock, RwLockWriteGuard, WaitTimeoutResult};
+use std::thread;
+
+fn needs_send<T: Send>(value: T) -> T {
+  value
+}
+
+static HELD: MutexGuard<i32> = new Mutex(1).lock(); //~ ERROR E0332
+
+fn main() {
+  const shared = new Mutex(1);
+  const guard = shared.lock();
+  const _a = thread::spawn(() => guard.get()); //~ ERROR E0332
+  const writer: RwLockWriteGuard<i32> = new RwLock(1).write();
+  const _b = needs_send(writer); //~ ERROR E0330
+  const _c = new MutexGuard<i32>(1); //~ ERROR E0300
+  const _d = new WaitTimeoutResult(true); //~ ERROR E0300
+  const condition = new Condvar();
+  const _f = new Barrier(-1); //~ ERROR E0310
+  // Shared, not taken: the lock, the condition and the barrier are `Send`.
+  const barrier = new Barrier(2);
+  const _g = thread::spawn(() => barrier.wait().is_leader() && condition == condition && shared.get() > 0);
+}

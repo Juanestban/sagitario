@@ -47,3 +47,60 @@ fn moved(point: &Point) -> i32 {
 
 /// A module-level constant, offered with its type.
 const LIMIT: i32 = 10;
+
+/// A static, offered with its type.
+static FRAMES: i64 = 0;
+@thread_local static var SCRATCH: i32 = 0;
+
+/// A global variable of C, offered with its type.
+extern "C" {
+  static var c_counter: i32;
+}
+
+/// Loads `std::hint`, whose `black_box` is completed after `std::hint::`.
+fn kept() -> i32 {
+  std::hint::black_box(1)
+}
+
+/// A tuple, whose elements are completed by their indices after `pair.`.
+fn first_of(pair: (i32, String)) -> i32 {
+  pair.0
+}
+
+/// Static functions of an interface, completed after `Origin::` and after `T::`, defaults included
+/// (docs/adr/0094-conversions-and-defaults.md, Q631).
+interface Zero {
+  fn zero() -> Self;
+  fn label() -> String { "zero" }
+}
+
+struct Origin impl Zero {
+  pub x: i32;
+
+  pub fn zero() -> Origin { Origin { x: 0 } }
+}
+
+fn zeros<T: Zero>() -> String {
+  const _origin = Origin::label();
+
+  T::label()
+}
+
+/// Loads `std::process`, whose `exit` and `abort` are completed after `std::process::`.
+fn own_id() -> u32 {
+  std::process::id()
+}
+
+/// Constants of a type, completed after `Limits::` and `Self::` with its static functions
+/// (docs/adr/0099-associated-and-composite-constants.md, Q687).
+struct Limits {
+  pub const MAX: i64 = 99;
+
+  pub fn max() -> i64 {
+    Self::MAX
+  }
+}
+
+fn limit() -> i64 {
+  Limits::MAX
+}

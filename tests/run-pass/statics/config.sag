@@ -1,0 +1,19 @@
+//! Statics of another module: `pub` exports them, and `use` imports them.
+
+use std::sync::Mutex;
+
+pub static WIDTH: i32 = 640;
+pub static TITLE: String = "Sagitario " + "demo";
+pub static MODE: Mutex<String> = new Mutex(default_mode());
+
+/// Visible in this module only.
+static PRIVATE_SCALE: i32 = 2;
+
+fn default_mode() -> String {
+  println("computing the mode");
+  "windowed"
+}
+
+pub fn scaled_width() -> i32 {
+  WIDTH * PRIVATE_SCALE
+}

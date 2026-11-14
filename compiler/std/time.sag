@@ -1,15 +1,25 @@
 //! `std::time`: spans of time, a monotonic clock for measuring, the system clock and `sleep`
-//! (docs/spec/11-standard-library.md#stdtime).
+//! (docs/spec/11-standard-library.md#stdtime), on the clocks of each system in `std::sys`.
 
-extern "C" {
-  fn sag_time_monotonic() -> u64;
-  fn sag_time_system() -> u64;
-  fn sag_time_sleep(nanos: u64);
+use std::sys;
+
+/// The monotonic clock and the sleep of the runtime's core, which its timers of `async` tasks use:
+/// they keep their C names, and every program compiles this module
+/// (docs/adr/0085-conditional-compilation-and-std-time.md, Q552).
+@export("sag_time_monotonic")
+extern "C" fn core_monotonic() -> u64 {
+  sys::monotonic_nanos()
 }
 
-/// A span of time with nanosecond precision, up to about 584 years. Creating or adding
-/// durations beyond that overflows like any `u64`.
-pub struct Duration impl Ord {
+@export("sag_time_sleep")
+extern "C" fn core_sleep(nanos: u64) {
+  sys::sleep_nanos(nanos);
+}
+
+/// A span of time with nanosecond precision, up to about 584 years. Creating durations beyond
+/// that with `from_secs` and the like overflows like any `u64`; the operators and the `checked_`
+/// and `saturating_` functions check it, as Rust's (docs/adr/0101-the-rest-of-s2.md, Q704).
+pub struct Duration impl Ord, Add<Duration, Duration>, Sub<Duration, Duration>, Mul<u32, Duration>, Div<u32, Duration> {
   prv nanos: u64;
 
   pub fn from_secs(secs: u64) -> Duration {
@@ -67,6 +77,120 @@ pub struct Duration impl Ord {
     Duration { nanos: self.nanos * factor }
   }
 
+  /// The seconds with their fraction, as an `f32`.
+  pub fn as_secs_f32(self) -> f32 {
+    self.as_secs_f64() as f32
+  }
+
+  /// The duration of `secs` seconds, truncated to the nanosecond; a negative, too large or NaN
+  /// number panics, as Rust's.
+  pub fn from_secs_f64(secs: f64) -> Duration {
+    if secs < 0.0 {
+      panic("cannot convert float seconds to Duration: value is negative");
+    }
+
+    const nanos = secs * 1_000_000_000.0;
+
+    // Also false for NaN.
+    if !(nanos < 18446744073709551616.0) {
+      panic("cannot convert float seconds to Duration: value is either too big or NaN");
+    }
+
+    Duration { nanos: nanos as u64 }
+  }
+
+  pub fn from_secs_f32(secs: f32) -> Duration {
+    Duration::from_secs_f64(secs as f64)
+  }
+
+  /// `self + other`, or `None` beyond the longest duration.
+  pub fn checked_add(self, other: Duration) -> Option<Duration> {
+    match self.nanos.checked_add(other.nanos) {
+      Some(nanos) => Some(Duration { nanos: nanos }),
+      None => None,
+    }
+  }
+
+  /// `self - other`, or `None` if `other` is longer.
+  pub fn checked_sub(self, other: Duration) -> Option<Duration> {
+    if other.nanos > self.nanos { None } else { Some(Duration { nanos: self.nanos - other.nanos }) }
+  }
+
+  pub fn checked_mul(self, factor: u32) -> Option<Duration> {
+    match self.nanos.checked_mul(factor as u64) {
+      Some(nanos) => Some(Duration { nanos: nanos }),
+      None => None,
+    }
+  }
+
+  /// `self / divisor`, or `None` for 0.
+  pub fn checked_div(self, divisor: u32) -> Option<Duration> {
+    if divisor == 0 { None } else { Some(Duration { nanos: self.nanos / divisor as u64 }) }
+  }
+
+  /// `self + other`, or the longest duration.
+  pub fn saturating_add(self, other: Duration) -> Duration {
+    Duration { nanos: self.nanos.saturating_add(other.nanos) }
+  }
+
+  /// `self - other`, or zero.
+  pub fn saturating_sub(self, other: Duration) -> Duration {
+    Duration { nanos: self.nanos.saturating_sub(other.nanos) }
+  }
+
+  pub fn saturating_mul(self, factor: u32) -> Duration {
+    Duration { nanos: self.nanos.saturating_mul(factor as u64) }
+  }
+
+  /// The duration times `factor`, through its seconds as an `f64`.
+  pub fn mul_f64(self, factor: f64) -> Duration {
+    Duration::from_secs_f64(self.as_secs_f64() * factor)
+  }
+
+  pub fn div_f64(self, divisor: f64) -> Duration {
+    Duration::from_secs_f64(self.as_secs_f64() / divisor)
+  }
+
+  pub fn mul_f32(self, factor: f32) -> Duration {
+    Duration::from_secs_f32(self.as_secs_f32() * factor)
+  }
+
+  pub fn div_f32(self, divisor: f32) -> Duration {
+    Duration::from_secs_f32(self.as_secs_f32() / divisor)
+  }
+
+  /// `a + b`, which panics beyond the longest duration, in every build.
+  pub fn add(self, other: Duration) -> Duration {
+    match self.checked_add(other) {
+      Some(found) => found,
+      None => panic("overflow when adding durations"),
+    }
+  }
+
+  /// `a - b`, which panics if `b` is longer.
+  pub fn sub(self, other: Duration) -> Duration {
+    match self.checked_sub(other) {
+      Some(found) => found,
+      None => panic("overflow when subtracting durations"),
+    }
+  }
+
+  /// `a * n`.
+  pub fn mul(self, factor: u32) -> Duration {
+    match self.checked_mul(factor) {
+      Some(found) => found,
+      None => panic("overflow when multiplying duration by scalar"),
+    }
+  }
+
+  /// `a / n`, which panics for 0.
+  pub fn div(self, divisor: u32) -> Duration {
+    match self.checked_div(divisor) {
+      Some(found) => found,
+      None => panic("divide by zero error when dividing duration by scalar"),
+    }
+  }
+
   pub fn equals(self, other: Duration) -> bool {
     self.nanos == other.nanos
   }
@@ -82,7 +206,7 @@ pub struct Instant impl Ord {
   prv nanos: u64;
 
   pub fn now() -> Instant {
-    Instant { nanos: unsafe { sag_time_monotonic() } }
+    Instant { nanos: sys::monotonic_nanos() }
   }
 
   /// The time since this instant.
@@ -109,7 +233,7 @@ pub struct SystemTime impl Ord {
   prv nanos: u64;
 
   pub fn now() -> SystemTime {
-    SystemTime { nanos: unsafe { sag_time_system() } }
+    SystemTime { nanos: sys::system_nanos() }
   }
 
   /// The time since 1970-01-01 00:00:00 UTC, or zero for an earlier time.
@@ -126,7 +250,25 @@ pub struct SystemTime impl Ord {
   }
 }
 
+/// 1970-01-01 00:00:00 UTC, as Rust's: `UNIX_EPOCH + duration` is a `SystemTime`
+/// (docs/adr/0096-streams-files-and-drop.md, Q659).
+pub static UNIX_EPOCH: SystemTime = SystemTime::default();
+
+/// The epoch, which a block reaches the field of: the value of `UNIX_EPOCH`.
+impl Default for SystemTime {
+  fn default() -> SystemTime {
+    SystemTime { nanos: 0 }
+  }
+}
+
+/// A `SystemTime` moved later by a `Duration`, as Rust's.
+impl Add<Duration, SystemTime> for SystemTime {
+  fn add(self, other: Duration) -> SystemTime {
+    SystemTime { nanos: self.nanos + other.as_nanos() }
+  }
+}
+
 /// Pauses the program for at least `duration`.
 pub fn sleep(duration: Duration) {
-  unsafe { sag_time_sleep(duration.as_nanos()) };
+  sys::sleep_nanos(duration.as_nanos());
 }

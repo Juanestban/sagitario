@@ -36,8 +36,13 @@ pub struct Package {
   pub target: TargetInfo;
 }
 
-/// The machine the program is compiled for: what the sizes of C types depend on.
+/// The machine the program is compiled for: what the sizes of C types and the conditions of
+/// `@cfg` depend on.
 pub struct TargetInfo {
+  /// `target_os` of `@cfg`: `windows`, `linux`, `macos`, `android` or `ios`.
+  pub os: String;
+  /// `target_arch` of `@cfg`: `x86_64`, `aarch64` or `arm`.
+  pub arch: String;
   /// The width of pointers, `isize` and `usize`: 32 or 64.
   pub pointer_width: u32;
   /// Whether C's `long` has 32 bits: on Windows and on 32-bit targets.
@@ -48,7 +53,13 @@ pub struct TargetInfo {
   /// The machine running the compiler. `sag` runs on 64-bit hosts, where C's `long` has 32 bits
   /// on Windows alone and C's `char` is unsigned on Linux for ARM alone.
   pub fn host() -> TargetInfo {
-    TargetInfo { pointer_width: 64, long_is_32: loader::windows(), char_is_unsigned: loader::linux_on_arm() }
+    TargetInfo {
+      os: loader::host_os(),
+      arch: loader::host_arch(),
+      pointer_width: 64,
+      long_is_32: loader::windows(),
+      char_is_unsigned: loader::linux_on_arm(),
+    }
   }
 }
 
@@ -68,10 +79,22 @@ pub struct Module {
   pub path: List<String>;
   /// Index in `Package::packages` of the package the file belongs to.
   pub package: usize;
-  /// The file's path on disk, for `include_str`; `None` for embedded modules.
+  /// The file's path on disk, for `include_str!`; `None` for embedded modules.
   pub location: Option<String>;
   pub uses: List<UseDecl>;
   pub items: List<Item>;
+  /// The files `include!` puts in the module, whose items the loader adds to `items`
+  /// (docs/adr/0103-build-scripts-and-binding-generation.md, Q724).
+  pub includes: List<Include>;
+  /// The names of the built-in macros called in the module, with their `!`, which the parser
+  /// expands: the language server colors them.
+  pub macros: List<Span>;
+}
+
+/// `include!(path);` where an item may be: the path, as the macros inside it give it.
+pub struct Include {
+  pub path: String;
+  pub span: Span;
 }
 
 /// `use tree;`
@@ -103,6 +126,7 @@ pub enum Item {
   Extern(ExternBlock),
   Const(ConstDecl),
   Impl(ImplBlock),
+  Static(StaticDecl),
 }
 
 /// `impl<T> Interface<A> for Type<T> { methods }`: the methods of one interface for one type,
@@ -126,6 +150,30 @@ pub struct ConstDecl {
   pub span: Span;
 }
 
+/// `static NAME: Type = value;` at module level (docs/adr/0083-global-state.md): one value for
+/// the whole program, computed on its first use.
+pub struct StaticDecl {
+  pub visibility: Visibility;
+  /// `static var` (Q528).
+  pub mutable: bool;
+  /// `@thread_local`, on a `static var` only: one value per thread (Q529).
+  pub thread_local: bool;
+  /// A global variable of C, declared in an `extern "C"` block without a value
+  /// (docs/adr/0086-c-globals-and-std-io.md): its name is the C symbol.
+  pub extern_c: bool;
+  pub name: Ident;
+  pub ty: TypeExpr;
+  /// A function without parameters that returns `value`, named as the static: the passes
+  /// check and compile it as any function, and the program calls it on the first use.
+  pub init: FnDecl;
+  pub span: Span;
+
+  /// The initializer.
+  pub fn value(self) -> Option<Expr> {
+    self.init.body.tail
+  }
+}
+
 pub struct InterfaceDecl {
   pub visibility: Visibility;
   pub name: Ident;
@@ -146,6 +194,9 @@ pub struct ClassDecl {
   /// The interfaces after `impl`.
   pub impls: List<TypeExpr>;
   pub fields: List<FieldDecl>;
+  /// `pub const NAME: Type = value;`: constants of the class
+  /// (docs/adr/0099-associated-and-composite-constants.md, Q683).
+  pub consts: List<ConstDecl>;
   pub functions: List<FnDecl>;
   pub span: Span;
 }
@@ -160,6 +211,9 @@ pub struct ExternFn {
   pub visibility: Visibility;
   pub name: Ident;
   pub params: List<Param>;
+  /// `...` after the parameters: a variadic C function, which takes more arguments
+  /// (docs/adr/0103-build-scripts-and-binding-generation.md, Q720).
+  pub variadic: bool;
   pub return_type: Option<TypeExpr>;
   pub span: Span;
 }
@@ -173,16 +227,23 @@ pub struct Export {
 pub struct EnumDecl {
   /// The integer type of `@repr(i32)`, or `C` for `@repr(C)` (docs/spec/10-ffi.md).
   pub repr: Option<Ident>;
+  /// `@default`: the variant marked `@default` is its `Default`
+  /// (docs/adr/0094-conversions-and-defaults.md, Q636).
+  pub default: Option<Span>;
   pub visibility: Visibility;
   pub name: Ident;
   pub generics: List<GenericParam>;
   pub impls: List<TypeExpr>;
   pub variants: List<VariantDecl>;
+  /// Constants of the enum (Q683).
+  pub consts: List<ConstDecl>;
   pub functions: List<FnDecl>;
   pub span: Span;
 }
 
 pub struct VariantDecl {
+  /// `@default` before the variant of an enum marked `@default`.
+  pub default: Option<Span>;
   pub name: Ident;
   pub fields: VariantFields;
   /// `= 7` or `= -1` after a variant of an enum with an integer representation.
@@ -211,6 +272,8 @@ pub struct VariantFieldDecl {
 
 pub struct StructDecl {
   pub repr_c: bool;
+  /// `@default`: the default of every field is its `Default` (Q636).
+  pub default: Option<Span>;
   /// `union`: its fields share their memory (docs/spec/10-ffi.md).
   pub is_union: bool;
   pub visibility: Visibility;
@@ -218,8 +281,33 @@ pub struct StructDecl {
   pub generics: List<GenericParam>;
   pub impls: List<TypeExpr>;
   pub fields: List<FieldDecl>;
+  /// Constants of the struct (Q683).
+  pub consts: List<ConstDecl>;
   pub functions: List<FnDecl>;
   pub span: Span;
+
+  /// Whether this is an opaque C type: a `@repr(C)` struct whose only field is a `prv` array of
+  /// length 0, as stable bindgen writes them. Its values never exist; it is used behind raw
+  /// pointers (docs/adr/0103-build-scripts-and-binding-generation.md, Q721).
+  pub fn is_opaque(self) -> bool {
+    if !self.repr_c || self.is_union || self.fields.len() != 1 {
+      return false;
+    }
+
+    const field = self.fields[0];
+
+    if let Visibility::Private = field.visibility {
+      return match field.ty.kind {
+        TypeExprKind::Array { len, .. } => match len.value.parse_u64() {
+          Ok(count) => count == 0,
+          Err(_) => false,
+        },
+        _ => false,
+      };
+    }
+
+    false
+  }
 }
 
 pub struct FieldDecl {
@@ -278,6 +366,8 @@ pub class TypeExpr {
 pub enum TypeExprKind {
   /// `()`
   Unit,
+  /// `(A, B, ...)`, with two or more elements (docs/adr/0092-tuples.md).
+  Tuple(List<TypeExpr>),
   /// A named type; `Self` is a path with the single segment `Self`.
   Path(Path),
   /// `Option<T>`, `Result<T, E>`
@@ -342,6 +432,38 @@ pub struct LetStmt {
   pub ty: Option<TypeExpr>;
   pub init: Option<Expr>;
   pub span: Span;
+  /// Set on the hidden binding a tuple pattern of `const`, `var` or `for` becomes: the parser
+  /// reads each element from it into a binding of its own (docs/adr/0092-tuples.md, Q610).
+  pub shape: Option<TupleShape>;
+}
+
+/// Whether `name` is that of a hidden binding the parser makes for a tuple pattern: no source
+/// can write it.
+pub fn is_hidden(name: String) -> bool {
+  name.starts_with("_tuple#")
+}
+
+/// Whether `value` reads an element of the hidden binding of a tuple pattern: the parser wrote
+/// it, at the place of the name it binds.
+pub fn is_hidden_read(value: Expr) -> bool {
+  match value.kind {
+    ExprKind::Field { base, .. } => match base.kind {
+      ExprKind::Path(path) => path.segments.len() == 1 && is_hidden(path.segments[0].name),
+      _ => false,
+    },
+    ExprKind::Path(path) => path.segments.len() == 1 && is_hidden(path.segments[0].name),
+    _ => false,
+  }
+}
+
+/// The elements a tuple pattern of a declaration takes apart.
+pub struct TupleShape {
+  /// The elements named or `_`, without `..`.
+  pub count: usize;
+  /// Whether `..` stands for any number of elements.
+  pub rest: bool;
+  /// The pattern.
+  pub span: Span;
 }
 
 pub enum BinaryOp {
@@ -358,6 +480,12 @@ pub enum BinaryOp {
   Ge,
   And,
   Or,
+  /// The bitwise operators and shifts (docs/adr/0088-bitwise-operators-and-integer-methods.md).
+  BitAnd,
+  BitOr,
+  BitXor,
+  Shl,
+  Shr,
 }
 
 pub fn binary_symbol(op: BinaryOp) -> String {
@@ -375,6 +503,11 @@ pub fn binary_symbol(op: BinaryOp) -> String {
     BinaryOp::Ge => ">=",
     BinaryOp::And => "&&",
     BinaryOp::Or => "||",
+    BinaryOp::BitAnd => "&",
+    BinaryOp::BitOr => "|",
+    BinaryOp::BitXor => "^",
+    BinaryOp::Shl => "<<",
+    BinaryOp::Shr => ">>",
   }
 }
 
@@ -415,16 +548,20 @@ pub enum ExprKind {
   Template(List<TemplatePart>),
   /// `()`
   Unit,
+  /// `(a, b, ...)`, with two or more elements (docs/adr/0092-tuples.md).
+  Tuple(List<Expr>),
   Path(Path),
   Call { callee: Expr, args: List<Expr> },
   /// `receiver.method(args)`
   MethodCall { receiver: Expr, method: Ident, args: List<Expr> },
-  /// `base.name`
+  /// `base.name`, or `base.0` for an element of a tuple, whose name is the index.
   Field { base: Expr, name: Ident },
   /// `base[index]`
   Index { base: Expr, index: Expr },
   /// `Name { field: value, ... }`; the shorthand `{ x }` is stored as `{ x: x }`.
-  StructLit { path: Path, fields: List<FieldInit> },
+  /// `Name { a: 1, ..base }`: the fields not written come from `base`
+  /// (docs/adr/0094-conversions-and-defaults.md, Q643).
+  StructLit { path: Path, fields: List<FieldInit>, base: Option<Expr> },
   /// `[a, b, c]`
   ArrayLit(List<Expr>),
   /// `[value; N]`
@@ -501,6 +638,9 @@ pub enum PatternKind {
   Tuple { path: Path, elems: List<Pattern> },
   /// `Shape::Rect { w, h: 0.0, .. }`; `rest` is set by `..`.
   Named { path: Path, fields: List<FieldPattern>, rest: bool },
+  /// `(a, b)`, or `(a, .., z)` with `rest` the position of `..` among `elems`
+  /// (docs/adr/0092-tuples.md, Q610).
+  Elements { elems: List<Pattern>, rest: Option<usize> },
   /// `a | b`
   Or(List<Pattern>),
 }
@@ -521,4 +661,56 @@ pub struct FieldInit {
 pub enum TemplatePart {
   Text(String),
   Expr(Expr),
+  /// `{expr:spec}` in a format string (docs/adr/0089-display-debug-and-format-specifiers.md).
+  Formatted { expr: Expr, spec: FormatSpec },
+
+  /// The interpolated expression, of either form.
+  pub fn expr(self) -> Option<Expr> {
+    match self {
+      TemplatePart::Text(_) => None,
+      TemplatePart::Expr(inner) => Some(inner),
+      TemplatePart::Formatted { expr, .. } => Some(expr),
+    }
+  }
+
+  /// The interpolated expression, then the bindings its specifier reads for its width and
+  /// precision (`{x:>width$.precision$}`, docs/adr/0101-the-rest-of-s2.md, Q711).
+  pub fn exprs(self) -> List<Expr> {
+    const found: List<Expr> = new List();
+
+    if let Some(inner) = self.expr() {
+      found.push(inner);
+    }
+
+    if let TemplatePart::Formatted { spec, .. } = self {
+      if let Some(width) = spec.width_expr {
+        found.push(width);
+      }
+
+      if let Some(precision) = spec.precision_expr {
+        found.push(precision);
+      }
+    }
+
+    found
+  }
+}
+
+/// A format specifier, Rust's `[[fill]align][+][#][0][width][.precision][type]`
+/// (docs/adr/0089-display-debug-and-format-specifiers.md, Q585).
+pub struct FormatSpec {
+  pub fill: char;
+  /// 0 without an alignment, 1 for `<`, 2 for `^`, 3 for `>`.
+  pub align: u32;
+  pub plus: bool;
+  pub alternate: bool;
+  pub zero: bool;
+  pub width: Option<u64>;
+  pub precision: Option<u64>;
+  /// `width$` and `.precision$`: a binding read for them when the string is formatted (Q711).
+  pub width_expr: Option<Expr>;
+  pub precision_expr: Option<Expr>;
+  /// `""`, `"?"`, `"x"`, `"X"`, `"o"`, `"b"`, `"e"` or `"E"`.
+  pub kind: String;
+  pub span: Span;
 }

@@ -5,9 +5,11 @@
 //! shares the compiler's spans and diagnostics (docs/adr/0064-nova-in-sagitario.md,
 //! docs/adr/0065-module-directories.md).
 
+use pkg::bindgen;
 use pkg::diagnostics;
 use pkg::diagnostics::{Diagnostic, DiagnosticFormat};
 use pkg::loader::{path_key, push_path, windows};
+use pkg::nova::build;
 use pkg::nova::codes;
 use pkg::nova::manifest;
 use pkg::nova::manifest::Manifest;
@@ -41,6 +43,7 @@ fn usage() -> String {
     "  check        Check the package without generating code",
     "  clean        Remove the `target` directory",
     "  update self  Update Sagitario (sag and nova) to the latest release",
+    "  bindgen      Write the Sagitario declarations of a C header once: `nova bindgen lib.h`",
     "  help         Show this message",
     "  version      Show Nova's version",
     "",
@@ -55,12 +58,19 @@ fn usage() -> String {
     "  --emit-c                    Also write the generated C next to the executable (build, run)",
     "  --cc <compiler>             C compiler to use; overrides SAG_CC (build, run)",
     "  --target <target>           Compile for another machine, such as `aarch64-linux-android`",
-    "                              (build, check); `sag targets` lists them",
+    "                              (build, check), or read a header for (bindgen); `sag targets`",
+    "                              lists them",
     "  --diagnostic-format <fmt>   `human` (default) or `short`: one line per diagnostic",
     "  --check                     Only say whether there is a newer release (update self)",
     "  --version <X.Y.Z>           Install that release instead of the latest (update self)",
     "  --from <url>                Download from a directory with the archives and SHA256SUMS",
     "                              instead of the GitHub Release (update self)",
+    "  --output <file>             Write the bindings there instead of stdout (bindgen)",
+    "  --allow-prefix <prefix>     Only the declarations whose names start with it (bindgen)",
+    "  --allow-file <header>       Only the declarations of that header (bindgen)",
+    "  --block <name>              Leave the declaration out (bindgen)",
+    "  --include-path <dir>        A directory of headers, `-I` (bindgen)",
+    "  --define <name>=<value>     A macro defined before the header, `-D` (bindgen)",
   ]).join("\n")
 }
 
@@ -102,8 +112,33 @@ enum Request {
   Compile(Mode, Options),
   Clean,
   UpdateSelf(update::Options),
+  Bindgen(BindgenOptions),
   Help,
   Version,
+}
+
+/// `nova bindgen <header>` (docs/adr/0103-build-scripts-and-binding-generation.md, Q732).
+class BindgenOptions {
+  pub var header: Option<String>;
+  pub var output: Option<String>;
+  pub var target: Option<String>;
+  pub const prefixes: List<String>;
+  pub const files: List<String>;
+  pub const blocked: List<String>;
+  pub const include_paths: List<String>;
+  /// `name=value`.
+  pub const defines: List<String>;
+
+  pub fn new(self) {
+    self.header = None;
+    self.output = None;
+    self.target = None;
+    self.prefixes = new List();
+    self.files = new List();
+    self.blocked = new List();
+    self.include_paths = new List();
+    self.defines = new List();
+  }
 }
 
 /// The position of the argument being read.
@@ -137,6 +172,8 @@ fn parse_args(args: List<String>) -> Result<Request, String> {
     }
   } else if command == "update" {
     parse_update(args)
+  } else if command == "bindgen" {
+    parse_bindgen(args)
   } else if command == "help" || command == "--help" || command == "-h" {
     Ok(Request::Help)
   } else if command == "version" || command == "--version" || command == "-v" {
@@ -181,6 +218,114 @@ fn parse_creation(command: String, args: List<String>) -> Result<Request, String
   match name {
     Some(found) => Ok(Request::New { name: found, lib: lib }),
     None => Err("`nova new` needs the package's name: `nova new my_app`"),
+  }
+}
+
+/// `nova bindgen <header> [--output <file>] [--allow-prefix <prefix>] [--allow-file <header>]
+/// [--block <name>] [--include-path <dir>] [--define <name>=<value>] [--target <target>]`.
+fn parse_bindgen(args: List<String>) -> Result<Request, String> {
+  const options = new BindgenOptions();
+  const index = new Position(1);
+
+  while index.value < args.len() {
+    const arg = args[index.value];
+    var flag = arg;
+    var inline: Option<String> = None;
+
+    if let Some(equals) = arg.find("=") {
+      if arg.starts_with("--") {
+        flag = arg.substring(0, equals);
+        inline = Some(arg.substring(equals + 1, arg.len()));
+      }
+    }
+
+    if flag == "--output" {
+      options.output = Some(flag_value(flag, inline, args, index)?);
+    } else if flag == "--target" {
+      options.target = Some(flag_value(flag, inline, args, index)?);
+    } else if flag == "--allow-prefix" {
+      options.prefixes.push(flag_value(flag, inline, args, index)?);
+    } else if flag == "--allow-file" {
+      options.files.push(flag_value(flag, inline, args, index)?);
+    } else if flag == "--block" {
+      options.blocked.push(flag_value(flag, inline, args, index)?);
+    } else if flag == "--include-path" {
+      options.include_paths.push(flag_value(flag, inline, args, index)?);
+    } else if flag == "--define" {
+      const value = flag_value(flag, inline, args, index)?;
+
+      if !value.contains("=") {
+        return Err(`\`--define\` takes \`name=value\`; found \`${value}\``);
+      }
+
+      options.defines.push(value);
+    } else if arg.starts_with("-") {
+      return Err(`unknown option \`${arg}\` for \`nova bindgen\``);
+    } else if options.header.is_none() {
+      options.header = Some(arg);
+    } else {
+      return Err(`unexpected argument \`${arg}\` for \`nova bindgen\`: it translates one header`);
+    }
+
+    index.value += 1;
+  }
+
+  if options.header.is_none() {
+    return Err("`nova bindgen` needs a header: `nova bindgen include/lib.h --output src/lib_bindings.sag`");
+  }
+
+  Ok(Request::Bindgen(options))
+}
+
+/// `nova bindgen`: the bindings of a header, written once, as `bindgen-cli`; it needs no
+/// package.
+fn generate_bindings(options: BindgenOptions) -> i32 {
+  const header = options.header.unwrap_or("");
+  const builder = new bindgen::Builder().header(header);
+
+  for prefix in options.prefixes {
+    builder.allow_prefix(prefix);
+  }
+
+  for file in options.files {
+    builder.allow_file(file);
+  }
+
+  for name in options.blocked {
+    builder.block(name);
+  }
+
+  for dir in options.include_paths {
+    builder.include_path(dir);
+  }
+
+  for define in options.defines {
+    const equals = define.find("=").unwrap_or(define.len());
+
+    builder.define(define.substring(0, equals), define.substring(equals + 1, define.len()));
+  }
+
+  if let Some(target) = options.target {
+    builder.target(target);
+  }
+
+  const bindings = match builder.generate() {
+    Ok(found) => found,
+    Err(problem) => return fail(problem.message()),
+  };
+
+  match options.output {
+    Some(file) => match bindings.write_to_file(file) {
+      Ok(_) => {
+        eprintln(`Wrote the bindings of ${header} to ${file}`);
+        0
+      }
+      Err(problem) => fail(problem.message()),
+    },
+    None => {
+      print(bindings.to_string());
+      0
+    }
   }
 }
 
@@ -816,6 +961,48 @@ fn compile(options: Options, mode: Mode) -> i32 {
     args.push(direct.join(","));
   }
 
+  // The build scripts, those of the dependencies first; each package's `env!("OUT_DIR")` is the
+  // directory of its own (docs/adr/0103-build-scripts-and-binding-generation.md, Q727-Q730).
+  const scripts: List<build::Directives> = new List();
+  var position = packages.len();
+
+  while position > 0 {
+    position -= 1;
+
+    const member = packages[position];
+
+    if !fs::is_file(push_path(member.dir, build::FILE_NAME)) {
+      continue;
+    }
+
+    const script = build::Script {
+      dir: member.dir,
+      name: member.manifest.name,
+      version: member.manifest.version,
+      target_dir: target_dir,
+      profile: profile,
+      release: options.release,
+      target: options.target.unwrap_or(build::host_triple()),
+      host: build::host_triple(),
+      cc: options.cc,
+      sag: sag,
+    };
+    const outcome = match build::run(script) {
+      Ok(found) => found,
+      Err(message) => return fail(message),
+    };
+
+    if position == 0 {
+      args.push("--env");
+      args.push("OUT_DIR=" + outcome.out_dir);
+    } else {
+      args.push("--dependency-env");
+      args.push(`${position - 1}=OUT_DIR=` + outcome.out_dir);
+    }
+
+    scripts.push(outcome.directives);
+  }
+
   // `[link]` of every package of the graph applies to the whole program.
   const libraries: List<String> = new List();
 
@@ -838,6 +1025,27 @@ fn compile(options: Options, mode: Mode) -> i32 {
     for item in member.manifest.link.sources {
       args.push("--link-source");
       args.push(tidy(push_path(member.dir, item.text)));
+    }
+  }
+
+  // What the build scripts asked for, as `[link]` (Q729).
+  for directives in scripts {
+    for library in directives.libraries {
+      if !libraries.contains(library) {
+        libraries.push(library);
+        args.push("--link-lib");
+        args.push(library);
+      }
+    }
+
+    for item in directives.search_paths {
+      args.push("--link-search");
+      args.push(tidy(item));
+    }
+
+    for item in directives.sources {
+      args.push("--link-source");
+      args.push(tidy(item));
     }
   }
 
@@ -1012,6 +1220,7 @@ fn execute(command: Request) -> i32 {
     Request::Compile(mode, options) => compile(options, mode),
     Request::Clean => clean(),
     Request::UpdateSelf(options) => update::run(options),
+    Request::Bindgen(options) => generate_bindings(options),
   }
 }
 

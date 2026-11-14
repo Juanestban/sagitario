@@ -29,10 +29,35 @@
     "description": "A public function or method",
     "body": ["pub fn ${1:name}(${2}) -> ${3:()} {", "  $0", "}"]
   },
+  "static": {
+    "prefix": "static",
+    "description": "A static: one value for the whole program, computed on its first use",
+    "body": ["static ${1:NAME}: ${2:AtomicI64} = ${3:new AtomicI64(0)};$0"]
+  },
+  "type const": {
+    "prefix": "typeconst",
+    "description": "A constant of a struct, enum or class, named `Type::NAME`",
+    "body": ["pub const ${1:NAME}: ${2:i32} = ${3:0};$0"]
+  },
+  "static var": {
+    "prefix": "staticvar",
+    "description": "A mutable global, read and written inside `unsafe`",
+    "body": ["static var ${1:NAME}: ${2:i32} = ${3:0};$0"]
+  },
+  "thread local": {
+    "prefix": "threadlocal",
+    "description": "A mutable global with one value per thread, used without `unsafe`",
+    "body": ["@thread_local", "static var ${1:NAME}: ${2:i32} = ${3:0};$0"]
+  },
   "struct": {
     "prefix": "struct",
     "description": "A struct: a value type, copied when assigned",
     "body": ["pub struct ${1:Name} {", "  pub ${2:field}: ${3:i32};$0", "}"]
+  },
+  "cfg": {
+    "prefix": "cfg",
+    "description": "Keep the next item only on some systems",
+    "body": ["@cfg(${1|windows,unix,target_os = \"linux\",target_os = \"macos\",target_os = \"android\",target_os = \"ios\"|})"]
   },
   "class": {
     "prefix": "class",
@@ -73,6 +98,17 @@
       "}"
     ]
   },
+  "impl Display": {
+    "prefix": "impldisplay",
+    "description": "Implement Display: format strings interpolate the text of `to_string`",
+    "body": [
+      "impl Display for ${1:Type} {",
+      "  fn to_string(self) -> String {",
+      "    $0",
+      "  }",
+      "}"
+    ]
+  },
   "impl Ord": {
     "prefix": "implord",
     "description": "Implement Ord beside Eq: `<`, `<=`, `>` and `>=` call `compare`",
@@ -106,6 +142,124 @@
       "}"
     ]
   },
+  "implfrom": {
+    "prefix": "implfrom",
+    "description": "A conversion: `Type::from(value)` and `value.into()`",
+    "body": [
+      "impl From<${1:Source}> for ${2:Type} {",
+      "  fn from(value: ${1:Source}) -> ${2:Type} {",
+      "    $0",
+      "  }",
+      "}"
+    ]
+  },
+  "impltryfrom": {
+    "prefix": "impltryfrom",
+    "description": "A conversion that can fail: `Type::try_from(value)` and `value.try_into()`",
+    "body": [
+      "impl TryFrom<${1:Source}, ${2:String}> for ${3:Type} {",
+      "  fn try_from(value: ${1:Source}) -> Result<${3:Type}, ${2:String}> {",
+      "    $0",
+      "  }",
+      "}"
+    ]
+  },
+  "implread": {
+    "prefix": "implread",
+    "description": "A source of bytes: `read` fills the start of the buffer and gives how many it put",
+    "body": [
+      "impl Read for ${1:Type} {",
+      "  fn read(self, buffer: &mut [u8]) -> Result<usize, io::Error> {",
+      "    $0",
+      "  }",
+      "}"
+    ]
+  },
+  "implwrite": {
+    "prefix": "implwrite",
+    "description": "A destination of bytes: `write` takes the start of the bytes and gives how many it took",
+    "body": [
+      "impl Write for ${1:Type} {",
+      "  fn write(self, bytes: &[u8]) -> Result<usize, io::Error> {",
+      "    $0",
+      "  }",
+      "",
+      "  fn flush(self) -> Result<(), io::Error> {",
+      "    Ok(())",
+      "  }",
+      "}"
+    ]
+  },
+  "impldrop": {
+    "prefix": "impldrop",
+    "description": "What a class does when its last reference goes, such as closing a resource",
+    "body": [
+      "impl Drop for ${1:Type} {",
+      "  fn drop(self) {",
+      "    $0",
+      "  }",
+      "}"
+    ]
+  },
+  "impliterable": {
+    "prefix": "impliterable",
+    "description": "What `for` iterates over: `for x in value` runs over `value.iter()`",
+    "body": [
+      "impl Iterable<${1:T}> for ${2:Type} {",
+      "  fn iter(self) -> Iter<${1:T}> {",
+      "    $0",
+      "  }",
+      "}"
+    ]
+  },
+  "implfromiter": {
+    "prefix": "implfromiter",
+    "description": "What `collect()` makes: `const value: Type = iter.collect();`",
+    "body": [
+      "impl FromIterator<${1:T}> for ${2:Type} {",
+      "  fn from_iter(iter: Iter<${1:T}>) -> ${2:Type} {",
+      "    $0",
+      "  }",
+      "}"
+    ]
+  },
+  "implindex": {
+    "prefix": "implindex",
+    "description": "Indexing: `value[index]` and, with `IndexMut`, `value[index] = new`",
+    "body": [
+      "impl Index<${1:usize}, ${2:Out}> for ${3:Type} {",
+      "  fn index(self, index: ${1:usize}) -> ${2:Out} {",
+      "    $0",
+      "  }",
+      "}",
+      "",
+      "impl IndexMut<${1:usize}, ${2:Out}> for ${3:Type} {",
+      "  fn index_set(self, index: ${1:usize}, value: ${2:Out}) {",
+      "  }",
+      "}"
+    ]
+  },
+  "impldefault": {
+    "prefix": "impldefault",
+    "description": "The value a type starts from: `Type::default()` and `T::default()`",
+    "body": [
+      "impl Default for ${1:Type} {",
+      "  fn default() -> ${1:Type} {",
+      "    $0",
+      "  }",
+      "}"
+    ]
+  },
+  "default": {
+    "prefix": "default",
+    "description": "A struct whose fields start from their defaults: `Name::default()`, `Name { field: 1, ..Name::default() }`",
+    "body": [
+      "@default",
+      "struct ${1:Name} {",
+      "  pub ${2:field}: ${3:i32};",
+      "}"
+    ]
+  },
   "match": {
     "prefix": "match",
     "description": "A match expression",
@@ -130,6 +284,26 @@
     "prefix": "forin",
     "description": "A for loop over a collection",
     "body": ["for ${1:item} in ${2:items} {", "  $0", "}"]
+  },
+  "assert": {
+    "prefix": "assert",
+    "description": "Panics, at this line, unless the condition holds",
+    "body": "assert(${1:condition});$0"
+  },
+  "assert_eq": {
+    "prefix": "asserteq",
+    "description": "Panics, at this line, unless both values are equal, showing them",
+    "body": "assert_eq(${1:left}, ${2:right});$0"
+  },
+  "for tuple": {
+    "prefix": "fortuple",
+    "description": "A for loop taking each tuple apart",
+    "body": ["for (${1:key}, ${2:value}) in ${3:pairs} {", "  $0", "}"]
+  },
+  "const tuple": {
+    "prefix": "consttuple",
+    "description": "A declaration taking a tuple apart",
+    "body": "const (${1:a}, ${2:b}) = ${3:value};$0"
   },
   "if": {
     "prefix": "if",
@@ -167,6 +341,48 @@
       "}"
     ]
   },
+  "build script": {
+    "prefix": "buildscript",
+    "description": "A package's build.sag: writes to OUT_DIR and prints directives for Nova",
+    "body": [
+      "use std::env;",
+      "use std::fs;",
+      "",
+      "fn main() {",
+      "  const out = env::variable(\"OUT_DIR\").unwrap();",
+      "",
+      "  fs::write(out + \"/${1:generated}.sag\", \"${2}\").unwrap();",
+      "  println(\"nova::${3|link-lib,link-search,link-source,rerun-if-changed,rerun-if-env-changed,warning|}=${4:value}\");$0",
+      "}"
+    ]
+  },
+  "bindgen": {
+    "prefix": "bindgen",
+    "description": "Generate the bindings of a C header in a build script",
+    "body": [
+      "new bindgen::Builder()",
+      "  .header(\"${1:include/lib.h}\")",
+      "  .allow_prefix(\"${2:LIB_}\")",
+      "  .generate()",
+      "  .expect(\"the bindings of ${3:lib}\")",
+      "  .write_to_file(env::variable(\"OUT_DIR\").unwrap() + \"/${4:lib}.sag\")",
+      "  .unwrap();$0"
+    ]
+  },
+  "extern \"C\" variadic function": {
+    "prefix": "externvariadic",
+    "description": "Declare a variadic C function, called with extra arguments inside `unsafe`",
+    "body": [
+      "extern \"C\" {",
+      "  fn ${1:printf}(${2:format: *const c_char}, ...) -> ${3:c_int};$0",
+      "}"
+    ]
+  },
+  "extern static": {
+    "prefix": "externstatic",
+    "description": "Declare a global variable of C, used inside `unsafe`",
+    "body": ["extern \"C\" {", "  static ${1:var }${2:name}: ${3:c_int};", "}$0"]
+  },
   "extern \"C\" fn": {
     "prefix": "externfn",
     "description": "A function with the C ABI, exported under its own name",
@@ -186,6 +402,11 @@
     "prefix": "reprc",
     "description": "A struct with the C layout, which can cross the FFI boundary",
     "body": ["@repr(C)", "pub struct ${1:Name} {", "  pub ${2:field}: ${3:i32};$0", "}"]
+  },
+  "opaque C type": {
+    "prefix": "opaque",
+    "description": "A C type only used behind pointers, whose contents only C knows",
+    "body": ["@repr(C)", "pub struct ${1:Name} {", "  prv _unused: [u8; 0];", "}$0"]
   },
   "@repr(C) union": {
     "prefix": "union",

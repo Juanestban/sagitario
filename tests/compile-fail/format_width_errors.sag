@@ -1,0 +1,12 @@
+// A width or a precision read at run time is a `usize` binding, and follows the rules of a
+// written one (docs/adr/0101-the-rest-of-s2.md, Q711).
+
+fn main() {
+  const signed = 4;
+  const size = 3usize;
+
+  println(f"{1:>signed$}"); //~ ERROR E0007
+  println(f"{1:>missing$}"); //~ ERROR E0200
+  println(f"{1:.size$}"); //~ ERROR E0007
+  println(f"{1.5:.size$?}"); //~ ERROR E0007
+}

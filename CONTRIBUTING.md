@@ -18,7 +18,7 @@ sh bootstrap/build.sh           # build/bin/sag and build/bin/nova from the seed
 bootstrap/build.ps1             # the same on Windows (PowerShell)
 sh bootstrap/build.sh --install # also copy them to ~/.sagitario/bin and add it to PATH
 sh bootstrap/build.sh --debug   # the compiler in debug: an integer overflow in it panics
-sh bootstrap/build.sh --update-seed   # write the C of the compiler and the runtime to bootstrap/
+sh bootstrap/build.sh --update-seed   # write the seed of every host and the runtime to bootstrap/
 sh bootstrap/build.sh --dist          # also write the archive of a release to build/dist/
 SAG_CC=gcc sh bootstrap/build.sh      # choose the C compiler
 
@@ -41,6 +41,7 @@ ANDROID_NDK_HOME=/path/to/ndk sag run tests/harness/main.sag -- --sag build/bin/
 nova new demo                   # a package (docs/nova.md); then, inside it:
 nova run -- a b                 # build target/debug/demo and run it
 nova check                      # front end only
+nova bindgen lib.h --output src/lib.sag   # Sagitario declarations of a C header (docs/nova.md)
 
 cd editors/vscode && npm ci && npm run package   # the VS Code extension: sagitario.vsix
 code --install-extension editors/vscode/sagitario.vsix   # it starts `sag lsp` from PATH
@@ -63,7 +64,8 @@ checks it), and the sessions in `tests/lsp/` expect it. One command changes all 
 sag run tools/version.sag -- 0.11.0   # without a version, it prints the current one
 ```
 
-Then rebuild `sag`, run the harness, commit, and push the tag:
+Move the entries under `[Unreleased]` in `CHANGELOG.md` to a section for the new version, with
+its date and link. Then rebuild `sag`, run the harness, commit, and push the tag:
 
 ```sh
 git tag v0.11.0 && git push origin v0.11.0
@@ -87,6 +89,8 @@ sh install/install.sh --from "file://$PWD/build/dist" --dir /tmp/sagitario --no-
 - Compiler structure: [`docs/architecture.md`](docs/architecture.md).
 - Test harness: [`docs/testing.md`](docs/testing.md).
 - Package manager: [`docs/nova.md`](docs/nova.md).
+- Benchmarks against other languages: [`benchmarks/`](benchmarks/README.md), with the results in
+  [`docs/benchmarks.md`](docs/benchmarks.md).
 - Phases and acceptance criteria: [`docs/roadmap.md`](docs/roadmap.md).
 
 ## Definition of Done (every language feature)

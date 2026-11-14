@@ -136,11 +136,42 @@ fn pattern(cx: Checker, found: Pattern, ty: Type) {
     PatternKind::Path(_) => resolved_variant_pattern(cx, found, ty, Shape::Unit),
     PatternKind::Tuple { elems, .. } => resolved_variant_pattern(cx, found, ty, Shape::Tuple(elems)),
     PatternKind::Named { fields, rest, .. } => resolved_variant_pattern(cx, found, ty, Shape::Named { fields: fields, rest: rest }),
+    PatternKind::Elements { elems, rest } => elements_pattern(cx, found.span, elems, rest, ty),
     PatternKind::Or(alternatives) => {
       for alternative in alternatives {
         pattern(cx, alternative, ty);
       }
     }
+  }
+}
+
+/// `(a, b)` or `(a, .., z)` against a tuple type (docs/adr/0092-tuples.md, Q610).
+fn elements_pattern(cx: Checker, span: Span, elems: List<Pattern>, rest: Option<usize>, ty: Type) {
+  const elem_types = match ty.kind {
+    TypeKind::Tuple(found) => found,
+    TypeKind::Error | TypeKind::Never => new List<Type>(),
+    _ => {
+      cx.error(codes::MISMATCHED_TYPES, span, "expected a pattern of type `" + types::text(ty) + "`, found a tuple pattern");
+      new List<Type>()
+    }
+  };
+  const len = elem_types.len();
+  const fits = !elem_types.is_empty() && (len == elems.len() || (rest.is_some() && len >= elems.len()));
+
+  if !elem_types.is_empty() && !fits {
+    const wanted = if rest.is_some() { `at least ${elems.len()}` } else { `${elems.len()}` };
+
+    cx.diagnostics.push(
+      Diagnostic::error(codes::MISMATCHED_TYPES, span, `this pattern takes ${wanted} elements, but the tuple has ${len}`)
+        .with_note("the value has type `" + types::text(ty) + "`")
+        .with_help("name or ignore with `_` each element, or write `..` for the rest"),
+    );
+  }
+
+  for index in 0..elems.len() {
+    const elem_ty = if fits { elem_types[types::pattern_position(index, elems.len(), rest, len)] } else { types::error() };
+
+    pattern(cx, elems[index], elem_ty);
   }
 }
 
@@ -437,6 +468,28 @@ fn simplify(cx: Checker, found: Pattern, ty: Type) -> Pat {
 
       return new Pat(PatKind::Or(simplified));
     }
+    // A tuple has one constructor, with an argument per element; `..` stands for `_`s.
+    PatternKind::Elements { elems, rest } => {
+      const elem_types = match ty.kind {
+        TypeKind::Tuple(found) => found,
+        _ => return exhaustive::wild(),
+      };
+      const args: List<Pat> = new List();
+
+      for _ in elem_types {
+        args.push(exhaustive::wild());
+      }
+
+      if elem_types.len() == elems.len() || (rest.is_some() && elem_types.len() >= elems.len()) {
+        for index in 0..elems.len() {
+          const position = types::pattern_position(index, elems.len(), rest, elem_types.len());
+
+          args[position] = simplify(cx, elems[index], elem_types[position]);
+        }
+      }
+
+      return exhaustive::ctor_pat(Ctor::Tuple, args);
+    }
     PatternKind::Literal(value) => {
       return match literal_ctor(value) {
         Some(ctor) => exhaustive::ctor_pat(ctor, new List()),
@@ -524,6 +577,17 @@ fn display(cx: Checker, pat: Pat, ty: Type) -> String {
   };
 
   match ctor {
+    Ctor::Tuple => {
+      const shown: List<String> = new List();
+
+      if let TypeKind::Tuple(elems) = ty.kind {
+        for index in 0..args.len() {
+          shown.push(display(cx, args[index], elems.get(index).unwrap_or(types::error())));
+        }
+      }
+
+      "(" + shown.join(", ") + ")"
+    }
     Ctor::Bool(value) => `${value}`,
     Ctor::Int(text) => text,
     Ctor::Char(value) => "'" + `${value}` + "'",

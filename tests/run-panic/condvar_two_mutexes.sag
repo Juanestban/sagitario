@@ -1,0 +1,14 @@
+// A `Condvar` waits with one mutex, as Rust's may require
+// (docs/adr/0098-locks-orderings-and-threads.md, Q672).
+// expect-panic: attempted to use a condition variable with two mutexes
+use std::sync::{Condvar, Mutex};
+use std::time::Duration;
+
+fn main() {
+  const first = new Mutex(0);
+  const second = new Mutex(0);
+  const condition = new Condvar();
+
+  condition.wait_timeout(first.lock(), Duration::from_millis(1));
+  condition.wait_timeout(second.lock(), Duration::from_millis(1));
+}

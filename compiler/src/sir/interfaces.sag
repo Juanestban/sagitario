@@ -5,10 +5,11 @@
 
 use pkg::resolve::{ParamOwner, TypeItem};
 use pkg::sir::{Callee, FieldAt, Itable, ItableEntry, Lowering, Operand, Rvalue, Stmt, type_key};
+use pkg::sir::collections;
 use pkg::sir::mono;
 use pkg::types::{NamedRef, Receiver, Subst, Type, TypeKind};
 use pkg::types;
-use pkg::types::typed::{TypedModule, owner_key};
+use pkg::types::typed::{Conversion, TypedModule, builtin_from, builtin_try_from, item_key, owner_key};
 
 /// The slot of the getter of a field, after the interface's methods; the setter follows it.
 pub fn field_slot(typed: TypedModule, interface_id: u32, index: usize) -> usize {
@@ -174,6 +175,228 @@ pub fn method_for(lw: Lowering, method: u32, concrete: Type, subst: Subst, own: 
   }
 }
 
+/// The function implementing the static function `function` of an interface for `concrete`: the
+/// function of the type's own `impl ... for` block, the type's own static function, or else the
+/// default instantiated for the type. Subclasses do not inherit them
+/// (docs/adr/0094-conversions-and-defaults.md, Q631).
+pub fn static_for(lw: Lowering, function: u32, concrete: Type, subst: Subst, own: List<Type>) -> u32 {
+  const name = match lw.resolution.fn_decl(lw.package, function) {
+    Some(decl) => decl.name.name,
+    None => "",
+  };
+  const item = types::type_item_of(concrete);
+  var found: Option<u32> = None;
+
+  if let Some(TypeItem::Interface(interface_id)) = lw.resolution.owner(function) {
+    const name_of = match lw.typed.interface_def(interface_id) {
+      Some(def) => def.name,
+      None => "",
+    };
+    const args = subst.args_of(ParamOwner::Item(TypeItem::Interface(interface_id))).unwrap_or(new List());
+    const interface_ref = NamedRef { id: interface_id, name: name_of, args: args };
+
+    if let Some(block_fn) = lw.typed.block_method(lw.resolution, lw.package, concrete, interface_ref, name) {
+      if let Some(own_item) = item {
+        if let Some(block_owner) = lw.resolution.owner(block_fn) {
+          if item_key(block_owner) == item_key(own_item) {
+            found = Some(block_fn);
+          }
+        }
+      }
+    }
+  }
+
+  if found.is_none() {
+    if let Some(own_item) = item {
+      if let Some(declared) = lw.resolution.type_function(lw.package, own_item, name) {
+        if let Some(decl) = lw.resolution.fn_decl(lw.package, declared) {
+          if decl.self_param.is_none() {
+            found = Some(declared);
+          }
+        }
+      }
+    }
+  }
+
+  match found {
+    Some(implementation) => {
+      const owner = owner_subst(lw, concrete, implementation);
+      const chosen = if has_own_params(lw, implementation) { owner.with(ParamOwner::Fn(implementation), own) } else { owner };
+
+      mono::instance(lw, implementation, chosen)
+    }
+    None => {
+      const chosen = if has_own_params(lw, function) { subst.with(ParamOwner::Fn(function), own) } else { subst };
+
+      mono::instance(lw, function, chosen)
+    }
+  }
+}
+
+/// `value`, of the type `from` of a recorded conversion, made a value of its type `to`: itself, a
+/// conversion of the prelude, or the `from` or `try_from` of the type `to`
+/// (docs/adr/0094-conversions-and-defaults.md, Q632–Q635). The types are those of the instance.
+pub fn convert_value(lw: Lowering, value: Operand, conversion: Conversion) -> Result<Operand, String> {
+  const from = types::substitute(conversion.from, lw.subst);
+  const to = types::substitute(conversion.to, lw.subst);
+  const error = match conversion.error {
+    Some(found) => Some(types::substitute(found, lw.subst)),
+    None => None,
+  };
+
+  match error {
+    None => {
+      if types::same_type(from, to) {
+        return Ok(value);
+      }
+
+      if builtin_from(to, from) {
+        if types::is_string(to) {
+          return prelude_call(lw, "string_from_char", value, to);
+        }
+
+        return Ok(lw.new_value(to, Rvalue::Cast { from: from, to: to, operand: value }));
+      }
+
+      // `List::from(array)` and `Map::from(pairs)`.
+      if lw.typed.collection_from(to, from) {
+        if let TypeKind::Class(named) = to.kind {
+          const function = match lw.resolution.type_function(lw.package, TypeItem::Class(named.id), "from") {
+            Some(found) => found,
+            None => return Err("`Map` without `from`"),
+          };
+          const target = mono::instance(lw, function, Subst::of(ParamOwner::Item(TypeItem::Class(named.id)), named.args));
+
+          return Ok(lw.call(Callee::Fn(target), List::from([value]), to));
+        }
+
+        return Ok(collections::list_from_array(lw, to, from, value));
+      }
+    }
+    Some(err) => {
+      if builtin_try_from(to, from) && types::is_string(err) {
+        const name = match to.kind {
+          TypeKind::Char => "char_try_from_u32",
+          _ => "int_try_from_" + types::text(to) + "_" + types::text(from),
+        };
+
+        return prelude_call(lw, name, value, types::result(to, err));
+      }
+    }
+  }
+
+  const conversion_interface = match error {
+    Some(_) => lw.typed.prelude.try_from,
+    None => lw.typed.prelude.from,
+  };
+  const interface_id = match conversion_interface {
+    Some(found) => found,
+    None => return Err("a conversion without its interface"),
+  };
+  const method = match lw.typed.interface_def(interface_id) {
+    Some(def) => match def.methods.first() {
+      Some(found) => found,
+      None => return Err("a conversion interface without its function"),
+    },
+    None => return Err("a conversion without its interface"),
+  };
+  const args = match error {
+    Some(err) => List::from([from, err]),
+    None => List::from([from]),
+  };
+  const subst = Subst::of(ParamOwner::Item(TypeItem::Interface(interface_id)), args).with_self(to);
+  const function = static_for(lw, method, to, subst, new List());
+  const ret = match error {
+    Some(err) => types::result(to, err),
+    None => to,
+  };
+
+  Ok(lw.call(Callee::Fn(function), List::from([value]), ret))
+}
+
+/// Whether `function` is `from_iter` of the prelude's `FromIterator`.
+pub fn is_from_iter(lw: Lowering, function: u32) -> bool {
+  match lw.typed.prelude.from_iterator {
+    Some(id) => match lw.typed.interface_def(id) {
+      Some(def) => match def.methods.first() {
+        Some(found) => found == function,
+        None => false,
+      },
+      None => false,
+    },
+    None => false,
+  }
+}
+
+/// The value of type `to` that `from_iter` (`function`) makes of `iter`, an iterator of `elem`: a
+/// list, a string, a map or a result through the prelude's functions, or the `from_iter` of the
+/// type (docs/adr/0095-collections.md, Q646).
+pub fn from_iter_value(lw: Lowering, iter: Operand, elem: Type, to: Type, function: u32) -> Result<Operand, String> {
+  match to.kind {
+    TypeKind::List(_) => {
+      const iter_class = match lw.typed.prelude.iter {
+        Some(found) => found,
+        None => return Err("`collect` without `Iter`"),
+      };
+      const collect = match lw.resolution.type_function(lw.package, TypeItem::Class(iter_class), "collect") {
+        Some(found) => found,
+        None => return Err("`Iter` without `collect`"),
+      };
+      const target = mono::instance(lw, collect, Subst::of(ParamOwner::Item(TypeItem::Class(iter_class)), List::from([elem])));
+
+      return Ok(lw.call(Callee::Fn(target), List::from([iter]), to));
+    }
+    TypeKind::String => {
+      const name = match elem.kind {
+        TypeKind::Char => "iter_collect_chars",
+        _ => "iter_collect_strings",
+      };
+
+      return prelude_call(lw, name, iter, to);
+    }
+    TypeKind::Result { value, error } => {
+      if let TypeKind::List(item) = value.kind {
+        return generic_prelude_call(lw, "iter_collect_result", List::from([item, error]), iter, to);
+      }
+    }
+    TypeKind::Class(named) => {
+      if lw.typed.map_args(to).is_some() {
+        return generic_prelude_call(lw, "iter_collect_map", named.args, iter, to);
+      }
+    }
+    _ => {}
+  }
+
+  const interface_id = match lw.typed.prelude.from_iterator {
+    Some(found) => found,
+    None => return Err("`FromIterator` without the prelude"),
+  };
+  const subst = Subst::of(ParamOwner::Item(TypeItem::Interface(interface_id)), List::from([elem])).with_self(to);
+  const target = static_for(lw, function, to, subst, new List());
+
+  Ok(lw.call(Callee::Fn(target), List::from([iter]), to))
+}
+
+/// A call of the generic prelude function `name` with the type arguments `args` and one argument.
+fn generic_prelude_call(lw: Lowering, name: String, args: List<Type>, value: Operand, ret: Type) -> Result<Operand, String> {
+  const function = match lw.resolution.prelude_fn(name) {
+    Some(found) => found,
+    None => return Err("the prelude has no `" + name + "`"),
+  };
+
+  Ok(lw.call(Callee::Fn(mono::instance(lw, function, Subst::of(ParamOwner::Fn(function), args))), List::from([value]), ret))
+}
+
+/// A call of the prelude function `name` with one argument.
+fn prelude_call(lw: Lowering, name: String, value: Operand, ret: Type) -> Result<Operand, String> {
+  const function = match lw.resolution.prelude_fn(name) {
+    Some(found) => found,
+    None => return Err("the prelude has no `" + name + "`"),
+  };
+
+  Ok(lw.call(Callee::Fn(mono::instance(lw, function, Subst::empty())), List::from([value]), ret))
+}
+
 /// The type arguments that the type declaring `function` receives in `concrete`.
 fn owner_subst(lw: Lowering, concrete: Type, function: u32) -> Subst {
   const owner = match lw.resolution.owner(function) {
@@ -241,6 +464,24 @@ pub fn concrete_interface_call(lw: Lowering, id: u32, function: u32, concrete: T
   const subst = mono::call_subst(lw, id, function, Some(concrete));
   const own = subst.args_of(ParamOwner::Fn(function)).unwrap_or(new List());
   const target = method_for(lw, function, concrete, subst, own);
+  const by_ref = match lw.typed.sig(template_of(lw, target.function)) {
+    Some(sig) => match sig.receiver {
+      Some(receiver) => receiver == Receiver::Var,
+      None => false,
+    },
+    None => false,
+  };
+
+  match target.slot {
+    Some(slot) => ConcreteCall { callee: Callee::Virtual { slot: slot, function: target.function }, by_ref: false },
+    None => ConcreteCall { callee: Callee::Fn(target.function), by_ref: by_ref },
+  }
+}
+
+/// The call of the interface method `function`, which has no type parameters of its own, on a
+/// value of the type `concrete`, outside of any expression: an element of a tuple.
+pub fn concrete_method(lw: Lowering, function: u32, concrete: Type) -> ConcreteCall {
+  const target = method_for(lw, function, concrete, Subst::empty().with_self(concrete), new List());
   const by_ref = match lw.typed.sig(template_of(lw, target.function)) {
     Some(sig) => match sig.receiver {
       Some(receiver) => receiver == Receiver::Var,
@@ -378,7 +619,12 @@ pub fn message_error(lw: Lowering, text: Operand) -> Result<Operand, String> {
 
 /// An error value of type `from` for a function returning errors of type `to`: converted to an
 /// interface, or, from a `String`, made an `Error`.
-pub fn convert_error(lw: Lowering, value: Operand, from: Type, to: Type) -> Result<Operand, String> {
+pub fn convert_error(lw: Lowering, value: Operand, from: Type, to: Type, conversion: Option<Conversion>) -> Result<Operand, String> {
+  // Through `From` (docs/adr/0094-conversions-and-defaults.md, Q635).
+  if let Some(found) = conversion {
+    return convert_value(lw, value, found);
+  }
+
   var into_error = false;
 
   if types::is_string(from) {

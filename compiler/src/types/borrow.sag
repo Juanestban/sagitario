@@ -3,7 +3,7 @@
 //! reference parameter through its fields and methods, and the borrow checker, a pass over each
 //! function once its types are known.
 
-use pkg::ast::{Block, Expr, ExprKind, FnDecl, Ident, Stmt, TemplatePart, TypeExprKind, UnaryOp};
+use pkg::ast::{Block, Expr, ExprKind, FnDecl, Ident, StaticDecl, Stmt, TypeExprKind, UnaryOp};
 use pkg::diagnostics::Diagnostic;
 use pkg::diagnostics::codes;
 use pkg::resolve::Res;
@@ -86,7 +86,7 @@ fn lent(cx: Checker, value: Expr) -> Lent {
     ExprKind::Field { base, name } => match cx.typed.expr_types.get(base.id) {
       Some(ty) => match ty.kind {
         TypeKind::Class(_) => Lent::ClassField(name.name),
-        TypeKind::Struct(_) => match lent(cx, base) {
+        TypeKind::Struct(_) | TypeKind::Tuple(_) => match lent(cx, base) {
           Lent::Temporary => Lent::Temporary,
           other => other,
         },
@@ -156,6 +156,32 @@ pub fn borrow(cx: Checker, mutable: bool, operand: Expr, expected: Option<Type>)
   cx.union_write = None;
 
   if types::is_error(ty) {
+    return types::error();
+  }
+
+  // A `static var` can change while lent, as Rust 2024 says (docs/adr/0083-global-state.md, Q528
+  // and Q529).
+  if let Some(decl) = static_var_root(cx, operand) {
+    const symbol = if mutable { "&mut" } else { "&" };
+    const name = decl.name.name;
+    var diagnostic = Diagnostic::error(codes::INVALID_BORROW, operand.span, "cannot lend the `static var` `" + name + "` with `" + symbol + "`");
+
+    if decl.extern_c {
+      diagnostic = Diagnostic::error(codes::INVALID_BORROW, operand.span, "cannot lend the C global `" + name + "` with `" + symbol + "`")
+        .with_note("C could change it while it is lent")
+        .with_help("copy its value in `unsafe`, or take a pointer with `&raw const`");
+    } else if decl.thread_local {
+      diagnostic = diagnostic
+        .with_note("the code it is lent to could change it, since every function of the thread reaches it")
+        .with_help("copy its value, or call its methods on `" + name + "` itself");
+    } else {
+      diagnostic = diagnostic
+        .with_note("another thread, or C, could change it while it is lent")
+        .with_help("copy its value in `unsafe`, or take a pointer with `&raw const` or `&raw mut`");
+    }
+
+    cx.diagnostics.push(diagnostic);
+
     return types::error();
   }
 
@@ -347,6 +373,10 @@ pub fn slice_method(cx: Checker, value: Expr, receiver_ty: Type, method: Ident, 
     return collections::prelude_method(cx, value, "slice_iter", List::from([elem]), args);
   }
 
+  if collections::SLICE_METHODS.split(" ").contains(name) {
+    return collections::slice_method_of(cx, value, value, receiver_ty, elem, method, args);
+  }
+
   var function = "";
   var ret = types::error();
 
@@ -375,7 +405,7 @@ pub fn slice_method(cx: Checker, value: Expr, receiver_ty: Type, method: Ident, 
   } else {
     cx.diagnostics.push(
       Diagnostic::error(codes::UNKNOWN_MEMBER, method.span, "no method `" + name + "` on type `" + types::text(receiver_ty) + "`")
-        .with_note("the methods of slices are `len`, `is_empty`, `iter`, `as_ptr` and `as_mut_ptr`"),
+        .with_note("the methods of slices are `len`, `is_empty`, `iter`, `as_ptr`, `as_mut_ptr` and " + collections::SLICE_METHODS.split(" ").map((found) => "`" + found + "`").collect().join(", ")),
     );
     exprs::unchecked_args(cx, args);
 
@@ -546,7 +576,7 @@ class Walker {
         | ExprKind::Zod | ExprKind::Continue => {}
       ExprKind::Template(parts) => {
         for part in parts {
-          if let TemplatePart::Expr(inner) = part {
+          for inner in part.exprs() {
             self.expr(inner);
           }
         }
@@ -566,12 +596,16 @@ class Walker {
         self.lent(base, true);
         self.expr(index);
       }
-      ExprKind::StructLit { fields, .. } => {
+      ExprKind::StructLit { fields, base, .. } => {
         for field in fields {
           self.expr(field.value);
         }
+
+        if let Some(found) = base {
+          self.expr(found);
+        }
       }
-      ExprKind::ArrayLit(elems) => self.exprs(elems),
+      ExprKind::ArrayLit(elems) | ExprKind::Tuple(elems) => self.exprs(elems),
       ExprKind::ArrayRepeat { value: repeated, .. } => self.expr(repeated),
       ExprKind::Unary { op, operand } => self.lent(operand, op == UnaryOp::Deref),
       ExprKind::Binary { lhs, rhs, .. } => {
@@ -654,6 +688,18 @@ class Walker {
   }
 
   prv fn method_params(self, value: Expr) -> Option<List<Type>> {
+    // A function of the prelude or of `std` called as a method takes its receiver first.
+    if let Some(BuiltinMethod::Prelude(function)) = self.cx.typed.builtin_methods.get(value.id) {
+      const params = self.cx.typed.sig(function)?.params;
+      const rest: List<Type> = new List();
+
+      for index in 1..params.len() {
+        rest.push(params[index]);
+      }
+
+      return Some(rest);
+    }
+
     const function = self.cx.typed.method_calls.get(value.id)?;
 
     Some(self.cx.typed.sig(function)?.params)
@@ -904,4 +950,20 @@ fn overlap(a: List<Step>, b: List<Step>) -> bool {
   }
 
   true
+}
+
+/// The `static var` or C global that `place` is, or is a part of.
+fn static_var_root(cx: Checker, place: Expr) -> Option<StaticDecl> {
+  match place.kind {
+    ExprKind::Field { base, .. } | ExprKind::Index { base, .. } => static_var_root(cx, base),
+    ExprKind::Path(_) => match cx.resolution.paths.get(place.id) {
+      Some(Res::Static(id)) => {
+        const decl = cx.resolution.static_decl(cx.package, id)?;
+
+        if decl.mutable || decl.extern_c { Some(decl) } else { None }
+      }
+      _ => None,
+    },
+    _ => None,
+  }
 }

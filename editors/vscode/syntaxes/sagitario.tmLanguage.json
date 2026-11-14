@@ -250,6 +250,18 @@
       },
       "patterns": [
         {
+          "comment": "A format specifier after the expression: {value:>8.2}, and the bindings it reads, {value:>width$.precision$} (docs/adr/0089-display-debug-and-format-specifiers.md, docs/adr/0101-the-rest-of-s2.md).",
+          "name": "constant.other.format-spec.sagitario",
+          "begin": "(?<!:):(?!:)(?=[^{}()\\[\\]\":]*\\})",
+          "end": "(?=\\})",
+          "patterns": [
+            {
+              "match": "([A-Za-z_][A-Za-z0-9_]*)(\\$)",
+              "captures": { "1": { "name": "variable.other.sagitario" }, "2": { "name": "punctuation.definition.format-argument.sagitario" } }
+            }
+          ]
+        },
+        {
           "include": "#braces"
         },
         {
@@ -295,6 +307,11 @@
     },
     "numbers": {
       "patterns": [
+        {
+          "comment": "The index of a tuple's element, `pair.0` (docs/adr/0092-tuples.md)",
+          "name": "variable.other.member.tuple-index.sagitario",
+          "match": "(?<=[A-Za-z0-9_)\\]]\\.)\\d+\\b"
+        },
         {
           "name": "constant.numeric.hex.sagitario",
           "match": "\\b0x[0-9A-Fa-f_]+(?:[iu](?:8|16|32|64|size))?\\b"
@@ -346,7 +363,7 @@
           }
         },
         {
-          "match": "\\b(const)\\s+([A-Z][A-Z0-9_]*)\\b(?![a-z])",
+          "match": "\\b(const|static(?:\\s+var)?)\\s+([A-Z][A-Z0-9_]*)\\b(?![a-z])",
           "captures": {
             "1": {
               "name": "storage.type.sagitario"
@@ -366,6 +383,55 @@
               "name": "variable.other.readwrite.declaration.sagitario"
             }
           }
+        },
+        {
+          "comment": "`const (a, b) = ...` and `for (index, value) in ...` (docs/adr/0092-tuples.md)",
+          "begin": "\\b(?:(const|var)|(for))\\s*(?=\\()",
+          "beginCaptures": {
+            "1": {
+              "name": "storage.type.sagitario"
+            },
+            "2": {
+              "name": "keyword.control.sagitario"
+            }
+          },
+          "end": "(?<=\\))",
+          "patterns": [
+            {
+              "include": "#tuple-pattern"
+            }
+          ]
+        }
+      ]
+    },
+    "tuple-pattern": {
+      "begin": "\\(",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.section.parens.begin.sagitario"
+        }
+      },
+      "end": "\\)",
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.section.parens.end.sagitario"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#tuple-pattern"
+        },
+        {
+          "name": "keyword.operator.range.sagitario",
+          "match": "\\.\\."
+        },
+        {
+          "name": "variable.other.readwrite.declaration.sagitario",
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b"
+        },
+        {
+          "name": "punctuation.separator.comma.sagitario",
+          "match": ","
         }
       ]
     },
@@ -385,7 +451,7 @@
         },
         {
           "name": "storage.type.sagitario",
-          "match": "\\b(struct|enum|class|interface|const|var)\\b"
+          "match": "\\b(struct|enum|class|interface|const|var|static)\\b"
         },
         {
           "comment": "Contextual keywords: `union` before the name of a union, `raw` and `mut` after `&`.",
@@ -464,8 +530,12 @@
     "calls": {
       "patterns": [
         {
+          "name": "entity.name.function.macro.sagitario",
+          "match": "\\b(?:include|include_str|include_bytes|concat|env)!(?=\\s*\\()"
+        },
+        {
           "name": "support.function.builtin.sagitario",
-          "match": "\\b(print|println|eprintln|panic|include_str)\\b(?=\\s*\\()"
+          "match": "\\b(print|println|eprintln|panic|assert|assert_eq|assert_ne|unreachable|todo)\\b(?=\\s*\\()"
         },
         {
           "name": "entity.name.function.call.sagitario",
@@ -478,6 +548,10 @@
         {
           "name": "keyword.operator.arrow.sagitario",
           "match": "->|=>"
+        },
+        {
+          "name": "keyword.operator.variadic.sagitario",
+          "match": "\\.\\.\\."
         },
         {
           "name": "keyword.operator.range.sagitario",
@@ -493,7 +567,11 @@
         },
         {
           "name": "keyword.operator.assignment.sagitario",
-          "match": "[+\\-*/%]?="
+          "match": "(<<|>>|[+\\-*/%&|^])?="
+        },
+        {
+          "name": "keyword.operator.bitwise.sagitario",
+          "match": "<<|>>|\\^|\\|"
         },
         {
           "name": "keyword.operator.try.sagitario",

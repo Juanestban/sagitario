@@ -1,0 +1,52 @@
+// Variadic C functions and opaque C types (docs/adr/0103-build-scripts-and-binding-generation.md,
+// Q720 and Q721).
+use std::ffi::{c_char, c_int};
+use std::mem;
+use pkg::plain;
+
+@repr(C)
+struct Window {
+  prv _unused: [u8; 0];
+}
+
+@repr(C)
+struct Handle {
+  prv _unused: [u8; 0];
+
+  pub fn width(self) -> i32 { 0 } //~ ERROR E0322
+}
+
+@repr(C)
+struct Header {
+  pub size: u32;
+  pub data: [u8; 0]; //~ ERROR E0322
+}
+
+extern "C" {
+  fn printf(format: *const c_char, ...) -> c_int;
+  fn window_at(index: c_int) -> *mut Window;
+}
+
+
+fn by_value(_window: Window) {} //~ ERROR E0322
+
+fn main() {
+  const format = "%d\n".as_ptr() as *const c_char;
+
+  unsafe {
+    plain::printf(format);
+    printf(); //~ ERROR E0301
+    printf(format, 1u8); //~ ERROR E0322
+    printf(format, true); //~ ERROR E0322
+    printf(format, 1.5f32); //~ ERROR E0322
+    printf(format, "text"); //~ ERROR E0322
+  }
+
+  const _pointer = printf; //~ ERROR E0322
+  const window = unsafe { window_at(0) };
+  const _copy = unsafe { *window }; //~ ERROR E0310
+  const _next = unsafe { window.add(1) }; //~ ERROR E0310
+  const _size = mem::size_of<Window>(); //~ ERROR E0322
+  const _list: List<Window> = new List(); //~ ERROR E0322
+  const _built = Window { _unused: [0u8; 0] }; //~ ERROR E0322
+}

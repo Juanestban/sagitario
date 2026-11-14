@@ -1,0 +1,80 @@
+// Calls of variadic C functions, and an opaque C type used behind pointers
+// (docs/adr/0103-build-scripts-and-binding-generation.md, Q720 and Q721).
+// expect-stdout: 12: 42|Ada|3.142
+// expect-stdout: 23:    -7|C   |5.000000e-01
+// expect-stdout: 10 Sg -9 7 ff
+// expect-stdout: 5 plain
+// expect-stdout: false a spider has 8 legs
+use std::ffi::{c_char, c_int, c_long, string_from_c, CString};
+use std::fs;
+
+// C's `FILE`, whose contents and size only the C library knows.
+@repr(C)
+struct FILE {
+  prv _unused: [u8; 0];
+}
+
+extern "C" {
+  fn fopen(path: *const c_char, mode: *const c_char) -> *mut FILE;
+  fn fprintf(file: *mut FILE, format: *const c_char, ...) -> c_int;
+  fn fgets(buffer: *mut c_char, size: c_int, file: *mut FILE) -> *mut c_char;
+  fn rewind(file: *mut FILE);
+  fn fclose(file: *mut FILE) -> c_int;
+  fn snprintf(buffer: *mut c_char, size: usize, format: *const c_char, ...) -> c_int;
+}
+
+/// `snprintf` into a buffer, read back as a `String`.
+fn formatted(format: String, value: i32, text: String, real: f64) -> String {
+  var buffer = [0u8; 64];
+  const format_c = CString::new(format).unwrap();
+  const text_c = CString::new(text).unwrap();
+  const written = unsafe { snprintf(buffer.as_mut_ptr() as *mut c_char, 64, format_c.as_ptr(), value, text_c.as_ptr(), real) };
+
+  f"{written}: " + unsafe { string_from_c(buffer.as_ptr() as *const c_char) }
+}
+
+fn main() {
+  println(formatted("%d|%s|%.3f", 42, "Ada", 3.14159));
+  println(formatted("%5d|%-4s|%e", -7, "C", 0.5));
+
+  // The extra arguments keep their own types: the same function with others.
+  var buffer = [0u8; 64];
+  const format = CString::new("%c%c %ld %u %llx").unwrap();
+  const letter = 'S' as u8;
+  const written = unsafe { snprintf(buffer.as_mut_ptr() as *mut c_char, 64, format.as_ptr(), letter as c_int, 'g' as c_int, -9 as c_long, 7u32, 255u64) };
+
+  println(f"{written} " + unsafe { string_from_c(buffer.as_ptr() as *const c_char) });
+
+  // Without extra arguments.
+  const plain = CString::new("plain").unwrap();
+  const count = unsafe { snprintf(buffer.as_mut_ptr() as *mut c_char, 64, plain.as_ptr()) };
+
+  println(f"{count} " + unsafe { string_from_c(buffer.as_ptr() as *const c_char) });
+
+  // A `FILE` is only ever behind a pointer.
+  const name = "variadic_and_opaque.txt";
+  const path = CString::new(name).unwrap();
+  const mode = CString::new("w+").unwrap();
+  const file = unsafe { fopen(path.as_ptr(), mode.as_ptr()) };
+
+  if file.is_null() {
+    println("cannot open the file");
+    return;
+  }
+
+  const line = CString::new("%s has %d legs\n").unwrap();
+  const animal = CString::new("a spider").unwrap();
+  var read = [0u8; 64];
+
+  unsafe {
+    fprintf(file, line.as_ptr(), animal.as_ptr(), 8);
+    rewind(file);
+
+    const got = fgets(read.as_mut_ptr() as *mut c_char, 64, file);
+
+    println(f"{got.is_null()} " + string_from_c(read.as_ptr() as *const c_char).trim());
+    fclose(file);
+  }
+
+  fs::remove_file(name).unwrap();
+}

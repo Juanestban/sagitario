@@ -1,23 +1,41 @@
 //! `std::io`: standard input and output with errors as values, and the error type of every
-//! input or output operation (docs/spec/11-standard-library.md#stdio).
+//! input or output operation (docs/spec/11-standard-library.md#stdio), on C's streams in
+//! `std::sys`, which the prelude's printing shares (docs/adr/0086-c-globals-and-std-io.md).
 
-extern "C" {
-  fn sag_io_write(stream: i32, text: String, newline: bool) -> i32;
-  fn sag_io_flush() -> i32;
-  fn sag_io_read_line(status: *mut i32) -> String;
-  fn sag_io_read_all(status: *mut i32) -> String;
-  fn sag_io_read_exact(count: usize, status: *mut i32) -> String;
-  fn sag_io_is_terminal(stream: i32) -> bool;
-}
+use std::ffi::c_void;
+use std::sys;
 
-/// What kind of failure an I/O error is.
+/// What kind of failure an I/O error is, in the order of Rust's `ErrorKind`.
 pub enum ErrorKind {
   NotFound,
   PermissionDenied,
+  /// The other end refused the connection (docs/adr/0100-networking.md, Q697).
+  ConnectionRefused,
+  /// The other end reset the connection.
+  ConnectionReset,
+  /// The connection was aborted, by this end.
+  ConnectionAborted,
+  /// The socket is not connected.
+  NotConnected,
+  /// The address is taken by another socket.
+  AddrInUse,
+  /// The address is not one of this machine, or does not exist.
+  AddrNotAvailable,
+  /// The other end of a pipe or socket closed while this one wrote.
+  BrokenPipe,
   AlreadyExists,
+  /// The operation would have to wait, on a socket that does not.
+  WouldBlock,
   InvalidInput,
   /// The data is not valid, such as input that is not UTF-8.
   InvalidData,
+  /// The time given to the operation ran out.
+  TimedOut,
+  /// A signal interrupted the operation.
+  Interrupted,
+  /// The system cannot do it, such as giving the creation time of a file on Linux
+  /// (docs/adr/0096-streams-files-and-drop.md, Q659).
+  Unsupported,
   UnexpectedEof,
   Other,
 }
@@ -38,7 +56,7 @@ pub fn is_terminal(stream: Stream) -> bool {
     Stream::Stderr => 2,
   };
 
-  unsafe { sag_io_is_terminal(fd) }
+  sys::is_terminal(fd)
 }
 
 /// The error of an input or output operation: its kind and the operating system's message.
@@ -60,71 +78,598 @@ pub class Error impl std::prelude::Error {
   }
 }
 
-/// The error with this runtime code.
+/// The error with this code.
 fn error_from(code: i32) -> Error {
   super::os_error(code, "")
 }
 
-/// The result of an operation that returned this runtime code, 0 on success.
-fn done(code: i32) -> Result<(), Error> {
-  if code == 0 { Ok(()) } else { Err(error_from(code)) }
+/// Writes `text` and maybe a newline to the standard stream `index`.
+fn write(index: i32, text: String, newline: bool) -> Result<(), Error> {
+  const stream = sys::stream(index);
+  const len = text.len();
+
+  sys::clear_errno();
+
+  if len > 0 && unsafe { sys::fwrite(text.as_ptr() as *const c_void, 1, len, stream) } != len {
+    return Err(error_from(super::last_error()));
+  }
+
+  // `\n`, which `fputc` returns unless it fails.
+  if newline && unsafe { sys::fputc(10, stream) } != 10 {
+    return Err(error_from(super::last_error()));
+  }
+
+  Ok(())
 }
 
 /// Writes `text` to stdout.
 pub fn print(text: String) -> Result<(), Error> {
-  done(unsafe { sag_io_write(1, text, false) })
+  write(1, text, false)
 }
 
 /// Writes `text` and a newline to stdout.
 pub fn println(text: String) -> Result<(), Error> {
-  done(unsafe { sag_io_write(1, text, true) })
+  write(1, text, true)
 }
 
 /// Writes `text` to stderr.
 pub fn eprint(text: String) -> Result<(), Error> {
-  done(unsafe { sag_io_write(2, text, false) })
+  write(2, text, false)
 }
 
 /// Writes `text` and a newline to stderr.
 pub fn eprintln(text: String) -> Result<(), Error> {
-  done(unsafe { sag_io_write(2, text, true) })
+  write(2, text, true)
 }
 
 /// Writes out what stdout holds in its buffer.
 pub fn flush() -> Result<(), Error> {
-  done(unsafe { sag_io_flush() })
+  sys::clear_errno();
+
+  if unsafe { sys::fflush(sys::stream(1)) } == 0 { Ok(()) } else { Err(error_from(super::last_error())) }
+}
+
+/// The error of a failed read of stdin, which is ready for the next read.
+fn read_error(stream: *mut c_void) -> Error {
+  const code = super::last_error();
+
+  unsafe { sys::clearerr(stream); }
+  error_from(code)
 }
 
 /// The next line of stdin without its `\n` or `\r\n`, or `None` at the end of the input. Input
 /// that is not UTF-8 is an error of kind `InvalidData`.
 pub fn read_line() -> Result<Option<String>, Error> {
-  var status = [0i32; 1];
-  const line = unsafe { sag_io_read_line(status.as_mut_ptr()) };
+  const stream = sys::stream(0);
+  const line = new List<u8>();
+  var any = false;
+  var c = 0;
 
-  if status[0] == 0 {
-    Ok(Some(line))
-  } else if status[0] == -1 {
-    // The end of the input (`SAG_IO_END` in the runtime).
-    Ok(None)
-  } else {
-    Err(error_from(status[0]))
+  sys::clear_errno();
+
+  loop {
+    c = unsafe { sys::getc(stream) };
+
+    // `EOF`, a negative value.
+    if c < 0 {
+      break;
+    }
+
+    any = true;
+
+    if c == 10 {
+      break;
+    }
+
+    line.push(c as u8);
   }
+
+  if c < 0 && unsafe { sys::ferror(stream) } != 0 {
+    return Err(read_error(stream));
+  }
+
+  if !any {
+    return Ok(None);
+  }
+
+  if !line.is_empty() && line[line.len() - 1] == 13 {
+    line.resize(line.len() - 1, 0);
+  }
+
+  Ok(Some(text_of(&line)?))
 }
 
 /// Exactly `count` bytes of stdin, such as a message whose length is known. An input that ends
 /// before is an error of kind `UnexpectedEof`, and bytes that are not UTF-8 one of kind
 /// `InvalidData`; the bytes read are lost either way.
 pub fn read_exact(count: usize) -> Result<String, Error> {
-  var status = [0i32; 1];
-  const text = unsafe { sag_io_read_exact(count, status.as_mut_ptr()) };
+  const stream = sys::stream(0);
+  const data = new List<u8>();
+  var filled = 0usize;
 
-  if status[0] == 0 { Ok(text) } else { Err(error_from(status[0])) }
+  data.resize(count, 0);
+  sys::clear_errno();
+
+  while filled < count {
+    const read = unsafe { sys::fread(data.as_mut_ptr().add(filled) as *mut c_void, 1, count - filled, stream) };
+
+    if read == 0 {
+      break;
+    }
+
+    filled += read;
+  }
+
+  if filled < count {
+    if unsafe { sys::ferror(stream) } != 0 {
+      return Err(read_error(stream));
+    }
+
+    unsafe { sys::clearerr(stream); }
+
+    return Err(error_from(super::UNEXPECTED_EOF));
+  }
+
+  text_of(&data)
 }
 
 /// The rest of stdin. Input that is not UTF-8 is an error of kind `InvalidData`.
 pub fn read_to_string() -> Result<String, Error> {
-  var status = [0i32; 1];
-  const text = unsafe { sag_io_read_all(status.as_mut_ptr()) };
+  const stream = sys::stream(0);
+  const data = new List<u8>();
 
-  if status[0] == 0 { Ok(text) } else { Err(error_from(status[0])) }
+  sys::clear_errno();
+
+  loop {
+    const start = data.len();
+
+    data.resize(start + 4096, 0);
+
+    const read = unsafe { sys::fread(data.as_mut_ptr().add(start) as *mut c_void, 1, 4096, stream) };
+
+    data.resize(start + read, 0);
+
+    if read == 0 {
+      break;
+    }
+  }
+
+  if unsafe { sys::ferror(stream) } != 0 {
+    return Err(read_error(stream));
+  }
+
+  text_of(&data)
+}
+
+/// `bytes` as a string, or an error of kind `InvalidData` if they are not UTF-8.
+fn text_of(bytes: &[u8]) -> Result<String, Error> {
+  match super::utf8(bytes) {
+    Some(text) => Ok(text),
+    None => Err(error_from(super::INVALID_DATA)),
+  }
+}
+
+// ---- Streams (docs/adr/0096-streams-files-and-drop.md, Q656) ------------------------------------
+
+/// A source of bytes, as Rust's `Read`: files, buffers and, with record 10, sockets. `read` fills
+/// the start of `buffer` and gives how many bytes it put there, `0` at the end.
+pub interface Read {
+  fn read(self, buffer: &mut [u8]) -> Result<usize, Error>;
+
+  /// Every byte left.
+  fn read_to_end(self) -> Result<List<u8>, Error> {
+    const data = new List<u8>();
+    const chunk = new List<u8>();
+
+    chunk.resize(4096, 0);
+
+    loop {
+      const count = self.read(&mut chunk)?;
+
+      if count == 0 {
+        break;
+      }
+
+      for index in 0..count {
+        data.push(chunk[index]);
+      }
+    }
+
+    Ok(data)
+  }
+
+  /// Every byte left, as text; bytes that are not UTF-8 are an error of kind `InvalidData`.
+  fn read_to_string(self) -> Result<String, Error> {
+    const data = self.read_to_end()?;
+
+    match super::utf8(&data) {
+      Some(text) => Ok(text),
+      None => Err(super::os_error(super::INVALID_DATA, "")),
+    }
+  }
+
+  /// Exactly as many bytes as `buffer` holds; an end before is an error of kind `UnexpectedEof`.
+  fn read_exact(self, buffer: &mut [u8]) -> Result<(), Error> {
+    var done = 0usize;
+    const chunk = new List<u8>();
+
+    while done < buffer.len() {
+      chunk.resize(buffer.len() - done, 0);
+
+      const count = self.read(&mut chunk)?;
+
+      if count == 0 {
+        return Err(super::os_error(super::UNEXPECTED_EOF, ""));
+      }
+
+      for index in 0..count {
+        buffer[done + index] = chunk[index];
+      }
+
+      done += count;
+    }
+
+    Ok(())
+  }
+}
+
+/// A destination of bytes, as Rust's `Write`. `write` takes the start of `bytes` and gives how
+/// many it took; `flush` writes out what a buffer holds.
+pub interface Write {
+  fn write(self, bytes: &[u8]) -> Result<usize, Error>;
+  fn flush(self) -> Result<(), Error>;
+
+  /// Every byte, in as many writes as it takes; a write that takes none is an error.
+  fn write_all(self, bytes: &[u8]) -> Result<(), Error> {
+    var done = 0usize;
+
+    while done < bytes.len() {
+      const count = self.write(&bytes[done..bytes.len()])?;
+
+      if count == 0 {
+        return Err(new Error(ErrorKind::Other, "failed to write whole buffer"));
+      }
+
+      done += count;
+    }
+
+    Ok(())
+  }
+
+  /// The bytes of `text`, which Rust writes with `write!`.
+  fn write_str(self, text: String) -> Result<(), Error> {
+    const bytes: List<u8> = text.bytes().collect();
+
+    self.write_all(&bytes)
+  }
+}
+
+/// Where `seek` moves to, as Rust's: from the start, the end or the current position.
+pub enum SeekFrom {
+  Start(u64),
+  End(i64),
+  Current(i64),
+}
+
+// ---- Buffers and the standard streams (docs/adr/0096-streams-files-and-drop.md, Q658, Q660) ----
+
+/// A reader whose input comes in lines, as Rust's `BufRead`. Rust's `fill_buf` lends its buffer,
+/// which Sagitario cannot; `read_line` stands for its uses.
+pub interface BufRead extends Read {
+  /// The next line without its `\n` or `\r\n`, or `None` at the end. Bytes that are not UTF-8 are
+  /// an error of kind `InvalidData`.
+  fn read_line(self) -> Result<Option<String>, Error>;
+
+  /// The lines left, each one or the error reading it.
+  fn lines(self) -> Iter<Result<String, Error>> {
+    const source = self;
+
+    new Iter<Result<String, Error>>(() => match source.read_line() {
+      Ok(Some(line)) => Some(Ok(line)),
+      Ok(None) => None,
+      Err(error) => Some(Err(error)),
+    })
+  }
+}
+
+/// The text of a line read, without its `\r`.
+fn line_text(line: List<u8>) -> Result<String, Error> {
+  if !line.is_empty() && line[line.len() - 1] == 13 {
+    line.resize(line.len() - 1, 0);
+  }
+
+  text_of(&line)
+}
+
+/// A reader of any `Read` through a buffer, as Rust's `BufReader`: few reads of the inner reader,
+/// and lines (Q658).
+pub class BufReader<R: Read> impl Read, BufRead {
+  prv var inner: R;
+  prv const buffer: List<u8>;
+  /// The next byte of `buffer` to give, and the end of those read.
+  prv var position: usize;
+  prv var filled: usize;
+
+  /// A reader with a buffer of 8 KiB, as Rust's.
+  pub fn new(self, inner: R) {
+    self.inner = inner;
+    self.buffer = new List<u8>();
+    self.buffer.resize(8192, 0);
+    self.position = 0;
+    self.filled = 0;
+  }
+
+  /// A reader with a buffer of `capacity` bytes, at least one.
+  pub fn with_capacity(capacity: usize, inner: R) -> BufReader<R> {
+    const reader = new BufReader<R>(inner);
+
+    reader.buffer.resize(max(capacity, 1), 0);
+    reader
+  }
+
+  /// The inner reader.
+  pub fn get_ref(self) -> R {
+    self.inner
+  }
+
+  pub fn capacity(self) -> usize {
+    self.buffer.len()
+  }
+
+  /// The bytes the buffer holds still, reading more when it holds none; `0` at the end.
+  prv fn fill(self) -> Result<usize, Error> {
+    if self.position >= self.filled {
+      const buffer = self.buffer;
+
+      self.filled = self.inner.read(&mut buffer)?;
+      self.position = 0;
+    }
+
+    Ok(self.filled - self.position)
+  }
+
+  pub fn read(self, out: &mut [u8]) -> Result<usize, Error> {
+    // A read as large as the buffer, with nothing in it, skips it.
+    if self.position >= self.filled && out.len() >= self.buffer.len() {
+      return self.inner.read(out);
+    }
+
+    const available = self.fill()?;
+    const count = min(available, out.len());
+
+    for index in 0..count {
+      out[index] = self.buffer[self.position + index];
+    }
+
+    self.position += count;
+    Ok(count)
+  }
+
+  pub fn read_line(self) -> Result<Option<String>, Error> {
+    const line = new List<u8>();
+    var any = false;
+
+    loop {
+      if self.fill()? == 0 {
+        break;
+      }
+
+      any = true;
+
+      var end = self.position;
+
+      while end < self.filled && self.buffer[end] != 10 {
+        end += 1;
+      }
+
+      for index in self.position..end {
+        line.push(self.buffer[index]);
+      }
+
+      if end < self.filled {
+        self.position = end + 1;
+        break;
+      }
+
+      self.position = end;
+    }
+
+    if !any {
+      return Ok(None);
+    }
+
+    Ok(Some(line_text(line)?))
+  }
+}
+
+/// A writer to any `Write` through a buffer, as Rust's `BufWriter`: its writes reach the inner
+/// writer when the buffer is full, on `flush`, and on its `drop`, which, as Rust's, loses an
+/// error there; `flush` reports it (Q658).
+pub class BufWriter<W: Write> impl Write, Drop {
+  prv var inner: W;
+  prv const buffer: List<u8>;
+  prv var limit: usize;
+
+  /// A writer with a buffer of 8 KiB, as Rust's.
+  pub fn new(self, inner: W) {
+    self.inner = inner;
+    self.buffer = new List<u8>();
+    self.limit = 8192;
+  }
+
+  /// A writer with a buffer of `capacity` bytes.
+  pub fn with_capacity(capacity: usize, inner: W) -> BufWriter<W> {
+    const writer = new BufWriter<W>(inner);
+
+    writer.limit = capacity;
+    writer
+  }
+
+  /// The inner writer.
+  pub fn get_ref(self) -> W {
+    self.inner
+  }
+
+  pub fn capacity(self) -> usize {
+    self.limit
+  }
+
+  /// Writes what the buffer holds to the inner writer.
+  prv fn flush_buffer(self) -> Result<(), Error> {
+    if self.buffer.is_empty() {
+      return Ok(());
+    }
+
+    const pending = self.buffer;
+
+    self.inner.write_all(&pending)?;
+    self.buffer.clear();
+    Ok(())
+  }
+
+  pub fn write(self, bytes: &[u8]) -> Result<usize, Error> {
+    if self.buffer.len() + bytes.len() > self.limit {
+      self.flush_buffer()?;
+    }
+
+    // Bytes as many as the buffer holds go straight to the inner writer.
+    if bytes.len() >= self.limit {
+      return self.inner.write(bytes);
+    }
+
+    for index in 0..bytes.len() {
+      self.buffer.push(bytes[index]);
+    }
+
+    Ok(bytes.len())
+  }
+
+  pub fn flush(self) -> Result<(), Error> {
+    self.flush_buffer()?;
+    self.inner.flush()
+  }
+
+  pub fn drop(self) {
+    if self.flush_buffer().is_err() {
+      return;
+    }
+  }
+}
+
+/// The program's standard input as a reader, as Rust's `Stdin`: the stream `read_line` reads, so
+/// the two can be mixed (Q660).
+pub class Stdin impl Read, BufRead {
+  pub fn new(self) {}
+
+  /// The bytes available, up to the end of a line, so that a terminal is not waited on for more.
+  pub fn read(self, buffer: &mut [u8]) -> Result<usize, Error> {
+    const stream = sys::stream(0);
+    var count = 0usize;
+
+    sys::clear_errno();
+
+    while count < buffer.len() {
+      const c = unsafe { sys::getc(stream) };
+
+      // `EOF`, a negative value.
+      if c < 0 {
+        if unsafe { sys::ferror(stream) } != 0 {
+          return Err(read_error(stream));
+        }
+
+        break;
+      }
+
+      buffer[count] = c as u8;
+      count += 1;
+
+      if c == 10 {
+        break;
+      }
+    }
+
+    Ok(count)
+  }
+
+  pub fn read_line(self) -> Result<Option<String>, Error> {
+    read_line()
+  }
+}
+
+/// Writes bytes to stdout or stderr, as `print` writes text.
+fn write_bytes(index: i32, bytes: &[u8]) -> Result<usize, Error> {
+  sys::clear_errno();
+
+  const written = unsafe { sys::fwrite(bytes.as_ptr() as *const c_void, 1, bytes.len(), sys::stream(index)) };
+
+  if written < bytes.len() { Err(error_from(super::last_error())) } else { Ok(written) }
+}
+
+fn flush_stream(index: i32) -> Result<(), Error> {
+  sys::clear_errno();
+
+  if unsafe { sys::fflush(sys::stream(index)) } == 0 { Ok(()) } else { Err(error_from(super::last_error())) }
+}
+
+/// The program's standard output as a writer, as Rust's `Stdout`.
+pub class Stdout impl Write {
+  pub fn new(self) {}
+
+  pub fn write(self, bytes: &[u8]) -> Result<usize, Error> {
+    write_bytes(1, bytes)
+  }
+
+  pub fn flush(self) -> Result<(), Error> {
+    flush_stream(1)
+  }
+
+  /// Holds stdout until the lock's `drop`, so that the writes made through it are not
+  /// interleaved with other threads' `print`.
+  pub fn lock(self) -> StdoutLock {
+    new StdoutLock()
+  }
+}
+
+/// Stdout held by one thread until its `drop`, as Rust's `StdoutLock`.
+pub class StdoutLock impl Write, Drop {
+  pub fn new(self) {
+    sys::lock_stream(1);
+  }
+
+  pub fn write(self, bytes: &[u8]) -> Result<usize, Error> {
+    write_bytes(1, bytes)
+  }
+
+  pub fn flush(self) -> Result<(), Error> {
+    flush_stream(1)
+  }
+
+  pub fn drop(self) {
+    sys::unlock_stream(1);
+  }
+}
+
+/// The program's standard error as a writer, as Rust's `Stderr`.
+pub class Stderr impl Write {
+  pub fn new(self) {}
+
+  pub fn write(self, bytes: &[u8]) -> Result<usize, Error> {
+    write_bytes(2, bytes)
+  }
+
+  pub fn flush(self) -> Result<(), Error> {
+    flush_stream(2)
+  }
+}
+
+pub fn stdin() -> Stdin {
+  new Stdin()
+}
+
+pub fn stdout() -> Stdout {
+  new Stdout()
+}
+
+pub fn stderr() -> Stderr {
+  new Stderr()
 }

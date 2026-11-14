@@ -33,11 +33,12 @@ pub const EXIT_FAILURE: i32 = 1;
 /// Exit code for an internal compiler error.
 pub const EXIT_ICE: i32 = 101;
 
-const RUNTIME_HEADER: String = include_str("../../../runtime/sagitario_runtime.h");
-const RUNTIME_SOURCE: String = include_str("../../../runtime/sagitario_runtime.c");
+const RUNTIME_HEADER: String = include_str!("../../../runtime/sagitario_runtime.h");
+const RUNTIME_SOURCE: String = include_str!("../../../runtime/sagitario_runtime.c");
 
 /// The line separating the two translation units in `--dump=c`.
 const C_DUMP_FFI_MARKER: String = "/* ---- sag_ffi.c ---- */\n";
+const C_DUMP_STD_FFI_MARKER: String = "/* ---- sag_std_ffi.c ---- */\n";
 
 /// The stack every executable reserves on Windows, the default of Linux and macOS: programs, and
 /// the compiler itself, recurse as deeply on every system (docs/adr/0055-driver-and-cli-port.md).
@@ -61,6 +62,9 @@ pub class CompileOptions {
   /// The name of the target to compile for (docs/nova.md#targets); the machine running the
   /// compiler when `None`.
   pub var target: Option<String>;
+  /// `--seed-host <host>`: the C of `check --dump=c` for that host, which a seed is
+  /// (docs/adr/0107-a-seed-per-host.md, Q766).
+  pub var seed_host: Option<String>;
   /// `check --dump=...`: print an intermediate result instead of checking.
   pub var dump: Option<String>;
   /// Where `build` and `run` write the executable (and `--emit-c` the C); by default next to
@@ -74,6 +78,9 @@ pub class CompileOptions {
   pub var dependencies: List<DependencySpec>;
   /// Indices in `dependencies` of the input's own dependencies.
   pub var direct_dependencies: List<usize>;
+  /// The variables `env!` reads in each package before the environment: Nova's `OUT_DIR` for the
+  /// package of each build script (docs/adr/0103-build-scripts-and-binding-generation.md, Q728).
+  pub var package_env: List<PackageEnv>;
   /// C libraries and sources to link (docs/nova.md#linking-c).
   pub var link: Link;
   /// Where `build` writes a library's files.
@@ -94,18 +101,28 @@ pub class CompileOptions {
     self.sanitize = false;
     self.thread_sanitizer = false;
     self.target = None;
+    self.seed_host = None;
     self.dump = None;
     self.output = None;
     self.library = false;
     self.name = "";
     self.dependencies = new List();
     self.direct_dependencies = new List();
+    self.package_env = new List();
     self.link = new Link();
     self.out_dir = None;
     self.static_lib = true;
     self.dynamic_lib = true;
     self.picked_outputs = false;
   }
+}
+
+/// `--env NAME=VALUE` (package 0, the input's) or `--dependency-env INDEX=NAME=VALUE` (package
+/// `INDEX + 1`).
+pub struct PackageEnv {
+  pub package: usize;
+  pub name: String;
+  pub value: String;
 }
 
 /// A library package the program depends on, compiled together with it.
@@ -297,7 +314,15 @@ fn dump_file(options: CompileOptions, kind: String) -> i32 {
   if kind == "tokens" {
     print(lexer::dump(tokens));
   } else if !diagnostics.has_errors() {
-    print(dump::dump(parser::parse_module(file, tokens, diagnostics)));
+    const target = match options.target {
+      Some(name) => match targets::find(name) {
+        Ok(found) => found.info,
+        Err(code) => return code,
+      },
+      None => TargetInfo::host(),
+    };
+
+    print(dump::dump(parser::parse_module(file, tokens, target, diagnostics)));
   }
 
   match report(diagnostics, sources, options) {
@@ -338,6 +363,10 @@ fn dump_c(options: CompileOptions) -> i32 {
 
         if let Some(ffi) = generated.ffi {
           print(C_DUMP_FFI_MARKER + ffi);
+        }
+
+        if let Some(ffi) = generated.std_ffi {
+          print(C_DUMP_STD_FFI_MARKER + ffi);
         }
       }
 
@@ -422,7 +451,22 @@ fn load_package(options: CompileOptions) -> Result<Loaded, i32> {
 
   const sources = new SourceMap();
   const diagnostics = new Diagnostics();
-  const loader = new Loader(input);
+  var target = match options.target {
+    Some(name) => targets::find(name)?.info,
+    None => TargetInfo::host(),
+  };
+
+  if let Some(host) = options.seed_host {
+    target = match targets::seed_host(host) {
+      Some(found) => found,
+      None => {
+        eprintln(`error: no seed is made for the host \`${host}\`; the hosts are ` + targets::SEED_HOSTS.split(" ").join(", "));
+        return Err(EXIT_FAILURE);
+      }
+    };
+  }
+
+  const loader = new Loader(input, target);
 
   // The input's package comes first; dependency `i` is package `i + 1`.
   for dependency in options.dependencies {
@@ -430,6 +474,10 @@ fn load_package(options: CompileOptions) -> Result<Loaded, i32> {
   }
 
   loader.set_direct_dependencies(options.direct_dependencies);
+
+  for entry in options.package_env {
+    loader.set_env(entry.package, entry.name, entry.value);
+  }
 
   if !loader.load_entries(sources, diagnostics) || !loader.load_references(sources, diagnostics) {
     return Err(EXIT_FAILURE);
@@ -443,12 +491,7 @@ fn load_package(options: CompileOptions) -> Result<Loaded, i32> {
 
   report(diagnostics, sources, options)?;
 
-  const target = match options.target {
-    Some(name) => targets::find(name)?.info,
-    None => TargetInfo::host(),
-  };
-
-  var package = loader.package(prelude, target);
+  var package = loader.package(prelude);
 
   package.library = options.library;
 
@@ -508,15 +551,18 @@ class Toolchain {
   pub const sanitize: List<String>;
   /// Whether the program uses threads (`GeneratedC::threads`).
   pub const threads: bool;
+  /// Whether the program uses sockets (`GeneratedC::sockets`).
+  pub const sockets: bool;
   /// Position-independent code, for dynamic libraries outside Windows.
   pub const pic: bool;
 
-  pub fn new(self, compiler: CCompiler, dir: String, mode: List<String>, sanitize: List<String>, threads: bool, pic: bool) {
+  pub fn new(self, compiler: CCompiler, dir: String, mode: List<String>, sanitize: List<String>, generated: GeneratedC, pic: bool) {
     self.compiler = compiler;
     self.dir = dir;
     self.mode = mode;
     self.sanitize = sanitize;
-    self.threads = threads;
+    self.threads = generated.threads;
+    self.sockets = generated.sockets;
     self.pic = pic;
   }
 
@@ -597,10 +643,12 @@ class Toolchain {
     Ok(objects)
   }
 
-  /// The libraries to link: the package's, then libm outside Windows (`fmod` and friends). For
-  /// `cl` they are options of the linker, after `/link`.
+  /// The libraries to link: the package's, then libm outside Windows (`fmod` and friends), and
+  /// Winsock on Windows for a program using sockets (docs/adr/0100-networking.md, Q698). For `cl`
+  /// they are options of the linker, after `/link`.
   pub fn link_args(self, link: Link) -> List<String> {
     const args: List<String> = new List();
+    const winsock = self.sockets && self.compiler.windows();
 
     if self.compiler.cl {
       for found in link.search_paths {
@@ -611,7 +659,15 @@ class Toolchain {
         args.push(library + ".lib");
       }
 
+      if winsock {
+        args.push("ws2_32.lib");
+      }
+
       return args;
+    }
+
+    if winsock {
+      args.push("-lws2_32");
     }
 
     for found in link.search_paths {
@@ -688,6 +744,7 @@ fn write_generated(generated: GeneratedC, dir: String) -> Result<List<String>, i
   const program_c = push_path(dir, "program.c");
   const runtime_c = push_path(dir, "sagitario_runtime.c");
   const ffi_c = push_path(dir, "sag_ffi.c");
+  const std_ffi_c = push_path(dir, "sag_std_ffi.c");
   const runtime = if generated.threads { "#define SAG_THREADS 1\n" + RUNTIME_SOURCE } else { RUNTIME_SOURCE };
   var written = fs::write(program_c, generated.program);
 
@@ -705,6 +762,12 @@ fn write_generated(generated: GeneratedC, dir: String) -> Result<List<String>, i
     }
   }
 
+  if written.is_ok() {
+    if let Some(ffi) = generated.std_ffi {
+      written = fs::write(std_ffi_c, ffi);
+    }
+  }
+
   if let Err(error) = written {
     eprintln(`error: cannot write generated C to \`${dir}\`: ${error.message()}`);
     return Err(EXIT_FAILURE);
@@ -714,6 +777,10 @@ fn write_generated(generated: GeneratedC, dir: String) -> Result<List<String>, i
 
   if generated.ffi.is_some() {
     files.push(ffi_c);
+  }
+
+  if generated.std_ffi.is_some() {
+    files.push(std_ffi_c);
   }
 
   Ok(files)
@@ -727,11 +794,21 @@ fn emit_c(generated: GeneratedC, base: String) -> Result<(), i32> {
     Some(parent) => push_path(parent, stem + "_ffi.c"),
     None => stem + "_ffi.c",
   };
+  const std_ffi_path = match path::parent(c_path) {
+    Some(parent) => push_path(parent, stem + "_std_ffi.c"),
+    None => stem + "_std_ffi.c",
+  };
   var written = fs::write(c_path, generated.program);
 
   if written.is_ok() {
     if let Some(ffi) = generated.ffi {
       written = fs::write(ffi_path, ffi);
+    }
+  }
+
+  if written.is_ok() {
+    if let Some(ffi) = generated.std_ffi {
+      written = fs::write(std_ffi_path, ffi);
     }
   }
 
@@ -744,8 +821,10 @@ fn emit_c(generated: GeneratedC, base: String) -> Result<(), i32> {
 }
 
 /// Reports a failed build. Failures with the package's own C sources or libraries are errors in
-/// the package; failures with the generated C alone are internal compiler errors.
-fn report_failure(failure: Failure, compiler: CCompiler, link: Link) -> i32 {
+/// the package, and so is a failure to link a program that declares C functions of its own
+/// (`own_ffi`), which may be in a library it does not link; failures with the generated C alone
+/// are internal compiler errors.
+fn report_failure(failure: Failure, compiler: CCompiler, link: Link, own_ffi: bool) -> i32 {
   match failure {
     Failure::Generated(stderr) => {
       eprintln(`internal compiler error: the generated C failed to compile with \`${compiler.command_name}\``);
@@ -758,14 +837,19 @@ fn report_failure(failure: Failure, compiler: CCompiler, link: Link) -> i32 {
       EXIT_FAILURE
     }
     Failure::Link(stderr) => {
-      if link.is_empty() {
-        eprintln(`internal compiler error: the generated C failed to link with \`${compiler.command_name}\``);
-      } else {
+      const package_error = !link.is_empty() || own_ffi;
+
+      if !link.is_empty() {
         eprintln("error: linking failed; check the C libraries and sources of `[link]`");
+      } else if own_ffi {
+        eprintln("error: linking failed: a C function the program declares is not defined");
+        eprintln("help: link its library with `libraries` of `[link]` in `Nova.toml`, or `nova::link-lib=NAME` in a build script");
+      } else {
+        eprintln(`internal compiler error: the generated C failed to link with \`${compiler.command_name}\``);
       }
 
       eprintln(stderr);
-      if link.is_empty() { EXIT_ICE } else { EXIT_FAILURE }
+      if package_error { EXIT_FAILURE } else { EXIT_ICE }
     }
     Failure::Spawn(tool, message) => {
       eprintln(`error: cannot run \`${tool}\`: ${message}`);
@@ -882,11 +966,11 @@ fn build_in(compiler: CCompiler, generated: GeneratedC, dir: String, options: Co
     }
   }
 
-  Err(report_failure(failure, compiler, options.link))
+  Err(report_failure(failure, compiler, options.link, generated.ffi.is_some()))
 }
 
 fn build_with(compiler: CCompiler, generated: GeneratedC, dir: String, mode: List<String>, sanitize: List<String>, files: List<String>, link: Link, executable: String) -> Result<(), Failure> {
-  const toolchain = new Toolchain(compiler, dir, mode, sanitize, generated.threads, false);
+  const toolchain = new Toolchain(compiler, dir, mode, sanitize, generated, false);
   const objects = toolchain.objects(files, link.sources)?;
 
   toolchain.executable(objects, link, executable)
@@ -1120,10 +1204,10 @@ fn build_library_in(options: CompileOptions, compiler: CCompiler, generated: Gen
 
   if let Some(found) = files.static_lib {
     const archiver = find_archiver(compiler)?;
-    const toolchain = new Toolchain(compiler, dir, mode, new List(), generated.threads, false);
+    const toolchain = new Toolchain(compiler, dir, mode, new List(), generated, false);
     const objects = match toolchain.objects(sources, options.link.sources) {
       Ok(list) => list,
-      Err(failure) => return Err(report_failure(failure, compiler, options.link)),
+      Err(failure) => return Err(report_failure(failure, compiler, options.link, generated.ffi.is_some())),
     };
 
     // `ar` adds to an existing archive, which could keep stale objects.
@@ -1139,21 +1223,21 @@ fn build_library_in(options: CompileOptions, compiler: CCompiler, generated: Gen
 
     const output = match toolchain.output(command, archiver) {
       Ok(result) => result,
-      Err(failure) => return Err(report_failure(failure, compiler, options.link)),
+      Err(failure) => return Err(report_failure(failure, compiler, options.link, generated.ffi.is_some())),
     };
 
     if !output.success {
-      return Err(report_failure(Failure::Link(output.text), compiler, options.link));
+      return Err(report_failure(Failure::Link(output.text), compiler, options.link, generated.ffi.is_some()));
     }
 
     written.push(found);
   }
 
   if let Some(found) = files.dynamic_lib {
-    const toolchain = new Toolchain(compiler, dir, mode, new List(), generated.threads, !windows_target);
+    const toolchain = new Toolchain(compiler, dir, mode, new List(), generated, !windows_target);
     const objects = match toolchain.objects(sources, options.link.sources) {
       Ok(list) => list,
-      Err(failure) => return Err(report_failure(failure, compiler, options.link)),
+      Err(failure) => return Err(report_failure(failure, compiler, options.link, generated.ffi.is_some())),
     };
     const command = compiler.command();
 
@@ -1167,7 +1251,7 @@ fn build_library_in(options: CompileOptions, compiler: CCompiler, generated: Gen
     command.args(toolchain.link_args(options.link));
 
     if let Err(failure) = toolchain.link(command) {
-      return Err(report_failure(failure, compiler, options.link));
+      return Err(report_failure(failure, compiler, options.link, generated.ffi.is_some()));
     }
 
     // The MSVC linker also writes an exports file next to the import library.

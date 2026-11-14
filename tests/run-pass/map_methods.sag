@@ -1,0 +1,35 @@
+// The methods of `Map` of ADR-0093, increment 4: `update`, `upsert` and `get_or_insert` stand for
+// Rust's `entry`, with `retain`, `extend`, `Map::from` and `iter` (docs/adr/0093-everyday-methods.md, Q625).
+// expect-stdout: {"a": 3, "b": 2, "c": 1}
+// expect-stdout: true false Some(30)
+// expect-stdout: 7 30 4
+// expect-stdout: {"c": 1, "d": 7}
+// expect-stdout: {"Ada": 37, "Alan": 41} [("Ada", 37), ("Alan", 41)]
+// expect-stdout: Ada: 37
+// expect-stdout: Alan: 41
+// expect-stdout: Grace: 85
+
+fn main() {
+  const counts = new Map<String, i32>();
+
+  for word in "a b a c a b".split_whitespace() {
+    counts.upsert(word, 1, (n) => n + 1);
+  }
+
+  println(f"{counts:?}");
+  println(f"{counts.update("a", (n) => n * 10)} {counts.update("z", (n) => n)} {counts.get("a"):?}");
+  println(f"{counts.get_or_insert("d", 7)} {counts.get_or_insert("a", 0)} {counts.len()}");
+  counts.retain((key, value) => key != "b" && value < 20);
+  println(f"{counts:?}");
+
+  const ages = Map::from(List::from([("Ada", 36), ("Alan", 41), ("Ada", 37)]));
+
+  println(f"{ages:?} {ages.iter().collect():?}");
+  ages.extend(List::from([("Grace", 85)]).iter());
+
+  for (name, age) in ages.iter() {
+    println(f"{name}: {age}");
+  }
+
+  assert_eq(ages, Map::from(List::from([("Grace", 85), ("Alan", 41), ("Ada", 37)])));
+}

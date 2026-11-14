@@ -12,8 +12,10 @@ fn runtime(function: String) -> Callee {
   Callee::Runtime { function: function, located: false }
 }
 
+/// Whether the result has the type of the operands, rather than `bool`.
 fn is_arithmetic(op: BinaryOp) -> bool {
-  op == BinaryOp::Add || op == BinaryOp::Sub || op == BinaryOp::Mul || op == BinaryOp::Div || op == BinaryOp::Rem
+  op == BinaryOp::Add || op == BinaryOp::Sub || op == BinaryOp::Mul || op == BinaryOp::Div || op == BinaryOp::Rem || op == BinaryOp::BitAnd
+    || op == BinaryOp::BitOr || op == BinaryOp::BitXor || op == BinaryOp::Shl || op == BinaryOp::Shr
 }
 
 /// `lhs op rhs` where both operands have type `operand_ty`.
@@ -48,6 +50,13 @@ pub fn text_method(lw: Lowering, method: BuiltinMethod, ty: Type, receiver: Expr
 
       Ok(sentinel_option(lw, ty, index, IntTy::Usize, 18446744073709551615))
     }
+    // The runtime gives 0x110000, past every character, when the text is empty.
+    BuiltinMethod::BuilderPop => {
+      const code = lw.new_value(types::int(IntTy::U32), Rvalue::Call { callee: runtime("sag_builder_pop"), args: operands });
+      const character = lw.new_value(types::of(TypeKind::Char), Rvalue::Cast { from: types::int(IntTy::U32), to: types::of(TypeKind::Char), operand: code });
+
+      Ok(sentinel_option(lw, ty, character, IntTy::U32, 0x110000))
+    }
     BuiltinMethod::ToDigit => {
       const callee = Callee::Runtime { function: "sag_char_to_digit_at", located: true };
       const digit = lw.new_value(types::int(IntTy::U32), Rvalue::Call { callee: callee, args: operands });
@@ -55,6 +64,28 @@ pub fn text_method(lw: Lowering, method: BuiltinMethod, ty: Type, receiver: Expr
       Ok(sentinel_option(lw, ty, digit, IntTy::U32, 4294967295))
     }
     BuiltinMethod::Parse(target) => parse(lw, ty, target, operands),
+    // The function writes the value and says whether there is one
+    // (docs/adr/0088-bitwise-operators-and-integer-methods.md).
+    BuiltinMethod::Checked(function) => {
+      const value_ty = match ty.kind {
+        TypeKind::Option(inner) => inner,
+        _ => return Err("a checked method without an `Option`"),
+      };
+      const found = lw.temp(value_ty);
+
+      operands.push(Operand::Ref(local_place(found, value_ty)));
+
+      const present = lw.new_value(types::of(TypeKind::Bool), Rvalue::Call { callee: runtime(function), args: operands });
+      const dest = lw.temp(ty);
+
+      lw.emit(Stmt::If {
+        cond: present,
+        then_body: List::from([Stmt::Assign { dest: dest, value: Rvalue::Variant { index: 1, fields: List::from([Operand::Local(found)]) } }]),
+        else_body: List::from([Stmt::Assign { dest: dest, value: Rvalue::Variant { index: 0, fields: new List() } }]),
+      });
+
+      Ok(Operand::Local(dest))
+    }
     _ => Err("unexpected text method"),
   }
 }

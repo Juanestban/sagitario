@@ -1,0 +1,35 @@
+// The rules of `static var` and of changing statics (docs/adr/0083-global-state.md, Q526, Q528).
+
+static var COUNT: i32 = 0;
+static FIXED: i32 = 1;
+
+struct P {
+  pub x: i32;
+
+  pub fn bump(self) {
+    self.x += 1;
+  }
+}
+
+static ORIGIN: P = P { x: 0 };
+
+fn read(value: &i32) -> i32 {
+  *value
+}
+
+fn main() {
+  COUNT += 1; //~ ERROR E0323
+  const copy = COUNT; //~ ERROR E0323
+
+  unsafe {
+    read(&COUNT); //~ ERROR E0340
+  }
+
+  ORIGIN.x = 3; //~ ERROR E0312
+  ORIGIN.bump(); //~ ERROR E0313
+
+  const pointer = &raw mut FIXED; //~ ERROR E0312
+  const address = &raw mut COUNT;
+
+  println(f"{copy} {pointer.is_null()} {address.is_null()}");
+}

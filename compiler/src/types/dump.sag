@@ -208,6 +208,8 @@ fn builtin_method(method: BuiltinMethod) -> String {
     BuiltinMethod::IsErr => "is_err",
     BuiltinMethod::Unwrap => "unwrap",
     BuiltinMethod::Expect => "expect",
+    BuiltinMethod::ExpectErr => "expect_err",
+    BuiltinMethod::BuilderPop => "pop",
     BuiltinMethod::UnwrapOr => "unwrap_or",
     BuiltinMethod::UnwrapErr => "unwrap_err",
     BuiltinMethod::Runtime { function, located } => "runtime " + function + (if located { " located" } else { "" }),
@@ -225,6 +227,12 @@ fn builtin_method(method: BuiltinMethod) -> String {
     BuiltinMethod::Prelude(function) => `prelude fn ${function}`,
     BuiltinMethod::TotalCompare => "total_compare",
     BuiltinMethod::RangeRev => "range_rev",
+    BuiltinMethod::RangeContains => "range_contains",
+    BuiltinMethod::RangeIsEmpty => "range_is_empty",
+    BuiltinMethod::Atomic(name) => "atomic " + name,
+    BuiltinMethod::Checked(function) => "checked " + function,
+    BuiltinMethod::Take => "take",
+    BuiltinMethod::Replace => "replace",
   }
 }
 
@@ -235,7 +243,20 @@ fn const_value(value: ConstValue) -> String {
     ConstValue::Int(found) => "int " + found.text(),
     ConstValue::Float(found) => `float ${found}`,
     ConstValue::Str(found) => "str " + lexer::quote(found),
+    ConstValue::Aggregate(parts) => "parts [" + const_parts(parts) + "]",
+    ConstValue::Repeat { part, count } => `repeat ${count} [` + const_parts(part) + "]",
+    ConstValue::Variant { index, fields } => `variant ${index} [` + const_parts(fields) + "]",
   }
+}
+
+fn const_parts(parts: List<pkg::types::consts::Typed>) -> String {
+  const shown: List<String> = new List();
+
+  for part in parts {
+    shown.push(const_value(part.value));
+  }
+
+  shown.join(", ")
 }
 
 fn optional(value: Option<u32>) -> String {
@@ -386,6 +407,7 @@ pub fn ty(value: Type) -> String {
       (if is_unsafe { "unsafe " } else { "" }) + "extern \"C\" fn(" + parts.join(", ") + ")" + result
     }
     TypeKind::Array { elem, len } => "[" + ty(elem) + `; ${len}]`,
+    TypeKind::Tuple(elems) => "(" + elems.iter().map((elem) => ty(elem)).collect().join(", ") + ")",
     TypeKind::List(elem) => "List<" + ty(elem) + ">",
     TypeKind::Option(inner) => "Option<" + ty(inner) + ">",
     TypeKind::Result { value: ok, error } => "Result<" + ty(ok) + ", " + ty(error) + ">",

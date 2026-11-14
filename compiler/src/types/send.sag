@@ -1,6 +1,6 @@
-//! `Send` (docs/spec/05-interfaces-generics.md#send, ADR-0045): the classes of `std::sync`, the
-//! prelude's `Send` interface, and the check of `thread::spawn`, whose lambda may only capture
-//! `Send` values. The port of `sagitario_types::send`; which types are `Send` is in
+//! `Send` (docs/spec/05-interfaces-generics.md#send, ADR-0045): the classes of `std::sync` and
+//! `std::thread::Thread`, the prelude's `Send` interface, and the check of `thread::spawn` and
+//! `Builder::spawn`, whose lambda may only capture `Send` values. The port of `sagitario_types::send`; which types are `Send` is in
 //! `types::typed`.
 
 use pkg::ast::{Expr, ExprKind};
@@ -8,28 +8,110 @@ use pkg::diagnostics::Diagnostic;
 use pkg::diagnostics::codes;
 use pkg::resolve::{ItemRef, Res, TypeItem};
 use pkg::span::Span;
-use pkg::types::{Checker, SpanInterface};
+use pkg::types::Checker;
 use pkg::types;
 use pkg::types::exprs;
 
-/// Finds the classes of `std::sync`, if the program uses it, in declaration order.
+/// Finds the classes of `std::sync`, if the program uses it, in declaration order, and apart
+/// its guards, whose names end in `Guard`; and `std::thread::Thread`, which threads share
+/// (docs/adr/0098-locks-orderings-and-threads.md, Q679).
 pub fn sync_classes(cx: Checker) {
-  for module in cx.resolution.modules {
-    if module.in_std && module.path.len() == 2 && module.path[0] == "std" && module.path[1] == "sync" {
-      const classes: List<u32> = new List();
+  const classes: List<u32> = new List();
+  const guards: List<u32> = new List();
 
-      for declared in module.items.values() {
+  if let Some(module) = std_module(cx, "sync") {
+    for name in module.items.keys() {
+      if let Some(declared) = module.items.get(name) {
         if let ItemRef::Type(TypeItem::Class(id)) = declared.item {
-          classes.push(id);
+          if name.ends_with("Guard") { guards.push(id); } else { classes.push(id); }
         }
       }
-
-      classes.sort();
-      cx.typed.sync_classes = classes;
-
-      return;
     }
   }
+
+  if let Some(class_id) = std_class(cx, "thread", "Thread") {
+    classes.push(class_id);
+  }
+
+  // The sockets of `std::net`, which a server gives a thread each
+  // (docs/adr/0100-networking.md, Q694).
+  for name in List::from(["TcpListener", "TcpStream", "UdpSocket"]) {
+    if let Some(class_id) = std_class(cx, "net", name) {
+      classes.push(class_id);
+    }
+  }
+
+  classes.sort();
+  guards.sort();
+  cx.typed.sync_classes = classes;
+  cx.typed.guard_classes = guards;
+}
+
+/// The items of `std::net` the compiler knows, if the program uses it
+/// (docs/adr/0100-networking.md, Q693).
+pub fn net_items(cx: Checker) {
+  const module = match std_module(cx, "net") {
+    Some(found) => found,
+    None => return,
+  };
+  const addrs = match module.items.get("ToSocketAddrs") {
+    Some(declared) => match declared.item {
+      ItemRef::Type(TypeItem::Interface(id)) => id,
+      _ => return,
+    },
+    None => return,
+  };
+  const ip = match module.items.get("IpAddr") {
+    Some(declared) => match declared.item {
+      ItemRef::Type(TypeItem::Enum(id)) => id,
+      _ => return,
+    },
+    None => return,
+  };
+  const ipv4 = match module.items.get("Ipv4Addr") {
+    Some(declared) => match declared.item {
+      ItemRef::Type(TypeItem::Struct(id)) => id,
+      _ => return,
+    },
+    None => return,
+  };
+  const ipv6 = match module.items.get("Ipv6Addr") {
+    Some(declared) => match declared.item {
+      ItemRef::Type(TypeItem::Struct(id)) => id,
+      _ => return,
+    },
+    None => return,
+  };
+
+  cx.typed.net = Some(pkg::types::typed::NetItems { to_socket_addrs: addrs, ip: ip, ipv4: ipv4, ipv6: ipv6 });
+}
+
+/// The class `name` of `std::module`, if the program uses it.
+fn std_class(cx: Checker, module: String, name: String) -> Option<u32> {
+  if let Some(found) = std_module(cx, module) {
+    if let Some(declared) = found.items.get(name) {
+      if let ItemRef::Type(TypeItem::Class(id)) = declared.item {
+        return Some(id);
+      }
+    }
+  }
+
+  None
+}
+
+/// The function `name` of the class `class_id`, if it has one.
+fn class_function(cx: Checker, class_id: u32, name: String) -> Option<u32> {
+  if let Some(info) = cx.resolution.classes.get(class_id as usize) {
+    for function in info.functions {
+      if let Some(decl) = cx.resolution.fn_decl(cx.package, function) {
+        if decl.name.name == name {
+          return Some(function);
+        }
+      }
+    }
+  }
+
+  None
 }
 
 /// The prelude's `Send` interface.
@@ -46,19 +128,6 @@ pub fn send_used_as_type(cx: Checker, span: Span) {
   );
 }
 
-/// `Send` written as a type inside function bodies, which are checked after the interfaces.
-pub fn check_send_types(cx: Checker) {
-  const used = cx.interface_types;
-
-  cx.interface_types = new List<SpanInterface>();
-
-  for entry in used {
-    if is_send_interface(cx, entry.id) {
-      send_used_as_type(cx, entry.span);
-    }
-  }
-}
-
 /// The module `std::name`, if the program uses it.
 fn std_module(cx: Checker, name: String) -> Option<pkg::resolve::ModuleInfo> {
   for module in cx.resolution.modules {
@@ -71,7 +140,8 @@ fn std_module(cx: Checker, name: String) -> Option<pkg::resolve::ModuleInfo> {
 }
 
 /// If `id` starts a thread, how it is called for its errors: `std::thread::spawn` and
-/// `JoinHandle::spawn`, which it calls, are `thread::spawn`, and `std::task::spawn_blocking` is
+/// `JoinHandle::spawn`, which it calls, are `thread::spawn`, the method `spawn` of
+/// `std::thread::Builder` is `Builder::spawn`, and `std::task::spawn_blocking` is
 /// `task::spawn_blocking`. They are checked where code outside the standard library calls them.
 pub fn spawn_name(cx: Checker, id: u32) -> Option<String> {
   if types::in_std(cx) {
@@ -88,7 +158,19 @@ pub fn spawn_name(cx: Checker, id: u32) -> Option<String> {
     }
   }
 
-  if is_thread_spawn(cx, id) { Some("thread::spawn") } else { None }
+  if is_thread_spawn(cx, id) {
+    return Some("thread::spawn");
+  }
+
+  if let Some(builder) = std_class(cx, "thread", "Builder") {
+    if let Some(found) = class_function(cx, builder, "spawn") {
+      if found == id {
+        return Some("Builder::spawn");
+      }
+    }
+  }
+
+  None
 }
 
 /// `std::thread::spawn`, or `JoinHandle::spawn`.
@@ -109,17 +191,7 @@ fn is_thread_spawn(cx: Checker, id: u32) -> bool {
 
   if let Some(declared) = module.items.get("JoinHandle") {
     if let ItemRef::Type(TypeItem::Class(class_id)) = declared.item {
-      if let Some(info) = cx.resolution.classes.get(class_id as usize) {
-        for function in info.functions {
-          if handle_spawn.is_none() {
-            if let Some(decl) = cx.resolution.fn_decl(cx.package, function) {
-              if decl.name.name == "spawn" {
-                handle_spawn = Some(function);
-              }
-            }
-          }
-        }
-      }
+      handle_spawn = class_function(cx, class_id, "spawn");
     }
   }
 
@@ -134,8 +206,9 @@ fn is_thread_spawn(cx: Checker, id: u32) -> bool {
   matches
 }
 
-/// The argument of `thread::spawn` (or `task::spawn_blocking`, named `spawn`) is a lambda whose
-/// captures are all `Send`, or a function named by its path, which captures nothing.
+/// The argument of `thread::spawn` (or `Builder::spawn` or `task::spawn_blocking`, named `spawn`)
+/// is a lambda whose captures are all `Send`, or a function named by its path, which captures
+/// nothing.
 pub fn check_spawn_argument(cx: Checker, spawn: String, args: List<Expr>) {
   const arg = match args.first() {
     Some(arg) => arg,
@@ -187,4 +260,34 @@ fn spawn_argument_error(cx: Checker, spawn: String, arg: Expr) {
     Diagnostic::error(codes::INVALID_SPAWN, arg.span, "`" + spawn + "` takes a lambda or the name of a function")
       .with_note("the compiler checks that what the thread captures is `Send`, which it cannot do for other function values"),
   );
+}
+
+/// The type of every `static` is `Send`, since every thread can read it
+/// (docs/adr/0083-global-state.md, Q526).
+pub fn check_statics(cx: Checker) {
+  for index in 0..cx.resolution.statics.len() {
+    const id = index as u32;
+    const decl = match cx.resolution.static_decl(cx.package, id) {
+      Some(found) => found,
+      None => continue,
+    };
+    const ty = match cx.typed.static_type(cx.resolution, id) {
+      Some(found) => found,
+      None => continue,
+    };
+
+    // A C global is reached only in `unsafe` (docs/adr/0086-c-globals-and-std-io.md, Q558).
+    if decl.mutable || decl.extern_c || types::is_error(ty) {
+      continue;
+    }
+
+    if let Some(reason) = cx.typed.not_send_reason(ty) {
+      cx.diagnostics.push(
+        Diagnostic::error(codes::NOT_SEND, decl.ty.span, "the static `" + decl.name.name + "` has the type `" + types::text(ty) + "`, which is not `Send`")
+          .with_note(reason)
+          .with_note("every thread can read a static, so its value must be `Send`")
+          .with_help("keep a `Send` value, such as an atomic or a `Mutex` of a `Send` value, or pass this one to the code that needs it"),
+      );
+    }
+  }
 }

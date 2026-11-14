@@ -5,7 +5,7 @@
 use pkg::resolve::{ParamOwner, Resolution, TypeItem};
 use pkg::ast::Package;
 use pkg::types::{
-  ClassDef, EnumDef, FieldDef, FnSig, GenericDef, InterfaceDef, NamedRef, ParamRef, SELF_PARAM, StructDef, Subst, Type, TypeKind, VariantDef,
+  ClassDef, EnumDef, FieldDef, FloatTy, FnSig, GenericDef, IntTy, InterfaceDef, NamedRef, ParamRef, SELF_PARAM, StructDef, Subst, Type, TypeKind, VariantDef,
 };
 use pkg::types;
 use pkg::types::consts::ConstValue;
@@ -18,8 +18,12 @@ pub struct PreludeItems {
   pub hash: Option<u32>;
   pub entry: Option<u32>;
   pub iter: Option<u32>;
+  /// `DoubleEndedIter<T>`, the iterators with two ends (docs/adr/0093-everyday-methods.md, Q627).
+  pub double_iter: Option<u32>;
   pub map: Option<u32>;
   pub send: Option<u32>;
+  /// `Display` (docs/adr/0089-display-debug-and-format-specifiers.md).
+  pub display: Option<u32>;
   /// The interfaces of the operators (docs/adr/0081-operator-overloading.md).
   pub add: Option<u32>;
   pub sub: Option<u32>;
@@ -27,6 +31,36 @@ pub struct PreludeItems {
   pub div: Option<u32>;
   pub rem: Option<u32>;
   pub neg: Option<u32>;
+  /// The bitwise operators (docs/adr/0101-the-rest-of-s2.md, Q709).
+  pub bit_and: Option<u32>;
+  pub bit_or: Option<u32>;
+  pub bit_xor: Option<u32>;
+  pub shl: Option<u32>;
+  pub shr: Option<u32>;
+  pub not: Option<u32>;
+  /// `From`, `Into`, `TryFrom` and `TryInto` (docs/adr/0094-conversions-and-defaults.md).
+  pub from: Option<u32>;
+  pub into: Option<u32>;
+  pub try_from: Option<u32>;
+  pub try_into: Option<u32>;
+  pub default: Option<u32>;
+  /// `Index` and `IndexMut` (docs/adr/0094-conversions-and-defaults.md, Q639).
+  pub index: Option<u32>;
+  pub index_mut: Option<u32>;
+  /// `Iterable` and `FromIterator` (docs/adr/0095-collections.md).
+  pub iterable: Option<u32>;
+  pub from_iterator: Option<u32>;
+  /// `HashSet` (docs/adr/0095-collections.md, Q647).
+  pub hash_set: Option<u32>;
+  /// `std::collections::VecDeque`, `BTreeMap` and `BTreeSet`, when the program uses the module
+  /// (Q648-Q650).
+  pub vec_deque: Option<u32>;
+  pub btree_map: Option<u32>;
+  pub btree_set: Option<u32>;
+  /// `std::collections::BinaryHeap`, whose debug form is its list (Q651, Q652).
+  pub binary_heap: Option<u32>;
+  /// `Drop` (docs/adr/0096-streams-files-and-drop.md, Q655).
+  pub drop: Option<u32>;
 }
 
 /// The methods of `List<T>` implemented by the compiler (docs/spec/02-types.md#arrays-and-lists).
@@ -53,6 +87,10 @@ pub enum BuiltinMethod {
   IsErr,
   Unwrap,
   Expect,
+  /// `expect_err(message)` on a `Result`.
+  ExpectErr,
+  /// `pop()` on a `StringBuilder`: the runtime's code point, or a sentinel.
+  BuilderPop,
   UnwrapOr,
   UnwrapErr,
   /// A runtime function taking the receiver and the arguments in order; `located` functions
@@ -73,6 +111,43 @@ pub enum BuiltinMethod {
   Prelude(u32),
   TotalCompare,
   RangeRev,
+  /// `(a..b).contains(x)` and `is_empty()` of a range written directly
+  /// (docs/adr/0101-the-rest-of-s2.md, Q705).
+  RangeContains,
+  RangeIsEmpty,
+  /// A method of `Atomic<T>`, by name (docs/adr/0087-atomic-storage-and-std-sync.md).
+  Atomic(String),
+  /// A `checked_*` method of an integer: the runtime function writes the result and says
+  /// whether there is one (docs/adr/0088-bitwise-operators-and-integer-methods.md).
+  Checked(String),
+  /// `place.take()` and `place.replace(value)` of an `Option`, which change the place
+  /// (docs/adr/0097-processes-and-environment.md, Q663).
+  Take,
+  Replace,
+}
+
+/// A call of the static function `function` of an interface, for the type `self_ty`, whose
+/// implementation runs: a type parameter or `Self` until monomorphization
+/// (docs/adr/0094-conversions-and-defaults.md, Q631).
+pub struct StaticCall {
+  pub function: u32;
+  pub self_ty: Type;
+}
+
+/// `base[index]` on a type implementing `Index<Idx, Out>` with these `args`: its `index`, and the
+/// `index_set` of `IndexMut` when the expression is assigned to (Q639).
+pub struct IndexCall {
+  pub index: u32;
+  pub set: Option<u32>;
+  pub args: List<Type>;
+}
+
+/// A value of type `from` made a `to`: by `From`, or by `TryFrom` with the error `error`. The
+/// types may name type parameters until monomorphization.
+pub struct Conversion {
+  pub from: Type;
+  pub to: Type;
+  pub error: Option<Type>;
 }
 
 /// A list or array used as an iterator: the prelude function making the iterator and its type
@@ -171,16 +246,41 @@ pub class TypedModule {
   /// The vtable slot of each method dispatched dynamically.
   pub var slots: Map<u32, usize>;
   pub var prelude: PreludeItems;
-  /// The classes of `std::sync`.
+  /// The classes of `std::sync`, `Send` by name, other than its guards, and
+  /// `std::thread::Thread`.
   pub var sync_classes: List<u32>;
+  /// The guards of `std::sync`, never `Send`: the thread that took a lock releases it
+  /// (docs/adr/0098-locks-orderings-and-threads.md, Q671).
+  pub var guard_classes: List<u32>;
+  /// The items of `std::net` the compiler knows, if the program uses it.
+  pub var net: Option<NetItems>;
   /// The type of each module-level constant.
   pub var const_types: List<Type>;
   /// The value of each module-level constant, or `None` if it has an error.
   pub var const_values: List<Option<ConstValue>>;
+  /// The value of each static computed from constants, by static id: its storage starts with it
+  /// (docs/adr/0083-global-state.md, Q527).
+  pub var static_values: List<Option<ConstValue>>;
   /// The type arguments of each use of a generic function, method or initializer, by node id.
   pub var call_args: Map<u32, List<Type>>;
   /// Calls to built-in methods, by node id.
   pub var builtin_methods: Map<u32, BuiltinMethod>;
+  /// The calls of static functions of interfaces, by call id.
+  pub var static_calls: Map<u32, StaticCall>;
+  /// The conversions of `from`, `try_from`, `into`, `try_into` and `?`, by the id of the call or
+  /// of the operand of `?` (docs/adr/0094-conversions-and-defaults.md, Q632–Q635).
+  pub var conversions: Map<u32, Conversion>;
+  /// `base[index]` on a type implementing `Index`, by the id of the index expression (Q639).
+  pub var index_calls: Map<u32, IndexCall>;
+  /// The iterable of a `for` over a type implementing `Iterable`, by the id of the iterable: the
+  /// type of its elements (docs/adr/0095-collections.md, Q645).
+  pub var iterable_fors: Map<u32, Type>;
+  /// `collect()` into a type implementing `FromIterator`, by call id (Q646).
+  pub var collect_calls: Map<u32, StaticCall>;
+  /// The structs and enums written after `@default`, by `item_key` (Q636).
+  pub var derived_defaults: Map<String, bool>;
+  /// The variant marked `@default` of each such enum, by enum id.
+  pub var default_variants: Map<u32, u32>;
   /// Type of each local binding, indexed by function id then local id.
   pub var local_types: List<List<Type>>;
   pub var expr_types: Map<u32, Type>;
@@ -215,20 +315,53 @@ pub class TypedModule {
       hash: None,
       entry: None,
       iter: None,
+      double_iter: None,
       map: None,
       send: None,
+      display: None,
       add: None,
       sub: None,
       mul: None,
       div: None,
       rem: None,
       neg: None,
+      bit_and: None,
+      bit_or: None,
+      bit_xor: None,
+      shl: None,
+      shr: None,
+      not: None,
+      from: None,
+      into: None,
+      try_from: None,
+      try_into: None,
+      default: None,
+      index: None,
+      index_mut: None,
+      iterable: None,
+      from_iterator: None,
+      hash_set: None,
+      vec_deque: None,
+      btree_map: None,
+      btree_set: None,
+      binary_heap: None,
+      drop: None,
     };
     self.sync_classes = new List();
+    self.guard_classes = new List();
+    self.net = None;
     self.const_types = new List();
+    self.static_values = new List();
     self.const_values = new List();
     self.call_args = new Map<u32, List<Type>>();
     self.builtin_methods = new Map<u32, BuiltinMethod>();
+    self.static_calls = new Map<u32, StaticCall>();
+    self.conversions = new Map<u32, Conversion>();
+    self.index_calls = new Map<u32, IndexCall>();
+    self.iterable_fors = new Map<u32, Type>();
+    self.collect_calls = new Map<u32, StaticCall>();
+    self.derived_defaults = new Map<String, bool>();
+    self.default_variants = new Map<u32, u32>();
     self.local_types = new List();
     self.expr_types = new Map<u32, Type>();
     self.method_calls = new Map<u32, u32>();
@@ -260,7 +393,15 @@ pub class TypedModule {
     }
   }
 
-  /// The element type of an `Iter<T>`.
+  /// `DoubleEndedIter<elem>`.
+  pub fn double_iter_type(self, elem: Type) -> Type {
+    match self.prelude.double_iter {
+      Some(id) => types::class_type(id, "DoubleEndedIter", List::from([elem])),
+      None => types::error(),
+    }
+  }
+
+  /// The element type of an `Iter<T>` or a `DoubleEndedIter<T>`.
   pub fn iter_elem(self, ty: Type) -> Option<Type> {
     if let TypeKind::Class(class_ref) = ty.kind {
       if let Some(iter) = self.prelude.iter {
@@ -268,9 +409,24 @@ pub class TypedModule {
           return class_ref.args.first();
         }
       }
+
+      if self.is_double_iter(ty) {
+        return class_ref.args.first();
+      }
     }
 
     None
+  }
+
+  /// Whether `ty` is a `DoubleEndedIter<T>`.
+  pub fn is_double_iter(self, ty: Type) -> bool {
+    match ty.kind {
+      TypeKind::Class(class_ref) => match self.prelude.double_iter {
+        Some(id) => id == class_ref.id,
+        None => false,
+      },
+      _ => false,
+    }
   }
 
   /// The key and value types of a `Map<K, V>`.
@@ -676,14 +832,47 @@ pub class TypedModule {
     match ty.kind {
       TypeKind::Struct(named) => {
         direct = self.impls_of(TypeItem::Struct(named.id), named.args);
+        self.push_derived_default(direct, TypeItem::Struct(named.id));
       }
       TypeKind::Enum(named) => {
         direct = self.impls_of(TypeItem::Enum(named.id), named.args);
+        self.push_derived_default(direct, TypeItem::Enum(named.id));
       }
       TypeKind::Class(named) => {
         for class_ref in self.class_ancestors(named) {
           for interface_ref in self.impls_of(TypeItem::Class(class_ref.id), class_ref.args) {
             direct.push(interface_ref);
+          }
+        }
+
+        // A `VecDeque`, `BTreeMap` or `BTreeSet` compares, orders and hashes as a list of its
+        // elements (docs/adr/0095-collections.md, Q648-Q650).
+        if let Some(elem) = self.compared_element(named) {
+          for found in self.tuple_impls(List::from([elem])) {
+            direct.push(found);
+          }
+        }
+
+        // A map is equal to another with the same keys and equal values (docs/adr/0093-everyday-methods.md, Q623).
+        if let Some(map) = self.prelude.map {
+          if map == named.id {
+            if let Some(eq) = self.prelude.eq {
+              const eq_ref = NamedRef { id: eq, name: "Eq", args: new List() };
+
+              if named.args.len() == 2 && self.implements(named.args[1], eq_ref) {
+                direct.push(eq_ref);
+              }
+            }
+
+            // An empty map (docs/adr/0094-conversions-and-defaults.md, Q636).
+            if let Some(default) = self.default_ref() {
+              direct.push(default);
+            }
+
+            // `collect()` into a map (docs/adr/0095-collections.md, Q646).
+            if named.args.len() == 2 {
+              self.push_ref(direct, self.prelude.from_iterator, "FromIterator", types::of(TypeKind::Tuple(List::from([named.args[0], named.args[1]]))));
+            }
           }
         }
       }
@@ -692,6 +881,39 @@ pub class TypedModule {
       }
       TypeKind::Param(param) => {
         direct = self.param_bounds(param);
+      }
+      TypeKind::Tuple(elems) => {
+        direct = self.tuple_impls(elems);
+        self.push_default_of(direct, elems);
+      }
+      // As Rust's (docs/adr/0093-everyday-methods.md, Q619); `None` is the default (Q636).
+      TypeKind::Option(value) => {
+        direct = self.tuple_impls(List::from([value]));
+
+        if let Some(default) = self.default_ref() {
+          direct.push(default);
+        }
+      }
+      TypeKind::Result { value, error } => {
+        direct = self.tuple_impls(List::from([value, error]));
+
+        // `collect()` of results into a list of the values or the first error (Q646).
+        if let TypeKind::List(elem) = value.kind {
+          self.push_ref(direct, self.prelude.from_iterator, "FromIterator", types::result(elem, error));
+        }
+      }
+      // Lists and arrays compare by value, as Rust's `Vec` (Q623). An empty list is a default,
+      // and an array of defaults (Q636).
+      TypeKind::List(elem) => {
+        direct = self.tuple_impls(List::from([elem]));
+        self.push_default_of(direct, new List());
+        self.push_ref(direct, self.prelude.iterable, "Iterable", elem);
+        self.push_ref(direct, self.prelude.from_iterator, "FromIterator", elem);
+      }
+      TypeKind::Array { elem, .. } => {
+        direct = self.tuple_impls(List::from([elem]));
+        self.push_default_of(direct, List::from([elem]));
+        self.push_ref(direct, self.prelude.iterable, "Iterable", elem);
       }
       _ => {
         direct = self.primitive_impls(ty);
@@ -711,6 +933,65 @@ pub class TypedModule {
     found
   }
 
+  /// Whether `==` compares instances of the class `id` by value, as Rust's: a `Map` and a
+  /// `HashSet` (docs/adr/0093-everyday-methods.md, Q623, and docs/adr/0095-collections.md, Q647).
+  pub fn compares_by_value(self, id: u32) -> bool {
+    is_id(self.prelude.map, id) || is_id(self.prelude.hash_set, id) || self.compared_elements(id)
+  }
+
+  /// Whether the class `id` is compared, ordered and hashed as a list of its elements: a
+  /// `VecDeque`, a `BTreeMap` or a `BTreeSet` (docs/adr/0095-collections.md, Q648-Q650).
+  pub fn compared_elements(self, id: u32) -> bool {
+    is_id(self.prelude.vec_deque, id) || is_id(self.prelude.btree_map, id) || is_id(self.prelude.btree_set, id)
+  }
+
+  /// The type of the elements such a class compares by: a pair of a key and its value for a
+  /// `BTreeMap`, the element for the others.
+  pub fn compared_element(self, named: NamedRef) -> Option<Type> {
+    if !self.compared_elements(named.id) {
+      return None;
+    }
+
+    if is_id(self.prelude.btree_map, named.id) && named.args.len() == 2 {
+      return Some(types::of(TypeKind::Tuple(List::from([named.args[0], named.args[1]]))));
+    }
+
+    named.args.first()
+  }
+
+  /// `Default`, without type arguments.
+  pub fn default_ref(self) -> Option<NamedRef> {
+    match self.prelude.default {
+      Some(id) => Some(NamedRef { id: id, name: "Default", args: new List() }),
+      None => None,
+    }
+  }
+
+  /// Adds the prelude interface `id`, named `name`, with the one type argument `arg`.
+  prv fn push_ref(self, found: List<NamedRef>, id: Option<u32>, name: String, arg: Type) {
+    if let Some(found_id) = id {
+      found.push(NamedRef { id: found_id, name: name, args: List::from([arg]) });
+    }
+  }
+
+  /// Adds `Default` when `item` was written after `@default`.
+  prv fn push_derived_default(self, found: List<NamedRef>, item: TypeItem) {
+    if self.derived_defaults.contains_key(item_key(item)) {
+      if let Some(default) = self.default_ref() {
+        found.push(default);
+      }
+    }
+  }
+
+  /// Adds `Default` when every one of `parts` has a default.
+  prv fn push_default_of(self, found: List<NamedRef>, parts: List<Type>) {
+    if let Some(default) = self.default_ref() {
+      if parts.iter().all((part) => self.implements(part, default)) {
+        found.push(default);
+      }
+    }
+  }
+
   prv fn impls_of(self, item: TypeItem, args: List<Type>) -> List<NamedRef> {
     const subst = Subst::of(ParamOwner::Item(item), args);
     const result: List<NamedRef> = new List();
@@ -726,6 +1007,26 @@ pub class TypedModule {
 
   /// The interfaces integers, `bool`, `char` and `String` implement: `Ord` and `Hash`; and those
   /// of the operators that numbers and `String` have, with their own type (Q513 of ADR-0081).
+  /// `Eq`, `Ord` and `Hash`, each when every element of a tuple implements it
+  /// (docs/adr/0092-tuples.md, Q611).
+  prv fn tuple_impls(self, elems: List<Type>) -> List<NamedRef> {
+    const result: List<NamedRef> = new List();
+    const ids = List::from([self.prelude.eq, self.prelude.ord, self.prelude.hash]);
+    const names = List::from(["Eq", "Ord", "Hash"]);
+
+    for index in 0..ids.len() {
+      if let Some(id) = ids[index] {
+        const interface_ref = NamedRef { id: id, name: names[index], args: new List() };
+
+        if elems.iter().all((elem) => self.implements(elem, interface_ref)) {
+          result.push(interface_ref);
+        }
+      }
+    }
+
+    result
+  }
+
   pub fn primitive_impls(self, ty: Type) -> List<NamedRef> {
     const result: List<NamedRef> = new List();
     var numeric = false;
@@ -745,6 +1046,16 @@ pub class TypedModule {
 
     const pair = List::from([ty, ty]);
 
+    // Numbers, `bool`, `char` and `String` have the text format strings give them.
+    match ty.kind {
+      TypeKind::Int(_) | TypeKind::Float(_) | TypeKind::Bool | TypeKind::Char | TypeKind::String => {
+        if let Some(id) = self.prelude.display {
+          result.push(NamedRef { id: id, name: "Display", args: new List() });
+        }
+      }
+      _ => {}
+    }
+
     if numeric {
       for entry in List::from([Operator { id: self.prelude.add, name: "Add" }, Operator { id: self.prelude.sub, name: "Sub" }, Operator { id: self.prelude.mul, name: "Mul" }, Operator { id: self.prelude.div, name: "Div" }, Operator { id: self.prelude.rem, name: "Rem" }]) {
         if let Some(id) = entry.id {
@@ -759,9 +1070,66 @@ pub class TypedModule {
       }
     }
 
+    // `&`, `|`, `^` and `!` of integers and `bool`, and the shifts of integers by a `u32`
+    // (docs/adr/0101-the-rest-of-s2.md, Q709).
+    const bits = match ty.kind {
+      TypeKind::Int(_) | TypeKind::Bool => true,
+      _ => false,
+    };
+
+    if bits {
+      for entry in List::from([Operator { id: self.prelude.bit_and, name: "BitAnd" }, Operator { id: self.prelude.bit_or, name: "BitOr" }, Operator { id: self.prelude.bit_xor, name: "BitXor" }]) {
+        if let Some(id) = entry.id {
+          result.push(NamedRef { id: id, name: entry.name, args: pair });
+        }
+      }
+
+      if let Some(id) = self.prelude.not {
+        result.push(NamedRef { id: id, name: "Not", args: List::from([ty]) });
+      }
+    }
+
+    if let TypeKind::Int(_) = ty.kind {
+      const amount = List::from([types::int(IntTy::U32), ty]);
+
+      for entry in List::from([Operator { id: self.prelude.shl, name: "Shl" }, Operator { id: self.prelude.shr, name: "Shr" }]) {
+        if let Some(id) = entry.id {
+          result.push(NamedRef { id: id, name: entry.name, args: amount });
+        }
+      }
+    }
+
     if types::is_string(ty) {
       if let Some(id) = self.prelude.add {
         result.push(NamedRef { id: id, name: "Add", args: pair });
+      }
+
+      // `collect()` of characters or strings (docs/adr/0095-collections.md, Q646).
+      self.push_ref(result, self.prelude.from_iterator, "FromIterator", types::of(TypeKind::Char));
+      self.push_ref(result, self.prelude.from_iterator, "FromIterator", types::string());
+    }
+
+    // Numbers, `bool`, `char`, `String` and `StringBuilder` start from zero, `false`, `'\0'` and
+    // empty text (Q636).
+    match ty.kind {
+      TypeKind::Int(_) | TypeKind::Float(_) | TypeKind::Bool | TypeKind::Char | TypeKind::String | TypeKind::StringBuilder => {
+        if let Some(default) = self.default_ref() {
+          result.push(default);
+        }
+      }
+      _ => {}
+    }
+
+    // Rust's conversions between numbers, characters and strings (Q632, Q634).
+    for source in conversion_sources() {
+      if builtin_from(ty, source) {
+        if let Some(id) = self.prelude.from {
+          result.push(NamedRef { id: id, name: "From", args: List::from([source]) });
+        }
+      } else if builtin_try_from(ty, source) {
+        if let Some(id) = self.prelude.try_from {
+          result.push(NamedRef { id: id, name: "TryFrom", args: List::from([source, types::string()]) });
+        }
       }
     }
 
@@ -845,6 +1213,25 @@ pub class TypedModule {
     None
   }
 
+  /// The method `to_string` of `Display`, if the prelude has it.
+  pub fn display_method(self) -> Option<u32> {
+    const id = self.prelude.display?;
+
+    self.interface_def(id)?.methods.first()
+  }
+
+  /// Whether values of `ty` can be interpolated: numbers, `bool`, `char`, `String`, and types
+  /// implementing `Display` (docs/adr/0089-display-debug-and-format-specifiers.md, Q583).
+  pub fn displayable(self, ty: Type) -> bool {
+    match ty.kind {
+      TypeKind::Int(_) | TypeKind::Float(_) | TypeKind::Bool | TypeKind::Char | TypeKind::String | TypeKind::Never | TypeKind::Error => true,
+      _ => match self.prelude.display {
+        Some(id) => self.implements(ty, NamedRef { id: id, name: "Display", args: new List() }),
+        None => false,
+      },
+    }
+  }
+
   /// Whether values of `ty` implement `interface` (with the same type arguments). The compiler
   /// infers `Send`, which no type names after `impl`.
   pub fn implements(self, ty: Type, interface_ref: NamedRef) -> bool {
@@ -854,7 +1241,102 @@ pub class TypedModule {
       }
     }
 
-    types::contains_ref(self.implemented_refs(ty), interface_ref)
+    if types::contains_ref(self.implemented_refs(ty), interface_ref) {
+      return true;
+    }
+
+    // Every type is `From` itself, and `Into` and `TryInto` mirror `From` and `TryFrom`
+    // (docs/adr/0094-conversions-and-defaults.md, Q632–Q634).
+    const args = interface_ref.args;
+
+    if is_id(self.prelude.from, interface_ref.id) && args.len() == 1 {
+      return types::same_type(args[0], ty) || self.collection_from(ty, args[0]);
+    }
+
+    if is_id(self.prelude.into, interface_ref.id) && args.len() == 1 {
+      return self.converts(ty, args[0]);
+    }
+
+    if let Some(net) = self.net {
+      if net.to_socket_addrs == interface_ref.id {
+        return self.socket_addrs_of(ty).is_some();
+      }
+    }
+
+    if is_id(self.prelude.try_into, interface_ref.id) && args.len() == 2 {
+      return match self.prelude.try_from {
+        Some(id) => self.implements(args[0], NamedRef { id: id, name: "TryFrom", args: List::from([ty, args[1]]) }),
+        None => false,
+      };
+    }
+
+    false
+  }
+
+  /// The function of `std::net` that is `to_socket_addrs` of `ty`, for the types the compiler
+  /// implements `ToSocketAddrs` for: `String`, and `String` or an IP address with a `u16` port
+  /// (docs/adr/0100-networking.md, Q693).
+  pub fn socket_addrs_of(self, ty: Type) -> Option<String> {
+    const net = self.net?;
+
+    if types::is_string(ty) {
+      return Some("text_socket_addrs");
+    }
+
+    const elems = match ty.kind {
+      TypeKind::Tuple(found) => found,
+      _ => return None,
+    };
+
+    if elems.len() != 2 || !types::same_type(elems[1], types::int(IntTy::U16)) {
+      return None;
+    }
+
+    match elems[0].kind {
+      TypeKind::String => Some("host_socket_addrs"),
+      TypeKind::Enum(named) if named.id == net.ip => Some("ip_socket_addrs"),
+      TypeKind::Struct(named) if named.id == net.ipv4 => Some("ipv4_socket_addrs"),
+      TypeKind::Struct(named) if named.id == net.ipv6 => Some("ipv6_socket_addrs"),
+      _ => None,
+    }
+  }
+
+  /// Whether `to` is a list made from an array of its elements (`List::from`), or a map from a
+  /// list of its pairs (`Map::from`), as Rust's (Q632).
+  pub fn collection_from(self, to: Type, from: Type) -> bool {
+    match to.kind {
+      TypeKind::List(elem) => match from.kind {
+        TypeKind::Array { elem: from_elem, .. } => types::same_type(elem, from_elem),
+        _ => false,
+      },
+      TypeKind::Class(named) => {
+        if !is_id(self.prelude.map, named.id) || named.args.len() != 2 {
+          return false;
+        }
+
+        if let TypeKind::List(pair) = from.kind {
+          if let TypeKind::Tuple(elems) = pair.kind {
+            return elems.len() == 2 && types::same_type(elems[0], named.args[0]) && types::same_type(elems[1], named.args[1]);
+          }
+        }
+
+        false
+      }
+      _ => false,
+    }
+  }
+
+  /// Whether a `from` converts into a `to` without failing: the same type, or `to` is
+  /// `From<from>`.
+  pub fn converts(self, from: Type, to: Type) -> bool {
+    if types::same_type(from, to) {
+      return true;
+    }
+
+    match self.prelude.from {
+      Some(id) => self.implements(to, NamedRef { id: id, name: "From", args: List::from([from]) }),
+      None => false,
+    }
   }
 
   /// The field types of a struct type, with its type arguments.
@@ -939,6 +1421,13 @@ pub class TypedModule {
   }
 
   /// Why values of `ty` cannot be sent to another thread, or `None` if `ty` is `Send`.
+  /// The type of a `static`: what the function computing its value returns.
+  pub fn static_type(self, resolution: Resolution, id: u32) -> Option<Type> {
+    const info = resolution.statics.get(id as usize)?;
+
+    Some(self.sigs.get(info.init as usize)?.ret)
+  }
+
   pub fn not_send_reason(self, ty: Type) -> Option<String> {
     self.not_send(ty, new List())
   }
@@ -959,6 +1448,8 @@ pub class TypedModule {
       TypeKind::Function { .. } => Some("a function value can capture values that are not `Send`"),
       TypeKind::Ptr { .. } | TypeKind::CVoid => Some("raw pointers are not `Send`"),
       TypeKind::Ref { .. } | TypeKind::Slice { .. } => Some("references live while a call does"),
+      // Threads share an atomic to change it at once (docs/adr/0087-atomic-storage-and-std-sync.md, Q569).
+      TypeKind::Atomic(_) => None,
       TypeKind::Interface(interface_ref) => {
         if let Some(send) = self.prelude.send {
           if send == interface_ref.id {
@@ -982,6 +1473,15 @@ pub class TypedModule {
         if bounded { None } else { Some("the type parameter `" + param.name + "` is not bounded by `Send`") }
       }
       TypeKind::Array { elem, .. } => self.not_send(elem, visiting),
+      TypeKind::Tuple(elems) => {
+        for elem in elems {
+          if let Some(reason) = self.not_send(elem, visiting) {
+            return Some(reason);
+          }
+        }
+
+        None
+      }
       TypeKind::Option(elem) => self.not_send(elem, visiting),
       TypeKind::Result { value, error } => {
         if let Some(reason) = self.not_send(value, visiting) {
@@ -1024,6 +1524,10 @@ pub class TypedModule {
         reason
       }
       TypeKind::Class(named) => {
+        if self.guard_classes.contains(named.id) {
+          return Some("`" + named.name + "` holds a lock, which the thread that took it releases");
+        }
+
         if self.sync_classes.contains(named.id) {
           for arg in named.args {
             if let Some(reason) = self.not_send(arg, visiting) {
@@ -1095,5 +1599,81 @@ pub class TypedModule {
     }
 
     None
+  }
+}
+
+/// The interface `ToSocketAddrs` of `std::net`, and the types of IP addresses, which the compiler
+/// implements it for with a port (docs/adr/0100-networking.md, Q693).
+pub struct NetItems {
+  pub to_socket_addrs: u32;
+  pub ip: u32;
+  pub ipv4: u32;
+  pub ipv6: u32;
+}
+
+fn is_id(found: Option<u32>, id: u32) -> bool {
+  match found {
+    Some(other) => other == id,
+    None => false,
+  }
+}
+
+/// The types the prelude converts from: integers, `f32` and `char`.
+fn conversion_sources() -> List<Type> {
+  const sources: List<Type> = new List();
+
+  for int_ty in types::int_types() {
+    sources.push(types::int(int_ty));
+  }
+
+  sources.push(types::of(TypeKind::Float(FloatTy::F32)));
+  sources.push(types::of(TypeKind::Char));
+  sources
+}
+
+/// Whether the prelude makes a `to` from every `from`, as Rust's `From`
+/// (docs/adr/0094-conversions-and-defaults.md, Q632).
+pub fn builtin_from(to: Type, from: Type) -> bool {
+  match to.kind {
+    TypeKind::Int(to_int) => match from.kind {
+      TypeKind::Int(from_int) => types::int_widens(to_int, from_int),
+      TypeKind::Char => to_int == IntTy::U32 || to_int == IntTy::U64,
+      _ => false,
+    },
+    TypeKind::Float(to_float) => match from.kind {
+      TypeKind::Float(from_float) => to_float == FloatTy::F64 && from_float == FloatTy::F32,
+      TypeKind::Int(from_int) => {
+        const sized = from_int == IntTy::Isize || from_int == IntTy::Usize;
+        const bits = if to_float == FloatTy::F64 { 32u32 } else { 16u32 };
+
+        !sized && types::int_bits(from_int) <= bits
+      }
+      _ => false,
+    },
+    TypeKind::Char => match from.kind {
+      TypeKind::Int(from_int) => from_int == IntTy::U8,
+      _ => false,
+    },
+    TypeKind::String => match from.kind {
+      TypeKind::Char => true,
+      _ => false,
+    },
+    _ => false,
+  }
+}
+
+/// Whether the prelude tries to make a `to` from a `from`, with a `String` error (Q634): between
+/// integers without a `From`, and `char` from `u32`.
+pub fn builtin_try_from(to: Type, from: Type) -> bool {
+  match to.kind {
+    TypeKind::Int(to_int) => match from.kind {
+      TypeKind::Int(from_int) => to_int != from_int && !types::int_widens(to_int, from_int),
+      _ => false,
+    },
+    TypeKind::Char => match from.kind {
+      TypeKind::Int(from_int) => from_int == IntTy::U32,
+      _ => false,
+    },
+    _ => false,
   }
 }

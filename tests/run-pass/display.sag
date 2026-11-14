@@ -1,0 +1,84 @@
+// `Display` and `to_string()` (docs/adr/0089-display-debug-and-format-specifiers.md, increment 1):
+// types implementing it are interpolated with their text, as numbers and strings are.
+// expect-stdout: point (1, -2), shape a circle of radius 2.5, counter clicks: 3
+// expect-stdout: generic [(1, -2)] [7] [true]
+// expect-stdout: as Display (0, 0)
+// expect-stdout: primitives 42 2.5 true x text
+// expect-stdout: nested ((1, -2) and (0, 0))
+
+struct Point {
+  pub x: i32;
+  pub y: i32;
+}
+
+impl Display for Point {
+  fn to_string(self) -> String {
+    f"({self.x}, {self.y})"
+  }
+}
+
+enum Shape {
+  Circle(f64),
+  Square(f64),
+}
+
+impl Display for Shape {
+  fn to_string(self) -> String {
+    match self {
+      Shape::Circle(radius) => f"a circle of radius {radius}",
+      Shape::Square(side) => f"a square of side {side}",
+    }
+  }
+}
+
+class Counter {
+  pub var count: i32;
+  pub const label: String;
+
+  pub fn new(self, label: String) {
+    self.count = 0;
+    self.label = label;
+  }
+
+  pub fn click(self) {
+    self.count += 1;
+  }
+}
+
+impl Display for Counter {
+  fn to_string(self) -> String {
+    f"{self.label}: {self.count}"
+  }
+}
+
+struct Pair {
+  pub a: Point;
+  pub b: Point;
+}
+
+impl Display for Pair {
+  fn to_string(self) -> String {
+    f"({self.a} and {self.b})"
+  }
+}
+
+fn bracketed<T: Display>(value: T) -> String {
+  f"[{value}]"
+}
+
+fn main() {
+  const p = Point { x: 1, y: -2 };
+  const counter = new Counter("clicks");
+
+  for _ in 0..3 {
+    counter.click();
+  }
+
+  println(f"point {p}, shape {Shape::Circle(2.5)}, counter {counter}");
+  println(f"generic {bracketed(p)} {bracketed(7)} {bracketed(true)}");
+
+  const shown: Display = Point { x: 0, y: 0 };
+  println(f"as Display {shown}");
+  println(f"primitives {42.to_string()} {2.5.to_string()} {true.to_string()} {'x'.to_string()} {"text".to_string()}");
+  println(f"nested {Pair { a: p, b: Point { x: 0, y: 0 } }}");
+}

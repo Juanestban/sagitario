@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sagitario benchmarks</title>
+<style>
+:root { --bg: #0f1420; --fg: #e8ecf4; --muted: #8b93a7; --track: #1d2433; }
+@media (prefers-color-scheme: light) { :root { --bg: #f6f7fb; --fg: #161a24; --muted: #5b6275; --track: #e3e6ee; } }
+body { margin: 0; padding: 24px 16px; background: var(--bg); color: var(--fg); font: 15px/1.4 system-ui, sans-serif; }
+main { max-width: 860px; margin: 0 auto; } h1 { font-size: 22px; margin: 0 0 4px; } p { color: var(--muted); margin: 0 0 20px; }
+section { margin: 0 0 28px; } h2 { font-size: 17px; margin: 0 0 10px; }
+.row { display: grid; grid-template-columns: 96px 1fr 92px; gap: 10px; align-items: center; margin: 6px 0; }
+.track { background: var(--track); border-radius: 6px; height: 18px; overflow: hidden; } .bar { height: 100%; width: 0; border-radius: 6px; }
+.time { font-variant-numeric: tabular-nums; color: var(--muted); text-align: right; } button { font: inherit; padding: 6px 14px; border-radius: 6px; border: 1px solid var(--muted); background: transparent; color: var(--fg); cursor: pointer; }
+</style>
+</head>
+<body>
+<main>
+<h1>The race of the languages</h1>
+<p>2026-11-12-windows-x86_64.json: the median time of each program. The fastest arrives in 1 s, the others in proportion; the race stops at 8 s.</p>
+<p><button id="replay">Replay</button></p>
+<div id="heats"></div>
+</main>
+<script>
+const END = 8.0;
+const heats = [
+  {"name": "binary-trees", "runners": [{"name": "Sagitario", "color": "#8b5cf6", "median": 1.168897, "arrival": 4.6397, "label": "1.17 s"}, {"name": "Rust", "color": "#dea584", "median": 0.745090, "arrival": 2.9575, "label": "745.1 ms"}, {"name": "C", "color": "#5c7cfa", "median": 0.621351, "arrival": 2.4663, "label": "621.4 ms"}, {"name": "C#", "color": "#68bd45", "median": 0.346603, "arrival": 1.3758, "label": "346.6 ms"}, {"name": "JavaScript", "color": "#f0db4f", "median": 0.251934, "arrival": 1.0000, "label": "251.9 ms"}, {"name": "Python", "color": "#37a0dc", "median": 3.398550, "arrival": 13.4898, "label": "3.40 s"}]},
+  {"name": "channels", "runners": [{"name": "Sagitario", "color": "#8b5cf6", "median": 0.044420, "arrival": 3.2571, "label": "44.4 ms"}, {"name": "Rust", "color": "#dea584", "median": 0.013638, "arrival": 1.0000, "label": "13.6 ms"}, {"name": "C", "color": "#5c7cfa", "median": 0.018671, "arrival": 1.3690, "label": "18.7 ms"}, {"name": "C#", "color": "#68bd45", "median": 0.146517, "arrival": 10.7433, "label": "146.5 ms"}, {"name": "JavaScript", "color": "#f0db4f", "median": 0.851999, "arrival": 62.4724, "label": "852.0 ms"}, {"name": "Python", "color": "#37a0dc", "median": 0.586804, "arrival": 43.0271, "label": "586.8 ms"}]},
+  {"name": "hello", "runners": [{"name": "Sagitario", "color": "#8b5cf6", "median": 0.008386, "arrival": 1.0904, "label": "8.4 ms"}, {"name": "Rust", "color": "#dea584", "median": 0.007691, "arrival": 1.0000, "label": "7.7 ms"}, {"name": "C", "color": "#5c7cfa", "median": 0.009956, "arrival": 1.2945, "label": "10.0 ms"}, {"name": "C#", "color": "#68bd45", "median": 0.063006, "arrival": 8.1922, "label": "63.0 ms"}, {"name": "JavaScript", "color": "#f0db4f", "median": 0.064361, "arrival": 8.3684, "label": "64.4 ms"}, {"name": "Python", "color": "#37a0dc", "median": 0.032233, "arrival": 4.1910, "label": "32.2 ms"}]},
+  {"name": "map-count", "runners": [{"name": "Sagitario", "color": "#8b5cf6", "median": 0.143222, "arrival": 4.5010, "label": "143.2 ms"}, {"name": "Rust", "color": "#dea584", "median": 0.048672, "arrival": 1.5296, "label": "48.7 ms"}, {"name": "C", "color": "#5c7cfa", "median": 0.031820, "arrival": 1.0000, "label": "31.8 ms"}, {"name": "C#", "color": "#68bd45", "median": 0.312897, "arrival": 9.8333, "label": "312.9 ms"}, {"name": "JavaScript", "color": "#f0db4f", "median": 0.247471, "arrival": 7.7772, "label": "247.5 ms"}, {"name": "Python", "color": "#37a0dc", "median": 0.625363, "arrival": 19.6531, "label": "625.4 ms"}]},
+  {"name": "n-body", "runners": [{"name": "Sagitario", "color": "#8b5cf6", "median": 0.116875, "arrival": 1.3265, "label": "116.9 ms"}, {"name": "Rust", "color": "#dea584", "median": 0.088110, "arrival": 1.0000, "label": "88.1 ms"}, {"name": "C", "color": "#5c7cfa", "median": 0.118743, "arrival": 1.3477, "label": "118.7 ms"}, {"name": "C#", "color": "#68bd45", "median": 0.198229, "arrival": 2.2498, "label": "198.2 ms"}, {"name": "JavaScript", "color": "#f0db4f", "median": 0.240434, "arrival": 2.7288, "label": "240.4 ms"}, {"name": "Python", "color": "#37a0dc", "median": 11.507750, "arrival": 130.6066, "label": "11.51 s"}]},
+  {"name": "parallel-sum", "runners": [{"name": "Sagitario", "color": "#8b5cf6", "median": 0.018023, "arrival": 1.0069, "label": "18.0 ms"}, {"name": "Rust", "color": "#dea584", "median": 0.018569, "arrival": 1.0374, "label": "18.6 ms"}, {"name": "C", "color": "#5c7cfa", "median": 0.017899, "arrival": 1.0000, "label": "17.9 ms"}, {"name": "C#", "color": "#68bd45", "median": 0.085030, "arrival": 4.7505, "label": "85.0 ms"}, {"name": "JavaScript", "color": "#f0db4f", "median": 0.269504, "arrival": 15.0569, "label": "269.5 ms"}, {"name": "Python", "color": "#37a0dc", "median": 2.859146, "arrival": 159.7378, "label": "2.86 s"}]},
+  {"name": "sort", "runners": [{"name": "Sagitario", "color": "#8b5cf6", "median": 0.207039, "arrival": 2.7110, "label": "207.0 ms"}, {"name": "Rust", "color": "#dea584", "median": 0.076370, "arrival": 1.0000, "label": "76.4 ms"}, {"name": "C", "color": "#5c7cfa", "median": 0.265620, "arrival": 3.4781, "label": "265.6 ms"}, {"name": "C#", "color": "#68bd45", "median": 0.323708, "arrival": 4.2387, "label": "323.7 ms"}, {"name": "JavaScript", "color": "#f0db4f", "median": 1.210008, "arrival": 15.8440, "label": "1.21 s"}, {"name": "Python", "color": "#37a0dc", "median": 1.197748, "arrival": 15.6835, "label": "1.20 s"}]},
+  {"name": "spectral-norm", "runners": [{"name": "Sagitario", "color": "#8b5cf6", "median": 0.052304, "arrival": 1.0000, "label": "52.3 ms"}, {"name": "Rust", "color": "#dea584", "median": 0.054873, "arrival": 1.0491, "label": "54.9 ms"}, {"name": "C", "color": "#5c7cfa", "median": 0.054809, "arrival": 1.0479, "label": "54.8 ms"}, {"name": "C#", "color": "#68bd45", "median": 0.117760, "arrival": 2.2515, "label": "117.8 ms"}, {"name": "JavaScript", "color": "#f0db4f", "median": 0.117211, "arrival": 2.2410, "label": "117.2 ms"}, {"name": "Python", "color": "#37a0dc", "median": 6.951295, "arrival": 132.9018, "label": "6.95 s"}]},
+  {"name": "word-count", "runners": [{"name": "Sagitario", "color": "#8b5cf6", "median": 0.445943, "arrival": 6.8267, "label": "445.9 ms"}, {"name": "Rust", "color": "#dea584", "median": 0.065323, "arrival": 1.0000, "label": "65.3 ms"}, {"name": "C", "color": "#5c7cfa", "median": 0.109921, "arrival": 1.6827, "label": "109.9 ms"}, {"name": "C#", "color": "#68bd45", "median": 0.221868, "arrival": 3.3965, "label": "221.9 ms"}, {"name": "JavaScript", "color": "#f0db4f", "median": 0.397326, "arrival": 6.0825, "label": "397.3 ms"}, {"name": "Python", "color": "#37a0dc", "median": 0.429554, "arrival": 6.5758, "label": "429.6 ms"}]}
+];
+const root = document.getElementById('heats');
+const rows = [];
+for (const heat of heats) {
+  const section = document.createElement('section');
+  const title = document.createElement('h2');
+  title.textContent = heat.name;
+  section.append(title);
+  for (const runner of heat.runners) {
+    const row = document.createElement('div');
+    row.className = 'row';
+    const name = document.createElement('div');
+    name.textContent = runner.name;
+    const track = document.createElement('div');
+    track.className = 'track';
+    const bar = document.createElement('div');
+    bar.className = 'bar';
+    bar.style.background = runner.color;
+    track.append(bar);
+    const time = document.createElement('div');
+    time.className = 'time';
+    row.append(name, track, time);
+    section.append(row);
+    rows.push({ runner, bar, time });
+  }
+  root.append(section);
+}
+let start = 0;
+function frame(now) {
+  const t = (now - start) / 1000;
+  for (const { runner, bar, time } of rows) {
+    const done = Math.min(t / runner.arrival, 1);
+    bar.style.width = (done * 100) + '%';
+    if (t >= runner.arrival) { time.textContent = runner.label; }
+    else if (t >= END) { time.textContent = runner.label + ' (' + (runner.arrival / 1).toFixed(0) + 'x)'; }
+    else { time.textContent = ''; }
+  }
+  if (t < END) { requestAnimationFrame(frame); }
+}
+function play() { start = performance.now(); requestAnimationFrame(frame); }
+document.getElementById('replay').addEventListener('click', play);
+play();
+</script>
+</body>
+</html>

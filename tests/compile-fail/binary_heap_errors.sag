@@ -1,0 +1,16 @@
+// `std::collections::BinaryHeap` (docs/adr/0095-collections.md, Q651).
+use std::collections::BinaryHeap;
+
+struct Plain {
+  pub x: i32;
+}
+
+fn main() {
+  const _floats = new BinaryHeap<f64>(); //~ ERROR E0330
+  const _plain = BinaryHeap::from(List::from([Plain { x: 1 }])); //~ ERROR E0330
+  const heap = BinaryHeap::from(List::from([1, 2]));
+
+  heap.push("a"); //~ ERROR E0300
+
+  const _wrong = BinaryHeap::with_compare((a: i32, b: i32) => a < b); //~ ERROR E0300
+}

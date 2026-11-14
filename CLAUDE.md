@@ -13,6 +13,9 @@ a seed of the C it generates for itself (`bootstrap/`).
   (installers, `nova update self`, `async`/`await`, ...) unless asked.
 
 ## Rules
+- Languages: talk with the user in Spanish, every message, including the short ones between
+  tool calls; write everything in the repository in English (code, comments, diagnostics,
+  docs, ADRs, commit messages).
 - Never invent syntax or semantics. If the spec is silent or ambiguous (see its open
   questions), stop and ask. Changing a decision requires a new ADR that supersedes the old
   one, plus a spec update.

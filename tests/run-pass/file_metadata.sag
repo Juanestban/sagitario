@@ -1,0 +1,82 @@
+// `fs::metadata`, `symlink_metadata` and `File::metadata`, `fs::remove_dir_all` and
+// `fs::canonicalize`, with `time::UNIX_EPOCH` and a `SystemTime` moved by a `Duration`
+// (docs/adr/0096-streams-files-and-drop.md, Q659).
+// expect-stdout: 11 true false false false | 11
+// expect-stdout: false true | true
+// expect-stdout: times true true true
+// expect-stdout: readonly true
+// expect-stdout: removed false | true
+// expect-stdout: canonical true true | NotFound
+// expect-stdout: epoch true
+
+use std::fs;
+use std::fs::File;
+use std::io;
+use std::io::ErrorKind;
+use std::path;
+use std::time;
+use std::time::{Duration, SystemTime};
+
+fn main() -> Result<(), io::Error> {
+  fs::write("data.txt", "hello world")?;
+
+  const info = fs::metadata("data.txt")?;
+  const file = File::open("data.txt")?;
+
+  println(f"{info.len()} {info.is_file()} {info.is_dir()} {info.is_symlink()} {info.readonly()} | {file.metadata()?.len()}");
+
+  fs::create_dir_all("tree/inner/deep")?;
+
+  const dir = fs::metadata("tree")?;
+
+  println(f"{dir.is_file()} {dir.is_dir()} | {!fs::symlink_metadata("data.txt")?.is_symlink()}");
+
+  // The times lie between the epoch and now, and a missing one is an error of its own kind.
+  const modified = info.modified()?;
+  const now = SystemTime::now() + Duration::from_secs(60);
+  const created_ok = match info.created() {
+    Ok(found) => found > time::UNIX_EPOCH,
+    Err(error) => match error.kind() {
+      ErrorKind::Unsupported => true,
+      _ => false,
+    },
+  };
+
+  println(f"times {modified > time::UNIX_EPOCH && modified < now} {info.accessed()? < now} {created_ok}");
+
+  // A file no one may write is read-only; it starts that way on no system, so this asks one that
+  // is: the directory of the program is writable, so `readonly` of a new file is `false`.
+  println(f"readonly {!info.readonly()}");
+
+  fs::write("tree/one.txt", "1")?;
+  fs::write("tree/inner/two.txt", "2")?;
+
+  const written = File::create("tree/inner/deep/three.txt")?;
+
+  written.write_str("3")?;
+  written.close()?;
+  fs::remove_dir_all("tree")?;
+
+  const not_dir = match fs::remove_dir_all("data.txt") {
+    Ok(_) => false,
+    Err(_) => true,
+  };
+
+  println(f"removed {fs::exists("tree")} | {not_dir}");
+
+  const canonical = fs::canonicalize("data.txt")?;
+  const here = fs::canonicalize(".")?;
+  const missing = match fs::canonicalize("missing.txt") {
+    Ok(_) => "found",
+    Err(error) => match error.kind() {
+      ErrorKind::NotFound => "NotFound",
+      _ => "another kind",
+    },
+  };
+
+  println(f"canonical {canonical.ends_with("data.txt")} {canonical.len() > here.len() && path::file_name(canonical) == Some("data.txt")} | {missing}");
+  file.close()?;
+  fs::remove_file("data.txt")?;
+  println(f"epoch {(time::UNIX_EPOCH + Duration::from_secs(1)).since_unix_epoch() == Duration::from_secs(1)}");
+  Ok(())
+}

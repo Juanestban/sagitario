@@ -2,17 +2,19 @@
 //! the types that implement them and interfaces used as types. The port of the declarations part
 //! of `sagitario_types::interfaces`.
 
-use pkg::ast::{Ident, ImplBlock, TypeExpr};
+use pkg::ast::{Expr, ExprKind, Ident, ImplBlock, Path, TypeExpr, VariantFields};
 use pkg::diagnostics::Diagnostic;
 use pkg::diagnostics::codes;
-use pkg::resolve::{ParamOwner, TypeItem};
+use pkg::resolve::{ParamOwner, TypeItem, TypeRes};
 use pkg::span::Span;
-use pkg::types::{Checker, FieldDef, FnSig, InterfaceDef, NamedRef, SpanInterface, Subst, Type, TypeKind};
+use pkg::types::{Checker, FieldDef, FnSig, InterfaceDef, NamedRef, ParamRef, SELF_PARAM, SpanInterface, Subst, Type, TypeKind};
 use pkg::types;
+use pkg::types::classes;
+use pkg::types::exprs;
 use pkg::types::generic;
 use pkg::types::inheritance;
 use pkg::types::send;
-use pkg::types::typed::{ErrorTypes, ImplEntry, item_key, owner_key};
+use pkg::types::typed::{Conversion, ErrorTypes, ImplEntry, IndexCall, StaticCall, item_key, owner_key};
 
 /// Resolves the parents, fields and methods of every interface.
 pub fn interface_defs(cx: Checker) {
@@ -168,10 +170,11 @@ pub fn check_interfaces(cx: Checker) {
     }
 
     // Methods with type parameters cannot be called through a value either: their instances are
-    // not known.
+    // not known; nor can static functions, which no value chooses
+    // (docs/adr/0094-conversions-and-defaults.md, Q631).
     for method in def.methods {
       if let Some(sig) = cx.typed.sig(method) {
-        if sig_mentions_self(sig) {
+        if sig_mentions_self(sig) || sig.receiver.is_none() {
           mentions_self = true;
         }
       }
@@ -199,6 +202,191 @@ pub fn check_interfaces(cx: Checker) {
     cx.typed.interfaces[index].uses_self = uses_self;
   }
 
+  check_used_interfaces(cx);
+  check_interface_members(cx);
+  derive_defaults(cx);
+  collect_impls(cx);
+  check_derived_defaults(cx);
+  check_implementations(cx);
+  generic::check_type_bounds(cx);
+}
+
+/// The structs and enums written after `@default`, and the variant each such enum marks
+/// (docs/adr/0094-conversions-and-defaults.md, Q636).
+fn derive_defaults(cx: Checker) {
+  for index in 0..cx.resolution.structs.len() {
+    if let Some(decl) = cx.resolution.struct_decl(cx.package, index as u32) {
+      if decl.default.is_some() && !decl.is_union {
+        cx.typed.derived_defaults.insert(item_key(TypeItem::Struct(index as u32)), true);
+      }
+    }
+  }
+
+  for index in 0..cx.resolution.enums.len() {
+    const decl = match cx.resolution.enum_decl(cx.package, index as u32) {
+      Some(found) => found,
+      None => continue,
+    };
+    var marked: Option<u32> = None;
+
+    for position in 0..decl.variants.len() {
+      const variant = decl.variants[position];
+      const span = match variant.default {
+        Some(found) => found,
+        None => continue,
+      };
+
+      if decl.default.is_none() {
+        cx.diagnostics.push(
+          Diagnostic::error(codes::INVALID_ATTRIBUTE, span, "`@default` marks a variant of an enum written after `@default`")
+            .with_help("write `@default` before `enum " + decl.name.name + "` too"),
+        );
+        continue;
+      }
+
+      const has_fields = match variant.fields {
+        VariantFields::Unit => false,
+        _ => true,
+      };
+
+      if has_fields {
+        cx.diagnostics.push(
+          Diagnostic::error(codes::INVALID_ATTRIBUTE, span, "the default variant `" + variant.name.name + "` has fields")
+            .with_note("as in Rust, the default of an enum is a variant without fields")
+            .with_help("implement `Default` for `" + decl.name.name + "` by hand to give its fields values"),
+        );
+      } else if marked.is_some() {
+        cx.error(codes::INVALID_ATTRIBUTE, span, "only one variant of `" + decl.name.name + "` is its default");
+      } else {
+        marked = Some(position as u32);
+      }
+    }
+
+    if let Some(span) = decl.default {
+      match marked {
+        Some(position) => {
+          cx.typed.derived_defaults.insert(item_key(TypeItem::Enum(index as u32)), true);
+          cx.typed.default_variants.insert(index as u32, position);
+        }
+        None => {
+          var any_marked = false;
+
+          for variant in decl.variants {
+            any_marked = any_marked || variant.default.is_some();
+          }
+
+          // A variant with fields was reported.
+          if !any_marked {
+            cx.diagnostics.push(
+              Diagnostic::error(codes::INVALID_ATTRIBUTE, span, "the enum `" + decl.name.name + "` marks no variant as its default")
+                .with_help("write `@default` before the variant without fields that is the default"),
+            );
+          }
+        }
+      }
+    }
+  }
+}
+
+/// The fields of a struct written after `@default` have defaults, and the type does not also
+/// implement `Default` by hand.
+fn check_derived_defaults(cx: Checker) {
+  const default = match cx.typed.default_ref() {
+    Some(found) => found,
+    None => return,
+  };
+  const items: List<TypeItem> = new List();
+
+  for index in 0..cx.resolution.structs.len() {
+    items.push(TypeItem::Struct(index as u32));
+  }
+
+  for index in 0..cx.resolution.enums.len() {
+    items.push(TypeItem::Enum(index as u32));
+  }
+
+  for item in items {
+    if !cx.typed.derived_defaults.contains_key(item_key(item)) {
+      continue;
+    }
+
+    const written = match item {
+      TypeItem::Struct(id) => match cx.resolution.struct_decl(cx.package, id) {
+        Some(decl) => decl.default,
+        None => None,
+      },
+      TypeItem::Enum(id) => match cx.resolution.enum_decl(cx.package, id) {
+        Some(decl) => decl.default,
+        None => None,
+      },
+      _ => None,
+    };
+    const span = match written {
+      Some(found) => found,
+      None => continue,
+    };
+    const name = cx.resolution.type_name(cx.package, item);
+
+    if let Some(entry) = cx.typed.impls.get(item_key(item)) {
+      if types::contains_ref(entry.interfaces, default) {
+        cx.diagnostics.push(
+          Diagnostic::error(codes::DUPLICATE_IMPL, span, "`" + name + "` implements `Default` by hand and with `@default`")
+            .with_help("remove `@default` or the implementation"),
+        );
+      }
+    }
+
+    if let TypeItem::Struct(id) = item {
+      if let Some(def) = cx.typed.struct_def(id) {
+        for field in def.fields {
+          if !types::is_error(field.ty) && !cx.typed.implements(field.ty, default) {
+            cx.diagnostics.push(
+              Diagnostic::error(codes::UNSATISFIED_BOUND, field.span, "the field `" + field.name + "` of `" + name + "` has no default: `" + types::text(field.ty) + "` does not implement `Default`")
+                .with_label(span, "`@default` gives every field its default")
+                .with_help("implement `Default` for `" + types::text(field.ty) + "`, or for `" + name + "` by hand"),
+            );
+          }
+        }
+      }
+    }
+  }
+}
+
+/// `i32::default()`, `String::default()`...: the default of a number, a character or a string
+/// (Q636), named by the prelude function's `name`.
+pub fn primitive_default(cx: Checker, value: Expr, name: String, args: List<Expr>) -> Option<Type> {
+  if !name.ends_with("::default") {
+    return None;
+  }
+
+  const prefix = name.split("::").first()?;
+  var self_ty: Option<Type> = None;
+
+  if let Some(int_ty) = types::int_from_name(prefix) {
+    self_ty = Some(types::int(int_ty));
+  } else if let Some(float_ty) = types::float_from_name(prefix) {
+    self_ty = Some(types::of(TypeKind::Float(float_ty)));
+  } else if prefix == "char" {
+    self_ty = Some(types::of(TypeKind::Char));
+  } else if prefix == "String" {
+    self_ty = Some(types::string());
+  }
+
+  const ty = self_ty?;
+  const function = match cx.typed.prelude.default {
+    Some(id) => cx.typed.interface_def(id)?.methods.first()?,
+    None => return None,
+  };
+
+  exprs::check_args(cx, value.span, "function", new List(), args);
+  cx.typed.static_calls.insert(value.id, StaticCall { function: function, self_ty: ty });
+
+  Some(ty)
+}
+
+/// The interfaces written as types since the last call, in declarations or, called again after
+/// them, in function bodies: `Send` and those that mention `Self` cannot be types.
+pub fn check_used_interfaces(cx: Checker) {
   const used = cx.interface_types;
 
   cx.interface_types = new List<SpanInterface>();
@@ -210,20 +398,15 @@ pub fn check_interfaces(cx: Checker) {
       if def.uses_self {
         cx.diagnostics.push(
           Diagnostic::error(codes::INVALID_IMPL, entry.span, "the interface `" + def.name + "` cannot be used as a type")
-            .with_note("it mentions `Self` or has methods with type parameters, which a value of the interface could not resolve")
+            .with_note("it mentions `Self`, has methods with type parameters or has static functions, which a value of the interface could not resolve")
             .with_help("use it as the bound of a type parameter instead"),
         );
       }
     }
   }
-
-  check_interface_members(cx);
-  collect_impls(cx);
-  check_implementations(cx);
-  generic::check_type_bounds(cx);
 }
 
-/// The methods of interfaces take `self` and have unique names among their ancestors.
+/// The methods and static functions of interfaces have unique names among their ancestors.
 fn check_interface_members(cx: Checker) {
   for index in 0..cx.typed.interfaces.len() {
     const id = index as u32;
@@ -239,10 +422,6 @@ fn check_interface_members(cx: Checker) {
       const function = decl.functions[position];
 
       position += 1;
-
-      if function.self_param.is_none() {
-        cx.error(codes::INVALID_IMPL, function.name.span, "the interface method `" + function.name.name + "` must take `self`");
-      }
 
       // A method reached through two parents is the same method; two with one name are not.
       for parent in cx.typed.interfaces[index].parents {
@@ -313,6 +492,11 @@ fn collect_impls(cx: Checker) {
     for ty in entry.types {
       if let Some(interface_ref) = supertype_interface(cx, ty) {
         check_new_impl(cx, entry.item, implemented, blocks, interface_ref, None, ty.span);
+
+        if is_mirrored(cx, interface_ref) {
+          continue;
+        }
+
         implemented.push(interface_ref);
         blocks.push(None);
         spans.push(ty.span);
@@ -329,6 +513,11 @@ fn collect_impls(cx: Checker) {
 
       if let Some(interface_ref) = supertype_interface(cx, block.implemented) {
         check_new_impl(cx, entry.item, implemented, blocks, interface_ref, Some(block_id), block.implemented.span);
+
+        if is_mirrored(cx, interface_ref) {
+          continue;
+        }
+
         implemented.push(interface_ref);
         blocks.push(Some(block_id));
         spans.push(block.implemented.span);
@@ -343,11 +532,42 @@ fn collect_impls(cx: Checker) {
   cx.owner = None;
 }
 
+/// `Into` or `TryInto`, which mirror `From` and `TryFrom`.
+fn is_mirrored(cx: Checker, interface_ref: NamedRef) -> bool {
+  is_prelude(cx.typed.prelude.into, interface_ref.id) || is_prelude(cx.typed.prelude.try_into, interface_ref.id)
+}
+
 /// A type implements each instantiation of an interface once; its header names each interface
 /// once, the other instantiations going in blocks (docs/adr/0081-operator-overloading.md, Q508).
 fn check_new_impl(cx: Checker, item: TypeItem, implemented: List<NamedRef>, blocks: List<Option<u32>>, interface_ref: NamedRef, block: Option<u32>, span: Span) {
   const type_name = cx.resolution.type_name(cx.package, item);
   const shown = types::text(types::interface_type(interface_ref));
+
+  // The compiler gives `Into` and `TryInto` from `From` and `TryFrom`, so the two cannot disagree
+  // (docs/adr/0094-conversions-and-defaults.md, Q633).
+  // Structs and enums are copied: no copy is the last (docs/adr/0096-streams-files-and-drop.md, Q655).
+  if is_prelude(cx.typed.prelude.drop, interface_ref.id) {
+    if let TypeItem::Class(_) = item {
+    } else {
+      cx.diagnostics.push(
+        Diagnostic::error(codes::INVALID_IMPL, span, "only classes implement `Drop`: `" + type_name + "` is copied, and no copy is the last")
+          .with_help("hold the resource in a class, whose instances are shared and freed when the last reference goes"),
+      );
+
+      return;
+    }
+  }
+
+  if is_mirrored(cx, interface_ref) {
+    const mirrored = if is_prelude(cx.typed.prelude.into, interface_ref.id) { "From" } else { "TryFrom" };
+
+    cx.diagnostics.push(
+      Diagnostic::error(codes::INVALID_IMPL, span, "`" + shown + "` cannot be implemented: the compiler gives it from `" + mirrored + "`")
+        .with_help("implement `" + mirrored + "<" + type_name + ">` for the type it converts into"),
+    );
+
+    return;
+  }
 
   for index in 0..implemented.len() {
     const previous = implemented[index];
@@ -444,9 +664,37 @@ fn check_implementations(cx: Checker) {
       }
     }
 
+    // The compiler makes the default of a type written after `@default`, and the default of
+    // `Map` and what it collects into (docs/adr/0094-conversions-and-defaults.md, Q636, and
+    // docs/adr/0095-collections.md, Q646).
+    const is_map = match item {
+      TypeItem::Class(id) => is_prelude(cx.typed.prelude.map, id),
+      _ => false,
+    };
+    const made_default = is_map || cx.typed.derived_defaults.contains_key(item_key(item));
+
     for interface_ref in implemented {
       var is_own = false;
       var block: Option<u32> = None;
+
+      if made_default && is_prelude(cx.typed.prelude.default, interface_ref.id) {
+        continue;
+      }
+
+      if is_map && is_prelude(cx.typed.prelude.from_iterator, interface_ref.id) {
+        continue;
+      }
+
+      // A `VecDeque`, `BTreeMap` or `BTreeSet` compares as a list of its elements
+      // (docs/adr/0095-collections.md, Q648-Q650).
+      const by_elements = match item {
+        TypeItem::Class(id) => cx.typed.compared_elements(id),
+        _ => false,
+      };
+
+      if by_elements && (is_prelude(cx.typed.prelude.eq, interface_ref.id) || is_prelude(cx.typed.prelude.ord, interface_ref.id) || is_prelude(cx.typed.prelude.hash, interface_ref.id)) {
+        continue;
+      }
 
       for index in 0..own.len() {
         if !is_own && types::same_ref(own[index], interface_ref) {
@@ -647,6 +895,10 @@ fn check_methods(cx: Checker, item: TypeItem, interface_ref: NamedRef, own: bool
       None => continue,
     };
     const name = decl.name.name;
+    // A static function is the type's own: subclasses do not inherit it, nor the blocks of
+    // their ancestors (Q631).
+    const is_static = decl.self_param.is_none();
+    const what = if is_static { "static function" } else { "method" };
     var candidate: Option<u32> = None;
 
     if let Some(block_id) = block {
@@ -659,6 +911,8 @@ fn check_methods(cx: Checker, item: TypeItem, interface_ref: NamedRef, own: bool
           }
         }
       }
+    } else if is_static {
+      candidate = cx.resolution.type_function(cx.package, item, name);
     } else {
       // An inherited block of an ancestor class, or else the type's own methods.
       candidate = cx.typed.block_method(cx.resolution, cx.package, self_ty, interface_ref, name);
@@ -674,7 +928,14 @@ fn check_methods(cx: Checker, item: TypeItem, interface_ref: NamedRef, own: bool
     var found: Option<u32> = None;
 
     if let Some(function) = candidate {
-      if cx.resolution.is_method(cx.package, function) {
+      const takes_self = match cx.resolution.fn_decl(cx.package, function) {
+        Some(found_decl) => found_decl.self_param.is_some(),
+        None => false,
+      };
+
+      const fits = if is_static { !takes_self } else { cx.resolution.is_method(cx.package, function) };
+
+      if fits {
         found = Some(function);
       }
     }
@@ -684,7 +945,7 @@ fn check_methods(cx: Checker, item: TypeItem, interface_ref: NamedRef, own: bool
       None => {
         if decl.is_abstract && !is_abstract {
           cx.diagnostics.push(
-            Diagnostic::error(codes::INVALID_IMPL, span, "`" + type_name + "` does not implement the method `" + name + "` of `" + interface_name + "`")
+            Diagnostic::error(codes::INVALID_IMPL, span, "`" + type_name + "` does not implement the " + what + " `" + name + "` of `" + interface_name + "`")
               .with_label(decl.name.span, "required here")
               .with_help(if block.is_some() { "add `fn " + name + "(...)` to the block" } else { "add `pub fn " + name + "(...)`" }),
           );
@@ -725,7 +986,7 @@ fn check_methods(cx: Checker, item: TypeItem, interface_ref: NamedRef, own: bool
       );
     } else if let Some(expected_sig) = expected {
       if let Some(actual_sig) = actual {
-        if !same_generics || !types::same_types(actual_sig.params, expected_sig.params) || !types::same_type(actual_sig.ret, expected_sig.ret) {
+        if !same_generics || !types::same_types(actual_sig.params, expected_sig.params) || !same_or_subclass(cx, actual_sig.ret, expected_sig.ret) {
           cx.diagnostics.push(
             Diagnostic::error(codes::INVALID_IMPL, implementation.name.span, "`" + name + "` must have the signature declared in `" + interface_name + "`")
               .with_label(decl.name.span, "declared here")
@@ -734,6 +995,23 @@ fn check_methods(cx: Checker, item: TypeItem, interface_ref: NamedRef, own: bool
         }
       }
     }
+  }
+}
+
+/// Whether the result of an implementation fits the one its interface declares: the same type,
+/// or an instance of a subclass of the class declared, as `iter()` of a `VecDeque` gives a
+/// `DoubleEndedIter<T>` for `Iter<T>` (docs/adr/0095-collections.md, Q648).
+fn same_or_subclass(cx: Checker, actual: Type, expected: Type) -> bool {
+  if types::same_type(actual, expected) {
+    return true;
+  }
+
+  match actual.kind {
+    TypeKind::Class(actual_ref) => match expected.kind {
+      TypeKind::Class(expected_ref) => types::contains_ref(cx.typed.class_ancestors(actual_ref), expected_ref),
+      _ => false,
+    },
+    _ => false,
   }
 }
 
@@ -862,4 +1140,666 @@ pub fn interface_method_of(cx: Checker, ty: Type, name: String) -> Option<u32> {
   }
 
   None
+}
+
+/// `T::name(args)`, `Self::name(args)` inside an interface, or `Type::name(args)`: a static
+/// function of an interface the type implements or is bounded by
+/// (docs/adr/0094-conversions-and-defaults.md, Q631).
+pub fn static_call(cx: Checker, value: Expr, path: Path, target: TypeRes, name: String, args: List<Expr>, expected: Option<Type>) -> Type {
+  const span = match path.segments.last() {
+    Some(last) => last.span,
+    None => path.span,
+  };
+  var item: Option<TypeItem> = None;
+  const self_ty = match target {
+    TypeRes::Param { owner, index } => cx.identity_args(owner).get(index as usize).unwrap_or(types::error()),
+    TypeRes::Builtin => match cx.owner {
+      Some(TypeItem::Interface(id)) => types::of(TypeKind::Param(ParamRef { owner: ParamOwner::Item(TypeItem::Interface(id)), index: SELF_PARAM, name: "Self" })),
+      _ => types::error(),
+    },
+    TypeRes::Item(found) => {
+      item = Some(found);
+      cx.type_ref(found)
+    }
+    _ => types::error(),
+  };
+
+  if types::is_error(self_ty) {
+    exprs::unchecked_args(cx, args);
+
+    return types::error();
+  }
+
+  // The static functions of that name in the interfaces of the type and their ancestors.
+  const seen: List<NamedRef> = new List();
+  const refs: List<NamedRef> = new List();
+  const functions: List<u32> = new List();
+
+  for implemented in cx.typed.implemented_refs(self_ty) {
+    for interface_ref in cx.typed.interface_ancestor_refs(implemented) {
+      if types::contains_ref(seen, interface_ref) {
+        continue;
+      }
+
+      seen.push(interface_ref);
+
+      if let Some(def) = cx.typed.interface_def(interface_ref.id) {
+        for method in def.methods {
+          if let Some(decl) = cx.resolution.fn_decl(cx.package, method) {
+            if decl.name.name == name && decl.self_param.is_none() {
+              refs.push(interface_ref);
+              functions.push(method);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  const shown = types::text(self_ty);
+
+  // `U::from(x)` and `U::try_from(x)` choose among the conversions of `U` by the type of `x`
+  // (docs/adr/0094-conversions-and-defaults.md, Q632 and Q634).
+  if name == "from" || name == "try_from" {
+    const conversion = if name == "from" { cx.typed.prelude.from } else { cx.typed.prelude.try_from };
+    var only_conversions = conversion.is_some();
+
+    for interface_ref in refs {
+      only_conversions = only_conversions && is_prelude(conversion, interface_ref.id);
+    }
+
+    if only_conversions && (name == "from" || !functions.is_empty()) {
+      return conversion_call(cx, value, path, self_ty, item, name == "try_from", args, expected);
+    }
+  }
+
+  if functions.is_empty() {
+    var diagnostic = Diagnostic::error(codes::UNRESOLVED_NAME, span, "no function `" + name + "` in `" + shown + "`");
+
+    if let TypeKind::Param(_) = self_ty.kind {
+      diagnostic = diagnostic.with_help("bound `" + shown + "` by an interface that declares `fn " + name + "(...)`");
+    }
+
+    cx.diagnostics.push(diagnostic);
+    exprs::unchecked_args(cx, args);
+
+    return types::error();
+  }
+
+  if functions.len() > 1 {
+    const names: List<String> = new List();
+
+    for interface_ref in refs {
+      names.push("`" + types::text(types::interface_type(interface_ref)) + "`");
+    }
+
+    cx.diagnostics.push(
+      Diagnostic::error(codes::AMBIGUOUS_METHOD, span, "the static function `" + name + "` of `" + shown + "` is ambiguous")
+        .with_note("it is declared in " + names.join(" and ")),
+    );
+    exprs::unchecked_args(cx, args);
+
+    return types::error();
+  }
+
+  const function = functions[0];
+  const interface_ref = refs[0];
+  const sig = match cx.typed.sig(function) {
+    Some(found) => types::substitute_sig(found, interface_subst(interface_ref, self_ty)),
+    None => {
+      exprs::unchecked_args(cx, args);
+
+      return types::error();
+    }
+  };
+  const owner_count = match item {
+    Some(found) => cx.generic_count(ParamOwner::Item(found)),
+    None => 0,
+  };
+  const own_count = cx.generic_count(ParamOwner::Fn(function));
+  const explicit = generic::explicit_args(cx, path);
+  const last = if path.segments.is_empty() { 0usize } else { path.segments.len() - 1 };
+  const unknowns = new generic::Unknowns();
+
+  // The type's arguments are written (`Box<i32>::default()`), its own with `Self`, or inferred.
+  if let Some(found) = item {
+    if owner_count > 0 {
+      var given: Option<List<Type>> = None;
+
+      if let Some(written) = explicit {
+        if written.segment != last {
+          given = Some(generic::given_args(cx, path.span, "`" + cx.resolution.type_name(cx.package, found) + "`", owner_count, written.args));
+        }
+      }
+
+      if given.is_none() {
+        if let Some(first) = path.segments.first() {
+          if first.name == "Self" {
+            given = Some(cx.identity_args(ParamOwner::Item(found)));
+          }
+        }
+      }
+
+      unknowns.add(ParamOwner::Item(found), owner_count, given);
+    }
+  }
+
+  var own_given: Option<List<Type>> = None;
+
+  if let Some(written) = explicit {
+    if written.segment == last {
+      own_given = Some(generic::given_args(cx, path.span, "`" + name + "`", own_count, written.args));
+    }
+  }
+
+  unknowns.add(ParamOwner::Fn(function), own_count, own_given);
+
+  if let Some(ty) = expected {
+    unknowns.unify(sig.ret, ty);
+  }
+
+  generic::generic_args(cx, value.span, "function", sig.params, args, Subst::empty(), unknowns);
+
+  const subst = generic::finish_inference(cx, value.span, "`" + name + "`", unknowns);
+  const chosen = types::substitute_ref(interface_ref, subst);
+  const own = subst.args_of(ParamOwner::Fn(function)).unwrap_or(new List());
+
+  generic::record_call_args(cx, value.id, Subst::of(ParamOwner::Item(TypeItem::Interface(chosen.id)), chosen.args), function, own);
+  cx.typed.static_calls.insert(value.id, StaticCall { function: function, self_ty: types::substitute(self_ty, subst) });
+
+  types::substitute(sig.ret, subst)
+}
+
+fn is_prelude(found: Option<u32>, id: u32) -> bool {
+  match found {
+    Some(other) => other == id,
+    None => false,
+  }
+}
+
+/// The conversions into a type: the source of each `From` it implements, itself first, or the
+/// source and the error of each `TryFrom`.
+struct Sources {
+  pub from: List<Type>;
+  pub errors: List<Type>;
+}
+
+fn conversion_sources(cx: Checker, self_ty: Type, fallible: bool) -> Sources {
+  const sources = Sources { from: new List(), errors: new List() };
+  const conversion = if fallible { cx.typed.prelude.try_from } else { cx.typed.prelude.from };
+  const arity = if fallible { 2usize } else { 1usize };
+
+  // Every type is `From` itself (Q632); `TryFrom` has no such implementation (Q634).
+  if !fallible {
+    sources.from.push(self_ty);
+    sources.errors.push(types::error());
+  }
+
+  for interface_ref in cx.typed.implemented_refs(self_ty) {
+    if is_prelude(conversion, interface_ref.id) && interface_ref.args.len() == arity {
+      const source = interface_ref.args[0];
+
+      if !sources.from.iter().any((known) => types::same_type(known, source)) {
+        sources.from.push(source);
+        sources.errors.push(if fallible { interface_ref.args[1] } else { types::error() });
+      }
+    }
+  }
+
+  sources
+}
+
+/// The kind of number an unsuffixed literal is: `1` an integer (`true`), `1.5` a float.
+fn literal_kind(arg: Expr) -> Option<bool> {
+  match arg.kind {
+    ExprKind::Int { suffix: None, .. } => Some(true),
+    ExprKind::Float { suffix: None, .. } => Some(false),
+    _ => None,
+  }
+}
+
+/// `U::from(x)` or `U::try_from(x)`: the conversion of `U` whose source is the type of `x`
+/// (Q632, Q634). With one, `x` is checked against it; an unsuffixed literal takes the one source of
+/// its kind of number, as the operand of an operator does.
+fn conversion_call(cx: Checker, value: Expr, path: Path, written: Type, item: Option<TypeItem>, fallible: bool, args: List<Expr>, expected: Option<Type>) -> Type {
+  const what = if fallible { "TryFrom" } else { "From" };
+
+  if args.len() != 1 {
+    exprs::check_args(cx, value.span, "function", List::from([types::error()]), args);
+
+    return types::error();
+  }
+
+  const arg = args[0];
+  var self_ty = written;
+
+  // A generic type takes its arguments from the path, from `Self`, from the type expected, or
+  // from the argument of its one conversion besides itself.
+  if let Some(found) = item {
+    const count = cx.generic_count(ParamOwner::Item(found));
+
+    if count > 0 {
+      const explicit = generic::explicit_args(cx, path);
+      const last = if path.segments.is_empty() { 0usize } else { path.segments.len() - 1 };
+      const unknowns = new generic::Unknowns();
+      var given: Option<List<Type>> = None;
+
+      if let Some(found_args) = explicit {
+        if found_args.segment != last {
+          given = Some(generic::given_args(cx, path.span, "`" + cx.resolution.type_name(cx.package, found) + "`", count, found_args.args));
+        }
+      }
+
+      if given.is_none() {
+        if let Some(first) = path.segments.first() {
+          if first.name == "Self" {
+            given = Some(cx.identity_args(ParamOwner::Item(found)));
+          }
+        }
+      }
+
+      unknowns.add(ParamOwner::Item(found), count, given);
+
+      if let Some(ty) = expected {
+        var wanted = ty;
+
+        if fallible {
+          if let TypeKind::Result { value: ok, .. } = ty.kind {
+            wanted = ok;
+          }
+        }
+
+        unknowns.unify(written, wanted);
+      }
+
+      const sources = conversion_sources(cx, written, fallible);
+      const others: List<Type> = new List();
+
+      for source in sources.from {
+        if !types::same_type(source, written) {
+          others.push(source);
+        }
+      }
+
+      if others.len() == 1 {
+        generic::generic_args(cx, value.span, "function", others, args, Subst::empty(), unknowns);
+
+        const subst = generic::finish_inference(cx, value.span, "`" + what + "`", unknowns);
+
+        return record_conversion(cx, value, types::substitute(others[0], subst), types::substitute(written, subst), sources, others[0], fallible);
+      }
+
+      self_ty = types::substitute(written, generic::finish_inference(cx, value.span, "`" + what + "`", unknowns));
+    }
+  }
+
+  const sources = conversion_sources(cx, self_ty, fallible);
+  var expected_arg: Option<Type> = None;
+
+  if sources.from.len() == 1 {
+    expected_arg = Some(sources.from[0]);
+  } else if let Some(integer) = literal_kind(arg) {
+    const of_kind: List<Type> = new List();
+
+    for source in sources.from {
+      const matches = match source.kind {
+        TypeKind::Int(_) => integer,
+        TypeKind::Float(_) => !integer,
+        _ => false,
+      };
+
+      if matches {
+        of_kind.push(source);
+      }
+    }
+
+    if of_kind.len() == 1 {
+      expected_arg = Some(of_kind[0]);
+    }
+  }
+
+  const arg_ty = exprs::expr(cx, arg, expected_arg);
+
+  if types::is_error(arg_ty) || types::is_error(self_ty) {
+    return types::error();
+  }
+
+  var chosen: Option<Type> = None;
+
+  for source in sources.from {
+    if chosen.is_none() && types::same_type(arg_ty, source) {
+      chosen = Some(source);
+    }
+  }
+
+  for source in sources.from {
+    if chosen.is_none() && cx.fits(arg_ty, source) {
+      chosen = Some(source);
+    }
+  }
+
+  const source = match chosen {
+    Some(found) => found,
+    None => {
+      const names: List<String> = new List();
+
+      for known in sources.from {
+        names.push("`" + types::text(known) + "`");
+      }
+
+      const wanted = what + "<" + types::text(arg_ty) + (if fallible { ", E" } else { "" }) + ">";
+      var diagnostic = Diagnostic::error(codes::UNSATISFIED_BOUND, arg.span, "`" + types::text(self_ty) + "` does not implement `" + wanted + "`");
+
+      if !names.is_empty() {
+        diagnostic = diagnostic.with_note("it converts from " + names.join(", "));
+      }
+
+      cx.diagnostics.push(diagnostic.with_help("implement `" + wanted + "` for `" + types::text(self_ty) + "`"));
+
+      return types::error();
+    }
+  };
+
+  record_conversion(cx, value, source, self_ty, sources, source, fallible)
+}
+
+/// `i64::from(x)`, `char::try_from(n)`, `String::from(c)`...: a conversion into a number, a
+/// character or a string, named by the prelude function's `name` (`i64::from`).
+pub fn primitive_conversion(cx: Checker, value: Expr, path: Path, name: String, args: List<Expr>, expected: Option<Type>) -> Option<Type> {
+  const fallible = name.ends_with("::try_from");
+
+  if !fallible && !name.ends_with("::from") {
+    return None;
+  }
+
+  const prefix = match name.split("::").first() {
+    Some(found) => found,
+    None => return None,
+  };
+  var self_ty: Option<Type> = None;
+
+  if let Some(int_ty) = types::int_from_name(prefix) {
+    self_ty = Some(types::int(int_ty));
+  } else if let Some(float_ty) = types::float_from_name(prefix) {
+    self_ty = Some(types::of(TypeKind::Float(float_ty)));
+  } else if prefix == "char" {
+    self_ty = Some(types::of(TypeKind::Char));
+  } else if prefix == "String" {
+    self_ty = Some(types::string());
+  }
+
+  Some(conversion_call(cx, value, path, self_ty?, None, fallible, args, expected))
+}
+
+/// Records the conversion of `value` from `from` into `to`, with the error of the source `pattern`
+/// of `sources` for `TryFrom`, and gives the type of the call.
+fn record_conversion(cx: Checker, value: Expr, from: Type, to: Type, sources: Sources, pattern: Type, fallible: bool) -> Type {
+  var error: Option<Type> = None;
+
+  if fallible {
+    for index in 0..sources.from.len() {
+      if error.is_none() && types::same_type(sources.from[index], pattern) {
+        error = Some(sources.errors[index]);
+      }
+    }
+  }
+
+  cx.typed.conversions.insert(value.id, Conversion { from: from, to: to, error: error });
+
+  match error {
+    Some(found) => types::result(to, found),
+    None => to,
+  }
+}
+
+/// `x.into()` or `x.try_into()`: the conversion into the type expected, or into the one a bound
+/// `Into<U>` of the type parameter of `x` names (Q633, Q634).
+pub fn into_call(cx: Checker, value: Expr, receiver_ty: Type, method: Ident, fallible: bool, expected: Option<Type>) -> Type {
+  const name = method.name;
+  const bound_interface = if fallible { cx.typed.prelude.try_into } else { cx.typed.prelude.into };
+  var target: Option<Type> = None;
+  var error: Option<Type> = None;
+
+  if let Some(ty) = expected {
+    if fallible {
+      if let TypeKind::Result { value: ok, error: err } = ty.kind {
+        target = Some(ok);
+        error = Some(err);
+      }
+    } else {
+      target = Some(ty);
+    }
+  }
+
+  // A bound `T: Into<U>` or `T: TryInto<U, E>` names the target.
+  if target.is_none() {
+    for interface_ref in cx.typed.implemented_refs(receiver_ty) {
+      if target.is_none() && is_prelude(bound_interface, interface_ref.id) && !interface_ref.args.is_empty() {
+        target = Some(interface_ref.args[0]);
+        error = interface_ref.args.get(1);
+      }
+    }
+  }
+
+  const to = match target {
+    Some(found) => found,
+    None => {
+      cx.diagnostics.push(
+        Diagnostic::error(codes::UNKNOWN_TYPE, method.span, "cannot infer the type `" + name + "` converts `" + types::text(receiver_ty) + "` into")
+          .with_help("give the result a type: `const value: Type = x." + name + "();`"),
+      );
+
+      return types::error();
+    }
+  };
+
+  // The conversions of the prelude fail with a `String`.
+  const err = error.unwrap_or(types::string());
+
+  if types::is_error(to) || types::is_error(receiver_ty) {
+    return types::error();
+  }
+
+  const holds = match bound_interface {
+    Some(id) => cx.typed.implements(receiver_ty, NamedRef { id: id, name: if fallible { "TryInto" } else { "Into" }, args: if fallible { List::from([to, err]) } else { List::from([to]) } }),
+    None => false,
+  };
+
+  if !holds {
+    const wanted = if fallible { "TryFrom<" + types::text(receiver_ty) + ", " + types::text(err) + ">" } else { "From<" + types::text(receiver_ty) + ">" };
+
+    cx.diagnostics.push(
+      Diagnostic::error(codes::UNSATISFIED_BOUND, method.span, "`" + types::text(receiver_ty) + "` does not convert into `" + types::text(to) + "`")
+        .with_help("implement `" + wanted + "` for `" + types::text(to) + "`"),
+    );
+
+    return types::error();
+  }
+
+  cx.typed.conversions.insert(value.id, Conversion { from: receiver_ty, to: to, error: if fallible { Some(err) } else { None } });
+
+  if fallible { types::result(to, err) } else { to }
+}
+
+/// The implementations of `wanted` (`Index` or `IndexMut`) by `ty`, each once.
+fn index_refs(cx: Checker, ty: Type, wanted: Option<u32>) -> List<NamedRef> {
+  const found: List<NamedRef> = new List();
+
+  for interface_ref in cx.typed.implemented_refs(ty) {
+    if is_prelude(wanted, interface_ref.id) && interface_ref.args.len() == 2 && !types::contains_ref(found, interface_ref) {
+      found.push(interface_ref);
+    }
+  }
+
+  found
+}
+
+/// `base[position]` on a type implementing `Index<Idx, Out>`: the implementation whose `Idx` is the
+/// type of `position`, chosen as `U::from(x)` chooses its conversion, or `None` without one
+/// (docs/adr/0094-conversions-and-defaults.md, Q639).
+pub fn user_index(cx: Checker, value: Expr, base_ty: Type, position: Expr) -> Option<Type> {
+  const refs = index_refs(cx, base_ty, cx.typed.prelude.index);
+
+  if refs.is_empty() {
+    return None;
+  }
+
+  const function = cx.typed.interface_def(cx.typed.prelude.index?)?.methods.first()?;
+  var expected: Option<Type> = None;
+
+  if refs.len() == 1 {
+    expected = Some(refs[0].args[0]);
+  } else if let Some(integer) = literal_kind(position) {
+    const of_kind: List<Type> = new List();
+
+    for interface_ref in refs {
+      const matches = match interface_ref.args[0].kind {
+        TypeKind::Int(_) => integer,
+        TypeKind::Float(_) => !integer,
+        _ => false,
+      };
+
+      if matches {
+        of_kind.push(interface_ref.args[0]);
+      }
+    }
+
+    if of_kind.len() == 1 {
+      expected = Some(of_kind[0]);
+    }
+  }
+
+  const position_ty = exprs::expr(cx, position, expected);
+
+  if types::is_error(position_ty) {
+    return Some(types::error());
+  }
+
+  var chosen: Option<NamedRef> = None;
+
+  for interface_ref in refs {
+    if chosen.is_none() && types::same_type(position_ty, interface_ref.args[0]) {
+      chosen = Some(interface_ref);
+    }
+  }
+
+  for interface_ref in refs {
+    if chosen.is_none() && cx.fits(position_ty, interface_ref.args[0]) {
+      chosen = Some(interface_ref);
+    }
+  }
+
+  const found = match chosen {
+    Some(found) => found,
+    None => {
+      const names: List<String> = new List();
+
+      for interface_ref in refs {
+        names.push("`" + types::text(interface_ref.args[0]) + "`");
+      }
+
+      cx.diagnostics.push(
+        Diagnostic::error(codes::INVALID_OPERAND, position.span, "`" + types::text(base_ty) + "` cannot be indexed by `" + types::text(position_ty) + "`")
+          .with_note("it is indexed by " + names.join(", ")),
+      );
+
+      return Some(types::error());
+    }
+  };
+
+  cx.typed.index_calls.insert(value.id, IndexCall { index: function, set: None, args: found.args });
+
+  Some(found.args[1])
+}
+
+/// The indexes of types implementing `Index` in the place `target` assigns to: each needs the
+/// `IndexMut` with the same arguments, whose `index_set` writes the element back as a method of its
+/// base would (Q639).
+pub fn assigned_indexes(cx: Checker, target: Expr) {
+  var current = target;
+
+  while true {
+    match current.kind {
+      ExprKind::Field { base, .. } => {
+        current = base;
+      }
+      ExprKind::Index { base, .. } => {
+        if let Some(call) = cx.typed.index_calls.get(current.id) {
+          const base_ty = cx.typed.expr_types.get(base.id).unwrap_or(types::error());
+          var set: Option<u32> = None;
+          // The function of the type, whose changes to `self` the receiver must allow.
+          var implementation: Option<u32> = None;
+
+          for interface_ref in index_refs(cx, base_ty, cx.typed.prelude.index_mut) {
+            if types::same_types(interface_ref.args, call.args) {
+              if let Some(def) = cx.typed.interface_def(interface_ref.id) {
+                set = def.methods.first();
+              }
+
+              implementation = cx.typed.block_method(cx.resolution, cx.package, base_ty, interface_ref, "index_set");
+
+              if implementation.is_none() {
+                if let Some(item) = types::type_item_of(base_ty) {
+                  implementation = cx.resolution.type_function(cx.package, item, "index_set");
+                }
+              }
+            }
+          }
+
+          match set {
+            Some(function) => {
+              cx.typed.index_calls.insert(current.id, IndexCall { index: call.index, set: Some(function), args: call.args });
+              classes::receiver_use(cx, base, implementation.unwrap_or(function), "index_set");
+            }
+            None => {
+              const wanted = "IndexMut<" + types::text(call.args[0]) + ", " + types::text(call.args[1]) + ">";
+
+              cx.diagnostics.push(
+                Diagnostic::error(codes::INVALID_OPERAND, current.span, "cannot assign through an index of `" + types::text(base_ty) + "`, which does not implement `" + wanted + "`")
+                  .with_help("implement `" + wanted + "`, whose `index_set` writes the element back"),
+              );
+            }
+          }
+        }
+
+        current = base;
+      }
+      _ => break,
+    }
+  }
+}
+
+/// The type of the elements of a type implementing `Iterable` once, or `None`
+/// (docs/adr/0095-collections.md, Q645).
+pub fn iterable_elem(cx: Checker, ty: Type) -> Option<Type> {
+  var found: Option<Type> = None;
+
+  for interface_ref in cx.typed.implemented_refs(ty) {
+    if is_prelude(cx.typed.prelude.iterable, interface_ref.id) && interface_ref.args.len() == 1 && found.is_none() {
+      found = Some(interface_ref.args[0]);
+    }
+  }
+
+  found
+}
+
+/// `iter.collect()` into `target`, a type other than a list that implements `FromIterator` of the
+/// elements: its `from_iter` (Q646).
+pub fn collect_into(cx: Checker, value: Expr, elem: Type, target: Type) -> Option<Type> {
+  if let TypeKind::List(_) = target.kind {
+    return None;
+  }
+
+  const from_iterator = cx.typed.prelude.from_iterator?;
+  const wanted = NamedRef { id: from_iterator, name: "FromIterator", args: List::from([elem]) };
+
+  if !cx.typed.implements(target, wanted) {
+    return None;
+  }
+
+  const function = cx.typed.interface_def(from_iterator)?.methods.first()?;
+
+  cx.typed.collect_calls.insert(value.id, StaticCall { function: function, self_ty: target });
+
+  Some(target)
 }
