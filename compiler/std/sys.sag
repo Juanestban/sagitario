@@ -1010,10 +1010,24 @@ extern "C" {
   fn unlink(path: *const c_char) -> c_int;
   fn rename(from: *const c_char, to: *const c_char) -> c_int;
   fn getcwd(buffer: *mut c_char, size: usize) -> *mut c_char;
+  fn stat(path: *const c_char, info: *mut StatBuffer) -> c_int;
+}
+
+// Linux and Android use opendir/readdir/closedir for directory iteration.
+@cfg(any(target_os = "linux", target_os = "android"))
+extern "C" {
   fn opendir(path: *const c_char) -> *mut c_void;
   fn readdir(dir: *mut c_void) -> *const u8;
   fn closedir(dir: *mut c_void) -> c_int;
-  fn stat(path: *const c_char, info: *mut StatBuffer) -> c_int;
+}
+
+// macOS and iOS use getdirentries64 instead of readdir because ASan instruments the internal
+// heap buffer of readdir() and reports heap-buffer-overflow when directory entries are large
+// (Apple's libsystem uses an 8 KB initial buffer that it overwrites for long names).
+@cfg(any(target_os = "macos", target_os = "ios"))
+extern "C" {
+  fn open(path: *const c_char, flag: c_int) -> c_int;
+  fn getdirentries64(fd: c_int, buf: *mut c_char, nbytes: usize, basep: *mut u64) -> isize;
 }
 
 /// Room for C's `struct stat` on every system, read at the offset of its `st_mode`. On macOS for
@@ -1226,7 +1240,8 @@ pub fn copy_file(from: String, to: String) -> i32 {
 }
 
 /// The names in the directory `path`, without `.` and `..`; invalid UTF-8 becomes U+FFFD.
-@cfg(unix)
+/// Linux and Android use opendir/readdir/closedir.
+@cfg(any(target_os = "linux", target_os = "android"))
 pub fn read_dir(path: String) -> Result<List<String>, i32> {
   const name = match c_path(path) {
     Some(found) => found,
@@ -1258,6 +1273,83 @@ pub fn read_dir(path: String) -> Result<List<String>, i32> {
   }
 
   unsafe { closedir(dir); }
+  Ok(names)
+}
+
+/// The names in the directory `path`, without `.` and `..`; invalid UTF-8 becomes U+FFFD.
+/// macOS and iOS use getdirentries64 because ASan instruments the internal heap buffer of
+/// readdir() and reports heap-buffer-overflow when directory entries exceed the 8 KB initial
+/// buffer that Apple's libsystem allocates. getdirentries64 lets us provide our own buffer.
+@cfg(any(target_os = "macos", target_os = "ios"))
+pub fn read_dir(path: String) -> Result<List<String>, i32> {
+  const name = match c_path(path) {
+    Some(found) => found,
+    None => return Err(EINVAL),
+  };
+
+  clear_errno();
+
+  // `O_RDONLY`: open for reading only.
+  const O_RDONLY: c_int = 0;
+
+  const fd = unsafe { open(name.as_ptr(), O_RDONLY) };
+
+  if fd < 0 {
+    return Err(failure());
+  }
+
+  const names = new List<String>();
+
+  // Buffer size: 64 KB is large enough for any directory entry name (macOS MAXPATHLEN is 1024,
+  // but we use a larger buffer to read multiple entries at once for efficiency).
+  const buf_size: usize = 65536;
+  const buffer = new List<u8>();
+  buffer.resize(buf_size, 0);
+
+  var base: u64 = 0;
+
+  loop {
+    const count = unsafe { getdirentries64(fd, buffer.as_mut_ptr() as *mut c_char, buf_size, &mut base) };
+
+    if count <= 0 {
+      break;
+    }
+
+    // Parse the directory entries from the buffer.
+    // On macOS, struct dirent has:
+      //   u64  d_ino (8 bytes)
+      //   u64  d_seekoff (8 bytes)
+      //   u16  d_reclen (2 bytes)
+      //   u8   d_type (1 byte)
+      //   u8   d_namlen (1 byte)
+    //   char  d_name[] (variable length, padded)
+    // NAME_OFFSET is the offset of d_name within the struct.
+    var offset: usize = 0;
+    while offset < count as usize {
+      // Read d_reclen to know the size of this entry (d_reclen is at offset 16).
+      const reclen = unsafe {
+        const reclen_ptr = buffer.as_ptr().add(offset + 16) as *const u16;
+        *reclen_ptr as usize
+      };
+
+      if reclen == 0 {
+        break;
+      }
+
+      const text = unsafe {
+        const name_ptr = buffer.as_ptr().add(offset + NAME_OFFSET) as *const c_char;
+        string_from_c(name_ptr)
+      };
+
+      if text != "." && text != ".." {
+        names.push(text);
+      }
+
+      offset += reclen;
+    }
+  }
+
+  unsafe { close(fd); }
   Ok(names)
 }
 
