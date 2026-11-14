@@ -330,20 +330,7 @@ fn checks_deeply_nested_code(cx: Context) -> Result<(), String> {
 fn generic_code_cannot_hold_opaque_types(cx: Context) -> Result<(), String> {
   const dir = cx.temp_dir("opaque-generic")?;
   const file = path::join(dir, "opaque.sag");
-  const source = "use std::ptr;
-
-@repr(C)
-struct Window {
-  prv _unused: [u8; 0];
-}
-
-fn keep<T>(pointer: *const T) -> *const T { pointer }
-
-fn main() {
-  const window: *const Window = keep(ptr::null());
-  const _value = unsafe { ptr::read(window) };
-}
-";
+  const source = "use std::ptr;\n\n@repr(C)\nstruct Window {\n  prv _unused: [u8; 0];\n}\n\nfn keep<T>(pointer: *const T) -> *const T { pointer }\n\nfn main() {\n  const window: *const Window = keep(ptr::null());\n  const _value = unsafe { ptr::read(window) };\n}\n";
 
   support::write_file(file, source)?;
 
@@ -351,8 +338,7 @@ fn main() {
 
   expect_exit("sag build", ran, 1)?;
   expect_contains("sag build", ran.stderr, "error[E0322]: this generic code holds a value of type `Window`")?;
-  expect(!ran.stderr.contains("incomplete type"), "the C compiler saw a value of an opaque type:
-" + ran.stderr)
+  expect(!ran.stderr.contains("incomplete type"), "the C compiler saw a value of an opaque type:\n" + ran.stderr)
 }
 
 /// A C function the program declares that no library defines fails to link: an error of the
@@ -362,21 +348,13 @@ fn an_undefined_c_function_is_an_error_of_the_program(cx: Context) -> Result<(),
   const dir = cx.temp_dir("undefined-c-function")?;
   const file = path::join(dir, "missing.sag");
 
-  support::write_file(file, "extern \"C\" {
-  fn no_library_defines_this() -> i32;
-}
-
-fn main() {
-  println(f\"{unsafe { no_library_defines_this() }}\");
-}
-")?;
+  support::write_file(file, "extern \"C\" {\n  fn no_library_defines_this() -> i32;\n}\n\nfn main() {\n  println(f\"{unsafe { no_library_defines_this() }}\");\n}\n")?;
 
   const ran = sag(cx, List::from(["build", file, "--output", path::join(dir, "missing")]))?;
 
   expect_exit("sag build", ran, 1)?;
   expect_contains("sag build", ran.stderr, "error: linking failed: a C function the program declares is not defined")?;
-  expect(!ran.stderr.contains("internal compiler error"), "an internal compiler error:
-" + ran.stderr)
+  expect(!ran.stderr.contains("internal compiler error"), "an internal compiler error:\n" + ran.stderr)
 }
 
 fn missing_output_directory_exits_with_1(cx: Context) -> Result<(), String> {
