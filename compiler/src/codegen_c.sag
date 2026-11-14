@@ -98,7 +98,7 @@ pub fn generate(program: Program) -> GeneratedC {
     const function = program.functions[index];
 
     if !function.template {
-      generator.out.append(linkage(function) + generator.signature(index as u32, function) + ";\n");
+      generator.out.append(generator.linkage(index as u32, function) + generator.signature(index as u32, function) + ";\n");
     }
   }
 
@@ -126,7 +126,7 @@ pub fn generate(program: Program) -> GeneratedC {
 
   generator.entry_point(program);
 
-  const text = head + generator.long_string_definitions() + generator.fn_pointer_conversions() + generator.zeroed_definitions() + generator.out.to_string();
+  const text = head + generator.bridge_prototypes(program) + generator.long_string_definitions() + generator.fn_pointer_conversions() + generator.zeroed_definitions() + generator.out.to_string();
 
   GeneratedC { program: text, ffi: generator.ffi_unit(program, false), std_ffi: generator.ffi_unit(program, true), threads: threads, sockets: sockets }
 }
@@ -258,9 +258,76 @@ fn debug_tuple(body: List<String>, name: String, items: List<DebugItem>, all: Li
   body.push(pad + "sag_debug_end(sb, true, indent, pretty, false, \")\");");
 }
 
-/// Exported functions are called from the FFI translation unit; the others stay private.
-fn linkage(function: Function) -> String {
-  if function.export.is_some() { "" } else { "static " }
+/// The `extern "C" fn`s used as values, which the trampolines of the FFI unit call.
+fn collect_c_callbacks(body: List<Stmt>, out: List<u32>) {
+  for statement in body {
+    match statement {
+      Stmt::Assign { value, .. } | Stmt::AssignPlace { value, .. } | Stmt::Eval(value) => {
+        if let Rvalue::CFnValue(function) = value {
+          if !out.contains(function) {
+            out.push(function);
+          }
+        }
+      }
+      Stmt::If { then_body, else_body, .. } => {
+        collect_c_callbacks(then_body, out);
+        collect_c_callbacks(else_body, out);
+      }
+      Stmt::Loop(inner) | Stmt::ForRange { body: inner, .. } | Stmt::ForArray { body: inner, .. } | Stmt::ForText { body: inner, .. } => collect_c_callbacks(inner, out),
+      _ => {}
+    }
+  }
+}
+
+/// Words that cannot be the tags or the members of C's structs.
+const C_KEYWORDS: String = " auto break case char const continue default do double else enum extern float for goto if inline int long register restrict return short signed sizeof static struct switch typedef union unsigned void volatile while _Alignas _Alignof _Atomic _Bool _Complex _Generic _Imaginary _Noreturn _Static_assert _Thread_local bool true false alignas alignof static_assert thread_local typeof nullptr ";
+
+/// Whether `name` can be a tag or a member of C: an identifier of C that is no keyword, no name C
+/// reserves (`__x`, `_X`) and none of the runtime's.
+fn c_identifier(name: String) -> bool {
+  if name.is_empty() || C_KEYWORDS.contains(" " + name + " ") || name.starts_with("__") || name.starts_with("sag_") || name.starts_with("SAG_") {
+    return false;
+  }
+
+  var first = true;
+  var second_upper = false;
+  var position = 0usize;
+
+  for c in name.chars() {
+    if first && !(c.is_ascii_alphabetic() || c == '_') {
+      return false;
+    }
+
+    if !(c.is_ascii_alphanumeric() || c == '_') {
+      return false;
+    }
+
+    if position == 1 {
+      second_upper = c.is_ascii_uppercase();
+    }
+
+    first = false;
+    position += 1;
+  }
+
+  !(name.starts_with("_") && second_upper)
+}
+
+/// The tags of the `@repr(C)` types: their names, the first type of a name taking it (Q745).
+fn c_tags(layouts: Layouts) -> Map<u32, String> {
+  const tags = new Map<u32, String>();
+  const taken = new Map<String, bool>();
+
+  for index in 0..layouts.structs.len() {
+    const layout = layouts.structs[index];
+
+    if (layout.repr_c || layout.opaque) && c_identifier(layout.name) && !taken.contains_key(layout.name) {
+      taken.insert(layout.name, true);
+      tags.insert(index as u32, layout.name);
+    }
+  }
+
+  tags
 }
 
 /// A C struct to define: a struct, an enum, the objects of a class instance, or an array,
@@ -295,6 +362,24 @@ fn fn_name(id: u32) -> String {
 /// `index`.
 fn ffi_name(index: usize) -> String {
   `sag_ffi_${index}`
+}
+
+/// The types of a function's parameters.
+fn param_types(function: Function) -> List<Type> {
+  const params: List<Type> = new List();
+
+  for index in 0..function.param_count {
+    if let Some(ty) = function.locals.get(index) {
+      params.push(ty);
+    }
+  }
+
+  params
+}
+
+/// The C function pointer type of a C function of an `extern` block.
+fn c_fn_type(decl: ExternDecl) -> Type {
+  types::of(TypeKind::CFn { is_unsafe: true, params: decl.params, ret: decl.ret })
 }
 
 fn local_name(local: u32) -> String {
@@ -377,6 +462,22 @@ class Generator {
   pub var debug_all: List<Type>;
   /// Whether an interface value is written with `{x:?}`: every itable then has a debug thunk.
   pub var dyn_debug: bool;
+  /// The C tag of each `@repr(C)` type that has one, by struct id
+  /// (docs/adr/0105-c-types-at-the-ffi-boundary.md, Q743 and Q745).
+  pub const c_tags: Map<u32, String>;
+  /// The `extern "C" fn`s used as values, which C reaches through trampolines (Q744).
+  pub var c_callbacks: List<u32>;
+  /// The C function pointer types Sagitario calls through, each with a helper of the FFI unit.
+  pub const pointer_calls: List<Type>;
+  pub const pointer_call_keys: Map<String, usize>;
+  /// The C functions of `extern` blocks used as values, by index.
+  pub const extern_pointers: List<usize>;
+  /// In the FFI unit being written: the function pointer types of C's spelling (`sag_cpN`), the
+  /// tags it names, and those it defines, in order.
+  pub var c_fn_pointers: List<String>;
+  pub var c_fn_pointer_keys: Map<String, usize>;
+  pub var used_tags: List<u32>;
+  pub var tag_definitions: List<u32>;
 
   pub fn new(self, program: Program) {
     self.layouts = program.layouts;
@@ -432,6 +533,22 @@ class Generator {
     self.zeroed_keys = new Map<String, usize>();
     self.debug_all = new List();
     self.dyn_debug = false;
+    self.c_tags = c_tags(program.layouts);
+    self.c_callbacks = new List();
+
+    for function in program.functions {
+      if !function.template {
+        collect_c_callbacks(function.body, self.c_callbacks);
+      }
+    }
+
+    self.pointer_calls = new List();
+    self.pointer_call_keys = new Map<String, usize>();
+    self.extern_pointers = new List();
+    self.c_fn_pointers = new List();
+    self.c_fn_pointer_keys = new Map<String, usize>();
+    self.used_tags = new List();
+    self.tag_definitions = new List();
   }
 
   /// Every aggregate type, each after the ones it contains, as C requires.
@@ -2268,6 +2385,275 @@ class Generator {
     }
   }
 
+  /// Exported functions and those C calls back are called from the FFI translation unit; the others
+  /// stay private.
+  pub fn linkage(self, id: u32, function: Function) -> String {
+    if function.export.is_some() || self.c_callbacks.contains(id) { "" } else { "static " }
+  }
+
+  /// A key of a type that tells the names of `std::ffi` apart, which C spells differently.
+  prv fn c_key(self, ty: Type) -> String {
+    match ty.kind {
+      TypeKind::Int(_) | TypeKind::Float(_) => type_key(ty) + ":" + ty.c_name,
+      TypeKind::Ptr { mutable, pointee } | TypeKind::Ref { mutable, pointee } => (if mutable { "*m" } else { "*c" }) + self.c_key(pointee),
+      TypeKind::Option(inner) => "?" + self.c_key(inner),
+      TypeKind::CFn { params, ret, .. } => {
+        const parts: List<String> = new List();
+
+        for param in params {
+          parts.push(self.c_key(param));
+        }
+
+        "cfn(" + parts.join(",") + ")" + self.c_key(ret)
+      }
+      _ => type_key(ty),
+    }
+  }
+
+  /// The helper of the FFI unit that calls through a C function pointer of `ty`: the call is C's,
+  /// with C's types (Q744).
+  prv fn pointer_call(self, ty: Type) -> usize {
+    const key = self.c_key(ty);
+
+    if let Some(index) = self.pointer_call_keys.get(key) {
+      return index;
+    }
+
+    self.pointer_calls.push(ty);
+    self.pointer_call_keys.insert(key, self.pointer_calls.len() - 1);
+    self.pointer_calls.len() - 1
+  }
+
+  /// The prototypes, in the program's unit, of what the FFI unit defines for function pointers:
+  /// the trampolines, the helpers calling through pointers, and the getters of C functions.
+  pub fn bridge_prototypes(self, program: Program) -> String {
+    const out = new StringBuilder();
+
+    for id in self.c_callbacks {
+      if let Some(function) = program.functions.get(id as usize) {
+        out.append(self.return_type(function.ret) + ` sag_cb_${id}(` + self.c_params(param_types(function)) + ");\n");
+      }
+    }
+
+    for index in 0..self.pointer_calls.len() {
+      out.append(self.pointer_call_signature(index, false) + ";\n");
+    }
+
+    for index in self.extern_pointers {
+      if let Some(decl) = program.externs.get(index) {
+        out.append(self.c_type(c_fn_type(decl)) + ` sag_ffi_${index}_pointer(void);\n`);
+      }
+    }
+
+    if !out.is_empty() {
+      out.append("\n");
+    }
+
+    out.to_string()
+  }
+
+  /// `ret sag_call_N(sag_pM f, params)`, with the program's types or, when `c` and the parameter
+  /// list is spelled for the definition, the same.
+  prv fn pointer_call_signature(self, index: usize, named: bool) -> String {
+    const ty = self.pointer_calls[index];
+    const params = match ty.kind {
+      TypeKind::CFn { params, .. } => params,
+      _ => new List<Type>(),
+    };
+    const ret = match ty.kind {
+      TypeKind::CFn { ret, .. } => ret,
+      _ => types::unit(),
+    };
+    const parts = List::from([self.c_type(ty) + (if named { " f" } else { "" })]);
+
+    for position in 0..params.len() {
+      parts.push(self.c_type(params[position]) + (if named { ` a${position}` } else { "" }));
+    }
+
+    self.return_type(ret) + ` sag_call_${index}(` + parts.join(", ") + ")"
+  }
+
+  // ---- C's spelling in the FFI unit (docs/adr/0105-c-types-at-the-ffi-boundary.md) -----------
+
+  /// The type of `ty` as C names it in the FFI unit: the names of `std::ffi` as C's (Q742), and
+  /// the `@repr(C)` types by their tags (Q743).
+  prv fn spelled(self, ty: Type) -> String {
+    match ty.kind {
+      TypeKind::Int(_) | TypeKind::Float(_) => if ty.c_name.is_empty() { self.c_type(ty) } else { ty.c_name },
+      TypeKind::Ptr { mutable, pointee } | TypeKind::Ref { mutable, pointee } => self.spelled(pointee) + (if mutable { "" } else { " const" }) + "*",
+      TypeKind::CFn { .. } => self.c_fn_pointer(ty),
+      TypeKind::Option(inner) => if pkg::sir::is_nullable_pointer(ty) { self.spelled(inner) } else { self.c_type(ty) },
+      TypeKind::Struct(named) => match self.tag_of(ty) {
+        Some(tag) => {
+          if !self.used_tags.contains(named.id) {
+            self.used_tags.push(named.id);
+          }
+
+          (if self.layouts.is_union(ty) { "union " } else { "struct " }) + tag
+        }
+        None => self.c_type(ty),
+      },
+      _ => self.c_type(ty),
+    }
+  }
+
+  /// The tag of a non-generic `@repr(C)` type that has one.
+  prv fn tag_of(self, ty: Type) -> Option<String> {
+    match ty.kind {
+      TypeKind::Struct(named) => if named.args.is_empty() { self.c_tags.get(named.id) } else { None },
+      _ => None,
+    }
+  }
+
+  /// `sag_cpN`, the C function pointer type of `ty` with C's spelling.
+  prv fn c_fn_pointer(self, ty: Type) -> String {
+    const params = match ty.kind {
+      TypeKind::CFn { params, .. } => params,
+      _ => new List<Type>(),
+    };
+    const ret = match ty.kind {
+      TypeKind::CFn { ret, .. } => ret,
+      _ => types::unit(),
+    };
+    const parts: List<String> = new List();
+
+    for param in params {
+      parts.push(self.spelled(param));
+    }
+
+    const text = self.spelled_return(ret) + " (*NAME)(" + (if parts.is_empty() { "void" } else { parts.join(", ") }) + ")";
+
+    if let Some(index) = self.c_fn_pointer_keys.get(text) {
+      return `sag_cp${index}`;
+    }
+
+    self.c_fn_pointers.push(text);
+    self.c_fn_pointer_keys.insert(text, self.c_fn_pointers.len() - 1);
+    `sag_cp${self.c_fn_pointers.len() - 1}`
+  }
+
+  prv fn spelled_return(self, ty: Type) -> String {
+    match ty.kind {
+      TypeKind::Unit | TypeKind::Never => "void",
+      _ => self.spelled(ty),
+    }
+  }
+
+  /// `T a0, U a1` with C's spelling, or `void`.
+  prv fn spelled_params(self, params: List<Type>) -> String {
+    if params.is_empty() {
+      return "void";
+    }
+
+    const parts: List<String> = new List();
+
+    for index in 0..params.len() {
+      parts.push(self.spelled(params[index]) + ` a${index}`);
+    }
+
+    parts.join(", ")
+  }
+
+  /// Marks the definition of a tagged type the FFI unit needs, after those it holds by value.
+  prv fn need_definition(self, ty: Type) {
+    match ty.kind {
+      TypeKind::Array { elem, .. } => self.need_definition(elem),
+      TypeKind::Struct(named) => {
+        if self.tag_of(ty).is_none() || self.tag_definitions.contains(named.id) || self.layouts.is_opaque(ty) {
+          return;
+        }
+
+        for field in self.flat_parts(ty) {
+          self.need_definition(field);
+        }
+
+        if !self.tag_definitions.contains(named.id) {
+          self.tag_definitions.push(named.id);
+        }
+      }
+      _ => {}
+    }
+  }
+
+  /// `struct Tag { members };` with C's spelling and the fields' names.
+  prv fn tag_definition(self, id: u32) -> String {
+    const layout = self.layouts.structs[id as usize];
+    const ty = types::of(TypeKind::Struct(NamedRef { id: id, name: layout.name, args: new List() }));
+    const members: List<String> = new List();
+
+    for index in 0..layout.fields.len() {
+      const name = if c_identifier(layout.field_names[index]) { layout.field_names[index] } else { `f${index}` };
+
+      members.push(self.member(layout.fields[index], name) + ";");
+    }
+
+    self.spelled(ty) + " { " + members.join(" ") + " };\n"
+  }
+
+  /// A member `T name`, `T name[N]` for an array.
+  prv fn member(self, ty: Type, name: String) -> String {
+    var elem = ty;
+    var dims = "";
+
+    while let TypeKind::Array { elem: inner, len } = elem.kind {
+      dims = dims + `[${len}]`;
+      elem = inner;
+    }
+
+    self.spelled(elem) + " " + name + dims
+  }
+
+  /// `value`, a value of `ty` in one spelling, in the other: a struct with a tag through a union of
+  /// both, a pointer through a cast, a number as it is. `setup` gets the statements it needs.
+  prv fn converted(self, ty: Type, value: String, to_c: bool, setup: List<String>) -> String {
+    if self.tag_of(ty).is_some() {
+      const name = `sag_u${setup.len()}`;
+
+      self.need_definition(ty);
+      setup.push("union { " + self.c_type(ty) + " s; " + self.spelled(ty) + " c; } " + name + ";");
+      setup.push(name + (if to_c { ".s" } else { ".c" }) + " = " + value + ";");
+
+      return name + (if to_c { ".c" } else { ".s" });
+    }
+
+    match ty.kind {
+      TypeKind::Ptr { .. } | TypeKind::Ref { .. } | TypeKind::CFn { .. } | TypeKind::Option(_) => "(" + (if to_c { self.spelled(ty) } else { self.c_type(ty) }) + ")" + value,
+      _ => value,
+    }
+  }
+
+  /// The body of a function of the FFI unit that calls `callee` with `args` of `params`: converted
+  /// to C's spelling when `to_c`, and the result `ret` back.
+  prv fn bridge_body(self, callee: String, params: List<Type>, args: List<String>, ret: Type, to_c: bool) -> String {
+    const setup: List<String> = new List();
+    const passed: List<String> = new List();
+
+    for index in 0..args.len() {
+      const ty = params.get(index).unwrap_or(types::unit());
+
+      passed.push(self.converted(ty, args[index], to_c, setup));
+    }
+
+    const call = callee + "(" + passed.join(", ") + ")";
+
+    match ret.kind {
+      TypeKind::Unit | TypeKind::Never => setup.push(call + ";"),
+      _ => {
+        const result = self.converted(ret, call, !to_c, setup);
+
+        setup.push("return " + result + ";");
+      }
+    }
+
+    const lines: List<String> = new List();
+
+    for line in setup {
+      lines.push("  " + line);
+    }
+
+    "{\n" + lines.join("\n") + "\n}\n"
+  }
+
   /// `ret sag_ffi_N(params)`, the wrapper calling a C function.
   pub fn extern_prototype(self, index: usize, decl: ExternDecl) -> String {
     self.return_type(decl.ret) + " " + ffi_name(index) + "(" + self.c_params(decl.params) + ")"
@@ -2295,8 +2681,8 @@ class Generator {
     parts.join(", ")
   }
 
-  /// The parameters C declares a function of an `extern` block with: a variadic one's own, then
-  /// `...` (docs/adr/0103-build-scripts-and-binding-generation.md, Q720).
+  /// The parameters C declares a function of an `extern` block with, in C's spelling: a variadic
+  /// one's own, then `...` (docs/adr/0103-build-scripts-and-binding-generation.md, Q720).
   prv fn c_declared_params(self, decl: ExternDecl) -> String {
     match decl.fixed {
       Some(count) => {
@@ -2306,9 +2692,9 @@ class Generator {
           own.push(decl.params[index]);
         }
 
-        self.c_params(own) + ", ..."
+        self.spelled_params(own) + ", ..."
       }
-      None => self.c_params(decl.params),
+      None => self.spelled_params(decl.params),
     }
   }
 
@@ -2346,9 +2732,24 @@ class Generator {
       }
     }
 
-    if externs.is_empty() && exports.is_empty() && globals.is_empty() {
+    const callbacks: List<u32> = if std { new List() } else { self.c_callbacks };
+    const calls = if std { 0usize } else { self.pointer_calls.len() };
+    const pointers: List<usize> = new List();
+
+    for index in self.extern_pointers {
+      if program.externs[index].in_std == std {
+        pointers.push(index);
+      }
+    }
+
+    if externs.is_empty() && exports.is_empty() && globals.is_empty() && callbacks.is_empty() && calls == 0 && pointers.is_empty() {
       return None;
     }
+
+    self.c_fn_pointers = new List();
+    self.c_fn_pointer_keys = new Map<String, usize>();
+    self.used_tags = new List();
+    self.tag_definitions = new List();
 
     const declared: List<String> = new List();
     const defined: List<Type> = new List();
@@ -2377,6 +2778,26 @@ class Generator {
 
     for index in globals {
       self.ffi_types(program.statics[index].ty, true, declared, defined);
+    }
+
+    for id in callbacks {
+      const function = program.functions[id as usize];
+
+      for ty in param_types(function) {
+        self.ffi_types(ty, true, declared, defined);
+      }
+
+      self.ffi_types(function.ret, true, declared, defined);
+    }
+
+    for index in 0..calls {
+      if let TypeKind::CFn { params, ret, .. } = self.pointer_calls[index].kind {
+        for ty in params {
+          self.ffi_types(ty, true, declared, defined);
+        }
+
+        self.ffi_types(ret, true, declared, defined);
+      }
     }
 
     const out = new StringBuilder();
@@ -2413,55 +2834,141 @@ class Generator {
       out.append(self.definition(ty));
     }
 
+    // The functions, with C's spelling where C sees them (docs/adr/0105-c-types-at-the-ffi-boundary.md).
+    const body = new StringBuilder();
+    const declared_symbols: List<String> = new List();
+
     for index in externs {
       const decl = program.externs[index];
       const args: List<String> = new List();
 
       for arg in 0..decl.params.len() {
         args.push(`a${arg}`);
+        self.need_definition(decl.params[arg]);
       }
 
-      const call = decl.symbol + "(" + args.join(", ") + ")";
-      const body = match decl.ret.kind {
-        TypeKind::Unit | TypeKind::Never => call + ";",
-        _ => "return " + call + ";",
-      };
+      self.need_definition(decl.ret);
 
-      out.append("\nextern " + self.return_type(decl.ret) + " " + decl.symbol + "(" + self.c_declared_params(decl) + ");\n");
-      out.append(self.extern_prototype(index, decl) + " { " + body + " }\n");
+      const prototype = "extern " + self.spelled_return(decl.ret) + " " + decl.symbol + "(" + self.c_declared_params(decl) + ");\n";
+
+      // A variadic function is declared once for its calls of other types.
+      if !declared_symbols.contains(prototype) {
+        declared_symbols.push(prototype);
+        body.append("\n" + prototype);
+      }
+
+      body.append(self.extern_prototype(index, decl) + " " + self.bridge_body(decl.symbol, decl.params, args, decl.ret, true));
+    }
+
+    for index in pointers {
+      const decl = program.externs[index];
+      const pointer = self.c_type(c_fn_type(decl));
+
+      body.append(pointer + ` sag_ffi_${index}_pointer(void) {\n  return (` + pointer + ")" + decl.symbol + ";\n}\n");
+    }
+
+    // The exported symbols and the trampolines C calls back: C's types, then the function.
+    const entries: List<u32> = new List();
+
+    for id in exports {
+      entries.push(id);
+    }
+
+    for id in callbacks {
+      if !entries.contains(id) {
+        entries.push(id);
+      }
+    }
+
+    for id in entries {
+      body.append("\n" + self.signature(id, program.functions[id as usize]) + ";\n");
     }
 
     for id in exports {
-      const function = program.functions[id as usize];
-      const params: List<Type> = new List();
+      body.append(self.entry_bridge(id, program.functions[id as usize], program.functions[id as usize].export.unwrap_or("")));
+    }
+
+    for id in callbacks {
+      body.append(self.entry_bridge(id, program.functions[id as usize], `sag_cb_${id}`));
+    }
+
+    for index in 0..calls {
+      const ty = self.pointer_calls[index];
+      const params = match ty.kind {
+        TypeKind::CFn { params, .. } => params,
+        _ => new List<Type>(),
+      };
+      const ret = match ty.kind {
+        TypeKind::CFn { ret, .. } => ret,
+        _ => types::unit(),
+      };
       const args: List<String> = new List();
 
-      for index in 0..function.param_count {
-        if let Some(ty) = function.locals.get(index) {
-          params.push(ty);
-          args.push(`a${index}`);
-        }
+      for position in 0..params.len() {
+        args.push(`a${position}`);
+        self.need_definition(params[position]);
       }
 
-      const call = fn_name(id) + "(" + args.join(", ") + ")";
-      const body = match function.ret.kind {
-        TypeKind::Unit | TypeKind::Never => call + ";",
-        _ => "return " + call + ";",
-      };
-
-      out.append("\n" + self.signature(id, function) + ";\n");
-      out.append(self.return_type(function.ret) + " " + function.export.unwrap_or("") + "(" + self.c_params(params) + ") { " + body + " }\n");
+      self.need_definition(ret);
+      body.append(self.pointer_call_signature(index, true) + " " + self.bridge_body("((" + self.c_fn_pointer(ty) + ")f)", params, args, ret, true));
     }
 
     for index in globals {
       const def = program.statics[index];
       const ty = self.c_type(def.ty);
 
-      out.append("\nextern " + ty + " " + def.name + ";\n");
-      out.append(ty + " *" + extern_static_getter(index as u32) + "(void) { return &" + def.name + "; }\n");
+      body.append("\nextern " + self.spelled(def.ty) + " " + def.name + ";\n");
+      body.append(ty + " *" + extern_static_getter(index as u32) + "(void) { return (" + ty + " *)&" + def.name + "; }\n");
     }
 
+    // What C's spelling needs before the functions: the tags, the function pointer types, and
+    // the definitions of the types passed by value; each may add to the next.
+    const definitions = new StringBuilder();
+    var written = 0usize;
+
+    while written < self.tag_definitions.len() {
+      definitions.append(self.tag_definition(self.tag_definitions[written]));
+      written += 1;
+    }
+
+    const typedefs = new StringBuilder();
+
+    for index in 0..self.c_fn_pointers.len() {
+      typedefs.append("typedef " + self.c_fn_pointers[index].replace("(*NAME)", `(*sag_cp${index})`) + ";\n");
+    }
+
+    const tags = new StringBuilder();
+
+    for id in self.used_tags {
+      const layout = self.layouts.structs[id as usize];
+
+      tags.append((if layout.is_union { "union " } else { "struct " }) + self.c_tags.get(id).unwrap_or("") + ";\n");
+    }
+
+    if !tags.is_empty() {
+      out.append(tags.to_string());
+    }
+
+    out.append(typedefs.to_string());
+    out.append(definitions.to_string());
+    out.append(body.to_string());
+
     Some(out.to_string())
+  }
+
+  /// The function C calls with C's types, `name`, which calls the program's function `id`: an
+  /// exported symbol or a trampoline (Q744).
+  prv fn entry_bridge(self, id: u32, function: Function, name: String) -> String {
+    const params = param_types(function);
+    const args: List<String> = new List();
+
+    for index in 0..params.len() {
+      args.push(`a${index}`);
+      self.need_definition(params[index]);
+    }
+
+    self.need_definition(function.ret);
+    self.spelled_return(function.ret) + " " + name + "(" + self.spelled_params(params) + ") " + self.bridge_body(fn_name(id), params, args, function.ret, false)
   }
 
   /// Collects the aggregate types the FFI unit needs: declared when behind a pointer, also defined
@@ -2572,7 +3079,7 @@ class Generator {
       return self.frame_function(id, env, function, signature);
     }
 
-    self.out.append(linkage(function) + signature + " {\n");
+    self.out.append(self.linkage(id, function) + signature + " {\n");
     self.indent = 1;
 
     for index in function.param_count..function.locals.len() {
@@ -2616,7 +3123,7 @@ class Generator {
     }
 
     self.out.append("  default:\n    break;\n  }\n}\n\n");
-    self.out.append(linkage(function) + signature + " {\n");
+    self.out.append(self.linkage(id, function) + signature + " {\n");
     self.indent = 1;
     self.line(`sag_env${env} *sag_f = (sag_env${env} *)l0;`);
     self.line("sag_task_enter();");
@@ -3139,7 +3646,8 @@ class Generator {
       Rvalue::Call { callee, args } => self.call(callee, args),
       Rvalue::Closure { function, .. } => "(sag_fnval){(sag_method)" + fn_name(function) + ", NULL}",
       Rvalue::FnValue(function) => `(sag_fnval){(sag_method)sag_wrap_${function}, NULL}`,
-      Rvalue::CFnValue(function) => fn_name(function),
+      // C reaches it through its trampoline (docs/adr/0105-c-types-at-the-ffi-boundary.md, Q744).
+      Rvalue::CFnValue(function) => `sag_cb_${function}`,
       Rvalue::SizeOf(measured) => "sizeof(" + self.c_type(measured) + ")",
       Rvalue::AlignOf(measured) => "_Alignof(" + self.c_type(measured) + ")",
       Rvalue::Zeroed => self.zeroed(ty),
@@ -3158,7 +3666,14 @@ class Generator {
           SliceSource::Slice(slice) => "sag_slice_sub(" + self.operand(slice) + ", " + size + ", " + bounds + ", __FILE__, __LINE__)",
         }
       }
-      Rvalue::ExternFnValue(index) => ffi_name(index as usize),
+      // The C function itself, from the FFI unit.
+      Rvalue::ExternFnValue(index) => {
+        if !self.extern_pointers.contains(index as usize) {
+          self.extern_pointers.push(index as usize);
+        }
+
+        `sag_ffi_${index}_pointer()`
+      }
       Rvalue::Aggregate(parts) => {
         const texts = self.operands(parts);
         const joined = if texts.is_empty() { "0" } else { texts.join(", ") };
@@ -3243,15 +3758,11 @@ class Generator {
 
         "((" + self.method_pointer(function) + ")(" + receiver + `->vtable[${slot}]))(` + texts.join(", ") + ")"
       }
-      Callee::Pointer { .. } => {
-        const pointer = texts.first().unwrap_or("");
-        const rest: List<String> = new List();
+      // A call through a C function pointer is C's, in the FFI unit (Q744).
+      Callee::Pointer { params, ret } => {
+        const index = self.pointer_call(types::of(TypeKind::CFn { is_unsafe: false, params: params, ret: ret }));
 
-        for index in 1..texts.len() {
-          rest.push(texts[index]);
-        }
-
-        "(" + pointer + ")(" + rest.join(", ") + ")"
+        `sag_call_${index}(` + texts.join(", ") + ")"
       }
       _ => {
         // Runtime functions that can panic report the source location.

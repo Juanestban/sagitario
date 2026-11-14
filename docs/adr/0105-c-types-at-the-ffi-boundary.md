@@ -1,6 +1,6 @@
 # 0105. C's own types at the FFI boundary, for callbacks
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-14
 - Refines: [ADR-0078](0078-ffi-without-c-shims.md) (C function pointers),
   [ADR-0103](0103-build-scripts-and-binding-generation.md) (the callbacks left open by its
@@ -72,3 +72,20 @@ same name, to give it to the first.
   structs, are compatible C, and `--sanitize` checks them as any call.
 - The FFI unit and the program's name the same aggregates differently; the architecture says how.
 - Programs see no change: the types of `std::ffi` stay Sagitario's integer types.
+
+## Notes
+
+- Implemented in one increment. A trampoline is C's type for callbacks only if Sagitario calls
+  through pointers with C's types too: a call from the program's unit through its own type to a
+  trampoline defined with C's would be reported the other way round. So every call through a C
+  function pointer goes to a helper of the FFI unit, `sag_call_N`, which calls through C's type,
+  and a C function of an `extern` block used as a value is the function itself rather than its
+  wrapper. This completes Q744.
+- Q747 holds for `strerror`, now `*mut c_char` as C returns it, and `std::sys` declares the
+  buffers of `fwrite` and `fread` as `c_void`. But clang asks for `<stdio.h>` to declare any
+  function taking a `FILE`, whatever its types, so the bootstrap keeps `-fno-builtin` for the
+  seed's FFI units, with that reason in its comment.
+- The fixture of S4 takes `const fx_rect *` again in its callback and gains `fx_log`, which calls
+  back with `const char *` and `long`; `tests/run-pass/c_callbacks_with_c_types.sag` sorts
+  `@repr(C)` structs with `qsort` and calls through pointers to `strlen` and to a callback.
+

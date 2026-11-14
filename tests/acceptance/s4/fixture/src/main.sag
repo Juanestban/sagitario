@@ -3,14 +3,19 @@
 // translates, used without being edited.
 include!(concat!(env!("OUT_DIR"), "/fixture.sag"));
 
-use std::ffi::{c_char, c_int, c_void, string_from_c, CString};
+use std::ffi::{c_char, c_int, c_long, c_void, string_from_c, CString};
 
 extern "C" fn on_event(user: *mut c_void, code: c_int) {
   unsafe { *(user as *mut c_int) = code; }
 }
 
-extern "C" fn accept(_area: *const c_void) -> c_int {
-  1
+extern "C" fn accept(area: *const fx_rect) -> c_int {
+  if area.is_null() { 1 } else { 0 }
+}
+
+extern "C" fn on_log(message: *const c_char, level: c_long) -> c_long {
+  println(unsafe { string_from_c(message) } + f" {level}");
+  level * 2
 }
 
 fn main() {
@@ -36,6 +41,8 @@ fn main() {
   };
   unsafe { fx_events_fire(&raw mut events, 7); }
   println(f"{seen} {events.stats.count}");
+
+  println(f"{unsafe { fx_log(Some(on_log), 21) }}");
 
   const value = unsafe { fx_value_of_int(99) };
   println(f"{unsafe { value.integer }}");

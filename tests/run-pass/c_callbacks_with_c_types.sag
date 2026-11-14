@@ -1,0 +1,62 @@
+// Callbacks C calls with its own types, and calls through C function pointers: C's spelling at
+// the FFI boundary (docs/adr/0105-c-types-at-the-ffi-boundary.md), checked under `--sanitize`.
+// expect-stdout: ada 9, bob 7, eve 3
+// expect-stdout: 5 5
+// expect-stdout: 42 42
+use std::ffi::{c_char, c_int, c_long, c_void, string_from_c, CString};
+use std::mem;
+
+@repr(C)
+struct Score {
+  pub name: *const c_char;
+  pub points: c_int;
+}
+
+extern "C" {
+  fn qsort(base: *mut c_void, count: usize, size: usize, compare: extern "C" fn(*const c_void, *const c_void) -> c_int);
+  fn strlen(text: *const c_char) -> usize;
+}
+
+/// Higher points first.
+extern "C" fn by_points(a: *const c_void, b: *const c_void) -> c_int {
+  const left = unsafe { *(a as *const Score) };
+  const right = unsafe { *(b as *const Score) };
+
+  right.points - left.points
+}
+
+extern "C" fn doubled(value: c_long) -> c_long {
+  value * 2
+}
+
+fn main() {
+  const ada = CString::new("ada").unwrap();
+  const bob = CString::new("bob").unwrap();
+  const eve = CString::new("eve").unwrap();
+  var scores = [
+    Score { name: eve.as_ptr(), points: 3 },
+    Score { name: ada.as_ptr(), points: 9 },
+    Score { name: bob.as_ptr(), points: 7 },
+  ];
+
+  unsafe { qsort(scores.as_mut_ptr() as *mut c_void, 3, mem::size_of<Score>(), by_points); }
+
+  const parts: List<String> = new List();
+
+  for score in scores {
+    parts.push(unsafe { string_from_c(score.name) } + f" {score.points}");
+  }
+
+  println(parts.join(", "));
+
+  // A C function as a value, called by Sagitario and by C alike.
+  const length: unsafe extern "C" fn(*const c_char) -> usize = strlen;
+  const hello = CString::new("hello").unwrap();
+
+  println(f"{unsafe { length(hello.as_ptr()) }} {unsafe { strlen(hello.as_ptr()) }}");
+
+  // A callback of the program, called through its pointer.
+  const twice: extern "C" fn(c_long) -> c_long = doubled;
+
+  println(f"{twice(21)} {doubled(21)}");
+}

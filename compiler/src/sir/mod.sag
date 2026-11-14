@@ -324,6 +324,9 @@ pub struct StructLayout {
   /// An opaque C type, which C declares but does not define here
   /// (docs/adr/0103-build-scripts-and-binding-generation.md, Q721).
   pub opaque: bool;
+  /// `@repr(C)`, which the C of the FFI names with a tag of C
+  /// (docs/adr/0105-c-types-at-the-ffi-boundary.md, Q743).
+  pub repr_c: bool;
 }
 
 pub struct Function {
@@ -891,8 +894,12 @@ pub fn lower(package: Package, resolution: Resolution, typed: TypedModule, sourc
       Some(decl) => decl.is_opaque(),
       None => false,
     };
+    const repr_c = match resolution.struct_decl(package, structs.len() as u32) {
+      Some(decl) => decl.repr_c,
+      None => false,
+    };
 
-    structs.push(StructLayout { name: def.name, fields: fields, field_names: field_names, is_union: def.is_union, opaque: opaque });
+    structs.push(StructLayout { name: def.name, fields: fields, field_names: field_names, is_union: def.is_union, opaque: opaque, repr_c: repr_c });
   }
 
   const enums: List<EnumLayout> = new List();

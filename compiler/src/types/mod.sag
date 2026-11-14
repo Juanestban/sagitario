@@ -201,9 +201,13 @@ pub enum TypeKind {
 /// A type. A class, since types contain types (`Box<Type>` in Rust).
 pub class Type {
   pub const kind: TypeKind;
+  /// For the types of `std::ffi`, C's own name of the type (`char`, `long`), which the C of the
+  /// FFI writes (docs/adr/0105-c-types-at-the-ffi-boundary.md, Q742); empty otherwise.
+  pub var c_name: String;
 
   pub fn new(self, kind: TypeKind) {
     self.kind = kind;
+    self.c_name = "";
   }
 }
 

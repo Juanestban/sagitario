@@ -161,8 +161,9 @@ A Nova tool that writes Sagitario declarations from C headers, as Rust's `bindge
 **Status:** done. Programs call variadic C functions and name opaque C types; packages have build
 scripts and Rust's built-in macros; `bindgen` and `nova bindgen` translate C headers, their macros
 included. The harness generates and uses, without editing them, the bindings of a fixture with
-every construct and those of the system's C library (`<string.h>`, `<time.h>`). Open: the
-callbacks C calls with pointers to its structs, which `--sanitize` reports (ADR-0103's notes).
+every construct and those of the system's C library (`<string.h>`, `<time.h>`). Callbacks C
+calls with its own types are compatible C, with `--sanitize` too
+([ADR-0105](adr/0105-c-types-at-the-ffi-boundary.md)).
 
 **Acceptance:** bindings generated from the headers of a real C library are used by a program in
 the harness without being edited by hand.

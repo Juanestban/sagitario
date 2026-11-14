@@ -81,9 +81,9 @@ else
 fi
 
 step "stage 0: the seed, with $SAG_CC"
-# The units of the FFI are translation units of their own, as `sag` compiles them: they declare C
-# functions with the types of the program, without headers, so the C compiler's own declarations
-# of its library functions are left out.
+# The units of the FFI are translation units of their own, as `sag` compiles them. They declare the
+# C library's functions without its headers, which clang asks for those that take a `FILE`
+# (`fwrite`, `fread`): its own declarations of them are left out.
 ffi_objects=""
 for unit in sag_ffi sag_std_ffi; do
   if [ -f "bootstrap/$unit.c" ]; then

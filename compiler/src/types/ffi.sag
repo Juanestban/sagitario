@@ -16,8 +16,37 @@ use pkg::types::exprs;
 use pkg::types::typed::BuiltinMethod;
 
 /// The Sagitario type of a C type, by its name, on the target: `long` has 32 bits on Windows and
-/// on 32-bit targets, and `char` is unsigned on Linux and Android for ARM.
+/// on 32-bit targets, and `char` is unsigned on Linux and Android for ARM. It keeps C's own name
+/// of the type (docs/adr/0105-c-types-at-the-ffi-boundary.md, Q742).
 pub fn c_type(name: String, target: TargetInfo) -> Type {
+  const ty = c_type_of(name, target);
+
+  ty.c_name = c_name_of(name);
+  ty
+}
+
+/// C's name of a type of `std::ffi`: `c_ulonglong` is `unsigned long long`.
+fn c_name_of(name: String) -> String {
+  if name == "c_void" {
+    return "";
+  }
+
+  const words = name.substring(2, name.len());
+  const unsigned = words.starts_with("u") && words != "uchar" || words == "uchar";
+  var base = if words.starts_with("u") { words.substring(1, words.len()) } else { words };
+
+  if words == "schar" {
+    return "signed char";
+  }
+
+  if base == "longlong" {
+    base = "long long";
+  }
+
+  if unsigned { "unsigned " + base } else { base }
+}
+
+fn c_type_of(name: String, target: TargetInfo) -> Type {
   if name == "c_char" {
     return types::int(if target.char_is_unsigned { IntTy::U8 } else { IntTy::I8 });
   }

@@ -90,7 +90,7 @@ fn write(index: i32, text: String, newline: bool) -> Result<(), Error> {
 
   sys::clear_errno();
 
-  if len > 0 && unsafe { sys::fwrite(text.as_ptr(), 1, len, stream) } != len {
+  if len > 0 && unsafe { sys::fwrite(text.as_ptr() as *const c_void, 1, len, stream) } != len {
     return Err(error_from(super::last_error()));
   }
 
@@ -191,7 +191,7 @@ pub fn read_exact(count: usize) -> Result<String, Error> {
   sys::clear_errno();
 
   while filled < count {
-    const read = unsafe { sys::fread(data.as_mut_ptr().add(filled), 1, count - filled, stream) };
+    const read = unsafe { sys::fread(data.as_mut_ptr().add(filled) as *mut c_void, 1, count - filled, stream) };
 
     if read == 0 {
       break;
@@ -225,7 +225,7 @@ pub fn read_to_string() -> Result<String, Error> {
 
     data.resize(start + 4096, 0);
 
-    const read = unsafe { sys::fread(data.as_mut_ptr().add(start), 1, 4096, stream) };
+    const read = unsafe { sys::fread(data.as_mut_ptr().add(start) as *mut c_void, 1, 4096, stream) };
 
     data.resize(start + read, 0);
 
@@ -600,7 +600,7 @@ pub class Stdin impl Read, BufRead {
 fn write_bytes(index: i32, bytes: &[u8]) -> Result<usize, Error> {
   sys::clear_errno();
 
-  const written = unsafe { sys::fwrite(bytes.as_ptr(), 1, bytes.len(), sys::stream(index)) };
+  const written = unsafe { sys::fwrite(bytes.as_ptr() as *const c_void, 1, bytes.len(), sys::stream(index)) };
 
   if written < bytes.len() { Err(error_from(super::last_error())) } else { Ok(written) }
 }

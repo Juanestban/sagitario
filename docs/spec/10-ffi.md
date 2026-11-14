@@ -99,6 +99,14 @@ unsafe { qsort(numbers.as_mut_ptr() as *mut c_void, numbers.len(), 4, by_value);
   between function pointer types, and from a raw pointer or a `usize` to a function pointer; a
   null address panics (`null C function pointer`). Function pointers are not compared with `==`
   nor interpolated; compare them as `usize`.
+- C calls an `extern "C" fn` of the program, and the program calls through a C function pointer,
+  with C's own types ([ADR-0105](../adr/0105-c-types-at-the-ffi-boundary.md)): the types of
+  `std::ffi` are C's (`c_char` is `char`, `c_long` is `long`), and a `@repr(C)` struct, union or
+  opaque type is the C type of its name. So a callback that takes `const char *` or a pointer to
+  a struct of a C library is compatible C, which `--sanitize` checks. When two `@repr(C)` types of
+  a program have the same name, the first in the order of its modules is the C type of that name,
+  and a callback taking the others may still be reported. Integers written as `i32` or `u8` are
+  C's `int32_t` and `uint8_t`.
 - C may call an `extern "C" fn` of the program through a pointer, also on a thread of its own: a
   program that uses one as a value counts references atomically, as programs using
   `std::thread` do. A panic inside it ends the process with exit code 101; it never unwinds into C.

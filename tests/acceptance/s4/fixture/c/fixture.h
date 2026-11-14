@@ -50,11 +50,12 @@ typedef union fx_value {
 } fx_value;
 
 typedef void (*fx_callback)(void *user, int code);
+typedef long (*fx_log_fn)(const char *message, long level);
 
 typedef struct fx_events {
   fx_callback on_event;
   void *user;
-  int (*filter)(const void *area);
+  int (*filter)(const fx_rect *area);
   struct {
     int count;
     char name[FX_LIMIT / 2];
@@ -76,6 +77,7 @@ void fx_events_fire(fx_events *events, int code);
 fx_value fx_value_of_int(int64_t value);
 int fx_bits_total(struct fx_bits *bits);
 int fx_match(int type);
+long fx_log(fx_log_fn log, long level);
 
 extern int fx_counter;
 extern const char *const fx_version;

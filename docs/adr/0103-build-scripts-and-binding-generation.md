@@ -178,4 +178,6 @@ The user chose:
   `clock` and `CLOCKS_PER_SEC`) a program uses on every platform of the CI. The functions MSVC's
   C library defines in its headers (`time`, `snprintf`) are left out there, so the program uses
   those every system exports.
+- The callbacks left open above are compatible C since
+  [ADR-0105](0105-c-types-at-the-ffi-boundary.md): the fixture takes `const fx_rect *` again.
 

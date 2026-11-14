@@ -906,14 +906,15 @@ fn generates_bindings_with_bindgen(cx: Context) -> Result<(), String> {
   const run = if cx.sanitize { List::from(["run", "--sanitize"]) } else { List::from(["run"]) };
   const ran = nova_ok(cx, fixture, run)?;
 
-  support::expect_equal(`nova run (stderr: ${ran.stderr})`, ran.stdout, "3 16 -3 307200 1\ntrue 6 40\n4 game 1.2.3\n7 1\n99\n0\n1 255 16 255 7 -5 4294967296 2.5 0.0005 120 fixture \"one\"\n")?;
+  support::expect_equal(`nova run (stderr: ${ran.stderr})`, ran.stdout, "3 16 -3 307200 1\ntrue 6 40\n4 game 1.2.3\n7 1\nfrom C 21\n42\n99\n0\n1 255 16 255 7 -5 4294967296 2.5 0.0005 120 fixture \"one\"\n")?;
 
   const bindings = read(under(fixture, List::from(["target", "debug", "build", "fixture", "out", "fixture.sag"])))?;
 
   for expected in List::from([
     "@repr(C)\npub struct fx_window {\n  prv _unused: [u8; 0];\n}",
     "pub union fx_value {",
-    "pub filter: Option<unsafe extern \"C\" fn(*const std::ffi::c_void) -> std::ffi::c_int>;",
+    "pub filter: Option<unsafe extern \"C\" fn(*const fx_rect) -> std::ffi::c_int>;",
+    "pub fn fx_log(log: Option<unsafe extern \"C\" fn(*const std::ffi::c_char, std::ffi::c_long) -> std::ffi::c_long>, level: std::ffi::c_long) -> std::ffi::c_long;",
     "pub stats: fx_events__bindgen_ty_1;",
     "pub fn fx_sum(count: std::ffi::c_int, ...) -> std::ffi::c_int;",
     "pub fn fx_match(type_: std::ffi::c_int) -> std::ffi::c_int;",

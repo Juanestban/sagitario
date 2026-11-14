@@ -275,6 +275,17 @@ runs the executor until the task of `main` finishes.
   arguments, so each call with other types of extra arguments gets a wrapper of its own: lowering
   registers it in `Registry.variadic_calls`, an `ExternDecl` with `fixed` set whose parameters
   are those types, and the call's `Callee::Extern` is its index after the externs of the blocks.
+- C's own types at the boundary ([ADR-0105](adr/0105-c-types-at-the-ffi-boundary.md)): the FFI
+  unit writes the types of `std::ffi` as C's (`Type.c_name`, kept from the name the program
+  wrote) and each `@repr(C)` type with a tag of its name (`Generator.c_tags`, the first type of a
+  name taking it; `StructLayout.repr_c`), with members of C's types and the fields' names. Its
+  wrappers take the program's types and call C with C's, converting pointers with casts and
+  structs passed by value through a union of both. An `extern "C" fn` used as a value is the
+  trampoline `sag_cb_N` of the FFI unit, which calls the function (no longer `static`); a C
+  function of an `extern` block used as a value is the function itself
+  (`sag_ffi_N_pointer()`); and a call through a C function pointer goes to `sag_call_N` of the
+  FFI unit, which calls through C's type (`sag_cpN`). The program's unit keeps its own names,
+  since its header includes the tags of the system's headers.
 - An opaque C type (Q721) is only declared, `typedef struct sag_sN sag_sN;`, and never defined
   (`StructLayout.opaque`). The checker rejects its values; generic code given one as a type
   argument is checked when its instance is lowered, since a local of that type would be a C

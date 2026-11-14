@@ -35,6 +35,12 @@ The sources say 0.32.0.
 
 ### Added
 
+- C's own types at the FFI boundary: the C the compiler writes for calls between the program and
+  C names the types of `std::ffi` as C does (`char`, `long`) and each `@repr(C)` type by its name,
+  and callbacks reach C through trampolines with those types. A callback a C library calls with
+  `const char *`, `long` or a pointer to one of its structs, as SDL's do, is now compatible C, and
+  `--sanitize` no longer reports it. `strerror`, `fwrite` and `fread` are declared with C's types
+  in `std::sys` ([ADR-0105](docs/adr/0105-c-types-at-the-ffi-boundary.md)).
 - The macros of C headers in `bindgen`: `#define`s whose bodies are constants become `pub const`s
   of integers, floats, strings and characters, computed from other macros, enumeration constants
   and casts. `nova bindgen <header>` writes the bindings of a header once, as `bindgen-cli`. With

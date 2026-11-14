@@ -39,4 +39,5 @@ void fx_events_fire(fx_events *events, int code) {
 fx_value fx_value_of_int(int64_t value) { fx_value result; result.integer = value; return result; }
 int fx_bits_total(struct fx_bits *bits) { return bits->a + bits->b; }
 int fx_match(int type) { return type * 10; }
+long fx_log(fx_log_fn log, long level) { return log("from C", level); }
 long double fx_precise(void) { return 1.0L; }
