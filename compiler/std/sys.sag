@@ -3505,7 +3505,8 @@ pub class Lock {
   }
 
   /// `wait_timeout`, on another condition, in whole milliseconds rounded up; a longer wait than
-  /// Windows takes returns early, which a wait may.
+  /// Windows takes returns early, which a wait may. It timed out when Windows says so, as Rust's
+  /// does: its timer may end a wait a little before the time measured, by its resolution.
   pub fn wait_on_timeout(self, condition: Condition, nanos: u64) -> bool {
     condition.bind(self.id());
 
@@ -3514,9 +3515,11 @@ pub class Lock {
     const bounded = if millis >= INFINITE as u64 { INFINITE - 1 } else { millis as u32 };
 
     self.owner.store(0, SEQ_CST);
-    unsafe { SleepConditionVariableSRW(condition.place(), self.srw_place(), bounded, 0); }
+
+    const woken = unsafe { SleepConditionVariableSRW(condition.place(), self.srw_place(), bounded, 0) };
+
     self.owner.store(thread_id(), SEQ_CST);
-    monotonic_nanos() - start >= nanos
+    woken == 0 || monotonic_nanos() - start >= nanos
   }
 
   /// Wakes one thread waiting on the lock.
