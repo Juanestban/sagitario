@@ -5,19 +5,6 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 
-/* On macOS, Apple's libsystem readdir() uses an 8 KB internal heap buffer that it overwrites
- * when directory entries are large, causing AddressSanitizer to report a heap-buffer-overflow.
- * This is a bug in Apple's library, not in our code. Suppress ASan reports originating from
- * libsystem_c.dylib so that sanitized tests pass while still catching bugs in our code.
- * The same pattern is used by projects that cannot avoid calling readdir() on macOS. */
-#if defined(__APPLE__) && defined(__has_feature)
-#if __has_feature(address_sanitizer)
-const char *__asan_default_suppressions(void) {
-  return "interceptor_via_lib:libsystem_c.dylib\n";
-}
-#endif
-#endif
-
 #include "sagitario_runtime.h"
 
 #include <errno.h>
