@@ -113,6 +113,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0102](0102-binding-generation-before-the-core.md) | Binding generation before the core in Sagitario | Accepted |
 | [0103](0103-build-scripts-and-binding-generation.md) | Build scripts and binding generation (S4) | Accepted |
 | [0104](0104-include-str-as-a-macro.md) | `include_str!` instead of `include_str` | Accepted |
+| [0105](0105-c-types-at-the-ffi-boundary.md) | C's own types at the FFI boundary, for callbacks | Proposed |
 
 ## Template
 
