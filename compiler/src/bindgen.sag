@@ -117,7 +117,7 @@ pub class Builder {
       absolute.push(absolute_path(file));
     }
 
-    const text = self.preprocess(absolute)?;
+    const text = self.preprocess(absolute, false)?;
     const lexed = lex(text)?;
     const parser = new Parser(lexed);
 
@@ -140,15 +140,22 @@ pub class Builder {
       None => env::variable("HOST").unwrap_or(if env::OS == "windows" { "x86_64-pc-windows-msvc" } else { "" }),
     };
     const msvc = target.contains("windows-msvc") || (target.contains("windows") && !target.contains("gnu"));
-    const writer = new Writer(parser, Choice { roots: roots, prefixes: self.prefixes, files: allowed_files, blocked: self.blocked, msvc: msvc });
+    const choice = Choice { roots: roots, prefixes: self.prefixes, files: allowed_files, blocked: self.blocked, msvc: msvc };
+    const macros = macro_definitions(self.preprocess(absolute, true)?, lexed, choice);
+    const writer = new Writer(parser, choice, macros);
 
     Ok(Bindings { text: writer.write(self.headers) })
   }
 
-  /// The headers through the C compiler's preprocessor, with their line markers.
-  prv fn preprocess(self, headers: List<String>) -> Result<String, Error> {
+  /// The headers through the C compiler's preprocessor, with their line markers, or (`macros`)
+  /// the definitions of every macro they leave (`-dM`).
+  prv fn preprocess(self, headers: List<String>, macros: bool) -> Result<String, Error> {
     const compiler = preprocessor()?;
     const args = List::from(["-E", "-x", "c"]);
+
+    if macros {
+      args.push("-dM");
+    }
 
     if let Some(triple) = self.chosen_target() {
       args.push("--target=" + triple);
@@ -1334,7 +1341,7 @@ class Parser {
             }
           }
 
-          next = match evaluate(self.tokens, start, self.pos, self.constants) {
+          next = match evaluate(self.tokens, start, self.pos, self.constants, self.typedefs) {
             Some(value) => value,
             None => return Err(`the value of the constant \`${name}\` is not an integer the bindings can compute`),
           };
@@ -1432,7 +1439,7 @@ class Parser {
         }
 
         if first < end {
-          match evaluate(self.tokens, first, end, self.constants) {
+          match evaluate(self.tokens, first, end, self.constants, self.typedefs) {
             Some(value) => {
               if value < 0 {
                 return Err("an array of negative length");
@@ -1505,7 +1512,7 @@ class Parser {
         self.pos += 1;
       }
 
-      if evaluate(self.tokens, start, self.pos, self.constants).is_none() {
+      if evaluate(self.tokens, start, self.pos, self.constants, self.typedefs).is_none() {
         return Err("a bitfield whose width the bindings cannot compute");
       }
 
@@ -1610,8 +1617,8 @@ fn is_identifier(text: String) -> bool {
 
 /// The value of the integer constant expression `tokens[start..end]`, as C computes it, with the
 /// enumeration constants known so far; `None` for anything else, such as `sizeof`.
-fn evaluate(tokens: List<Token>, start: usize, end: usize, constants: Map<String, i64>) -> Option<i64> {
-  const evaluator = new Evaluator(tokens, start, end, constants);
+fn evaluate(tokens: List<Token>, start: usize, end: usize, constants: Map<String, i64>, types: Map<String, CType>) -> Option<i64> {
+  const evaluator = new Evaluator(tokens, start, end, constants, types);
   const value = evaluator.conditional()?;
 
   if evaluator.pos != end {
@@ -1626,12 +1633,15 @@ class Evaluator {
   pub var pos: usize;
   prv const end: usize;
   prv const constants: Map<String, i64>;
+  /// The typedefs, whose names cast: `((Uint32)0x20u)`.
+  prv const types: Map<String, CType>;
 
-  pub fn new(self, tokens: List<Token>, start: usize, end: usize, constants: Map<String, i64>) {
+  pub fn new(self, tokens: List<Token>, start: usize, end: usize, constants: Map<String, i64>, types: Map<String, CType>) {
     self.tokens = tokens;
     self.pos = start;
     self.end = end;
     self.constants = constants;
+    self.types = types;
   }
 
   prv fn peek(self) -> String {
@@ -1714,8 +1724,8 @@ class Evaluator {
     if text == "(" {
       self.pos += 1;
 
-      // A cast to an integer type, `(int)x` or `(unsigned long)(x)`, keeps the value.
-      if is_type_word(self.peek()) {
+      // A cast to an integer type, `(int)x`, `(unsigned long)(x)` or `(Uint32)x`, keeps the value.
+      if is_type_word(self.peek()) || self.types.contains_key(self.peek()) {
         while self.pos < self.end && self.peek() != ")" {
           self.pos += 1;
         }
@@ -1918,10 +1928,13 @@ class Writer {
   prv const used_enums: Map<String, bool>;
   /// The names the output declares, so that a type and a function never share one.
   prv const names: Map<String, bool>;
+  /// The macros without parameters of the headers.
+  prv var macros: List<MacroDef>;
 
-  pub fn new(self, parser: Parser, choice: Choice) {
+  pub fn new(self, parser: Parser, choice: Choice, macros: List<MacroDef>) {
     self.parser = parser;
     self.choice = choice;
+    self.macros = macros;
     self.full = new Map<String, bool>();
     self.opaque = new Map<String, bool>();
     self.used_enums = new Map<String, bool>();
@@ -2199,6 +2212,8 @@ class Writer {
       }
     }
 
+    out.append(self.macro_constants());
+
     // The records, in the order of the headers.
     for index in 0..parser.records.len() {
       const key = self.record_key(index);
@@ -2258,6 +2273,69 @@ class Writer {
       Some(found) => found.key,
       None => "",
     }
+  }
+
+  /// The constants of the chosen macros whose bodies are constants (Q736): integers, floats,
+  /// strings and characters, also computed from other macros, enumeration constants and casts.
+  /// Macros with parameters and the others are left out, as bindgen does.
+  prv fn macro_constants(self) -> String {
+    const taken = new Map<String, bool>();
+
+    for entry in self.parser.constants.keys() {
+      taken.insert(entry, true);
+    }
+
+    for record in self.parser.records {
+      taken.insert(record.name, true);
+    }
+
+    for declaration in self.parser.declarations {
+      taken.insert(declaration.name, true);
+    }
+
+    // Integer macros may name others: each pass computes those whose names are known.
+    const values = new Map<String, i64>();
+
+    for entry in self.parser.constants.keys() {
+      values.insert(entry, self.parser.constants.get(entry).unwrap_or(0));
+    }
+
+    const integers = new Map<String, i64>();
+    var progress = true;
+
+    while progress {
+      progress = false;
+
+      for found in self.macros {
+        if integers.contains_key(found.name) || !is_integer_body(found.body) {
+          continue;
+        }
+
+        if let Some(value) = evaluate(found.body, 0, found.body.len(), values, self.parser.typedefs) {
+          integers.insert(found.name, value);
+          values.insert(found.name, value);
+          progress = true;
+        }
+      }
+    }
+
+    const out = new StringBuilder();
+
+    for found in self.macros {
+      if taken.contains_key(found.name) || self.choice.blocked.contains(found.name) || !self.chosen(found.name, found.file) {
+        continue;
+      }
+
+      const line = macro_line(rust_name(found.name), found.body, integers.get(found.name));
+
+      if !line.is_empty() {
+        out.append(line + "\n");
+      }
+    }
+
+    const text = out.to_string();
+
+    if text.is_empty() { "" } else { "\n// Macros\n" + text }
   }
 
   /// Whether an enumeration's constants are chosen by themselves: by its name or theirs.
@@ -2472,6 +2550,368 @@ class Writer {
 
     "std::ffi::c_void"
   }
+}
+
+// ---- Macros -----------------------------------------------------------------------------------
+
+/// The constant of a macro's body, or nothing: a character is a `u8`, as bindgen writes it, and
+/// then integers, strings and floats.
+fn macro_line(name: String, body: List<Token>, integer: Option<i64>) -> String {
+  if body.len() == 1 {
+    if let Kind::Char = body[0].kind {
+      if let Some(value) = char_value(body[0].text) {
+        if value >= 0 && value < 256 {
+          return f"pub const {name}: u8 = {value};";
+        }
+      }
+    }
+  }
+
+  if let Some(value) = integer {
+    return `pub const ${name}: ` + macro_int_type(value) + f" = {macro_int_literal(value)};";
+  }
+
+  if let Some(text) = string_body(body) {
+    return `pub const ${name}: String = ` + sagitario_string(text) + ";";
+  }
+
+  match float_body(body) {
+    Some(text) => `pub const ${name}: f64 = ${text};`,
+    None => "",
+  }
+}
+
+/// A macro without parameters: its name, the tokens of its body, and the header that defines
+/// it, when it is one bindgen reads (empty otherwise).
+struct MacroDef {
+  pub name: String;
+  pub body: List<Token>;
+  pub file: String;
+}
+
+/// The macros without parameters of `-dM`'s output, with the files that define them: those of the
+/// headers' directories and the files allowed, whose `#define` lines are read, since `-dM` says
+/// nothing of where a macro comes from.
+fn macro_definitions(dump: String, tokens: List<Token>, choice: Choice) -> List<MacroDef> {
+  const origin = new Map<String, String>();
+  const order: List<String> = new List();
+  const files = new Map<String, bool>();
+
+  for token in tokens {
+    if !files.contains_key(token.file) {
+      files.insert(token.file, true);
+      order.push(token.file);
+    }
+  }
+
+  const defined: List<String> = new List();
+
+  for file in order {
+    var wanted = choice.files.contains(file);
+
+    for root in choice.roots {
+      wanted = wanted || file.starts_with(root);
+    }
+
+    if !wanted {
+      continue;
+    }
+
+    if let Ok(text) = fs::read_to_string(file) {
+      for raw in text.lines() {
+        const line = raw.trim();
+
+        if !line.starts_with("#") {
+          continue;
+        }
+
+        const rest = line.substring(1, line.len()).trim();
+
+        if !rest.starts_with("define") {
+          continue;
+        }
+
+        const name = leading_identifier(rest.substring(6, rest.len()).trim());
+
+        if !name.is_empty() && !origin.contains_key(name) {
+          origin.insert(name, file);
+          defined.push(name);
+        }
+      }
+    }
+  }
+
+  const bodies = new Map<String, List<Token>>();
+  const names: List<String> = new List();
+
+  for raw in dump.lines() {
+    const line = raw.trim();
+
+    if !line.starts_with("#define ") {
+      continue;
+    }
+
+    const rest = line.substring(8, line.len());
+    const name = leading_identifier(rest);
+
+    // `NAME(` without a space is a macro with parameters.
+    if name.is_empty() || rest.substring(name.len(), rest.len()).starts_with("(") {
+      continue;
+    }
+
+    const body = rest.substring(name.len(), rest.len()).trim();
+
+    if body.is_empty() {
+      continue;
+    }
+
+    match lex(body) {
+      Ok(found) => {
+        if !bodies.contains_key(name) {
+          names.push(name);
+        }
+
+        bodies.insert(name, found);
+      }
+      Err(_) => {}
+    }
+  }
+
+  // Those of the headers first, in their order, then the others the allow list may name.
+  const result: List<MacroDef> = new List();
+  const added = new Map<String, bool>();
+
+  for name in defined {
+    if let Some(body) = bodies.get(name) {
+      result.push(MacroDef { name: name, body: body, file: origin.get(name).unwrap_or("") });
+      added.insert(name, true);
+    }
+  }
+
+  names.sort();
+
+  for name in names {
+    if !added.contains_key(name) {
+      result.push(MacroDef { name: name, body: bodies.get(name).unwrap_or(new List()), file: "" });
+    }
+  }
+
+  result
+}
+
+/// The identifier at the start of `text`.
+fn leading_identifier(text: String) -> String {
+  const out = new StringBuilder();
+
+  for c in text.chars() {
+    if c.is_ascii_alphanumeric() || c == '_' {
+      out.append_char(c);
+    } else {
+      break;
+    }
+  }
+
+  const name = out.to_string();
+
+  if is_identifier(name) { name } else { "" }
+}
+
+/// Whether a body may be an integer expression: no strings, and no floats.
+fn is_integer_body(body: List<Token>) -> bool {
+  for token in body {
+    match token.kind {
+      Kind::Str => return false,
+      Kind::Number => {
+        if is_float_literal(token.text) {
+          return false;
+        }
+      }
+      _ => {}
+    }
+  }
+
+  !body.is_empty()
+}
+
+fn is_float_literal(text: String) -> bool {
+  const lower = text.to_ascii_lowercase();
+
+  if lower.starts_with("0x") {
+    return lower.contains("p");
+  }
+
+  lower.contains(".") || lower.contains("e")
+}
+
+/// The text of a body of string literals, joined as C joins them.
+fn string_body(body: List<Token>) -> Option<String> {
+  if body.is_empty() {
+    return None;
+  }
+
+  const out = new StringBuilder();
+
+  for token in body {
+    match token.kind {
+      Kind::Str => out.append(c_unescape(token.text)?),
+      _ => return None,
+    }
+  }
+
+  Some(out.to_string())
+}
+
+/// A float literal, maybe negative and in parentheses, as Sagitario writes it.
+fn float_body(body: List<Token>) -> Option<String> {
+  var start = 0usize;
+  var end = body.len();
+
+  while end > start + 1 && body[start].text == "(" && body[end - 1].text == ")" {
+    start += 1;
+    end -= 1;
+  }
+
+  var sign = "";
+
+  if end > start && body[start].text == "-" {
+    sign = "-";
+    start += 1;
+  }
+
+  if end != start + 1 {
+    return None;
+  }
+
+  const token = body[start];
+
+  match token.kind {
+    Kind::Number => {}
+    _ => return None,
+  }
+
+  if !is_float_literal(token.text) || token.text.to_ascii_lowercase().starts_with("0x") {
+    return None;
+  }
+
+  var digits = token.text.to_ascii_lowercase();
+
+  while digits.ends_with("f") || digits.ends_with("l") {
+    digits = digits.substring(0, digits.len() - 1);
+  }
+
+  if digits.starts_with(".") {
+    digits = "0" + digits;
+  }
+
+  digits = digits.replace(".e", ".0e");
+
+  if digits.ends_with(".") {
+    digits = digits + "0";
+  }
+
+  if !digits.contains(".") {
+    // `1e5`: Sagitario writes the fraction.
+    match digits.find("e") {
+      Some(at) => {
+        digits = digits.substring(0, at) + ".0" + digits.substring(at, digits.len());
+      }
+      None => return None,
+    }
+  }
+
+  Some(sign + digits)
+}
+
+/// The text of a C string literal's contents, with its escapes, or `None` for escapes bindgen
+/// does not read.
+fn c_unescape(text: String) -> Option<String> {
+  const out = new StringBuilder();
+  const chars = text.chars().collect();
+  var at = 0usize;
+
+  while at < chars.len() {
+    const c = chars[at];
+
+    if c != '\\' {
+      out.append_char(c);
+      at += 1;
+      continue;
+    }
+
+    if at + 1 >= chars.len() {
+      return None;
+    }
+
+    const next = chars[at + 1];
+
+    at += 2;
+
+    if next == 'n' {
+      out.append_char('\n');
+    } else if next == 't' {
+      out.append_char('\t');
+    } else if next == 'r' {
+      out.append_char('\r');
+    } else if next == '0' {
+      out.append_char('\0');
+    } else if next == '\\' || next == '"' || next == '\'' || next == '?' {
+      out.append_char(next);
+    } else {
+      return None;
+    }
+  }
+
+  Some(out.to_string())
+}
+
+/// A Sagitario string literal of `text`.
+fn sagitario_string(text: String) -> String {
+  const out = new StringBuilder();
+
+  out.append_char('"');
+
+  for c in text.chars() {
+    if c == '"' {
+      out.append("\\\"");
+    } else if c == '\\' {
+      out.append("\\\\");
+    } else if c == '\n' {
+      out.append("\\n");
+    } else if c == '\t' {
+      out.append("\\t");
+    } else if c == '\r' {
+      out.append("\\r");
+    } else if c == '\0' {
+      out.append("\\0");
+    } else {
+      out.append_char(c);
+    }
+  }
+
+  out.append_char('"');
+  out.to_string()
+}
+
+/// The type of an integer macro, as bindgen gives it: `u32` or `i32` when the value fits, else
+/// `u64` or `i64`.
+fn macro_int_type(value: i64) -> String {
+  if value >= 0 {
+    return if value <= 4294967295 { "u32" } else { "u64" };
+  }
+
+  if value >= -2147483648 { "i32" } else { "i64" }
+}
+
+fn macro_int_literal(value: i64) -> String {
+  if value == i64::MIN {
+    return "-9223372036854775807 - 1";
+  }
+
+  if value == -2147483648 {
+    return "-2147483647 - 1";
+  }
+
+  f"{value}"
 }
 
 /// The type of a C typedef that has a Sagitario type of its own (Q734).

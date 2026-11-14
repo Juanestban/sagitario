@@ -1,0 +1,25 @@
+// The bindings of the system's C library that `build.sag` generates, used without being edited.
+include!(concat!(env!("OUT_DIR"), "/libc.sag"));
+
+use std::ffi::{c_char, CString};
+
+fn main() {
+  const hello = CString::new("hello").unwrap();
+  const help = CString::new("help").unwrap();
+
+  println(f"{unsafe { strlen(hello.as_ptr()) }} {unsafe { strcmp(hello.as_ptr(), help.as_ptr()) } > 0} {unsafe { memcmp(hello.as_ptr() as *const std::ffi::c_void, hello.as_ptr() as *const std::ffi::c_void, 5) }}");
+
+  // `struct tm`, written by the program and read by C.
+  var date: tm = unsafe { std::mem::zeroed() };
+
+  date.tm_year = 124;
+  date.tm_mon = 2;
+  date.tm_mday = 5;
+
+  var buffer = [0u8; 32];
+  const format = CString::new("%Y-%m-%d").unwrap();
+  const written = unsafe { strftime(buffer.as_mut_ptr() as *mut c_char, 32, format.as_ptr(), &raw const date) };
+
+  println(f"{written} " + unsafe { std::ffi::string_from_c(buffer.as_ptr() as *const c_char) });
+  println(f"{CLOCKS_PER_SEC > 0} {unsafe { clock() } >= 0}");
+}

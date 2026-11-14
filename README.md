@@ -278,10 +278,10 @@ The phases and their acceptance criteria are in [docs/roadmap.md](docs/roadmap.m
 | F7    | Distribution: releases, installers, `nova update self`                    | 🟡 Acceptance  |
 | F8    | `async`/`await`                                                           | ✅ Done        |
 | G1    | Language prerequisites: math, FFI, references, operators, global state    | ✅ Done        |
-| S1    | The standard library in Sagitario, over the C library of each system      | 🟡 In progress |
-| S2    | A standard library as complete as Rust's, from an audit of its modules    | ⬜ Planned     |
+| S1    | The standard library in Sagitario, over the C library of each system      | ✅ Done        |
+| S2    | A standard library as complete as Rust's, from an audit of its modules    | ✅ Done        |
 | S3    | The core of the runtime in Sagitario (ARC, strings, lists, tasks)         | ⬜ Planned     |
-| S4    | Binding generation from C headers, as `bindgen`                           | ⬜ Planned     |
+| S4    | Binding generation from C headers, as `bindgen` (before S3)               | ✅ Done        |
 
 The game engine is a project apart, written in Sagitario; its plan is in
 [docs/engine-roadmap.md](docs/engine-roadmap.md) until its repository exists.
@@ -307,8 +307,8 @@ needs an ADR before it is implemented.
 
 **The standard library**
 
-- [ ] Written in Sagitario over the C library of each system, instead of the C runtime (S1)
-- [ ] The modules of Rust's std it still lacks, from an audit (S2)
+- [x] Written in Sagitario over the C library of each system, instead of the C runtime (S1)
+- [x] The modules of Rust's std it still lacks, from an audit (S2)
 - [ ] `std::net` (TCP, UDP), then HTTP
 - [ ] Asynchronous I/O for `async` tasks
 - [ ] Bounded channels, `try_receive` and timeouts
@@ -317,7 +317,7 @@ needs an ADR before it is implemented.
 
 - [ ] `@test` and a test runner (`nova test`), and `@deprecated`
 - [ ] A formatter (`sag fmt`) and a documentation generator (`sag doc`)
-- [ ] Binding generation from C headers (S4)
+- [x] Binding generation from C headers, and build scripts (S4)
 - [ ] Debugging with the names and types of Sagitario (today `#line` maps the C back to the lines)
 - [ ] Backtraces in panics, and diagnostics in other languages
 - [ ] Signed executables, native packages (`.msi`, `.pkg`, `.deb`) and the VS Code Marketplace

@@ -35,6 +35,11 @@ The sources say 0.32.0.
 
 ### Added
 
+- The macros of C headers in `bindgen`: `#define`s whose bodies are constants become `pub const`s
+  of integers, floats, strings and characters, computed from other macros, enumeration constants
+  and casts. `nova bindgen <header>` writes the bindings of a header once, as `bindgen-cli`. With
+  them S4 is done: the harness generates and uses the bindings of the system's C library
+  ([ADR-0103](docs/adr/0103-build-scripts-and-binding-generation.md), increment 5).
 - `bindgen`, as Rust's: build scripts generate Sagitario declarations from C headers with
   `new bindgen::Builder().header("lib.h").allow_prefix("LIB_").generate()`, which preprocesses
   them with clang or gcc and writes `extern "C"` blocks with variadic functions and C globals,

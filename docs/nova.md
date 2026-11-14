@@ -43,6 +43,7 @@ Programs use libraries through [dependencies](#dependencies), and C uses them th
 | `nova check` | Checks the package without generating code |
 | `nova clean` | Removes `target/`, the outputs of [build scripts](#build-scripts) with it |
 | `nova update self` | Updates Sagitario (`sag` and `nova`) to the latest release ([updating](#updating)) |
+| `nova bindgen <header>` | Writes the Sagitario declarations of a C header once, to standard output or `--output <file>` ([bindings](#bindings-from-c-headers)); it needs no package |
 | `nova help`, `nova version` | Usage and version |
 
 `build`, `run`, `check` and `clean` work in the package's directory or any directory below it:
@@ -322,12 +323,26 @@ system's headers they include. What C declares becomes:
 | `char`, `int`, `unsigned long`... | `std::ffi::c_char`, `c_int`, `c_ulong`...; `float` and `double` are `f32` and `f64`, `bool` is `bool` |
 | `int32_t`, `uint8_t`..., `size_t`, `ptrdiff_t` | `i32`, `u8`..., `usize`, `isize` |
 | a `typedef` | the type it names; a `typedef` of a struct names the struct |
+| `#define MASK 0xFFu`, `#define NAME "text"`, `#define RATIO 2.5`, `#define LETTER 'x'` | `pub const MASK: u32 = 255;` (`u32` or `i32` when the value fits, else `u64` or `i64`), `pub const NAME: String = "text";`, `pub const RATIO: f64 = 2.5;`, `pub const LETTER: u8 = 120;` |
 
+A macro's value may use other macros, enumeration constants, casts and C's operators; macros
+with parameters, and those whose bodies are no constants, are left out, as bindgen does. A macro
+is chosen as any declaration: by the header that defines it, or by its name with `allow_prefix`.
 A name that is a keyword of Sagitario gets `_` (`type_`). The bindings are written with paths such
 as `std::ffi::c_int`, so they import nothing. Left out, with a comment saying why: bitfields and
 packed structs (the struct is opaque), `static inline` functions and functions defined in the
 headers, `long double`, `_Complex` and `__int128`, flexible array members, and symbols Sagitario
 reserves (`__name`, `_Name`, `name_t`).
+
+`nova bindgen` does the same once, from the command line, as `bindgen-cli`:
+
+```sh
+nova bindgen include/SDL3/SDL.h --include-path include --allow-prefix SDL_ --output src/sdl.sag
+```
+
+Its options are `--output <file>` (standard output without it), `--allow-prefix <prefix>`,
+`--allow-file <header>`, `--block <name>`, `--include-path <dir>`, `--define <name>=<value>` and
+`--target <target>`, each as the method of the same name, and they may repeat.
 
 ## Targets
 

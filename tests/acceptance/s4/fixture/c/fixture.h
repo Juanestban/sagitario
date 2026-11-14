@@ -5,6 +5,22 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* Macros: constants of every kind, also computed from others, and some that are not. */
+#define FX_VERSION_MAJOR 1
+#define FX_MASK 0xFFu
+#define FX_SHIFTED (1u << 4)
+#define FX_COMBINED (FX_MASK | FX_SHIFTED)
+#define FX_CAST ((uint32_t)7)
+#define FX_NEGATIVE_MACRO (-5)
+#define FX_BIG 0x100000000ull
+#define FX_RATIO 2.5
+#define FX_SMALL .5e-3f
+#define FX_NAME "fixture \"one\""
+#define FX_LETTER 'x'
+#define FX_TWICE(x) ((x) * 2)
+#define FX_NOTHING
+#define FX_ALIAS fx_window_create
+
 /* An opaque type, whose definition is in fixture.c. */
 typedef struct fx_window fx_window;
 

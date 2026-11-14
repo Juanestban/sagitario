@@ -41,6 +41,7 @@ ANDROID_NDK_HOME=/path/to/ndk sag run tests/harness/main.sag -- --sag build/bin/
 nova new demo                   # a package (docs/nova.md); then, inside it:
 nova run -- a b                 # build target/debug/demo and run it
 nova check                      # front end only
+nova bindgen lib.h --output src/lib.sag   # Sagitario declarations of a C header (docs/nova.md)
 
 cd editors/vscode && npm ci && npm run package   # the VS Code extension: sagitario.vsix
 code --install-extension editors/vscode/sagitario.vsix   # it starts `sag lsp` from PATH

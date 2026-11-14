@@ -167,4 +167,15 @@ The user chose:
 - Translating the headers of the system (MSVC's C library and `windows.h`) showed that a C
   function no library defines failed to link as an internal compiler error when the program had
   no `[link]`: it is now an error of the program, with a regression test.
+- Increment 5 is done, and with it the record and S4. `-dM` says nothing of where a macro comes
+  from, so bindgen reads the `#define` lines of the headers it chooses by file, and takes from
+  `-dM` the bodies of those and of the names the allow list matches. An integer macro takes
+  bindgen's types, `u32` or `i32` when it fits, else `u64` or `i64`; a character `u8`, a float
+  `f64` and a string `String`. Macros whose values name others are computed in passes until no
+  more are known. `nova bindgen` takes `--allow-file` and `--block` too, as the builder does. The
+  acceptance (Q738) is `tests/acceptance/s4/`: the fixture, and `libc`, whose bindings of
+  `<string.h>` and `<time.h>` (`strlen`, `strcmp`, `memcmp`, `strftime` with `struct tm`,
+  `clock` and `CLOCKS_PER_SEC`) a program uses on every platform of the CI. The functions MSVC's
+  C library defines in its headers (`time`, `snprintf`) are left out there, so the program uses
+  those every system exports.
 
