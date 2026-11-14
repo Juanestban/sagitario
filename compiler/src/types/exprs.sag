@@ -931,7 +931,7 @@ fn other_expr_kind(cx: Checker, value: Expr, expected: Option<Type>) -> Type {
 
         cx.typed.static_type(cx.resolution, id).unwrap_or(types::error())
       }
-      Some(Res::Extern(id)) if !cx.resolution.is_runtime_extern(cx.package, id) => ffi::extern_value(cx, id),
+      Some(Res::Extern(id)) if !cx.resolution.is_runtime_extern(cx.package, id) => ffi::extern_value(cx, value.span, id),
       Some(Res::FromRaw(_)) => {
         cx.diagnostics.push(
           Diagnostic::error(codes::WRONG_CALL_FORM, value.span, "`from_raw` cannot be used as a value").with_help("wrap the call in a lambda: `(n) => Name::from_raw(n)`"),
@@ -1700,6 +1700,7 @@ fn call(cx: Checker, value: Expr, callee: Expr, args: List<Expr>, expected: Opti
     None => return closures::call_value(cx, value, callee, args),
   };
   var sig: Option<FnSig> = None;
+  var variadic = false;
 
   match cx.resolution.paths.get(callee.id) {
     Some(Res::Fn(id)) => {
@@ -1714,6 +1715,7 @@ fn call(cx: Checker, value: Expr, callee: Expr, args: List<Expr>, expected: Opti
     Some(Res::InterfaceFn { target, name }) => return interfaces::static_call(cx, value, path, target, name, args, expected),
     Some(Res::Extern(id)) => {
       sig = ffi::extern_call_sig(cx, callee, id);
+      variadic = ffi::is_variadic(cx, id);
     }
     Some(Res::FromRaw(id)) => {
       const enum_ty = cx.type_ref(TypeItem::Enum(id));
@@ -1798,7 +1800,11 @@ fn call(cx: Checker, value: Expr, callee: Expr, args: List<Expr>, expected: Opti
     }
   };
 
-  check_args(cx, value.span, "function", found.params, args);
+  if variadic {
+    ffi::variadic_args(cx, value.span, found.params, args);
+  } else {
+    check_args(cx, value.span, "function", found.params, args);
+  }
 
   found.ret
 }
@@ -2480,6 +2486,14 @@ fn struct_literal(cx: Checker, value: Expr, path: Path, fields: List<FieldInit>,
   };
   const def = cx.typed.struct_def(id).unwrap_or(StructDef { name: "", fields: new List(), is_union: false });
   const seen: List<Seen> = new List();
+
+  if ffi::is_opaque(cx, id) {
+    for init in fields {
+      expr(cx, init.value, None);
+    }
+
+    return ffi::bare_opaque(cx, path.span, id);
+  }
   // The type arguments of a generic struct come from the path, the expected type and the field
   // values.
   const owner = ParamOwner::Item(TypeItem::Struct(id));

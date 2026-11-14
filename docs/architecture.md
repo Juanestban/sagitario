@@ -264,6 +264,15 @@ runs the executor until the task of `main` finishes.
   defines a wrapper `sag_ffi_N` for it, plus a function with each exported symbol that calls
   the Sagitario function; exported functions are the only non-`static` ones. A dereference
   goes through `SAG_CHECK_PTR`, which panics on a null pointer.
+- A variadic C function ([ADR-0103](adr/0103-build-scripts-and-binding-generation.md), Q720) is
+  declared in `sag_ffi.c` with `...` after its parameters. A wrapper cannot forward extra
+  arguments, so each call with other types of extra arguments gets a wrapper of its own: lowering
+  registers it in `Registry.variadic_calls`, an `ExternDecl` with `fixed` set whose parameters
+  are those types, and the call's `Callee::Extern` is its index after the externs of the blocks.
+- An opaque C type (Q721) is only declared, `typedef struct sag_sN sag_sN;`, and never defined
+  (`StructLayout.opaque`). The checker rejects its values; generic code given one as a type
+  argument is checked when its instance is lowered, since a local of that type would be a C
+  value of an incomplete type (`Layouts::holds_opaque`).
 - C function pointer types (`extern "C" fn(..)`, [ADR-0078](adr/0078-ffi-without-c-shims.md))
   become one `typedef R (*sag_pN)(A, B);` per signature, shared by safe and unsafe ones and
   emitted in both translation units after the declarations of the aggregates. An `extern "C" fn`

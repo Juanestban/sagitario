@@ -1,6 +1,6 @@
 # 0103. Build scripts and binding generation (S4)
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-14
 - Refines: [ADR-0084](0084-a-complete-language-and-the-engine-apart.md) (Q544: S4),
   [ADR-0102](0102-binding-generation-before-the-core.md) (S4 before S3),
@@ -116,3 +116,16 @@ The user chose:
 - The roadmap's S4 is done with this record.
 
 ## Notes
+
+- Increment 1 is done. `...` is a token of its own. Each call of a variadic function with other
+  types of extra arguments gets a C wrapper of its own, since a wrapper cannot forward them; a call
+  without extra arguments uses the function's. Q721's "an array of length 0 is an error anywhere
+  else" applies to the fields of `@repr(C)` structs and unions, where C has no such arrays: other
+  arrays of length 0 stay valid, as they were (C gets one element that is never read). Generic
+  code given an opaque type that holds a value of it, as `ptr::read`, is found when its instance
+  is lowered, so `sag check` does not report it. As with `c_void`, an opaque type is not a type
+  argument written explicitly (`ptr::null_mut<SDL_Window>()`); one inferred from a pointer is.
+- `include_str("path")` already exists, without `!` ([ADR-0049](0049-self-hosting-plan-and-language-prerequisites.md),
+  Q222), and the compiler uses it to embed the runtime and `std`, which the seed compiles. Q725's
+  `include_str!` meets it in increment 2.
+

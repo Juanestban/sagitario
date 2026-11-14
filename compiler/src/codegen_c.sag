@@ -1141,6 +1141,11 @@ class Generator {
     const name = self.struct_name(ty);
     var members = "";
 
+    // C defines an opaque type; its `typedef` names an incomplete struct (Q721).
+    if self.layouts.is_opaque(ty) {
+      return "";
+    }
+
     match ty.kind {
       TypeKind::Class(class_ref) => {
         const fields = self.flat_parts(ty);
@@ -2290,6 +2295,23 @@ class Generator {
     parts.join(", ")
   }
 
+  /// The parameters C declares a function of an `extern` block with: a variadic one's own, then
+  /// `...` (docs/adr/0103-build-scripts-and-binding-generation.md, Q720).
+  prv fn c_declared_params(self, decl: ExternDecl) -> String {
+    match decl.fixed {
+      Some(count) => {
+        const own: List<Type> = new List();
+
+        for index in 0..count {
+          own.push(decl.params[index]);
+        }
+
+        self.c_params(own) + ", ..."
+      }
+      None => self.c_params(decl.params),
+    }
+  }
+
   /// A FFI translation unit: a wrapper per C function called and a getter per C global, of the
   /// standard library (`std`) or of the program, which also has a function with the exported
   /// symbol per `extern "C" fn`.
@@ -2405,7 +2427,7 @@ class Generator {
         _ => "return " + call + ";",
       };
 
-      out.append("\nextern " + self.return_type(decl.ret) + " " + decl.symbol + "(" + self.c_params(decl.params) + ");\n");
+      out.append("\nextern " + self.return_type(decl.ret) + " " + decl.symbol + "(" + self.c_declared_params(decl) + ");\n");
       out.append(self.extern_prototype(index, decl) + " { " + body + " }\n");
     }
 

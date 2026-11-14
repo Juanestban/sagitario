@@ -199,6 +199,9 @@ pub struct ExternFn {
   pub visibility: Visibility;
   pub name: Ident;
   pub params: List<Param>;
+  /// `...` after the parameters: a variadic C function, which takes more arguments
+  /// (docs/adr/0103-build-scripts-and-binding-generation.md, Q720).
+  pub variadic: bool;
   pub return_type: Option<TypeExpr>;
   pub span: Span;
 }
@@ -270,6 +273,29 @@ pub struct StructDecl {
   pub consts: List<ConstDecl>;
   pub functions: List<FnDecl>;
   pub span: Span;
+
+  /// Whether this is an opaque C type: a `@repr(C)` struct whose only field is a `prv` array of
+  /// length 0, as stable bindgen writes them. Its values never exist; it is used behind raw
+  /// pointers (docs/adr/0103-build-scripts-and-binding-generation.md, Q721).
+  pub fn is_opaque(self) -> bool {
+    if !self.repr_c || self.is_union || self.fields.len() != 1 {
+      return false;
+    }
+
+    const field = self.fields[0];
+
+    if let Visibility::Private = field.visibility {
+      return match field.ty.kind {
+        TypeExprKind::Array { len, .. } => match len.value.parse_u64() {
+          Ok(count) => count == 0,
+          Err(_) => false,
+        },
+        _ => false,
+      };
+    }
+
+    false
+  }
 }
 
 pub struct FieldDecl {

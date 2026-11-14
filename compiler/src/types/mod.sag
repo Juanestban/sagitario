@@ -1864,6 +1864,12 @@ pub class Checker {
               self.interface_types.push(SpanInterface { span: path.span, id: id });
             }
 
+            if let TypeItem::Struct(id) = item {
+              if !behind_pointer && ffi::is_opaque(self, id) {
+                return ffi::bare_opaque(self, path.span, id);
+              }
+            }
+
             return self.type_ref(item);
           }
           Some(TypeRes::Param { owner, index }) => {

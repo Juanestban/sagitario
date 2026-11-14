@@ -341,6 +341,15 @@
       "}"
     ]
   },
+  "extern \"C\" variadic function": {
+    "prefix": "externvariadic",
+    "description": "Declare a variadic C function, called with extra arguments inside `unsafe`",
+    "body": [
+      "extern \"C\" {",
+      "  fn ${1:printf}(${2:format: *const c_char}, ...) -> ${3:c_int};$0",
+      "}"
+    ]
+  },
   "extern static": {
     "prefix": "externstatic",
     "description": "Declare a global variable of C, used inside `unsafe`",
@@ -365,6 +374,11 @@
     "prefix": "reprc",
     "description": "A struct with the C layout, which can cross the FFI boundary",
     "body": ["@repr(C)", "pub struct ${1:Name} {", "  pub ${2:field}: ${3:i32};$0", "}"]
+  },
+  "opaque C type": {
+    "prefix": "opaque",
+    "description": "A C type only used behind pointers, whose contents only C knows",
+    "body": ["@repr(C)", "pub struct ${1:Name} {", "  prv _unused: [u8; 0];", "}$0"]
   },
   "@repr(C) union": {
     "prefix": "union",

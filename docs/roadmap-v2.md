@@ -153,9 +153,12 @@ Small gaps found while filling S2, to take up once the core is in Sagitario:
 A Nova tool that writes Sagitario declarations from C headers, as Rust's `bindgen` does (Q544):
 `extern "C"` blocks, `@repr(C)` structs, unions and enums, and function pointers.
 
-- Question: its inputs (C headers, through a parser of the part of C that headers use, or
-  descriptions such as Vulkan's `vk.xml`), the translation of macros, opaque types and
-  callbacks, and its command.
+- Its record is [ADR-0103](adr/0103-build-scripts-and-binding-generation.md): build scripts
+  (`build.sag`, as Cargo's `build.rs`), Rust's built-in macros (`include!`, `env!`...), calls of
+  variadic C functions, opaque structs, and the library `bindgen` with `nova bindgen`, which read
+  C headers preprocessed by the C compiler.
+
+**Status:** in progress.
 
 **Acceptance:** bindings generated from the headers of a real C library are used by a program in
 the harness without being edited by hand.
@@ -163,4 +166,6 @@ the harness without being edited by hand.
 ## Order
 
 S1 first, since it removes C right away and uses the FFI against real C libraries; the audit of
-S2 follows; filling its gaps can interleave with S3 and S4, which come in that order (Q545).
+S2 follows (Q545). S4 comes before S3, since it does not need the core in Sagitario and the game
+engine needs it first ([ADR-0102](adr/0102-binding-generation-before-the-core.md), Q719); filling
+gaps of S2 can interleave with both.

@@ -28,6 +28,14 @@ The sources say 0.32.0.
 
 ### Added
 
+- Calls of variadic C functions, as Rust's: `fn printf(format: *const c_char, ...) -> c_int;` in
+  an `extern "C"` block, whose extra arguments keep their types; those C promotes (`u8`, `bool`,
+  `f32`...) are errors that give the cast. Opaque C types, as bindgen writes them: a `@repr(C)`
+  struct whose only field is `prv _unused: [u8; 0]`, used only behind pointers. `std::sys` calls
+  `fcntl` itself, so the runtime loses its two C helpers for sockets, and the sockets of macOS and
+  iOS are now closed in the programs a program starts. The editor colors `...` and gains the
+  snippets `externvariadic` and `opaque`
+  ([ADR-0103](docs/adr/0103-build-scripts-and-binding-generation.md), increment 1).
 - Widths and precisions read from bindings in format strings, `{x:>width$}`, `{pi:.digits$}`, as
   Rust's inline arguments, and the debug form of an interface value, which is that of the value
   it holds instead of `dyn Name`; the grammar colors the bindings. With them every row of the

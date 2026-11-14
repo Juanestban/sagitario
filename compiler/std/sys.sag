@@ -1772,9 +1772,8 @@ extern "C" {
 @cfg(any(target_os = "linux", target_os = "android"))
 const O_CLOEXEC: c_int = 0x80000;
 
-/// Apple systems start programs with `posix_spawn`, whose option types are pointers there: setting
-/// `FD_CLOEXEC` takes `fcntl`, which is variadic, and `POSIX_SPAWN_CLOEXEC_DEFAULT` closes every
-/// descriptor the child is not given instead.
+/// Apple systems start programs with `posix_spawn`, whose option types are pointers there:
+/// `POSIX_SPAWN_CLOEXEC_DEFAULT` closes every descriptor the child is not given.
 @cfg(any(target_os = "macos", target_os = "ios"))
 extern "C" {
   fn pipe(fds: *mut c_int) -> c_int;
@@ -4743,6 +4742,30 @@ extern "C" {
   fn accept(socket: c_int, addr: *mut SockaddrBuffer, len: *mut u32) -> c_int;
 }
 
+/// `fcntl`, variadic: its third argument depends on the command
+/// (docs/adr/0103-build-scripts-and-binding-generation.md, Q722).
+@cfg(unix)
+extern "C" {
+  fn fcntl(fd: c_int, command: c_int, ...) -> c_int;
+}
+
+@cfg(unix)
+const F_GETFL: c_int = 3;
+@cfg(unix)
+const F_SETFL: c_int = 4;
+@cfg(any(target_os = "linux", target_os = "android"))
+const O_NONBLOCK: c_int = 0x800;
+@cfg(any(target_os = "linux", target_os = "android"))
+const F_DUPFD_CLOEXEC: c_int = 1030;
+@cfg(any(target_os = "macos", target_os = "ios"))
+const O_NONBLOCK: c_int = 4;
+@cfg(any(target_os = "macos", target_os = "ios"))
+const F_DUPFD_CLOEXEC: c_int = 67;
+@cfg(any(target_os = "macos", target_os = "ios"))
+const F_SETFD: c_int = 2;
+@cfg(any(target_os = "macos", target_os = "ios"))
+const FD_CLOEXEC: c_int = 1;
+
 /// `SOCK_CLOEXEC`: the socket is closed in the programs this one starts.
 @cfg(any(target_os = "linux", target_os = "android"))
 const SOCK_CLOEXEC: c_int = 0x80000;
@@ -4780,16 +4803,15 @@ fn open_socket(v6: bool, kind: c_int) -> c_int {
   unsafe { socket(family as c_int, kind | SOCK_CLOEXEC, 0) }
 }
 
-/// `std::process` closes in the children every descriptor it does not give them
-/// (`POSIX_SPAWN_CLOEXEC_DEFAULT`), so the socket needs no `FD_CLOEXEC`, which takes the
-/// variadic `fcntl`; it never raises `SIGPIPE`.
+/// Apple systems have no `SOCK_CLOEXEC`: the socket gets `FD_CLOEXEC` after it is opened, and it
+/// never raises `SIGPIPE`.
 @cfg(any(target_os = "macos", target_os = "ios"))
 fn open_socket(v6: bool, kind: c_int) -> c_int {
   const family = if v6 { AF_INET6 } else { AF_INET };
   const fd = unsafe { socket(family as c_int, kind, 0) };
 
   if fd >= 0 {
-    if let Err(_) = set_int_option(fd, SOL_SOCKET, SO_NOSIGPIPE, 1) {
+    if let Err(_) = apple_socket_options(fd) {
       const code = errno();
 
       unsafe { close(fd); }
@@ -4800,6 +4822,17 @@ fn open_socket(v6: bool, kind: c_int) -> c_int {
   }
 
   fd
+}
+
+/// What a socket of an Apple system needs that others get from flags: closed in the programs
+/// this one starts, and no `SIGPIPE`.
+@cfg(any(target_os = "macos", target_os = "ios"))
+fn apple_socket_options(fd: c_int) -> Result<(), i32> {
+  if unsafe { fcntl(fd, F_SETFD, FD_CLOEXEC) } != 0 {
+    return Err(failure());
+  }
+
+  set_int_option(fd, SOL_SOCKET, SO_NOSIGPIPE, 1)
 }
 
 /// A new socket of the family of `v6`, for streams or datagrams.
@@ -4858,7 +4891,7 @@ pub fn socket_accept(handle: usize) -> Result<(usize, RawAddr), i32> {
     const fd = unsafe { accept(handle as c_int, &raw mut buffer, &raw mut len) };
 
     if fd >= 0 {
-      if let Err(code) = set_int_option(fd, SOL_SOCKET, SO_NOSIGPIPE, 1) {
+      if let Err(code) = apple_socket_options(fd) {
         unsafe { close(fd); }
 
         return Err(code);
@@ -5470,8 +5503,6 @@ fn nanos_of(value: Timeval) -> u64 {
 @cfg(unix)
 extern "C" {
   fn getsockopt(socket: c_int, level: c_int, name: c_int, value: *mut c_void, len: *mut u32) -> c_int;
-  fn sag_socket_nonblocking(fd: c_int, on: c_int) -> c_int;
-  fn sag_socket_duplicate(fd: c_int) -> c_int;
 }
 
 // `PollFd`, `poll` and `POLLOUT` are those of the pipes of `std::process`, above.
@@ -5517,13 +5548,21 @@ pub fn socket_option(handle: usize, option: i32) -> Result<i32, i32> {
 
 @cfg(unix)
 pub fn socket_set_nonblocking(handle: usize, on: bool) -> Result<(), i32> {
-  if unsafe { sag_socket_nonblocking(handle as c_int, if on { 1 } else { 0 }) } == 0 { Ok(()) } else { Err(failure()) }
+  const flags = unsafe { fcntl(handle as c_int, F_GETFL) };
+
+  if flags < 0 {
+    return Err(failure());
+  }
+
+  const changed = if on { flags | O_NONBLOCK } else { flags & !O_NONBLOCK };
+
+  if unsafe { fcntl(handle as c_int, F_SETFL, changed) } == 0 { Ok(()) } else { Err(failure()) }
 }
 
 /// Another descriptor of the same socket, closed in the programs this one starts.
 @cfg(unix)
 pub fn socket_duplicate(handle: usize) -> Result<usize, i32> {
-  const fd = unsafe { sag_socket_duplicate(handle as c_int) };
+  const fd = unsafe { fcntl(handle as c_int, F_DUPFD_CLOEXEC, 0 as c_int) };
 
   if fd < 0 { Err(failure()) } else { Ok(fd as usize) }
 }

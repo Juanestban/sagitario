@@ -13,7 +13,7 @@ Support for the [Sagitario](https://github.com/Juanestban/sagitario) programming
   types and constants in paths (semantic tokens). Inside the braces of format strings, as rust-analyzer does
   in Rust's, it also colors the variables, parameters, fields, methods and functions.
 - Syntax highlighting of `.sag` files: keywords, types, operators (the bitwise ones and shifts
-  too), numbers with their suffixes, the indices of tuples' elements (`pair.0`) and the names a tuple pattern declares
+  too, and the `...` of variadic C functions), numbers with their suffixes, the indices of tuples' elements (`pair.0`) and the names a tuple pattern declares
   (`const (q, r) = ...`), characters,
   strings, format strings `f"...{expr}..."` with their specifiers (`{x:>8.2}`, and the bindings of `{x:>width$}`) and template strings with their interpolations,
   whose expressions are highlighted as code and whose braces as punctuation, nested block
@@ -23,8 +23,8 @@ Support for the [Sagitario](https://github.com/Juanestban/sagitario) programming
 - Snippets: `main`, `mainr`, `asyncmain`, `asyncfn`, `fn`, `pfn`, `static`, `staticvar`, `typeconst`,
   `threadlocal`, `cfg`, `struct`, `class`, `enum`, `interface`, `implfor`, `match`, `iflet`, `whilelet`, `for`,
   `forin`, `fortuple`, `consttuple`, `assert`, `asserteq`, `if`, `ifelse`, `println`, `fstr` (a format string) and `use`; for operators and text, `impleq`, `implord`, `impldisplay`, `implop` (`+`, `-`, `*`,
-  `/`, `%`) and `implneg`; for conversions, defaults, indexing and iteration, `implfrom`, `impltryfrom`, `impldefault`, `default` (a struct with `@default`), `implindex`, `impliterable`, `implfromiter` and `impldrop`; for streams, `implread` and `implwrite`; and for the FFI, `extern` (a block of C functions), `externstatic` (a global variable of C), `externfn`,
-  `export`, `reprc`, `union`, `reprenum`, `cfn`, `unsafe`, `cstring` and `library` (a function
+  `/`, `%`) and `implneg`; for conversions, defaults, indexing and iteration, `implfrom`, `impltryfrom`, `impldefault`, `default` (a struct with `@default`), `implindex`, `impliterable`, `implfromiter` and `impldrop`; for streams, `implread` and `implwrite`; and for the FFI, `extern` (a block of C functions), `externvariadic` (a variadic C function), `externstatic` (a global variable of C), `externfn`,
+  `export`, `reprc`, `opaque` (an opaque C type), `union`, `reprenum`, `cfn`, `unsafe`, `cstring` and `library` (a function
   loaded from a dynamic library).
 
 ## The language server

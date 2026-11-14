@@ -1,7 +1,8 @@
 # 10. Foreign function interface (F1)
 
 Rationale: [ADR-0009](../adr/0009-ffi-and-unsafe.md), [ADR-0026](../adr/0026-ffi-details.md),
-[ADR-0078](../adr/0078-ffi-without-c-shims.md).
+[ADR-0078](../adr/0078-ffi-without-c-shims.md),
+[ADR-0103](../adr/0103-build-scripts-and-binding-generation.md).
 
 The C ABI is how Sagitario talks to operating systems and how mobile hosts (Swift, Kotlin
 via JNI) will call Sagitario code.
@@ -26,8 +27,33 @@ fn main() {
 - A C function may be declared in several blocks, always with the same signature.
 - Parameters and results must be FFI-safe (below); a function returning `()` returns `void`.
 - The C standard library is always linked. A package links other C libraries and C sources
-  with `[link]` in its `Nova.toml` (F3, [Nova](../nova.md#linking-c)). Variadic functions
-  (`printf`) are not supported in the MVP.
+  with `[link]` in its `Nova.toml` (F3, [Nova](../nova.md#linking-c)).
+
+## Variadic functions
+
+Rationale: [ADR-0103](../adr/0103-build-scripts-and-binding-generation.md) (Q720).
+
+```sag
+extern "C" {
+  fn printf(format: *const c_char, ...) -> c_int;
+}
+
+const format = CString::new("%s is %d\n").unwrap();
+const name = CString::new("Ada").unwrap();
+
+unsafe { printf(format.as_ptr(), name.as_ptr(), 36); }
+```
+
+- A function of an `extern "C"` block may end its parameters with `...`, after at least one
+  (`E0100`): it is a variadic C function, as Rust's. A call passes its parameters, then any number
+  of extra arguments (fewer than its parameters is `E0301`).
+- Each extra argument keeps its own type, which must be FFI-safe (`E0322`) and one C passes as it
+  is: C promotes `i8`, `i16`, `u8`, `u16`, `bool`, `f32` and enums of those representations, so
+  they are errors (`E0322`) whose help gives the cast, `as c_int`, `as c_uint` or `as f64`. An
+  integer literal is an `i32`, and a float literal an `f64`.
+- A variadic function is called directly: it is not a function pointer (`E0322`), and the type of
+  a function pointer cannot end in `...` (`E0100`). Sagitario code cannot define one (`E0100`).
+- The same C function declared with and without `...` has two different signatures (`E0208`).
 
 ## Exporting functions
 
@@ -135,7 +161,9 @@ Integers, floats, `bool`, raw pointers, references to FFI-safe types (non-null p
 C function pointers (also in an `Option`), `@repr(C)` structs and unions, and enums with an
 integer representation. Fields of `@repr(C)` structs and
 unions may also be fixed arrays of these (`[c_char; 256]`), laid out as C's `T name[N]`; an array
-is never a parameter or a result, since C passes a pointer to its first element instead. `String`, `char`, enums, arrays,
+is never a parameter or a result, since C passes a pointer to its first element instead. C has no
+arrays of length 0, so they are errors in fields of `@repr(C)` structs and unions (`E0322`), except
+as the field of an [opaque type](#opaque-types). `String`, `char`, enums, arrays,
 tuples and other structs cannot cross the boundary: strings travel as `CString` pointers, and
 characters as `u32`.
 
@@ -228,6 +256,32 @@ const get_proc = unsafe { found as unsafe extern "C" fn(*mut c_void, *const c_ch
   ends. Linking a program with `[link]` remains the way for libraries it always needs.
 - `Library` is written in Sagitario (`compiler/std/ffi.sag`) on functions of the runtime.
 
+## Opaque types
+
+Rationale: [ADR-0103](../adr/0103-build-scripts-and-binding-generation.md) (Q721).
+
+```sag
+@repr(C)
+struct SDL_Window {
+  prv _unused: [u8; 0];
+}
+
+extern "C" {
+  fn SDL_CreateWindow(title: *const c_char, width: c_int, height: c_int, flags: u64) -> *mut SDL_Window;
+  fn SDL_DestroyWindow(window: *mut SDL_Window);
+}
+```
+
+- A `@repr(C)` struct whose only field is a `prv` array of length 0 is an opaque C type, as
+  bindgen writes C's `typedef struct SDL_Window SDL_Window;`: C defines its contents and its size.
+  Each one is a type of its own, so a `*mut SDL_Window` is no `*mut SDL_Renderer`.
+- Its values never exist: it is only used behind a raw pointer. A binding, parameter, result,
+  field or type argument of its type, a literal of it, `mem::size_of` and `mem::align_of` of it are
+  errors (`E0322`), and so are its methods. `*p` and `p.add(n)` of a pointer to it are errors
+  (`E0310`). Generic code given it as a type argument that holds a value of it, as `ptr::read`,
+  is an error of the call that needs that code (`E0322`), found when the program is compiled.
+- Its C is an incomplete struct, declared and never defined.
+
 ## C-compatible structs
 
 `@repr(C)` gives a struct the C layout (fields in declaration order with C's alignment). Its
@@ -296,5 +350,7 @@ const back: Option<Result> = Result::from_raw(code);
 
 ## Not yet
 
-Automatic binding generation (in the style of `bindgen`, or from `vk.xml`), variadic functions,
-bitfields and packed structs. C++ libraries are used through their C interfaces.
+Automatic binding generation, in the style of `bindgen`, comes with S4
+([ADR-0103](../adr/0103-build-scripts-and-binding-generation.md)). Defining variadic functions,
+bitfields and packed structs are not supported. C++ libraries are used through their C
+interfaces.

@@ -23,6 +23,7 @@ pub fn tests() -> List<Test> {
     support::test("the_arc_pass_keeps_what_programs_do", the_arc_pass_keeps_what_programs_do),
     support::test("check_follows_the_target_of_cfg", check_follows_the_target_of_cfg),
     support::test("missing_output_directory_exits_with_1", missing_output_directory_exits_with_1),
+    support::test("generic_code_cannot_hold_opaque_types", generic_code_cannot_hold_opaque_types),
   ])
 }
 
@@ -320,6 +321,37 @@ fn checks_deeply_nested_code(cx: Context) -> Result<(), String> {
   const ran = sag(cx, List::from(["check", file]))?;
 
   support::expect_success("sag check", ran)
+}
+
+/// An opaque C type given to generic code that holds it by value, as `ptr::read` does, is an error
+/// of the instance, found when it is lowered: its C would declare a value of an incomplete type
+/// (docs/adr/0103-build-scripts-and-binding-generation.md, Q721).
+fn generic_code_cannot_hold_opaque_types(cx: Context) -> Result<(), String> {
+  const dir = cx.temp_dir("opaque-generic")?;
+  const file = path::join(dir, "opaque.sag");
+  const source = "use std::ptr;
+
+@repr(C)
+struct Window {
+  prv _unused: [u8; 0];
+}
+
+fn keep<T>(pointer: *const T) -> *const T { pointer }
+
+fn main() {
+  const window: *const Window = keep(ptr::null());
+  const _value = unsafe { ptr::read(window) };
+}
+";
+
+  support::write_file(file, source)?;
+
+  const ran = sag(cx, List::from(["build", file, "--output", path::join(dir, "opaque")]))?;
+
+  expect_exit("sag build", ran, 1)?;
+  expect_contains("sag build", ran.stderr, "error[E0322]: this generic code holds a value of type `Window`")?;
+  expect(!ran.stderr.contains("incomplete type"), "the C compiler saw a value of an opaque type:
+" + ran.stderr)
 }
 
 fn missing_output_directory_exits_with_1(cx: Context) -> Result<(), String> {

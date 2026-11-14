@@ -783,7 +783,9 @@ class Lexer {
     const text = match c {
       '(' | ')' | '{' | '}' | '[' | ']' | ',' | ';' | '@' | '?' => `${c}`,
       ':' => if self.eat(':') { "::" } else { ":" },
-      '.' => if self.eat('.') { if self.eat('=') { "..=" } else { ".." } } else { "." },
+      // `...` ends the parameters of a variadic C function
+      // (docs/adr/0103-build-scripts-and-binding-generation.md, Q720).
+      '.' => if self.eat('.') { if self.eat('=') { "..=" } else if self.eat('.') { "..." } else { ".." } } else { "." },
       '-' => if self.eat('>') { "->" } else if self.eat('=') { "-=" } else { "-" },
       '=' => if self.eat('=') { "==" } else if self.eat('>') { "=>" } else { "=" },
       '!' => if self.eat('=') { "!=" } else { "!" },

@@ -1,6 +1,6 @@
 # 0102. Binding generation before the core in Sagitario
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-14
 - Supersedes: Q545 of [ADR-0084](0084-a-complete-language-and-the-engine-apart.md) (the order
   of S3 and S4)

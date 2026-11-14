@@ -8,6 +8,7 @@
 
 use pkg::ast::{BinaryOp, Block, Expr, ExprKind, FieldInit, FnDecl, FormatSpec, Ident, Package, Stmt as AstStmt, TemplatePart, UnaryOp};
 use pkg::diagnostics::{Diagnostic, Diagnostics};
+use pkg::diagnostics::codes;
 use pkg::resolve::{ItemRef, ParamOwner, Res, Resolution, TypeItem};
 use pkg::span::{SourceMap, Span};
 use pkg::sir::arc;
@@ -132,6 +133,10 @@ pub struct ExternDecl {
   /// Declared by the standard library, whose C declarations go to a unit of their own, so that
   /// they never meet the program's of the same function (docs/adr/0086-c-globals-and-std-io.md).
   pub in_std: bool;
+  /// For a variadic C function, the number of its own parameters: `params` then has the types of
+  /// the extra arguments of one call after them, and C sees `...` there
+  /// (docs/adr/0103-build-scripts-and-binding-generation.md, Q720).
+  pub fixed: Option<usize>;
 }
 
 /// The fields of the program's structs and enums, with type parameters in generic ones.
@@ -182,6 +187,50 @@ pub struct Layouts {
     }
   }
 
+  /// Whether values of `ty` hold a value of an opaque C type, which only exists in C
+  /// (docs/adr/0103-build-scripts-and-binding-generation.md, Q721).
+  pub fn holds_opaque(self, ty: Type) -> bool {
+    match ty.kind {
+      TypeKind::Array { elem, .. } => self.holds_opaque(elem),
+      TypeKind::Tuple(elems) => {
+        for elem in elems {
+          if self.holds_opaque(elem) {
+            return true;
+          }
+        }
+
+        false
+      }
+      TypeKind::Struct(named) => {
+        if self.is_opaque(ty) {
+          return true;
+        }
+
+        for field in self.struct_fields(named) {
+          if self.holds_opaque(field) {
+            return true;
+          }
+        }
+
+        false
+      }
+      TypeKind::Enum(_) | TypeKind::Option(_) | TypeKind::Result { .. } => {
+        if let Some(variants) = self.variants(ty) {
+          for fields in variants {
+            for field in fields {
+              if self.holds_opaque(field) {
+                return true;
+              }
+            }
+          }
+        }
+
+        false
+      }
+      _ => false,
+    }
+  }
+
   /// The field types of each variant of an enum, `Option` or `Result` type.
   pub fn variants(self, ty: Type) -> Option<List<List<Type>>> {
     match ty.kind {
@@ -205,6 +254,17 @@ pub struct Layouts {
       TypeKind::Option(value) => Some(List::from([new List<Type>(), List::from([value])])),
       TypeKind::Result { value, error } => Some(List::from([List::from([value]), List::from([error])])),
       _ => None,
+    }
+  }
+
+  /// Whether `ty` is an opaque C type.
+  pub fn is_opaque(self, ty: Type) -> bool {
+    match ty.kind {
+      TypeKind::Struct(named) => match self.structs.get(named.id as usize) {
+        Some(layout) => layout.opaque,
+        None => false,
+      },
+      _ => false,
     }
   }
 
@@ -261,6 +321,9 @@ pub struct StructLayout {
   pub field_names: List<String>;
   /// A union: its fields share their memory.
   pub is_union: bool;
+  /// An opaque C type, which C declares but does not define here
+  /// (docs/adr/0103-build-scripts-and-binding-generation.md, Q721).
+  pub opaque: bool;
 }
 
 pub struct Function {
@@ -761,6 +824,13 @@ pub class Registry {
   pub var debug_types: List<Type>;
   /// The types whose debug form is reached, by `type_key`.
   pub var debug_seen: Map<String, bool>;
+  /// Where each instance was first needed, for the errors found in its code.
+  pub var instance_spans: Map<usize, Span>;
+  /// The calls of variadic C functions, one per function and types of the arguments: the C
+  /// function `externs + N`, after those of the `extern` blocks, is the `N`th.
+  pub var variadic_calls: List<ExternDecl>;
+  /// By extern id and `type_key` of the arguments.
+  pub var variadic_index: Map<String, usize>;
 
   pub fn new(self, first_instance: u32) {
     self.itables = new List();
@@ -781,6 +851,9 @@ pub class Registry {
     self.async_main = None;
     self.debug_types = new List();
     self.debug_seen = new Map<String, bool>();
+    self.instance_spans = new Map<usize, Span>();
+    self.variadic_calls = new List();
+    self.variadic_index = new Map<String, usize>();
   }
 }
 
@@ -814,7 +887,12 @@ pub fn lower(package: Package, resolution: Resolution, typed: TypedModule, sourc
       field_names.push(field.name);
     }
 
-    structs.push(StructLayout { name: def.name, fields: fields, field_names: field_names, is_union: def.is_union });
+    const opaque = match resolution.struct_decl(package, structs.len() as u32) {
+      Some(decl) => decl.is_opaque(),
+      None => false,
+    };
+
+    structs.push(StructLayout { name: def.name, fields: fields, field_names: field_names, is_union: def.is_union, opaque: opaque });
   }
 
   const enums: List<EnumLayout> = new List();
@@ -929,6 +1007,20 @@ pub fn lower(package: Package, resolution: Resolution, typed: TypedModule, sourc
     };
     const function = lower_function(instance.template, decl, instance.subst, cx)?;
 
+    // Generic code given an opaque C type as a type argument, which it holds by value (Q721).
+    if let Some(span) = registry.instance_spans.get(index) {
+      for ty in function.locals {
+        if layouts.holds_opaque(ty) {
+          diagnostics.push(
+            Diagnostic::error(codes::NOT_FFI_SAFE, span, "this generic code holds a value of type `" + types::text(ty) + "`, an opaque C type or one holding it")
+              .with_note("the values of an opaque C type only exist in C, behind pointers")
+              .with_help("pass the pointer to the C functions that use it instead"),
+          );
+          break;
+        }
+      }
+    }
+
     while instances.len() <= index {
       instances.push(None);
     }
@@ -991,7 +1083,13 @@ pub fn lower(package: Package, resolution: Resolution, typed: TypedModule, sourc
       None => false,
     };
 
-    externs.push(ExternDecl { symbol: decl.name.name, params: sig.params, ret: sig.ret, runtime: resolution.is_runtime_extern(package, id), in_std: in_std });
+    const fixed: Option<usize> = if decl.variadic { Some(sig.params.len()) } else { None };
+
+    externs.push(ExternDecl { symbol: decl.name.name, params: sig.params, ret: sig.ret, runtime: resolution.is_runtime_extern(package, id), in_std: in_std, fixed: fixed });
+  }
+
+  for call in registry.variadic_calls {
+    externs.push(call);
   }
 
   const statics: List<StaticDef> = new List();
@@ -3777,6 +3875,14 @@ pub class Lowering {
       Some(chosen) => chosen,
       None => return Err("call without a callee"),
     };
+
+    if let Callee::Extern(id) = chosen {
+      if let Some(decl) = self.resolution.extern_decl(self.package, id) {
+        if decl.variadic && args.len() > decl.params.len() {
+          return self.variadic_call(id, args, ty);
+        }
+      }
+    }
     const params = match chosen {
       Callee::Extern(id) => match self.typed.extern_sig(id) {
         Some(sig) => sig.params,
@@ -3794,6 +3900,47 @@ pub class Lowering {
     }
 
     Ok(self.call(chosen, operands, ty))
+  }
+
+  /// A call of a variadic C function: its arguments past the parameters keep their own types, and
+  /// the call goes to the wrapper of the C function for those types (Q720).
+  prv fn variadic_call(self, id: u32, args: List<Expr>, ty: Type) -> Result<Operand, String> {
+    const sig = match self.typed.extern_sig(id) {
+      Some(sig) => sig,
+      None => return Err("a variadic C function without a signature"),
+    };
+    const decl = match self.resolution.extern_decl(self.package, id) {
+      Some(decl) => decl,
+      None => return Err("a variadic C function without a declaration"),
+    };
+    const operands: List<Operand> = new List();
+    const params: List<Type> = new List();
+    const keys: List<String> = new List();
+
+    for index in 0..args.len() {
+      const param = if index < sig.params.len() { sig.params[index] } else { self.type_of(args[index])? };
+
+      operands.push(self.operand_as(args[index], param)?);
+      params.push(param);
+      keys.push(type_key(param));
+    }
+
+    const key = `${id}:` + keys.join(",");
+    const position = match self.registry.variadic_index.get(key) {
+      Some(found) => found,
+      None => {
+        const in_std = match self.resolution.externs.get(id as usize) {
+          Some(info) => self.resolution.is_std_source(info.module),
+          None => false,
+        };
+
+        self.registry.variadic_calls.push(ExternDecl { symbol: decl.name.name, params: params, ret: sig.ret, runtime: false, in_std: in_std, fixed: Some(sig.params.len()) });
+        self.registry.variadic_index.insert(key, self.registry.variadic_calls.len() - 1);
+        self.registry.variadic_calls.len() - 1
+      }
+    };
+
+    Ok(self.call(Callee::Extern((self.resolution.externs.len() + position) as u32), operands, ty))
   }
 
   prv fn method_call(self, value: Expr, receiver: Expr, args: List<Expr>, ty: Type) -> Result<Operand, String> {

@@ -1267,9 +1267,26 @@ class Parser {
     self.expect("(")?;
 
     const params = self.params()?;
+    var variadic = false;
 
-    if self.at("..") || self.at("..=") {
-      return Err(self.not_implemented(self.span(), "variadic C functions"));
+    if self.at("...") {
+      const dots = self.advance().span;
+
+      variadic = true;
+
+      if params.is_empty() {
+        self.diagnostics.push(
+          Diagnostic::error(codes::UNEXPECTED_TOKEN, dots, "a variadic C function needs a parameter before `...`")
+            .with_help("declare the parameter C names before `...`, as in `fn printf(format: *const c_char, ...)`"),
+        );
+      }
+    } else if self.at("..") || self.at("..=") {
+      self.diagnostics.push(
+        Diagnostic::error(codes::UNEXPECTED_TOKEN, self.span(), "the extra arguments of a variadic C function are written `...`")
+          .with_help("write `...` after the last parameter, as in `fn printf(format: *const c_char, ...)`"),
+      );
+      self.advance();
+      variadic = true;
     }
 
     self.expect(")")?;
@@ -1293,14 +1310,14 @@ class Parser {
       return Ok(None);
     }
 
-    Ok(Some(ExternFn { visibility: visibility, name: name, params: params, return_type: return_type, span: start.to(end) }))
+    Ok(Some(ExternFn { visibility: visibility, name: name, params: params, variadic: variadic, return_type: return_type, span: start.to(end) }))
   }
 
   /// The parameters `name: Type, ...` up to the closing `)`, which is not consumed.
   prv fn params(self) -> Result<List<Param>, ()> {
     const params: List<Param> = new List();
 
-    while !self.at(")") && !self.at("..") && !self.at("..=") {
+    while !self.at(")") && !self.at("..") && !self.at("..=") && !self.at("...") {
       const param_name = self.ident("a parameter name")?;
 
       self.expect(":")?;
@@ -2008,6 +2025,16 @@ class Parser {
 
     const params = self.params()?;
 
+    if self.at("...") {
+      self.diagnostics.push(
+        Diagnostic::error(codes::UNEXPECTED_TOKEN, self.span(), "Sagitario functions cannot be variadic")
+          .with_note("`...` declares a C function of an `extern` block that takes more arguments")
+          .with_help("take a list or a slice of the arguments instead"),
+      );
+
+      return Err(());
+    }
+
     self.expect(")")?;
 
     const return_type: Option<TypeExpr> = if self.eat("->") { Some(self.type_expr()?) } else { None };
@@ -2319,6 +2346,15 @@ class Parser {
     const params: List<TypeExpr> = new List();
 
     while !self.at(")") {
+      if self.at("...") {
+        self.diagnostics.push(
+          Diagnostic::error(codes::UNEXPECTED_TOKEN, self.span(), "a function pointer cannot be variadic")
+            .with_note("only the C functions of an `extern` block can be variadic, and they are called directly (docs/spec/10-ffi.md)"),
+        );
+
+        return Err(());
+      }
+
       params.push(self.param_type()?);
 
       if !self.eat(",") {

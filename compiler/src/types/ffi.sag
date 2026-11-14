@@ -135,6 +135,39 @@ pub fn bare_c_void(cx: Checker, span: Span) -> Type {
   types::error()
 }
 
+/// Whether the struct `id` is an opaque C type (docs/adr/0103-build-scripts-and-binding-generation.md,
+/// Q721).
+pub fn is_opaque(cx: Checker, id: u32) -> bool {
+  match cx.resolution.struct_decl(cx.package, id) {
+    Some(decl) => decl.is_opaque(),
+    None => false,
+  }
+}
+
+/// A value of an opaque C type, which never exists.
+pub fn bare_opaque(cx: Checker, span: Span, id: u32) -> Type {
+  const name = match cx.resolution.struct_decl(cx.package, id) {
+    Some(decl) => decl.name.name,
+    None => "",
+  };
+
+  cx.diagnostics.push(
+    Diagnostic::error(codes::NOT_FFI_SAFE, span, "`" + name + "` is an opaque C type: it can only be used behind a raw pointer")
+      .with_note("its only field is a private array of length 0, so C defines its contents and its size")
+      .with_help("write `*mut " + name + "` or `*const " + name + "`"),
+  );
+
+  types::error()
+}
+
+/// The pointee of `ty`, when it is an opaque C type.
+fn opaque_pointee(cx: Checker, pointee: Type) -> bool {
+  match pointee.kind {
+    TypeKind::Struct(named) => is_opaque(cx, named.id),
+    _ => false,
+  }
+}
+
 /// Whether C can receive or return values of `ty`: numbers, `bool`, pointers, C function
 /// pointers (also in an `Option`, whose `None` is `NULL`) and `@repr(C)` structs.
 fn ffi_safe(cx: Checker, ty: Type) -> bool {
@@ -306,8 +339,35 @@ pub fn check_repr_c_structs(cx: Checker) {
         const kind = if decl.is_union { "union" } else { "struct" };
 
         not_ffi_safe(cx, field.ty.span, ty, "the field `" + field.name.name + "` of the `@repr(C)` " + kind + " `" + decl.name.name + "`");
+      } else if !decl.is_opaque() && has_empty_array(ty) {
+        cx.diagnostics.push(
+          Diagnostic::error(codes::NOT_FFI_SAFE, field.ty.span, "C has no arrays of length 0, so the field `" + field.name.name + "` has no C layout")
+            .with_note("a `@repr(C)` struct whose only field is a `prv` array of length 0 is an opaque C type")
+            .with_help("for an opaque type, declare `@repr(C) struct " + decl.name.name + " { prv _unused: [u8; 0]; }` and use it behind pointers"),
+        );
       }
     }
+
+    // Its values never exist, so it has no methods (Q721).
+    if decl.is_opaque() {
+      for function in decl.functions {
+        if function.self_param.is_some() {
+          cx.diagnostics.push(
+            Diagnostic::error(codes::NOT_FFI_SAFE, function.name.span, "the opaque C type `" + decl.name.name + "` cannot have methods")
+              .with_note("its values only exist in C, behind pointers")
+              .with_help("write a function taking a `*mut " + decl.name.name + "` instead"),
+          );
+        }
+      }
+    }
+  }
+}
+
+/// Whether `ty` is, or holds directly, an array of length 0.
+fn has_empty_array(ty: Type) -> bool {
+  match ty.kind {
+    TypeKind::Array { elem, len } => len == 0 || has_empty_array(elem),
+    _ => false,
   }
 }
 
@@ -318,6 +378,8 @@ struct Symbol {
   /// Of the standard library, which may declare the reserved names of the system's C library
   /// and define the runtime's own (docs/adr/0085-conditional-compilation-and-std-time.md, Q552).
   pub in_std: bool;
+  /// A C function declared with `...`.
+  pub variadic: bool;
 }
 
 /// Checks the C symbols: valid identifiers, not reserved, each declared or defined once (a C
@@ -340,14 +402,14 @@ pub fn check_symbols(cx: Checker) {
     }
 
     names.push(decl.name.name);
-    found.push(Symbol { span: decl.name.span, sig: cx.typed.extern_sig(id), in_std: cx.resolution.is_std_source(cx.resolution.externs[index].module) });
+    found.push(Symbol { span: decl.name.span, sig: cx.typed.extern_sig(id), in_std: cx.resolution.is_std_source(cx.resolution.externs[index].module), variadic: decl.variadic });
   }
 
   for index in 0..cx.resolution.statics.len() {
     if let Some(decl) = cx.resolution.static_decl(cx.package, index as u32) {
       if decl.extern_c {
         names.push(decl.name.name);
-        found.push(Symbol { span: decl.name.span, sig: None, in_std: cx.resolution.is_std_source(cx.resolution.statics[index].module) });
+        found.push(Symbol { span: decl.name.span, sig: None, in_std: cx.resolution.is_std_source(cx.resolution.statics[index].module), variadic: false });
       }
     }
   }
@@ -364,11 +426,11 @@ pub fn check_symbols(cx: Checker) {
       match decl.export {
         Some(export) => {
           names.push(export.symbol);
-          found.push(Symbol { span: export.span, sig: None, in_std: in_std });
+          found.push(Symbol { span: export.span, sig: None, in_std: in_std, variadic: false });
         }
         None => {
           names.push(decl.name.name);
-          found.push(Symbol { span: decl.name.span, sig: None, in_std: in_std });
+          found.push(Symbol { span: decl.name.span, sig: None, in_std: in_std, variadic: false });
         }
       }
     }
@@ -398,7 +460,7 @@ pub fn check_symbols(cx: Checker) {
 
       if let Some(sig) = entry.sig {
         if let Some(previous_sig) = previous.sig {
-          if types::same_sig(previous_sig, sig) {
+          if types::same_sig(previous_sig, sig) && previous.variadic == entry.variadic {
             continue;
           }
 
@@ -746,6 +808,17 @@ pub fn deref(cx: Checker, value: Expr, operand: Expr) -> Type {
         return types::error();
       }
 
+      if opaque_pointee(cx, pointee) {
+        require_unsafe(cx, value.span, "dereferencing a raw pointer");
+        cx.diagnostics.push(
+          Diagnostic::error(codes::INVALID_OPERAND, value.span, "cannot dereference a `" + types::text(ty) + "`: `" + types::text(pointee) + "` is an opaque C type")
+            .with_note("its contents and its size are known only to C")
+            .with_help("pass the pointer to the C functions that use it"),
+        );
+
+        return types::error();
+      }
+
       require_unsafe(cx, value.span, "dereferencing a raw pointer");
 
       pointee
@@ -813,7 +886,10 @@ pub fn ffi_method(cx: Checker, value: Expr, receiver: Expr, receiver_ty: Type, m
         builtin = runtime_method("SAG_PTR_IS_NULL");
         ret = types::of(TypeKind::Bool);
       } else if name == "add" {
-        if points_to_void(pointee) {
+        if opaque_pointee(cx, pointee) {
+          require_unsafe(cx, value.span, "offsetting a raw pointer");
+          cx.error(codes::INVALID_OPERAND, method.span, "cannot offset a `" + types::text(receiver_ty) + "`; its pointee is an opaque C type, whose size only C knows");
+        } else if points_to_void(pointee) {
           cx.error(codes::INVALID_OPERAND, method.span, "cannot offset a `" + types::text(receiver_ty) + "`; its pointee has no size");
         } else {
           require_unsafe(cx, value.span, "offsetting a raw pointer");
@@ -896,10 +972,82 @@ pub fn c_fn_type(is_unsafe: bool, sig: FnSig) -> Type {
 }
 
 /// A C function of an `extern` block used as a value: an `unsafe extern "C" fn`.
-pub fn extern_value(cx: Checker, id: u32) -> Type {
+pub fn extern_value(cx: Checker, span: Span, id: u32) -> Type {
+  if is_variadic(cx, id) {
+    cx.diagnostics.push(
+      Diagnostic::error(codes::NOT_FFI_SAFE, span, "a variadic C function cannot be used as a function pointer")
+        .with_note("a function pointer has a fixed list of parameters (docs/spec/10-ffi.md)")
+        .with_help("call it directly, or wrap the call in an `extern \"C\" fn` with the parameters you need"),
+    );
+
+    return types::error();
+  }
+
   match cx.typed.extern_sig(id) {
     Some(sig) => c_fn_type(true, sig),
     None => types::error(),
+  }
+}
+
+/// Whether the C function `id` of an `extern` block ends its parameters with `...`
+/// (docs/adr/0103-build-scripts-and-binding-generation.md, Q720).
+pub fn is_variadic(cx: Checker, id: u32) -> bool {
+  match cx.resolution.extern_decl(cx.package, id) {
+    Some(decl) => decl.variadic,
+    None => false,
+  }
+}
+
+/// The arguments of a call to a variadic C function: its parameters, then the extra ones, which
+/// must be FFI-safe and of a type C passes as it is, as in Rust: C promotes the narrower integers,
+/// `bool` and `f32` (Q720).
+pub fn variadic_args(cx: Checker, span: Span, params: List<Type>, args: List<Expr>) {
+  if args.len() < params.len() {
+    cx.error(codes::WRONG_ARGUMENT_COUNT, span, `this function takes at least ${params.len()} argument${types::plural(params.len())} but ${args.len()} were supplied`);
+  }
+
+  for index in 0..args.len() {
+    if index < params.len() {
+      exprs::expect(cx, args[index], params[index]);
+      continue;
+    }
+
+    const ty = exprs::expr(cx, args[index], None);
+
+    if types::is_error(ty) {
+      continue;
+    }
+
+    if let Some(promoted) = promoted_type(cx, ty) {
+      cx.diagnostics.push(
+        Diagnostic::error(codes::NOT_FFI_SAFE, args[index].span, "C promotes a `" + types::text(ty) + "` passed as an extra argument of a variadic function")
+          .with_help("convert it to the type C reads: `as " + promoted + "`"),
+      );
+    } else if !ffi_safe(cx, ty) {
+      not_ffi_safe(cx, args[index].span, ty, "this extra argument");
+    }
+  }
+}
+
+/// The type a value of `ty` becomes when C passes it as an extra argument, if C changes it.
+fn promoted_type(cx: Checker, ty: Type) -> Option<String> {
+  match ty.kind {
+    TypeKind::Bool => Some("c_int"),
+    TypeKind::Int(int_ty) => match int_ty {
+      IntTy::I8 | IntTy::I16 | IntTy::U8 => Some("c_int"),
+      IntTy::U16 => Some("c_uint"),
+      _ => None,
+    },
+    TypeKind::Float(float_ty) => if float_ty == FloatTy::F32 { Some("f64") } else { None },
+    TypeKind::Enum(named) => match cx.typed.enums.get(named.id as usize) {
+      Some(def) => match def.repr {
+        Some(IntTy::I8) | Some(IntTy::I16) | Some(IntTy::U8) => Some("c_int"),
+        Some(IntTy::U16) => Some("c_uint"),
+        _ => None,
+      },
+      None => None,
+    },
+    _ => None,
   }
 }
 
