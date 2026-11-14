@@ -15,6 +15,13 @@ The sources say 0.32.0.
 
 ### Changed
 
+- **Breaking:** `include_str("path")` is now the macro `include_str!("path")`, as in Rust, valid in
+  any expression and not only in constants; the old form is an error that gives the new one
+  ([ADR-0104](docs/adr/0104-include-str-as-a-macro.md)). The seed keeps the units of the FFI of
+  its C apart, `bootstrap/sag_ffi.c` and `bootstrap/sag_std_ffi.c`, which `--update-seed` writes
+  and the bootstrap compiles on their own: since the standard library exports functions to the
+  runtime, one file of C no longer compiled.
+
 - **Breaking:** `io::ErrorKind` gains Rust's `ConnectionRefused`, `ConnectionReset`,
   `ConnectionAborted`, `NotConnected`, `AddrInUse`, `AddrNotAvailable`, `BrokenPipe`,
   `WouldBlock`, `TimedOut` and `Interrupted`, in Rust's order; a `match` on it without `_` must
@@ -28,6 +35,12 @@ The sources say 0.32.0.
 
 ### Added
 
+- Rust's built-in macros: `include!("file.sag");` puts the items of a file in the module, as
+  `include!(concat!(env!("OUT_DIR"), "/bindings.sag"))` will for build scripts;
+  `include_str!` and `include_bytes!` give the text and the bytes of a file; `concat!` joins
+  literals, and `env!` reads a variable of the compiler's environment. They are expanded when the
+  file is parsed. Programs cannot define macros. The editor colors and completes them
+  ([ADR-0103](docs/adr/0103-build-scripts-and-binding-generation.md), increment 2).
 - Calls of variadic C functions, as Rust's: `fn printf(format: *const c_char, ...) -> c_int;` in
   an `extern "C"` block, whose extra arguments keep their types; those C promotes (`u8`, `bool`,
   `f32`...) are errors that give the cast. Opaque C types, as bindgen writes them: a `@repr(C)`

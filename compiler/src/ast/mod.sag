@@ -79,10 +79,19 @@ pub struct Module {
   pub path: List<String>;
   /// Index in `Package::packages` of the package the file belongs to.
   pub package: usize;
-  /// The file's path on disk, for `include_str`; `None` for embedded modules.
+  /// The file's path on disk, for `include_str!`; `None` for embedded modules.
   pub location: Option<String>;
   pub uses: List<UseDecl>;
   pub items: List<Item>;
+  /// The files `include!` puts in the module, whose items the loader adds to `items`
+  /// (docs/adr/0103-build-scripts-and-binding-generation.md, Q724).
+  pub includes: List<Include>;
+}
+
+/// `include!(path);` where an item may be: the path, as the macros inside it give it.
+pub struct Include {
+  pub path: String;
+  pub span: Span;
 }
 
 /// `use tree;`

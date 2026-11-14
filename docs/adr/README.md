@@ -57,7 +57,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0046](0046-mutex-and-atomics.md) | `std::sync`: `Mutex` and atomics | Accepted |
 | [0047](0047-channels-and-thread-utilities.md) | Channels and thread utilities | Accepted |
 | [0048](0048-async-await.md) | `async`/`await`, for phase F6 | Accepted (not implemented; moved to F7 by 0057, to F8 by 0063) |
-| [0049](0049-self-hosting-plan-and-language-prerequisites.md) | The self-hosting plan, module-level constants, `include_str`, `if let` and `while let` | Accepted (refined by 0050 and 0076; Q214 superseded by 0067) |
+| [0049](0049-self-hosting-plan-and-language-prerequisites.md) | The self-hosting plan, module-level constants, `include_str`, `if let` and `while let` | Accepted (refined by 0050 and 0076; Q214 superseded by 0067, Q222 by 0104) |
 | [0050](0050-lexer-port-and-token-dumps.md) | The lexer port, token dumps and `char::from_u32` | Accepted (refined by 0051) |
 | [0051](0051-parser-port-and-ast-dumps.md) | The parser port and AST dumps | Accepted (refined by 0052) |
 | [0052](0052-resolver-port-and-resolution-dumps.md) | The resolver port and resolution dumps | Accepted (refined by 0053) |
@@ -92,7 +92,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0081](0081-operator-overloading.md) | Operator overloading through interfaces | Accepted (refined by 0094) |
 | [0082](0082-format-strings.md) | Format strings `f"..."` | Accepted |
 | [0083](0083-global-state.md) | Global state: `static`, `static var` and `@thread_local` | Accepted |
-| [0084](0084-a-complete-language-and-the-engine-apart.md) | Roadmap v2: a complete language, with the game engine as a project apart | Accepted |
+| [0084](0084-a-complete-language-and-the-engine-apart.md) | Roadmap v2: a complete language, with the game engine as a project apart | Accepted (Q545 superseded by 0102) |
 | [0085](0085-conditional-compilation-and-std-time.md) | Conditional compilation with `@cfg`, and `std::time` in Sagitario (S1) | Accepted |
 | [0086](0086-c-globals-and-std-io.md) | C's global variables in the FFI, and `std::io` in Sagitario (S1) | Accepted |
 | [0087](0087-atomic-storage-and-std-sync.md) | Atomic storage for the standard library, and `std::sync` and `std::thread` in Sagitario (S1) | Accepted |
@@ -112,6 +112,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0101](0101-the-rest-of-s2.md) | The rest of S2: numbers, ranges, pointers, paths, hashing, operators and formats | Accepted |
 | [0102](0102-binding-generation-before-the-core.md) | Binding generation before the core in Sagitario | Accepted |
 | [0103](0103-build-scripts-and-binding-generation.md) | Build scripts and binding generation (S4) | Accepted |
+| [0104](0104-include-str-as-a-macro.md) | `include_str!` instead of `include_str` | Accepted |
 
 ## Template
 

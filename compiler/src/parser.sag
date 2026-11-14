@@ -3,7 +3,7 @@
 //! reported") and the parser recovers at item and statement boundaries.
 
 use pkg::ast::{
-  ArrayLen, BinaryOp, Block, ClassDecl, ConstDecl, StaticDecl, Discriminant, EnumDecl, Export, Expr, ExprKind, ExternBlock, ExternFn, FieldDecl, FieldInit, FieldPattern,
+  ArrayLen, BinaryOp, Include, Block, ClassDecl, ConstDecl, StaticDecl, Discriminant, EnumDecl, Export, Expr, ExprKind, ExternBlock, ExternFn, FieldDecl, FieldInit, FieldPattern,
   FnDecl, GenericParam, Ident, ImplBlock, InterfaceDecl, Item, LambdaParam, LetStmt, MatchArm, Module, Param, Path, Pattern, PatternKind, Stmt,
   StructDecl, TargetInfo, FormatSpec, TemplatePart, TupleShape, TypeArgs, TypeExpr, TypeExprKind, UnaryOp, UseDecl, UseTree, UseTreeKind, VariantDecl, VariantFieldDecl,
   VariantFields, Visibility,
@@ -15,6 +15,10 @@ use pkg::diagnostics::codes;
 use pkg::lexer;
 use pkg::lexer::{Token, TokenKind};
 use pkg::span::Span;
+use std::env;
+use std::fs;
+use std::io::ErrorKind;
+use std::path;
 
 /// The next node id, shared by the parsers of a module and of its template interpolations.
 pub class Ids {
@@ -34,12 +38,21 @@ pub fn parse_module(file: u32, tokens: List<Token>, target: TargetInfo, diagnost
 }
 
 /// Parses one module of a package; node ids continue from `ids`, so they stay unique across the
-/// modules of the package.
-pub fn parse_module_from(file: u32, tokens: List<Token>, ids: Ids, target: TargetInfo, diagnostics: Diagnostics) -> Module {
+/// modules of the package. `location` is the file on disk, which the paths of `include_str!`,
+/// `include_bytes!` and `include!` are relative to; an embedded module has none.
+pub fn parse_module_from(file: u32, tokens: List<Token>, ids: Ids, target: TargetInfo, diagnostics: Diagnostics, location: Option<String>) -> Module {
   const parser = new Parser(file, tokens, ids, target, diagnostics);
 
-  parser.module(file)
+  parser.location = location;
+
+  var module = parser.module(file);
+
+  module.location = location;
+  module
 }
+
+/// The built-in macros, as Rust's (docs/adr/0103-build-scripts-and-binding-generation.md, Q723).
+pub const MACROS: String = "include include_str include_bytes concat env";
 
 /// An attribute as written; `Parser::apply_attributes` checks it against its item.
 struct Attribute {
@@ -241,6 +254,13 @@ pub fn describe(kind: TokenKind) -> String {
   }
 }
 
+/// `name!(args)`, before it is expanded.
+struct MacroCall {
+  pub name: Ident;
+  pub args: List<Expr>;
+  pub span: Span;
+}
+
 /// A binding named in a format specifier, and where the specifier goes on after its `$`.
 struct SpecName {
   pub expr: Expr;
@@ -291,6 +311,10 @@ class Parser {
   prv var slice_allowed: bool;
   /// The C globals of the `extern` block being parsed, which become items of the module.
   prv var extern_statics: List<Item>;
+  /// The file being parsed, on disk.
+  pub var location: Option<String>;
+  /// The files of the `include!`s of the module.
+  prv var includes: List<Include>;
 
   pub fn new(self, file: u32, tokens: List<Token>, ids: Ids, target: TargetInfo, diagnostics: Diagnostics) {
     // Documentation comments are not processed in the MVP (docs/spec/01-lexical.md).
@@ -318,6 +342,8 @@ class Parser {
     self.in_guard = false;
     self.slice_allowed = false;
     self.extern_statics = new List();
+    self.location = None;
+    self.includes = new List();
   }
 
   prv fn current(self) -> Token {
@@ -462,7 +488,18 @@ class Parser {
         Ok(attributes) => {
           const kept = self.cfg_holds(attributes);
 
-          if self.at_keyword("use") {
+          if self.at_macro("include") {
+            match self.include_item() {
+              Ok(include) => {
+                self.apply_attributes(attributes, AttributeTarget::Use);
+
+                if kept {
+                  self.includes.push(include);
+                }
+              }
+              Err(_) => self.skip_item(),
+            }
+          } else if self.at_keyword("use") {
             match self.use_decl() {
               Ok(decl) => {
                 self.apply_attributes(attributes, AttributeTarget::Use);
@@ -499,7 +536,234 @@ class Parser {
       }
     }
 
-    Module { file: file, path: new List(), package: 0, location: None, uses: uses, items: items }
+    Module { file: file, path: new List(), package: 0, location: None, uses: uses, items: items, includes: self.includes }
+  }
+
+  /// Whether a call of the macro `name` starts here: `name!(`.
+  prv fn at_macro(self, name: String) -> bool {
+    if let TokenKind::Ident(found) = self.kind() {
+      return found == name && is_punct(self.nth_kind(1), "!") && is_punct(self.nth_kind(2), "(");
+    }
+
+    false
+  }
+
+  /// `include!(path);` where an item may be (Q724).
+  prv fn include_item(self) -> Result<Include, ()> {
+    const start = self.span();
+    const call = self.macro_call()?;
+    const end = self.expect(";")?.span;
+    const span = start.to(end);
+
+    if call.args.len() != 1 {
+      return Err(self.macro_error(call.span, "`include!` takes one argument: the path of a file", Some("write `include!(\"file.sag\");`")));
+    }
+
+    const given = self.macro_text(call.args[0], "include!")?;
+
+    match self.macro_path(call.span, given, "include!") {
+      Some(full) => Ok(Include { path: full, span: span }),
+      None => Err(()),
+    }
+  }
+
+  /// `name!(args)`: the name and the arguments, each one expanded already.
+  prv fn macro_call(self) -> Result<MacroCall, ()> {
+    const name = self.ident("the name of a macro")?;
+
+    self.expect("!")?;
+    self.expect("(")?;
+
+    const args: List<Expr> = new List();
+
+    while !self.at(")") && !self.at_eof() {
+      args.push(self.expr()?);
+
+      if !self.eat(",") {
+        break;
+      }
+    }
+
+    const end = self.expect(")")?.span;
+
+    Ok(MacroCall { name: name, args: args, span: name.span.to(end) })
+  }
+
+  /// A built-in macro written as an expression, expanded to the literal it gives (Q723, Q725,
+  /// Q726).
+  prv fn macro_expr(self) -> Result<Expr, ()> {
+    const call = self.macro_call()?;
+    const name = call.name.name;
+    const span = call.span;
+
+    if name == "concat" {
+      const text = new StringBuilder();
+
+      for arg in call.args {
+        text.append(self.concat_part(arg)?);
+      }
+
+      return Ok(self.expr_node(ExprKind::Str(text.to_string()), span));
+    }
+
+    if name == "env" {
+      if call.args.is_empty() || call.args.len() > 2 {
+        return Err(self.macro_error(span, "`env!` takes the name of a variable, and optionally a message", Some("write `env!(\"NAME\")` or `env!(\"NAME\", \"message\")`")));
+      }
+
+      const variable = self.macro_text(call.args[0], "env!")?;
+      const message: Option<String> = if call.args.len() == 2 { Some(self.macro_text(call.args[1], "env!")?) } else { None };
+
+      return match env::variable(variable) {
+        Some(value) => Ok(self.expr_node(ExprKind::Str(value), span)),
+        None => {
+          const text = match message {
+            Some(given) => given,
+            None => "the environment variable `" + variable + "` is not set",
+          };
+
+          self.diagnostics.push(
+            Diagnostic::error(codes::INVALID_MACRO, span, text)
+              .with_note("`env!` reads the environment of the compiler, when the program is compiled")
+              .with_help("set `" + variable + "` before compiling"),
+          );
+
+          Err(())
+        }
+      };
+    }
+
+    if name == "include_str" || name == "include_bytes" {
+      const macro_name = name + "!";
+
+      if call.args.len() != 1 {
+        return Err(self.macro_error(span, "`" + macro_name + "` takes one argument: the path of a file", None));
+      }
+
+      const given = self.macro_text(call.args[0], macro_name)?;
+      const full = match self.macro_path(span, given, macro_name) {
+        Some(found) => found,
+        None => return Err(()),
+      };
+
+      if name == "include_str" {
+        return match fs::read_to_string(full) {
+          Ok(text) => Ok(self.expr_node(ExprKind::Str(text), span)),
+          Err(problem) => Err(self.unreadable(call.args[0].span, full, problem.kind(), true)),
+        };
+      }
+
+      const bytes = match fs::read(full) {
+        Ok(found) => found,
+        Err(problem) => return Err(self.unreadable(call.args[0].span, full, problem.kind(), false)),
+      };
+
+      return Ok(self.byte_array(bytes, span));
+    }
+
+    if name == "include" {
+      return Err(self.macro_error(span, "`include!` puts the items of a file in the module, so it is written where an item may be", Some("move it to the module level: `include!(\"file.sag\");`")));
+    }
+
+    Err(self.macro_error(call.name.span, "there is no macro `" + name + "!`", Some("the built-in macros are `include!`, `include_str!`, `include_bytes!`, `concat!` and `env!`; programs cannot define macros")))
+  }
+
+  /// `[1u8, 2u8, ...]`, the bytes of `include_bytes!`, or `[0u8; 0]` for none.
+  prv fn byte_array(self, bytes: List<u8>, span: Span) -> Expr {
+    if bytes.is_empty() {
+      const zero = self.expr_node(ExprKind::Int { value: "0", suffix: Some("u8") }, span);
+
+      return self.expr_node(ExprKind::ArrayRepeat { value: zero, len: ArrayLen { value: "0", suffix: None, span: span } }, span);
+    }
+
+    const elems: List<Expr> = new List();
+
+    for byte in bytes {
+      elems.push(self.expr_node(ExprKind::Int { value: `${byte}`, suffix: Some("u8") }, span));
+    }
+
+    self.expr_node(ExprKind::ArrayLit(elems), span)
+  }
+
+  /// A literal joined by `concat!`: strings, integers, floats, characters and `bool`s, also
+  /// negative numbers.
+  prv fn concat_part(self, arg: Expr) -> Result<String, ()> {
+    match arg.kind {
+      ExprKind::Str(text) => Ok(text),
+      ExprKind::Int { value, .. } => Ok(value),
+      ExprKind::Float { text, .. } => Ok(text),
+      ExprKind::Char(c) => Ok(`${c}`),
+      ExprKind::Bool(value) => Ok(if value { "true" } else { "false" }),
+      ExprKind::Unary { op, operand } => {
+        if op == UnaryOp::Neg {
+          match operand.kind {
+            ExprKind::Int { value, .. } => return Ok("-" + value),
+            ExprKind::Float { text, .. } => return Ok("-" + text),
+            _ => {}
+          }
+        }
+
+        Err(self.macro_error(arg.span, "`concat!` joins literals: strings, numbers, characters and `bool`s", None))
+      }
+      _ => Err(self.macro_error(arg.span, "`concat!` joins literals: strings, numbers, characters and `bool`s", None)),
+    }
+  }
+
+  /// The text of a macro's argument, which must be a string literal or a macro giving one.
+  prv fn macro_text(self, arg: Expr, macro_name: String) -> Result<String, ()> {
+    match arg.kind {
+      ExprKind::Str(text) => Ok(text),
+      _ => Err(self.macro_error(arg.span, "the arguments of `" + macro_name + "` are string literals, or `concat!` and `env!` of them", None)),
+    }
+  }
+
+  /// The file a macro names: an absolute path, or one relative to the directory of the file
+  /// being parsed.
+  prv fn macro_path(self, span: Span, given: String, macro_name: String) -> Option<String> {
+    if path::is_absolute(given) {
+      return Some(given);
+    }
+
+    match self.location {
+      Some(file) => match path::parent(file) {
+        Some(dir) => Some(path::join(dir, given)),
+        None => Some(given),
+      },
+      None => {
+        self.macro_error(span, "`" + macro_name + "` needs a source file on disk, which its relative path starts from", None);
+
+        None
+      }
+    }
+  }
+
+  /// A file a macro cannot read, with the reason by kind: the system's message depends on the
+  /// platform.
+  prv fn unreadable(self, span: Span, full: String, kind: ErrorKind, text: bool) {
+    const reason = match kind {
+      ErrorKind::NotFound => "the file does not exist",
+      ErrorKind::PermissionDenied => "permission denied",
+      ErrorKind::InvalidData => "the file is not UTF-8",
+      _ => "the file cannot be read",
+    };
+    var diagnostic = Diagnostic::error(codes::INVALID_INCLUDE, span, "cannot read `" + full + "`: " + reason)
+      .with_note("a relative path starts from the directory of this source file");
+
+    if text {
+      diagnostic = diagnostic.with_help("`include_str!` reads UTF-8 text; `include_bytes!` reads any file");
+    }
+
+    self.diagnostics.push(diagnostic);
+  }
+
+  prv fn macro_error(self, span: Span, message: String, help: Option<String>) {
+    var diagnostic = Diagnostic::error(codes::INVALID_MACRO, span, message);
+
+    if let Some(text) = help {
+      diagnostic = diagnostic.with_help(text);
+    }
+
+    self.diagnostics.push(diagnostic);
   }
 
   /// `use tree;`
@@ -3153,6 +3417,23 @@ class Parser {
       return self.lambda_body(span, params);
     }
 
+    // `name!(...)`, a built-in macro (Q723).
+    if is_ident(kind) && is_punct(self.nth_kind(1), "!") && is_punct(self.nth_kind(2), "(") {
+      return self.macro_expr();
+    }
+
+    // The form of `include_str` before it was a macro (docs/adr/0104-include-str-as-a-macro.md).
+    if let TokenKind::Ident(name) = kind {
+      if name == "include_str" && is_punct(self.nth_kind(1), "(") {
+        self.diagnostics.push(
+          Diagnostic::error(codes::INVALID_MACRO, span, "`include_str` is a macro: write `include_str!(\"file\")`")
+            .with_note("it reads the file when the program is compiled, as Rust's `include_str!`"),
+        );
+
+        return Err(());
+      }
+    }
+
     if is_ident(kind) || is_keyword(kind, "self") || is_keyword(kind, "Self") || is_keyword(kind, "pkg") || is_keyword(kind, "super") {
       const path = self.expr_path()?;
 
@@ -3940,6 +4221,8 @@ class Parser {
         }
         lexer::TemplatePart::Expr(tokens) => {
           const sub = new Parser(self.eof.span.file, tokens, self.ids, self.target, self.diagnostics);
+
+          sub.location = self.location;
 
           if sub.at_eof() {
             return Err(sub.unexpected("an expression inside `${}`"));

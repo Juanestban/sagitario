@@ -9,11 +9,11 @@ Support for the [Sagitario](https://github.com/Juanestban/sagitario) programming
   indices of a tuple's elements), of items after `::` (`MIN` and `MAX` after an integer type, the functions of `std::mem` and `std::hint`, `exit` and `abort` after `std::process::`, the constants of a type and the static functions of its interfaces after `Type::` and `Self::`, those of a type parameter's bounds after `T::`, and `default`, `from` and `try_from` after the types of numbers, `char` and `String`), of attributes after
   `@` (`@cfg`, `@default`, `@export`, `@repr`, `@thread_local`), of their representations after `@repr(` and
   of the conditions of `@cfg(`, of names
-  (module-level constants and statics with their types, and the builtins, `assert` and `assert_eq` among them) and of types, the outline of a document (`Ctrl+Shift+O`), the constants of types included, and the colors of modules, functions,
+  (module-level constants and statics with their types, the builtins, `assert` and `assert_eq` among them, and the built-in macros `include!`, `include_str!`, `include_bytes!`, `concat!` and `env!`) and of types, the outline of a document (`Ctrl+Shift+O`), the constants of types included, and the colors of modules, functions,
   types and constants in paths (semantic tokens). Inside the braces of format strings, as rust-analyzer does
   in Rust's, it also colors the variables, parameters, fields, methods and functions.
 - Syntax highlighting of `.sag` files: keywords, types, operators (the bitwise ones and shifts
-  too, and the `...` of variadic C functions), numbers with their suffixes, the indices of tuples' elements (`pair.0`) and the names a tuple pattern declares
+  too, and the `...` of variadic C functions), the built-in macros (`include_str!`...), numbers with their suffixes, the indices of tuples' elements (`pair.0`) and the names a tuple pattern declares
   (`const (q, r) = ...`), characters,
   strings, format strings `f"...{expr}..."` with their specifiers (`{x:>8.2}`, and the bindings of `{x:>width$}`) and template strings with their interpolations,
   whose expressions are highlighted as code and whose braces as punctuation, nested block

@@ -60,8 +60,14 @@ editors/vscode/     the VS Code extension
 
 The compiler is written in plain Sagitario, and its C is strict C11 like any program's. Each pass
 reads the result of the previous ones; none depends on a later pass, except that the loader,
-which runs the lexer and the parser, is shared by the driver, the type checker (for
-`include_str`) and the language server.
+which runs the lexer and the parser, is shared by the driver and the language server.
+
+The parser expands the built-in macros ([ADR-0103](adr/0103-build-scripts-and-binding-generation.md),
+Q723-Q726) as it reads them, so no later pass sees them: `concat!`, `env!` and `include_str!`
+become string literals, and `include_bytes!` an array literal of `u8`s, reading files relative
+to the file being parsed (`Parser.location`). `include!(path);` is kept in `Module.includes`, and
+the loader lexes and parses each file it names and adds its imports and items to the module,
+with the spans of that file (`Loader::expand_includes`).
 
 ## SIR
 
@@ -295,7 +301,7 @@ runs the executor until the task of `main` finishes.
 
 ## Runtime
 
-Minimal C, embedded in the `sag` binary (`include_str` in `compiler/src/driver/mod.sag`) and
+Minimal C, embedded in the `sag` binary (`include_str!` in `compiler/src/driver/mod.sag`) and
 compiled with every program:
 
 - ARC object header and retain/release, through `sag_count`: atomic when the program uses

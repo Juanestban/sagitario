@@ -97,14 +97,24 @@ foreach ($dir in @('build\stage0', 'build\stage1', 'build\bin')) {
 Step "stage 0: the seed, with $cc"
 $name = [IO.Path]::GetFileNameWithoutExtension($cc).ToLowerInvariant()
 $sources = @('bootstrap\sag.c', 'bootstrap\sagitario_runtime.c')
+# The units of the FFI are translation units of their own, as `sag` compiles them: they declare C
+# functions with the types of the program, without headers, so the C compiler's own declarations
+# of its library functions are left out (`cl` has none).
+$units = @('sag_ffi', 'sag_std_ffi') | Where-Object { Test-Path "bootstrap\$_.c" }
 
 # The flags `sag` uses for the generated C in release mode, and the stack it reserves on Windows,
 # the default of Linux and macOS. `cl` optimizes with `/O1`: its `/O2` miscompiles the compiler.
 if ($name -eq 'cl') {
+  $sources += $units | ForEach-Object { "bootstrap\$_.c" }
   Invoke $cc (@('/nologo', '/std:c11', '/W3', '/utf-8', '/O1','/DSAG_RELEASE', '/I', 'bootstrap', '/Fobuild\stage0\', '/Febuild\stage0\sag.exe') + $sources + @('/link', '/STACK:8388608'))
 } else {
   $machine = & $cc -dumpmachine
   $stack = if ($machine -match 'mingw|gnu') { '-Wl,--stack,8388608' } else { '-Wl,/STACK:8388608' }
+
+  foreach ($unit in $units) {
+    Invoke $cc @('-std=c11', '-pedantic-errors', '-O2', '-fno-builtin', '-c', "bootstrap\$unit.c", '-o', "build\stage0\$unit.o")
+    $sources += "build\stage0\$unit.o"
+  }
 
   Invoke $cc (@('-std=c11', '-pedantic-errors', '-O2', '-DSAG_RELEASE', '-I', 'bootstrap', '-o', 'build\stage0\sag.exe') + $sources + @($stack))
 }
@@ -138,7 +148,27 @@ Invoke 'build\bin\sag.exe' (@('build') + $mode + @('compiler/src/nova_main.sag',
 
 if ($updateSeed) {
   Step 'update the seed'
-  Copy-Item 'build\sag.c' 'bootstrap\sag.c'
+  # `--dump=c` gives the program, then each unit of the FFI after its marker line.
+  $text = [IO.File]::ReadAllText((Join-Path $PWD 'build\sag.c'))
+  $units = @{}
+
+  foreach ($unit in @('sag_std_ffi.c', 'sag_ffi.c')) {
+    $marker = "/* ---- $unit ---- */`n"
+    $at = $text.IndexOf($marker)
+    Remove-Item (Join-Path 'bootstrap' $unit) -ErrorAction SilentlyContinue
+
+    if ($at -ge 0) {
+      $units[$unit] = $text.Substring($at + $marker.Length)
+      $text = $text.Substring(0, $at)
+    }
+  }
+
+  $units['sag.c'] = $text
+  $utf8 = New-Object System.Text.UTF8Encoding $false
+
+  foreach ($unit in $units.Keys) {
+    [IO.File]::WriteAllText((Join-Path $PWD (Join-Path 'bootstrap' $unit)), $units[$unit], $utf8)
+  }
   Copy-Item 'runtime\sagitario_runtime.c', 'runtime\sagitario_runtime.h' 'bootstrap\'
 }
 

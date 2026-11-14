@@ -1,0 +1,31 @@
+// The built-in macros (docs/adr/0103-build-scripts-and-binding-generation.md, Q723-Q726): the
+// items of other files with `include!`, and the text, bytes and environment the compiler reads.
+// env: SAG_MACROS_GREETING=hello from the compiler
+// expect-stdout: 24 9 second
+// expect-stdout: pub fn second_name() -> String {
+// expect-stdout: true 112 117 98 | 0
+// expect-stdout: a1-23.5ctrue
+// expect-stdout: hello from the compiler
+// expect-stdout: 3 lines
+include!("parts/generated.sag");
+include!(concat!("parts/", "second", ".sag"));
+include!("parts/empty.sag");
+
+const SECOND: String = include_str!("parts/second.sag");
+const BYTES: [u8; 3] = [include_bytes!("parts/second.sag")[0], include_bytes!("parts/second.sag")[1], include_bytes!("parts/second.sag")[2]];
+
+fn main() {
+  println(generated_summary() + " " + second_name());
+  println(SECOND.lines()[0]);
+
+  // The bytes of a file are those of its text; its line endings depend on the checkout.
+  const bytes = include_bytes!("parts/second.sag");
+  const empty = include_bytes!("parts/empty.sag");
+  println(f"{bytes.len() == SECOND.len()} {BYTES[0]} {BYTES[1]} {BYTES[2]} | {empty.len()}");
+
+  println(concat!("a", 1, -2, 3.5, 'c', true));
+  println(env!("SAG_MACROS_GREETING"));
+
+  // An expression anywhere, not only a constant.
+  println(f"{include_str!("parts/second.sag").lines().len()} lines");
+}

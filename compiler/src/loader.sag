@@ -16,34 +16,35 @@ use pkg::resolve::modules::ModuleRef;
 use pkg::span::{SourceMap, Span};
 use std::env;
 use std::fs;
+use std::io;
 use std::path;
 use std::process::Command;
 
 /// The part of the prelude written in Sagitario.
-const PRELUDE: String = include_str("../std/prelude.sag");
+const PRELUDE: String = include_str!("../std/prelude.sag");
 
 /// The file of `std` itself: helpers shared by its modules, which programs cannot name.
-const STD_ROOT: String = include_str("../std/mod.sag");
+const STD_ROOT: String = include_str!("../std/mod.sag");
 
-const STD_COLLECTIONS: String = include_str("../std/collections.sag");
-const STD_ENV: String = include_str("../std/env.sag");
-const STD_FFI: String = include_str("../std/ffi.sag");
-const STD_FS: String = include_str("../std/fs.sag");
-const STD_HASH: String = include_str("../std/hash.sag");
-const STD_HINT: String = include_str("../std/hint.sag");
-const STD_IO: String = include_str("../std/io.sag");
-const STD_MATH: String = include_str("../std/math.sag");
-const STD_MEM: String = include_str("../std/mem.sag");
-const STD_NET: String = include_str("../std/net.sag");
-const STD_PATH: String = include_str("../std/path.sag");
-const STD_PROCESS: String = include_str("../std/process.sag");
-const STD_PTR: String = include_str("../std/ptr.sag");
-const STD_SYNC: String = include_str("../std/sync.sag");
-const STD_TASK: String = include_str("../std/task.sag");
-const STD_THREAD: String = include_str("../std/thread.sag");
-const STD_TIME: String = include_str("../std/time.sag");
-const STD_SYS: String = include_str("../std/sys.sag");
-const STD_UNICODE: String = include_str("../std/unicode.sag");
+const STD_COLLECTIONS: String = include_str!("../std/collections.sag");
+const STD_ENV: String = include_str!("../std/env.sag");
+const STD_FFI: String = include_str!("../std/ffi.sag");
+const STD_FS: String = include_str!("../std/fs.sag");
+const STD_HASH: String = include_str!("../std/hash.sag");
+const STD_HINT: String = include_str!("../std/hint.sag");
+const STD_IO: String = include_str!("../std/io.sag");
+const STD_MATH: String = include_str!("../std/math.sag");
+const STD_MEM: String = include_str!("../std/mem.sag");
+const STD_NET: String = include_str!("../std/net.sag");
+const STD_PATH: String = include_str!("../std/path.sag");
+const STD_PROCESS: String = include_str!("../std/process.sag");
+const STD_PTR: String = include_str!("../std/ptr.sag");
+const STD_SYNC: String = include_str!("../std/sync.sag");
+const STD_TASK: String = include_str!("../std/task.sag");
+const STD_THREAD: String = include_str!("../std/thread.sag");
+const STD_TIME: String = include_str!("../std/time.sag");
+const STD_SYS: String = include_str!("../std/sys.sag");
+const STD_UNICODE: String = include_str!("../std/unicode.sag");
 
 /// The modules of `std` whose functions the runtime's core calls, which every program compiles
 /// (docs/adr/0085-conditional-compilation-and-std-time.md, Q552).
@@ -564,15 +565,66 @@ pub class Loader {
     const tokens = lexer::lex(id, text, diagnostics);
 
     if diagnostics.error_count() == errors {
-      var module = parser::parse_module_from(id, tokens, self.ids, self.target, diagnostics);
+      var module = parser::parse_module_from(id, tokens, self.ids, self.target, diagnostics, Some(file));
 
+      self.expand_includes(module, sources, diagnostics);
       module.path = module_path;
       module.package = package;
-      module.location = Some(file);
       self.modules.push(module);
     }
 
     true
+  }
+
+  /// Puts the items of the files `include!` names in their module, as if written there; their
+  /// spans are the file's (docs/adr/0103-build-scripts-and-binding-generation.md, Q724).
+  prv fn expand_includes(self, module: Module, sources: SourceMap, diagnostics: Diagnostics) {
+    for include in module.includes {
+      const text = match self.overrides.get(path_key(include.path)) {
+        Some(found) => found,
+        None => match fs::read_to_string(include.path) {
+          Ok(found) => found,
+          Err(problem) => {
+            const reason = match problem.kind() {
+              io::ErrorKind::NotFound => "the file does not exist",
+              io::ErrorKind::PermissionDenied => "permission denied",
+              io::ErrorKind::InvalidData => "the file is not UTF-8",
+              _ => "the file cannot be read",
+            };
+
+            diagnostics.push(
+              Diagnostic::error(codes::INVALID_INCLUDE, include.span, "cannot read `" + include.path + "`: " + reason)
+                .with_note("a relative path starts from the directory of this source file"),
+            );
+            continue;
+          }
+        },
+      };
+      const id = sources.add(include.path, text);
+      const errors = diagnostics.error_count();
+      const tokens = lexer::lex(id, text, diagnostics);
+
+      if diagnostics.error_count() != errors {
+        continue;
+      }
+
+      const included = parser::parse_module_from(id, tokens, self.ids, self.target, diagnostics, Some(include.path));
+
+      for nested in included.includes {
+        diagnostics.push(
+          Diagnostic::error(codes::INVALID_MACRO, nested.span, "a file put in a module by `include!` cannot call `include!` itself")
+            .with_help("include both files from the module"),
+        );
+      }
+
+      for decl in included.uses {
+        module.uses.push(decl);
+      }
+
+      for item in included.items {
+        module.items.push(item);
+      }
+    }
   }
 
   /// Loads the modules the loaded ones refer to that exist as files, and the standard library
@@ -665,7 +717,7 @@ pub class Loader {
   prv fn load_embedded(self, file: String, text: String, module_path: List<String>, sources: SourceMap, diagnostics: Diagnostics) -> usize {
     const id = sources.add(file, text);
     const tokens = lexer::lex(id, text, diagnostics);
-    var module = parser::parse_module_from(id, tokens, self.ids, self.target, diagnostics);
+    var module = parser::parse_module_from(id, tokens, self.ids, self.target, diagnostics, None);
 
     module.path = module_path;
     self.modules.push(module);

@@ -35,6 +35,11 @@ zod
 `union` is a contextual keyword, as in Rust: it declares a [union](10-ffi.md#unions) only before
 the name of one, and is an ordinary name elsewhere.
 
+`include`, `include_str`, `include_bytes`, `concat` and `env` are the names of the
+[built-in macros](09-modules.md#built-in-macros-s4) when `!(` follows them (`include_str!("file")`),
+and ordinary names elsewhere. `...` ends the parameters of a
+[variadic C function](10-ffi.md#variadic-functions).
+
 `let` only appears in `if let` and `while let` (F5,
 [control flow](06-control-flow.md#if-let-and-while-let)); bindings are `const` and `var`.
 

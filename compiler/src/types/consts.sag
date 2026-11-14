@@ -1,6 +1,6 @@
 //! Module-level constants (docs/spec/03-memory.md#module-level-constants, ADR-0049): the compiler
 //! computes each value from literals, other constants, arithmetic, comparisons, casts and
-//! `include_str`, and reports anything it cannot compute. The port of `sagitario_types::consts`.
+//! the literals `include_str!` gives, and reports anything it cannot compute. The port of `sagitario_types::consts`.
 //!
 //! A constant may also be a struct, an enum, an array or a tuple of constants
 //! (docs/adr/0099-associated-and-composite-constants.md, Q685): such a value, and one that reads a
@@ -14,16 +14,12 @@ use pkg::ast::{BinaryOp, Expr, ExprKind, UnaryOp};
 use pkg::ast;
 use pkg::diagnostics::Diagnostic;
 use pkg::diagnostics::codes;
-use pkg::loader;
 use pkg::resolve::Res;
 use pkg::span::Span;
 use pkg::types::{Checker, FloatTy, IntTy, Type, TypeKind};
 use pkg::types;
 use pkg::types::exprs;
 use pkg::types::numbers;
-use std::fs;
-use std::io::ErrorKind;
-use std::path;
 
 const U64_MAX: u64 = 18446744073709551615;
 
@@ -307,7 +303,6 @@ fn constant_shape(cx: Checker, value: Expr) -> bool {
     ExprKind::Call { callee, args } => {
       match cx.resolution.paths.get(callee.id) {
         Some(Res::Variant(_)) => {}
-        Some(Res::Builtin(name)) if name == "include_str" => return true,
         _ => {
           not_constant(cx, value.span);
 
@@ -574,7 +569,6 @@ fn const_eval(cx: Checker, expr: Expr, hint: Option<Type>, module: usize) -> Opt
     }
     ExprKind::Call { callee, args } => {
       match cx.resolution.paths.get(callee.id) {
-        Some(Res::Builtin(name)) if name == "include_str" => return include_str(cx, expr.span, args, module),
         Some(Res::Variant(variant)) => return const_variant(cx, expr, variant, args, module),
         _ => {}
       }
@@ -738,7 +732,7 @@ fn const_variant(cx: Checker, value: Expr, variant: pkg::resolve::VariantRef, ar
 fn not_constant(cx: Checker, span: Span) -> Option<Typed> {
   cx.diagnostics.push(
     Diagnostic::error(codes::NOT_CONSTANT, span, "the compiler cannot compute this expression")
-      .with_note("a constant is made of literals, other constants, arithmetic, comparisons, `as` and `include_str`"),
+      .with_note("a constant is made of literals, other constants, arithmetic, comparisons and `as`"),
   );
 
   None
@@ -1185,61 +1179,6 @@ fn const_cast(cx: Checker, from: Type, value: ConstValue, to: Type, span: Span) 
   cx.error(codes::INVALID_CAST, span, "cannot cast `" + types::text(from) + "` to `" + types::text(to) + "`");
 
   None
-}
-
-/// `include_str("path")`: the text of a file, by a path relative to the constant's file.
-fn include_str(cx: Checker, span: Span, args: List<Expr>, module: usize) -> Option<Typed> {
-  if args.len() != 1 {
-    cx.error(codes::INVALID_INCLUDE, span, "`include_str` takes one argument: the path of a file");
-
-    return None;
-  }
-
-  const arg = args[0];
-  const relative = match arg.kind {
-    ExprKind::Str(text) => text,
-    _ => {
-      cx.error(codes::INVALID_INCLUDE, arg.span, "the path of `include_str` must be a string literal");
-
-      return None;
-    }
-  };
-  const location = match cx.package.modules.get(module) {
-    Some(found) => found.location,
-    None => None,
-  };
-  const file = match location {
-    Some(found) => found,
-    None => {
-      cx.error(codes::INVALID_INCLUDE, span, "`include_str` needs a source file on disk");
-
-      return None;
-    }
-  };
-  const full = match path::parent(file) {
-    Some(dir) => loader::push_path(dir, relative),
-    None => relative,
-  };
-
-  match fs::read_to_string(full) {
-    Ok(text) => Some(Typed { ty: types::string(), value: ConstValue::Str(text) }),
-    Err(problem) => {
-      // The reason by kind, not the system's message, which depends on the platform.
-      const reason = match problem.kind() {
-        ErrorKind::NotFound => "the file does not exist",
-        ErrorKind::PermissionDenied => "permission denied",
-        ErrorKind::InvalidData => "the file is not UTF-8",
-        _ => "the file cannot be read",
-      };
-
-      cx.diagnostics.push(
-        Diagnostic::error(codes::INVALID_INCLUDE, arg.span, "cannot read `" + full + "`: " + reason)
-          .with_note("the path is relative to the directory of this source file, and the file must be UTF-8"),
-      );
-
-      None
-    }
-  }
 }
 
 fn is_comparison(op: BinaryOp) -> bool {

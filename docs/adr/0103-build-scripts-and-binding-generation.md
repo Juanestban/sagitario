@@ -128,4 +128,12 @@ The user chose:
 - `include_str("path")` already exists, without `!` ([ADR-0049](0049-self-hosting-plan-and-language-prerequisites.md),
   Q222), and the compiler uses it to embed the runtime and `std`, which the seed compiles. Q725's
   `include_str!` meets it in increment 2.
+- Increment 2 is done. The parser expands the macros of expressions into literals as it reads
+  them, and keeps `include!` for the loader, which parses the file and adds its imports and items
+  to the module. `include_bytes!` gives an array literal of `u8`s, `[0u8; 0]` for an empty file.
+  Paths given by `concat!` and `env!` may be absolute. `include_str!` replaces the
+  `include_str(...)` of ADR-0049, by [ADR-0104](0104-include-str-as-a-macro.md): the seed was
+  updated so that the compiler's sources could use it, which showed that the seed, one file of C,
+  no longer compiled once the standard library exported functions to the runtime; it now keeps
+  the units of the FFI apart.
 

@@ -57,14 +57,15 @@ total += x;
 
 ## Module-level constants
 
-Rationale: [ADR-0049](../adr/0049-self-hosting-plan-and-language-prerequisites.md).
+Rationale: [ADR-0049](../adr/0049-self-hosting-plan-and-language-prerequisites.md),
+[ADR-0104](../adr/0104-include-str-as-a-macro.md).
 
 ```sag
 pub const MAX_USERS: i32 = 100;
 const TIMEOUT_MS: u64 = 60 * 1_000;
 const LIMIT: i64 = MAX_USERS as i64 * 2;
 const GREETING: String = "hello, " + "world";
-const RUNTIME: String = include_str("../runtime/runtime.c");
+const RUNTIME: String = include_str!("../runtime/runtime.c");
 ```
 
 - A constant is an item: `pub` exports it, `use` imports it, and `limits::MAX_USERS` names it
@@ -72,16 +73,14 @@ const RUNTIME: String = include_str("../runtime/runtime.c");
   or a struct, an enum, an array or a tuple of such types ([below](#composite-constants)).
 - The compiler computes its value from literals, other constants, unary `-` and `!`, the
   arithmetic operators (`+` also joins strings), the bitwise operators and shifts, comparisons,
-  `&&`, `||`, `as` between primitive types and `include_str`. A constant cannot need its own
-  value. A constant shifted by its width or more is an error.
+  `&&`, `||` and `as` between primitive types. The [built-in macros](09-modules.md#built-in-macros-s4)
+  are literals by then (`include_str!`, `concat!`, `env!`). A constant cannot need its own value.
+  A constant shifted by its width or more is an error.
 - A value outside its type, an integer division by zero, a float literal too large for its type
   (`1e39` as `f32`), or any other expression (a call, a lambda, `new`) is an error.
 - Float arithmetic follows IEEE-754: a constant may be infinite or NaN (`1.0 / 0.0`, `0.0 / 0.0`),
   and every comparison with NaN is false except `!=`
   ([ADR-0076](../adr/0076-std-math-and-methods-of-numbers.md)).
-- `include_str("path")` is the text of a file, as a `String`. It is only valid in the value of
-  a module-level constant; the path is a string literal relative to the directory of the
-  source file, and the file must be UTF-8. The file is read when the program is compiled.
 
 ### Composite constants
 
@@ -109,8 +108,8 @@ const LAST: u32 = PRIMES[3] * 2;              // 14
 - A part of a constant is a constant: `ORIGIN.x`, `FALLBACK.0`, and `PRIMES[3]` with a constant
   index; an index outside the array is an error (`index out of bounds`).
 - Classes, `List`, `Map`, slices, references, raw pointers and function values cannot be parts of
-  a constant (`E0334`): `new` creates them, or they point to memory. There are no calls but
-  `include_str`. Operators apply to the primitive parts only: `ORIGIN == ORIGIN` is an error.
+  a constant (`E0334`): `new` creates them, or they point to memory. There are no calls.
+  Operators apply to the primitive parts only: `ORIGIN == ORIGIN` is an error.
 - Each use of a composite constant is a copy of its value, as any value of a struct.
 
 ### Constants of types

@@ -190,12 +190,17 @@ pub const INVALID_SPAWN: String = "E0333";
 /// that needs itself.
 pub const NOT_CONSTANT: String = "E0334";
 
-/// `include_str` outside a constant, with a path that is not a string literal, or naming a file
-/// that cannot be read.
+/// `include_str!`, `include_bytes!` or `include!` naming a file that cannot be read
+/// (docs/adr/0103-build-scripts-and-binding-generation.md, Q724 and Q725).
 pub const INVALID_INCLUDE: String = "E0335";
 
 /// `await` outside an `async fn`, or inside a lambda written in one.
 pub const AWAIT_OUTSIDE_ASYNC: String = "E0336";
+
+/// A built-in macro that does not exist, given arguments it does not take, written where it does
+/// not go, or `env!` of a variable that is not set
+/// (docs/adr/0103-build-scripts-and-binding-generation.md, Q723).
+pub const INVALID_MACRO: String = "E0346";
 
 /// An `async fn` that cannot be one: `extern "C"`, `@export` or an initializer.
 pub const INVALID_ASYNC: String = "E0337";

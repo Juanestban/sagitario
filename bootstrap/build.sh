@@ -81,9 +81,20 @@ else
 fi
 
 step "stage 0: the seed, with $SAG_CC"
+# The units of the FFI are translation units of their own, as `sag` compiles them: they declare C
+# functions with the types of the program, without headers, so the C compiler's own declarations
+# of its library functions are left out.
+ffi_objects=""
+for unit in sag_ffi sag_std_ffi; do
+  if [ -f "bootstrap/$unit.c" ]; then
+    "$SAG_CC" -std=c11 -pedantic-errors -O2 -fno-builtin -c "bootstrap/$unit.c" -o "build/stage0/$unit.o"
+    ffi_objects="$ffi_objects build/stage0/$unit.o"
+  fi
+done
+
 # The flags `sag` uses for the generated C in release mode.
 "$SAG_CC" -std=c11 -pedantic-errors -O2 -DSAG_RELEASE -I bootstrap -o build/stage0/sag$exe \
-  bootstrap/sag.c bootstrap/sagitario_runtime.c $link
+  bootstrap/sag.c bootstrap/sagitario_runtime.c $ffi_objects $link
 
 step "stage 1"
 build/stage0/sag$exe build $mode compiler/src/main.sag --output build/stage1/sag$exe
@@ -110,7 +121,14 @@ build/bin/sag$exe build $mode compiler/src/nova_main.sag --output build/bin/nova
 
 if [ "$update_seed" = 1 ]; then
   step "update the seed"
-  cp build/sag.c bootstrap/sag.c
+  # `--dump=c` gives the program, then each unit of the FFI after its marker line.
+  rm -f bootstrap/sag_ffi.c bootstrap/sag_std_ffi.c
+  awk '
+    BEGIN { out = "bootstrap/sag.c"; printf "" > out }
+    $0 == "/* ---- sag_ffi.c ---- */" { out = "bootstrap/sag_ffi.c"; next }
+    $0 == "/* ---- sag_std_ffi.c ---- */" { out = "bootstrap/sag_std_ffi.c"; next }
+    { print > out }
+  ' build/sag.c
   cp runtime/sagitario_runtime.c runtime/sagitario_runtime.h bootstrap/
 fi
 

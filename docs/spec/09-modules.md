@@ -177,3 +177,41 @@ const CLOCK_MONOTONIC: c_int = 6;
   loads no module. Two items may have the same name if their conditions exclude each other; if
   both hold, the name is repeated (`E0201`).
 - `sag check --target` checks the program as that target sees it.
+
+## Built-in macros (S4)
+
+Rationale: [ADR-0103](../adr/0103-build-scripts-and-binding-generation.md) (Q723-Q726),
+[ADR-0104](../adr/0104-include-str-as-a-macro.md).
+
+```sag
+include!(concat!(env!("OUT_DIR"), "/sdl.sag"));
+
+const SHADER: String = include_str!("shaders/sprite.glsl");
+const ICON: [u8; 1150] = include_bytes!("assets/icon.ico");
+
+fn main() {
+  println(concat!("built for ", env!("TARGET"), " with SDL ", 3));
+}
+```
+
+Sagitario has Rust's built-in macros that read files and the environment when the program is
+compiled. Each one is called as `name!(...)`, and its name has no path. Programs cannot define
+macros, and any other `name!(...)` is an error (`E0346`).
+
+- `include!(path);` is written where a module-level item may be, also after `@cfg`. It puts the
+  items and imports of the file in the current module, as if written there; their errors are
+  reported in that file. The file cannot call `include!` itself (`E0346`). Written as an
+  expression, it is an error (`E0346`).
+- `include_str!(path)` is a string literal with the text of the file, which must be UTF-8, and
+  `include_bytes!(path)` an array literal `[u8; N]` with its bytes. Both are expressions, valid
+  anywhere a literal is, also in constants.
+- `concat!(a, b, ...)` is a string literal joining literals: strings, integers, floats (also
+  negative), characters and `bool`s, and the macros among them. Anything else is `E0346`.
+- `env!("NAME")` is a string literal with the value of the environment variable `NAME` of the
+  compiler. A variable that is not set is an error (`E0346`); `env!("NAME", "message")` reports
+  `message` instead.
+- A path is a string literal, or a `concat!` and `env!` of them. A relative path starts from the
+  directory of the source file that calls the macro; an embedded module of the standard library
+  has none (`E0346`). A file that cannot be read is `E0335`, with the reason.
+- The macros are expanded while the file is parsed, before names are resolved: what they give
+  is a literal, or the items of a file.

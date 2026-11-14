@@ -32,7 +32,7 @@ const STRUCT: i64 = 22;
 
 const KEYWORDS: String = "abstract as async await break class const continue else enum extends extern false fn for if impl in interface let loop match new override pkg prv pub return self Self static struct super true union unsafe use var weak where while zod";
 
-const BUILTINS: String = "print println eprintln panic include_str assert assert_eq assert_ne unreachable todo";
+const BUILTINS: String = "print println eprintln panic assert assert_eq assert_ne unreachable todo";
 
 /// The types the language provides (docs/spec/02-types.md).
 const BUILTIN_TYPES: String = "i8 i16 i32 i64 isize u8 u16 u32 u64 usize f32 f64 bool char String StringBuilder List Option Result";
@@ -265,7 +265,17 @@ pub fn complete(analysis: Option<Analysis>, module: Option<Module>, module_index
   items.add_words(BUILTIN_TYPES, STRUCT);
   items.add_words(KEYWORDS, KEYWORD);
   items.add_words(BUILTINS, FUNCTION);
+  macros(items);
   Json::Array(items.list)
+}
+
+/// The built-in macros, as Rust's (docs/adr/0103-build-scripts-and-binding-generation.md, Q723).
+fn macros(items: Items) {
+  items.add_snippet("include!", FUNCTION, "include!(\"file.sag\"): puts the items of a file in the module", "include!(\"${1:file.sag}\");");
+  items.add_snippet("include_str!", FUNCTION, "include_str!(\"file\"): the text of a file, read when the program is compiled", "include_str!(\"${1:file}\")");
+  items.add_snippet("include_bytes!", FUNCTION, "include_bytes!(\"file\"): the bytes of a file, as a `[u8; N]`", "include_bytes!(\"${1:file}\")");
+  items.add_snippet("concat!", FUNCTION, "concat!(a, b, ...): literals joined into one string literal", "concat!(${1})");
+  items.add_snippet("env!", FUNCTION, "env!(\"NAME\"): an environment variable of the compiler, read when the program is compiled", "env!(\"${1:NAME}\")");
 }
 
 // ---- Attributes -------------------------------------------------------------------------------
