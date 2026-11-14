@@ -152,7 +152,8 @@ pub fn run(script: Script) -> Result<Outcome, String> {
   }
 
   const manifest_dir = absolute(script.dir);
-  const command = new Command(executable)
+  // Absolute: on Unix the path of the program is read in the directory the script runs in.
+  const command = new Command(absolute(executable))
     .current_dir(if script.dir.is_empty() { "." } else { script.dir })
     .env("OUT_DIR", absolute(out_dir))
     .env("TARGET", script.target)

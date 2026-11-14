@@ -972,7 +972,8 @@ fn bindgen_writes_bindings_once(cx: Context) -> Result<(), String> {
   const dir = path::join(temp, "fixture");
   const printed = nova_ok(cx, dir, List::from(["bindgen", "c/fixture.h", "--allow-prefix", "fx_window", "--block", "fx_window_area", "--define", "FX_UNUSED=1"]))?;
 
-  expect_contains("nova bindgen", printed.stdout, "pub fn fx_window_create(title: *const std::ffi::c_char, area: fx_rect, flags: std::ffi::c_int) -> *mut fx_window;")?;
+  // The enumeration is `int` with MSVC and `unsigned int` elsewhere, as clang gives it (Q735).
+  expect_contains("nova bindgen", printed.stdout, "pub fn fx_window_create(title: *const std::ffi::c_char, area: fx_rect, flags: std::ffi::c_")?;
   expect_contains("nova bindgen", printed.stdout, "pub struct fx_rect {")?;
   expect(!printed.stdout.contains("fx_window_area") && !printed.stdout.contains("fx_sum"), "the bindings have what was not allowed:\n" + printed.stdout)?;
 
