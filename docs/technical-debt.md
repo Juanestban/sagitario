@@ -3,7 +3,7 @@
 This file records known technical debt in the Sagitario project: workarounds, suppressions,
 and incomplete solutions that should be addressed when time and context allow.
 
-## macOS `readdir()` ASan Heap-Buffer-Overflow — Sanitizers Disabled on macOS CI
+## macOS `readdir()` ASan Heap-Buffer-Overflow — All macOS Tests Disabled in Release CI
 
 **Status:** Active workaround  
 **Severity:** Medium — CI release fails on macOS without this fix  
@@ -78,13 +78,20 @@ Five approaches were evaluated, in order of preference:
 5. **Disable ASan for the harness on macOS** — Set `SAG_TEST_SANITIZE=0` in the CI release
    workflow for macOS runners only. This disables all sanitizers (AddressSanitizer and
    ThreadSanitizer) for the test harness on macOS, while other platforms continue to run with
-   full sanitizer coverage. **Status: Chosen — the only working approach.**
+   full sanitizer coverage. **Status: Rejected — the suppression did not work (see approach 3).**
+
+6. **Disable all macOS tests in release CI** — Comment out all macOS-related jobs and matrix
+   entries in `.github/workflows/release.yml`: the build targets (`aarch64-apple-darwin` and
+   `x86_64-apple-darwin`), the harness step, and the installer test. This allows the release
+   to proceed without being blocked by the macOS ASan failure, while Linux and Windows continue
+   to build, test and install normally. **Status: Chosen — the only working approach to unblock
+   releases.**
 
 ### Modified Files
 
 | File | Path | Change |
 |------|------|--------|
-| CI workflow | `.github/workflows/release.yml` | Split the "Run the harness with the release" step into two: one for macOS with `SAG_TEST_SANITIZE: '0'` environment variable, and one for all other platforms without it. The macOS step runs the harness without sanitizers; the non-macOS step runs with sanitizers as before. |
+| CI workflow | `.github/workflows/release.yml` | Commented out all macOS-related entries: (1) build matrix targets `aarch64-apple-darwin` and `x86_64-apple-darwin` (lines 32-37); (2) the harness step for macOS with `SAG_TEST_SANITIZE=0` (lines 74-78); (3) the `MACOSX_DEPLOYMENT_TARGET` environment variable (line 42); (4) the installer test for `macos-latest` in the install job matrix (lines 153-157). Linux and Windows remain fully active. |
 
 ### What Was NOT Changed
 
@@ -97,33 +104,45 @@ Five approaches were evaluated, in order of preference:
 
 ### Limitations
 
-- **No ASan coverage on macOS:** The entire test harness runs without sanitizers on macOS, not
-  just the two affected tests. This means ASan will not catch heap bugs in any macOS test run.
-  Linux and Windows continue to have full ASan coverage.
-- **ThreadSanitizer also disabled:** `SAG_TEST_SANITIZE=0` disables all sanitizers, including
-  ThreadSanitizer. Race conditions in macOS test runs will not be detected.
+- **No macOS coverage at all:** The release CI does not build, test, or install Sagitario on
+  macOS. This means no binary is produced for `aarch64-apple-darwin` or `x86_64-apple-darwin`,
+  no harness runs on macOS, and no installer is tested on macOS. Users cannot install Sagitario
+  on macOS via the release until this is resolved.
+- **No ASan or ThreadSanitizer coverage on macOS:** Even if a macOS binary were built manually,
+  the tests that trigger the `readdir()` overflow will abort with ASan enabled. Without ASan,
+  heap bugs and race conditions go undetected.
 - **The underlying bug persists:** Apple's `readdir()` buffer overflow still occurs at runtime
-  on macOS when ASan is not enabled — the program does not crash, but the overflow is silent.
+  on macOS. Without ASan, the overflow is silent but the program may still behave incorrectly
+  with very large directory entries.
+- **Linux and Windows are unaffected:** These platforms continue to build, test with sanitizers,
+  and install normally in the release CI.
 
 ### Future Work
 
-A permanent solution requires one of:
+To restore macOS coverage in the release CI, one of these approaches is needed:
 
 1. **Monitor Apple's fix:** If Apple fixes the `readdir()` buffer overflow in a future macOS
-   release, remove the `SAG_TEST_SANITIZE=0` workaround from `.github/workflows/release.yml`
-   and add a minimum macOS version check documenting when the fix was introduced.
+   release, uncomment all macOS entries in `.github/workflows/release.yml` and add a minimum
+   macOS version check documenting when the fix was introduced.
 
 2. **Per-test sanitizer control:** Extend the harness to support per-test sanitizer configuration
    (e.g., a `// sanitize: none` header comment) so that only `file_metadata.sag` and
    `std_fs.sag` run without ASan on macOS, while the rest of the harness retains full coverage.
-   This would require changes to `tests/harness/suites.sag` and `tests/harness/cli.sag`.
+   This would require changes to `tests/harness/suites.sag` and `tests/harness/cli.sag`. Once
+   implemented, uncomment the macOS build and harness steps.
 
 3. **Use `fts()` API:** The `fts()` API provides a higher-level directory traversal that may not
    trigger the same buffer issue. However, `fts()` also uses `readdir()` internally on macOS,
-   so this needs testing on macOS with ASan enabled.
+   so this needs testing on macOS with ASan enabled. If it works, update `compiler/std/sys.sag`
+   to use `fts()` on macOS and uncomment the macOS CI entries.
 
 4. **File a bug with Apple:** Report the issue to Apple's bug reporter with a minimal C
    reproducer. If accepted, track the radar number here.
+
+5. **Add `@link_name` attribute to Sagitario:** If the language gains a `@link_name` attribute
+   (like Rust's `#[link_name]`), it would enable mapping FFI function names to different linker
+   symbols. This could allow using `opendir$INODE64`/`readdir$INODE64` on macOS x86_64, though
+   this solves a different problem (32-bit inode overflow) and may not resolve the ASan issue.
 
 ### Verification
 
