@@ -364,6 +364,22 @@ fn ffi_name(index: usize) -> String {
   `sag_ffi_${index}`
 }
 
+/// The name the FFI unit gives the C symbol `symbol`: the symbol itself when it is a C identifier,
+/// else `alias`, declared with an assembler label naming the symbol (docs/adr/0108-link-names.md).
+fn linked_name(symbol: String, alias: String) -> String {
+  if symbol.contains("$") { alias } else { symbol }
+}
+
+/// The assembler label after the declaration of `symbol`, when `linked_name` gives an alias.
+fn link_label(symbol: String) -> String {
+  if symbol.contains("$") { " __asm__(SAG_LINK_NAME(\"" + symbol + "\"))" } else { "" }
+}
+
+/// What the labels of `link_label` need: C has no way to name a symbol that is not an identifier,
+/// so they are clang's and gcc's assembler labels, with the platform's prefix of C symbols (`_`
+/// on Apple's systems).
+const LINK_NAME_MACROS: String = "#if defined(__GNUC__)\n#define SAG_LINK_STRING(text) #text\n#define SAG_LINK_PREFIX(prefix) SAG_LINK_STRING(prefix)\n#define SAG_LINK_NAME(symbol) SAG_LINK_PREFIX(__USER_LABEL_PREFIX__) symbol\n#else\n#error \"a `@link_name` holding `$` needs clang or gcc\"\n#endif\n";
+
 /// The types of a function's parameters.
 fn param_types(function: Function) -> List<Type> {
   const params: List<Type> = new List();
@@ -2849,7 +2865,8 @@ class Generator {
 
       self.need_definition(decl.ret);
 
-      const prototype = "extern " + self.spelled_return(decl.ret) + " " + decl.symbol + "(" + self.c_declared_params(decl) + ");\n";
+      const name = linked_name(decl.symbol, `sag_link_${index}`);
+      const prototype = "extern " + self.spelled_return(decl.ret) + " " + name + "(" + self.c_declared_params(decl) + ")" + link_label(decl.symbol) + ";\n";
 
       // A variadic function is declared once for its calls of other types.
       if !declared_symbols.contains(prototype) {
@@ -2857,14 +2874,14 @@ class Generator {
         body.append("\n" + prototype);
       }
 
-      body.append(self.extern_prototype(index, decl) + " " + self.bridge_body(decl.symbol, decl.params, args, decl.ret, true));
+      body.append(self.extern_prototype(index, decl) + " " + self.bridge_body(name, decl.params, args, decl.ret, true));
     }
 
     for index in pointers {
       const decl = program.externs[index];
       const pointer = self.c_type(c_fn_type(decl));
 
-      body.append(pointer + ` sag_ffi_${index}_pointer(void) {\n  return (` + pointer + ")" + decl.symbol + ";\n}\n");
+      body.append(pointer + ` sag_ffi_${index}_pointer(void) {\n  return (` + pointer + ")" + linked_name(decl.symbol, `sag_link_${index}`) + ";\n}\n");
     }
 
     // The exported symbols and the trampolines C calls back: C's types, then the function.
@@ -2917,8 +2934,10 @@ class Generator {
       const def = program.statics[index];
       const ty = self.c_type(def.ty);
 
-      body.append("\nextern " + self.spelled(def.ty) + " " + def.name + ";\n");
-      body.append(ty + " *" + extern_static_getter(index as u32) + "(void) { return (" + ty + " *)&" + def.name + "; }\n");
+      const name = linked_name(def.symbol, `sag_link_static_${index}`);
+
+      body.append("\nextern " + self.spelled(def.ty) + " " + name + link_label(def.symbol) + ";\n");
+      body.append(ty + " *" + extern_static_getter(index as u32) + "(void) { return (" + ty + " *)&" + name + "; }\n");
     }
 
     // What C's spelling needs before the functions: the tags, the function pointer types, and
@@ -2951,7 +2970,14 @@ class Generator {
 
     out.append(typedefs.to_string());
     out.append(definitions.to_string());
-    out.append(body.to_string());
+
+    const text = body.to_string();
+
+    if text.contains("SAG_LINK_NAME(") {
+      out.append(LINK_NAME_MACROS);
+    }
+
+    out.append(text);
 
     Some(out.to_string())
   }

@@ -13,6 +13,38 @@ followed them.
 
 The sources say 0.32.0.
 
+### Added
+
+- `@link_name("symbol")` on the functions and globals of `extern "C"` blocks, as Rust's
+  `#[link_name]`: Sagitario code calls them by the declared name and the linker sees the symbol,
+  which may hold `$` for Apple's variants of its C library (`readdir$INODE64`)
+  ([ADR-0108](docs/adr/0108-link-names.md)). The VS Code extension completes it after `@` and has
+  the snippet `linkname`.
+- Signature help in the language server: inside a call, the signature of the function, C function,
+  builtin or method, its documentation and the parameter at the cursor
+  ([ADR-0109](docs/adr/0109-language-server-members.md)).
+- Hover and completion show documentation: the `///` comments of the program and of the standard
+  library, and that of the compiler's builtin methods, static functions and builtins. Hover shows
+  the signatures of methods, C functions and builtins, fields and variants as declared.
+- Completion after `CString::`, `List::`, `Atomic::` and the static functions of builtin types,
+  with their signatures, and of variants with their fields.
+
+### Fixed
+
+- The language server knows the type of any receiver before `.`: chains of builtin methods
+  (`words.first().unwrap().`), calls of paths (`fs::read_to_string(path).`), C functions and
+  generic methods (`holder.get().`, whose `T` is substituted), so `Option` and `Result` values
+  offer `unwrap`, `expect` and the rest, with their signatures. It also answers while the document
+  has a syntax error, from the text without what is being typed and from the last analysis that
+  parsed. `into` and `try_into` come after a value's own methods.
+
+- On macOS for Intel, `std::fs` and `std::sys` called the symbols of 32-bit inodes (`stat`,
+  `readdir`...), which AddressSanitizer reads as the 64-bit ones: every program listing a directory
+  aborted under `--sanitize`. They call the `$INODE64` symbols now, as C's headers do, and files
+  have their time of birth there too; on Apple's systems `realpath` is the POSIX one,
+  `realpath$DARWIN_EXTSN`. The release builds, tests and installs on macOS again
+  ([ADR-0108](docs/adr/0108-link-names.md)).
+
 ### Changed
 
 - The seed is one for each host, `bootstrap/seed/<host>/`, for Windows and Linux on x86-64, Linux

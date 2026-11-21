@@ -82,6 +82,8 @@ pub struct StaticDef {
   /// A global variable of C, `name`, whose address the FFI unit gives
   /// (docs/adr/0086-c-globals-and-std-io.md, Q562).
   pub extern_c: bool;
+  /// The C symbol of a global of C: its `@link_name`, or `name` (docs/adr/0108-link-names.md).
+  pub symbol: String;
   /// Of the standard library, as `ExternDecl::in_std`.
   pub in_std: bool;
 }
@@ -1092,7 +1094,7 @@ pub fn lower(package: Package, resolution: Resolution, typed: TypedModule, sourc
 
     const fixed: Option<usize> = if decl.variadic { Some(sig.params.len()) } else { None };
 
-    externs.push(ExternDecl { symbol: decl.name.name, params: sig.params, ret: sig.ret, runtime: resolution.is_runtime_extern(package, id), in_std: in_std, fixed: fixed });
+    externs.push(ExternDecl { symbol: decl.symbol(), params: sig.params, ret: sig.ret, runtime: resolution.is_runtime_extern(package, id), in_std: in_std, fixed: fixed });
   }
 
   for call in registry.variadic_calls {
@@ -1126,7 +1128,10 @@ pub fn lower(package: Package, resolution: Resolution, typed: TypedModule, sourc
       }
     }
 
-    statics.push(StaticDef { name: decl.name.name, ty: ty, init: init, mutable: decl.mutable, thread_local: decl.thread_local, value: value, extern_c: decl.extern_c, in_std: resolution.is_std_source(resolution.statics[index].module) });
+    statics.push(StaticDef { name: decl.name.name, ty: ty, init: init, mutable: decl.mutable, thread_local: decl.thread_local, value: value, extern_c: decl.extern_c, symbol: match decl.link_name {
+      Some(link_name) => link_name.symbol,
+      None => decl.name.name,
+    }, in_std: resolution.is_std_source(resolution.statics[index].module) });
   }
 
   // Fewer reference counts (docs/adr/0091-fewer-reference-counts.md); `SAG_NO_ARC_PASS` turns
@@ -3941,7 +3946,7 @@ pub class Lowering {
           None => false,
         };
 
-        self.registry.variadic_calls.push(ExternDecl { symbol: decl.name.name, params: params, ret: sig.ret, runtime: false, in_std: in_std, fixed: Some(sig.params.len()) });
+        self.registry.variadic_calls.push(ExternDecl { symbol: decl.symbol(), params: params, ret: sig.ret, runtime: false, in_std: in_std, fixed: Some(sig.params.len()) });
         self.registry.variadic_index.insert(key, self.registry.variadic_calls.len() - 1);
         self.registry.variadic_calls.len() - 1
       }

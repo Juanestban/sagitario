@@ -1,0 +1,29 @@
+// Where `@link_name` goes (docs/adr/0108-link-names.md): on the functions and globals of
+// `extern "C"` blocks, once, with one string.
+use std::ffi::c_int;
+
+extern "C" {
+  @link_name(abs) //~ ERROR E0105
+  fn first(value: c_int) -> c_int;
+  @link_name("abs", "labs") //~ ERROR E0105
+  fn second(value: c_int) -> c_int;
+  @link_name("count$2") @link_name("count") //~ ERROR E0105
+  static counter: c_int;
+}
+
+@link_name("twice") //~ ERROR E0105
+fn twice(x: i32) -> i32 {
+  x * 2
+}
+
+@link_name("exported") //~ ERROR E0105
+extern "C" fn exported() {}
+
+@link_name("tag") //~ ERROR E0105
+extern "C" {
+  fn tagged();
+}
+
+fn main() {
+  println(f"{twice(2)}");
+}

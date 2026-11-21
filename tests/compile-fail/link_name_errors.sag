@@ -1,0 +1,20 @@
+// The symbols of `@link_name` (docs/adr/0108-link-names.md): C identifiers, which may also hold `$`
+// after their first character, not reserved, and declared again only with the same signature.
+use std::ffi::c_int;
+
+extern "C" {
+  @link_name("not-a-symbol") //~ ERROR E0208
+  fn first(value: c_int) -> c_int;
+  @link_name("$INODE64") //~ ERROR E0208
+  fn second(value: c_int) -> c_int;
+  @link_name("__reserved") //~ ERROR E0208
+  fn third(value: c_int) -> c_int;
+  @link_name("strlen")
+  fn fourth(text: *const u8) -> usize;
+  @link_name("strlen") //~ ERROR E0208
+  fn fifth(value: c_int) -> c_int;
+  @link_name("sag_count") //~ ERROR E0208
+  static counter: c_int;
+}
+
+fn main() {}

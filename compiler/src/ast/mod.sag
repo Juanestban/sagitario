@@ -159,8 +159,10 @@ pub struct StaticDecl {
   /// `@thread_local`, on a `static var` only: one value per thread (Q529).
   pub thread_local: bool;
   /// A global variable of C, declared in an `extern "C"` block without a value
-  /// (docs/adr/0086-c-globals-and-std-io.md): its name is the C symbol.
+  /// (docs/adr/0086-c-globals-and-std-io.md): its name is the C symbol, unless `link_name`.
   pub extern_c: bool;
+  /// `@link_name("symbol")` on a C global (docs/adr/0108-link-names.md).
+  pub link_name: Option<Export>;
   pub name: Ident;
   pub ty: TypeExpr;
   /// A function without parameters that returns `value`, named as the static: the passes
@@ -215,10 +217,22 @@ pub struct ExternFn {
   /// (docs/adr/0103-build-scripts-and-binding-generation.md, Q720).
   pub variadic: bool;
   pub return_type: Option<TypeExpr>;
+  /// `@link_name("symbol")`: the C symbol, when it is not the name
+  /// (docs/adr/0108-link-names.md).
+  pub link_name: Option<Export>;
   pub span: Span;
+
+  /// The C symbol the linker sees.
+  pub fn symbol(self) -> String {
+    match self.link_name {
+      Some(link_name) => link_name.symbol,
+      None => self.name.name,
+    }
+  }
 }
 
-/// `@export("symbol")` on an `extern "C" fn`.
+/// `@export("symbol")` on an `extern "C" fn`, or `@link_name("symbol")` on a declaration of an
+/// `extern "C"` block.
 pub struct Export {
   pub symbol: String;
   pub span: Span;

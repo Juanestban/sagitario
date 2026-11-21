@@ -6,17 +6,17 @@
 typedef void (*sag_p0)(int32_t);
 typedef void* (*sag_p1)(void*);
 
-void sag_fn_2898(int32_t l0, uint8_t const* const* l1);
+void sag_fn_2901(int32_t l0, uint8_t const* const* l1);
 
-uint64_t sag_fn_2899(void);
+uint64_t sag_fn_2902(void);
 
-void sag_fn_2900(uint64_t l0);
+void sag_fn_2903(uint64_t l0);
 void sag_env_init(int a0, char const* const* a1) {
-  sag_fn_2898(a0, (uint8_t const* const*)a1);
+  sag_fn_2901(a0, (uint8_t const* const*)a1);
 }
 uint64_t sag_time_monotonic(void) {
-  return sag_fn_2899();
+  return sag_fn_2902();
 }
 void sag_time_sleep(uint64_t a0) {
-  sag_fn_2900(a0);
+  sag_fn_2903(a0);
 }

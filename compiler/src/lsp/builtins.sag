@@ -1,0 +1,994 @@
+//! The members of values, as completion, hover and signature help show them
+//! (docs/adr/0109-language-server-members.md): the fields and methods of the program's types,
+//! with the type arguments of the receiver, and the methods the compiler gives the built-in types
+//! (docs/spec/02-types.md, docs/spec/11-standard-library.md), whose signatures come from the
+//! prelude functions implementing them where there are some, and else from the table below.
+
+use pkg::lsp::analysis::Analysis;
+use pkg::lsp::docs;
+use pkg::resolve::{ItemRef, ParamOwner, Resolution, TypeItem};
+use pkg::types;
+use pkg::types::generic;
+use pkg::types::numbers;
+use pkg::types::{NamedRef, Subst, SubstEntry, Type, TypeKind};
+use pkg::types::typed::TypedModule;
+
+/// A member of a value.
+pub struct Member {
+  pub name: String;
+  /// `fn trim(self) -> String`, or `value: T` for a field, with the receiver's type arguments.
+  pub signature: String;
+  /// Markdown, or empty.
+  pub doc: String;
+  pub is_field: bool;
+  /// The function, for the members declared in Sagitario code.
+  pub function: Option<u32>;
+  /// The names of the parameters after `self` and their types, for signature help.
+  pub params: List<String>;
+  /// Shown after the program's own members: the conversions every value has.
+  pub general: bool;
+  /// The type of the field, or of the result of the method, for the members of Sagitario code.
+  pub ty: Option<Type>;
+}
+
+/// The methods the compiler gives the built-in types, one per line: `kind|name|source|doc`.
+/// `source` is the signature without `self`, `(a: A) -> R`, where `T` is the value or element,
+/// `E` the error of a `Result` and other capitals type parameters of the method; or `@name`, the
+/// prelude function implementing it, whose first parameter is the receiver; or `#name`, the same
+/// for a function of the root of `std`; or `*`, the method of `Iter` with that name, for the
+/// iterator methods of lists and arrays.
+const TABLE: String = "string|len|() -> usize|The number of bytes of the text, which is UTF-8.
+string|is_empty|() -> bool|Whether the text has no characters.
+string|contains|(pattern: String) -> bool|Whether `pattern` is part of the text.
+string|starts_with|(prefix: String) -> bool|Whether the text starts with `prefix`.
+string|ends_with|(suffix: String) -> bool|Whether the text ends with `suffix`.
+string|find|(pattern: String) -> Option<usize>|The byte index of the first `pattern` in the text, or `None`.
+string|trim|() -> String|The text without whitespace at its start and end.
+string|trim_start|() -> String|The text without whitespace at its start.
+string|trim_end|() -> String|The text without whitespace at its end.
+string|to_ascii_uppercase|() -> String|The text with its ASCII letters in uppercase.
+string|to_ascii_lowercase|() -> String|The text with its ASCII letters in lowercase.
+string|replace|(from: String, to: String) -> String|The text with every `from` replaced by `to`.
+string|repeat|(count: usize) -> String|The text repeated `count` times.
+string|substring|(start: usize, end: usize) -> String|The bytes from `start` to `end`, which must be on character boundaries; panics otherwise.
+string|as_ptr|() -> *const u8|A pointer to the bytes of the text, for C; they hold no NUL at the end, see `CString`.
+string|chars|@string_chars|The characters of the text, as an iterator.
+string|bytes|@string_bytes|The bytes of the text, as an iterator.
+string|split|@string_split|The pieces of the text between the separators.
+string|lines|@string_lines|The lines of the text, without their `\\n` or `\\r\\n`.
+string|rfind|#text_rfind|The byte index of the last `pattern` in the text, or `None`.
+string|split_whitespace|#text_split_whitespace|The words of the text, split at runs of whitespace.
+string|splitn|#text_splitn|At most `count` pieces of the text between the separators; the last holds the rest.
+string|rsplit|#text_rsplit|The pieces of the text between the separators, from the end.
+string|split_once|#text_split_once|The text before and after the first separator, or `None`.
+string|rsplit_once|#text_rsplit_once|The text before and after the last separator, or `None`.
+string|strip_prefix|#text_strip_prefix|The text without `prefix`, or `None` if it does not start with it.
+string|strip_suffix|#text_strip_suffix|The text without `suffix`, or `None` if it does not end with it.
+string|char_indices|#text_char_indices|The characters of the text with their byte indices.
+string|matches|#text_matches|Every `pattern` found in the text.
+string|replacen|#text_replacen|The text with the first `count` of `from` replaced by `to`.
+string|to_uppercase|#text_to_uppercase|The text in uppercase, by Unicode's rules.
+string|to_lowercase|#text_to_lowercase|The text in lowercase, by Unicode's rules.
+string|parse_i8|() -> Result<i8, String>|The text as an `i8`, or an error saying why it is not one.
+string|parse_i16|() -> Result<i16, String>|The text as an `i16`, or an error saying why it is not one.
+string|parse_i32|() -> Result<i32, String>|The text as an `i32`, or an error saying why it is not one.
+string|parse_i64|() -> Result<i64, String>|The text as an `i64`, or an error saying why it is not one.
+string|parse_isize|() -> Result<isize, String>|The text as an `isize`, or an error saying why it is not one.
+string|parse_u8|() -> Result<u8, String>|The text as a `u8`, or an error saying why it is not one.
+string|parse_u16|() -> Result<u16, String>|The text as a `u16`, or an error saying why it is not one.
+string|parse_u32|() -> Result<u32, String>|The text as a `u32`, or an error saying why it is not one.
+string|parse_u64|() -> Result<u64, String>|The text as a `u64`, or an error saying why it is not one.
+string|parse_usize|() -> Result<usize, String>|The text as a `usize`, or an error saying why it is not one.
+string|parse_f32|() -> Result<f32, String>|The text as an `f32`, or an error saying why it is not one.
+string|parse_f64|() -> Result<f64, String>|The text as an `f64`, or an error saying why it is not one.
+char|is_ascii_digit|() -> bool|Whether the character is `0` to `9`.
+char|is_ascii_alphabetic|() -> bool|Whether the character is an ASCII letter.
+char|is_ascii_alphanumeric|() -> bool|Whether the character is an ASCII letter or digit.
+char|is_ascii_whitespace|() -> bool|Whether the character is ASCII whitespace.
+char|is_ascii_uppercase|() -> bool|Whether the character is an ASCII uppercase letter.
+char|is_ascii_lowercase|() -> bool|Whether the character is an ASCII lowercase letter.
+char|to_ascii_uppercase|() -> char|The character in uppercase, if it is an ASCII letter.
+char|to_ascii_lowercase|() -> char|The character in lowercase, if it is an ASCII letter.
+char|to_digit|(radix: u32) -> Option<u32>|The value of the character as a digit in base `radix`, or `None`.
+char|is_alphabetic|#char_is_alphabetic|Whether the character is a letter, by Unicode's rules.
+char|is_numeric|#char_is_numeric|Whether the character is a number, by Unicode's rules.
+char|is_alphanumeric|#char_is_alphanumeric|Whether the character is a letter or a number, by Unicode's rules.
+char|is_whitespace|#char_is_whitespace|Whether the character is whitespace, by Unicode's rules.
+char|is_uppercase|#char_is_uppercase|Whether the character is uppercase, by Unicode's rules.
+char|is_lowercase|#char_is_lowercase|Whether the character is lowercase, by Unicode's rules.
+char|is_control|#char_is_control|Whether the character is a control character.
+char|to_uppercase|#char_to_uppercase|The character in uppercase, which may be several characters.
+char|to_lowercase|#char_to_lowercase|The character in lowercase, which may be several characters.
+char|len_utf8|#char_len_utf8|The number of bytes of the character in UTF-8.
+char|len_utf16|#char_len_utf16|The number of 16-bit units of the character in UTF-16.
+builder|append|(text: String)|Adds `text` at the end.
+builder|append_char|(c: char)|Adds a character at the end.
+builder|len|() -> usize|The number of bytes written.
+builder|is_empty|() -> bool|Whether nothing is written.
+builder|clear|()|Removes everything written.
+builder|to_string|() -> String|The text written.
+builder|insert|(at: usize, text: String)|Writes `text` at the byte index `at`, which must be on a character boundary.
+builder|truncate|(len: usize)|Keeps the first `len` bytes, which must end on a character boundary.
+builder|pop|() -> Option<char>|Removes and returns the last character, or `None`.
+builder|capacity|() -> usize|The number of bytes it holds room for.
+builder|reserve|(additional: usize)|Makes room for `additional` more bytes.
+list|len|() -> usize|The number of elements.
+list|is_empty|() -> bool|Whether the list has no elements.
+list|push|(value: T)|Adds `value` at the end.
+list|pop|() -> Option<T>|Removes and returns the last element, or `None`.
+list|get|(index: usize) -> Option<T>|The element at `index`, or `None` past the end.
+list|first|() -> Option<T>|The first element, or `None`.
+list|last|() -> Option<T>|The last element, or `None`.
+list|insert|(index: usize, value: T)|Puts `value` at `index`, moving the later elements.
+list|remove|(index: usize) -> T|Removes and returns the element at `index`; panics past the end.
+list|clear|()|Removes every element.
+list|reverse|()|Reverses the order of the elements in place.
+list|capacity|() -> usize|The number of elements it holds room for.
+list|reserve|(additional: usize)|Makes room for `additional` more elements.
+list|as_ptr|() -> *const T|A pointer to the first element, for C.
+list|as_mut_ptr|() -> *mut T|A mutable pointer to the first element, for C.
+list|iter|@list_iter|An iterator over the elements.
+list|contains|@list_contains|Whether `value` is an element.
+list|index_of|@list_index_of|The index of the first element equal to `value`, or `None`.
+list|sort|@list_sort|Sorts the elements in place, in ascending order.
+list|sort_by|@list_sort_by|Sorts the elements in place, by `compare`.
+list|join|@list_join|The strings of the list with `separator` between them.
+list|resize|@list_resize|Makes the list `len` long, adding copies of `value` or removing elements from the end.
+list|extend|@list_extend|Adds the values of an iterator at the end.
+list|append|@list_append|Adds the elements of `other` at the end.
+list|truncate|@list_truncate|Keeps the first `len` elements.
+list|retain|@list_retain|Keeps the elements for which `keep` is true.
+list|dedup|@list_dedup|Removes consecutive equal elements.
+list|split_off|@list_split_off|Removes and returns the elements from `at` on.
+list|drain|@list_drain|Removes and returns the elements from `start` to `end`.
+list|windows|@list_windows|Every run of `size` consecutive elements.
+list|chunks|@list_chunks|The elements in lists of `size`, the last maybe shorter.
+list|concat|@list_concat|The elements of the lists one after another.
+list|binary_search|@slice_binary_search|In a sorted list, `Ok` of the index of `value`, or `Err` of where it would go.
+list|binary_search_by|@slice_binary_search_by|`binary_search` with an ordering of its own.
+list|min|@slice_min|The smallest element, or `None`.
+list|max|@slice_max|The largest element, or `None`.
+list|sort_by_key|@slice_sort_by_key|Sorts the elements in place, by the keys `key` gives.
+list|fill|@slice_fill|Sets every element to `value`.
+list|swap|@slice_swap|Exchanges the elements at `a` and `b`.
+list|copy_from_slice|@slice_copy_from_slice|Copies `source`, of the same length, over the elements.
+array|len|() -> usize|The number of elements.
+array|as_ptr|() -> *const T|A pointer to the first element, for C.
+array|as_mut_ptr|() -> *mut T|A mutable pointer to the first element, for C.
+array|iter|@list_iter|An iterator over copies of the elements.
+slice|len|() -> usize|The number of elements.
+slice|is_empty|() -> bool|Whether the slice has no elements.
+slice|as_ptr|() -> *const T|A pointer to the first element, for C.
+slice|as_mut_ptr|() -> *mut T|A mutable pointer to the first element, for C; the slice must be `&mut`.
+slice|iter|@slice_iter|An iterator over the elements.
+seq|contains|@slice_contains|Whether `value` is an element.
+seq|index_of|@slice_index_of|The index of the first element equal to `value`, or `None`.
+seq|binary_search|@slice_binary_search|In sorted elements, `Ok` of the index of `value`, or `Err` of where it would go.
+seq|binary_search_by|@slice_binary_search_by|`binary_search` with an ordering of its own.
+seq|min|@slice_min|The smallest element, or `None`.
+seq|max|@slice_max|The largest element, or `None`.
+seq|sort|@slice_sort|Sorts the elements in place, in ascending order.
+seq|sort_by|@slice_sort_by|Sorts the elements in place, by `compare`.
+seq|sort_by_key|@slice_sort_by_key|Sorts the elements in place, by the keys `key` gives.
+seq|reverse|@slice_reverse|Reverses the order of the elements in place.
+seq|fill|@slice_fill|Sets every element to `value`.
+seq|swap|@slice_swap|Exchanges the elements at `a` and `b`.
+seq|copy_from_slice|@slice_copy_from_slice|Copies `source`, of the same length, over the elements.
+iterable|map|*|The values transformed by `f`, lazily.
+iterable|filter|*|The values for which `keep` is true, lazily.
+iterable|take|*|The first `count` values.
+iterable|skip|*|The values after the first `count`.
+iterable|step_by|*|Every `step`-th value, starting with the first.
+iterable|collect|*|The values gathered into a collection: a `List`, a `Map` of pairs, or a `String`.
+iterable|count|*|The number of values, consuming them.
+iterable|fold|*|The values combined by `f`, starting from `initial`.
+iterable|for_each|*|Calls `f` with each value.
+iterable|any|*|Whether `f` is true for some value.
+iterable|all|*|Whether `f` is true for every value.
+iterable|find|*|The first value for which `f` is true, or `None`.
+iterable|enumerate|*|The values with their indices, as `(usize, T)`.
+iterable|zip|*|The values paired with those of another iterator.
+iterable|chain|*|The values, then those of another iterator.
+iterable|flat_map|*|The values of the iterators `f` gives, one after another.
+iterable|take_while|*|The values while `f` is true.
+iterable|skip_while|*|The values after the first for which `f` is false.
+iterable|map_while|*|The values `f` gives while it gives `Some`.
+iterable|inspect|*|The values, calling `f` with each.
+iterable|cycle|*|The values over and over.
+iterable|min_by|*|The smallest value by `compare`, or `None`.
+iterable|max_by|*|The largest value by `compare`, or `None`.
+iterable|min_by_key|*|The value with the smallest key, or `None`.
+iterable|max_by_key|*|The value with the largest key, or `None`.
+iterable|position|*|The index of the first value for which `f` is true, or `None`.
+iterable|last|*|The last value, or `None`.
+iterable|nth|*|The value at `index`, or `None`.
+iterable|partition|*|The values for which `f` is true, and the others.
+iter|sum|() -> T|The sum of the values, which are numbers.
+iter|product|() -> T|The product of the values, which are numbers.
+iter|min|@iter_min|The smallest value, or `None`.
+iter|max|@iter_max|The largest value, or `None`.
+iter|unzip|@iter_unzip|The pairs split into two lists.
+iter|flatten|@iter_flatten|The values of the inner iterators, one after another.
+option|is_some|() -> bool|Whether the option is `Some`.
+option|is_none|() -> bool|Whether the option is `None`.
+option|unwrap|() -> T|The value of `Some`; panics on `None`.
+option|expect|(message: String) -> T|The value of `Some`; panics with `message` on `None`.
+option|unwrap_or|(default: T) -> T|The value of `Some`, or `default`.
+option|unwrap_or_else|(f: fn() -> T) -> T|The value of `Some`, or what `f` computes.
+option|map|(f: fn(T) -> U) -> Option<U>|`Some` of `f` applied to the value, or `None`.
+option|and_then|(f: fn(T) -> Option<U>) -> Option<U>|What `f` gives for the value, or `None`.
+option|filter|(keep: fn(T) -> bool) -> Option<T>|The option if it is `Some` and `keep` is true for its value, else `None`.
+option|take|() -> Option<T>|The value, leaving `None` in its place.
+option|replace|(value: T) -> Option<T>|The value, leaving `Some(value)` in its place.
+option|ok_or|@option_ok_or|`Ok` of the value, or `Err(error)`.
+option|ok_or_else|@option_ok_or_else|`Ok` of the value, or `Err` of what `error` computes.
+option|or|@option_or|The option if it is `Some`, else `other`.
+option|or_else|@option_or_else|The option if it is `Some`, else what `other` computes.
+option|and|@option_and|`other` if the option is `Some`, else `None`.
+option|xor|@option_xor|The one of the two options that is `Some`, or `None` if both or neither are.
+option|map_or|@option_map_or|`f` applied to the value, or `default`.
+option|map_or_else|@option_map_or_else|`f` applied to the value, or what `default` computes.
+option|is_some_and|@option_is_some_and|Whether the option is `Some` and `f` is true for its value.
+option|is_none_or|@option_is_none_or|Whether the option is `None` or `f` is true for its value.
+option|zip|@option_zip|`Some` of both values, or `None` if either is `None`.
+option|flatten|@option_flatten|The inner option of an `Option<Option<T>>`.
+option|iter|@option_iter|An iterator over the value, if there is one.
+option|unwrap_or_default|@option_unwrap_or_default|The value of `Some`, or the default of its type.
+result|is_ok|() -> bool|Whether the result is `Ok`.
+result|is_err|() -> bool|Whether the result is `Err`.
+result|unwrap|() -> T|The value of `Ok`; panics on `Err`, with its error.
+result|expect|(message: String) -> T|The value of `Ok`; panics with `message` on `Err`.
+result|unwrap_or|(default: T) -> T|The value of `Ok`, or `default`.
+result|unwrap_or_else|(f: fn(E) -> T) -> T|The value of `Ok`, or what `f` computes from the error.
+result|unwrap_err|() -> E|The error of `Err`; panics on `Ok`.
+result|expect_err|(message: String) -> E|The error of `Err`; panics with `message` on `Ok`.
+result|map|(f: fn(T) -> U) -> Result<U, E>|`Ok` of `f` applied to the value, or the same `Err`.
+result|map_err|(f: fn(E) -> F) -> Result<T, F>|`Err` of `f` applied to the error, or the same `Ok`.
+result|and_then|(f: fn(T) -> Result<U, E>) -> Result<U, E>|What `f` gives for the value, or the same `Err`.
+result|ok|@result_ok|`Some` of the value, or `None`.
+result|err|@result_err|`Some` of the error, or `None`.
+result|and|@result_and|`other` if the result is `Ok`, else the same `Err`.
+result|or|@result_or|The result if it is `Ok`, else `other`.
+result|or_else|@result_or_else|The result if it is `Ok`, else what `other` computes from the error.
+result|map_or|@result_map_or|`f` applied to the value, or `default`.
+result|map_or_else|@result_map_or_else|`f` applied to the value, or what `default` computes from the error.
+result|is_ok_and|@result_is_ok_and|Whether the result is `Ok` and `f` is true for its value.
+result|is_err_and|@result_is_err_and|Whether the result is `Err` and `f` is true for its error.
+result|iter|@result_iter|An iterator over the value, if there is one.
+result|unwrap_or_default|@result_unwrap_or_default|The value of `Ok`, or the default of its type.
+pointer|is_null|() -> bool|Whether the pointer is null.
+pointer|add|(count: usize) -> Self|The pointer `count` elements further; `unsafe`.
+cstring|as_ptr|() -> *const c_char|A pointer to the NUL-terminated bytes, for C, valid while the `CString` lives.
+display|to_string|() -> String|The value as text, as `{}` formats it.";
+
+/// What every value has (docs/adr/0094-conversions-and-defaults.md, Q633).
+const GENERAL: String = "into|() -> U|The value converted into the type expected, through `From`.
+try_into|() -> Result<U, E>|The value converted into the type expected, through `TryFrom`, or why it cannot be.";
+
+/// The kinds of `TABLE` that a value of type `ty` has.
+fn kinds_of(ty: Type, iterable: bool) -> List<String> {
+  const kinds: List<String> = match ty.kind {
+    TypeKind::String => List::from(["string", "display"]),
+    TypeKind::Char => List::from(["char", "display"]),
+    TypeKind::Int(_) | TypeKind::Float(_) | TypeKind::Bool => List::from(["display"]),
+    TypeKind::StringBuilder => List::from(["builder"]),
+    TypeKind::List(_) => List::from(["list", "iterable"]),
+    TypeKind::Array { .. } => List::from(["array", "seq", "iterable"]),
+    TypeKind::Slice { .. } => List::from(["slice", "seq"]),
+    TypeKind::Option(_) => List::from(["option"]),
+    TypeKind::Result { .. } => List::from(["result"]),
+    TypeKind::Ptr { .. } => List::from(["pointer"]),
+    TypeKind::CString => List::from(["cstring"]),
+    _ => new List(),
+  };
+
+  if iterable {
+    kinds.push("iter");
+  }
+
+  kinds
+}
+
+/// The receiver's type arguments for `T`, `E` and `Self` in the table.
+fn table_subst(ty: Type) -> Map<String, String> {
+  const names = new Map<String, String>();
+
+  names.insert("Self", types::text(ty));
+
+  match ty.kind {
+    TypeKind::List(elem) | TypeKind::Option(elem) | TypeKind::Array { elem, .. } | TypeKind::Slice { elem, .. } => {
+      names.insert("T", types::text(elem));
+    }
+    TypeKind::Ptr { pointee, .. } => {
+      names.insert("T", types::text(pointee));
+    }
+    TypeKind::Result { value, error } => {
+      names.insert("T", types::text(value));
+      names.insert("E", types::text(error));
+    }
+    _ => {}
+  }
+
+  names
+}
+
+fn is_word_char(c: char) -> bool {
+  c.is_ascii_alphanumeric() || c == '_'
+}
+
+/// `text` with each whole word that `names` holds replaced by its value.
+fn replace_words(text: String, names: Map<String, String>) -> String {
+  const out = new StringBuilder();
+  const word = new StringBuilder();
+
+  for c in text.chars() {
+    if is_word_char(c) {
+      word.append_char(c);
+      continue;
+    }
+
+    if !word.is_empty() {
+      const found = word.to_string();
+
+      out.append(names.get(found).unwrap_or(found));
+      word.clear();
+    }
+
+    out.append_char(c);
+  }
+
+  if !word.is_empty() {
+    const found = word.to_string();
+
+    out.append(names.get(found).unwrap_or(found));
+  }
+
+  out.to_string()
+}
+
+/// The parameters of a table signature, `(a: A, b: fn(T) -> U)`, as `a: A` and `b: fn(T) -> U`.
+fn table_params(source: String) -> List<String> {
+  const close = source.rfind(")").unwrap_or(0);
+  const inside = if close > 0 { source.substring(1, close) } else { "" };
+  const params: List<String> = new List();
+  const current = new StringBuilder();
+  var depth = 0i32;
+
+  for c in inside.chars() {
+    if c == '(' || c == '<' || c == '[' {
+      depth += 1;
+    } else if c == ')' || c == '>' || c == ']' {
+      // `->` holds a `>` that closes nothing.
+      if !current.to_string().ends_with("-") {
+        depth -= 1;
+      }
+    }
+
+    if c == ',' && depth == 0 {
+      params.push(current.to_string().trim());
+      current.clear();
+    } else {
+      current.append_char(c);
+    }
+  }
+
+  if !current.to_string().trim().is_empty() {
+    params.push(current.to_string().trim());
+  }
+
+  params
+}
+
+/// `fn name(self, params) -> R` from a table signature `(params) -> R`.
+fn table_signature(name: String, source: String) -> String {
+  const params = table_params(source);
+  const close = source.rfind(")").unwrap_or(0);
+  const rest = source.substring(close + 1, source.len());
+  const all = List::from(["self"]);
+
+  for param in params {
+    all.push(param);
+  }
+
+  "fn " + name + "(" + all.join(", ") + ")" + rest
+}
+
+/// The type arguments `unknowns` learned, with the parameters still unknown named as declared.
+fn learned(typed: TypedModule, unknowns: generic::Unknowns) -> Subst {
+  const params: List<SubstEntry> = new List();
+
+  for group in unknowns.groups {
+    const identity = typed.identity_args(group.owner);
+    const args: List<Type> = new List();
+
+    for index in 0..group.slots.len() {
+      match group.slots[index] {
+        Some(ty) => args.push(ty),
+        None => args.push(identity.get(index).unwrap_or(types::error())),
+      }
+    }
+
+    params.push(SubstEntry { owner: group.owner, args: args });
+  }
+
+  Subst { params: params, self_ty: None }
+}
+
+/// The receiver as the first parameter of a prelude function sees it: a slice for the functions
+/// of slices, which lists and arrays lend.
+fn as_first_param(ty: Type, first: Type) -> Type {
+  if let TypeKind::Ref { mutable, pointee } = first.kind {
+    if let TypeKind::Slice { .. } = pointee.kind {
+      const elem = match ty.kind {
+        TypeKind::List(elem) | TypeKind::Array { elem, .. } | TypeKind::Slice { elem, .. } => elem,
+        _ => return ty,
+      };
+
+      return types::of(TypeKind::Ref { mutable: mutable, pointee: types::of(TypeKind::Slice { mutable: mutable, elem: elem }) });
+    }
+  }
+
+  ty
+}
+
+/// A function written in Sagitario as a method of the receiver `ty`: `skip` leading parameters
+/// are the receiver's, and the generic ones it shares with the receiver take its arguments.
+fn function_member(analysis: Analysis, function: u32, name: String, ty: Type, skip: usize, owner_subst: Option<Subst>) -> Option<Member> {
+  const package = analysis.package?;
+  const resolution = analysis.resolution?;
+  const typed = analysis.typed?;
+  const decl = resolution.fn_decl(package, function)?;
+  const sig = typed.sigs.get(function as usize)?;
+  var subst = Subst::empty();
+
+  match owner_subst {
+    Some(found) => {
+      subst = found;
+    }
+    None => {
+      const unknowns = new generic::Unknowns();
+
+      unknowns.typed = Some(typed);
+      unknowns.add(ParamOwner::Fn(function), resolution.generics(package, ParamOwner::Fn(function)).len(), None);
+
+      if let Some(first) = sig.params.first() {
+        unknowns.unify(first, as_first_param(ty, first));
+      }
+
+      subst = learned(typed, unknowns);
+    }
+  }
+
+  const params: List<String> = new List();
+
+  for index in skip..decl.params.len() {
+    const param_ty = match sig.params.get(index) {
+      Some(found) => types::text(types::substitute(found, subst)),
+      None => "?",
+    };
+
+    params.push(decl.params[index].name.name + ": " + param_ty);
+  }
+
+  const shown = List::from(["self"]);
+
+  for param in params {
+    shown.push(param);
+  }
+
+  const ret = types::substitute(sig.ret, subst);
+  const ret_text = match ret.kind {
+    TypeKind::Unit => "",
+    _ => " -> " + types::text(ret),
+  };
+
+  Some(Member {
+    name: name,
+    signature: (if decl.is_async { "async fn " } else { "fn " }) + name + "(" + shown.join(", ") + ")" + ret_text,
+    doc: docs::of_function(analysis, function),
+    is_field: false,
+    function: Some(function),
+    params: params,
+    general: false,
+    ty: Some(ret),
+  })
+}
+
+/// The class `Iter` of the prelude.
+fn iter_class(resolution: Resolution) -> Option<u32> {
+  const prelude = resolution.prelude?;
+  const info = resolution.modules.get(prelude as usize)?;
+
+  match info.items.get("Iter")?.item {
+    ItemRef::Type(TypeItem::Class(id)) => Some(id),
+    _ => None,
+  }
+}
+
+/// A function of the root of `std`.
+fn std_root_fn(resolution: Resolution, name: String) -> Option<u32> {
+  const root = resolution.std_root?;
+  const info = resolution.module(root)?;
+
+  match info.items.get(name)?.item {
+    ItemRef::Fn(id) => Some(id),
+    _ => None,
+  }
+}
+
+/// The element of a list, an array or a slice.
+fn elem_of(ty: Type) -> Option<Type> {
+  match ty.kind {
+    TypeKind::List(elem) | TypeKind::Array { elem, .. } | TypeKind::Slice { elem, .. } => Some(elem),
+    _ => None,
+  }
+}
+
+/// The method `name` of the class `class_id` for a receiver whose type arguments are `args`.
+fn class_method(analysis: Analysis, class_id: u32, name: String, args: List<Type>, ty: Type) -> Option<Member> {
+  const package = analysis.package?;
+  const resolution = analysis.resolution?;
+  const typed = analysis.typed?;
+
+  for ancestor_id in typed.class_chain(class_id) {
+    for function in functions_of(resolution, TypeItem::Class(ancestor_id)) {
+      if let Some(decl) = resolution.fn_decl(package, function) {
+        if decl.name.name == name && decl.self_param.is_some() {
+          const owner_args = if ancestor_id == class_id { args } else { ancestor_args(typed, class_id, ancestor_id, args) };
+
+          return function_member(analysis, function, name, ty, 0, Some(Subst::of(ParamOwner::Item(TypeItem::Class(ancestor_id)), owner_args)));
+        }
+      }
+    }
+  }
+
+  None
+}
+
+/// The type arguments of the ancestor `ancestor` of the class `class_id` instantiated with `args`.
+fn ancestor_args(typed: TypedModule, class_id: u32, ancestor: u32, args: List<Type>) -> List<Type> {
+  for found in typed.class_ancestors(NamedRef { id: class_id, name: "", args: args }) {
+    if found.id == ancestor {
+      return found.args;
+    }
+  }
+
+  new List()
+}
+
+/// One line of `TABLE` as a member of `ty`, or `None` if the receiver does not have it (`join` of
+/// a list of numbers, `flatten` of an option of numbers).
+fn table_member(analysis: Analysis, ty: Type, name: String, source: String, doc: String) -> Option<Member> {
+  const resolution = analysis.resolution?;
+  var found: Option<Member> = None;
+
+  if source.starts_with("@") || source.starts_with("#") {
+    const function_name = source.substring(1, source.len());
+    const function = if source.starts_with("@") { resolution.prelude_fn(function_name)? } else { std_root_fn(resolution, function_name)? };
+
+    found = function_member(analysis, function, name, ty, 1, None);
+  } else if source == "*" {
+    found = class_method(analysis, iter_class(resolution)?, name, List::from([elem_of(ty)?]), ty);
+  } else {
+    const names = table_subst(ty);
+    const signature = replace_words(table_signature(name, source), names);
+    const params: List<String> = new List();
+
+    for param in table_params(source) {
+      params.push(replace_words(param, names));
+    }
+
+    found = Some(Member { name: name, signature: signature, doc: "", is_field: false, function: None, params: params, general: false, ty: None });
+  }
+
+  var member = found?;
+
+  if member.doc.is_empty() {
+    member.doc = doc;
+  }
+
+  Some(member)
+}
+
+/// The type of the values of an iterator: of `Iter<T>` and its subclasses.
+fn iter_elem(analysis: Analysis, ty: Type) -> Option<Type> {
+  analysis.typed?.iter_elem(ty)
+}
+
+/// The fields and methods of a value of type `ty`: the program's members first, then those the
+/// compiler gives, then those every value has.
+pub fn members(analysis: Analysis, ty: Type) -> List<Member> {
+  const found: List<Member> = new List();
+  const seen = new Map<String, bool>();
+  const add = (member: Member) => {
+    if !seen.contains_key(member.name) {
+      seen.insert(member.name, true);
+      found.push(member);
+    }
+  };
+
+  for member in declared_members(analysis, ty) {
+    add(member);
+  }
+
+  for member in tuple_members(ty) {
+    add(member);
+  }
+
+  const iterable = iter_elem(analysis, ty).is_some();
+
+  for kind in kinds_of(ty, iterable) {
+    for line in TABLE.split("\n") {
+      const parts = line.split("|");
+
+      if parts.len() == 4 && parts[0] == kind {
+        if let Some(member) = table_member(analysis, ty, parts[1], parts[2], parts[3]) {
+          add(member);
+        }
+      }
+    }
+  }
+
+  // The methods of numbers (docs/adr/0076-std-math-and-methods-of-numbers.md).
+  for method in numbers::methods_of(ty) {
+    add(Member { name: method.name, signature: numbers::signature(method), doc: "", is_field: false, function: None, params: new List(), general: false, ty: None });
+  }
+
+  // The conversions to bytes of integers, written in the prelude (docs/adr/0101-the-rest-of-s2.md, Q702).
+  if let TypeKind::Int(int_ty) = ty.kind {
+    if let Some(resolution) = analysis.resolution {
+      for name in numbers::BYTE_METHODS.split(" ") {
+        if let Some(function) = resolution.prelude_fn("int_" + name + "_" + types::int_name(int_ty)) {
+          if let Some(member) = function_member(analysis, function, name, ty, 1, None) {
+            add(member);
+          }
+        }
+      }
+    }
+  }
+
+  for line in GENERAL.split("\n") {
+    const parts = line.split("|");
+
+    add(Member { name: parts[0], signature: table_signature(parts[0], parts[1]), doc: parts[2], is_field: false, function: None, params: new List(), general: true, ty: None });
+  }
+
+  found
+}
+
+/// The member `name` of a value of type `ty`.
+pub fn member(analysis: Analysis, ty: Type, name: String) -> Option<Member> {
+  for found in members(analysis, ty) {
+    if found.name == name {
+      return Some(found);
+    }
+  }
+
+  None
+}
+
+// ---- The program's types ---------------------------------------------------------------------
+
+fn functions_of(resolution: Resolution, item: TypeItem) -> List<u32> {
+  const info = match item {
+    TypeItem::Struct(id) => resolution.structs.get(id as usize),
+    TypeItem::Enum(id) => resolution.enums.get(id as usize),
+    TypeItem::Class(id) => resolution.classes.get(id as usize),
+    TypeItem::Interface(id) => resolution.interfaces.get(id as usize),
+  };
+  const found: List<u32> = new List();
+
+  if let Some(info) = info {
+    for function in info.functions {
+      found.push(function);
+    }
+  }
+
+  // The methods of the `impl ... for` blocks of the type (docs/adr/0081-operator-overloading.md).
+  for block in resolution.type_blocks(item) {
+    if let Some(block_info) = resolution.blocks.get(block as usize) {
+      for function in block_info.functions {
+        found.push(function);
+      }
+    }
+  }
+
+  found
+}
+
+/// The type item of a named type, with its type arguments.
+fn named_item(ty: Type) -> Option<(TypeItem, List<Type>)> {
+  match ty.kind {
+    TypeKind::Struct(named) => Some((TypeItem::Struct(named.id), named.args)),
+    TypeKind::Enum(named) => Some((TypeItem::Enum(named.id), named.args)),
+    TypeKind::Class(named) => Some((TypeItem::Class(named.id), named.args)),
+    TypeKind::Interface(named) => Some((TypeItem::Interface(named.id), named.args)),
+    _ => None,
+  }
+}
+
+/// The fields and methods declared by the type of `ty` and the types it inherits from, with its
+/// type arguments in their types.
+fn declared_members(analysis: Analysis, ty: Type) -> List<Member> {
+  const found: List<Member> = new List();
+  const package = match analysis.package {
+    Some(value) => value,
+    None => return found,
+  };
+  const resolution = match analysis.resolution {
+    Some(value) => value,
+    None => return found,
+  };
+  const typed = match analysis.typed {
+    Some(value) => value,
+    None => return found,
+  };
+  const named = match named_item(ty) {
+    Some(value) => value,
+    None => return found,
+  };
+  const item = named.0;
+  const args = named.1;
+  // The type and its ancestors, each with its own type arguments.
+  const owners: List<(TypeItem, List<Type>)> = List::from([(item, args)]);
+
+  if let TypeItem::Class(id) = item {
+    for ancestor_id in typed.class_chain(id) {
+      if ancestor_id != id {
+        owners.push((TypeItem::Class(ancestor_id), ancestor_args(typed, id, ancestor_id, args)));
+      }
+    }
+  }
+
+  for owner in owners {
+    const subst = Subst::of(ParamOwner::Item(owner.0), owner.1);
+
+    for field in fields_of(typed, owner.0) {
+      const field_ty = types::substitute(field.1, subst);
+
+      found.push(Member {
+        name: field.0,
+        signature: field.0 + ": " + types::text(field_ty),
+        doc: docs::of_field(analysis, owner.0, field.0),
+        is_field: true,
+        function: None,
+        params: new List(),
+        general: false,
+        ty: Some(field_ty),
+      });
+    }
+
+    for function in functions_of(resolution, owner.0) {
+      if let Some(decl) = resolution.fn_decl(package, function) {
+        // A class's `new` initializes instances: `new Class(...)` calls it, an instance cannot.
+        const initializer = decl.name.name == "new" && is_class(item);
+
+        if decl.self_param.is_some() && !initializer {
+          if let Some(member) = function_member(analysis, function, decl.name.name, ty, 0, Some(subst)) {
+            found.push(member);
+          }
+        }
+      }
+    }
+  }
+
+  found
+}
+
+fn is_class(item: TypeItem) -> bool {
+  match item {
+    TypeItem::Class(_) => true,
+    _ => false,
+  }
+}
+
+/// The names and types of the fields an item declares itself.
+fn fields_of(typed: TypedModule, item: TypeItem) -> List<(String, Type)> {
+  const found: List<(String, Type)> = new List();
+
+  match item {
+    TypeItem::Struct(id) => {
+      if let Some(def) = typed.structs.get(id as usize) {
+        for field in def.fields {
+          found.push((field.name, field.ty));
+        }
+      }
+    }
+    TypeItem::Class(id) => {
+      if let Some(def) = typed.classes.get(id as usize) {
+        for field in def.fields {
+          found.push((field.name, field.ty));
+        }
+      }
+    }
+    TypeItem::Interface(id) => {
+      if let Some(def) = typed.interfaces.get(id as usize) {
+        for field in def.fields {
+          found.push((field.name, field.ty));
+        }
+      }
+    }
+    TypeItem::Enum(_) => {}
+  }
+
+  found
+}
+
+/// The elements of a tuple, by their indices (docs/adr/0092-tuples.md, Q615).
+pub fn tuple_members(ty: Type) -> List<Member> {
+  const found: List<Member> = new List();
+
+  if let TypeKind::Tuple(elems) = ty.kind {
+    for index in 0..elems.len() {
+      found.push(Member { name: `${index}`, signature: `${index}: ` + types::text(elems[index]), doc: "", is_field: true, function: None, params: new List(), general: false, ty: Some(elems[index]) });
+    }
+  }
+
+  found
+}
+
+// ---- Static functions and builtins -----------------------------------------------------------
+
+/// The functions the compiler provides that are not methods, one per line: `owner|name|signature|doc`,
+/// where `owner` is the type or module before `::` (`int` and `float` for each number type, whose
+/// name `T` stands for), or empty for the builtins of every module. A signature without `fn` is a
+/// constant.
+const STATICS: String = "|print|fn print(text: String)|Writes `text` to the standard output.
+|println|fn println(text: String)|Writes `text` and a new line to the standard output.
+|eprintln|fn eprintln(text: String)|Writes `text` and a new line to the standard error.
+|panic|fn panic(message: String) -> never|Stops the program with `message` and exit code 101.
+|assert|fn assert(condition: bool)|Panics with `assertion failed` if `condition` is false.
+|assert_eq|fn assert_eq(left: T, right: T)|Panics, showing both values, if `left != right`.
+|assert_ne|fn assert_ne(left: T, right: T)|Panics, showing both values, if `left == right`.
+|unreachable|fn unreachable() -> never|Panics with `entered unreachable code`.
+|todo|fn todo() -> never|Panics with `not yet implemented`.
+ffi|string_from_c|fn string_from_c(pointer: *const c_char) -> String|Copies a C string; invalid UTF-8 becomes U+FFFD. Needs `unsafe`; a null pointer panics.
+process|exit|fn exit(code: i32) -> never|Ends the program with the exit code `code`.
+process|abort|fn abort() -> never|Ends the program at once, abnormally.
+hint|black_box|fn black_box<T>(value: T) -> T|Returns `value`, keeping the compiler from computing it ahead, for benchmarks.
+mem|size_of|fn size_of<T>() -> usize|The size of `T` in bytes, as C lays it out.
+mem|align_of|fn align_of<T>() -> usize|The alignment of `T` in bytes, as C lays it out.
+mem|zeroed|fn zeroed<T>() -> T|A value of the C type `T` with every byte zero. Needs `unsafe`.
+CString|new|fn new(text: String) -> Result<CString, String>|A NUL-terminated copy of `text` for C, or an error if it holds a NUL byte.
+Atomic|new|fn new(value: T) -> Atomic<T>|An atomic `bool` or integer, the type of a `const` field of a class.
+Atomic|fence|fn fence(ordering: i32)|A memory fence with an ordering of `std::sync`.
+List|from|fn from(values: [T; N]) -> List<T>|A list with the elements of an array.
+List|with_capacity|fn with_capacity(capacity: usize) -> List<T>|An empty list with room for `capacity` elements.
+String|from|fn from(value: T) -> String|The text of a `char` or another value convertible to `String`.
+String|default|fn default() -> String|The empty string.
+String|from_utf8|fn from_utf8(bytes: List<u8>) -> Result<String, String>|The text the bytes encode in UTF-8, or an error where they do not.
+String|from_utf8_lossy|fn from_utf8_lossy(bytes: List<u8>) -> String|The text the bytes encode in UTF-8, with U+FFFD for each ill-formed sequence.
+String|from_utf16|fn from_utf16(units: List<u16>) -> Result<String, String>|The text the units encode in UTF-16, or an error where they do not.
+char|from_u32|fn from_u32(code: u32) -> Option<char>|The character with the code point `code`, or `None`.
+char|from_digit|fn from_digit(digit: u32, radix: u32) -> Option<char>|The character of `digit` in base `radix`, or `None`.
+char|from|fn from(value: u8) -> char|The character of a byte.
+char|try_from|fn try_from(value: u32) -> Result<char, String>|The character with a code point, or why it is not one.
+char|default|fn default() -> char|The character `\\0`.
+int|MIN|const MIN: T|The smallest value of `T`.
+int|MAX|const MAX: T|The largest value of `T`.
+int|from|fn from(value: U) -> T|`value` as `T`, when every value of its type fits.
+int|try_from|fn try_from(value: U) -> Result<T, String>|`value` as `T`, or an error if it does not fit.
+int|default|fn default() -> T|Zero.
+int|from_le_bytes|fn from_le_bytes(bytes: [u8; N]) -> T|The integer of the bytes, least significant first.
+int|from_be_bytes|fn from_be_bytes(bytes: [u8; N]) -> T|The integer of the bytes, most significant first.
+int|from_ne_bytes|fn from_ne_bytes(bytes: [u8; N]) -> T|The integer of the bytes, in the order of the target.
+int|from_str_radix|fn from_str_radix(text: String, radix: u32) -> Result<T, String>|The integer `text` writes in base `radix`.
+float|from|fn from(value: U) -> T|`value` as `T`, when it converts without loss.
+float|default|fn default() -> T|Zero.";
+
+/// The owner of `STATICS` a type or module name stands for.
+fn static_owner(name: String) -> String {
+  if types::int_from_name(name).is_some() {
+    "int"
+  } else if name == "f32" || name == "f64" {
+    "float"
+  } else {
+    name
+  }
+}
+
+fn static_member(owner: String, parts: List<String>) -> Member {
+  const names = new Map<String, String>();
+
+  if owner == "int" || owner == "float" {
+    names.insert("T", parts[0]);
+  }
+
+  const signature = replace_words(parts[2], names);
+  const open = signature.find("(");
+  const params = match open {
+    Some(at) => table_params(signature.substring(at, signature.len())),
+    None => new List(),
+  };
+
+  Member { name: parts[1], signature: signature, doc: replace_words(parts[3], names), is_field: !signature.starts_with("fn "), function: None, params: params, general: false, ty: None }
+}
+
+/// The static functions and constants the compiler gives the type or module `name`
+/// (`CString`, `i32`, `mem`), or the builtins of every module for an empty name.
+pub fn statics(name: String) -> List<Member> {
+  const owner = static_owner(name);
+  const found: List<Member> = new List();
+
+  for line in STATICS.split("\n") {
+    const parts = line.split("|");
+
+    if parts.len() == 4 && parts[0] == owner {
+      parts[0] = name;
+      found.push(static_member(owner, parts));
+    }
+  }
+
+  found
+}
+
+/// A builtin by the name the resolver gives it: `println`, `CString::new`, `i32::MAX`,
+/// `mem::size_of`, `hint::black_box`.
+pub fn builtin(name: String) -> Option<Member> {
+  const parts = name.split("::");
+  const owner = if parts.len() == 2 { parts[0] } else { "" };
+  const member_name = parts.last()?;
+
+  for found in statics(owner) {
+    if found.name == member_name {
+      return Some(found);
+    }
+  }
+
+  // `string_from_c`, `exit` and `abort` are named without their module.
+  for module in List::from(["ffi", "process"]) {
+    for found in statics(module) {
+      if found.name == member_name && owner.is_empty() {
+        return Some(found);
+      }
+    }
+  }
+
+  None
+}
+
+/// The type a reference refers to: its fields and methods are used through it
+/// (docs/spec/03-memory.md#references).
+pub fn referred(ty: Type) -> Type {
+  match ty.kind {
+    TypeKind::Ref { pointee, .. } => pointee,
+    _ => ty,
+  }
+}
+
+/// The parameters of a signature `fn name(a: A, b: B) -> R`, without `self`.
+pub fn params_of(signature: String) -> List<String> {
+  const open = match signature.find("(") {
+    Some(at) => at,
+    None => return new List(),
+  };
+  var depth = 0i32;
+  var close = signature.len();
+  var index = open;
+
+  // The `)` that closes the parameters, not one of the result's type.
+  for c in signature.substring(open, signature.len()).chars() {
+    if c == '(' {
+      depth += 1;
+    } else if c == ')' {
+      depth -= 1;
+
+      if depth == 0 {
+        close = index;
+        break;
+      }
+    }
+
+    index += c.len_utf8();
+  }
+
+  const found: List<String> = new List();
+
+  for param in table_params(signature.substring(open, close + 1)) {
+    if param != "self" && !param.starts_with("self:") {
+      found.push(param);
+    }
+  }
+
+  found
+}

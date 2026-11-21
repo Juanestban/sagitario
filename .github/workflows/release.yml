@@ -29,17 +29,17 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-22.04-arm
             cc: clang
-          # - target: aarch64-apple-darwin
-          #   os: macos-15
-          #   cc: clang
-          # - target: x86_64-apple-darwin
-          #   os: macos-15-intel
-          #   cc: clang
+          - target: aarch64-apple-darwin
+            os: macos-15
+            cc: clang
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+            cc: clang
     runs-on: ${{ matrix.os }}
     env:
       SAG_CC: ${{ matrix.cc }}
       # The oldest macOS the executables run on.
-      # MACOSX_DEPLOYMENT_TARGET: '11.0'
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
     steps:
       - uses: actions/checkout@v4
       - name: Check that the tag is the version of Sagitario
@@ -68,16 +68,7 @@ jobs:
         if: runner.os != 'Windows'
         run: sh bootstrap/build.sh --dist
       # What is released passes the harness, also on the platforms CI does not build on.
-      # On macOS, disable sanitizers because Apple's libsystem readdir() triggers a heap-buffer-overflow
-      # that ASan detects even though it is a bug in Apple's library, not ours (docs/technical-debt.md). -> Need Add to sagitario the library-name attr for
-      # can fix it and return to eval the release for macos devices
-      # - name: Run the harness with the release
-      #   if: runner.os == 'macOS'
-      #   env:
-      #     SAG_TEST_SANITIZE: '0'
-      #   run: ./build/bin/sag run tests/harness/main.sag -- --sag build/bin/sag --nova build/bin/nova
       - name: Run the harness with the release
-        # if: runner.os != 'macOS'
         run: ./build/bin/sag run tests/harness/main.sag -- --sag build/bin/sag${{ runner.os == 'Windows' && '.exe' || '' }} --nova build/bin/nova${{ runner.os == 'Windows' && '.exe' || '' }}
       - uses: actions/upload-artifact@v4
         with:
@@ -150,11 +141,8 @@ jobs:
             cc: C:\Program Files\LLVM\bin\clang.exe
           - os: ubuntu-latest
             cc: clang
-          # macOS installer disabled due to readdir() ASan heap-buffer-overflow bug in Apple's
-          # libsystem_c.dylib that causes file_metadata.sag and std_fs.sag to abort.
-          # See docs/technical-debt.md for details and future work.
-          # - os: macos-latest
-          #   cc: clang
+          - os: macos-latest
+            cc: clang
     runs-on: ${{ matrix.os }}
     env:
       SAG_CC: ${{ matrix.cc }}

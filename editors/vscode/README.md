@@ -2,12 +2,19 @@
 
 Support for the [Sagitario](https://github.com/Juanestban/sagitario) programming language:
 
-- The language server (`sag lsp`): the errors and warnings of `sag check` while typing, the type
-  of what is under the cursor, go to definition (`F12` or `Ctrl+Click`, also on the modules of
-  `use` and of paths), completion of members after `.` (the methods of numbers, text, characters, lists, arrays, slices, maps, sets, iterators, `Option` and
-  `Result` too, `into` and `try_into` on every value, and the
-  indices of a tuple's elements), of items after `::` (`MIN` and `MAX` after an integer type, the functions of `std::mem` and `std::hint`, `exit` and `abort` after `std::process::`, the constants of a type and the static functions of its interfaces after `Type::` and `Self::`, those of a type parameter's bounds after `T::`, and `default`, `from` and `try_from` after the types of numbers, `char` and `String`), of attributes after
-  `@` (`@cfg`, `@default`, `@export`, `@repr`, `@thread_local`), of their representations after `@repr(` and
+- The language server (`sag lsp`): the errors and warnings of `sag check` while typing; hover
+  with the signature of what is under the cursor (functions, methods, C functions of `extern`
+  blocks and of `bindgen`, builtins, fields, variants, bindings) and its documentation, the `///`
+  comments of the program and of the standard library; signature help inside calls, with the
+  parameter at the cursor; go to definition (`F12` or `Ctrl+Click`, also on the modules of
+  `use` and of paths); completion of members after `.`, with signatures and documentation, after
+  any expression (chains of calls such as `words.first().unwrap().`, calls of the standard
+  library and of C, generic methods with their type arguments, also while the line does not
+  compile): the methods of numbers, text, characters, lists, arrays, slices, maps, sets,
+  iterators, pointers, `CString`, `Option` and `Result` (`unwrap`, `expect`, `map`...), the fields
+  and methods of the program's types, `into` and `try_into` on every value after them, and the
+  indices of a tuple's elements; of items after `::` (`MIN` and `MAX` after an integer type, the functions of `std::mem` and `std::hint`, `exit` and `abort` after `std::process::`, `CString::new`, `List::from`, `Atomic::new`, the variants of an enum with their fields, the constants of a type and the static functions of its interfaces after `Type::` and `Self::`, those of a type parameter's bounds after `T::`, and `default`, `from` and `try_from` after the types of numbers, `char` and `String`), of attributes after
+  `@` (`@cfg`, `@default`, `@export`, `@link_name`, `@repr`, `@thread_local`), of their representations after `@repr(` and
   of the conditions of `@cfg(`, of names
   (module-level constants and statics with their types, the builtins, `assert` and `assert_eq` among them, and the built-in macros `include!`, `include_str!`, `include_bytes!`, `concat!` and `env!`) and of types, the outline of a document (`Ctrl+Shift+O`), the constants of types included, and the colors of modules, functions,
   types and constants in paths, and of the built-in macros with their `!`, as rust-analyzer's `macro` tokens (semantic tokens). Inside the braces of format strings, as rust-analyzer does
@@ -23,7 +30,7 @@ Support for the [Sagitario](https://github.com/Juanestban/sagitario) programming
 - Snippets: `main`, `mainr`, `asyncmain`, `asyncfn`, `fn`, `pfn`, `static`, `staticvar`, `typeconst`,
   `threadlocal`, `cfg`, `struct`, `class`, `enum`, `interface`, `implfor`, `match`, `iflet`, `whilelet`, `for`,
   `forin`, `fortuple`, `consttuple`, `assert`, `asserteq`, `if`, `ifelse`, `println`, `fstr` (a format string) and `use`; for operators and text, `impleq`, `implord`, `impldisplay`, `implop` (`+`, `-`, `*`,
-  `/`, `%`) and `implneg`; for conversions, defaults, indexing and iteration, `implfrom`, `impltryfrom`, `impldefault`, `default` (a struct with `@default`), `implindex`, `impliterable`, `implfromiter` and `impldrop`; for streams, `implread` and `implwrite`; for build scripts, `buildscript` (a `build.sag` with the `nova::` directives) and `bindgen` (the bindings of a C header); and for the FFI, `extern` (a block of C functions), `externvariadic` (a variadic C function), `externstatic` (a global variable of C), `externfn`,
+  `/`, `%`) and `implneg`; for conversions, defaults, indexing and iteration, `implfrom`, `impltryfrom`, `impldefault`, `default` (a struct with `@default`), `implindex`, `impliterable`, `implfromiter` and `impldrop`; for streams, `implread` and `implwrite`; for build scripts, `buildscript` (a `build.sag` with the `nova::` directives) and `bindgen` (the bindings of a C header); and for the FFI, `extern` (a block of C functions), `externvariadic` (a variadic C function), `externstatic` (a global variable of C), `linkname` (a C function under a name of its own), `externfn`,
   `export`, `reprc`, `opaque` (an opaque C type), `union`, `reprenum`, `cfn`, `unsafe`, `cstring` and `library` (a function
   loaded from a dynamic library).
 

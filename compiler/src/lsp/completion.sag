@@ -5,15 +5,17 @@
 
 use pkg::ast::Module;
 use pkg::cfg;
+use pkg::lsp::analysis;
 use pkg::lsp::analysis::Analysis;
+use pkg::lsp::builtins;
+use pkg::lsp::builtins::Member;
+use pkg::lsp::docs;
 use pkg::lsp::json;
 use pkg::lsp::json::{Json, member};
 use pkg::lsp::query;
 use pkg::resolve::{ItemRef, ModuleInfo, ParamOwner, Resolution, StdItem, TypeItem};
 use pkg::types;
-use pkg::types::numbers;
 use pkg::types::{NamedRef, Type, TypeKind};
-use pkg::types::typed::TypedModule;
 
 /// Kinds of completion items (LSP's `CompletionItemKind`).
 const METHOD: i64 = 2;
@@ -52,7 +54,7 @@ const OPTION_METHODS: String = "is_some is_none unwrap expect unwrap_or map and_
 const RESULT_METHODS: String = "is_ok is_err unwrap expect unwrap_or unwrap_err map map_err and_then unwrap_or_else expect_err ok err and or or_else map_or map_or_else is_ok_and is_err_and iter unwrap_or_default";
 const BUILDER_METHODS: String = "append append_char len is_empty clear to_string insert truncate pop capacity reserve";
 /// The attributes (docs/spec/01-lexical.md#attributes-f1), with what they are written as.
-const ATTRIBUTES: String = "cfg default export repr thread_local";
+const ATTRIBUTES: String = "cfg default export link_name repr thread_local";
 /// The representations of `@repr(...)`: `C` for structs, unions and enums, an integer type for
 /// enums.
 const REPRESENTATIONS: String = "C i8 i16 i32 i64 isize u8 u16 u32 u64 usize";
@@ -100,6 +102,41 @@ class Items {
     ])));
   }
 
+  /// An item with its documentation, as Markdown, and the text it sorts by: the program's members
+  /// before those every value has.
+  pub fn add_documented(self, label: String, kind: i64, detail: String, documentation: String, sort: String) {
+    if label.is_empty() || self.seen.contains_key(label) {
+      return;
+    }
+
+    self.seen.insert(label, true);
+
+    const members = List::from([member("label", json::str(label)), member("kind", json::int(kind))]);
+
+    if !detail.is_empty() {
+      members.push(member("detail", json::str(detail)));
+    }
+
+    if !documentation.is_empty() {
+      members.push(member("documentation", json::object(List::from([member("kind", json::str("markdown")), member("value", json::str(documentation))]))));
+    }
+
+    if !sort.is_empty() {
+      members.push(member("sortText", json::str(sort)));
+    }
+
+    self.list.push(json::object(members));
+  }
+
+  /// A field or method of a value.
+  pub fn add_member(self, found: Member) {
+    const kind = if found.is_field { FIELD } else { METHOD };
+    // `0` before the program's members, `1` before the conversions every value has.
+    const sort = (if found.general { "1" } else { "0" }) + found.name;
+
+    self.add_documented(found.name, kind, found.signature, found.doc, sort);
+  }
+
   pub fn add_words(self, words: String, kind: i64) {
     for word in words.split(" ") {
       self.add(word, kind, "");
@@ -107,12 +144,12 @@ class Items {
   }
 }
 
-fn is_name_char(c: char) -> bool {
+pub fn is_name_char(c: char) -> bool {
   c.is_ascii_alphanumeric() || c == '_'
 }
 
 /// The characters of `text` before `offset`.
-fn before(text: String, offset: u32) -> List<char> {
+pub fn before(text: String, offset: u32) -> List<char> {
   const end = if offset as usize > text.len() { text.len() } else { offset as usize };
 
   text.substring(0, end).chars().collect()
@@ -250,7 +287,7 @@ pub fn complete(analysis: Option<Analysis>, module: Option<Module>, module_index
 
   if let Some(found) = analysis {
     if separator == '.' {
-      members_after(items, found, module, chars, start - 1, offset);
+      members_after(items, found, module, text, chars, start - 1, offset);
       return Json::Array(items.list);
     }
 
@@ -286,6 +323,8 @@ fn attributes(items: Items) {
       items.add_snippet(name, KEYWORD, "@cfg(condition): keeps the item only on the systems where the condition holds", "cfg(${1:windows})");
     } else if name == "export" {
       items.add_snippet(name, KEYWORD, "@export(\"symbol\"): the C symbol of an `extern \"C\"` function", "export(\"${1:symbol}\")");
+    } else if name == "link_name" {
+      items.add_snippet(name, KEYWORD, "@link_name(\"symbol\"): the C symbol of a function or global of an `extern \"C\"` block, when it is not its name", "link_name(\"${1:symbol}\")");
     } else if name == "default" {
       items.add_snippet(name, KEYWORD, "@default on a struct or enum, and before the default variant: implements `Default`", "default");
     } else if name == "repr" {
@@ -387,6 +426,7 @@ fn item_kind(item: ItemRef) -> i64 {
 fn item_detail(analysis: Analysis, item: ItemRef) -> String {
   match item {
     ItemRef::Fn(id) => query::signature(analysis, id).unwrap_or(""),
+    ItemRef::Extern(id) => query::extern_signature(analysis, id).unwrap_or(""),
     // Module-level constants, the globals of a program, with their types.
     ItemRef::Const(_) | ItemRef::Static(_) => query::item_text(analysis, item).unwrap_or(""),
     _ => "",
@@ -409,7 +449,7 @@ fn module_info(resolution: Resolution, index: usize) -> Option<ModuleInfo> {
 fn add_module_items(items: Items, analysis: Analysis, info: ModuleInfo, public_only: bool) {
   for entry in info.items.entries() {
     if !public_only || entry.value.visibility == pkg::ast::Visibility::Public {
-      items.add(entry.key, item_kind(entry.value.item), item_detail(analysis, entry.value.item));
+      items.add_documented(entry.key, item_kind(entry.value.item), item_detail(analysis, entry.value.item), docs::of_item(analysis, entry.value.item), "");
     }
   }
 
@@ -478,6 +518,26 @@ fn names(items: Items, analysis: Analysis, module: Option<Module>, module_index:
 
 // ---- Paths ------------------------------------------------------------------------------------
 
+/// The built-in types with static functions or constants.
+const BUILTIN_OWNERS: String = "CString Atomic List String char int float";
+
+/// `int` and `float` for the number types, which share their static functions.
+fn builtins_owner(name: String) -> String {
+  if types::int_from_name(name).is_some() {
+    "int"
+  } else if name == "f32" || name == "f64" {
+    "float"
+  } else {
+    name
+  }
+}
+
+fn add_statics(items: Items, owner: String) {
+  for found in builtins::statics(owner) {
+    items.add_documented(found.name, if found.is_field { CONSTANT } else { FUNCTION }, found.signature, found.doc, "");
+  }
+}
+
 /// The items after `a::b::`.
 fn path_members(items: Items, analysis: Analysis, module: Option<Module>, module_index: Option<usize>, chain: List<String>, offset: u32) {
   const resolution = match analysis.resolution {
@@ -494,26 +554,10 @@ fn path_members(items: Items, analysis: Analysis, module: Option<Module>, module
     return;
   }
 
-  // `i32::MAX` (docs/adr/0088-bitwise-operators-and-integer-methods.md, Q581).
-  if chain.len() == 1 && types::int_from_name(first).is_some() {
-    items.add_words("MIN MAX", CONSTANT);
-    items.add_words("default from try_from " + numbers::INT_STATICS, FUNCTION);
-    return;
-  }
-
-  // The conversions of the prelude (docs/adr/0094-conversions-and-defaults.md, Q632 and Q634).
-  if chain.len() == 1 && (first == "f32" || first == "f64") {
-    items.add_words("default from", FUNCTION);
-    return;
-  }
-
-  if chain.len() == 1 && first == "String" {
-    items.add_words("default from from_utf8 from_utf8_lossy from_utf16", FUNCTION);
-    return;
-  }
-
-  if chain.len() == 1 && first == "char" {
-    items.add_words("default from from_digit from_u32 try_from", FUNCTION);
+  // The static functions and constants of the built-in types: `i32::MAX`, `CString::new`,
+  // `List::from` (docs/adr/0109-language-server-members.md).
+  if chain.len() == 1 && BUILTIN_OWNERS.split(" ").contains(builtins_owner(first)) {
+    add_statics(items, first);
     return;
   }
 
@@ -600,14 +644,7 @@ fn path_members(items: Items, analysis: Analysis, module: Option<Module>, module
 
         // The functions the compiler provides to modules of `std`.
         if info.in_std && info.path.len() == 2 {
-          if info.path[1] == "mem" {
-            items.add_words("size_of align_of zeroed", FUNCTION);
-          } else if info.path[1] == "hint" {
-            items.add("black_box", FUNCTION, "fn black_box<T>(value: T) -> T");
-          } else if info.path[1] == "process" {
-            items.add("exit", FUNCTION, "fn exit(code: i32)");
-            items.add("abort", FUNCTION, "fn abort()");
-          }
+          add_statics(items, info.path[1]);
         }
       }
     }
@@ -631,7 +668,13 @@ fn type_functions(items: Items, analysis: Analysis, item: TypeItem) {
   if let TypeItem::Enum(id) = item {
     if let Some(decl) = resolution.enum_decl(package, id) {
       for variant in decl.variants {
-        items.add(variant.name.name, ENUM_MEMBER, "");
+        // As written, with its fields: `Circle(f64)`.
+        const written = match analysis.sources.get(variant.span.file) {
+          Some(source) => source.slice(variant.span),
+          None => variant.name.name,
+        };
+
+        items.add_documented(variant.name.name, ENUM_MEMBER, written, docs::above(analysis, variant.span), "");
       }
     }
   }
@@ -663,7 +706,7 @@ fn type_functions(items: Items, analysis: Analysis, item: TypeItem) {
   for function in found {
     if let Some(decl) = resolution.fn_decl(package, function) {
       if decl.self_param.is_none() {
-        items.add(decl.name.name, FUNCTION, query::signature(analysis, function).unwrap_or(""));
+        items.add_documented(decl.name.name, FUNCTION, query::signature(analysis, function).unwrap_or(""), docs::of_function(analysis, function), "");
       }
     }
   }
@@ -764,15 +807,110 @@ fn add_block_functions(found: List<u32>, resolution: Resolution, item: TypeItem)
 
 // ---- Members ----------------------------------------------------------------------------------
 
-/// The members after `receiver.`, where the `.` is at `dot` of the characters before the cursor.
-fn members_after(items: Items, analysis: Analysis, module: Option<Module>, chars: List<char>, dot: usize, offset: u32) {
-  const chain = receiver_chain(chars, dot);
-  const ty = match receiver_type(analysis, module, chain, offset) {
-    Some(found) => found,
-    None => return,
+/// Whether `analysis` read the document `text` up to `end` as it is now, so that its offsets are
+/// those of the text.
+pub fn reads(analysis: Option<Analysis>, module: Option<Module>, text: String, end: u32) -> bool {
+  const found = match analysis {
+    Some(value) => value,
+    None => return false,
+  };
+  const found_module = match module {
+    Some(value) => value,
+    None => return false,
   };
 
-  members(items, analysis, ty);
+  if found.typed.is_none() {
+    return false;
+  }
+
+  match analysis::source_of(found, found_module) {
+    Some(source) => end as usize <= source.text.len() && end as usize <= text.len() && source.text.substring(0, end as usize) == text.substring(0, end as usize),
+    None => false,
+  }
+}
+
+/// Whether `analysis` read the document `text` up to the `.` at `dot` and found an expression
+/// before it, whose type is the receiver's.
+pub fn knows_receiver(analysis: Option<Analysis>, module: Option<Module>, text: String, dot: u32) -> bool {
+  if !reads(analysis, module, text, dot) {
+    return false;
+  }
+
+  match analysis {
+    Some(found) => match module {
+      Some(found_module) => query::find(found, found_module, dot).ending.is_some(),
+      None => false,
+    },
+    None => false,
+  }
+}
+
+/// The offset of the `.` before the name being typed at `offset`, if the name follows one.
+pub fn member_dot(text: String, offset: u32) -> Option<u32> {
+  const chars = before(text, offset);
+  var start = chars.len();
+
+  while start > 0 && is_name_char(chars.get(start - 1).unwrap_or(' ')) {
+    start -= 1;
+  }
+
+  if start == 0 || chars.get(start - 1).unwrap_or(' ') != '.' {
+    return None;
+  }
+
+  // `1..` and `0.5` are not members.
+  if start >= 2 {
+    const previous = chars.get(start - 2).unwrap_or(' ');
+
+    if previous == '.' || previous.is_ascii_digit() && !ends_in_name(chars, start - 2) {
+      return None;
+    }
+  }
+
+  // The name being typed is ASCII, one byte per character.
+  Some(offset - (chars.len() - start) as u32 - 1)
+}
+
+/// Whether the digit at `index` ends a name, as in `x1.`, rather than a number.
+fn ends_in_name(chars: List<char>, index: usize) -> bool {
+  var position = index + 1;
+
+  while position > 0 && is_name_char(chars.get(position - 1).unwrap_or(' ')) {
+    position -= 1;
+  }
+
+  !chars.get(position).unwrap_or('0').is_ascii_digit()
+}
+
+/// The members after `receiver.`, where the `.` is at `dot` of the characters before the cursor.
+fn members_after(items: Items, analysis: Analysis, module: Option<Module>, text: String, chars: List<char>, dot: usize, offset: u32) {
+  var ty: Option<Type> = None;
+
+  // The type the checker gave the expression before the `.`, when the analysis read this text.
+  if let Some(dot_offset) = member_dot(text, offset) {
+    if reads(Some(analysis), module, text, dot_offset) {
+      if let Some(found_module) = module {
+        if let Some(expr) = query::find(analysis, found_module, dot_offset).ending {
+          if let Some(typed) = analysis.typed {
+            ty = typed.expr_types.get(expr.id);
+          }
+        }
+      }
+    }
+  }
+
+  // Else the type of the names before it, in the latest analysis that reached the checker.
+  if ty.is_none() {
+    ty = receiver_type(analysis, module, receiver_chain(chars, dot), offset);
+  }
+
+  if let Some(found) = ty {
+    if !types::is_error(found) {
+      for member in builtins::members(analysis, builtins::referred(found)) {
+        items.add_member(member);
+      }
+    }
+  }
 }
 
 /// The type of a receiver chain: a binding, `self` or a constant, then fields and method calls.
@@ -801,216 +939,11 @@ fn receiver_type(analysis: Analysis, module: Option<Module>, chain: List<String>
   var ty = current?;
 
   for index in 1..chain.len() {
-    ty = member_type(analysis, referred(ty), chain[index])?;
+    const segment = chain[index];
+    const name = if segment.ends_with("()") { segment.substring(0, segment.len() - 2) } else { segment };
+
+    ty = builtins::member(analysis, builtins::referred(ty), name)?.ty?;
   }
 
   Some(ty)
-}
-
-/// The type of `value.name` (a field) or of `value.name()` (a method's result).
-fn member_type(analysis: Analysis, ty: Type, segment: String) -> Option<Type> {
-  const package = analysis.package?;
-  const resolution = analysis.resolution?;
-  const typed = analysis.typed?;
-  const called = segment.ends_with("()");
-  const name = if called { segment.substring(0, segment.len() - 2) } else { segment };
-
-  if called {
-    for function in methods_of(typed, resolution, ty) {
-      if let Some(decl) = resolution.fn_decl(package, function) {
-        if decl.name.name == name {
-          return Some(typed.sigs.get(function as usize)?.ret);
-        }
-      }
-    }
-
-    return None;
-  }
-
-  for field in fields_of(typed, ty) {
-    if field.name == name {
-      return Some(field.ty);
-    }
-  }
-
-  None
-}
-
-/// A field's name and type.
-struct FieldItem {
-  pub name: String;
-  pub ty: Type;
-}
-
-fn fields_of(typed: TypedModule, ty: Type) -> List<FieldItem> {
-  const found: List<FieldItem> = new List();
-
-  match ty.kind {
-    TypeKind::Struct(named) => {
-      if let Some(def) = typed.structs.get(named.id as usize) {
-        for field in def.fields {
-          found.push(FieldItem { name: field.name, ty: field.ty });
-        }
-      }
-    }
-    TypeKind::Class(named) => {
-      for class_id in typed.class_chain(named.id) {
-        if let Some(def) = typed.classes.get(class_id as usize) {
-          for field in def.fields {
-            found.push(FieldItem { name: field.name, ty: field.ty });
-          }
-        }
-      }
-    }
-    TypeKind::Interface(named) => {
-      if let Some(def) = typed.interfaces.get(named.id as usize) {
-        for field in def.fields {
-          found.push(FieldItem { name: field.name, ty: field.ty });
-        }
-      }
-    }
-    // The elements of a tuple, by their indices (docs/adr/0092-tuples.md, Q615).
-    TypeKind::Tuple(elems) => {
-      for index in 0..elems.len() {
-        found.push(FieldItem { name: `${index}`, ty: elems[index] });
-      }
-    }
-    _ => {}
-  }
-
-  found
-}
-
-/// The functions with `self` of a type and of the types it inherits from.
-fn methods_of(typed: TypedModule, resolution: Resolution, ty: Type) -> List<u32> {
-  const found: List<u32> = new List();
-
-  match ty.kind {
-    TypeKind::Struct(named) => {
-      for function in functions_of(resolution, TypeItem::Struct(named.id)) {
-        found.push(function);
-      }
-
-      add_block_functions(found, resolution, TypeItem::Struct(named.id));
-    }
-    TypeKind::Enum(named) => {
-      for function in functions_of(resolution, TypeItem::Enum(named.id)) {
-        found.push(function);
-      }
-
-      add_block_functions(found, resolution, TypeItem::Enum(named.id));
-    }
-    TypeKind::Class(named) => {
-      for class_id in typed.class_chain(named.id) {
-        for function in functions_of(resolution, TypeItem::Class(class_id)) {
-          found.push(function);
-        }
-
-        add_block_functions(found, resolution, TypeItem::Class(class_id));
-      }
-    }
-    TypeKind::Interface(named) => {
-      for function in functions_of(resolution, TypeItem::Interface(named.id)) {
-        found.push(function);
-      }
-    }
-    _ => {}
-  }
-
-  found
-}
-
-fn is_class(ty: Type) -> bool {
-  match ty.kind {
-    TypeKind::Class(_) => true,
-    _ => false,
-  }
-}
-
-/// The type a reference refers to: its fields and methods are used through it
-/// (docs/spec/03-memory.md#references).
-fn referred(ty: Type) -> Type {
-  match ty.kind {
-    TypeKind::Ref { pointee, .. } => pointee,
-    _ => ty,
-  }
-}
-
-/// The fields and methods of a value of type `ty`.
-fn members(items: Items, analysis: Analysis, reference: Type) {
-  const ty = referred(reference);
-  const package = match analysis.package {
-    Some(found) => found,
-    None => return,
-  };
-  const resolution = match analysis.resolution {
-    Some(found) => found,
-    None => return,
-  };
-  const typed = match analysis.typed {
-    Some(found) => found,
-    None => return,
-  };
-
-  for field in fields_of(typed, ty) {
-    items.add(field.name, FIELD, types::text(field.ty));
-  }
-
-  for function in methods_of(typed, resolution, ty) {
-    if let Some(decl) = resolution.fn_decl(package, function) {
-      // A class's `new` initializes instances; `new Class(...)` calls it, an instance cannot.
-      const initializer = decl.name.name == "new" && is_class(ty);
-
-      if decl.self_param.is_some() && !initializer {
-        items.add(decl.name.name, METHOD, query::signature(analysis, function).unwrap_or(""));
-      }
-    }
-  }
-
-  for found in numbers::methods_of(ty) {
-    items.add(found.name, METHOD, numbers::signature(found));
-  }
-
-  // The conversions to bytes, written in the prelude (docs/adr/0101-the-rest-of-s2.md, Q702).
-  if let TypeKind::Int(int_ty) = ty.kind {
-    for name in numbers::BYTE_METHODS.split(" ") {
-      if let Some(function) = resolution.prelude_fn("int_" + name + "_" + types::int_name(int_ty)) {
-        items.add(name, METHOD, query::signature(analysis, function).unwrap_or("").replace("value: " + types::int_name(int_ty), "self"));
-      }
-    }
-  }
-
-  // The methods of iterators the compiler gives by the kind of their values
-  // (docs/adr/0093-everyday-methods.md, Q626).
-  if typed.iter_elem(ty).is_some() {
-    items.add_words(ITER_COMPILER_METHODS, METHOD);
-  }
-
-  // `Into` and `TryInto`, which every value has (docs/adr/0094-conversions-and-defaults.md, Q633).
-  items.add("into", METHOD, "fn into(self) -> U");
-  items.add("try_into", METHOD, "fn try_into(self) -> Result<U, E>");
-
-  // `Display` of numbers, `bool`, `char` and `String` (docs/adr/0089-display-debug-and-format-specifiers.md).
-  match ty.kind {
-    TypeKind::Int(_) | TypeKind::Float(_) | TypeKind::Bool | TypeKind::Char | TypeKind::String => items.add("to_string", METHOD, "fn to_string(self) -> String"),
-    _ => {}
-  }
-
-  const builtin = match ty.kind {
-    TypeKind::String => STRING_METHODS,
-    TypeKind::StringBuilder => BUILDER_METHODS,
-    TypeKind::List(_) => LIST_METHODS,
-    TypeKind::Array { .. } => ARRAY_METHODS,
-    TypeKind::Option(_) => OPTION_METHODS,
-    TypeKind::Result { .. } => RESULT_METHODS,
-    TypeKind::Char => CHAR_METHODS,
-    TypeKind::Slice { .. } => SLICE_METHODS,
-    TypeKind::Ptr { .. } => POINTER_METHODS,
-    TypeKind::CString => "as_ptr",
-    _ => "",
-  };
-
-  if !builtin.is_empty() {
-    items.add_words(builtin, METHOD);
-  }
 }

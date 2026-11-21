@@ -1,0 +1,240 @@
+//! The documentation comments of declarations (docs/spec/01-lexical.md#comments): the `///` lines
+//! right above a declaration, past its attributes, which hover and completion show
+//! (docs/adr/0109-language-server-members.md). The sources of the standard library are read as
+//! the program's, so its documentation shows too.
+
+use pkg::lsp::analysis::Analysis;
+use pkg::resolve::{ItemRef, TypeItem};
+use pkg::span::Span;
+
+/// Words that may come before a declaration on its line.
+const LEADING_WORDS: String = "pub prv const var static async unsafe weak abstract override extern \"C\"";
+
+/// The documentation above the declaration starting at `span`, as Markdown, or empty.
+pub fn above(analysis: Analysis, span: Span) -> String {
+  const source = match analysis.sources.get(span.file) {
+    Some(found) => found,
+    None => return "",
+  };
+  const text = source.text;
+  const start = if span.start as usize > text.len() { text.len() } else { span.start as usize };
+  const before = text.substring(0, start);
+  const lines = before.split("\n");
+
+  // What the line holds before the declaration: only words such as `pub`.
+  if let Some(current) = lines.last() {
+    for word in current.split_whitespace() {
+      if !LEADING_WORDS.split(" ").contains(word) {
+        return "";
+      }
+    }
+  }
+
+  const found: List<String> = new List();
+  var index = lines.len() - 1;
+
+  while index > 0 {
+    index -= 1;
+
+    const line = lines[index].trim();
+
+    if line.starts_with("///") {
+      const content = line.substring(3, line.len());
+
+      found.insert(0, if content.starts_with(" ") { content.substring(1, content.len()) } else { content });
+    } else if line.starts_with("@") && found.is_empty() {
+      // The attributes between the documentation and the declaration.
+      continue;
+    } else {
+      break;
+    }
+  }
+
+  clean(found.join("\n"))
+}
+
+/// Documentation without the references to the records of the project, `(docs/adr/...)` and
+/// `(Q123)`, which say why rather than what.
+fn clean(text: String) -> String {
+  const out = new StringBuilder();
+  const chars: List<char> = text.chars().collect();
+  var index = 0usize;
+
+  while index < chars.len() {
+    if chars[index] == '(' && reference_at(chars, index + 1) {
+      var depth = 0i32;
+      var end = index;
+
+      while end < chars.len() {
+        if chars[end] == '(' {
+          depth += 1;
+        } else if chars[end] == ')' {
+          depth -= 1;
+
+          if depth == 0 {
+            break;
+          }
+        }
+
+        end += 1;
+      }
+
+      // The space or line break before the reference goes with it.
+      const kept = out.to_string().trim_end();
+
+      out.clear();
+      out.append(kept);
+
+      index = end + 1;
+      continue;
+    }
+
+    out.append_char(chars[index]);
+    index += 1;
+  }
+
+  out.to_string().trim()
+}
+
+/// Whether a reference to the project's records starts at `index`.
+fn reference_at(chars: List<char>, index: usize) -> bool {
+  const rest = new StringBuilder();
+  var at = index;
+
+  while at < chars.len() && rest.len() < 6 {
+    rest.append_char(chars[at]);
+    at += 1;
+  }
+
+  const text = rest.to_string();
+
+  if text.starts_with("docs/") {
+    return true;
+  }
+
+  // `Q123`, a question of a record.
+  text.starts_with("Q") && text.len() > 1 && text.substring(1, 2).chars().all((c) => c.is_ascii_digit())
+}
+
+/// The documentation of the function `id`.
+pub fn of_function(analysis: Analysis, id: u32) -> String {
+  const package = match analysis.package {
+    Some(found) => found,
+    None => return "",
+  };
+
+  match analysis.resolution {
+    Some(resolution) => match resolution.fn_decl(package, id) {
+      Some(decl) => above(analysis, decl.span),
+      None => "",
+    },
+    None => "",
+  }
+}
+
+/// The documentation of the field `name` of a struct, class or interface.
+pub fn of_field(analysis: Analysis, item: TypeItem, name: String) -> String {
+  const package = match analysis.package {
+    Some(found) => found,
+    None => return "",
+  };
+  const resolution = match analysis.resolution {
+    Some(found) => found,
+    None => return "",
+  };
+  const fields = match item {
+    TypeItem::Struct(id) => match resolution.struct_decl(package, id) {
+      Some(decl) => decl.fields,
+      None => new List(),
+    },
+    TypeItem::Class(id) => match resolution.class_decl(package, id) {
+      Some(decl) => decl.fields,
+      None => new List(),
+    },
+    TypeItem::Interface(id) => match resolution.interface_decl(package, id) {
+      Some(decl) => decl.fields,
+      None => new List(),
+    },
+    TypeItem::Enum(_) => new List(),
+  };
+
+  for field in fields {
+    if field.name.name == name {
+      return above(analysis, field.span);
+    }
+  }
+
+  ""
+}
+
+/// The documentation of a variant of an enum.
+pub fn of_variant(analysis: Analysis, enum_id: u32, name: String) -> String {
+  const package = match analysis.package {
+    Some(found) => found,
+    None => return "",
+  };
+
+  if let Some(resolution) = analysis.resolution {
+    if let Some(decl) = resolution.enum_decl(package, enum_id) {
+      for variant in decl.variants {
+        if variant.name.name == name {
+          return above(analysis, variant.span);
+        }
+      }
+    }
+  }
+
+  ""
+}
+
+/// The documentation of an item: a function, a C function, a constant, a static or a type.
+pub fn of_item(analysis: Analysis, item: ItemRef) -> String {
+  const package = match analysis.package {
+    Some(found) => found,
+    None => return "",
+  };
+  const resolution = match analysis.resolution {
+    Some(found) => found,
+    None => return "",
+  };
+  const span: Option<Span> = match item {
+    ItemRef::Fn(id) => match resolution.fn_decl(package, id) {
+      Some(decl) => Some(decl.span),
+      None => None,
+    },
+    ItemRef::Extern(id) => match resolution.extern_decl(package, id) {
+      Some(decl) => Some(decl.span),
+      None => None,
+    },
+    ItemRef::Const(id) => match resolution.const_decl(package, id) {
+      Some(decl) => Some(decl.span),
+      None => None,
+    },
+    ItemRef::Static(id) => match resolution.static_decl(package, id) {
+      Some(decl) => Some(decl.span),
+      None => None,
+    },
+    ItemRef::Type(TypeItem::Struct(id)) => match resolution.struct_decl(package, id) {
+      Some(decl) => Some(decl.span),
+      None => None,
+    },
+    ItemRef::Type(TypeItem::Enum(id)) => match resolution.enum_decl(package, id) {
+      Some(decl) => Some(decl.span),
+      None => None,
+    },
+    ItemRef::Type(TypeItem::Class(id)) => match resolution.class_decl(package, id) {
+      Some(decl) => Some(decl.span),
+      None => None,
+    },
+    ItemRef::Type(TypeItem::Interface(id)) => match resolution.interface_decl(package, id) {
+      Some(decl) => Some(decl.span),
+      None => None,
+    },
+    _ => None,
+  };
+
+  match span {
+    Some(found) => above(analysis, found),
+    None => "",
+  }
+}

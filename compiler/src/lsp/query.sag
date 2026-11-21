@@ -4,7 +4,9 @@
 use pkg::ast::{Block, Expr, ExprKind, FnDecl, Ident, Item, Module, Package, Path, Pattern, PatternKind, Stmt, TypeExpr, TypeExprKind, UseTree, UseTreeKind};
 use pkg::ast;
 use pkg::lsp::analysis::Analysis;
-use pkg::resolve::{EnumKind, ItemRef, Res, Resolution, TypeItem, TypeRes};
+use pkg::lsp::builtins;
+use pkg::lsp::docs;
+use pkg::resolve::{EnumKind, ItemRef, Res, Resolution, TypeItem, TypeRes, VariantRef};
 use pkg::span::Span;
 use pkg::types;
 use pkg::types::{Type, TypeKind};
@@ -27,9 +29,15 @@ pub class Hit {
   /// A segment of a `use` or a module before `::` in a path, such as `loader` in
   /// `pkg::loader::push_path`.
   pub var path: Option<PathHit>;
+  /// The shortest expression ending at the offset, with the function holding it: the receiver of
+  /// a `.` or the callee of a `(` written there (docs/adr/0109-language-server-members.md).
+  pub var ending: Option<Expr>;
+  pub var ending_function: Option<u32>;
 
   pub fn new(self) {
     self.function = None;
+    self.ending = None;
+    self.ending_function = None;
     self.expr = None;
     self.type_path = None;
     self.type_span = None;
@@ -373,6 +381,18 @@ class Finder {
     self.hit.expr = Some(expr);
     self.hit.function = self.current;
 
+    if expr.span.end == self.offset {
+      const shorter = match self.hit.ending {
+        Some(found) => expr.span.end - expr.span.start < found.span.end - found.span.start,
+        None => true,
+      };
+
+      if shorter {
+        self.hit.ending = Some(expr);
+        self.hit.ending_function = self.current;
+      }
+    }
+
     match expr.kind {
       ExprKind::Path(path) => self.path_prefix(path),
       ExprKind::Template(parts) => {
@@ -586,14 +606,82 @@ fn local_at(resolution: Resolution, function: u32, span: Span) -> Option<u32> {
   None
 }
 
-/// What hovering the offset shows: code in Sagitario.
-pub fn hover(analysis: Analysis, module: Module, offset: u32) -> Option<String> {
+/// What hovering shows: a declaration or a type in Sagitario, and its documentation.
+pub struct HoverInfo {
+  pub code: String;
+  /// Markdown, or empty.
+  pub doc: String;
+}
+
+fn info(code: String, doc: String) -> HoverInfo {
+  HoverInfo { code: code, doc: doc }
+}
+
+/// `fn name(a: A) -> R` of a C function of an `extern` block.
+pub fn extern_signature(analysis: Analysis, id: u32) -> Option<String> {
+  const decl = analysis.resolution?.extern_decl(analysis.package?, id)?;
+  const sig = analysis.typed?.extern_sig(id)?;
+  const params: List<String> = new List();
+
+  for index in 0..decl.params.len() {
+    const ty = match sig.params.get(index) {
+      Some(found) => types::text(found),
+      None => "?",
+    };
+
+    params.push(decl.params[index].name.name + ": " + ty);
+  }
+
+  if decl.variadic {
+    params.push("...");
+  }
+
+  const ret = match sig.ret.kind {
+    TypeKind::Unit => "",
+    _ => " -> " + types::text(sig.ret),
+  };
+  const link = match decl.link_name {
+    Some(link_name) => "@link_name(\"" + link_name.symbol + "\")\n",
+    None => "",
+  };
+
+  Some(link + "extern \"C\" fn " + decl.name.name + "(" + params.join(", ") + ")" + ret)
+}
+
+/// What a variant is, `Circle(f64)` of `enum Shape`, and its documentation.
+fn variant_info(analysis: Analysis, variant: VariantRef) -> Option<HoverInfo> {
+  match variant.owner {
+    EnumKind::Option => Some(if variant.index == 1 {
+      info("Some(T)", "A variant of `Option<T>`: a value is present.")
+    } else {
+      info("None", "A variant of `Option<T>`: no value.")
+    }),
+    EnumKind::Result => Some(if variant.index == 0 {
+      info("Ok(T)", "A variant of `Result<T, E>`: the operation succeeded with a value.")
+    } else {
+      info("Err(E)", "A variant of `Result<T, E>`: the operation failed with an error.")
+    }),
+    EnumKind::User(id) => {
+      const package = analysis.package?;
+      const decl = analysis.resolution?.enum_decl(package, id)?;
+      const found = decl.variants.get(variant.index as usize)?;
+      const text = analysis.sources.get(found.span.file)?.slice(found.span);
+
+      Some(info("enum " + decl.name.name + "\n" + text, docs::above(analysis, found.span)))
+    }
+  }
+}
+
+/// What hovering the offset shows.
+pub fn hover(analysis: Analysis, module: Module, offset: u32) -> Option<HoverInfo> {
   const resolution = analysis.resolution?;
   const typed = analysis.typed?;
   const hit = find(analysis, module, offset);
 
   if let Some(found) = hit.path {
-    return item_text(analysis, resolve_path(analysis, module_index_of(analysis, module)?, found.segments)?);
+    const item = resolve_path(analysis, module_index_of(analysis, module)?, found.segments)?;
+
+    return Some(info(item_text(analysis, item)?, docs::of_item(analysis, item)));
   }
 
   // A binding's name: its type; a function's name: its signature.
@@ -602,26 +690,32 @@ pub fn hover(analysis: Analysis, module: Module, offset: u32) -> Option<String> 
       if let Some(package) = analysis.package {
         if let Some(decl) = resolution.fn_decl(package, function) {
           if decl.name.span.start == ident.span.start && decl.name.span.file == ident.span.file {
-            return signature(analysis, function);
+            return Some(info(signature(analysis, function)?, docs::of_function(analysis, function)));
           }
         }
       }
 
       if let Some(local) = local_at(resolution, function, ident.span) {
         if let Some(ty) = typed.local_type(function, local) {
-          return Some(ident.name + ": " + types::text(ty));
+          if types::is_error(ty) {
+            return None;
+          }
+
+          return Some(info(ident.name + ": " + types::text(ty), ""));
         }
       }
     }
 
-    return declaration_text(analysis, module, ident);
+    return declaration_info(analysis, module, ident);
   }
 
   if let Some(path) = hit.type_path {
     return match resolution.type_paths.get(path) {
-      Some(TypeRes::Item(item)) => Some(type_item_text(analysis, item)),
-      Some(TypeRes::Builtin) => Some(hit_text(analysis, module, hit.type_span?)),
-      Some(TypeRes::Param { .. }) => Some("type parameter " + hit_text(analysis, module, hit.type_span?)),
+      Some(TypeRes::Item(item)) => Some(info(type_item_text(analysis, item), docs::of_item(analysis, ItemRef::Type(item)))),
+      Some(TypeRes::Builtin) => Some(info(hit_text(analysis, module, hit.type_span?), "")),
+      Some(TypeRes::CString) => Some(info("CString", "A NUL-terminated copy of a string, for C: `CString::new(text)`, then `as_ptr()`.")),
+      Some(TypeRes::CType(name)) => Some(info("type " + name, "A C type of `std::ffi`, an alias of the Sagitario type of the target.")),
+      Some(TypeRes::Param { .. }) => Some(info("type parameter " + hit_text(analysis, module, hit.type_span?), "")),
       _ => None,
     };
   }
@@ -629,16 +723,41 @@ pub fn hover(analysis: Analysis, module: Module, offset: u32) -> Option<String> 
   const expr = hit.expr?;
 
   match expr.kind {
-    ExprKind::MethodCall { method, .. } => {
+    ExprKind::MethodCall { receiver, method, .. } => {
       if contains(method.span, offset) {
+        if let Some(receiver_ty) = typed.expr_types.get(receiver.id) {
+          if let Some(member) = builtins::member(analysis, builtins::referred(receiver_ty), method.name) {
+            return Some(info(member.signature, member.doc));
+          }
+        }
+
         if let Some(function) = typed.method_calls.get(expr.id) {
-          return signature(analysis, function);
+          return Some(info(signature(analysis, function)?, docs::of_function(analysis, function)));
+        }
+      }
+    }
+    ExprKind::Field { base, name } => {
+      if contains(name.span, offset) {
+        if let Some(base_ty) = typed.expr_types.get(base.id) {
+          if let Some(member) = builtins::member(analysis, builtins::referred(base_ty), name.name) {
+            return Some(info(member.signature, member.doc));
+          }
         }
       }
     }
     ExprKind::Path(_) => {
-      if let Some(Res::Fn(function)) = resolution.paths.get(expr.id) {
-        return signature(analysis, function);
+      match resolution.paths.get(expr.id) {
+        Some(Res::Fn(function)) => return Some(info(signature(analysis, function)?, docs::of_function(analysis, function))),
+        Some(Res::Extern(id)) => return Some(info(extern_signature(analysis, id)?, docs::of_item(analysis, ItemRef::Extern(id)))),
+        Some(Res::Builtin(name)) => {
+          if let Some(member) = builtins::builtin(name) {
+            return Some(info(member.signature, member.doc));
+          }
+        }
+        Some(Res::Variant(variant)) => return variant_info(analysis, variant),
+        Some(Res::Const(id)) => return Some(info(item_text(analysis, ItemRef::Const(id))?, docs::of_item(analysis, ItemRef::Const(id)))),
+        Some(Res::Static(id)) => return Some(info(item_text(analysis, ItemRef::Static(id))?, docs::of_item(analysis, ItemRef::Static(id)))),
+        _ => {}
       }
     }
     _ => {}
@@ -646,7 +765,38 @@ pub fn hover(analysis: Analysis, module: Module, offset: u32) -> Option<String> 
 
   const ty = typed.expr_types.get(expr.id)?;
 
-  Some(types::text(ty))
+  // A type the checker could not find tells nothing.
+  if types::is_error(ty) {
+    return None;
+  }
+
+  Some(info(types::text(ty), ""))
+}
+
+/// The declaration a name of the module declares, such as a function's or a type's name, with its
+/// documentation.
+fn declaration_info(analysis: Analysis, module: Module, ident: Ident) -> Option<HoverInfo> {
+  const code = declaration_text(analysis, module, ident)?;
+  var doc = "";
+
+  for item in module.items {
+    const span: Option<Span> = match item {
+      Item::Fn(decl) => if decl.name.span.start == ident.span.start { Some(decl.span) } else { None },
+      Item::Struct(decl) => if decl.name.span.start == ident.span.start { Some(decl.span) } else { None },
+      Item::Enum(decl) => if decl.name.span.start == ident.span.start { Some(decl.span) } else { None },
+      Item::Class(decl) => if decl.name.span.start == ident.span.start { Some(decl.span) } else { None },
+      Item::Interface(decl) => if decl.name.span.start == ident.span.start { Some(decl.span) } else { None },
+      Item::Const(decl) => if decl.name.span.start == ident.span.start { Some(decl.span) } else { None },
+      Item::Static(decl) => if decl.name.span.start == ident.span.start { Some(decl.span) } else { None },
+      Item::Extern(_) | Item::Impl(_) => None,
+    };
+
+    if let Some(found) = span {
+      doc = docs::above(analysis, found);
+    }
+  }
+
+  Some(info(code, doc))
 }
 
 /// The declaration a name of the module declares, such as a function's or a type's name.

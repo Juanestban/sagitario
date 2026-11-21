@@ -106,8 +106,10 @@ fn c_type_of(name: String, target: TargetInfo) -> Type {
 /// `sag` define.
 const C_RESERVED: String = "auto break case char const continue default do double else enum extern float for goto if inline int long register restrict return short signed sizeof static struct switch typedef union unsigned void volatile while bool true false NULL main offsetof";
 
-/// Why a symbol cannot be used in C, or `None` if it can.
-fn symbol_problem(symbol: String) -> Option<String> {
+/// Why a symbol cannot be used in C, or `None` if it can. A `@link_name` (`linked`) may also hold
+/// `$` after its first character, as the variants of Apple's C library do (`readdir$INODE64`,
+/// docs/adr/0108-link-names.md).
+fn symbol_problem(symbol: String, linked: bool) -> Option<String> {
   var valid = !symbol.is_empty();
   var first = true;
 
@@ -116,8 +118,12 @@ fn symbol_problem(symbol: String) -> Option<String> {
       valid = valid && (c.is_ascii_alphabetic() || c == '_');
       first = false;
     } else {
-      valid = valid && (c.is_ascii_alphanumeric() || c == '_');
+      valid = valid && (c.is_ascii_alphanumeric() || c == '_' || linked && c == '$');
     }
+  }
+
+  if !valid && linked {
+    return Some("`" + symbol + "` is not a C symbol (ASCII letters, digits, `_` and `$`, starting with a letter or `_`)");
   }
 
   if !valid {
@@ -409,6 +415,8 @@ struct Symbol {
   pub in_std: bool;
   /// A C function declared with `...`.
   pub variadic: bool;
+  /// Given by `@link_name`.
+  pub linked: bool;
 }
 
 /// Checks the C symbols: valid identifiers, not reserved, each declared or defined once (a C
@@ -430,15 +438,30 @@ pub fn check_symbols(cx: Checker) {
       continue;
     }
 
-    names.push(decl.name.name);
-    found.push(Symbol { span: decl.name.span, sig: cx.typed.extern_sig(id), in_std: cx.resolution.is_std_source(cx.resolution.externs[index].module), variadic: decl.variadic });
+    const span = match decl.link_name {
+      Some(link_name) => link_name.span,
+      None => decl.name.span,
+    };
+
+    names.push(decl.symbol());
+    found.push(Symbol { span: span, sig: cx.typed.extern_sig(id), in_std: cx.resolution.is_std_source(cx.resolution.externs[index].module), variadic: decl.variadic, linked: decl.link_name.is_some() });
   }
 
   for index in 0..cx.resolution.statics.len() {
     if let Some(decl) = cx.resolution.static_decl(cx.package, index as u32) {
       if decl.extern_c {
-        names.push(decl.name.name);
-        found.push(Symbol { span: decl.name.span, sig: None, in_std: cx.resolution.is_std_source(cx.resolution.statics[index].module), variadic: false });
+        const in_std = cx.resolution.is_std_source(cx.resolution.statics[index].module);
+
+        match decl.link_name {
+          Some(link_name) => {
+            names.push(link_name.symbol);
+            found.push(Symbol { span: link_name.span, sig: None, in_std: in_std, variadic: false, linked: true });
+          }
+          None => {
+            names.push(decl.name.name);
+            found.push(Symbol { span: decl.name.span, sig: None, in_std: in_std, variadic: false, linked: false });
+          }
+        }
       }
     }
   }
@@ -455,11 +478,11 @@ pub fn check_symbols(cx: Checker) {
       match decl.export {
         Some(export) => {
           names.push(export.symbol);
-          found.push(Symbol { span: export.span, sig: None, in_std: in_std, variadic: false });
+          found.push(Symbol { span: export.span, sig: None, in_std: in_std, variadic: false, linked: false });
         }
         None => {
           names.push(decl.name.name);
-          found.push(Symbol { span: decl.name.span, sig: None, in_std: in_std, variadic: false });
+          found.push(Symbol { span: decl.name.span, sig: None, in_std: in_std, variadic: false, linked: false });
         }
       }
     }
@@ -470,14 +493,18 @@ pub fn check_symbols(cx: Checker) {
     const entry = found[index];
     const span = entry.span;
 
-    const problem: Option<String> = if entry.in_std { None } else { symbol_problem(symbol) };
+    const problem: Option<String> = if entry.in_std { None } else { symbol_problem(symbol, entry.linked) };
 
     if let Some(problem) = problem {
-      cx.diagnostics.push(
-        Diagnostic::error(codes::INVALID_SYMBOL, span, "cannot use `" + symbol + "` as a C symbol")
-          .with_note(problem)
-          .with_help("rename the function, or choose the exported name with `@export(\"name\")`"),
-      );
+      const help = if entry.linked {
+        "write the symbol the C library exports"
+      } else if entry.sig.is_some() {
+        "rename the function, or give its C symbol with `@link_name(\"name\")`"
+      } else {
+        "rename the function, or choose the exported name with `@export(\"name\")`"
+      };
+
+      cx.diagnostics.push(Diagnostic::error(codes::INVALID_SYMBOL, span, "cannot use `" + symbol + "` as a C symbol").with_note(problem).with_help(help));
       continue;
     }
 

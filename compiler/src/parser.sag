@@ -93,6 +93,8 @@ enum AttributeTarget {
 /// What the attributes of an item set.
 struct Applied {
   pub export: Option<Export>;
+  /// `@link_name("symbol")` on a declaration of an `extern "C"` block.
+  pub link_name: Option<Export>;
   pub repr_c: bool;
   /// The representation of an enum: an integer type, or `C`.
   pub repr: Option<Ident>;
@@ -1134,7 +1136,7 @@ class Parser {
       span: start.to(end),
     };
 
-    Ok(StaticDecl { visibility: visibility, mutable: mutable, thread_local: false, extern_c: false, name: name, ty: ty, init: init, span: start.to(end) })
+    Ok(StaticDecl { visibility: visibility, mutable: mutable, thread_local: false, extern_c: false, link_name: None, name: name, ty: ty, init: init, span: start.to(end) })
   }
 
   /// `@name` or `@name(arg, ...)` before an item; the arguments are string literals or names.
@@ -1256,7 +1258,7 @@ class Parser {
   /// Checks the attributes of an item: `@export("symbol")` on an `extern "C" fn`, `@repr(C)` on
   /// a struct. Errors are reported and the attribute is ignored.
   prv fn apply_attributes(self, attributes: List<Attribute>, target: AttributeTarget) -> Applied {
-    var applied = Applied { export: None, repr_c: false, repr: None, thread_local: None, default: None };
+    var applied = Applied { export: None, link_name: None, repr_c: false, repr: None, thread_local: None, default: None };
     const seen: List<String> = new List();
 
     for attribute in attributes {
@@ -1291,6 +1293,10 @@ class Parser {
         AttributeTarget::Variant => true,
         _ => false,
       };
+      const in_extern_block = match target {
+        AttributeTarget::ExternBlockFn => true,
+        _ => false,
+      };
 
       // A variant takes `@default` only.
       if is_variant && name != "default" {
@@ -1312,6 +1318,21 @@ class Parser {
             applied.export = Some(Export { symbol: text, span: attribute.span });
           }
           None => self.attribute_error(attribute.span, "`@export` takes the exported symbol as a string: `@export(\"name\")`", None),
+        }
+      } else if name == "link_name" && in_extern_block {
+        var symbol: Option<String> = None;
+
+        if attribute.args.len() == 1 {
+          if let Some(AttributeArg::Str(text)) = attribute.args.first() {
+            symbol = Some(text);
+          }
+        }
+
+        match symbol {
+          Some(text) => {
+            applied.link_name = Some(Export { symbol: text, span: attribute.span });
+          }
+          None => self.attribute_error(attribute.span, "`@link_name` takes the C symbol as a string: `@link_name(\"name\")`", None),
         }
       } else if name == "repr" && is_struct {
         var c = false;
@@ -1375,6 +1396,12 @@ class Parser {
         self.diagnostics.push(Diagnostic::error(codes::NOT_IMPLEMENTED, attribute.span, "the attribute `@" + name + "` is not implemented yet"));
       } else if name == "export" {
         self.attribute_error(attribute.span, "`@export` applies to `extern \"C\"` functions", Some("write `@export(\"name\") extern \"C\" fn ...`"));
+      } else if name == "link_name" {
+        self.attribute_error(
+          attribute.span,
+          "`@link_name` applies to the functions and globals of `extern \"C\"` blocks",
+          Some("to choose the symbol of a function C calls, write `@export(\"name\") extern \"C\" fn ...`"),
+        );
       } else if name == "repr" {
         self.attribute_error(attribute.span, "`@repr(C)` applies to structs", None);
       } else if name == "thread_local" {
@@ -1383,7 +1410,7 @@ class Parser {
         self.attribute_error(
           attribute.span,
           "unknown attribute `@" + name + "`",
-          Some("the attributes are `@cfg(condition)`, `@default`, `@export(\"symbol\")`, `@repr(C)` and `@thread_local`"),
+          Some("the attributes are `@cfg(condition)`, `@default`, `@export(\"symbol\")`, `@link_name(\"symbol\")`, `@repr(C)` and `@thread_local`"),
         );
       }
     }
@@ -1500,7 +1527,7 @@ class Parser {
       span: span,
     };
 
-    Ok(StaticDecl { visibility: visibility, mutable: mutable, thread_local: false, extern_c: true, name: name, ty: ty, init: init, span: span })
+    Ok(StaticDecl { visibility: visibility, mutable: mutable, thread_local: false, extern_c: true, link_name: None, name: name, ty: ty, init: init, span: span })
   }
 
   /// The ABI string after `extern`, which must be `"C"`.
@@ -1527,9 +1554,9 @@ class Parser {
     const visibility = self.visibility();
 
     if self.at_keyword("static") {
-      const global = self.extern_static(visibility, start)?;
+      var global = self.extern_static(visibility, start)?;
 
-      self.apply_attributes(attributes, AttributeTarget::ExternBlockFn);
+      global.link_name = self.apply_attributes(attributes, AttributeTarget::ExternBlockFn).link_name;
 
       if self.cfg_holds(attributes) {
         self.extern_statics.push(Item::Static(global));
@@ -1582,13 +1609,13 @@ class Parser {
 
     const end = self.expect(";")?.span;
 
-    self.apply_attributes(attributes, AttributeTarget::ExternBlockFn);
+    const link_name = self.apply_attributes(attributes, AttributeTarget::ExternBlockFn).link_name;
 
     if !self.cfg_holds(attributes) {
       return Ok(None);
     }
 
-    Ok(Some(ExternFn { visibility: visibility, name: name, params: params, variadic: variadic, return_type: return_type, span: start.to(end) }))
+    Ok(Some(ExternFn { visibility: visibility, name: name, params: params, variadic: variadic, return_type: return_type, link_name: link_name, span: start.to(end) }))
   }
 
   /// The parameters `name: Type, ...` up to the closing `)`, which is not consumed.

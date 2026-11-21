@@ -1,0 +1,169 @@
+//! Signature help (docs/adr/0109-language-server-members.md): inside the parentheses of a call,
+//! the signature of the function or method called, its documentation and the parameter at the
+//! cursor. The text before the cursor tells where the call starts, since code being typed rarely
+//! compiles.
+
+use pkg::ast::Module;
+use pkg::lsp::analysis::Analysis;
+use pkg::lsp::builtins;
+use pkg::lsp::completion;
+use pkg::lsp::docs;
+use pkg::lsp::query;
+use pkg::resolve::ItemRef;
+
+/// The signature of a call being written.
+pub struct Help {
+  pub label: String;
+  /// Markdown, or empty.
+  pub doc: String;
+  pub params: List<String>;
+  /// The parameter at the cursor.
+  pub active: u32;
+}
+
+/// The call whose arguments the cursor is in.
+pub struct OpenCall {
+  /// The name called: a function's path, or a method's name.
+  pub segments: List<String>;
+  /// The offset of the `.` before a method's name, `None` for a path.
+  pub dot: Option<u32>;
+  /// The index of the argument at the cursor.
+  pub argument: u32;
+}
+
+/// The call around `offset`: the `(` without its `)` before it, the commas between them that are
+/// not nested, and the name before it.
+pub fn open_call(text: String, offset: u32) -> Option<OpenCall> {
+  const chars = completion::before(text, offset);
+  var index = chars.len();
+  var depth = 0usize;
+  var argument = 0u32;
+  var in_string = false;
+
+  loop {
+    if index == 0 {
+      return None;
+    }
+
+    index -= 1;
+
+    const c = chars[index];
+
+    // shortcut: a `"` inside a char literal or an escape confuses this, rarely in a call.
+    if c == '"' {
+      in_string = !in_string;
+    } else if in_string {
+      continue;
+    } else if c == ')' || c == ']' || c == '}' {
+      depth += 1;
+    } else if c == '[' || c == '{' {
+      if depth == 0 {
+        return None;
+      }
+
+      depth -= 1;
+    } else if c == '(' {
+      if depth == 0 {
+        break;
+      }
+
+      depth -= 1;
+    } else if c == ',' && depth == 0 {
+      argument += 1;
+    } else if c == ';' && depth == 0 {
+      return None;
+    }
+  }
+
+  // The name before the `(`, then `::` and the segments before it, or a `.`.
+  var end = index;
+
+  while end > 0 && chars[end - 1] == ' ' {
+    end -= 1;
+  }
+
+  const segments: List<String> = new List();
+  var start = end;
+
+  loop {
+    while start > 0 && completion::is_name_char(chars[start - 1]) {
+      start -= 1;
+    }
+
+    if start == end {
+      return None;
+    }
+
+    const segment = new StringBuilder();
+
+    for at in start..end {
+      segment.append_char(chars[at]);
+    }
+
+    segments.insert(0, segment.to_string());
+
+    if start >= 2 && chars[start - 1] == ':' && chars[start - 2] == ':' {
+      end = start - 2;
+      start = end;
+    } else {
+      break;
+    }
+  }
+
+  var dot: Option<u32> = None;
+
+  if segments.len() == 1 && start > 0 && chars[start - 1] == '.' {
+    // The bytes from the `.` to the cursor.
+    var bytes = 0u32;
+
+    for at in start - 1..chars.len() {
+      bytes += chars[at].len_utf8() as u32;
+    }
+
+    dot = Some(offset - bytes);
+  }
+
+  Some(OpenCall { segments: segments, dot: dot, argument: argument })
+}
+
+fn help(label: String, doc: String, params: List<String>, argument: u32) -> Help {
+  Help { label: label, doc: doc, params: params, active: argument }
+}
+
+/// The signature of the method `name` of the expression ending at `dot`, in an analysis that read
+/// the text up to there.
+pub fn of_method(analysis: Analysis, module: Module, dot: u32, name: String, argument: u32) -> Option<Help> {
+  const receiver = query::find(analysis, module, dot).ending?;
+  const ty = analysis.typed?.expr_types.get(receiver.id)?;
+  const found = builtins::member(analysis, builtins::referred(ty), name)?;
+  const params = if found.function.is_some() { found.params } else { builtins::params_of(found.signature) };
+
+  Some(help(found.signature, found.doc, params, argument))
+}
+
+/// The signature of the function at `segments`: one of the program's, a C function or a builtin.
+pub fn of_path(analysis: Analysis, module: Module, segments: List<String>, argument: u32) -> Option<Help> {
+  const index = query::module_index_of(analysis, module)?;
+
+  match query::resolve_path(analysis, index, segments) {
+    Some(ItemRef::Fn(id)) => {
+      const label = query::signature(analysis, id)?;
+
+      return Some(help(label, docs::of_function(analysis, id), builtins::params_of(label), argument));
+    }
+    Some(ItemRef::Extern(id)) => {
+      const label = query::extern_signature(analysis, id)?;
+
+      return Some(help(label, docs::of_item(analysis, ItemRef::Extern(id)), builtins::params_of(label), argument));
+    }
+    _ => {}
+  }
+
+  const found = builtins::builtin(segments.join("::"))?;
+
+  if found.is_field {
+    return None;
+  }
+
+  Some(help(found.signature, found.doc, builtins::params_of(found.signature), argument))
+}

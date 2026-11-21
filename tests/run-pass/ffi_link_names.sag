@@ -1,0 +1,58 @@
+// `@link_name` (docs/adr/0108-link-names.md): C functions called by a name of Sagitario, the same
+// symbol under two names, a symbol with `$` (Apple's variants, through an assembler label), and a
+// function pointer to a function declared with a link name.
+// expect-stdout: 7 7
+// expect-stdout: 5 5
+// expect-stdout: true
+// expect-stdout: 9
+use std::ffi::{c_char, c_int, CString};
+
+extern "C" {
+  @link_name("abs")
+  fn absolute(value: c_int) -> c_int;
+  fn abs(value: c_int) -> c_int;
+  @link_name("strlen")
+  pub fn length(text: *const c_char) -> usize;
+  // C's headers name this variant of `realpath` on Apple's systems.
+  @cfg(any(target_os = "macos", target_os = "ios"))
+  @link_name("realpath$DARWIN_EXTSN")
+  fn resolve(path: *const c_char, resolved: *mut c_char) -> *mut c_char;
+  @cfg(all(unix, not(any(target_os = "macos", target_os = "ios"))))
+  @link_name("realpath")
+  fn resolve(path: *const c_char, resolved: *mut c_char) -> *mut c_char;
+  @cfg(windows)
+  @link_name("_fullpath")
+  fn full_path(resolved: *mut c_char, path: *const c_char, size: usize) -> *mut c_char;
+  fn free(memory: *mut c_char);
+}
+
+@cfg(unix)
+fn resolves(path: CString) -> bool {
+  const found = unsafe { resolve(path.as_ptr(), 0 as *mut c_char) };
+  const ok = !found.is_null();
+
+  unsafe { free(found); }
+  ok
+}
+
+@cfg(windows)
+fn resolves(path: CString) -> bool {
+  const found = unsafe { full_path(0 as *mut c_char, path.as_ptr(), 0) };
+  const ok = !found.is_null();
+
+  unsafe { free(found); }
+  ok
+}
+
+fn main() {
+  println(f"{unsafe { absolute(-7) }} {unsafe { abs(-7) }}");
+
+  const text = CString::new("hola!").unwrap();
+
+  println(f"{unsafe { length(text.as_ptr()) }} {unsafe { length(text.as_ptr()) }}");
+  println(f"{resolves(CString::new(".").unwrap())}");
+
+  const pointer: unsafe extern "C" fn(c_int) -> c_int = absolute;
+
+  println(f"{unsafe { pointer(-9) }}");
+}

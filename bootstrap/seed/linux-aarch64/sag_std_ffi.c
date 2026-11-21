@@ -108,24 +108,24 @@ int32_t sag_ffi_27(uint8_t const* a0) {
   return unlink((char const*)a0);
 }
 
+extern int stat(char const* a0, struct StatBuffer* a1);
+int32_t sag_ffi_30(uint8_t const* a0, sag_s19* a1) {
+  return stat((char const*)a0, (struct StatBuffer*)a1);
+}
+
 extern void* opendir(char const* a0);
-void* sag_ffi_30(uint8_t const* a0) {
+void* sag_ffi_31(uint8_t const* a0) {
   return (void*)opendir((char const*)a0);
 }
 
 extern uint8_t const* readdir(void* a0);
-uint8_t const* sag_ffi_31(void* a0) {
+uint8_t const* sag_ffi_32(void* a0) {
   return (uint8_t const*)readdir((void*)a0);
 }
 
 extern int closedir(void* a0);
-int32_t sag_ffi_32(void* a0) {
+int32_t sag_ffi_33(void* a0) {
   return closedir((void*)a0);
-}
-
-extern int stat(char const* a0, struct StatBuffer* a1);
-int32_t sag_ffi_33(uint8_t const* a0, sag_s19* a1) {
-  return stat((char const*)a0, (struct StatBuffer*)a1);
 }
 
 extern int close(int a0);

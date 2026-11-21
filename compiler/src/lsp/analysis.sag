@@ -284,11 +284,14 @@ pub fn find_entry(file: String) -> Entry {
 pub class Analysis {
   pub const entry: Entry;
   pub const sources: SourceMap;
-  /// `None` when lexical or syntax errors stopped the front end before resolving.
+  /// `None` when the files of the program could not be read; with syntax errors, the parts the
+  /// parser could read are resolved and checked.
   pub var package: Option<Package>;
   pub var resolution: Option<Resolution>;
   pub var typed: Option<TypedModule>;
   pub var diagnostics: List<Diagnostic>;
+  /// Whether lexical or syntax errors left parts of the program unread.
+  pub var syntax_errors: bool;
   /// The line index of each source file, by file id, built when needed.
   prv const lines: Map<u32, LineIndex>;
   /// The id of each function in the resolution, by the node id of its declaration.
@@ -304,6 +307,7 @@ pub class Analysis {
     self.resolution = None;
     self.typed = None;
     self.diagnostics = new List();
+    self.syntax_errors = false;
     self.lines = new Map<u32, LineIndex>();
     self.functions = None;
     self.embedded = new Map<String, String>();
@@ -443,15 +447,17 @@ pub fn analyze(entry: Entry, documents: Map<String, Document>, internal: List<St
     return result;
   }
 
-  // As in a build, lexical and syntax errors stop before resolving.
-  if diagnostics.has_errors() {
-    result.diagnostics = diagnostics.take();
-    return result;
-  }
+  // As in a build, lexical and syntax errors are the only ones reported. The parser skips what
+  // it cannot read, so the rest of the program is still resolved and checked, into diagnostics
+  // nobody sees, for hover and completion while the code being typed does not compile
+  // (docs/adr/0109-language-server-members.md).
+  const syntax_errors = diagnostics.has_errors();
 
-  const prelude = loader.load_prelude(sources, diagnostics);
+  result.syntax_errors = syntax_errors;
+  const later = if syntax_errors { new Diagnostics() } else { diagnostics };
+  const prelude = loader.load_prelude(sources, later);
 
-  if diagnostics.has_errors() {
+  if later.has_errors() && !syntax_errors {
     result.diagnostics = diagnostics.take();
     return result;
   }
@@ -460,8 +466,8 @@ pub fn analyze(entry: Entry, documents: Map<String, Document>, internal: List<St
 
   package.library = entry.library;
 
-  const resolution = resolve::resolve(package, diagnostics);
-  const typed = types::check_until(package, resolution, diagnostics, Stage::Bodies);
+  const resolution = resolve::resolve(package, later);
+  const typed = types::check_until(package, resolution, later, Stage::Bodies);
 
   result.package = Some(package);
   result.resolution = Some(resolution);

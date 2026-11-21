@@ -1010,20 +1010,36 @@ extern "C" {
   fn unlink(path: *const c_char) -> c_int;
   fn rename(from: *const c_char, to: *const c_char) -> c_int;
   fn getcwd(buffer: *mut c_char, size: usize) -> *mut c_char;
+  // On macOS for Intel, the plain symbols are those of 32-bit inodes, which Apple keeps for old
+  // programs; C's headers name the 64-bit ones, whose layouts are those of Apple silicon
+  // (docs/adr/0108-link-names.md).
+  @cfg(not(all(target_os = "macos", target_arch = "x86_64")))
+  fn stat(path: *const c_char, info: *mut StatBuffer) -> c_int;
+  @cfg(all(target_os = "macos", target_arch = "x86_64"))
+  @link_name("stat$INODE64")
   fn stat(path: *const c_char, info: *mut StatBuffer) -> c_int;
 }
 
 // All Unix platforms use opendir/readdir/closedir for directory iteration.
 @cfg(unix)
 extern "C" {
+  // On macOS for Intel, the plain symbols are those of 32-bit inodes, which Apple keeps for old
+  // programs; C's headers name the 64-bit ones, whose layouts are those of Apple silicon
+  // (docs/adr/0108-link-names.md).
+  @cfg(not(all(target_os = "macos", target_arch = "x86_64")))
   fn opendir(path: *const c_char) -> *mut c_void;
+  @cfg(all(target_os = "macos", target_arch = "x86_64"))
+  @link_name("opendir$INODE64")
+  fn opendir(path: *const c_char) -> *mut c_void;
+  @cfg(not(all(target_os = "macos", target_arch = "x86_64")))
+  fn readdir(dir: *mut c_void) -> *const u8;
+  @cfg(all(target_os = "macos", target_arch = "x86_64"))
+  @link_name("readdir$INODE64")
   fn readdir(dir: *mut c_void) -> *const u8;
   fn closedir(dir: *mut c_void) -> c_int;
 }
 
-/// Room for C's `struct stat` on every system, read at the offset of its `st_mode`. On macOS for
-/// Intel, `stat` and `readdir` are the symbols of 32-bit inodes, which Apple still exports: the
-/// 64-bit ones are named `stat$INODE64` and `readdir$INODE64`, which C cannot name.
+/// Room for C's `struct stat` on every system, read at the offset of its `st_mode`.
 @cfg(unix)
 @repr(C)
 struct StatBuffer {
@@ -1035,10 +1051,8 @@ struct StatBuffer {
 const MODE_OFFSET: usize = 24;
 @cfg(all(any(target_os = "linux", target_os = "android"), not(target_arch = "x86_64")))
 const MODE_OFFSET: usize = 16;
-@cfg(any(target_os = "ios", all(target_os = "macos", target_arch = "aarch64")))
+@cfg(any(target_os = "macos", target_os = "ios"))
 const MODE_OFFSET: usize = 4;
-@cfg(all(target_os = "macos", target_arch = "x86_64"))
-const MODE_OFFSET: usize = 8;
 
 @cfg(any(target_os = "linux", target_os = "android"))
 const MODE_BYTES: usize = 4;
@@ -1048,10 +1062,8 @@ const MODE_BYTES: usize = 2;
 /// Where `d_name` is in `struct dirent`.
 @cfg(any(target_os = "linux", target_os = "android"))
 const NAME_OFFSET: usize = 19;
-@cfg(any(target_os = "ios", all(target_os = "macos", target_arch = "aarch64")))
+@cfg(any(target_os = "macos", target_os = "ios"))
 const NAME_OFFSET: usize = 21;
-@cfg(all(target_os = "macos", target_arch = "x86_64"))
-const NAME_OFFSET: usize = 8;
 
 /// `path` as a C string, or `None` if it holds a NUL.
 @cfg(unix)
@@ -4218,8 +4230,23 @@ pub struct FileInfo {
 
 @cfg(unix)
 extern "C" {
+  // As `stat` above.
+  @cfg(not(all(target_os = "macos", target_arch = "x86_64")))
   fn lstat(path: *const c_char, info: *mut StatBuffer) -> c_int;
+  @cfg(all(target_os = "macos", target_arch = "x86_64"))
+  @link_name("lstat$INODE64")
+  fn lstat(path: *const c_char, info: *mut StatBuffer) -> c_int;
+  @cfg(not(all(target_os = "macos", target_arch = "x86_64")))
   fn fstat(fd: c_int, info: *mut StatBuffer) -> c_int;
+  @cfg(all(target_os = "macos", target_arch = "x86_64"))
+  @link_name("fstat$INODE64")
+  fn fstat(fd: c_int, info: *mut StatBuffer) -> c_int;
+  // Apple's plain `realpath` is the one before POSIX 2008, kept for old programs; C's headers name
+  // the conforming one.
+  @cfg(not(any(target_os = "macos", target_os = "ios")))
+  fn realpath(path: *const c_char, resolved: *mut c_char) -> *mut c_char;
+  @cfg(any(target_os = "macos", target_os = "ios"))
+  @link_name("realpath$DARWIN_EXTSN")
   fn realpath(path: *const c_char, resolved: *mut c_char) -> *mut c_char;
 }
 
@@ -4227,10 +4254,8 @@ extern "C" {
 /// bytes each part of its `struct timespec` has. Linux and Android have no time of birth in it.
 @cfg(any(target_os = "linux", target_os = "android"))
 const SIZE_OFFSET: usize = 48;
-@cfg(any(target_os = "ios", all(target_os = "macos", target_arch = "aarch64")))
+@cfg(any(target_os = "macos", target_os = "ios"))
 const SIZE_OFFSET: usize = 96;
-@cfg(all(target_os = "macos", target_arch = "x86_64"))
-const SIZE_OFFSET: usize = 72;
 
 @cfg(all(any(target_os = "linux", target_os = "android"), not(all(target_os = "android", target_pointer_width = "32"))))
 const ACCESS_OFFSET: usize = 72;
@@ -4240,19 +4265,15 @@ const MODIFY_OFFSET: usize = 88;
 const ACCESS_OFFSET: usize = 72;
 @cfg(all(target_os = "android", target_pointer_width = "32"))
 const MODIFY_OFFSET: usize = 80;
-@cfg(any(target_os = "ios", all(target_os = "macos", target_arch = "aarch64")))
+@cfg(any(target_os = "macos", target_os = "ios"))
 const ACCESS_OFFSET: usize = 32;
-@cfg(any(target_os = "ios", all(target_os = "macos", target_arch = "aarch64")))
+@cfg(any(target_os = "macos", target_os = "ios"))
 const MODIFY_OFFSET: usize = 48;
-@cfg(all(target_os = "macos", target_arch = "x86_64"))
-const ACCESS_OFFSET: usize = 24;
-@cfg(all(target_os = "macos", target_arch = "x86_64"))
-const MODIFY_OFFSET: usize = 40;
 
-/// The time of birth, which only the 64-bit `struct stat` of Apple's systems has; 0 for none.
-@cfg(any(target_os = "ios", all(target_os = "macos", target_arch = "aarch64")))
+/// The time of birth, which only the `struct stat` of Apple's systems has; 0 for none.
+@cfg(any(target_os = "macos", target_os = "ios"))
 const BIRTH_OFFSET: usize = 80;
-@cfg(any(target_os = "linux", target_os = "android", all(target_os = "macos", target_arch = "x86_64")))
+@cfg(any(target_os = "linux", target_os = "android"))
 const BIRTH_OFFSET: usize = 0;
 
 @cfg(all(target_os = "android", target_pointer_width = "32"))

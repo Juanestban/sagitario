@@ -12,6 +12,13 @@ struct Timespec;
 struct StatBuffer;
 struct PollFd;
 typedef void (*sag_cp0)(int);
+#if defined(__GNUC__)
+#define SAG_LINK_STRING(text) #text
+#define SAG_LINK_PREFIX(prefix) SAG_LINK_STRING(prefix)
+#define SAG_LINK_NAME(symbol) SAG_LINK_PREFIX(__USER_LABEL_PREFIX__) symbol
+#else
+#error "a `@link_name` holding `$` needs clang or gcc"
+#endif
 
 extern int* __error(void);
 int32_t* sag_ffi_1(void) {
@@ -103,24 +110,24 @@ int32_t sag_ffi_27(int8_t const* a0) {
   return unlink((char const*)a0);
 }
 
-extern void* opendir(char const* a0);
-void* sag_ffi_30(int8_t const* a0) {
-  return (void*)opendir((char const*)a0);
+extern int sag_link_30(char const* a0, struct StatBuffer* a1) __asm__(SAG_LINK_NAME("stat$INODE64"));
+int32_t sag_ffi_30(int8_t const* a0, sag_s19* a1) {
+  return sag_link_30((char const*)a0, (struct StatBuffer*)a1);
 }
 
-extern uint8_t const* readdir(void* a0);
-uint8_t const* sag_ffi_31(void* a0) {
-  return (uint8_t const*)readdir((void*)a0);
+extern void* sag_link_31(char const* a0) __asm__(SAG_LINK_NAME("opendir$INODE64"));
+void* sag_ffi_31(int8_t const* a0) {
+  return (void*)sag_link_31((char const*)a0);
+}
+
+extern uint8_t const* sag_link_32(void* a0) __asm__(SAG_LINK_NAME("readdir$INODE64"));
+uint8_t const* sag_ffi_32(void* a0) {
+  return (uint8_t const*)sag_link_32((void*)a0);
 }
 
 extern int closedir(void* a0);
-int32_t sag_ffi_32(void* a0) {
+int32_t sag_ffi_33(void* a0) {
   return closedir((void*)a0);
-}
-
-extern int stat(char const* a0, struct StatBuffer* a1);
-int32_t sag_ffi_33(int8_t const* a0, sag_s19* a1) {
-  return stat((char const*)a0, (struct StatBuffer*)a1);
 }
 
 extern int close(int a0);

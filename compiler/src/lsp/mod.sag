@@ -12,6 +12,8 @@ use pkg::lsp::json::{Json, member};
 use pkg::lsp::positions::{LineIndex, Position};
 use pkg::lsp::protocol;
 use pkg::lsp::query;
+use pkg::lsp::signatures;
+use pkg::lsp::signatures::Help;
 use pkg::lsp::tokens;
 use pkg::loader::path_key;
 use pkg::span::Span;
@@ -100,6 +102,8 @@ class Server {
       protocol::respond(id, self.definition(params));
     } else if method == "textDocument/completion" {
       protocol::respond(id, self.completion(params));
+    } else if method == "textDocument/signatureHelp" {
+      protocol::respond(id, self.signature_help(params));
     } else if method == "textDocument/documentSymbol" {
       protocol::respond(id, self.symbols(params));
     } else if method == "textDocument/semanticTokens/full" {
@@ -179,7 +183,9 @@ class Server {
     self.analyses.insert(key, result);
     self.programs.insert(path_key(document.path), key);
 
-    if result.typed.is_some() {
+    // An analysis with syntax errors misses what the parser skipped: the latest one without them
+    // answers better about the rest (docs/adr/0109-language-server-members.md).
+    if result.typed.is_some() && (!result.syntax_errors || !self.typed.contains_key(key)) {
       self.typed.insert(key, result);
     }
 
@@ -251,13 +257,75 @@ class Server {
     };
 
     match query::hover(located.analysis, located.module, located.offset) {
-      Some(text) => {
-        const contents = json::object(List::from([member("kind", json::str("markdown")), member("value", json::str("```sagitario\n" + text + "\n```"))]));
+      Some(found) => {
+        const doc = if found.doc.is_empty() { "" } else { "\n\n---\n\n" + found.doc };
+        const contents = json::object(List::from([member("kind", json::str("markdown")), member("value", json::str("```sagitario\n" + found.code + "\n```" + doc))]));
 
         json::object(List::from([member("contents", contents)]))
       }
       None => Json::Null,
     }
+  }
+
+  /// The signature of the call the cursor is in (docs/adr/0109-language-server-members.md).
+  prv fn signature_help(self, params: Json) -> Json {
+    const document = match self.document(params) {
+      Some(found) => found,
+      None => return Json::Null,
+    };
+    const offset = new LineIndex(document.text).offset(Server::position(params));
+    const call = match signatures::open_call(document.text, offset) {
+      Some(found) => found,
+      None => return Json::Null,
+    };
+    var found = self.analysis_of(document, true);
+    var module = Server::module_in(found, document);
+    var result: Option<Help> = None;
+
+    match call.dot {
+      Some(dot) => {
+        // The receiver's type, as for completion after `.`.
+        if !completion::knows_receiver(found, module, document.text, dot) {
+          found = self.without_member(document, dot, offset);
+          module = Server::module_in(found, document);
+        }
+
+        if let Some(analysis) = found {
+          if let Some(in_module) = module {
+            result = signatures::of_method(analysis, in_module, dot, call.segments[0], call.argument);
+          }
+        }
+      }
+      None => {
+        if let Some(analysis) = found {
+          if let Some(in_module) = module {
+            result = signatures::of_path(analysis, in_module, call.segments, call.argument);
+          }
+        }
+      }
+    }
+
+    const shown = match result {
+      Some(value) => value,
+      None => return Json::Null,
+    };
+    const parameters: List<Json> = new List();
+
+    for param in shown.params {
+      parameters.push(json::object(List::from([member("label", json::str(param))])));
+    }
+
+    const fields = List::from([member("label", json::str(shown.label)), member("parameters", Json::Array(parameters))]);
+
+    if !shown.doc.is_empty() {
+      fields.push(member("documentation", json::object(List::from([member("kind", json::str("markdown")), member("value", json::str(shown.doc))]))));
+    }
+
+    json::object(List::from([
+      member("signatures", Json::Array(List::from([json::object(fields)]))),
+      member("activeSignature", json::int(0)),
+      member("activeParameter", json::int(shown.active as i64)),
+    ]))
   }
 
   prv fn definition(self, params: Json) -> Json {
@@ -279,24 +347,87 @@ class Server {
     };
     // The cursor is in the text being typed, which the analysis may not have read.
     const offset = new LineIndex(document.text).offset(Server::position(params));
-    const found = self.analysis_of(document, true);
-    var module: Option<Module> = None;
+    var found = self.analysis_of(document, true);
+    var module = Server::module_in(found, document);
+
+    // After `.`, the receiver's type comes from an analysis of the text as it is now; while it
+    // does not compile, of the text without the member being typed
+    // (docs/adr/0109-language-server-members.md).
+    if let Some(dot) = completion::member_dot(document.text, offset) {
+      if !completion::knows_receiver(found, module, document.text, dot) {
+        if let Some(patched) = self.without_member(document, dot, offset) {
+          found = Some(patched);
+          module = Server::module_in(found, document);
+        }
+      }
+    }
+
     var module_index: Option<usize> = None;
 
     if let Some(analysis) = found {
       module_index = analysis.module_of(document.path);
-
-      if let Some(index) = module_index {
-        if let Some(package) = analysis.package {
-          module = package.modules.get(index);
-        }
-      }
     }
 
     const trigger = json::as_str(json::at(params, List::from(["context", "triggerCharacter"])));
     const items = completion::complete(found, module, module_index, document.text, offset, trigger);
 
     json::object(List::from([member("isIncomplete", Json::Bool(false)), member("items", items)]))
+  }
+
+  /// The module of a document in an analysis.
+  prv fn module_in(analysis: Option<Analysis>, document: Document) -> Option<Module> {
+    const found = analysis?;
+
+    found.package?.modules.get(found.module_of(document.path)?)
+  }
+
+  /// An analysis of the document without the `.` at `dot` and the name after it, up to `offset`:
+  /// what comes before the `.` then compiles as it would once the member is written. If the
+  /// statement then lacks its `;`, it is given one. The first that parses is chosen, else the last
+  /// that reached the type checker, whose syntax errors may be elsewhere.
+  prv fn without_member(self, document: Document, dot: u32, offset: u32) -> Option<Analysis> {
+    const head = document.text.substring(0, dot as usize);
+    const tail = document.text.substring(offset as usize, document.text.len());
+    var fallback: Option<Analysis> = None;
+
+    const texts = List::from([head + tail, head + ";" + tail]);
+
+    // The `)` the editor closed by itself after `receiver.name(`.
+    if tail.trim_start().starts_with(")") {
+      const after = tail.trim_start().substring(1, tail.trim_start().len());
+
+      texts.push(head + after);
+      texts.push(head + ";" + after);
+    }
+
+    for text in texts {
+      const documents = new Map<String, Document>();
+
+      for entry in self.documents.entries() {
+        documents.insert(entry.key, entry.value);
+      }
+
+      documents.insert(path_key(document.path), new Document(document.uri, document.path, text));
+
+      const internal: List<String> = new List();
+      var entry = analysis::find_entry(document.path);
+      var result = analysis::analyze(entry, documents, internal);
+
+      if !result.contains(document.path) && path_key(entry.path) != path_key(document.path) {
+        entry = analysis::alone(document.path);
+        result = analysis::analyze(entry, documents, internal);
+      }
+
+      if result.typed.is_some() {
+        if !result.syntax_errors {
+          return Some(result);
+        }
+
+        fallback = Some(result);
+      }
+    }
+
+    fallback
   }
 
   /// The semantic tokens of a document, from an analysis that read its current text: tokens of
@@ -364,6 +495,7 @@ fn initialize_result() -> Json {
     member("hoverProvider", Json::Bool(true)),
     member("definitionProvider", Json::Bool(true)),
     member("completionProvider", completion_options),
+    member("signatureHelpProvider", json::object(List::from([member("triggerCharacters", Json::Array(List::from([json::str("("), json::str(",")])))]))),
     member("documentSymbolProvider", Json::Bool(true)),
     member("semanticTokensProvider", json::object(List::from([member("legend", tokens::legend()), member("full", Json::Bool(true))]))),
   ]));

@@ -205,7 +205,12 @@ class Dumper {
         self.depth += 1;
 
         for function in block.functions {
-          self.line("function", "ExternFn", Some(function.span), None, ident(function.name) + " " + visibility(function.visibility));
+          const link_text = match function.link_name {
+            Some(link_name) => " link_name=" + lexer::quote(link_name.symbol) + "@" + span_text(link_name.span),
+            None => "",
+          };
+
+          self.line("function", "ExternFn", Some(function.span), None, ident(function.name) + " " + visibility(function.visibility) + link_text);
           self.depth += 1;
           self.params(function.params);
 
@@ -228,7 +233,10 @@ class Dumper {
       Item::Static(decl) => {
         const mutable_text = if decl.mutable { " var" } else { "" };
         const thread_local_text = if decl.thread_local { " thread_local" } else { "" };
-        const extern_text = if decl.extern_c { " extern" } else { "" };
+        const extern_text = match decl.link_name {
+          Some(link_name) => " extern link_name=" + lexer::quote(link_name.symbol) + "@" + span_text(link_name.span),
+          None => if decl.extern_c { " extern" } else { "" },
+        };
 
         self.line("item", "Static", Some(decl.span), None, ident(decl.name) + " " + visibility(decl.visibility) + mutable_text + thread_local_text + extern_text);
         self.depth += 1;

@@ -23,11 +23,38 @@ fn main() {
 ## Importing C functions
 
 - Functions declared in `extern "C" { ... }` can only be called inside an `unsafe` block.
-  Their names are their C symbols; each one may be `pub`, like any function.
+  Their names are their C symbols, unless given by `@link_name` (below); each one may be `pub`,
+  like any function.
 - A C function may be declared in several blocks, always with the same signature.
 - Parameters and results must be FFI-safe (below); a function returning `()` returns `void`.
 - The C standard library is always linked. A package links other C libraries and C sources
   with `[link]` in its `Nova.toml` (F3, [Nova](../nova.md#linking-c)).
+
+## Link names
+
+Rationale: [ADR-0108](../adr/0108-link-names.md) (Q770-Q773).
+
+```sag
+extern "C" {
+  @link_name("abs")
+  fn absolute(value: c_int) -> c_int;
+
+  @cfg(all(target_os = "macos", target_arch = "x86_64"))
+  @link_name("readdir$INODE64")
+  fn readdir(dir: *mut c_void) -> *const u8;
+}
+```
+
+- `@link_name("symbol")` before a function or a global of an `extern "C"` block gives its C
+  symbol: Sagitario code uses the declared name, and the linker sees the symbol. It is written
+  once, with one string, and nowhere else (`E0105`); an `extern "C" fn` chooses its symbol with
+  `@export`.
+- The symbol follows the rules of [C symbols](#c-symbols), and may also hold `$` after its first
+  character, as Apple's variants of its C library do (`readdir$INODE64`, `realpath$DARWIN_EXTSN`).
+  A symbol holding `$` needs clang or gcc: C cannot name it, so the generated C declares it with an
+  assembler label, and other C compilers (MSVC `cl`) stop.
+- A symbol declared under several names, with or without `@link_name`, is one C function: every
+  declaration has the same signature (`E0208`).
 
 ## Variadic functions
 
@@ -158,8 +185,8 @@ unsafe { c_counter += 1; }
 
 ## C symbols
 
-A symbol (the name of an imported function or C global, or an exported function) must be an ASCII C
-identifier. It cannot be a C keyword, `main`, a name reserved by C (starting with `__` or with
+A symbol (the name or `@link_name` of an imported function or C global, or an exported function)
+must be an ASCII C identifier; a `@link_name` may also hold `$` after its first character. It cannot be a C keyword, `main`, a name reserved by C (starting with `__` or with
 `_` and an uppercase letter), a name starting with `sag_` (the runtime's) or ending in `_t`,
 and each symbol is defined once.
 

@@ -1,0 +1,51 @@
+use std::ffi::{c_int, c_char, CString};
+use std::fs;
+use std::io;
+
+extern "C" {
+  /// The absolute value of an integer.
+  fn abs(value: c_int) -> c_int;
+  fn strlen(text: *const c_char) -> usize;
+}
+
+/// A box holding one value.
+class Holder<T> {
+  /// What the box holds.
+  pub var value: T;
+
+  pub fn new(self, value: T) {
+    self.value = value;
+  }
+
+  /// The value held.
+  pub fn get(self) -> T {
+    self.value
+  }
+}
+
+/// A shape of the plane.
+enum Shape {
+  /// A circle, by its radius.
+  Circle(f64),
+  Square(f64),
+}
+
+/// Reads a file and counts its lines.
+fn count_lines(path: String) -> Result<usize, io::Error> {
+  const text = fs::read_to_string(path)?;
+  Ok(text.lines().count())
+}
+
+fn main() {
+  const words = "a b c".split(" ");
+  const first = words.first().unwrap().trim().to_uppercase();
+  const result = count_lines("x.txt");
+  const counted = result.unwrap();
+  const n = unsafe { abs(-3) };
+  const c = CString::new("hi").unwrap();
+  const len = unsafe { strlen(c.as_ptr()) };
+  const holder = new Holder("text");
+  const got = holder.get().len();
+  const shape = Shape::Circle(1.0);
+  const next = holder.get().
+}
