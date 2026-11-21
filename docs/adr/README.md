@@ -119,6 +119,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0109](0109-language-server-members.md) | What the language server knows of members | Accepted |
 | [0110](0110-the-core-in-sagitario.md) | The core in Sagitario | Accepted |
 | [0111](0111-modules-as-rust.md) | Modules as Rust's | Accepted |
+| [0112](0112-language-server-packages-and-inlay-hints.md) | The language server sees packages as Nova builds them, and shows inferred types | Accepted |
 
 ## Template
 

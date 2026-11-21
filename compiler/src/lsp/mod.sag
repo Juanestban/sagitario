@@ -7,7 +7,9 @@ pub mod analysis;
 pub mod builtins;
 pub mod completion;
 pub mod docs;
+pub mod hints;
 pub mod json;
+pub mod package;
 pub mod positions;
 pub mod protocol;
 pub mod query;
@@ -22,6 +24,7 @@ use pkg::lsp::signatures::Help;
 use pkg::loader::path_key;
 use pkg::span::Span;
 use pkg::version;
+use std::path;
 
 /// Kinds of document symbols (LSP's `SymbolKind`).
 const CLASS: i64 = 5;
@@ -47,6 +50,8 @@ class Server {
   prv const programs: Map<String, String>;
   /// The URIs whose last published diagnostics were not empty.
   prv const reported: Map<String, bool>;
+  /// The packages whose build scripts the server ran (docs/adr/0112-language-server-packages-and-inlay-hints.md, Q801).
+  prv const built: Map<String, bool>;
   pub var shutdown: bool;
 
   pub fn new(self) {
@@ -54,6 +59,7 @@ class Server {
     self.analyses = new Map<String, Analysis>();
     self.typed = new Map<String, Analysis>();
     self.programs = new Map<String, String>();
+    self.built = new Map<String, bool>();
     self.reported = new Map<String, bool>();
     self.shutdown = false;
   }
@@ -110,6 +116,11 @@ class Server {
       protocol::respond(id, self.signature_help(params));
     } else if method == "textDocument/documentSymbol" {
       protocol::respond(id, self.symbols(params));
+    } else if method == "textDocument/inlayHint" {
+      match self.inlay_hints(params) {
+        Some(found) => protocol::respond(id, found),
+        None => protocol::respond_error(id, protocol::CONTENT_MODIFIED, "the document changed since its last analysis"),
+      }
     } else if method == "textDocument/semanticTokens/full" {
       match self.semantic_tokens(params) {
         Some(found) => protocol::respond(id, found),
@@ -146,6 +157,21 @@ class Server {
       }
     } else if method == "textDocument/didSave" {
       if let Some(document) = self.document(params) {
+        // A build script that changed may write other files: run it again, then analyse what
+        // is open with them.
+        if path::file_name(document.path).unwrap_or("") == "build.sag" {
+          if let Some(dir) = analysis::find_entry(document.path).package {
+            package::run_build_scripts(dir);
+            self.built.insert(path_key(dir), true);
+
+            for other in self.documents.values() {
+              self.analyze(other);
+            }
+
+            return;
+          }
+        }
+
         self.analyze(document);
       }
     } else if method == "textDocument/didClose" {
@@ -172,6 +198,21 @@ class Server {
     var entry = analysis::find_entry(document.path);
     var result = analysis::analyze(entry, self.documents, internal);
     var unlinked: Option<String> = None;
+
+    // Build scripts that never ran: once, so the files they write exist.
+    var ran = false;
+
+    for dir in result.unbuilt {
+      if !self.built.contains_key(path_key(dir)) {
+        self.built.insert(path_key(dir), true);
+        package::run_build_scripts(dir);
+        ran = true;
+      }
+    }
+
+    if ran {
+      result = analysis::analyze(entry, self.documents, internal);
+    }
 
     // A file the program of its directory does not reach is analysed alone.
     if !result.contains(document.path) && path_key(entry.path) != path_key(document.path) {
@@ -447,6 +488,28 @@ class Server {
 
   /// The semantic tokens of a document, from an analysis that read its current text: tokens of
   /// an older text would color the wrong names.
+  /// The inferred types of the bindings of a document, from an analysis that read its current
+  /// text (docs/adr/0112-language-server-packages-and-inlay-hints.md, Q803).
+  prv fn inlay_hints(self, params: Json) -> Option<Json> {
+    const document = self.document(params)?;
+    const first = json::as_u32(json::at(params, List::from(["range", "start", "line"]))).unwrap_or(0);
+    const last = json::as_u32(json::at(params, List::from(["range", "end", "line"]))).unwrap_or(4294967295u32);
+
+    for typed in List::from([true, false]) {
+      if let Some(found) = self.analysis_of(document, typed) {
+        if let Some(index) = found.module_of(document.path) {
+          const module = found.package?.modules.get(index)?;
+
+          if found.sources.get(module.file)?.text == document.text && found.typed.is_some() {
+            return Some(hints::inlay_hints(found, module, first, last));
+          }
+        }
+      }
+    }
+
+    None
+  }
+
   prv fn semantic_tokens(self, params: Json) -> Option<Json> {
     const document = self.document(params)?;
 
@@ -512,6 +575,7 @@ fn initialize_result() -> Json {
     member("completionProvider", completion_options),
     member("signatureHelpProvider", json::object(List::from([member("triggerCharacters", Json::Array(List::from([json::str("("), json::str(",")])))]))),
     member("documentSymbolProvider", Json::Bool(true)),
+    member("inlayHintProvider", Json::Bool(true)),
     member("semanticTokensProvider", json::object(List::from([member("legend", tokens::legend()), member("full", Json::Bool(true))]))),
   ]));
   const info = json::object(List::from([member("name", json::str("sag")), member("version", json::str(version::VERSION))]));

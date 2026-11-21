@@ -29,7 +29,7 @@ fn plain_byte(byte: u8) -> bool {
 
 /// The URI of a file as the server writes them: `/` as the separator, a Windows drive in
 /// lowercase with its colon encoded, and every byte but letters, digits and `/-._~` encoded.
-fn file_uri(file: String) -> String {
+pub(pkg) fn file_uri(file: String) -> String {
   var text = support::slashes(file);
 
   if support::windows() && text.len() >= 2 && text.substring(1, 2) == ":" {
@@ -52,7 +52,7 @@ fn file_uri(file: String) -> String {
 }
 
 /// A JSON string holding `text`.
-fn json_string(text: String) -> String {
+pub(pkg) fn json_string(text: String) -> String {
   const out = new StringBuilder();
 
   out.append("\"");
@@ -101,7 +101,7 @@ fn expand(line: String, uri: String, root: String, dir: String) -> Result<String
 }
 
 /// The bodies of the messages of the server's output.
-fn messages(output: String) -> List<String> {
+pub(pkg) fn messages(output: String) -> List<String> {
   const bodies: List<String> = new List();
   var rest = output;
 

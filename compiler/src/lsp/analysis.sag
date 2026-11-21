@@ -7,6 +7,7 @@ use pkg::diagnostics::{Diagnostic, Diagnostics, Severity};
 use pkg::loader::{Loader, path_key, push_path, windows};
 use pkg::lsp::json;
 use pkg::lsp::json::{Json, member};
+use pkg::lsp::package;
 use pkg::lsp::positions::{LineIndex, Position};
 use pkg::resolve;
 use pkg::resolve::Resolution;
@@ -174,12 +175,17 @@ pub struct Entry {
   /// For a source of the standard library, the module it is (`prelude`, `std` or the name of a
   /// module of `std`); the entry is then a program written by the server that uses it.
   pub std_module: Option<String>;
+  /// The directory of the `Nova.toml` of its package, whose dependencies and build scripts it
+  /// sees as Nova gives them (docs/adr/0112-language-server-packages-and-inlay-hints.md).
+  pub package: Option<String>;
+  /// Whether it is the package's `build.sag`, which sees `bindgen` (Q800).
+  pub build_script: bool;
 }
 
 /// The program of a file alone: a library, since a file without `main` may be a module, and
 /// `sag run` reports a missing `main` where it matters.
 pub fn alone(file: String) -> Entry {
-  Entry { path: file, library: true, std_module: None }
+  Entry { path: file, library: true, std_module: None, package: None, build_script: false }
 }
 
 /// The module of the standard library a file is, if it is one of its sources: a file of a
@@ -230,7 +236,7 @@ pub fn find_entry(file: String) -> Entry {
     // Not a file on disk: the loader reads it from its overrides.
     const dir = path::parent(file).unwrap_or("");
 
-    return Entry { path: push_path(dir, "<std check>.sag"), library: false, std_module: Some(module) };
+    return Entry { path: push_path(dir, "<std check>.sag"), library: false, std_module: Some(module), package: None, build_script: false };
   }
 
   var dir = path::parent(file);
@@ -245,18 +251,18 @@ pub fn find_entry(file: String) -> Entry {
       const build = push_path(current, "build.sag");
 
       if !path_key(file).starts_with(path_key(src)) && fs::is_file(build) {
-        return Entry { path: build, library: false, std_module: None };
+        return Entry { path: build, library: false, std_module: None, package: Some(current), build_script: true };
       }
       const main = push_path(src, "main.sag");
 
       if fs::is_file(main) {
-        return Entry { path: main, library: false, std_module: None };
+        return Entry { path: main, library: false, std_module: None, package: Some(current), build_script: false };
       }
 
       const lib = push_path(src, "lib.sag");
 
       if fs::is_file(lib) {
-        return Entry { path: lib, library: true, std_module: None };
+        return Entry { path: lib, library: true, std_module: None, package: Some(current), build_script: false };
       }
 
       break;
@@ -288,7 +294,7 @@ pub fn find_entry(file: String) -> Entry {
     const main = push_path(current, "main.sag");
 
     if fs::is_file(main) {
-      return Entry { path: main, library: false, std_module: None };
+      return Entry { path: main, library: false, std_module: None, package: None, build_script: false };
     }
 
     const parent = path::parent(current);
@@ -335,6 +341,9 @@ pub class Analysis {
   pub var diagnostics: List<Diagnostic>;
   /// Whether lexical or syntax errors left parts of the program unread.
   pub var syntax_errors: bool;
+  /// The packages whose build scripts have not written their `OUT_DIR` yet
+  /// (docs/adr/0112-language-server-packages-and-inlay-hints.md, Q801).
+  pub var unbuilt: List<String>;
   /// The line index of each source file, by file id, built when needed.
   prv const lines: Map<u32, LineIndex>;
   /// The id of each function in the resolution, by the node id of its declaration.
@@ -351,6 +360,7 @@ pub class Analysis {
     self.typed = None;
     self.diagnostics = new List();
     self.syntax_errors = false;
+    self.unbuilt = new List();
     self.lines = new Map<u32, LineIndex>();
     self.functions = None;
     self.embedded = new Map<String, String>();
@@ -485,6 +495,9 @@ pub fn analyze(entry: Entry, documents: Map<String, Document>, internal: List<St
     loader.overrides.insert(path_key(entry.path), std_check_program(module));
   }
 
+  // The dependencies, `bindgen` and `OUT_DIR` Nova gives the package.
+  result.unbuilt = package::configure(loader, entry);
+
   if !loader.load_entries(sources, diagnostics) || !loader.load_references(sources, diagnostics) {
     result.diagnostics = diagnostics.take();
     return result;
@@ -494,13 +507,15 @@ pub fn analyze(entry: Entry, documents: Map<String, Document>, internal: List<St
   // it cannot read, so the rest of the program is still resolved and checked, into diagnostics
   // nobody sees, for hover and completion while the code being typed does not compile
   // (docs/adr/0109-language-server-members.md).
-  const syntax_errors = diagnostics.has_errors();
+  const syntax_errors = skipped_code(diagnostics);
 
   result.syntax_errors = syntax_errors;
-  const later = if syntax_errors { new Diagnostics() } else { diagnostics };
+  // A build stops after the errors of parsing, those of macros too.
+  const stopped = diagnostics.has_errors();
+  const later = if stopped { new Diagnostics() } else { diagnostics };
   const prelude = loader.load_prelude(sources, later);
 
-  if later.has_errors() && !syntax_errors {
+  if later.has_errors() && !stopped {
     result.diagnostics = diagnostics.take();
     return result;
   }
@@ -603,4 +618,16 @@ pub fn diagnostics_by_file(analysis: Analysis) -> Map<String, List<Json>> {
 /// The text of a module's source.
 pub fn source_of(analysis: Analysis, module: Module) -> Option<SourceFile> {
   analysis.sources.get(module.file)
+}
+
+/// Whether lexical or syntax errors (`E0001`-`E0199`) made the parser skip code; the errors of
+/// macros do not (docs/adr/0112-language-server-packages-and-inlay-hints.md, Q802).
+fn skipped_code(diagnostics: Diagnostics) -> bool {
+  for diagnostic in diagnostics.list() {
+    if diagnostic.is_error() && (diagnostic.code.starts_with("E00") || diagnostic.code.starts_with("E01")) {
+      return true;
+    }
+  }
+
+  false
 }

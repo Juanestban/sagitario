@@ -15,6 +15,11 @@ The sources say 0.32.0.
 
 ### Added
 
+- Inlay hints in the language server, as rust-analyzer's: the inferred type after each binding
+  written without one (`const`, `var`, `for`, the bindings of patterns) and after each parameter
+  of a closure without one; and, inside `env!("`, completion of `OUT_DIR` and of the variables of
+  the environment ([ADR-0112](docs/adr/0112-language-server-packages-and-inlay-hints.md)).
+
 - `@link_name("symbol")` on the functions and globals of `extern "C"` blocks, as Rust's
   `#[link_name]`: Sagitario code calls them by the declared name and the linker sees the symbol,
   which may hold `$` for Apple's variants of its C library (`readdir$INODE64`)
@@ -47,6 +52,14 @@ The sources say 0.32.0.
   ([ADR-0110](docs/adr/0110-the-core-in-sagitario.md)).
 
 ### Fixed
+
+- The language server analyses packages as Nova builds them
+  ([ADR-0112](docs/adr/0112-language-server-packages-and-inlay-hints.md)): `build.sag` sees
+  `bindgen`, the dependencies of `Nova.toml` are loaded, and `env!("OUT_DIR")` is the directory of
+  the package's build script, which the server runs when it never ran, so the C functions of the
+  bindings it includes are found inside `unsafe`. Errors of macros no longer keep hover on the text
+  the file had when it was opened, and hover shows `{unknown}` for a type that could not be
+  inferred.
 
 - The language server knows the type of any receiver before `.`: chains of builtin methods
   (`words.first().unwrap().`), calls of paths (`fs::read_to_string(path).`), C functions and

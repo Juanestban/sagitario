@@ -707,11 +707,9 @@ pub fn hover(analysis: Analysis, module: Module, offset: u32) -> Option<HoverInf
 
       if let Some(local) = local_at(resolution, function, ident.span) {
         if let Some(ty) = typed.local_type(function, local) {
-          if types::is_error(ty) {
-            return None;
-          }
-
-          return Some(info(ident.name + ": " + types::text(ty), ""));
+          // What the checker could not infer, as rust-analyzer shows it
+          // (docs/adr/0112-language-server-packages-and-inlay-hints.md, Q805).
+          return Some(info(ident.name + ": " + types::text(ty).replace("{error}", "{unknown}"), ""));
         }
       }
     }

@@ -402,7 +402,11 @@ Anything expressible in Sagitario belongs in `compiler/std/` instead.
 stdin and stdout. After each change it runs the front end on the program of the document, as
 `sag check` does, with the open documents in place of their files (`Loader::overrides`), and
 keeps the last analysis that reached the type checker for hover, definitions and completion
-while the code being typed does not compile. `lsp/positions.sag` converts LSP's UTF-16 columns
+while the code being typed does not compile. For a file of a package, `lsp/package.sag` gives the loader
+what Nova would: the dependencies of `Nova.toml`, `bindgen` for `build.sag` and the `OUT_DIR` of
+each build script, running `nova check` when they never ran
+([ADR-0112](adr/0112-language-server-packages-and-inlay-hints.md)); `lsp/hints.sag` gives the
+inlay hints of inferred types. `lsp/positions.sag` converts LSP's UTF-16 columns
 to byte offsets, `lsp/query.sag` finds the node under the cursor, `lsp/completion.sag` reads the
 text before the cursor (a member after `.`, an item after `::`, an attribute after `@` and its
 representation after `@repr(`, or a name; typing `(` asks only for the last), `lsp/tokens.sag` gives the names of paths their semantic tokens

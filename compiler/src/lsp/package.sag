@@ -1,0 +1,239 @@
+//! The packages of a program as Nova builds them: the dependencies of `Nova.toml`, the library
+//! `bindgen` of build scripts and the `OUT_DIR` of each package with one
+//! (docs/adr/0112-language-server-packages-and-inlay-hints.md, Q799-Q801).
+
+use pkg::loader::{Loader, path_key, push_path, windows};
+use pkg::lsp::analysis::Entry;
+use pkg::nova::manifest;
+use pkg::nova::toml;
+use std::env;
+use std::fs;
+use std::path;
+use std::process::Command;
+
+/// The library build scripts see, as Nova gives it to them.
+const BINDGEN: String = include_str!("../bindgen.sag");
+
+/// A package of the graph: the one being analysed first.
+struct Member {
+  /// The name its dependents give it, a path root in them; empty for the one being analysed.
+  pub name: String;
+  /// The name of its `Nova.toml`, which names its `OUT_DIR`.
+  pub package_name: String;
+  pub dir: String;
+  pub entry: String;
+  /// Indices in the graph of its dependencies.
+  pub dependencies: List<usize>;
+  pub manifest_dependencies: List<manifest::DependencySpec>;
+}
+
+/// Gives `loader` what Nova would give the program of `entry`. Returns the directories of the
+/// packages whose build scripts have not written their `OUT_DIR` yet.
+pub fn configure(loader: Loader, entry: Entry) -> List<String> {
+  const missing: List<String> = new List();
+  const dir = match entry.package {
+    Some(found) => found,
+    None => return missing,
+  };
+
+  if entry.build_script {
+    const bindgen = bindgen_path(dir);
+
+    if !loader.overrides.contains_key(path_key(bindgen)) {
+      loader.overrides.insert(path_key(bindgen), BINDGEN);
+    }
+
+    loader.add_dependency("bindgen", bindgen, new List());
+    loader.set_direct_dependencies(List::from([0usize]));
+
+    return missing;
+  }
+
+  const graph = read_graph(dir);
+
+  for index in 1..graph.len() {
+    const member = graph[index];
+    const uses: List<usize> = new List();
+
+    for used in member.dependencies {
+      uses.push(used - 1);
+    }
+
+    loader.add_dependency(member.name, member.entry, uses);
+  }
+
+  if let Some(first) = graph.first() {
+    const direct: List<usize> = new List();
+
+    for used in first.dependencies {
+      direct.push(used - 1);
+    }
+
+    loader.set_direct_dependencies(direct);
+  }
+
+  for index in 0..graph.len() {
+    const member = graph[index];
+
+    if !fs::is_file(push_path(member.dir, "build.sag")) {
+      continue;
+    }
+
+    const out_dir = out_dir_of(dir, member.package_name);
+
+    loader.set_env(index, "OUT_DIR", out_dir);
+
+    if !fs::is_file(push_path(path::parent(out_dir).unwrap_or(out_dir), "output")) && !missing.contains(dir) {
+      missing.push(dir);
+    }
+  }
+
+  missing
+}
+
+/// Where Nova writes `bindgen` for the build scripts of the package in `dir`.
+pub fn bindgen_path(dir: String) -> String {
+  push_path(push_path(push_path(push_path(push_path(dir, "target"), "debug"), "build"), ".bindgen"), "lib.sag")
+}
+
+/// The `OUT_DIR` of the package `name` when Nova builds the package in `top`: that of the debug
+/// profile, or of the release one when only it exists.
+pub fn out_dir_of(top: String, name: String) -> String {
+  const target = push_path(top, "target");
+  const debug = push_path(push_path(push_path(push_path(target, "debug"), "build"), name), "out");
+  const release = push_path(push_path(push_path(push_path(target, "release"), "build"), name), "out");
+
+  if !fs::is_dir(debug) && fs::is_dir(release) { release } else { debug }
+}
+
+/// The variables Nova gives `env!` in the package in `dir`: `OUT_DIR` when it has a build script
+/// (Q804).
+pub fn variables_of(dir: Option<String>) -> List<String> {
+  const names: List<String> = new List();
+
+  if let Some(found) = dir {
+    if fs::is_file(push_path(found, "build.sag")) {
+      names.push("OUT_DIR");
+    }
+  }
+
+  names
+}
+
+/// Runs `nova check` in the package in `dir`, which runs the build scripts of its graph (Q801).
+/// Its output is not shown: the next analysis reports what is still wrong.
+pub fn run_build_scripts(dir: String) -> bool {
+  const command = new Command(nova_path()).arg("check").current_dir(dir).input("");
+
+  match command.output() {
+    Ok(found) => found.status.success(),
+    Err(_) => false,
+  }
+}
+
+/// The `nova` next to the running `sag`, else the one on `PATH`.
+fn nova_path() -> String {
+  const name = if windows() { "nova.exe" } else { "nova" };
+
+  if let Ok(exe) = env::current_exe() {
+    if let Some(dir) = path::parent(exe) {
+      const candidate = push_path(dir, name);
+
+      if fs::is_file(candidate) {
+        return candidate;
+      }
+    }
+  }
+
+  "nova"
+}
+
+/// The package in `dir` and the packages it depends on, each once, as Nova loads them. A manifest
+/// that cannot be read gives its package no dependencies.
+fn read_graph(dir: String) -> List<Member> {
+  const graph: List<Member> = new List();
+
+  add_member(graph, "", dir);
+
+  var index = 0usize;
+
+  while index < graph.len() {
+    const member = graph[index];
+
+    for spec in member.manifest_dependencies {
+      const found = normalize(push_path(member.dir, spec.path));
+      var position: Option<usize> = None;
+
+      for other in 0..graph.len() {
+        if path_key(graph[other].dir) == path_key(found) {
+          position = Some(other);
+        }
+      }
+
+      const at = match position {
+        Some(existing) => existing,
+        None => {
+          if !fs::is_file(push_path(found, manifest::FILE_NAME)) {
+            continue;
+          }
+
+          add_member(graph, spec.name, found);
+          graph.len() - 1
+        }
+      };
+
+      // A package reaching the one being analysed is a cycle `nova check` reports.
+      if at != 0 && !member.dependencies.contains(at) {
+        member.dependencies.push(at);
+      }
+    }
+
+    index += 1;
+  }
+
+  graph
+}
+
+fn add_member(graph: List<Member>, name: String, dir: String) {
+  const src = push_path(dir, "src");
+  const main = push_path(src, "main.sag");
+  const entry = if fs::is_file(main) { main } else { push_path(src, "lib.sag") };
+  var package_name = name;
+  var dependencies: List<manifest::DependencySpec> = new List();
+
+  if let Some(found) = read_manifest(dir) {
+    package_name = found.name;
+    dependencies = found.dependencies;
+  }
+
+  graph.push(Member { name: name, package_name: package_name, dir: dir, entry: entry, dependencies: new List(), manifest_dependencies: dependencies });
+}
+
+fn read_manifest(dir: String) -> Option<manifest::Manifest> {
+  const text = fs::read_to_string(push_path(dir, manifest::FILE_NAME)).ok()?;
+  const document = toml::parse(0, text).ok()?;
+
+  manifest::read(document).ok()
+}
+
+/// `dir` without `.` and `..` segments, which a dependency's relative path brings.
+fn normalize(dir: String) -> String {
+  const separator = if windows() { "\\" } else { "/" };
+  const unified = dir.replace("\\", "/");
+  const parts: List<String> = new List();
+
+  for part in unified.split("/") {
+    if part == "." {
+      continue;
+    }
+
+    if part == ".." && !parts.is_empty() && parts[parts.len() - 1] != ".." && parts[parts.len() - 1] != "" {
+      parts.pop();
+      continue;
+    }
+
+    parts.push(part);
+  }
+
+  parts.join(separator)
+}

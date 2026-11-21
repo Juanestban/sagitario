@@ -8,7 +8,10 @@ Support for the [Sagitario](https://github.com/Juanestban/sagitario) programming
   comments of the program and of the standard library; signature help inside calls, with the
   parameter at the cursor; go to definition (`F12` or `Ctrl+Click`, also on the modules of
   `use`, of paths and of `mod name;`, which opens its file); a hint on a file that no `mod`
-  declaration reaches, and completion of the files of the directory after `mod `; completion of members after `.`, with signatures and documentation, after
+  declaration reaches, and completion of the files of the directory after `mod `; inlay hints with the
+  inferred types of bindings and of closure parameters written without one; completion of the
+  variables of `env!("`, `OUT_DIR` included; packages analysed as Nova builds them, with their
+  dependencies, `bindgen` in `build.sag` and the files the build scripts write; completion of members after `.`, with signatures and documentation, after
   any expression (chains of calls such as `words.first().unwrap().`, calls of the standard
   library and of C, generic methods with their type arguments, also while the line does not
   compile): the methods of numbers, text, characters, lists, arrays, slices, maps, sets,

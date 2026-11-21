@@ -13,10 +13,12 @@ use pkg::lsp::docs;
 use pkg::lsp::json;
 use pkg::lsp::json::{Json, member};
 use pkg::loader::push_path;
+use pkg::lsp::package;
 use pkg::lsp::query;
 use pkg::resolve::{ItemRef, ModuleInfo, ParamOwner, Resolution, StdItem, TypeItem};
 use pkg::types;
 use pkg::types::{NamedRef, Type, TypeKind};
+use std::env;
 use std::fs;
 
 /// Kinds of completion items (LSP's `CompletionItemKind`).
@@ -265,6 +267,22 @@ pub fn complete(analysis: Option<Analysis>, module: Option<Module>, module_index
   const separator = if start > 0 { chars.get(start - 1).unwrap_or(' ') } else { ' ' };
   const double_colon = separator == ':' && start >= 2 && chars.get(start - 2).unwrap_or(' ') == ':';
 
+  if separator == '"' && start >= 1 && in_env_macro(chars, start - 1) {
+    const package = match analysis {
+      Some(found) => found.entry.package,
+      None => None,
+    };
+
+    const typed = new StringBuilder();
+
+    for index in start..chars.len() {
+      typed.append_char(chars.get(index).unwrap_or(' '));
+    }
+
+    env_variables(items, package, typed.to_string());
+    return Json::Array(items.list);
+  }
+
   if separator == '@' {
     attributes(items);
     return Json::Array(items.list);
@@ -394,6 +412,68 @@ fn in_cfg(chars: List<char>, start: usize) -> bool {
 }
 
 /// The name of the attribute written as `@name` right before the `(` at `paren`, or `""`.
+/// Whether the quote at `quote` opens the argument of `env!(`.
+fn in_env_macro(chars: List<char>, quote: usize) -> bool {
+  var at = quote;
+
+  while at > 0 && chars.get(at - 1).unwrap_or('x') == ' ' {
+    at -= 1;
+  }
+
+  if at < 5 {
+    return false;
+  }
+
+  const before = new StringBuilder();
+
+  for index in at - 5..at {
+    before.append_char(chars.get(index).unwrap_or(' '));
+  }
+
+  before.to_string() == "env!(" && (at == 5 || !is_name_char(chars.get(at - 6).unwrap_or(' ')))
+}
+
+/// Inside `env!("`: the variables Nova gives the package, then those of the environment, with
+/// their values (docs/adr/0112-language-server-packages-and-inlay-hints.md, Q804).
+fn env_variables(items: Items, package_dir: Option<String>, prefix: String) {
+  const given = package::variables_of(package_dir);
+
+  for name in given {
+    if name.starts_with(prefix) {
+      items.add(name, CONSTANT, "set by Nova for the package's build script");
+    }
+  }
+
+  const vars = env::vars();
+
+  vars.sort_by((a, b) => a.0.compare(b.0));
+
+  for pair in vars {
+    // Those starting with what is typed: the environment is long.
+    if !given.contains(pair.0) && pair.0.starts_with(prefix) {
+      items.add(pair.0, CONSTANT, shorten(pair.1, 80));
+    }
+  }
+}
+
+/// The first `limit` characters of `text`, with `…` when it is longer.
+fn shorten(text: String, limit: usize) -> String {
+  const out = new StringBuilder();
+  var count = 0usize;
+
+  for c in text.chars() {
+    if count == limit {
+      out.append("…");
+      break;
+    }
+
+    out.append_char(c);
+    count += 1;
+  }
+
+  out.to_string()
+}
+
 /// The word before the spaces that end at `end`.
 fn word_before(chars: List<char>, end: usize) -> String {
   var stop = end;

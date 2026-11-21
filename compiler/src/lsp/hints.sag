@@ -1,0 +1,102 @@
+//! Inlay hints: the type the compiler inferred after each binding written without one, as
+//! rust-analyzer shows them (docs/adr/0112-language-server-packages-and-inlay-hints.md, Q803).
+
+use pkg::ast::Module;
+use pkg::lsp::analysis;
+use pkg::lsp::analysis::Analysis;
+use pkg::lsp::json;
+use pkg::lsp::json::{Json, member};
+use pkg::resolve::LocalKind;
+use pkg::types;
+
+/// LSP's `InlayHintKind.Type`.
+const TYPE_HINT: i64 = 1;
+
+/// The hints of `module`, a document the analysis read as it is now, between the lines `first`
+/// and `last`.
+pub fn inlay_hints(found: Analysis, module: Module, first: u32, last: u32) -> Json {
+  const hints: List<Json> = new List();
+  const resolution = match found.resolution {
+    Some(value) => value,
+    None => return Json::Array(hints),
+  };
+  const typed = match found.typed {
+    Some(value) => value,
+    None => return Json::Array(hints),
+  };
+  const text = match found.sources.get(module.file) {
+    Some(source) => source.text,
+    None => return Json::Array(hints),
+  };
+  const chars = text.char_indices().collect();
+  const lines = match found.line_index(module.file) {
+    Some(index) => index,
+    None => return Json::Array(hints),
+  };
+
+  for function in 0..resolution.locals.len() {
+    const locals = resolution.locals[function];
+
+    for index in 0..locals.len() {
+      const local = locals[index];
+
+      if local.span.file != module.file || local.kind == LocalKind::SelfParam || annotated(chars, local.span.end as usize) {
+        continue;
+      }
+
+      const ty = match typed.local_type(function as u32, index as u32) {
+        Some(value) => value,
+        None => continue,
+      };
+
+      const shown = types::text(ty);
+
+      // A type the checker could not infer would mislead.
+      if types::is_error(ty) || shown.contains("{error}") {
+        continue;
+      }
+
+      const position = lines.position(local.span.end);
+
+      if position.line < first || position.line > last {
+        continue;
+      }
+
+      hints.push(json::object(List::from([
+        member("position", analysis::position_json(position)),
+        member("label", json::str(": " + shown)),
+        member("kind", json::int(TYPE_HINT)),
+      ])));
+    }
+  }
+
+  Json::Array(hints)
+}
+
+/// Whether the binding that ends at the byte `end` is followed by `:` and its type. `chars` are
+/// the characters of the text with their byte indices.
+fn annotated(chars: List<(usize, char)>, end: usize) -> bool {
+  // The first character at or after `end`.
+  var low = 0usize;
+  var high = chars.len();
+
+  while low < high {
+    const middle = (low + high) / 2;
+
+    if chars[middle].0 < end {
+      low = middle + 1;
+    } else {
+      high = middle;
+    }
+  }
+
+  while low < chars.len() && chars[low].1.is_whitespace() {
+    low += 1;
+  }
+
+  if low >= chars.len() || chars[low].1 != ':' {
+    return false;
+  }
+
+  low + 1 >= chars.len() || chars[low + 1].1 != ':'
+}

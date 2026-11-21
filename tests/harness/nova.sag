@@ -2,6 +2,7 @@
 //! Building and running need a C compiler, found as `sag` finds it (`SAG_CC`, then `clang`,
 //! `gcc`). Nova runs the compiler under test, through `SAG`.
 
+use pkg::lsp;
 use pkg::suites;
 use pkg::support;
 use pkg::support::{Context, Ran, Test, expect, expect_contains, expect_exit, expect_success};
@@ -32,6 +33,7 @@ pub fn tests() -> List<Test> {
     support::test("links_c_sources_and_libraries_into_programs", links_c_sources_and_libraries),
     support::test("runs_build_scripts_before_their_packages", runs_build_scripts),
     support::test("runs_build_scripts_again_only_when_needed", reruns_build_scripts),
+    support::test("the_language_server_sees_packages_as_nova_builds_them", language_server_sees_packages),
     support::test("reports_build_script_failures", reports_build_script_failures),
     support::test("generates_bindings_with_bindgen", generates_bindings_with_bindgen),
     support::test("generates_bindings_of_the_c_library", generates_bindings_of_the_c_library),
@@ -724,12 +726,9 @@ fn links_c_sources_and_libraries(cx: Context) -> Result<(), String> {
   expect_contains("nova build", broken.stderr, "cannot compile the C source")
 }
 
-/// The build script of a library and of the program using it
-/// (docs/adr/0103-build-scripts-and-binding-generation.md, Q727-Q730): each one writes Sagitario
-/// to its own `OUT_DIR`, which its package includes, and the library's adds a C source and a
-/// warning; both see the variables Nova gives them.
-fn runs_build_scripts(cx: Context) -> Result<(), String> {
-  const temp = cx.temp_dir("nova")?;
+/// `app`, which uses `geo`, each with a build script that writes Sagitario to its `OUT_DIR`; gives
+/// the directory of `app`.
+fn build_script_packages(temp: String) -> Result<String, String> {
   const geo = path::join(temp, "geo");
   const app = path::join(temp, "app");
 
@@ -773,6 +772,17 @@ fn runs_build_scripts(cx: Context) -> Result<(), String> {
     "",
   ]).join("\n"))?;
 
+  Ok(app)
+}
+
+/// The build script of a library and of the program using it
+/// (docs/adr/0103-build-scripts-and-binding-generation.md, Q727-Q730): each one writes Sagitario
+/// to its own `OUT_DIR`, which its package includes, and the library's adds a C source and a
+/// warning; both see the variables Nova gives them.
+fn runs_build_scripts(cx: Context) -> Result<(), String> {
+  const temp = cx.temp_dir("nova")?;
+  const app = build_script_packages(temp)?;
+
   const run = nova_ok(cx, app, List::from(["run"]))?;
 
   support::expect_equal(`nova run (stderr: ${run.stderr})`, run.stdout, "4 12 debug app 0.1.0 true\n")?;
@@ -793,6 +803,60 @@ fn runs_build_scripts(cx: Context) -> Result<(), String> {
   const release = nova_ok(cx, app, List::from(["run", "--release"]))?;
 
   support::expect_equal(`nova run --release (stderr: ${release.stderr})`, release.stdout, "4 12 release app 0.1.0 true\n")
+}
+
+/// The language server gives a package its dependencies, the `OUT_DIR` of its build scripts, which
+/// it runs when they never ran, and `bindgen` to `build.sag`
+/// (docs/adr/0112-language-server-packages-and-inlay-hints.md, Q799-Q801).
+fn language_server_sees_packages(cx: Context) -> Result<(), String> {
+  const temp = cx.temp_dir("nova")?;
+  const app = build_script_packages(temp)?;
+  const script = path::join(temp, "script");
+
+  package(script, manifest("script", no_pairs()), List::from([pair("main.sag", "fn main() {}\n")]))?;
+  support::write_file(path::join(script, "build.sag"), "fn main() {\n  const builder = new bindgen::Builder();\n\n  builder.header(\"none.h\");\n}\n")?;
+
+  const main = under(app, List::from(["src", "main.sag"]));
+  const output = language_server(cx, List::from([main, path::join(script, "build.sag")]))?;
+
+  for file in List::from([main, path::join(script, "build.sag")]) {
+    const expected = `"uri":"${lsp::file_uri(file)}","diagnostics":[]`;
+
+    expect(output.contains(expected), `no diagnostics expected for ${file}:\n${output}`)?;
+  }
+
+  // It ran the build scripts of `app` and of its dependency.
+  expect(fs::is_file(under(app, List::from(["target", "debug", "build", "geo", "out", "generated.sag"]))), "the build script of `geo` did not run")?;
+  expect(fs::is_file(under(app, List::from(["target", "debug", "build", "app", "out", "info.sag"]))), "the build script of `app` did not run")
+}
+
+/// What `sag lsp` publishes after opening `files`, with Nova under test on `PATH`.
+fn language_server(cx: Context, files: List<String>) -> Result<String, String> {
+  const input = new StringBuilder();
+  const messages: List<String> = List::from([
+    "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"processId\":null,\"capabilities\":{}}}",
+  ]);
+
+  for file in files {
+    const text = support::read_file(file)?;
+
+    messages.push(`{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"${lsp::file_uri(file)}","languageId":"sagitario","version":1,"text":${lsp::json_string(text)}}}}`);
+  }
+
+  messages.push("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"shutdown\"}");
+
+  for body in messages {
+    input.append(`Content-Length: ${body.len()}\r\n\r\n${body}`);
+  }
+
+  const nova_dir = path::parent(nova_binary(cx)?).unwrap_or(".");
+  const separator = if support::windows() { ";" } else { ":" };
+  const search = nova_dir + separator + env::variable("PATH").unwrap_or("");
+
+  match cx.sag_command(List::from(["lsp"])).current_dir(cx.root).env("PATH", search).env("SAG", cx.sag).input(input.to_string()).output() {
+    Ok(found) => Ok(lsp::messages(found.stdout).join("\n")),
+    Err(error) => Err(error.message()),
+  }
 }
 
 /// A build script runs again when what it depends on changes: the paths of `rerun-if-changed`,
