@@ -2668,7 +2668,8 @@ pub class Resolver {
       }
 
       // `std::sys` is the standard library's own (docs/adr/0085-conditional-compilation-and-std-time.md, Q551).
-      var visible = name != "sys" && name != "unicode";
+      // `std::core` too (docs/adr/0110-the-core-in-sagitario.md, Q780).
+      var visible = name != "sys" && name != "unicode" && name != "core";
 
       if let Some(current) = self.resolution.module(self.module) {
         visible = visible || current.in_std;

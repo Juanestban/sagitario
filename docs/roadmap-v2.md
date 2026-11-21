@@ -131,6 +131,11 @@ program.
 - Question: how the bootstrap builds a compiler whose own runtime is Sagitario code, and which
   checks keep a fault in the core from breaking the compiler.
 
+**Status:** in progress. Its record is [ADR-0110](adr/0110-the-core-in-sagitario.md): the core is
+`std::core`, exporting the symbols the generated code calls, without reference counting inside it;
+its C is in the seed with the rest of `std`; the harness with sanitizers and a compiler that
+reproduces itself accept each part; and counts are atomic by type, as Rust's `Rc` and `Arc`.
+
 **Acceptance:** the runtime is Sagitario code. What stays C is the generated code and the system's C
 library; anything else is listed in S3's record with its reason.
 

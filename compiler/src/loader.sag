@@ -27,6 +27,7 @@ const PRELUDE: String = include_str!("../std/prelude.sag");
 const STD_ROOT: String = include_str!("../std/mod.sag");
 
 const STD_COLLECTIONS: String = include_str!("../std/collections.sag");
+const STD_CORE: String = include_str!("../std/core.sag");
 const STD_ENV: String = include_str!("../std/env.sag");
 const STD_FFI: String = include_str!("../std/ffi.sag");
 const STD_FS: String = include_str!("../std/fs.sag");
@@ -47,14 +48,17 @@ const STD_SYS: String = include_str!("../std/sys.sag");
 const STD_UNICODE: String = include_str!("../std/unicode.sag");
 
 /// The modules of `std` whose functions the runtime's core calls, which every program compiles
-/// (docs/adr/0085-conditional-compilation-and-std-time.md, Q552).
-const CORE_STD: String = "env time";
+/// (docs/adr/0085-conditional-compilation-and-std-time.md, Q552), and the core itself
+/// (docs/adr/0110-the-core-in-sagitario.md).
+const CORE_STD: String = "env time core";
 
 /// The source of the standard library module `std::name` written in Sagitario.
 fn std_source(name: String) -> Option<String> {
   // Change this and use match for improve the design
   if name == "collections" {
     Some(STD_COLLECTIONS)
+  } else if name == "core" {
+    Some(STD_CORE)
   } else if name == "env" {
     Some(STD_ENV)
   } else if name == "ffi" {
@@ -698,7 +702,7 @@ pub class Loader {
 
       for name in modules::std_references(module) {
         // `std::sys` and `std::unicode` are the standard library's own (Q551).
-        if attempted_std.contains_key(name) || ((name == "sys" || name == "unicode") && !self.std.contains(index)) {
+        if attempted_std.contains_key(name) || ((name == "sys" || name == "unicode" || name == "core") && !self.std.contains(index)) {
           continue;
         }
 

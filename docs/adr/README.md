@@ -53,7 +53,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0042](0042-library-outputs-and-linking-c.md) | Library outputs and linking C | Accepted (refined by 0044) |
 | [0043](0043-cross-compilation.md) | Cross-compilation to Android and iOS | Accepted |
 | [0044](0044-c-toolchains.md) | C toolchains: MSVC `cl` best-effort, no `zig cc`, and the F3 acceptance program | Accepted (refined by 0067) |
-| [0045](0045-threads-and-send.md) | Threads and `Send` | Accepted (refined by 0046, 0047, 0048) |
+| [0045](0045-threads-and-send.md) | Threads and `Send` | Accepted (refined by 0046, 0047, 0048; Q175 superseded by 0110) |
 | [0046](0046-mutex-and-atomics.md) | `std::sync`: `Mutex` and atomics | Accepted |
 | [0047](0047-channels-and-thread-utilities.md) | Channels and thread utilities | Accepted |
 | [0048](0048-async-await.md) | `async`/`await`, for phase F6 | Accepted (not implemented; moved to F7 by 0057, to F8 by 0063) |
@@ -117,6 +117,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0107](0107-a-seed-per-host.md) | A seed for each host | Accepted |
 | [0108](0108-link-names.md) | Link names | Accepted |
 | [0109](0109-language-server-members.md) | What the language server knows of members | Accepted |
+| [0110](0110-the-core-in-sagitario.md) | The core in Sagitario | Accepted |
 
 ## Template
 

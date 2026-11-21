@@ -29,6 +29,12 @@ The sources say 0.32.0.
 - Completion after `CString::`, `List::`, `Atomic::` and the static functions of builtin types,
   with their signatures, and of variants with their fields.
 
+### Changed
+
+- The runtime's core starts moving to Sagitario, as `std::core`, which every program compiles and
+  only `std` can name: hashing strings and the total order of floats are Sagitario code
+  ([ADR-0110](docs/adr/0110-the-core-in-sagitario.md)).
+
 ### Fixed
 
 - The language server knows the type of any receiver before `.`: chains of builtin methods

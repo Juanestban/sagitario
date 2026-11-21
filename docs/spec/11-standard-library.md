@@ -1147,6 +1147,11 @@ functions, constants and structs, and the reading of `errno`. Only the modules o
 it; for a program it does not exist (`E0200`)
 ([ADR-0085](../adr/0085-conditional-compilation-and-std-time.md), Q551).
 
+`std::core` is the core of the runtime written in Sagitario: reference counting, panics, strings,
+lists and the rest the generated code calls, exported to it under the runtime's C symbols.
+Every program compiles it, and as `std::sys`, only the modules of `std` can name it
+([ADR-0110](../adr/0110-the-core-in-sagitario.md)).
+
 `std::sys::Atomic<T>`, provided by the compiler, holds a `bool` or an integer that threads read
 and change at once; the atomics of `std::sync` are written on it. It is only the type of a
 `const` field of a class, set once in the class's initializer with `Atomic::new(value)` and then

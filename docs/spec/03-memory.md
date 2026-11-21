@@ -25,8 +25,11 @@ and arrays are value types too ([types](02-types.md#tuples-s2)).
   [`drop`](04-classes.md#drop) when the class implements `Drop`. Chains of instances (a long
   linked list) are destroyed iteratively, without exhausting the stack.
 - Class instances are compared with `==`/`!=` by identity (the same instance).
-- Reference counting is **non-atomic**, except in programs using `std::thread` (F4), where
-  every count is atomic ([ADR-0045](../adr/0045-threads-and-send.md)).
+- Reference counting is **non-atomic**, as Rust's `Rc`, except for values that can cross threads
+  in programs using `std::thread` (F4): there the count of a [`Send`](05-interfaces-generics.md#send-f4)
+  value is atomic, as Rust's `Arc`. The kind is fixed when the object is created, by its own type,
+  so an object seen through an interface value or a base class keeps it
+  ([ADR-0110](../adr/0110-the-core-in-sagitario.md), Q784).
 
 ## Bindings: `const` and `var` (F1)
 
