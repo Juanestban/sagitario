@@ -1,0 +1,24 @@
+exit: 0
+--- stdout
+module: Module
+  use: Use 247..263 pub
+    tree: UseTree 251..262 net@251..254::Client@256..262
+  use: Use 273..303 pub(pkg)
+    tree: UseGroup 277..302 util@277..281
+      tree: UseTree 284..288 self@284..288
+      tree: UseTree 290..301 helper@290..296 as h@300..301
+  use: Use 304..319
+    tree: UseGlob 308..318 std@308..311::io@313..315::*
+  mod: Mod 97..105 net@101..104 module
+  mod: Mod 106..119 util@114..118 pub
+  mod: Mod 120..139 store@133..138 pub(pkg)
+  mod: Mod 140..167 parent_only@155..166 pub(super)
+  mod: InlineMod 169..241 tests@173..178 module
+    use: Use 183..196
+      tree: UseGlob 187..195 super@187..192::*
+    mod: Mod 228..239 nested@232..238 module
+    item: Fn 200..224 #0 check@214..219 pub(super) extern_c=false abstract=false override=false
+      body: Block 222..224
+  item: Fn 321..344 #1 shared@333..339 pub(pkg) extern_c=false abstract=false override=false
+    body: Block 342..344
+--- stderr

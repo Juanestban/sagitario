@@ -1,7 +1,7 @@
 # 0024. Modules, imports, visibility and the entry point
 
 - Status: Accepted; visibility amended by [ADR-0025](0025-single-pub-visibility.md) (no `pub(pkg)`);
-  the `std` root refined by [ADR-0037](0037-standard-library-env-io-process.md)
+  the `std` root refined by [ADR-0037](0037-standard-library-env-io-process.md); partly superseded by [ADR-0111](0111-modules-as-rust.md) (modules declared with `mod`).
 - Date: 2026-10-22
 - Amends: [ADR-0010](0010-modules-and-packages.md) (paths, `use` forms and privacy),
   [ADR-0003](0003-static-typing-and-generics.md) and [ADR-0019](0019-prelude-and-printing.md)

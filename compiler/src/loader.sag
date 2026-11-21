@@ -12,8 +12,7 @@ use pkg::lexer;
 use pkg::parser;
 use pkg::parser::Ids;
 use pkg::resolve::modules;
-use pkg::resolve::modules::ModuleRef;
-use pkg::span::{SourceMap, Span};
+use pkg::span::SourceMap;
 use std::env;
 use std::fs;
 use std::io;
@@ -462,6 +461,21 @@ fn has_entry(dir: String, name: String, directory: bool) -> bool {
   entries.contains(name) && fs::is_dir(push_path(base, name)) == directory
 }
 
+/// The directory of the files of the modules a file declares: its own for the root and for
+/// `mod.sag`, `dir/name/` for `dir/name.sag`, as Rust's (docs/adr/0111-modules-as-rust.md, Q791).
+fn children_dir(file: String, root: bool) -> String {
+  const dir = path::parent(file).unwrap_or("");
+
+  if root {
+    return dir;
+  }
+
+  match path::file_name(file) {
+    Some(name) => if name == "mod.sag" { dir } else { push_path(dir, name.substring(0, name.len() - 4)) },
+    None => dir,
+  }
+}
+
 /// A package whose modules are loaded: the input's, or a dependency.
 pub class LoadedPackage {
   /// The name its dependents use as a path root; empty for the input's.
@@ -483,13 +497,6 @@ pub class LoadedPackage {
   }
 }
 
-/// Where the file of a module is.
-enum ModuleFile {
-  File(String),
-  /// `name.sag` next to a directory `name/`, which holds `mod.sag` when `merged`.
-  Conflict { file: String, merged: bool },
-  Missing,
-}
 
 pub class Loader {
   /// The input's package first, then its dependencies.
@@ -591,6 +598,7 @@ pub class Loader {
       self.expand_includes(module, package, sources, diagnostics);
       module.path = module_path;
       module.package = package;
+      module.dir = Some(children_dir(file, module_path.is_empty()));
       self.modules.push(module);
     }
 
@@ -648,10 +656,10 @@ pub class Loader {
     }
   }
 
-  /// Loads the modules the loaded ones refer to that exist as files, and the standard library
-  /// modules they name, until no module names a new one.
+  /// Loads the modules the loaded ones declare with `mod`, the inline ones as modules of their
+  /// own (docs/adr/0111-modules-as-rust.md, Q790 and Q791), and the standard library modules they
+  /// name, until no module declares or names a new one.
   pub fn load_references(self, sources: SourceMap, diagnostics: Diagnostics) -> bool {
-    const attempted = new Map<String, bool>();
     const attempted_std = new Map<String, bool>();
     var index = 0usize;
 
@@ -665,43 +673,13 @@ pub class Loader {
 
     while index < self.modules.len() {
       const module = self.modules[index];
-      const package = module.package;
-      const targets = if self.std.contains(index) { new List<ModuleRef>() } else { modules::module_references(module, self.dependency_names(package)) };
 
-      for target in targets {
-        const target_package = match target.dependency {
-          None => Some(package),
-          Some(name) => self.dependency(package, name),
-        };
-        const found = match target_package {
-          Some(found) => found,
-          None => continue,
-        };
-        const key = `${found}:` + target.path.join("::");
-
-        if attempted.contains_key(key) {
-          continue;
-        }
-
-        attempted.insert(key, true);
-
-        match self.module_file(found, target.path) {
-          ModuleFile::File(file) => {
-            if !self.load(file, target.path, found, sources, diagnostics) {
-              return false;
-            }
-          }
-          ModuleFile::Conflict { file, merged } => {
-            if !self.report_layout(found, target.path, file, merged, sources, diagnostics) {
-              return false;
-            }
-          }
-          ModuleFile::Missing => {}
-        }
+      if !self.std.contains(index) && !self.load_declared(module, sources, diagnostics) {
+        return false;
       }
 
       for name in modules::std_references(module) {
-        // `std::sys` and `std::unicode` are the standard library's own (Q551).
+        // `std::sys`, `std::unicode` and `std::core` are the standard library's own (Q551).
         if attempted_std.contains_key(name) || ((name == "sys" || name == "unicode" || name == "core") && !self.std.contains(index)) {
           continue;
         }
@@ -714,6 +692,57 @@ pub class Loader {
       }
 
       index += 1;
+    }
+
+    true
+  }
+
+  /// Loads the modules `module` declares: the file of each `mod name;`, and each inline
+  /// `mod name { }`. Returns `false`, after printing why, if a file cannot be read.
+  prv fn load_declared(self, module: Module, sources: SourceMap, diagnostics: Diagnostics) -> bool {
+    const dir = module.dir.unwrap_or("");
+
+    for decl in module.mods {
+      const name = decl.name.name;
+      const path: List<String> = new List();
+
+      for segment in module.path {
+        path.push(segment);
+      }
+
+      path.push(name);
+
+      if let Some(body) = decl.body {
+        var inline = body;
+
+        inline.path = path;
+        inline.package = module.package;
+        inline.location = module.location;
+        inline.dir = Some(push_path(dir, name));
+        self.modules.push(inline);
+        continue;
+      }
+
+      const file = push_path(dir, name + ".sag");
+      const nested = push_path(push_path(dir, name), "mod.sag");
+      const has_file = has_entry(dir, name + ".sag", false);
+      const has_nested = has_entry(dir, name, true) && has_entry(push_path(dir, name), "mod.sag", false);
+
+      if has_file && has_nested {
+        diagnostics.push(
+          Diagnostic::error(codes::MODULE_LAYOUT, decl.name.span, `the module \`${name}\` has two files, \`${file}\` and \`${nested}\``)
+            .with_help("keep one file for the module: merge one into the other"),
+        );
+      } else if has_file || has_nested {
+        if !self.load(if has_file { file } else { nested }, path, module.package, sources, diagnostics) {
+          return false;
+        }
+      } else {
+        diagnostics.push(
+          Diagnostic::error(codes::MODULE_NOT_FOUND, decl.name.span, `file not found for module \`${name}\``)
+            .with_help(`create \`${file}\`, or \`${nested}\` for a module with submodules`),
+        );
+      }
     }
 
     true
@@ -772,90 +801,6 @@ pub class Loader {
     }
 
     None
-  }
-
-  /// The file of the module at `module_path` in `package` (docs/spec/09-modules.md#files):
-  /// `name.sag`, or `name/mod.sag` for a module with submodules, with exactly these names. The
-  /// package's entry file is no module, and `mod` names none. Unlike the driver, which compares
-  /// canonical paths, the entry file is recognized by its name: a module of the root directory
-  /// with the entry's name.
-  prv fn module_file(self, package: usize, module_path: List<String>) -> ModuleFile {
-    const loaded = match self.packages.get(package) {
-      Some(found) => found,
-      None => return ModuleFile::Missing,
-    };
-    const last = match module_path.last() {
-      Some(found) => found,
-      None => return ModuleFile::Missing,
-    };
-
-    if module_path.contains("mod") {
-      return ModuleFile::Missing;
-    }
-
-    var dir = loaded.root;
-
-    for index in 0..module_path.len() - 1 {
-      const name = module_path[index];
-
-      if !has_entry(dir, name, true) {
-        return ModuleFile::Missing;
-      }
-
-      dir = push_path(dir, name);
-    }
-
-    const name = last + ".sag";
-    const same = module_path.len() == 1 && match path::file_name(loaded.entry) {
-      Some(entry_name) => entry_name == name,
-      None => false,
-    };
-    const has_file = has_entry(dir, name, false) && !same;
-    const has_dir = has_entry(dir, last, true);
-    const merged = has_dir && has_entry(push_path(dir, last), "mod.sag", false);
-
-    if has_file && has_dir {
-      return ModuleFile::Conflict { file: push_path(dir, name), merged: merged };
-    }
-
-    if has_file {
-      return ModuleFile::File(push_path(dir, name));
-    }
-
-    if merged { ModuleFile::File(push_path(push_path(dir, last), "mod.sag")) } else { ModuleFile::Missing }
-  }
-
-  /// Reports a module with two places for its file: `name.sag` next to a directory `name/`.
-  /// Returns `false`, after printing why, if the file cannot be read.
-  prv fn report_layout(self, package: usize, module_path: List<String>, file: String, merged: bool, sources: SourceMap, diagnostics: Diagnostics) -> bool {
-    const text = match fs::read_to_string(file) {
-      Ok(found) => found,
-      Err(error) => {
-        eprintln(`error: cannot read \`${file}\`: ${error.message()}`);
-        return false;
-      }
-    };
-    const root = match self.packages.get(package) {
-      Some(loaded) => if loaded.name.is_empty() { "pkg" } else { loaded.name },
-      None => "pkg",
-    };
-    const parts = List::from([root]);
-
-    for segment in module_path {
-      parts.push(segment);
-    }
-
-    const name = module_path.last().unwrap_or("");
-    const id = sources.add(file, text);
-    const help = if merged { `keep one file for the module: merge \`${name}.sag\` into \`${name}/mod.sag\`` } else { `move \`${name}.sag\` to \`${name}/mod.sag\`, next to its submodules` };
-
-    diagnostics.push(
-      Diagnostic::error(codes::MODULE_LAYOUT, Span::new(id, 0, 0), `the module \`${parts.join("::")}\` has both the file \`${name}.sag\` and the directory \`${name}/\``)
-        .with_note("a module with submodules is the file `mod.sag` of their directory")
-        .with_help(help),
-    );
-
-    true
   }
 
   /// The package of the program, compiled for `target`: its modules, the prelude and the

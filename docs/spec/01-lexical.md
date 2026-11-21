@@ -23,10 +23,10 @@ treated as comments. A documentation tool (`sag doc`) is post-MVP.
 ```
 abstract  as        async     await     break     class     const     continue
 else      enum      extends   extern    false     fn        for       if
-impl      in        interface let       loop      match     new       override
-pkg       prv       pub       return    self      Self      static    struct
-super     true      unsafe    use       var       weak      where     while
-zod
+impl      in        interface let       loop      match     mod       new
+override  pkg       prv       pub       return    self      Self      static
+struct    super     true      unsafe    use       var       weak      where
+while     zod
 ```
 
 `async` and `await` are those of [`async` functions](12-async.md) (F8), and `static` declares a

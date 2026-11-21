@@ -17,12 +17,13 @@ Phases communicate only through data structures (tokens, AST, typed AST, SIR). T
 global mutable state; `sag check --dump=tokens|ast|resolve|declarations|types|c` prints the
 result of each pass, which the expected dumps of `tests/` check (docs/testing.md).
 
-A program is a *package* of modules, one per file (docs/spec/09-modules.md). The driver lexes
-and parses the entry file, asks `resolve::modules::module_references` which module paths it
-mentions, loads those that exist as files (`pkg::net::http` is `net/http.sag` next to the
-entry file) and repeats for each new module. Resolution builds the module tree, resolves `use`
-declarations and checks visibility; from then on the package is analyzed as a whole, and
-functions and types are numbered across all modules.
+A program is a *package* of modules, declared with `mod` as in Rust (docs/spec/09-modules.md,
+ADR-0111). The loader lexes and parses the entry file, then the file of each `mod name;` it
+declares (`name.sag` or `name/mod.sag`, in the directory `Module::dir` gives), and adds each
+inline `mod name { ... }` as a module of its own; the modules of `std` a program names are loaded
+through `resolve::modules::module_references`. Resolution builds the module tree, resolves `use`
+declarations (again while re-exports find new names) and checks visibility; from then on the
+package is analyzed as a whole, and functions and types are numbered across all modules.
 
 ## Repository layout
 
@@ -216,8 +217,7 @@ runs the executor until the task of `main` finishes.
   values when it ends (`sag_thread_run`), and the main thread at exit.
 - A program can span several packages (`Package::packages`): the one being compiled, then its
   dependencies, each with its own module tree (`Module::package`, `Resolution::package_roots`).
-  The driver loads each dependency's root module and the modules its paths reach
-  (`resolve::modules::module_references` tells which package each one belongs to). `pkg` names
+  The driver loads each dependency's root module and the modules it declares. `pkg` names
   the root of the current module's package, and a dependency's name is a further path root.
   Everything is then checked and lowered as one program. Nova, not the compiler, reads the
   manifests and checks the graph (names, libraries, no cycles).

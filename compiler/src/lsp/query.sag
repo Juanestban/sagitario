@@ -128,6 +128,7 @@ class Finder {
           self.use_tree(inner, segments);
         }
       }
+      UseTreeKind::Glob => {}
     }
   }
 
@@ -676,6 +677,15 @@ fn variant_info(analysis: Analysis, variant: VariantRef) -> Option<HoverInfo> {
 pub fn hover(analysis: Analysis, module: Module, offset: u32) -> Option<HoverInfo> {
   const resolution = analysis.resolution?;
   const typed = analysis.typed?;
+  // `mod name;` and `mod name { ... }`: the module.
+  for decl in module.mods {
+    if contains(decl.name.span, offset) {
+      const item = resolve_path(analysis, module_index_of(analysis, module)?, List::from(["self", decl.name.name]))?;
+
+      return Some(info(item_text(analysis, item)?, ""));
+    }
+  }
+
   const hit = find(analysis, module, offset);
 
   if let Some(found) = hit.path {
@@ -1117,6 +1127,13 @@ pub fn definition(analysis: Analysis, module: Module, offset: u32) -> Option<Spa
   const package = analysis.package?;
   const resolution = analysis.resolution?;
   const typed = analysis.typed?;
+  // `mod name;`: the file of the module (docs/adr/0111-modules-as-rust.md, Q797).
+  for decl in module.mods {
+    if decl.body.is_none() && contains(decl.name.span, offset) {
+      return item_span(analysis, resolve_path(analysis, module_index_of(analysis, module)?, List::from(["self", decl.name.name]))?);
+    }
+  }
+
   const hit = find(analysis, module, offset);
 
   if let Some(found) = hit.path {

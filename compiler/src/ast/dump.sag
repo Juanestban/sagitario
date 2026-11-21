@@ -17,17 +17,7 @@ pub fn dump(module: Module) -> String {
   dumper.line("module", "Module", None, None, "");
   dumper.depth += 1;
 
-  for decl in module.uses {
-    dumper.line("use", "Use", Some(decl.span), None, "");
-    dumper.depth += 1;
-    dumper.use_tree("tree", decl.tree);
-    dumper.depth -= 1;
-  }
-
-  for item in module.items {
-    dumper.item(item);
-  }
-
+  dumper.module_items(module);
   dumper.out.to_string()
 }
 
@@ -54,6 +44,8 @@ fn visibility(visibility: Visibility) -> String {
     Visibility::Module => "module",
     Visibility::Public => "pub",
     Visibility::Private => "prv",
+    Visibility::Package => "pub(pkg)",
+    Visibility::Super => "pub(super)",
   }
 }
 
@@ -93,6 +85,37 @@ class Dumper {
     self.out.append("\n");
   }
 
+  /// The `use` declarations, the `mod` declarations, inline modules with their items, and the
+  /// items of a module.
+  pub fn module_items(self, module: Module) {
+    for decl in module.uses {
+      // The visibility only when the import is a re-export, as old dumps had none.
+      const values = match decl.visibility {
+        Visibility::Module => "",
+        _ => visibility(decl.visibility),
+      };
+
+      self.line("use", "Use", Some(decl.span), None, values);
+      self.depth += 1;
+      self.use_tree("tree", decl.tree);
+      self.depth -= 1;
+    }
+
+    for decl in module.mods {
+      self.line("mod", if decl.body.is_some() { "InlineMod" } else { "Mod" }, Some(decl.span), None, ident(decl.name) + " " + visibility(decl.visibility));
+
+      if let Some(body) = decl.body {
+        self.depth += 1;
+        self.module_items(body);
+        self.depth -= 1;
+      }
+    }
+
+    for item in module.items {
+      self.item(item);
+    }
+  }
+
   pub fn use_tree(self, label: String, tree: UseTree) {
     const prefix = idents(tree.prefix, "::");
 
@@ -104,6 +127,9 @@ class Dumper {
         };
 
         self.line(label, "UseTree", Some(tree.span), None, prefix + suffix);
+      }
+      UseTreeKind::Glob => {
+        self.line(label, "UseGlob", Some(tree.span), None, prefix + "::*");
       }
       UseTreeKind::Group(trees) => {
         self.line(label, "UseGroup", Some(tree.span), None, prefix);

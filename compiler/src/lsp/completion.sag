@@ -3,7 +3,7 @@
 //! attribute after `@` and its argument after `@repr(`, or a name. Types come from the last
 //! analysis of the document that reached the type checker.
 
-use pkg::ast::Module;
+use pkg::ast::{Module, Visibility};
 use pkg::cfg;
 use pkg::lsp::analysis;
 use pkg::lsp::analysis::Analysis;
@@ -12,10 +12,12 @@ use pkg::lsp::builtins::Member;
 use pkg::lsp::docs;
 use pkg::lsp::json;
 use pkg::lsp::json::{Json, member};
+use pkg::loader::push_path;
 use pkg::lsp::query;
 use pkg::resolve::{ItemRef, ModuleInfo, ParamOwner, Resolution, StdItem, TypeItem};
 use pkg::types;
 use pkg::types::{NamedRef, Type, TypeKind};
+use std::fs;
 
 /// Kinds of completion items (LSP's `CompletionItemKind`).
 const METHOD: i64 = 2;
@@ -32,7 +34,7 @@ const ENUM_MEMBER: i64 = 20;
 const CONSTANT: i64 = 21;
 const STRUCT: i64 = 22;
 
-const KEYWORDS: String = "abstract as async await break class const continue else enum extends extern false fn for if impl in interface let loop match new override pkg prv pub return self Self static struct super true union unsafe use var weak where while zod";
+const KEYWORDS: String = "abstract as async await break class const continue else enum extends extern false fn for if impl in interface let loop match mod new override pkg prv pub return self Self static struct super true union unsafe use var weak where while zod";
 
 const BUILTINS: String = "print println eprintln panic assert assert_eq assert_ne unreachable todo";
 
@@ -278,6 +280,14 @@ pub fn complete(analysis: Option<Analysis>, module: Option<Module>, module_index
     return Json::Array(items.list);
   }
 
+  if separator == ' ' && word_before(chars, start) == "mod" {
+    if let Some(found) = module {
+      mod_files(items, found);
+    }
+
+    return Json::Array(items.list);
+  }
+
   // `(` asks only for the argument of an attribute: in a call, the names would cover the code.
   if let Some(character) = trigger {
     if character == "(" || character == "@" {
@@ -384,6 +394,68 @@ fn in_cfg(chars: List<char>, start: usize) -> bool {
 }
 
 /// The name of the attribute written as `@name` right before the `(` at `paren`, or `""`.
+/// The word before the spaces that end at `end`.
+fn word_before(chars: List<char>, end: usize) -> String {
+  var stop = end;
+
+  while stop > 0 && chars.get(stop - 1).unwrap_or('x') == ' ' {
+    stop -= 1;
+  }
+
+  var start = stop;
+
+  while start > 0 && is_name_char(chars.get(start - 1).unwrap_or(' ')) {
+    start -= 1;
+  }
+
+  const word = new StringBuilder();
+
+  for index in start..stop {
+    word.append_char(chars.get(index).unwrap_or(' '));
+  }
+
+  word.to_string()
+}
+
+/// After `mod `: the files of the module's directory that no `mod` of it declares yet, `name.sag`
+/// or `name/mod.sag` (docs/adr/0111-modules-as-rust.md, Q797).
+fn mod_files(items: Items, module: Module) {
+  const dir = match module.dir {
+    Some(found) => found,
+    None => return,
+  };
+  const entries = match fs::read_dir(if dir.is_empty() { "." } else { dir }) {
+    Ok(found) => found,
+    Err(_) => return,
+  };
+  // In the same order on every system.
+  entries.sort();
+
+  const declared: List<String> = new List();
+
+  for decl in module.mods {
+    declared.push(decl.name.name);
+  }
+
+  for entry in entries {
+    const full = push_path(dir, entry);
+    var name = "";
+
+    if entry.ends_with(".sag") && fs::is_file(full) {
+      name = entry.substring(0, entry.len() - 4);
+    } else if fs::is_file(push_path(full, "mod.sag")) {
+      name = entry;
+    }
+
+    // Roots are no submodules.
+    if name.is_empty() || name == "mod" || name == "main" || name == "lib" || name == "build" || declared.contains(name) {
+      continue;
+    }
+
+    items.add_snippet(name, MODULE, "the module of `" + entry + "`", name + ";");
+  }
+}
+
 fn attribute_before(chars: List<char>, paren: usize) -> String {
   var start = paren;
 
@@ -446,15 +518,42 @@ fn module_info(resolution: Resolution, index: usize) -> Option<ModuleInfo> {
   None
 }
 
-fn add_module_items(items: Items, analysis: Analysis, info: ModuleInfo, public_only: bool) {
+/// The names of the module `owner` that code of `viewer` sees, or its public names without a
+/// viewer: items, re-exports and declared modules (docs/adr/0111-modules-as-rust.md, Q797).
+fn add_module_items(items: Items, analysis: Analysis, resolution: Resolution, owner: u32, viewer: Option<u32>) {
+  const info = match resolution.modules.get(owner as usize) {
+    Some(found) => found,
+    None => return,
+  };
+  const sees = (visibility: Visibility) => match viewer {
+    Some(from) => resolution.visible(visibility, owner, from),
+    None => visibility == Visibility::Public,
+  };
+
   for entry in info.items.entries() {
-    if !public_only || entry.value.visibility == pkg::ast::Visibility::Public {
+    if sees(entry.value.visibility) {
       items.add_documented(entry.key, item_kind(entry.value.item), item_detail(analysis, entry.value.item), docs::of_item(analysis, entry.value.item), "");
     }
   }
 
-  for name in info.children.keys() {
-    items.add(name, MODULE, "");
+  // Plain imports are the module's own; `pub use` makes them names of it.
+  for entry in info.imports.entries() {
+    if entry.value.visibility != Visibility::Module && sees(entry.value.visibility) {
+      items.add(entry.key, item_kind(entry.value.item), item_detail(analysis, entry.value.item));
+    }
+  }
+
+  // The modules of `std` and of the prelude need no `mod`.
+  if info.in_std || info.source.is_none() {
+    for name in info.children.keys() {
+      items.add(name, MODULE, "");
+    }
+  } else {
+    for entry in info.mods.entries() {
+      if sees(entry.value.visibility) {
+        items.add(entry.key, MODULE, "");
+      }
+    }
   }
 }
 
@@ -495,7 +594,9 @@ fn names(items: Items, analysis: Analysis, module: Option<Module>, module_index:
 
   if let Some(index) = module_index {
     if let Some(info) = module_info(resolution, index) {
-      add_module_items(items, analysis, info, false);
+      if let Some(id) = query::module_id(resolution, index) {
+        add_module_items(items, analysis, resolution, id, Some(id));
+      }
 
       for entry in info.imports.entries() {
         items.add(entry.key, item_kind(entry.value.item), item_detail(analysis, entry.value.item));
@@ -504,9 +605,7 @@ fn names(items: Items, analysis: Analysis, module: Option<Module>, module_index:
   }
 
   if let Some(prelude) = resolution.prelude {
-    if let Some(info) = resolution.modules.get(prelude as usize) {
-      add_module_items(items, analysis, info, true);
-    }
+    add_module_items(items, analysis, resolution, prelude, None);
   }
 
   items.add("Some", ENUM_MEMBER, "");
@@ -634,13 +733,7 @@ fn path_members(items: Items, analysis: Analysis, module: Option<Module>, module
   match target {
     Some(ItemRef::Module(id)) => {
       if let Some(info) = resolution.modules.get(id as usize) {
-        // Another module shows its public items only.
-        const own = match here {
-          Some(found) => found == id,
-          None => false,
-        };
-
-        add_module_items(items, analysis, info, !own);
+        add_module_items(items, analysis, resolution, id, here);
 
         // The functions the compiler provides to modules of `std`.
         if info.in_std && info.path.len() == 2 {

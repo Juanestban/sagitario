@@ -26,8 +26,8 @@ hello/
 ```
 
 A package is a **program** if it has `src/main.sag`, or a **library** if it has `src/lib.sag`;
-it must have exactly one of them. Modules are the files under `src/`, as described in
-[modules](spec/09-modules.md).
+it must have exactly one of them. Its other modules are the files under `src/` that it declares
+with `mod`, as described in [modules](spec/09-modules.md).
 
 Programs use libraries through [dependencies](#dependencies), and C uses them through the
 [library outputs](#library-outputs) that `nova build` writes.
@@ -136,8 +136,8 @@ fn main() {
   `Nova.toml` that names it (or absolute). Its key must be the dependency's own `name`.
 - Its name is a path root in the dependent package, like `std`: `use geometry::shapes::Circle;`
   or `geometry::area(c)`. A module-level item or import with the same name hides it.
-- Only its `pub` items can be used, through the path of the module declaring them: the
-  dependency's modules are all reachable, and `pub` marks its API.
+- Only its `pub` items can be used, through the path of the module declaring them or of a
+  `pub use` re-exporting them: `pub mod` and `pub` mark its API.
 - Each package sees only its own dependencies by name. A package reached through several
   dependencies (the same directory) is compiled once.
 - Packages cannot depend on each other in a cycle.

@@ -184,7 +184,7 @@ fn runs_with_arguments_modules_and_exit_codes(cx: Context) -> Result<(), String>
   support::write_file(under(src, List::from(["util", "text.sag"])), "pub fn shout(text: String) -> String {\n  text.to_ascii_uppercase()\n}\n")?;
   support::write_file(
     path::join(src, "main.sag"),
-    "use std::env;\nuse std::process;\nuse pkg::util::text;\n\nfn main() {\n  const args = env::args();\n  println(text::shout(args[1]));\n  process::exit(args.len() as i32);\n}\n",
+    "mod util {\n  pub mod text;\n}\n\nuse std::env;\nuse std::process;\nuse pkg::util::text;\n\nfn main() {\n  const args = env::args();\n  println(text::shout(args[1]));\n  process::exit(args.len() as i32);\n}\n",
   )?;
 
   const run = nova(cx, package, List::from(["run", "--", "hola", "x"]))?;
@@ -402,7 +402,7 @@ fn builds_a_program_with_dependencies(cx: Context) -> Result<(), String> {
     path::join(temp, "geo"),
     manifest("geo", List::from([pair("numbers", "../numbers")])),
     List::from([
-      pair("lib.sag", "use pkg::shapes::square::Square;\n\npub fn unit() -> Square {\n  Square { side: 1 }\n}\n"),
+      pair("lib.sag", "pub mod shapes {\n  pub mod square;\n}\n\nuse pkg::shapes::square::Square;\n\npub fn unit() -> Square {\n  Square { side: 1 }\n}\n"),
       pair("shapes/square.sag", "pub struct Square {\n  pub side: i32;\n\n  pub fn area(self) -> i32 {\n    numbers::square(self.side)\n  }\n}\n"),
     ]),
   )?;
@@ -440,7 +440,7 @@ fn keeps_items_private(cx: Context) -> Result<(), String> {
 
   // An import called like a dependency hides it.
   support::write_file(under(app, List::from(["src", "helpers.sag"])), "pub fn open() -> i32 {\n  3\n}\n")?;
-  support::write_file(under(app, List::from(["src", "main.sag"])), "use pkg::helpers as util;\n\nfn main() {\n  println(`${util::open()}`);\n}\n")?;
+  support::write_file(under(app, List::from(["src", "main.sag"])), "mod helpers;\n\nuse pkg::helpers as util;\n\nfn main() {\n  println(`${util::open()}`);\n}\n")?;
 
   const run = nova(cx, app, List::from(["run"]))?;
 

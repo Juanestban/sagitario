@@ -8,6 +8,8 @@ module: Module
       tree: UseGroup 143..155 e@143..144
         tree: UseTree 147..148 f@147..148
         tree: UseTree 150..154 self@150..154
+  use: Use 1355..1366 pub
+    tree: UseTree 1359..1365 pkg@1359..1362::a@1364..1365
   item: Fn 173..215 #0 chained@176..183 module extern_c=false abstract=false override=false
     param: Param 184..190 a@184..185
       ty: PathType 187..190
@@ -94,28 +96,28 @@ module: Module
     function: ExternFn 1078..1091 nothing@1081..1088 module
   item: Fn 1095..1122 #41 other@1112..1117 module extern_c=true abstract=false override=false
     body: Block 1120..1122
-  item: Fn 1124..1151 #42 restricted@1136..1146 pub extern_c=false abstract=false override=false
-    body: Block 1149..1151
-  item: Fn 1153..1173 #43 bad_self@1156..1164 module extern_c=false abstract=false override=false
-    body: Block 1171..1173
-  item: Fn 1175..1199 #44 var_self@1178..1186 module extern_c=false abstract=false override=false
-    body: Block 1197..1199
-  item: Fn 1201..1240 #45 where_clause@1204..1216 module extern_c=false abstract=false override=false
-    generic: GenericParam T@1217..1218
-    param: Param 1220..1224 x@1220..1221
-      ty: PathType 1223..1224
-        path: Path 1223..1224 #46 T@1223..1224
-    body: Block 1238..1240
-  item: Fn 1366..1418 #51 last@1369..1373 module extern_c=false abstract=false override=false
-    body: Block 1376..1418
-      tail: Match 1380..1416 #58
-        scrutinee: PathExpr 1386..1387 #53
-          path: Path 1386..1387 #52 x@1386..1387
-        arm: MatchArm 1394..1400
-          pattern: LiteralPattern 1394..1395 #55
-            expr: Int 1394..1395 #54 1
-          body: PathExpr 1399..1400 #57
-            path: Path 1399..1400 #56 a@1399..1400
+  item: Fn 1124..1153 #42 restricted@1138..1148 pub extern_c=false abstract=false override=false
+    body: Block 1151..1153
+  item: Fn 1155..1175 #43 bad_self@1158..1166 module extern_c=false abstract=false override=false
+    body: Block 1173..1175
+  item: Fn 1177..1201 #44 var_self@1180..1188 module extern_c=false abstract=false override=false
+    body: Block 1199..1201
+  item: Fn 1203..1242 #45 where_clause@1206..1218 module extern_c=false abstract=false override=false
+    generic: GenericParam T@1219..1220
+    param: Param 1222..1226 x@1222..1223
+      ty: PathType 1225..1226
+        path: Path 1225..1226 #46 T@1225..1226
+    body: Block 1240..1242
+  item: Fn 1368..1420 #51 last@1371..1375 module extern_c=false abstract=false override=false
+    body: Block 1378..1420
+      tail: Match 1382..1418 #58
+        scrutinee: PathExpr 1388..1389 #53
+          path: Path 1388..1389 #52 x@1388..1389
+        arm: MatchArm 1396..1402
+          pattern: LiteralPattern 1396..1397 #55
+            expr: Int 1396..1397 #54 1
+          body: PathExpr 1401..1402 #57
+            path: Path 1401..1402 #56 a@1401..1402
 --- stderr
 error[E0100]: expected a name, found `;`
  --> tests/parser/recovery.sag:4:13
@@ -320,12 +322,12 @@ error[E0900]: the ABI "Rust" is not supported; write `extern "C"`
 80 | extern "Rust" fn other() {}
    |        ^^^^^^
 
-error[E0100]: visibility has no restricted forms such as `pub(pkg)`
+error[E0100]: expected `pkg` or `super` in a restricted visibility
   --> tests/parser/recovery.sag:82:4
    |
-82 | pub(pkg) fn restricted() {}
-   |    ^^^^^
-   = help: write `pub` to make the item visible outside its module
+82 | pub(crate) fn restricted() {}
+   |    ^^^^^^^
+   = help: write `pub(pkg)`: the package root is `pkg`
 
 error[E0100]: a `self` parameter is only allowed in methods
   --> tests/parser/recovery.sag:84:13
@@ -366,16 +368,10 @@ error[E0100]: expected a parameter name, found `{`
 92 | fn trailing( {}
    |              ^
 
-error[E0900]: re-exports (`pub use`) are not implemented yet
-  --> tests/parser/recovery.sag:94:5
-   |
-94 | pub use pkg::a;
-   |     ^^^
-
 error[E0100]: expected `,` or `}`, found integer literal
   --> tests/parser/recovery.sag:99:5
    |
 99 |     2 => b,
    |     ^
 
-error: could not compile `tests/parser/recovery.sag` due to 40 previous errors
+error: could not compile `tests/parser/recovery.sag` due to 39 previous errors

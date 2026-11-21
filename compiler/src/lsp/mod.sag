@@ -3,18 +3,22 @@
 //! diagnostics as `sag check` reports them, hover, go to definition, completion, the symbols of a
 //! document and semantic tokens. One thread analyses after every change.
 
+pub mod analysis;
+pub mod builtins;
+pub mod completion;
+pub mod docs;
+pub mod json;
+pub mod positions;
+pub mod protocol;
+pub mod query;
+pub mod signatures;
+pub mod tokens;
+
 use pkg::ast::{ConstDecl, Item, Module};
-use pkg::lsp::analysis;
 use pkg::lsp::analysis::{Analysis, Document};
-use pkg::lsp::completion;
-use pkg::lsp::json;
 use pkg::lsp::json::{Json, member};
 use pkg::lsp::positions::{LineIndex, Position};
-use pkg::lsp::protocol;
-use pkg::lsp::query;
-use pkg::lsp::signatures;
 use pkg::lsp::signatures::Help;
-use pkg::lsp::tokens;
 use pkg::loader::path_key;
 use pkg::span::Span;
 use pkg::version;
@@ -167,9 +171,14 @@ class Server {
     const internal: List<String> = new List();
     var entry = analysis::find_entry(document.path);
     var result = analysis::analyze(entry, self.documents, internal);
+    var unlinked: Option<String> = None;
 
     // A file the program of its directory does not reach is analysed alone.
     if !result.contains(document.path) && path_key(entry.path) != path_key(document.path) {
+      if entry.std_module.is_none() && result.package.is_some() {
+        unlinked = Some(entry.path);
+      }
+
       entry = analysis::alone(document.path);
       result = analysis::analyze(entry, self.documents, internal);
     }
@@ -193,6 +202,12 @@ class Server {
       const uri = self.uri_of(entry_of_file.key);
 
       // Files without diagnostics now and before need no message.
+      if path_key(entry_of_file.key) == path_key(document.path) {
+        if let Some(root) = unlinked {
+          entry_of_file.value.push(analysis::unlinked_hint(document.path, root));
+        }
+      }
+
       if !entry_of_file.value.is_empty() || self.reported.contains_key(uri) || path_key(entry_of_file.key) == path_key(document.path) {
         self.publish_file(uri, entry_of_file.value);
       }

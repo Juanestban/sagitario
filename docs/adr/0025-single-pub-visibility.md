@@ -1,6 +1,6 @@
 # 0025. A single `pub` visibility, without `pub(pkg)`
 
-- Status: Accepted
+- Status: Superseded by [ADR-0111](0111-modules-as-rust.md) (`pub(pkg)` and `pub(super)`).
 - Date: 2026-10-22
 - Amends: [ADR-0010](0010-modules-and-packages.md) and
   [ADR-0024](0024-modules-imports-and-visibility.md) (visibility levels)

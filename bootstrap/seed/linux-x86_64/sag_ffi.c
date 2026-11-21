@@ -3,20 +3,41 @@
 #include <stddef.h>
 #include <stdint.h>
 
+typedef struct sag_s3 sag_s3;
 typedef void (*sag_p0)(int32_t);
 typedef void* (*sag_p1)(void*);
+struct sag_s3 { uint8_t const* f0; size_t f1; void* f2; };
+struct RawString;
+struct RawString { uint8_t const* ptr; size_t len; void* buf; };
 
-void sag_fn_2901(int32_t l0, int8_t const* const* l1);
+void sag_fn_2993(int32_t l0, int8_t const* const* l1);
 
-uint64_t sag_fn_2902(void);
+uint64_t sag_fn_2994(void);
 
-void sag_fn_2903(uint64_t l0);
+void sag_fn_2995(uint64_t l0);
+
+uint64_t sag_fn_2996(sag_s3 l0);
+
+int32_t sag_fn_2997(float l0, float l1);
+
+int32_t sag_fn_2998(double l0, double l1);
 void sag_env_init(int a0, char const* const* a1) {
-  sag_fn_2901(a0, (int8_t const* const*)a1);
+  sag_fn_2993(a0, (int8_t const* const*)a1);
 }
 uint64_t sag_time_monotonic(void) {
-  return sag_fn_2902();
+  return sag_fn_2994();
 }
 void sag_time_sleep(uint64_t a0) {
-  sag_fn_2903(a0);
+  sag_fn_2995(a0);
+}
+uint64_t sag_string_hash(struct RawString a0) {
+  union { sag_s3 s; struct RawString c; } sag_u0;
+  sag_u0.c = a0;
+  return sag_fn_2996(sag_u0.s);
+}
+int32_t sag_f32_total_compare(float a0, float a1) {
+  return sag_fn_2997(a0, a1);
+}
+int32_t sag_f64_total_compare(double a0, double a1) {
+  return sag_fn_2998(a0, a1);
 }

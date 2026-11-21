@@ -1,0 +1,55 @@
+// Modules declared as in Rust (docs/spec/09-modules.md, docs/adr/0111-modules-as-rust.md):
+// `net.sag` next to `net/`, `geo/mod.sag`, an inline module with a file of its own, globs,
+// re-exports and the restricted visibilities. `orphan.sag` is declared by no `mod`, so it is not
+// compiled, although it does not parse.
+// expect-stdout: INNER
+// expect-stdout: x
+// expect-stdout: 6
+// expect-stdout: private root helper y
+// expect-stdout: REEXPORTED
+// expect-stdout: private root helper
+// expect-stdout: 1
+// expect-stdout: 7
+mod net;
+mod geo;
+pub mod util;
+
+mod inner {
+  pub fn hello() -> String {
+    super::util::shout("inner")
+  }
+
+  pub(super) mod deeper;
+}
+
+mod tests {
+  use super::*;
+
+  // The glob sees the private items of the parent, and its modules.
+  pub fn private_sum() -> i32 {
+    helper_number() + inner::deeper::deep() * 4
+  }
+}
+
+use geo::*;
+use net::http::Client;
+
+fn main() {
+  println(inner::hello());
+  const client = new Client("x");
+  println(client.name);
+  println(f"{area(Point { x: 2.0, y: 3.0 })}");
+  println(net::describe());
+  println(util::shout("reexported"));
+  println(pkg::helper());
+  println(f"{inner::deeper::deep()}");
+  println(f"{tests::private_sum()}");
+}
+
+fn helper() -> String {
+  "private root helper"
+}
+
+fn helper_number() -> i32 {
+  3
+}

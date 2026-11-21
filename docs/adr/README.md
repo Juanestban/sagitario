@@ -18,7 +18,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0007](0007-mutability-const-var.md) | Mutability with `const` / `var` | Accepted (amended by 0028; refined by 0049) |
 | [0008](0008-concurrency-deferred.md) | Single-threaded MVP; Rust-style concurrency later | Accepted (superseded in part by 0045) |
 | [0009](0009-ffi-and-unsafe.md) | Rust-style FFI and `unsafe` | Accepted (refined by 0026) |
-| [0010](0010-modules-and-packages.md) | File-as-module, logical imports, packages | Accepted (amended by 0024, 0025; manifest superseded by 0040) |
+| [0010](0010-modules-and-packages.md) | File-as-module, logical imports, packages | Accepted (amended by 0024, 0025; manifest superseded by 0040; modules superseded by 0111) |
 | [0011](0011-surface-syntax.md) | Surface syntax | Accepted (refined by 0035) |
 | [0012](0012-closures.md) | Closures capture by value, read-only | Accepted (refined by 0033) |
 | [0013](0013-primitive-semantics.md) | Semantics of primitives and `String` | Accepted (refined by 0034, 0050) |
@@ -32,8 +32,8 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0021](0021-structs-and-fixed-arrays.md) | Structs, methods and fixed arrays | Accepted (amended by 0028) |
 | [0022](0022-enums-match-option-result.md) | Enums, `match`, `Option`/`Result` and `?` | Accepted |
 | [0023](0023-string-api-and-panic.md) | The `String` API, `StringBuilder` and `panic` | Accepted |
-| [0024](0024-modules-imports-and-visibility.md) | Modules, imports, visibility and the entry point | Accepted (amended by 0025; refined by 0037; files of modules superseded by 0065) |
-| [0025](0025-single-pub-visibility.md) | A single `pub` visibility, without `pub(pkg)` | Accepted |
+| [0024](0024-modules-imports-and-visibility.md) | Modules, imports, visibility and the entry point | Accepted (amended by 0025; refined by 0037; files of modules superseded by 0065; modules and visibility superseded by 0111) |
+| [0025](0025-single-pub-visibility.md) | A single `pub` visibility, without `pub(pkg)` | Superseded by 0111 |
 | [0026](0026-ffi-details.md) | FFI details: pointers, `unsafe`, `std::ffi` and exports | Accepted (refined by 0043) |
 | [0027](0027-classes-and-arc.md) | Classes, construction, ARC objects and `weak` references | Accepted (refined by 0030, 0035, 0096) |
 | [0028](0028-inferred-self-mutation.md) | `self` without `var`: methods that modify `self` are inferred | Accepted |
@@ -73,7 +73,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0062](0062-language-server-std-sources-and-lone-files.md) | The language server on the standard library and on lone files | Accepted (Q338 refined by 0067) |
 | [0063](0063-distribution-phase-and-roadmap-v2.md) | Distribution as phase F7, and the roadmap v2 of a game engine | Accepted (refined by 0068 and 0076; Q342 superseded by 0084) |
 | [0064](0064-nova-in-sagitario.md) | Nova in Sagitario | Accepted (refined by 0066) |
-| [0065](0065-module-directories.md) | Modules with submodules in `mod.sag` | Accepted |
+| [0065](0065-module-directories.md) | Modules with submodules in `mod.sag` | Accepted (Q349-Q351 superseded by 0111) |
 | [0066](0066-test-harness-in-sagitario.md) | The test harness in Sagitario | Accepted |
 | [0067](0067-bootstrap-from-the-seed.md) | The bootstrap from the seed, and retiring Rust | Accepted (Q363, Q364 and Q371 superseded by 0107) |
 | [0068](0068-releases-and-distribution.md) | Releases and distribution | Accepted (completed by 0069 and 0071; Q387 refined by 0070) |
@@ -118,6 +118,7 @@ old one, set the old one's status to `Superseded by ADR-NNNN`, and update the sp
 | [0108](0108-link-names.md) | Link names | Accepted |
 | [0109](0109-language-server-members.md) | What the language server knows of members | Accepted |
 | [0110](0110-the-core-in-sagitario.md) | The core in Sagitario | Accepted |
+| [0111](0111-modules-as-rust.md) | Modules as Rust's | Accepted |
 
 ## Template
 

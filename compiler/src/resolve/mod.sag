@@ -4,6 +4,9 @@
 //! first, later shadowing earlier), the module's items and imports, then the prelude. Ids are
 //! `u32` indices; maps by node id are `Map<u32, ...>`.
 
+pub mod dump;
+pub mod modules;
+
 use pkg::ast::{
   Block, ClassDecl, ConstDecl, StaticDecl, EnumDecl, Expr, ExprKind, ExternFn, FnDecl, GenericParam, Ident, ImplBlock, InterfaceDecl, Item, LambdaParam, Module, Package,
   Path, Pattern, PatternKind, Stmt, StructDecl, TypeExpr, TypeExprKind, VariantFields, Visibility,
@@ -11,7 +14,6 @@ use pkg::ast::{
 use pkg::diagnostics;
 use pkg::diagnostics::{Diagnostic, Diagnostics};
 use pkg::diagnostics::codes;
-use pkg::resolve::modules;
 use pkg::span::Span;
 
 /// The builtins a single name can refer to, besides `Error`, `List::from`, `CString::new`,
@@ -208,6 +210,16 @@ pub struct Declared {
 pub struct Imported {
   pub item: ItemRef;
   pub span: Span;
+  /// `Module` for a plain `use`; the visibility of a re-export, `pub use`
+  /// (docs/adr/0111-modules-as-rust.md, Q793).
+  pub visibility: Visibility;
+}
+
+/// `use path::*;`: the module whose names it imports (Q794).
+pub struct Glob {
+  pub module: u32;
+  pub span: Span;
+  pub visibility: Visibility;
 }
 
 /// A module of the package: a source file, or a directory without its own file.
@@ -221,6 +233,9 @@ pub class ModuleInfo {
   pub const children: Map<String, u32>;
   pub const items: Map<String, Declared>;
   pub const imports: Map<String, Imported>;
+  /// The submodules it declares with `mod`, with their visibility (docs/adr/0111-modules-as-rust.md).
+  pub const mods: Map<String, Declared>;
+  pub const globs: List<Glob>;
 
   pub fn new(self) {
     self.path = new List();
@@ -232,6 +247,8 @@ pub class ModuleInfo {
     self.children = new Map<String, u32>();
     self.items = new Map<String, Declared>();
     self.imports = new Map<String, Imported>();
+    self.mods = new Map<String, Declared>();
+    self.globs = new List();
   }
 
   /// The path as written in source: `pkg`, `pkg::net::http`.
@@ -805,6 +822,26 @@ pub class Resolution {
     None
   }
 
+  /// Whether code of the module `from` sees a name declared with `visibility` in the module `owner`
+  /// (docs/adr/0111-modules-as-rust.md, Q792).
+  pub fn visible(self, visibility: Visibility, owner: u32, from: u32) -> bool {
+    match visibility {
+      Visibility::Public => true,
+      Visibility::Package => match self.module(owner) {
+        Some(info) => match self.module(from) {
+          Some(viewer) => viewer.package == info.package,
+          None => false,
+        },
+        None => false,
+      },
+      Visibility::Super => match self.module(owner) {
+        Some(info) => self.is_within(from, info.parent.unwrap_or(owner)),
+        None => false,
+      },
+      _ => self.is_within(from, owner),
+    }
+  }
+
   /// Whether `inner` is `outer` or one of its submodules, which see `outer`'s private items.
   pub fn is_within(self, inner: u32, outer: u32) -> bool {
     var current: Option<u32> = Some(inner);
@@ -822,6 +859,11 @@ pub class Resolution {
 
     false
   }
+}
+
+/// Whether two names refer to the same thing.
+pub fn same_item(a: ItemRef, b: ItemRef) -> bool {
+  dump::item_ref(a) == dump::item_ref(b)
 }
 
 fn is_initializer_decl(decl: FnDecl) -> bool {
@@ -884,9 +926,7 @@ pub fn resolve(package: Package, diagnostics: Diagnostics) -> Resolution {
     }
   }
 
-  for source in 0..package.modules.len() {
-    modules::resolve_imports(resolution, package, module_of(module_ids, source), package.modules[source], diagnostics);
-  }
+  modules::resolve_all_imports(resolution, package, module_ids, diagnostics);
 
   const used = new Map<String, bool>();
   // The types in the fields of structs and variants, then each function.
@@ -1773,6 +1813,12 @@ pub class Resolver {
   /// A module-level name of the current module: one of its items or imports, or else a public
   /// item of the prelude module.
   pub fn lookup_item(self, name: String) -> Option<ItemRef> {
+    self.lookup_item_at(name, None)
+  }
+
+  /// The item `name` names in the current module, written at `span`, where two glob imports
+  /// giving it different meanings are reported.
+  pub fn lookup_item_at(self, name: String, span: Option<Span>) -> Option<ItemRef> {
     const info = self.resolution.module(self.module)?;
 
     if let Some(declared) = info.items.get(name) {
@@ -1783,6 +1829,16 @@ pub class Resolver {
       self.used.insert(used_key(self.module, name), true);
 
       return Some(imported.item);
+    }
+
+    // A module declared here is in scope, as Rust's (docs/adr/0111-modules-as-rust.md, Q790).
+    if let Some(declared) = info.mods.get(name) {
+      return Some(declared.item);
+    }
+
+    // Then the names of glob imports, which those above shadow (Q794).
+    if let Some(found) = self.glob_name(self.module, name, self.module, span, 0) {
+      return Some(found);
     }
 
     const prelude = self.resolution.module(self.resolution.prelude?)?;
@@ -2480,7 +2536,7 @@ pub class Resolver {
       return None;
     }
 
-    if let Some(item) = self.lookup_item(name) {
+    if let Some(item) = self.lookup_item_at(name, Some(span)) {
       match item {
         ItemRef::Fn(id) => return Some(Res::Fn(id)),
         ItemRef::Extern(id) => return Some(Res::Extern(id)),
@@ -2575,7 +2631,7 @@ pub class Resolver {
     } else {
       const name = first.name;
 
-      match self.lookup_item(name) {
+      match self.lookup_item_at(name, Some(first.span)) {
         Some(item) => {
           start = Start::Item(item);
         }
@@ -2604,8 +2660,8 @@ pub class Resolver {
 
             if let Some(similar) = diagnostics::closest_match(name, self.item_names()) {
               diagnostic = diagnostic.with_help("a name with a similar spelling exists: `" + similar + "`");
-            } else {
-              diagnostic = diagnostic.with_help("to use a module of this package, import it with `use pkg::" + name + ";`");
+            } else if name.chars().next().unwrap_or('A').is_lowercase() {
+              diagnostic = diagnostic.with_help("a module of this package is declared with `mod " + name + ";`");
             }
 
             self.diagnostics.push(diagnostic);
@@ -2806,24 +2862,39 @@ pub class Resolver {
     }
 
     if let Some(declared) = info.items.get(name) {
-      const private = match declared.visibility {
-        Visibility::Module => true,
-        _ => false,
-      };
-
-      if private && !self.resolution.is_within(self.module, module) {
-        self.diagnostics.push(
-          Diagnostic::error(codes::PRIVATE_ITEM, segment.span, "`" + name + "` is private to the module `" + info.display_path() + "`")
-            .with_label(declared.span, "declared without `pub` here")
-            .with_help("mark it `pub` to use it from other modules"),
-        );
-      }
+      self.check_visible(declared, module, segment);
 
       return Some(declared.item);
     }
 
-    if let Some(child) = info.children.get(name) {
-      return Some(ItemRef::Module(child));
+    // A re-export, `pub use` (docs/adr/0111-modules-as-rust.md, Q793), or, inside the module and
+    // its submodules, any of its imports.
+    if let Some(imported) = info.imports.get(name) {
+      if module == self.module {
+        self.used.insert(used_key(module, name), true);
+      }
+
+      // A plain `use` is private to its module, as Rust's.
+      self.check_visible(Declared { item: imported.item, span: imported.span, visibility: imported.visibility }, module, segment);
+
+      return Some(imported.item);
+    }
+
+    if let Some(declared) = info.mods.get(name) {
+      self.check_visible(declared, module, segment);
+
+      return Some(declared.item);
+    }
+
+    // The modules of `std` and the directories of the prelude need no `mod`.
+    if info.in_std || info.source.is_none() {
+      if let Some(child) = info.children.get(name) {
+        return Some(ItemRef::Module(child));
+      }
+    }
+
+    if let Some(found) = self.glob_name(module, name, self.module, Some(segment.span), 0) {
+      return Some(found);
     }
 
     var diagnostic = Diagnostic::error(codes::UNRESOLVED_NAME, segment.span, "cannot find `" + name + "` in the module `" + info.display_path() + "`");
@@ -2842,26 +2913,115 @@ pub class Resolver {
     if let Some(similar) = diagnostics::closest_match(name, candidates) {
       diagnostic = diagnostic.with_help("a name with a similar spelling exists: `" + similar + "`");
     } else if info.source.is_some() || module == 0 {
-      const parts: List<String> = new List();
-
-      for part in info.path {
-        parts.push(part);
-      }
-
-      parts.push(segment.name);
-
-      const file = parts.join("/");
-
       diagnostic = if name == "mod" {
         diagnostic.with_note("`mod` cannot name a module: `mod.sag` is the file of the module of its directory")
       } else {
-        diagnostic.with_note("a module `" + name + "` would be the file `" + file + ".sag`, or `" + file + "/mod.sag` with its submodules, next to the program's entry file")
+        diagnostic.with_help("declare it with `mod " + name + ";` in the file of `" + info.display_path() + "`; its file is `" + name + ".sag` or `" + name + "/mod.sag` (docs/spec/09-modules.md)")
       };
     }
 
     self.diagnostics.push(diagnostic);
 
     None
+  }
+
+  /// Reports `declared`, a name of the module `owner`, if the current module cannot see it.
+  prv fn check_visible(self, declared: Declared, owner: u32, segment: Ident) {
+    if self.resolution.visible(declared.visibility, owner, self.module) {
+      return;
+    }
+
+    const info = match self.resolution.module(owner) {
+      Some(found) => found,
+      None => return,
+    };
+    const help = match declared.visibility {
+      Visibility::Super => "it is `pub(super)`: mark it `pub(pkg)` or `pub` to use it from other modules",
+      Visibility::Package => "it is `pub(pkg)`, visible only in its package: mark it `pub` to use it from other packages",
+      _ => "mark it `pub` to use it from other modules, or `pub use` for an import",
+    };
+
+    self.diagnostics.push(
+      Diagnostic::error(codes::PRIVATE_ITEM, segment.span, "`" + segment.name + "` is private to the module `" + info.display_path() + "`")
+        .with_label(declared.span, "declared here")
+        .with_help(help),
+    );
+  }
+
+  /// The name `name` that the glob imports of `module` give code of the module `from`: the names
+  /// of each glob's module visible from `module`, through globs that `from` sees. `span` is where
+  /// the name is used, to report two globs giving it to different things (`E0212`).
+  pub fn glob_name(self, module: u32, name: String, from: u32, span: Option<Span>, depth: usize) -> Option<ItemRef> {
+    // Globs importing each other.
+    if depth > 16 {
+      return None;
+    }
+
+    const info = self.resolution.module(module)?;
+    var found: Option<ItemRef> = None;
+
+    for index in 0..info.globs.len() {
+      const glob = info.globs[index];
+
+      if !self.resolution.visible(glob.visibility, module, from) {
+        continue;
+      }
+
+      const item = match self.visible_name(glob.module, name, module, depth) {
+        Some(value) => value,
+        None => continue,
+      };
+
+      if from == module {
+        self.used.insert(used_key(module, `*${index}`), true);
+      }
+
+      if let Some(previous) = found {
+        if !same_item(previous, item) {
+          if let Some(at) = span {
+            self.diagnostics.push(
+              Diagnostic::error(codes::AMBIGUOUS_GLOB, at, "`" + name + "` is imported by two glob imports, and they name different things")
+                .with_label(glob.span, "one of them")
+                .with_help("import the one you mean by name: `use path::" + name + ";`"),
+            );
+          }
+
+          return Some(previous);
+        }
+      }
+
+      found = Some(item);
+    }
+
+    found
+  }
+
+  /// The name `name` of the module `module` that code of `from` sees: an item, a re-export, a
+  /// submodule, or what its own globs give.
+  prv fn visible_name(self, module: u32, name: String, from: u32, depth: usize) -> Option<ItemRef> {
+    const info = self.resolution.module(module)?;
+
+    if let Some(declared) = info.items.get(name) {
+      return if self.resolution.visible(declared.visibility, module, from) { Some(declared.item) } else { None };
+    }
+
+    if let Some(imported) = info.imports.get(name) {
+      if self.resolution.visible(imported.visibility, module, from) {
+        return Some(imported.item);
+      }
+    }
+
+    if let Some(declared) = info.mods.get(name) {
+      return if self.resolution.visible(declared.visibility, module, from) { Some(declared.item) } else { None };
+    }
+
+    if info.in_std {
+      if let Some(child) = info.children.get(name) {
+        return Some(ItemRef::Module(child));
+      }
+    }
+
+    self.glob_name(module, name, from, None, depth + 1)
   }
 
   /// The path of `Name { ... }`: a struct, or an enum variant with named fields.
@@ -3195,7 +3355,7 @@ pub class Resolver {
       } else if is_numeric_type(name) || name == "Self" {
         res = TypeRes::Builtin;
       } else {
-        match self.lookup_item(name) {
+        match self.lookup_item_at(name, Some(segment.span)) {
           Some(ItemRef::Type(item)) => {
             res = TypeRes::Item(item);
           }

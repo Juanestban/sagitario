@@ -2,6 +2,8 @@
 //! types are resolved by later phases, which refer to nodes by their ids. `Expr`, `Pattern` and
 //! `TypeExpr` are classes: they contain themselves, which a struct cannot do by value.
 
+pub mod dump;
+
 use pkg::loader;
 use pkg::span::Span;
 
@@ -12,12 +14,17 @@ pub struct Ident {
 
 /// Visibility of module-level items and of struct members.
 pub enum Visibility {
-  /// No modifier: visible in the declaring module only.
+  /// No modifier: visible in the declaring module and its descendants.
   Module,
   /// `pub`
   Public,
   /// `prv`: a member visible only inside its struct, enum or class.
   Private,
+  /// `pub(pkg)`: visible in the whole package, as Rust's `pub(crate)`
+  /// (docs/adr/0111-modules-as-rust.md, Q792).
+  Package,
+  /// `pub(super)`: visible in the parent module and its descendants.
+  Super,
 }
 
 /// The modules of a program: the root module (the entry file) first, then every module it
@@ -83,6 +90,11 @@ pub struct Module {
   pub location: Option<String>;
   pub uses: List<UseDecl>;
   pub items: List<Item>;
+  /// The modules it declares with `mod` (docs/adr/0111-modules-as-rust.md, Q790).
+  pub mods: List<ModDecl>;
+  /// The directory of the files of the modules it declares, which the loader sets: the file's
+  /// own directory for the root and `mod.sag`, `dir/name/` for `dir/name.sag` (Q791).
+  pub dir: Option<String>;
   /// The files `include!` puts in the module, whose items the loader adds to `items`
   /// (docs/adr/0103-build-scripts-and-binding-generation.md, Q724).
   pub includes: List<Include>;
@@ -97,10 +109,21 @@ pub struct Include {
   pub span: Span;
 }
 
-/// `use tree;`
+/// `use tree;`, or `pub use tree;`, a re-export (docs/adr/0111-modules-as-rust.md, Q793).
 pub struct UseDecl {
+  pub visibility: Visibility;
   pub tree: UseTree;
   pub span: Span;
+}
+
+/// `mod name;`, whose items are in a file of their own, or `mod name { items }`
+/// (docs/adr/0111-modules-as-rust.md, Q790).
+pub struct ModDecl {
+  pub name: Ident;
+  pub visibility: Visibility;
+  pub span: Span;
+  /// The items of an inline module, which the loader makes a module of its own.
+  pub body: Option<Module>;
 }
 
 /// `a::b`, `a::b as c` or `a::{b, c::d}`.
@@ -115,6 +138,8 @@ pub enum UseTreeKind {
   Simple(Option<Ident>),
   /// `prefix::{trees}`
   Group(List<UseTree>),
+  /// `prefix::*`: every name of the module visible from the importing one (Q794).
+  Glob,
 }
 
 pub enum Item {

@@ -9,7 +9,7 @@ use pkg::ast::{
 use pkg::diagnostics::{Diagnostic, Diagnostics};
 use pkg::diagnostics::codes;
 use pkg::resolve;
-use pkg::resolve::{Imported, ItemRef, ModuleInfo, Resolution, Resolver, Start, StdItem, TypeItem, TypeRes};
+use pkg::resolve::{Declared, Imported, ItemRef, ModuleInfo, Resolution, Resolver, Start, StdItem, TypeItem, TypeRes};
 use pkg::span::Span;
 
 /// Creates a module for every file of the package and for the directories above them. Returns
@@ -110,6 +110,20 @@ pub fn build_tree(resolution: Resolution, package: Package) -> List<u32> {
     ids.push(node);
   }
 
+  // The visibility of each module, from its `mod` declaration in its parent
+  // (docs/adr/0111-modules-as-rust.md, Q792).
+  for source in 0..package.modules.len() {
+    const module = package.modules[source];
+
+    for decl in module.mods {
+      if let Some(info) = resolution.module(ids[source]) {
+        if let Some(child) = info.children.get(decl.name.name) {
+          info.mods.insert(decl.name.name, Declared { item: ItemRef::Module(child), span: decl.name.span, visibility: decl.visibility });
+        }
+      }
+    }
+  }
+
   ids
 }
 
@@ -143,14 +157,18 @@ fn child_module(resolution: Resolution, parent: u32, name: String) -> u32 {
   child
 }
 
-/// One name imported by a `use` declaration: the path to it and its alias.
+/// One name imported by a `use` declaration: the path to it and its alias, or a glob of the
+/// module at the path.
 struct FlatImport {
   pub segments: List<Ident>;
   pub alias: Option<Ident>;
+  pub glob: bool;
+  pub span: Span;
+  pub visibility: Visibility;
 }
 
 /// Expands the groups of a `use` tree; a trailing `self` inside braces names the prefix.
-fn flatten(tree: UseTree, prefix: List<Ident>, out: List<FlatImport>) {
+fn flatten(tree: UseTree, prefix: List<Ident>, visibility: Visibility, out: List<FlatImport>) {
   const segments: List<Ident> = new List();
 
   for segment in prefix {
@@ -171,12 +189,15 @@ fn flatten(tree: UseTree, prefix: List<Ident>, out: List<FlatImport>) {
         }
       }
 
-      out.push(FlatImport { segments: segments, alias: alias });
+      out.push(FlatImport { segments: segments, alias: alias, glob: false, span: tree.span, visibility: visibility });
     }
     UseTreeKind::Group(trees) => {
       for inner in trees {
-        flatten(inner, segments, out);
+        flatten(inner, segments, visibility, out);
       }
+    }
+    UseTreeKind::Glob => {
+      out.push(FlatImport { segments: segments, alias: None, glob: true, span: tree.span, visibility: visibility });
     }
   }
 }
@@ -185,17 +206,132 @@ fn flat_imports(module: Module) -> List<FlatImport> {
   const flat: List<FlatImport> = new List();
 
   for decl in module.uses {
-    flatten(decl.tree, new List(), flat);
+    flatten(decl.tree, new List(), decl.visibility, flat);
   }
 
   flat
 }
 
+/// How widely a visibility makes a name visible, to compare a re-export with what it re-exports.
+fn reach(visibility: Visibility) -> i32 {
+  match visibility {
+    Visibility::Public => 3,
+    Visibility::Package => 2,
+    Visibility::Super => 1,
+    _ => 0,
+  }
+}
+
+/// The visibility of the last segment of `segments` where it is declared; `pub` for what the
+/// standard library and the prelude give.
+fn declared_visibility(resolution: Resolution, package: Package, node: u32, segments: List<Ident>) -> Visibility {
+  if segments.len() < 2 {
+    return Visibility::Public;
+  }
+
+  const prefix: List<Ident> = new List();
+
+  for index in 0..segments.len() - 1 {
+    prefix.push(segments[index]);
+  }
+
+  const resolver = new Resolver(package, resolution, node, None, new Diagnostics());
+  const owner = match resolver.qualified(prefix) {
+    Some(found) => match found.start {
+      Start::Item(ItemRef::Module(id)) => if found.rest.is_empty() { id } else { return Visibility::Public },
+      _ => return Visibility::Public,
+    },
+    None => return Visibility::Public,
+  };
+  const info = match resolution.module(owner) {
+    Some(found) => found,
+    None => return Visibility::Public,
+  };
+
+  if info.in_std {
+    return Visibility::Public;
+  }
+
+  const name = segments[segments.len() - 1].name;
+
+  if let Some(declared) = info.items.get(name) {
+    return declared.visibility;
+  }
+
+  if let Some(imported) = info.imports.get(name) {
+    return imported.visibility;
+  }
+
+  if let Some(declared) = info.mods.get(name) {
+    return declared.visibility;
+  }
+
+  Visibility::Public
+}
+
+/// Resolves the `use` declarations of every module. A re-export can name another one, in any
+/// order, so the imports are resolved again while that finds new names, without reporting, then
+/// once more reporting what is left (docs/adr/0111-modules-as-rust.md, Q793).
+pub fn resolve_all_imports(resolution: Resolution, package: Package, ids: List<u32>, diagnostics: Diagnostics) {
+  var known = -1i64;
+
+  loop {
+    const quiet = new Diagnostics();
+
+    for source in 0..package.modules.len() {
+      resolve_imports(resolution, package, ids[source], package.modules[source], quiet, true);
+    }
+
+    var count = 0i64;
+
+    for info in resolution.modules {
+      count += info.imports.len() as i64 + info.globs.len() as i64;
+    }
+
+    if count == known {
+      break;
+    }
+
+    known = count;
+  }
+
+  for source in 0..package.modules.len() {
+    resolve_imports(resolution, package, ids[source], package.modules[source], diagnostics, false);
+  }
+}
+
+fn same_span(a: Span, b: Span) -> bool {
+  a.file == b.file && a.start == b.start
+}
+
 /// Resolves the `use` declarations of one module and adds the imported names to it.
-pub fn resolve_imports(resolution: Resolution, package: Package, node: u32, module: Module, diagnostics: Diagnostics) {
+/// Resolves the `use` declarations of one module. `again` skips those an earlier round resolved,
+/// while re-exports are being found; the last round resolves all of them, to report their errors.
+pub fn resolve_imports(resolution: Resolution, package: Package, node: u32, module: Module, diagnostics: Diagnostics, again: bool) {
   const imports: List<NamedImport> = new List();
 
+  const info_of = resolution.module(node);
+
   for import in flat_imports(module) {
+    // Resolved by an earlier round.
+    if let Some(info) = info_of {
+      if import.glob && again && info.globs.iter().any((glob) => same_span(glob.span, import.span)) {
+        continue;
+      }
+
+      if !import.glob && again {
+        if let Some(last) = import.segments.last() {
+          const name = import.alias.unwrap_or(last);
+
+          if let Some(existing) = info.imports.get(name.name) {
+            if same_span(existing.span, name.span) {
+              continue;
+            }
+          }
+        }
+      }
+    }
+
     const first = match import.segments.first() {
       Some(first) => first,
       None => continue,
@@ -207,15 +343,21 @@ pub fn resolve_imports(resolution: Resolution, package: Package, node: u32, modu
     const name = import.alias.unwrap_or(last);
     const root = first.name == "pkg" || first.name == "self" || first.name == "super" || first.name == "std";
 
-    if !root && resolution.dependency_root(package, node, first.name).is_none() {
+    // Or a name of the module, as Rust's paths in `use` (docs/adr/0111-modules-as-rust.md, Q795).
+    const in_scope = match info_of {
+      Some(info) => info.mods.contains_key(first.name) || info.items.contains_key(first.name) || (info.imports.contains_key(first.name) && first.name != name.name),
+      None => false,
+    };
+
+    if !root && !in_scope && resolution.dependency_root(package, node, first.name).is_none() {
       diagnostics.push(
         Diagnostic::error(codes::UNRESOLVED_NAME, first.span, "cannot find `" + first.name + "` to import")
-          .with_help("`use` paths start with `pkg`, `self`, `super`, `std` or the name of a dependency: `use pkg::" + first.name + "`"),
+          .with_help("`use` paths start with `pkg`, `self`, `super`, `std`, a module declared with `mod`, or the name of a dependency: `use pkg::" + first.name + "`"),
       );
       continue;
     }
 
-    if name.name == "pkg" || name.name == "self" || name.name == "super" {
+    if !import.glob && (name.name == "pkg" || name.name == "self" || name.name == "super") {
       diagnostics.push(
         Diagnostic::error(codes::UNRESOLVED_NAME, name.span, "importing `" + name.name + "` needs a name")
           .with_help("give it one with `as`: `use " + name.name + " as name;`"),
@@ -228,6 +370,43 @@ pub fn resolve_imports(resolution: Resolution, package: Package, node: u32, modu
       Some(qualified) => qualified,
       None => continue,
     };
+
+    // `use path::*;` names a module (Q794).
+    if import.glob {
+      match qualified.start {
+        Start::Item(ItemRef::Module(target)) => {
+          if qualified.rest.is_empty() {
+            if let Some(info) = info_of {
+              if !info.globs.iter().any((glob) => same_span(glob.span, import.span)) {
+                info.globs.push(resolve::Glob { module: target, span: import.span, visibility: import.visibility });
+              }
+            }
+
+            continue;
+          }
+        }
+        _ => {}
+      }
+
+      diagnostics.push(
+        Diagnostic::error(codes::NOT_IMPLEMENTED, last.span, "a glob import names a module; importing every variant or function of a type is not implemented")
+          .with_help("import the type and write `Type::name`"),
+      );
+      continue;
+    }
+
+    // A re-export reaches no further than what it re-exports (Q793).
+    if reach(import.visibility) > 0 {
+      const declared = declared_visibility(resolution, package, node, import.segments);
+
+      if reach(import.visibility) > reach(declared) {
+        diagnostics.push(
+          Diagnostic::error(codes::PRIVATE_REEXPORT, last.span, "`" + last.name + "` is less visible than this re-export")
+            .with_help("re-export it with the visibility it has, or make it more visible where it is declared"),
+        );
+      }
+    }
+
     var item: Option<ItemRef> = None;
 
     if qualified.rest.is_empty() {
@@ -258,7 +437,7 @@ pub fn resolve_imports(resolution: Resolution, package: Package, node: u32, modu
     }
 
     if let Some(found) = item {
-      imports.push(NamedImport { name: name.name, imported: Imported { item: found, span: name.span } });
+      imports.push(NamedImport { name: name.name, imported: Imported { item: found, span: name.span, visibility: import.visibility } });
     }
   }
 
@@ -279,9 +458,13 @@ pub fn resolve_imports(resolution: Resolution, package: Package, node: u32, modu
       previous = Some(declared.span);
     } else if let Some(other) = info.imports.get(name) {
       previous = Some(other.span);
+    } else if let Some(declared) = info.mods.get(name) {
+      previous = Some(declared.span);
     }
 
     match previous {
+      // This import, resolved by an earlier round.
+      Some(span) if same_span(span, imported.span) => {}
       Some(span) => {
         diagnostics.push(
           Diagnostic::error(codes::DUPLICATE_DEFINITION, imported.span, "the name `" + name + "` is defined more than once")
@@ -303,7 +486,22 @@ struct NamedImport {
 
 pub fn report_unused_imports(resolution: Resolution, used: Map<String, bool>, diagnostics: Diagnostics) {
   for index in 0..resolution.modules.len() {
-    for entry in resolution.modules[index].imports.entries() {
+    const info = resolution.modules[index];
+
+    for position in 0..info.globs.len() {
+      const glob = info.globs[position];
+
+      if reach(glob.visibility) == 0 && !used.contains_key(resolve::used_key(index as u32, `*${position}`)) {
+        diagnostics.push(Diagnostic::warning(codes::UNUSED_IMPORT, glob.span, "unused glob import").with_help("remove it"));
+      }
+    }
+
+    for entry in info.imports.entries() {
+      // A re-export is used by other modules.
+      if reach(entry.value.visibility) > 0 {
+        continue;
+      }
+
       if !used.contains_key(resolve::used_key(index as u32, entry.key)) {
         diagnostics.push(Diagnostic::warning(codes::UNUSED_IMPORT, entry.value.span, "unused import `" + entry.key + "`").with_help("remove it"));
       }

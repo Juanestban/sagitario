@@ -31,6 +31,17 @@ The sources say 0.32.0.
 
 ### Changed
 
+- **Breaking:** modules are declared as in Rust ([ADR-0111](docs/adr/0111-modules-as-rust.md)).
+  A file is part of the program only if a `mod name;` declares it, in the file of its parent
+  module; to migrate, add `pub mod name;` for each module a path reached. `mod` is a keyword.
+  A module may be `name.sag` next to `name/` or `name/mod.sag` (both is `E0209`, neither
+  `E0210`); `mod name { ... }` declares an inline module. Visibility gains `pub(pkg)` and
+  `pub(super)`, also on `mod` and `use`; `pub use` re-exports (`E0211`), and `use path::*;`
+  imports every visible name (`E0212` where two globs disagree). The language server analyzes
+  only the tree of `main.sag`, `lib.sag` or `build.sag`, hints at files no `mod` reaches,
+  completes the files of the directory after `mod ` and goes from `mod name;` to its file; the
+  VS Code extension knows `mod` and has the snippets `mod` and `modb`.
+
 - The runtime's core starts moving to Sagitario, as `std::core`, which every program compiles and
   only `std` can name: hashing strings and the total order of floats are Sagitario code
   ([ADR-0110](docs/adr/0110-the-core-in-sagitario.md)).

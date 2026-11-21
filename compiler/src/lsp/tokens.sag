@@ -240,6 +240,7 @@ class Collector {
           self.use_tree(inner, names);
         }
       }
+      UseTreeKind::Glob => {}
     }
   }
 
@@ -285,6 +286,15 @@ class Collector {
   pub fn module(self, module: Module) {
     for found in module.uses {
       self.use_tree(found.tree, new List());
+    }
+
+    // The names of `mod` declarations, and the items of inline modules.
+    for decl in module.mods {
+      self.add(decl.name, Some(NAMESPACE));
+
+      if let Some(body) = decl.body {
+        self.module(body);
+      }
     }
 
     for item in module.items {

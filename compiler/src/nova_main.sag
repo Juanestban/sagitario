@@ -5,8 +5,26 @@
 //! shares the compiler's spans and diagnostics (docs/adr/0064-nova-in-sagitario.md,
 //! docs/adr/0065-module-directories.md).
 
-use pkg::bindgen;
-use pkg::diagnostics;
+pub mod ast;
+pub mod bindgen;
+pub mod cfg;
+pub mod diagnostics;
+pub mod lexer;
+pub mod loader;
+pub mod nova {
+  pub mod build;
+  pub mod codes;
+  pub mod files;
+  pub mod manifest;
+  pub mod toml;
+  pub mod update;
+}
+pub mod parser;
+pub mod resolve;
+pub mod span;
+pub mod unicode;
+pub mod version;
+
 use pkg::diagnostics::{Diagnostic, DiagnosticFormat};
 use pkg::loader::{path_key, push_path, windows};
 use pkg::nova::build;
@@ -17,7 +35,6 @@ use pkg::nova::toml;
 use pkg::nova::update;
 use pkg::nova::files::remove_tree;
 use pkg::span::SourceMap;
-use pkg::version;
 use std::env;
 use std::fs;
 use std::io;

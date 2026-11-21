@@ -4,6 +4,26 @@
 //! modules of `types` the checks of one area each, as functions taking the checker
 //! (docs/adr/0053-type-checker-port-and-type-dumps.md).
 
+pub mod borrow;
+pub mod classes;
+pub mod closures;
+pub mod collections;
+pub mod consts;
+pub mod dump;
+pub mod exhaustive;
+pub mod exprs;
+pub mod ffi;
+pub mod flow;
+pub mod generic;
+pub mod inheritance;
+pub mod interfaces;
+pub mod numbers;
+pub mod operators;
+pub mod patterns;
+pub mod send;
+pub mod strings;
+pub mod typed;
+
 use pkg::ast::{ArrayLen, EnumDecl, Expr, FieldDecl, FnDecl, Package, TargetInfo, TypeExpr, TypeExprKind, VariantFields, Visibility};
 use pkg::diagnostics;
 use pkg::diagnostics::{Diagnostic, Diagnostics};
@@ -11,18 +31,8 @@ use pkg::diagnostics::codes;
 use pkg::resolve::{ParamOwner, Resolution, TypeItem, TypeRes};
 use pkg::resolve;
 use pkg::span::Span;
-use pkg::types::borrow;
-use pkg::types::classes;
-use pkg::types::collections;
-use pkg::types::consts;
 use pkg::types::consts::ConstState;
-use pkg::types::exprs;
-use pkg::types::ffi;
-use pkg::types::flow;
 use pkg::types::flow::FlowOwner;
-use pkg::types::generic;
-use pkg::types::interfaces;
-use pkg::types::send;
 use pkg::types::typed::TypedModule;
 
 pub enum IntTy {

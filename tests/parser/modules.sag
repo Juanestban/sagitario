@@ -1,0 +1,19 @@
+// Module declarations, restricted visibilities, globs and re-exports (docs/spec/09-modules.md).
+mod net;
+pub mod util;
+pub(pkg) mod store;
+pub(super) mod parent_only;
+
+mod tests {
+  use super::*;
+
+  pub(super) fn check() {}
+
+  mod nested;
+}
+
+pub use net::Client;
+pub(pkg) use util::{self, helper as h};
+use std::io::*;
+
+pub(pkg) fn shared() {}

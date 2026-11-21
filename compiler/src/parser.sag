@@ -3,6 +3,7 @@
 //! reported") and the parser recovers at item and statement boundaries.
 
 use pkg::ast::{
+  ModDecl,
   ArrayLen, BinaryOp, Include, Block, ClassDecl, ConstDecl, StaticDecl, Discriminant, EnumDecl, Export, Expr, ExprKind, ExternBlock, ExternFn, FieldDecl, FieldInit, FieldPattern,
   FnDecl, GenericParam, Ident, ImplBlock, InterfaceDecl, Item, LambdaParam, LetStmt, MatchArm, Module, Param, Path, Pattern, PatternKind, Stmt,
   StructDecl, TargetInfo, FormatSpec, TemplatePart, TupleShape, TypeArgs, TypeExpr, TypeExprKind, UnaryOp, UseDecl, UseTree, UseTreeKind, VariantDecl, VariantFieldDecl,
@@ -487,16 +488,28 @@ class Parser {
 
 
   pub fn module(self, file: u32) -> Module {
+    var module = self.module_body(file, false);
+
+    module.includes = self.includes;
+    module.macros = self.macros;
+    module
+  }
+
+  /// The items of a module up to the end of the file, or, for an inline module, up to its `}`.
+  prv fn module_body(self, file: u32, inline: bool) -> Module {
     const uses: List<UseDecl> = new List();
     const items: List<Item> = new List();
+    const mods: List<ModDecl> = new List();
 
-    while !self.at_eof() {
+    while !self.at_eof() && !(inline && self.at("}")) {
       const start = self.pos;
       const item_start = self.span();
 
       match self.attributes() {
         Ok(attributes) => {
           const kept = self.cfg_holds(attributes);
+          // What follows a visibility: `pub use` and `pub mod` are not items of their own.
+          const after = self.nth_kind(self.visibility_len());
 
           if self.at_macro("include") {
             match self.include_item() {
@@ -509,13 +522,28 @@ class Parser {
               }
               Err(_) => self.skip_item(),
             }
-          } else if self.at_keyword("use") {
-            match self.use_decl() {
+          } else if is_keyword(after, "use") {
+            const visibility = self.visibility();
+
+            match self.use_decl(visibility) {
               Ok(decl) => {
                 self.apply_attributes(attributes, AttributeTarget::Use);
 
                 if kept {
                   uses.push(decl);
+                }
+              }
+              Err(_) => self.skip_item(),
+            }
+          } else if is_keyword(after, "mod") {
+            const visibility = self.visibility();
+
+            match self.mod_decl(file, visibility, item_start) {
+              Ok(decl) => {
+                self.apply_attributes(attributes, AttributeTarget::Use);
+
+                if kept {
+                  mods.push(decl);
                 }
               }
               Err(_) => self.skip_item(),
@@ -546,7 +574,27 @@ class Parser {
       }
     }
 
-    Module { file: file, path: new List(), package: 0, location: None, uses: uses, items: items, includes: self.includes, macros: self.macros }
+    Module { file: file, path: new List(), package: 0, location: None, uses: uses, items: items, mods: mods, dir: None, includes: new List(), macros: new List() }
+  }
+
+  /// `mod name;` or `mod name { items }` (docs/adr/0111-modules-as-rust.md, Q790).
+  prv fn mod_decl(self, file: u32, visibility: Visibility, start: Span) -> Result<ModDecl, ()> {
+    self.expect_keyword("mod")?;
+
+    const name = self.ident("a module name")?;
+
+    if self.at("{") {
+      self.advance();
+
+      const body = self.module_body(file, true);
+      const end = self.expect("}")?.span;
+
+      return Ok(ModDecl { name: name, visibility: visibility, span: start.to(end), body: Some(body) });
+    }
+
+    const end = self.expect(";")?.span;
+
+    Ok(ModDecl { name: name, visibility: visibility, span: start.to(end), body: None })
   }
 
   /// Whether a call of the macro `name` starts here: `name!(`.
@@ -783,12 +831,12 @@ class Parser {
   }
 
   /// `use tree;`
-  prv fn use_decl(self) -> Result<UseDecl, ()> {
+  prv fn use_decl(self, visibility: Visibility) -> Result<UseDecl, ()> {
     const start = self.expect_keyword("use")?.span;
     const tree = self.use_tree()?;
     const end = self.expect(";")?.span;
 
-    Ok(UseDecl { tree: tree, span: start.to(end) })
+    Ok(UseDecl { visibility: visibility, tree: tree, span: start.to(end) })
   }
 
   /// `a::b`, `a::b as c` or `a::{tree, ...}`.
@@ -797,6 +845,13 @@ class Parser {
     const prefix = List::from([self.path_segment()?]);
 
     while self.eat("::") {
+      // `a::*`, every name of `a` (Q794).
+      if self.at("*") {
+        const end = self.advance().span;
+
+        return Ok(UseTree { prefix: prefix, kind: UseTreeKind::Glob, span: start.to(end) });
+      }
+
       if self.at("{") {
         self.advance();
 
@@ -1639,26 +1694,51 @@ class Parser {
     Ok(params)
   }
 
+  /// The number of tokens of the visibility here: 0, 1 for `pub`, 4 for `pub(pkg)`.
+  prv fn visibility_len(self) -> usize {
+    if !self.at_keyword("pub") {
+      return 0;
+    }
+
+    if is_punct(self.nth_kind(1), "(") && is_punct(self.nth_kind(3), ")") {
+      return 4;
+    }
+
+    1
+  }
+
+  /// `pub`, `pub(pkg)`, `pub(super)` or nothing (docs/adr/0111-modules-as-rust.md, Q792).
   prv fn visibility(self) -> Visibility {
     if !self.eat_keyword("pub") {
       return Visibility::Module;
     }
 
-    // `pub(pkg)` and other restricted forms do not exist (ADR-0025); recover as `pub`.
-    const restricted = self.at("(") && is_punct(self.nth_kind(2), ")") && !is_punct(self.nth_kind(1), ")");
-
-    if restricted {
-      const start = self.advance().span;
-
-      self.advance();
-
-      const end = self.advance().span;
-
-      self.diagnostics.push(
-        Diagnostic::error(codes::UNEXPECTED_TOKEN, start.to(end), "visibility has no restricted forms such as `pub(pkg)`")
-          .with_help("write `pub` to make the item visible outside its module"),
-      );
+    if !(self.at("(") && is_punct(self.nth_kind(2), ")")) {
+      return Visibility::Public;
     }
+
+    const start = self.advance().span;
+    const inner = self.advance();
+    const end = self.advance().span;
+
+    if is_keyword(inner.kind, "pkg") {
+      return Visibility::Package;
+    }
+
+    if is_keyword(inner.kind, "super") {
+      return Visibility::Super;
+    }
+
+    // Rust's `pub(crate)` is `pub(pkg)` here; `pub(self)` and `pub(in path)` do not exist.
+    var help = "write `pub(pkg)` for the whole package, `pub(super)` for the parent module, or `pub`";
+
+    if let TokenKind::Ident(found) = inner.kind {
+      if found == "crate" {
+        help = "write `pub(pkg)`: the package root is `pkg`";
+      }
+    }
+
+    self.diagnostics.push(Diagnostic::error(codes::UNEXPECTED_TOKEN, start.to(end), "expected `pkg` or `super` in a restricted visibility").with_help(help));
 
     Visibility::Public
   }

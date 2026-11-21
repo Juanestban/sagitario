@@ -1,6 +1,6 @@
 # 0065. Modules with submodules in `mod.sag`
 
-- Status: Accepted
+- Status: Accepted; partly superseded by [ADR-0111](0111-modules-as-rust.md) (modules declared with `mod`).
 - Date: 2026-10-26
 - Supersedes: the files of modules in [ADR-0024](0024-modules-imports-and-visibility.md) (a
   module with submodules was `name.sag` next to the directory `name/`)

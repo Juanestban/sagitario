@@ -26,6 +26,8 @@ pub fn dump(resolution: Resolution) -> String {
           Visibility::Module => "module",
           Visibility::Public => "pub",
           Visibility::Private => "prv",
+          Visibility::Package => "pub(pkg)",
+          Visibility::Super => "pub(super)",
         };
 
         out.append(`  item ${name} -> ${item_ref(declared.item)} ${visibility} ${span(declared.span)}\n`);
@@ -183,7 +185,7 @@ fn type_item(item: TypeItem) -> String {
   }
 }
 
-fn item_ref(item: ItemRef) -> String {
+pub fn item_ref(item: ItemRef) -> String {
   match item {
     ItemRef::Fn(id) => `fn ${id}`,
     ItemRef::Extern(id) => `extern ${id}`,

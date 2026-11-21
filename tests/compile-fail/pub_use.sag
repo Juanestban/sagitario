@@ -1,3 +1,11 @@
-pub use pkg::helper; //~ ERROR E0900
+// A re-export reaches no further than what it re-exports (docs/spec/09-modules.md#imports).
+mod inner {
+  pub(super) fn half() {}
+
+  pub fn whole() {}
+}
+
+pub use inner::half; //~ ERROR E0211
+pub use inner::whole;
 
 fn main() {}

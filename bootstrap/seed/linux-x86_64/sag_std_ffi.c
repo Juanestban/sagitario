@@ -3,9 +3,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
-typedef struct sag_s18 sag_s18;
-typedef struct sag_s19 sag_s19;
-typedef struct sag_s22 sag_s22;
+typedef struct sag_s123 sag_s123;
+typedef struct sag_s124 sag_s124;
+typedef struct sag_s127 sag_s127;
 typedef void (*sag_p0)(int32_t);
 typedef void* (*sag_p1)(void*);
 struct Timespec;
@@ -13,193 +13,198 @@ struct StatBuffer;
 struct PollFd;
 typedef void (*sag_cp0)(int);
 
+extern void* memcpy(void* a0, void const* a1, size_t a2);
+void* sag_ffi_1(void* a0, void const* a1, size_t a2) {
+  return (void*)memcpy((void*)a0, (void const*)a1, a2);
+}
+
 extern int* __errno_location(void);
-int32_t* sag_ffi_1(void) {
+int32_t* sag_ffi_2(void) {
   return (int32_t*)__errno_location();
 }
 
 extern char* strerror(int a0);
-int8_t* sag_ffi_2(int32_t a0) {
+int8_t* sag_ffi_3(int32_t a0) {
   return (int8_t*)strerror(a0);
 }
 
 extern int clock_gettime(int a0, struct Timespec* a1);
-int32_t sag_ffi_3(int32_t a0, sag_s18* a1) {
+int32_t sag_ffi_4(int32_t a0, sag_s123* a1) {
   return clock_gettime(a0, (struct Timespec*)a1);
 }
 
 extern int nanosleep(struct Timespec const* a0, struct Timespec* a1);
-int32_t sag_ffi_4(sag_s18 const* a0, sag_s18* a1) {
+int32_t sag_ffi_5(sag_s123 const* a0, sag_s123* a1) {
   return nanosleep((struct Timespec const*)a0, (struct Timespec*)a1);
 }
 
 extern char const* getenv(char const* a0);
-int8_t const* sag_ffi_5(int8_t const* a0) {
+int8_t const* sag_ffi_6(int8_t const* a0) {
   return (int8_t const*)getenv((char const*)a0);
 }
 
 extern int chdir(char const* a0);
-int32_t sag_ffi_8(int8_t const* a0) {
+int32_t sag_ffi_9(int8_t const* a0) {
   return chdir((char const*)a0);
 }
 
 extern size_t fwrite(void const* a0, size_t a1, size_t a2, void* a3);
-size_t sag_ffi_13(void const* a0, size_t a1, size_t a2, void* a3) {
+size_t sag_ffi_14(void const* a0, size_t a1, size_t a2, void* a3) {
   return fwrite((void const*)a0, a1, a2, (void*)a3);
 }
 
 extern int fputc(int a0, void* a1);
-int32_t sag_ffi_14(int32_t a0, void* a1) {
+int32_t sag_ffi_15(int32_t a0, void* a1) {
   return fputc(a0, (void*)a1);
 }
 
 extern int fflush(void* a0);
-int32_t sag_ffi_15(void* a0) {
+int32_t sag_ffi_16(void* a0) {
   return fflush((void*)a0);
 }
 
 extern int getc(void* a0);
-int32_t sag_ffi_16(void* a0) {
+int32_t sag_ffi_17(void* a0) {
   return getc((void*)a0);
 }
 
 extern size_t fread(void* a0, size_t a1, size_t a2, void* a3);
-size_t sag_ffi_17(void* a0, size_t a1, size_t a2, void* a3) {
+size_t sag_ffi_18(void* a0, size_t a1, size_t a2, void* a3) {
   return fread((void*)a0, a1, a2, (void*)a3);
 }
 
 extern int ferror(void* a0);
-int32_t sag_ffi_18(void* a0) {
+int32_t sag_ffi_19(void* a0) {
   return ferror((void*)a0);
 }
 
 extern void clearerr(void* a0);
-void sag_ffi_19(void* a0) {
+void sag_ffi_20(void* a0) {
   clearerr((void*)a0);
 }
 
 extern int isatty(int a0);
-int32_t sag_ffi_22(int32_t a0) {
+int32_t sag_ffi_23(int32_t a0) {
   return isatty(a0);
 }
 
 extern void* fopen(char const* a0, char const* a1);
-void* sag_ffi_23(int8_t const* a0, int8_t const* a1) {
+void* sag_ffi_24(int8_t const* a0, int8_t const* a1) {
   return (void*)fopen((char const*)a0, (char const*)a1);
 }
 
 extern int fclose(void* a0);
-int32_t sag_ffi_24(void* a0) {
+int32_t sag_ffi_25(void* a0) {
   return fclose((void*)a0);
 }
 
 extern int mkdir(char const* a0, uint32_t a1);
-int32_t sag_ffi_25(int8_t const* a0, uint32_t a1) {
+int32_t sag_ffi_26(int8_t const* a0, uint32_t a1) {
   return mkdir((char const*)a0, a1);
 }
 
 extern int rmdir(char const* a0);
-int32_t sag_ffi_26(int8_t const* a0) {
+int32_t sag_ffi_27(int8_t const* a0) {
   return rmdir((char const*)a0);
 }
 
 extern int unlink(char const* a0);
-int32_t sag_ffi_27(int8_t const* a0) {
+int32_t sag_ffi_28(int8_t const* a0) {
   return unlink((char const*)a0);
 }
 
 extern int stat(char const* a0, struct StatBuffer* a1);
-int32_t sag_ffi_30(int8_t const* a0, sag_s19* a1) {
+int32_t sag_ffi_31(int8_t const* a0, sag_s124* a1) {
   return stat((char const*)a0, (struct StatBuffer*)a1);
 }
 
 extern void* opendir(char const* a0);
-void* sag_ffi_31(int8_t const* a0) {
+void* sag_ffi_32(int8_t const* a0) {
   return (void*)opendir((char const*)a0);
 }
 
 extern uint8_t const* readdir(void* a0);
-uint8_t const* sag_ffi_32(void* a0) {
+uint8_t const* sag_ffi_33(void* a0) {
   return (uint8_t const*)readdir((void*)a0);
 }
 
 extern int closedir(void* a0);
-int32_t sag_ffi_33(void* a0) {
+int32_t sag_ffi_34(void* a0) {
   return closedir((void*)a0);
 }
 
 extern int close(int a0);
-int32_t sag_ffi_34(int32_t a0) {
+int32_t sag_ffi_35(int32_t a0) {
   return close(a0);
 }
 
 extern intptr_t read(int a0, void* a1, size_t a2);
-intptr_t sag_ffi_35(int32_t a0, void* a1, size_t a2) {
+intptr_t sag_ffi_36(int32_t a0, void* a1, size_t a2) {
   return read(a0, (void*)a1, a2);
 }
 
 extern intptr_t write(int a0, void const* a1, size_t a2);
-intptr_t sag_ffi_36(int32_t a0, void const* a1, size_t a2) {
+intptr_t sag_ffi_37(int32_t a0, void const* a1, size_t a2) {
   return write(a0, (void const*)a1, a2);
 }
 
 extern int access(char const* a0, int a1);
-int32_t sag_ffi_37(int8_t const* a0, int32_t a1) {
+int32_t sag_ffi_38(int8_t const* a0, int32_t a1) {
   return access((char const*)a0, a1);
 }
 
 extern int waitpid(int a0, int* a1, int a2);
-int32_t sag_ffi_38(int32_t a0, int32_t* a1, int32_t a2) {
+int32_t sag_ffi_39(int32_t a0, int32_t* a1, int32_t a2) {
   return waitpid(a0, (int*)a1, a2);
 }
 
 extern sag_cp0 signal(int a0, sag_cp0 a1);
-sag_p0 sag_ffi_40(int32_t a0, sag_p0 a1) {
+sag_p0 sag_ffi_41(int32_t a0, sag_p0 a1) {
   return (sag_p0)signal(a0, (sag_cp0)a1);
 }
 
 extern int poll(struct PollFd* a0, size_t a1, int a2);
-int32_t sag_ffi_41(sag_s22* a0, size_t a1, int32_t a2) {
+int32_t sag_ffi_42(sag_s127* a0, size_t a1, int32_t a2) {
   return poll((struct PollFd*)a0, a1, a2);
 }
 
 extern int pipe2(int* a0, int a1);
-int32_t sag_ffi_42(int32_t* a0, int32_t a1) {
+int32_t sag_ffi_43(int32_t* a0, int32_t a1) {
   return pipe2((int*)a0, a1);
 }
 
 extern int fork(void);
-int32_t sag_ffi_43(void) {
+int32_t sag_ffi_44(void) {
   return fork();
 }
 
 extern int dup2(int a0, int a1);
-int32_t sag_ffi_44(int32_t a0, int32_t a1) {
+int32_t sag_ffi_45(int32_t a0, int32_t a1) {
   return dup2(a0, a1);
 }
 
 extern int execve(char const* a0, char* const* a1, char* const* a2);
-int32_t sag_ffi_45(int8_t const* a0, int8_t* const* a1, int8_t* const* a2) {
+int32_t sag_ffi_46(int8_t const* a0, int8_t* const* a1, int8_t* const* a2) {
   return execve((char const*)a0, (char* const*)a1, (char* const*)a2);
 }
 
 extern void _exit(int a0);
-void sag_ffi_46(int32_t a0) {
+void sag_ffi_47(int32_t a0) {
   _exit(a0);
 }
 
 extern size_t pthread_self(void);
-size_t sag_ffi_65(void) {
+size_t sag_ffi_66(void) {
   return pthread_self();
 }
 
 extern int fileno(void* a0);
-int32_t sag_ffi_75(void* a0) {
+int32_t sag_ffi_76(void* a0) {
   return fileno((void*)a0);
 }
 
 extern int dup(int a0);
-int32_t sag_ffi_76(int32_t a0) {
+int32_t sag_ffi_77(int32_t a0) {
   return dup(a0);
 }
 

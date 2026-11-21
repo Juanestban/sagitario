@@ -1,0 +1,29 @@
+// Visibility of modules and their items, as Rust's (docs/spec/09-modules.md#visibility-of-items).
+mod outer;
+
+mod first {
+  pub fn same() -> i32 {
+    1
+  }
+}
+
+mod second {
+  pub fn same() -> i32 {
+    2
+  }
+}
+
+mod spare {
+  pub fn unused() {}
+}
+
+use first::*;
+use second::*;
+use spare::*; //~ WARN W0005
+
+fn main() {
+  outer::hidden::f(); //~ ERROR E0207
+  outer::only_parent(); //~ ERROR E0207
+  outer::visible();
+  const _n = same(); //~ ERROR E0212
+}

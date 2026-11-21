@@ -1337,44 +1337,8 @@ void sag_list_reverse(sag_object *object) {
 
 /* ---- Hashing and order ------------------------------------------------------------------- */
 
-/* The finalizer of SplitMix64: every input bit affects every output bit. */
-/* FNV-1a. */
-uint64_t sag_string_hash(sag_string text) {
-  uint64_t hash = UINT64_C(0xcbf29ce484222325);
-  for (size_t i = 0; i < text.len; i++) {
-    hash = (hash ^ text.ptr[i]) * UINT64_C(0x100000001b3);
-  }
-  return hash;
-}
-
-/* Maps the bits of a float to an unsigned key with the same total order. */
-static uint64_t sag_total_key64(uint64_t bits) {
-  return (bits >> 63) != 0 ? ~bits : bits | (UINT64_C(1) << 63);
-}
-
-static uint32_t sag_total_key32(uint32_t bits) {
-  return (bits >> 31) != 0 ? ~bits : bits | (UINT32_C(1) << 31);
-}
-
-int32_t sag_f32_total_compare(float a, float b) {
-  uint32_t x;
-  uint32_t y;
-  memcpy(&x, &a, sizeof x);
-  memcpy(&y, &b, sizeof y);
-  x = sag_total_key32(x);
-  y = sag_total_key32(y);
-  return (x > y) - (x < y);
-}
-
-int32_t sag_f64_total_compare(double a, double b) {
-  uint64_t x;
-  uint64_t y;
-  memcpy(&x, &a, sizeof x);
-  memcpy(&y, &b, sizeof y);
-  x = sag_total_key64(x);
-  y = sag_total_key64(y);
-  return (x > y) - (x < y);
-}
+/* `sag_string_hash`, `sag_f32_total_compare` and `sag_f64_total_compare` are in `std::core`
+ * (docs/adr/0110-the-core-in-sagitario.md). */
 
 /* ---- FFI --------------------------------------------------------------------------------- */
 

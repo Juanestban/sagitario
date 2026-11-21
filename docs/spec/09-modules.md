@@ -3,14 +3,15 @@
 Rationale: [ADR-0010](../adr/0010-modules-and-packages.md),
 [ADR-0024](../adr/0024-modules-imports-and-visibility.md),
 [ADR-0025](../adr/0025-single-pub-visibility.md), [ADR-0040](../adr/0040-nova-package-manager.md),
-[ADR-0041](../adr/0041-dependencies-by-path.md), [ADR-0065](../adr/0065-module-directories.md).
+[ADR-0041](../adr/0041-dependencies-by-path.md), [ADR-0065](../adr/0065-module-directories.md),
+[ADR-0111](../adr/0111-modules-as-rust.md).
 
 ## Packages
 
 - A package is the unit of compilation and distribution. It is described by `Nova.toml` and
   built by Nova, the package manager ([reference](../nova.md)). Its root module `pkg` is
   `src/main.sag` for a program or `src/lib.sag` for a library (F3), and its other modules are
-  the files under `src/`.
+  those it declares with `mod`. A build script, `build.sag`, is the root of its own tree.
 - A single program can also be built from its entry file without a package,
   `sag build dir/main.sag` (F1). The entry file is the root module, `pkg`, and its directory is
   the package root.
@@ -18,28 +19,44 @@ Rationale: [ADR-0010](../adr/0010-modules-and-packages.md),
 
 ## Modules
 
-- **Each file is a module**, implicitly. There are no `mod` declarations.
+```sag
+// main.sag
+mod net;            // net.sag or net/mod.sag
+pub mod util;       // util.sag or util/mod.sag
+
+mod tests {         // an inline module
+  use super::*;
+
+  fn check() {
+    util::helper();
+  }
+}
+```
+
+- A module is declared in its parent with `mod name;`, whose items are in a file, or
+  `mod name { items }`, inline, as in Rust. The root module, `pkg`, is the entry file: `main.sag`,
+  `lib.sag`, `build.sag`, or the file given to `sag`.
+- **Only the files that the tree of `mod` declarations reaches are compiled.** Any other `.sag`
+  file is not part of the program, whatever paths name it: `use pkg::esp;` without `mod esp;` is
+  `E0200`.
+- A `mod` declaration is a module-level item: it takes a [visibility](#visibility-of-items) and
+  `@cfg` (a module left out loads no file), and its name shares the module's namespace.
 
 ### Files
 
-- The directory structure is the module structure: `net/http.sag`, next to the entry file, is
-  the module `pkg::net::http`.
-- A module without submodules is the file `name.sag`. A module with submodules is the file
-  `name/mod.sag`, in the directory that holds them: `net/mod.sag` is `pkg::net`, next to
-  `net/http.sag`. A directory without `mod.sag` is an empty module that only holds submodules.
-- `name.sag` next to a directory `name/` is an error (`E0209`): a module has one place for its
-  file, `name/mod.sag` when it has submodules.
-- `mod` cannot name a module: `mod.sag` is always the file of its directory's module, and a path
-  such as `pkg::mod` names nothing (`E0200`). `mod` is not a keyword; it names anything else.
-- The entry file is the root module whatever its name; a `mod.sag` next to it is no module.
+- The file of `mod name;` declared in the root or in a `mod.sag` is `name.sag`, or
+  `name/mod.sag`, next to that file. Declared in another file, `parent.sag`, it is
+  `parent/name.sag` or `parent/name/mod.sag`. A module of an inline `mod a { mod b; }` adds `a/`
+  to the directory.
+- A module with submodules can be `net.sag` next to the directory `net/`, or `net/mod.sag`; both
+  files existing is an error (`E0209`), and neither is `E0210`.
+- `mod` is a keyword: `mod.sag` is always the file of its directory's module.
 - File and directory names must be identifiers and match the path exactly, also on
   case-insensitive file systems.
-- Only the modules that the entry file reaches through paths (directly or through other
-  modules) are compiled; other `.sag` files are ignored.
 - Circular imports between modules of the same package are allowed (the whole package is
   analyzed together). Cycles between packages are not allowed.
 - Items, imports and submodules share one namespace per module: a function or type cannot
-  have the name of a submodule, and a name cannot be declared or imported twice.
+  have the name of a submodule, and a name cannot be declared or imported twice (`E0201`).
 
 ## Paths
 
@@ -52,12 +69,13 @@ Paths are logical, never relative file paths. Their first segment is one of:
 | `super` | The parent module; it can repeat at the start: `super::super::x` |
 | `std` | The standard library ([chapter 11](11-standard-library.md)) |
 | A dependency's name | The root of that dependency of the current package (F3, [Nova](../nova.md#dependencies)) |
-| A name in scope | An item or import of the current module, such as an imported module |
+| A name in scope | An item, import or `mod` of the current module, such as an imported module |
 
 An item or import of the current module hides a dependency with the same name. In a dependency,
 `pkg` is the root of that dependency.
 
-Qualified paths can be written wherever a name can: `pkg::util::format(x)`,
+`pkg::a::b` follows the tree of `mod` declarations. Qualified paths can be written wherever a name
+can: `pkg::util::format(x)`,
 `geo::Point { x: 1, y: 2 }`, `const p: geo::Point = ...`, `shapes::Shape::Circle(r)` in a
 pattern.
 
@@ -69,19 +87,30 @@ use pkg::net::http::{Client, Request};
 use pkg::util::format;
 use pkg::geometry::{self, Point as P};
 use super::shapes;
+use shapes::*;
+pub use http::Client as HttpClient;
 ```
 
 - `use` brings a module, function, struct or enum into the current module under its last
   name, or under the name given with `as`. Inside braces, `self` names the module before the
   braces, and groups can nest: `use pkg::{a::B, c::{self, D}};`.
-- A `use` path starts with `pkg`, `self`, `super`, `std` or the name of one of the package's
-  dependencies.
+- A `use` path starts as any [path](#paths): `pkg`, `self`, `super`, `std`, a dependency, or a
+  name in scope such as a module declared with `mod`.
 - `use` declarations appear at module level, in any position, and apply to the whole module.
 - An imported name shadows a prelude name, like a declared one. Importing a name that is
   already declared or imported in the module is an error; an import that is never used is a
   warning.
-- Not in the MVP: re-exports (`pub use`), glob imports (`use a::*`), importing the variants
-  or functions of a type (`use Color::Red`) and `use` inside blocks.
+- **Re-exports.** `pub use path;`, and `pub(pkg) use`, `pub(super) use`, make the imported name a
+  name of the module, which paths and other imports reach. A plain `use` is private: its name is
+  seen by the module and its submodules. Re-exporting a name more widely than it is visible is
+  `E0211`.
+- **Globs.** `use path::*;` imports every name of the module at `path` that the importing module
+  sees: its items, its re-exports, its submodules and its own globs (`use super::*;` in an inline
+  `mod tests` sees the parent's private items). A name declared, imported by name or declared with
+  `mod` in the module shadows a glob's. Two globs giving one name to different things is an error
+  only where the name is used (`E0212`). A glob from which nothing is used is a warning.
+- Not supported: importing the variants or functions of a type (`use Color::Red`,
+  `use Color::*`) and `use` inside blocks.
 
 ## Prelude
 
@@ -122,13 +151,17 @@ fn main() {
 | Modifier | Visible in |
 |---|---|
 | (none) | The declaring module and its submodules |
-| `pub` | Every module that imports it, including other packages' |
+| `pub(super)` | The parent module and its submodules |
+| `pub(pkg)` | The whole package (Rust's `pub(crate)`) |
+| `pub` | Everywhere its module is visible, other packages included |
 
+- The modifiers apply to items, `mod` declarations and `use` declarations.
 - As in Rust, a submodule sees the private items of all its ancestors: code in
   `net/http.sag` can call a private function of the root with `pkg::helper()` or
   `super::super::helper()`. A private item of `net/http.sag` is not visible in `net/mod.sag`.
-- There are no restricted forms such as Rust's `pub(crate)`: `pub(pkg)` is a syntax error.
-- Modules themselves are visible in the whole package.
+- Using a name where it is not visible is `E0207`, also a private module on a path:
+  `pkg::a::b`, with `mod b;` private in `a`, outside `a`. `pub(in path)` and `pub(self)` do not
+  exist; `pub(crate)` is a syntax error that suggests `pub(pkg)`.
 - Struct members follow their own rules (`pub`/`prv`, mandatory; a `prv` member is visible
   only inside its struct); enum variants have their enum's visibility. Class members follow
   [classes](04-classes.md).

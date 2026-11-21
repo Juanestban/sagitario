@@ -222,7 +222,9 @@ fn std_check_program(module: String) -> String {
 }
 
 /// The program of a file: the standard library for one of its sources, the package whose
-/// `Nova.toml` is in one of its directories, the `main.sag` next to it, or else the file alone.
+/// `Nova.toml` is in one of its directories (its `build.sag` for a file outside `src`), the
+/// nearest `main.sag` in its directories, or else the file alone, as Rust finds a crate root
+/// (docs/adr/0111-modules-as-rust.md, Q797).
 pub fn find_entry(file: String) -> Entry {
   if let Some(module) = std_module_of(file) {
     // Not a file on disk: the loader reads it from its overrides.
@@ -240,6 +242,11 @@ pub fn find_entry(file: String) -> Entry {
 
     if fs::is_file(push_path(current, "Nova.toml")) {
       const src = push_path(current, "src");
+      const build = push_path(current, "build.sag");
+
+      if !path_key(file).starts_with(path_key(src)) && fs::is_file(build) {
+        return Entry { path: build, library: false, std_module: None };
+      }
       const main = push_path(src, "main.sag");
 
       if fs::is_file(main) {
@@ -267,15 +274,51 @@ pub fn find_entry(file: String) -> Entry {
     dir = parent;
   }
 
-  if let Some(parent) = path::parent(file) {
-    const main = push_path(parent, "main.sag");
+  if path::file_name(file).unwrap_or("") == "main.sag" {
+    return alone(file);
+  }
 
-    if path::file_name(file).unwrap_or("") != "main.sag" && fs::is_file(main) {
+  var up = path::parent(file);
+
+  while let Some(current) = up {
+    if current.is_empty() {
+      break;
+    }
+
+    const main = push_path(current, "main.sag");
+
+    if fs::is_file(main) {
       return Entry { path: main, library: false, std_module: None };
     }
+
+    const parent = path::parent(current);
+
+    if let Some(found) = parent {
+      if found == current {
+        break;
+      }
+    }
+
+    up = parent;
   }
 
   alone(file)
+}
+
+/// The hint on a file that the program of its directories does not reach: no `mod` declares it
+/// (docs/adr/0111-modules-as-rust.md, Q797).
+pub fn unlinked_hint(file: String, root: String) -> Json {
+  const name = path::stem(file).unwrap_or("name");
+  const module = if name == "mod" { path::file_name(path::parent(file).unwrap_or("")).unwrap_or("name") } else { name };
+  const start = json::object(List::from([member("line", json::int(0)), member("character", json::int(0))]));
+  const message = "this file is not part of the program of `" + path::file_name(root).unwrap_or(root) + "`: no `mod` declaration reaches it\nhelp: declare it with `mod " + module + ";` in the file of its parent module";
+
+  json::object(List::from([
+    member("range", json::object(List::from([member("start", start), member("end", start)]))),
+    member("severity", json::int(4)),
+    member("source", json::str("sagitario")),
+    member("message", json::str(message)),
+  ]))
 }
 
 // ---- Analysis ---------------------------------------------------------------------------------
